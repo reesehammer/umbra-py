@@ -234,6 +234,18 @@ class UmbraItem:
             "available_assets": self.available_assets,
         }
 
+    def to_geojson(self) -> dict[str, Any]:
+        """Return a GeoJSON ``Feature`` representing this item.
+
+        Convenience wrapper around :func:`umbra_py.viz.item_to_feature` so
+        users can call ``item.to_geojson()`` directly. The third coordinate
+        of 3D footprints is stripped so the feature renders cleanly in
+        standard 2D GIS tools.
+        """
+        from .viz import item_to_feature  # noqa: PLC0415
+
+        return item_to_feature(self)
+
     def summary(self) -> str:
         """A one-paragraph readable description for the CLI / notebooks."""
         info = self.metadata_summary()

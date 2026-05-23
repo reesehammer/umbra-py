@@ -1,4 +1,4 @@
-"""Command-line interface: ``umbra search | info | download``."""
+"""Command-line interface: ``umbra search | info | download | map``."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import UmbraError
 from .models import UmbraItem
+from .viz import save_footprint_map, write_geojson
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -113,6 +114,52 @@ def download(item_url, assets, dest, overwrite) -> None:
             item, dest, assets=[name], overwrite=overwrite, progress=_progress_printer(name)
         )[0]
         click.echo(f"\n  -> {path}")
+
+
+@cli.command(name="map")
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Keep items exposing this asset (repeatable).",
+)
+@click.option("--limit", type=int, default=100, show_default=True, help="Max results to plot.")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output file. '.html' writes an interactive Folium map (requires the "
+    "viz extra); '.geojson' / '.json' writes a GeoJSON FeatureCollection.",
+)
+def map_cmd(bbox, start, end, products, limit, out_path) -> None:
+    """Render search results as an interactive map or GeoJSON file."""
+    catalog = UmbraCatalog()
+    items = list(
+        catalog.search(
+            bbox=_parse_bbox(bbox),
+            start=start,
+            end=end,
+            product_types=list(products) or None,
+            limit=limit,
+        )
+    )
+    if not items:
+        raise click.ClickException("No items matched the search.")
+
+    lower = out_path.lower()
+    if lower.endswith((".geojson", ".json")):
+        path = write_geojson(items, out_path)
+    elif lower.endswith(".html") or lower.endswith(".htm"):
+        path = save_footprint_map(items, out_path)
+    else:
+        raise click.ClickException(
+            "Unrecognized output extension. Use .html for a map or .geojson for data."
+        )
+    click.echo(f"Wrote {len(items)} footprint(s) to {path}")
 
 
 def main() -> None:

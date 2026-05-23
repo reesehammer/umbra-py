@@ -66,6 +66,22 @@ paths = download_item(first, dest_dir="downloads", assets=["GEC"])
 print(paths)
 ```
 
+### See where your search landed
+
+Visualize footprints before downloading multi-GB SAR scenes:
+
+```python
+from umbra_py import UmbraCatalog, footprint_map, write_geojson
+
+items = list(UmbraCatalog().search(start="2024-01-01", end="2024-01-31", limit=50))
+
+# Interactive Folium map for notebooks / sharing (requires the `viz` extra).
+footprint_map(items).save("footprints.html")
+
+# Or export to GeoJSON for QGIS, leafmap, Earth Engine, geopandas, deck.gl, ...
+write_geojson(items, "footprints.geojson")
+```
+
 ### Command line
 
 ```bash
@@ -77,6 +93,10 @@ umbra info <item-json-url>
 
 # Download specific asset(s).
 umbra download <item-json-url> --asset GEC --dest downloads/
+
+# Visualize search results: interactive HTML map or GeoJSON for any GIS.
+umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html
+umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.geojson
 ```
 
 ## What the data looks like
