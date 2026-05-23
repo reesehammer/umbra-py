@@ -49,9 +49,7 @@ EXAMPLE_HTTPS_URL = (
     "stac/2024/2024-02/2024-02-08/<acquisition-id>/<filename>_GEC.tif"
 )
 EXAMPLE_S3_BUCKET = "umbra-open-data-catalog"
-EXAMPLE_S3_KEY = (
-    "stac/2024/2024-02/2024-02-08/<acquisition-id>/<filename>_GEC.tif"
-)
+EXAMPLE_S3_KEY = "stac/2024/2024-02/2024-02-08/<acquisition-id>/<filename>_GEC.tif"
 
 CHUNK = 1 << 20  # 1 MiB
 

@@ -39,9 +39,7 @@ from datetime import datetime, timezone
 
 import pystac
 
-STAC_ROOT = (
-    "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
-)
+STAC_ROOT = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
 
 
 def search_pystac(

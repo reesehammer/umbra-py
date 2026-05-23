@@ -35,18 +35,12 @@ The classifier below is exactly the heuristic umbra-py uses
 (``src/umbra_py/models.py:_classify_asset``); reproducing it here is the cost
 of doing this without the library.
 
-Requires::
-
-    pip install requests
-
 Run::
 
     python 03_find_the_geotiff.py
 """
 
 from __future__ import annotations
-
-import requests
 
 # Canonical product types, ordered from most processed (start here) to most raw.
 PRODUCT_ASSETS = ("GEC", "CSI", "SIDD", "SICD", "CPHD")
@@ -102,9 +96,7 @@ def asset_href(item: dict, product_type: str) -> str:
     key = mapping.get(product_type)
     if key is None:
         available = ", ".join(p for p in PRODUCT_ASSETS if p in mapping) or "none"
-        raise KeyError(
-            f"Item has no {product_type!r} asset. Available: {available}."
-        )
+        raise KeyError(f"Item has no {product_type!r} asset. Available: {available}.")
     return item["assets"][key]["href"]
 
 

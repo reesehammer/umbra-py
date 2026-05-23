@@ -42,9 +42,7 @@ from urllib.parse import urljoin
 
 import requests
 
-STAC_ROOT = (
-    "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
-)
+STAC_ROOT = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
 
 _TOKEN_RE = re.compile(r"(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?$")
 
@@ -70,9 +68,7 @@ def token_span(token: str) -> tuple[date, date] | None:
     return date(y, 1, 1), date(y, 12, 31)
 
 
-def spans_overlap(
-    span: tuple[date, date], start: date | None, end: date | None
-) -> bool:
+def spans_overlap(span: tuple[date, date], start: date | None, end: date | None) -> bool:
     lo, hi = span
     if start is not None and hi < start:
         return False
@@ -143,9 +139,7 @@ def walk(
             item_url = urljoin(url, href)
             item = session.get(item_url, timeout=30).json()
             if bbox is not None:
-                item_bbox = item.get("bbox") or bbox_from_geometry(
-                    item.get("geometry") or {}
-                )
+                item_bbox = item.get("bbox") or bbox_from_geometry(item.get("geometry") or {})
                 if item_bbox is None or not overlaps(item_bbox[:4], bbox):
                     continue
             yield item
