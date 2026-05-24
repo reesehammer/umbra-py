@@ -33,12 +33,10 @@ DateLike = str | date | datetime | None
 
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 _TASKS_PREFIX = "sar-data/tasks/"
-# Acquisition directories look like 2025-12-06-07-52-28_UMBRA-10/. Match the
-# leading YYYY-MM-DD to prune subtrees before fetching their contents.
+# Acquisition directories look like 2025-12-06-07-52-28_UMBRA-10/. We use the
+# leading YYYY-MM-DD both to identify the acquisition component of a key and
+# to prune by date.
 _ACQ_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-")
-# tasks/<task>/[<uuid>/]<acquisition>/ — bounded recursion so a malformed
-# bucket layout can never run away.
-_MAX_WALK_DEPTH = 4
 
 _GEOTIFF_MEDIA = "image/tiff; application=geotiff; profile=cloud-optimized"
 _NITF_MEDIA = "application/vnd.nitf"
@@ -137,6 +135,35 @@ class UmbraCatalog:
                 break
         return subdirs, files
 
+    def _stream_keys(self, prefix: str) -> Iterator[str]:
+        """Yield every object key under ``prefix`` (no delimiter), paginated.
+
+        Used to enumerate a whole task in a single paginated stream rather
+        than one S3 LIST per acquisition directory -- the latter is
+        prohibitively slow against the real bucket (~1000s of round
+        trips for an unconstrained search).
+        """
+        token: str | None = None
+        while True:
+            url = f"{self._list_base}/?prefix={quote(prefix)}"
+            if token:
+                url += f"&continuation-token={quote(token)}"
+            try:
+                resp = self.session.get(url, timeout=30)
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                raise CatalogError(f"Failed to list bucket prefix {url!r}: {exc}") from exc
+            root = ET.fromstring(resp.content)
+            for c in root.findall(f"{_S3_NS}Contents"):
+                k = c.findtext(f"{_S3_NS}Key")
+                if k:
+                    yield k
+            if root.findtext(f"{_S3_NS}IsTruncated") != "true":
+                break
+            token = root.findtext(f"{_S3_NS}NextContinuationToken")
+            if not token:
+                break
+
     # -- search ----------------------------------------------------------------
 
     def search(
@@ -156,9 +183,10 @@ class UmbraCatalog:
             ``(min_lon, min_lat, max_lon, max_lat)`` footprint filter.
         start, end:
             Inclusive acquisition-date bounds. Accepts ``date`` /
-            ``datetime`` objects or ISO ``YYYY-MM-DD`` strings. Strongly
-            recommended -- without them the walker scans every published
-            acquisition, which takes minutes.
+            ``datetime`` objects or ISO ``YYYY-MM-DD`` strings. The walker
+            still has to list each task to discover what's published in
+            range, so even a narrow window takes a few seconds; provide
+            ``limit`` to stop as soon as you have enough.
         product_types:
             Keep only items exposing at least one of these assets
             (e.g. ``["GEC"]``).
@@ -169,52 +197,66 @@ class UmbraCatalog:
         end_d = _coerce_date(end)
         wanted = {p.upper() for p in product_types} if product_types else None
 
-        count = 0
-        for item in self._walk(_TASKS_PREFIX, depth=0, start=start_d, end=end_d):
-            if bbox is not None and not item.intersects_bbox(bbox):
-                continue
-            if wanted is not None and not (wanted & set(item.available_assets)):
-                continue
-            yield item
-            count += 1
-            if limit is not None and count >= limit:
-                return
+        task_subdirs, _ = self._list_prefix(_TASKS_PREFIX)
 
-    def _walk(
+        count = 0
+        for task_prefix in task_subdirs:
+            for item in self._walk_task(task_prefix, start_d, end_d):
+                if bbox is not None and not item.intersects_bbox(bbox):
+                    continue
+                if wanted is not None and not (wanted & set(item.available_assets)):
+                    continue
+                yield item
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+
+    def _walk_task(
         self,
-        prefix: str,
-        depth: int,
+        task_prefix: str,
         start: date | None,
         end: date | None,
     ) -> Iterator[UmbraItem]:
-        subdirs, files = self._list_prefix(prefix)
+        """Stream every key under one task and yield in-range acquisitions.
 
-        # An acquisition directory is the one that contains the sidecar.
-        sidecar_key = next((k for k in files if k.endswith(".stac.v2.json")), None)
-        if sidecar_key is not None:
-            d = _acq_date(prefix)
-            if d is not None:
-                if start is not None and d < start:
-                    return
-                if end is not None and d > end:
-                    return
-            sidecar_url = f"{self._list_base}/{sidecar_key}"
-            item = self._item_from_sidecar(self._get(sidecar_url), prefix, files, sidecar_url)
+        Tasks are organised as either ``<task>/<acquisition>/<file>``
+        (UUID-style tasks) or ``<task>/<inner-uuid>/<acquisition>/<file>``
+        (named tasks). We don't know which up front and we can't usefully
+        prefix-prune by date for named tasks (inner UUIDs sort randomly),
+        so we do one paginated non-delimited listing per task, identify
+        the acquisition component by its ``YYYY-MM-DD-HH-MM-SS`` prefix,
+        and group files by acquisition directory client-side.
+        """
+        by_acq: dict[str, list[str]] = {}
+        for key in self._stream_keys(task_prefix):
+            rel = key[len(task_prefix) :]
+            parts = rel.split("/")
+            # The acquisition component is the first segment matching the
+            # date pattern; skip anything without one (stray bucket junk).
+            acq_idx = next(
+                (i for i, p in enumerate(parts[:-1]) if _ACQ_DATE_RE.match(p)),
+                None,
+            )
+            if acq_idx is None:
+                continue
+            d = _acq_date(parts[acq_idx])
+            if start is not None and d is not None and d < start:
+                continue
+            if end is not None and d is not None and d > end:
+                continue
+            acq_prefix = task_prefix + "/".join(parts[: acq_idx + 1]) + "/"
+            by_acq.setdefault(acq_prefix, []).append(key)
+
+        # Sort so output order is deterministic (older acquisitions first).
+        for acq_prefix in sorted(by_acq):
+            keys = by_acq[acq_prefix]
+            sidecar = next((k for k in keys if k.endswith(".stac.v2.json")), None)
+            if sidecar is None:
+                continue
+            sidecar_url = f"{self._list_base}/{sidecar}"
+            item = self._item_from_sidecar(self._get(sidecar_url), acq_prefix, keys, sidecar_url)
             if item is not None:
                 yield item
-            return
-
-        if depth >= _MAX_WALK_DEPTH:
-            return
-
-        for sub in subdirs:
-            sub_date = _acq_date(sub)
-            if sub_date is not None:
-                if start is not None and sub_date < start:
-                    continue
-                if end is not None and sub_date > end:
-                    continue
-            yield from self._walk(sub, depth + 1, start, end)
 
     def _item_from_sidecar(
         self,

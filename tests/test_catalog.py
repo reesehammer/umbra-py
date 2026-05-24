@@ -45,55 +45,30 @@ def _sidecar(item_id: str, dt: str, bbox: tuple) -> dict:
 
 @pytest.fixture
 def fake_bucket(monkeypatch):
-    """A tiny in-memory ``sar-data/tasks/`` tree with two acquisitions.
+    """A tiny in-memory ``sar-data/tasks/`` tree with three acquisitions.
 
     Layout:
       sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/  -> item "a"
+      sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/  -> item "c" (out of range)
       sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/      -> item "b"
-      sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/  -> out-of-range
     """
-    listings = {
-        # Top level: two task directories.
-        "sar-data/tasks/": (
-            ["sar-data/tasks/AIR/", "sar-data/tasks/uuid-task/"],
-            [],
-        ),
-        # Named task (one extra UUID level).
-        "sar-data/tasks/AIR/": (["sar-data/tasks/AIR/aaaa-uuid/"], []),
-        "sar-data/tasks/AIR/aaaa-uuid/": (
-            [
-                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/",
-                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/",
-            ],
-            [],
-        ),
-        "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/": (
-            [],
-            [
-                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04.stac.v2.json",
-                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_GEC.tif",
-                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_SICD.nitf",
-            ],
-        ),
-        "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/": (
-            [],
-            [
-                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04.stac.v2.json",
-                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04_GEC.tif",
-            ],
-        ),
-        # UUID-style task (sidecar one level shallower).
-        "sar-data/tasks/uuid-task/": (
-            ["sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/"],
-            [],
-        ),
-        "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/": (
-            [],
-            [
-                "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09.stac.v2.json",
-                "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09_GEC.tif",
-            ],
-        ),
+    # Top-level task discovery uses _list_prefix with delimiter.
+    top_subdirs = ["sar-data/tasks/AIR/", "sar-data/tasks/uuid-task/"]
+
+    # Each task is then streamed in full (one paginated LIST per task) via
+    # _stream_keys: keys include the sidecar and every data file.
+    task_keys = {
+        "sar-data/tasks/AIR/": [
+            "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04.stac.v2.json",
+            "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_GEC.tif",
+            "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_SICD.nitf",
+            "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04.stac.v2.json",
+            "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04_GEC.tif",
+        ],
+        "sar-data/tasks/uuid-task/": [
+            "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09.stac.v2.json",
+            "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09_GEC.tif",
+        ],
     }
     sidecars = {
         "2024-01-15-10-00-00_UMBRA-04": _sidecar("a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)),
@@ -102,13 +77,20 @@ def fake_bucket(monkeypatch):
     }
 
     listed: list[str] = []
+    streamed: list[str] = []
     fetched: list[str] = []
 
     def fake_list(self, prefix):
         listed.append(prefix)
-        if prefix not in listings:
+        if prefix == "sar-data/tasks/":
+            return (top_subdirs, [])
+        raise KeyError(prefix)
+
+    def fake_stream(self, prefix):
+        streamed.append(prefix)
+        if prefix not in task_keys:
             raise KeyError(prefix)
-        return listings[prefix]
+        yield from task_keys[prefix]
 
     def fake_get(self, url):
         fetched.append(url)
@@ -118,9 +100,11 @@ def fake_bucket(monkeypatch):
         raise KeyError(url)
 
     monkeypatch.setattr(UmbraCatalog, "_list_prefix", fake_list)
+    monkeypatch.setattr(UmbraCatalog, "_stream_keys", fake_stream)
     monkeypatch.setattr(UmbraCatalog, "_get", fake_get)
     cat = UmbraCatalog()
     cat._listed = listed
+    cat._streamed = streamed
     cat._fetched = fetched
     return cat
 
@@ -132,15 +116,24 @@ def test_search_walks_named_and_uuid_tasks(fake_bucket):
 
 def test_search_prunes_out_of_range_acquisitions(fake_bucket):
     items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
-    # The 2023 acquisition directory must have been pruned -- never listed.
-    assert "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/" not in fake_bucket._listed
-    # And its sidecar must never have been fetched.
+    # The 2023 acquisition's sidecar must never have been fetched: keys are
+    # date-filtered before the GET.
     assert not any("2023-06-01" in u for u in fake_bucket._fetched)
     assert "c" not in {i.id for i in items}
 
 
+def test_search_uses_one_stream_per_task(fake_bucket):
+    """The walker must issue exactly one streaming LIST per task -- the
+    whole point of the v2 rewrite is to avoid per-acquisition LIST calls."""
+    list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
+    assert sorted(fake_bucket._streamed) == [
+        "sar-data/tasks/AIR/",
+        "sar-data/tasks/uuid-task/",
+    ]
+
+
 def test_search_assets_have_public_urls(fake_bucket):
-    [a] = [i for i in fake_bucket.search(start="2024-01-15", end="2024-01-15")]
+    [a] = list(fake_bucket.search(start="2024-01-15", end="2024-01-15"))
     href = a.asset_href("GEC")
     assert href.startswith("https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/")
     assert href.endswith("2024-01-15-10-00-00_UMBRA-04_GEC.tif")
