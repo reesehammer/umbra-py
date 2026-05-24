@@ -165,6 +165,45 @@ def _popup_html(item: UmbraItem) -> str:
     return f"<table style='font-family:sans-serif;font-size:12px'>{body}</table>{link}"
 
 
+def _centroid(item: UmbraItem) -> tuple[float, float] | None:
+    """Return (lat, lon) center of an item's footprint, or None."""
+    if item.bbox is None:
+        return None
+    minx, miny, maxx, maxy = item.bbox
+    return ((miny + maxy) / 2.0, (minx + maxx) / 2.0)
+
+
+def _legend_html(total: int, with_imagery: int | None, color: str) -> str:
+    """Small fixed-position legend pinned to the top-right of the map."""
+    if with_imagery is None:
+        body = (
+            f"<div style='display:flex;align-items:center;gap:6px'>"
+            f"<span style='display:inline-block;width:10px;height:10px;"
+            f"border-radius:50%;border:2px solid {color};background:white'></span>"
+            f"<span>{total} footprint{'s' if total != 1 else ''}</span>"
+            f"</div>"
+        )
+    else:
+        without = total - with_imagery
+        body = (
+            f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:3px'>"
+            f"<span style='display:inline-block;width:10px;height:10px;"
+            f"border-radius:50%;background:{color};border:2px solid {color}'></span>"
+            f"<span>{with_imagery} with SAR imagery</span></div>"
+            f"<div style='display:flex;align-items:center;gap:6px'>"
+            f"<span style='display:inline-block;width:10px;height:10px;"
+            f"border-radius:50%;border:2px solid {color};background:white'></span>"
+            f"<span>{without} footprint only</span></div>"
+        )
+    return (
+        "<div style='position:fixed;top:12px;right:12px;z-index:1000;"
+        "background:rgba(255,255,255,0.95);padding:8px 12px;border:1px solid #ccc;"
+        "border-radius:4px;font:12px/1.4 -apple-system,sans-serif;"
+        "box-shadow:0 1px 3px rgba(0,0,0,0.2)'>"
+        f"<div style='font-weight:600;margin-bottom:5px'>Umbra footprints</div>{body}</div>"
+    )
+
+
 def footprint_map(
     items: Iterable[UmbraItem],
     *,
@@ -205,11 +244,13 @@ def footprint_map(
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=zoom_start or 2)
 
+    rendered_imagery: set[str] = set()
     if imagery:
         ik = imagery_kwargs or {}
         for item, _ in features:
             try:
                 image_overlay(item, **ik).add_to(m)
+                rendered_imagery.add(item.id)
             except (AssetNotFoundError, OSError, ValueError) as exc:
                 # Skip items whose imagery we can't fetch/decode -- the
                 # footprint polygon still renders below. Common causes:
@@ -232,6 +273,34 @@ def footprint_map(
             tooltip=item.id,
             popup=folium.Popup(_popup_html(item), max_width=420),
         ).add_to(m)
+
+        # Always-visible centroid marker so a single tiny footprint is
+        # findable when the polygon shrinks below a pixel at world zoom.
+        center_ll = _centroid(item)
+        if center_ll is not None:
+            has_img = item.id in rendered_imagery
+            folium.CircleMarker(
+                location=center_ll,
+                radius=6,
+                color=color,
+                weight=2,
+                fill=True,
+                fill_color=color if has_img else "white",
+                fill_opacity=0.9 if has_img else 0.7,
+                tooltip=item.id,
+                popup=folium.Popup(_popup_html(item), max_width=420),
+            ).add_to(m)
+
+    if features:
+        m.get_root().html.add_child(
+            folium.Element(
+                _legend_html(
+                    total=len(features),
+                    with_imagery=len(rendered_imagery) if imagery else None,
+                    color=color,
+                )
+            )
+        )
 
     if bbox is not None and len(features) > 0:
         # Folium expects [[south, west], [north, east]].

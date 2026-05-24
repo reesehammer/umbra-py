@@ -118,6 +118,61 @@ def test_stretch_to_rgba_all_invalid_raises():
         _stretch_to_rgba(data)
 
 
+def test_centroid_from_bbox():
+    from umbra_py.viz import _centroid
+
+    item = UmbraItem(id="x", bbox=(-2.0, 10.0, 4.0, 20.0))
+    # (lat, lon) = ((10+20)/2, (-2+4)/2)
+    assert _centroid(item) == (15.0, 1.0)
+
+
+def test_centroid_returns_none_without_bbox():
+    from umbra_py.viz import _centroid
+
+    assert _centroid(UmbraItem(id="x")) is None
+
+
+def test_footprint_map_includes_centroid_marker_and_legend(sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = viz_mod.footprint_map([item]).get_root().render()
+
+    # Centroid marker is always drawn so the item is visible at any zoom.
+    assert "circleMarker" in html  # folium emits L.circleMarker(...)
+    # Legend is pinned to the corner with the count.
+    assert "Umbra footprints" in html
+    assert "1 footprint" in html
+
+
+def test_footprint_map_legend_distinguishes_imagery_when_enabled(monkeypatch, sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    def fake_overlay(item, **_kwargs):
+        if item.id == "bad":
+            raise OSError("404")
+
+        class _FakeLayer:
+            def add_to(self, _m):
+                return self
+
+        return _FakeLayer()
+
+    monkeypatch.setattr(viz_mod, "image_overlay", fake_overlay)
+
+    good = UmbraItem.from_dict(sample_item_dict)
+    bad = UmbraItem(id="bad", bbox=(10.0, 10.0, 11.0, 11.0))
+
+    with pytest.warns(UserWarning):
+        m = viz_mod.footprint_map([good, bad], imagery=True)
+    html = m.get_root().render()
+
+    assert "1 with SAR imagery" in html
+    assert "1 footprint only" in html
+
+
 def test_footprint_map_imagery_skips_unreachable_items(monkeypatch, sample_item_dict):
     """When imagery=True hits a 404 / network error for one item, the map
     should still render the rest -- not crash the whole call."""

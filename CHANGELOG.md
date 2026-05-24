@@ -47,6 +47,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `image_overlay` now raises `AssetNotFoundError` with a clear message
     when the asset's URL can't be resolved (empty href, no
     `umbra:task_id`), instead of passing an empty URL to rasterio.
+  - `footprint_map` now also draws a small always-visible circle marker
+    at each footprint's centroid and a fixed-position legend in the
+    top-right corner. Filled markers indicate items whose SAR imagery
+    was rendered; outlined markers are footprint-only. This solves the
+    "I have items, but I can't see any dots at world zoom" problem
+    Umbra footprints are only a few km across.
 
 ## [0.1.0] - 2026-05-22
 
