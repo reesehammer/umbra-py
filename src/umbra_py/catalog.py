@@ -253,10 +253,20 @@ class UmbraCatalog:
             sidecar = next((k for k in keys if k.endswith(".stac.v2.json")), None)
             if sidecar is None:
                 continue
-            sidecar_url = f"{self._list_base}/{sidecar}"
+            sidecar_url = self._url_for(sidecar)
             item = self._item_from_sidecar(self._get(sidecar_url), acq_prefix, keys, sidecar_url)
             if item is not None:
                 yield item
+
+    def _url_for(self, key: str) -> str:
+        """Build a public HTTPS URL for an S3 key, encoding spaces / unicode.
+
+        Named task directories like ``Allegiant Stadium`` and
+        ``Atmospheric-River_Nov-2025`` show up under ``sar-data/tasks/``
+        and contain characters that must be percent-encoded for CURL /
+        rasterio to fetch them.
+        """
+        return f"{self._list_base}/{quote(key, safe='/')}"
 
     def _item_from_sidecar(
         self,
@@ -279,7 +289,7 @@ class UmbraCatalog:
             if basename.endswith(".stac.v2.json"):
                 continue
             assets[basename] = {
-                "href": f"{self._list_base}/{key}",
+                "href": self._url_for(key),
                 "type": _guess_media_type(basename),
             }
         if not assets:

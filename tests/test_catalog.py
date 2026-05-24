@@ -155,3 +155,34 @@ def test_search_product_type_filter(fake_bucket):
 def test_search_limit(fake_bucket):
     items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31", limit=1))
     assert len(items) == 1
+
+
+def test_search_url_encodes_spaces_in_task_names(monkeypatch):
+    """Named tasks like 'Allegiant Stadium' have spaces in their path;
+    asset hrefs must be percent-encoded or rasterio/CURL rejects them."""
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_list_prefix",
+        lambda self, prefix: (["sar-data/tasks/Allegiant Stadium/"], []),
+    )
+    acq = "sar-data/tasks/Allegiant Stadium/uuid/2024-01-15-10-00-00_UMBRA-04"
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_stream_keys",
+        lambda self, prefix: iter(
+            [
+                f"{acq}/2024-01-15-10-00-00_UMBRA-04.stac.v2.json",
+                f"{acq}/2024-01-15-10-00-00_UMBRA-04_GEC.tif",
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_get",
+        lambda self, url: _sidecar("a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)),
+    )
+
+    [item] = list(UmbraCatalog().search(start="2024-01-15", end="2024-01-15"))
+    href = item.asset_href("GEC")
+    assert " " not in href
+    assert "Allegiant%20Stadium" in href
