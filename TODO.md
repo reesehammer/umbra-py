@@ -1,22 +1,20 @@
-# TODO / Known issues
+# Outstanding TODOs
 
-Working backlog of things worth fixing in `umbra-py`. Add new items at the
-top of the relevant section.
+This file tracks follow-up items that were intentionally scoped out of merged
+PRs. Each entry should link to the PR that surfaced it, point at the code
+involved, and describe the smallest change that closes it out.
 
-## Bugs
+When you finish one, delete the entry (or move it under a short "Done" log at
+the bottom if the history is useful).
 
-### Asset hrefs are empty in current Umbra STAC items
+---
 
-**Symptom.** `UmbraItem.asset_href("GEC")` returns `""` (and downstream:
-`download_item` writes nothing; `image_overlay` fails inside rasterio
-with `CPLE_IllegalArgError: Missing url parameter`) on most items
-currently published to Umbra's open catalog.
+## Asset hrefs are empty in current Umbra STAC items
 
-**Discovered.** 2026-05-24, while smoke-testing the SAR image overlay
-feature (PR #5) against live data for `2024-02-08`.
+- **Surfaced in:** [PR #5](https://github.com/theminiverse/umbra-py/pull/5) (smoke-testing the SAR image overlay against live data)
+- **Code:** `src/umbra_py/models.py` (`UmbraItem.asset_href`)
 
-**Cause.** Umbra has been publishing STAC items where every asset
-entry's `href` is the empty string, e.g.:
+Current Umbra STAC items publish every asset entry with `"href": ""`:
 
 ```json
 "assets": {
@@ -25,40 +23,56 @@ entry's `href` is the empty string, e.g.:
     "type": "application/octet-stream",
     "title": "RAW_COLLECT",
     "roles": ["data"]
-  },
-  ...
+  }
 }
 ```
 
-The asset **key** is the actual filename, but the `href` that
-`asset_href()` reads is blank. Older items (see
-`tests/data/sample_item.json`) had populated hrefs like
-`..._GEC.tif`, which is why the offline tests pass and this didn't
-surface until live testing.
+The asset *key* is the actual filename, but the `href` that `asset_href()`
+returns is the empty string. Older items (see `tests/data/sample_item.json`)
+had populated hrefs like `..._GEC.tif`, which is why the offline tests still
+pass and this didn't surface until live testing against 2024+ data.
 
-**Scope of impact.**
-- `download_url` / `download_asset` / `download_item` — pass an empty
-  URL to `requests`, which raises `MissingSchema`.
-- `image_overlay` — passes `"/vsicurl/"` (just the prefix) to rasterio.
-- `umbra info <item-url>` — summary works, but the printed asset list
-  is technically misleading since nothing is reachable.
+**Impact:**
+- `download_url` / `download_asset` / `download_item` — `requests` raises
+  `MissingSchema` when given an empty URL.
+- `image_overlay` (PR #5) — rasterio raises
+  `CPLE_IllegalArgError: Missing url parameter`.
+- `umbra info` still prints a usable summary, but its asset list is
+  technically misleading since nothing is reachable.
 
-**Possible fix.** In `models.UmbraItem.asset_href`, when the stored
-`href` is empty/missing, derive the URL by treating the asset *key* as
-a relative path and resolving it against the item's own URL
-(`urljoin(self.href, key)`). Needs verification that this actually
-points at the data on S3 — initial `HEAD` against the STAC directory
-returned 404, so the data probably lives under a parallel path
-(`sar-data/...` instead of `stac/...`) and we'll need to ask Umbra or
-read their documentation to find the right rewrite rule.
+**Fix sketch:** in `UmbraItem.asset_href`, when the stored `href` is
+empty/missing, derive the URL by joining the asset *key* (the filename) to
+the item's own `href`. A `HEAD` against the obvious path (the STAC
+directory) returns 404 — the binary assets likely live under a parallel
+prefix (`sar-data/...` instead of `stac/...`), so this fix needs a short
+spike to confirm the rewrite rule against Umbra's docs or a real working
+URL before shipping.
 
-**Acceptance criteria.**
-- A live network test that downloads at least the first few bytes of a
-  GEC asset from a recent item (e.g. anything from 2025).
-- `umbra download <recent-item-url> --asset GEC` actually writes the
-  file.
-- `footprint_map([recent_item], imagery=True)` renders the SAR image.
+**Acceptance:**
+- A network-marked test downloads the first few bytes of a GEC asset
+  from a recent (2025) item.
+- `umbra download <recent-item-url> --asset GEC` actually writes the file.
+- `footprint_map([recent_item], imagery=True)` renders the SAR image
+  (verifies the URL resolution flows through to rasterio as well).
 
-## Nice to have
+---
 
-_(empty)_
+## Asset classifier: `"tif"` substring check can never match uppercased name
+
+- **Surfaced in:** [PR #2](https://github.com/theminiverse/umbra-py/pull/2) ("Notes for reviewers")
+- **Origin PR:** [PR #1](https://github.com/theminiverse/umbra-py/pull/1)
+- **Code:** `src/umbra_py/models.py:27-29` (`_classify_asset`)
+
+`_classify_asset` builds `name = f"{key} {asset.get('href', '')}".upper()` and
+then checks `"tif" in name`. Because `name` is uppercased, the lowercase
+substring `"tif"` can never match — the branch is dead code.
+
+In practice the parallel `"geotiff" in media` check (against the lowercased
+media type) catches Umbra's COGs, so no regression has been observed. But an
+item that only declares `image/tiff` (no `geotiff` substring) would slip
+through and never be classified as a GeoTIFF asset.
+
+**Fix sketch:** either compare against the lowercased name
+(`".tif" in name.lower()`) or use `"TIF" in name` to match the existing upper-cased
+string. Add a regression test in `tests/` covering an asset whose media type is
+plain `image/tiff` and whose href ends in `.tif`.

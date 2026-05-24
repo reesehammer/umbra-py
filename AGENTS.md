@@ -49,6 +49,7 @@ tests/
 examples/            # planned notebooks (v0.2); see examples/README.md
 .github/workflows/ci.yml  # lint + format check + offline pytest, matrix 3.10/3.11/3.12
 pyproject.toml       # deps, extras, ruff + pytest config
+TODO.md              # ledger of follow-ups intentionally scoped out of merged PRs
 ```
 
 **Discovery tips for agents:**
@@ -118,7 +119,9 @@ If yes, simplify.
 - Don't "improve" adjacent code, comments, formatting, or naming — even when
   you'd do it differently. Match existing style.
 - If you spot unrelated dead code or a latent bug, **mention it** in your
-  reply or open an issue. Don't delete or fix it.
+  reply and add an entry to [`TODO.md`](TODO.md) (link to the PR that
+  surfaced it, point at the code, sketch the fix). Don't delete or fix it
+  inline.
 - **Clean up your own orphans only:** if your edit removes the last use of
   an import / variable / helper, delete it. Don't sweep pre-existing dead
   code on the side.
@@ -259,6 +262,10 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   - Any new public API (functions, CLI flags, env vars).
   - Test plan (what you ran; what a reviewer should run).
   - A `CHANGELOG.md` entry under **Unreleased** for any user-visible change.
+- **Scoping out follow-ups:** if you defer something to keep the PR small
+  (latent bug, missing test, adjacent refactor), add an entry to
+  [`TODO.md`](TODO.md) in the same PR. The PR body alone is too easy to lose.
+  When a follow-up PR closes one out, delete the entry.
 - Pre-commit hooks (`.pre-commit-config.yaml`) run ruff + a few sanity checks.
   Don't bypass with `--no-verify` — fix the root cause.
 
