@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `UmbraCatalog.available_task_ids()` and `search(data_available_only=True)`:
+  list the public bucket's top-level `sar-data/tasks/<UUID>/` directories
+  and prune the v1 STAC walk to items whose `umbra:task_id` actually has
+  data published. Umbra's v1 STAC catalog is mostly metadata stubs (a
+  60-item search returned only 1 with reachable data); this filter lets
+  users get a map / list of only the items they can actually download.
+  Costs one extra paginated S3 listing on the first call (cached).
+- `umbra search --available-only` and `umbra map --available-only` CLI
+  flags wired through to the same filter.
 - `umbra_py.viz` module for visualizing search results.
   - `item_to_feature`, `items_to_featurecollection`, `write_geojson`:
     convert items to GeoJSON for QGIS, leafmap, Earth Engine, geopandas,

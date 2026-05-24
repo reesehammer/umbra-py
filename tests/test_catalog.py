@@ -112,3 +112,45 @@ def test_search_bbox_filter(fake_catalog):
 def test_search_limit(fake_catalog):
     items = list(fake_catalog.search(limit=1))
     assert len(items) == 1
+
+
+def test_fetch_available_task_ids_parses_s3_listing(monkeypatch):
+    """available_task_ids() lists the bucket prefix and keeps UUID-style dirs."""
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>false</IsTruncated>
+  <CommonPrefixes><Prefix>sar-data/tasks/3e56976b-fa2b-4035-bb71-385efde84c4a/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>sar-data/tasks/AIR/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>sar-data/tasks/Allegiant Stadium/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>sar-data/tasks/b35d4b50-1234-5678-9abc-def012345678/</Prefix></CommonPrefixes>
+</ListBucketResult>"""
+
+    class _FakeResp:
+        content = xml
+
+        def raise_for_status(self):
+            return None
+
+    cat = UmbraCatalog(root_url="root")
+    monkeypatch.setattr(cat.session, "get", lambda *a, **k: _FakeResp())
+
+    ids = cat.available_task_ids()
+    # Named tasks are filtered out; UUID-style directories are kept.
+    assert ids == {
+        "3e56976b-fa2b-4035-bb71-385efde84c4a",
+        "b35d4b50-1234-5678-9abc-def012345678",
+    }
+    # Cached on the instance: second call doesn't refetch.
+    assert cat.available_task_ids() is ids
+
+
+def test_search_data_available_only_filters_by_task_id(fake_catalog, monkeypatch):
+    """``data_available_only=True`` drops items whose task_id isn't published."""
+    # Force the bucket listing to claim only "task-aaa" is available.
+    monkeypatch.setattr(UmbraCatalog, "available_task_ids", lambda self: {"task-aaa"})
+
+    # Items in the fake tree have no umbra:task_id, so they should all be filtered.
+    assert list(fake_catalog.search(data_available_only=True)) == []
+
+    # Sanity: without the flag, search still returns the items as before.
+    assert {i.id for i in fake_catalog.search()} == {"a", "b"}
