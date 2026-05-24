@@ -118,6 +118,58 @@ def test_stretch_to_rgba_all_invalid_raises():
         _stretch_to_rgba(data)
 
 
+def test_footprint_map_imagery_skips_unreachable_items(monkeypatch, sample_item_dict):
+    """When imagery=True hits a 404 / network error for one item, the map
+    should still render the rest -- not crash the whole call."""
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    seen: list[str] = []
+
+    def fake_overlay(item, **_kwargs):
+        seen.append(item.id)
+        # First item simulates a 404 / unreachable data; second succeeds.
+        if item.id == "bad":
+            raise OSError("HTTP response code: 404")
+
+        class _FakeLayer:
+            def add_to(self, _m):
+                return self
+
+        return _FakeLayer()
+
+    monkeypatch.setattr(viz_mod, "image_overlay", fake_overlay)
+
+    good = UmbraItem.from_dict(sample_item_dict)
+    bad = UmbraItem(id="bad", bbox=(10.0, 10.0, 11.0, 11.0))
+
+    with pytest.warns(UserWarning, match="Skipping SAR overlay for 'bad'"):
+        m = viz_mod.footprint_map([bad, good], imagery=True)
+
+    assert {"bad", good.id} == set(seen), "both items should be attempted"
+    assert m is not None  # the map still rendered
+
+
+def test_image_overlay_raises_clear_error_on_empty_url(monkeypatch):
+    """If asset_href returns '' (no task_id, no populated href), don't pass an
+    empty string to rasterio -- raise something the caller can act on."""
+    pytest.importorskip("folium")
+    pytest.importorskip("rasterio")
+    from umbra_py import viz as viz_mod
+    from umbra_py.exceptions import AssetNotFoundError
+
+    item = UmbraItem(
+        id="x",
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        assets={"foo.tif": {"href": ""}},
+        properties={},  # no umbra:task_id -> asset_href returns ""
+    )
+    # Force asset_href to return "" without going through asset_map lookups.
+    monkeypatch.setattr(UmbraItem, "asset_href", lambda self, name: "")
+    with pytest.raises(AssetNotFoundError, match="no resolvable URL"):
+        viz_mod.image_overlay(item)
+
+
 def test_footprint_map_without_extra_raises(monkeypatch, sample_item_dict):
     # Simulate folium not being installed.
     import builtins

@@ -38,6 +38,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     self-contained — no tile server required.
   - The `viz` extra now also pulls in `rasterio` and `numpy` for the
     image-overlay path; folium-only users are unaffected.
+  - `footprint_map(items, imagery=True)` is resilient to per-item
+    failures: when one item's GEC asset is unreachable (404, network
+    error, missing pixels), it emits a `UserWarning` and continues, so
+    the remaining footprints and overlays still render. Umbra's public
+    bucket has many STAC items whose binary data was never published,
+    and the previous behavior crashed the whole map on the first one.
+  - `image_overlay` now raises `AssetNotFoundError` with a clear message
+    when the asset's URL can't be resolved (empty href, no
+    `umbra:task_id`), instead of passing an empty URL to rasterio.
 
 ## [0.1.0] - 2026-05-22
 

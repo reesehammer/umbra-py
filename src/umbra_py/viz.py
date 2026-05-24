@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -209,8 +210,16 @@ def footprint_map(
         for item, _ in features:
             try:
                 image_overlay(item, **ik).add_to(m)
-            except AssetNotFoundError:
-                continue
+            except (AssetNotFoundError, OSError, ValueError) as exc:
+                # Skip items whose imagery we can't fetch/decode -- the
+                # footprint polygon still renders below. Common causes:
+                # the item lacks a GEC asset, the bucket returns 404 for
+                # a referenced file, or the image has no valid pixels.
+                # RasterioIOError subclasses OSError.
+                warnings.warn(
+                    f"Skipping SAR overlay for {item.id!r}: {exc}",
+                    stacklevel=2,
+                )
 
     for item, geometry in features:
         folium.GeoJson(
@@ -294,6 +303,11 @@ def image_overlay(
     from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
     url = item.asset_href(asset)
+    if not url:
+        raise AssetNotFoundError(
+            f"Item {item.id!r} has no resolvable URL for asset {asset!r} "
+            "(asset href is empty and no umbra:task_id available to derive one)."
+        )
     with rasterio.open(f"/vsicurl/{url}") as src:
         epsg = src.crs.to_epsg() if src.crs else None
         wrap = WarpedVRT(src, crs="EPSG:4326") if epsg != 4326 else None
