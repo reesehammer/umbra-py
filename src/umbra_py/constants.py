@@ -15,9 +15,6 @@ S3_BUCKET = "umbra-open-data-catalog"
 #: AWS region the bucket lives in.
 S3_REGION = "us-west-2"
 
-#: Root of the static STAC catalog. Traversal starts here.
-DEFAULT_STAC_ROOT = f"https://s3.{S3_REGION}.amazonaws.com/{S3_BUCKET}/stac/catalog.json"
-
 #: Canonical Umbra product types, ordered from most processed / easiest to use
 #: (GEC, a cloud-optimized GeoTIFF) to most raw (CPHD). Different catalog
 #: generations name their STAC assets differently (e.g. an explicit ``"GEC"``

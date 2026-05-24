@@ -21,9 +21,11 @@ Treat **this** file as the source of truth.
 - **Package layout:** `src/umbra_py/` (importable as `umbra_py`).
 - **Console entry points:** `umbra` and `umbra-py` → `umbra_py.cli:main`.
 
-The data lives in a **static** STAC catalog (tree of `catalog.json` files in
-public S3), **not** a STAC API. There is no search endpoint — this library is
-the search layer.
+The data lives in a public S3 bucket under
+`sar-data/tasks/<task>/[<uuid>/]<acquisition>/`, with a `*.stac.v2.json`
+sidecar next to each acquisition's binary products. There is no STAC API
+or search endpoint — this library is the search layer, enumerating
+acquisitions via paginated S3 listings.
 
 ---
 
@@ -32,7 +34,7 @@ the search layer.
 ```
 src/umbra_py/
   __init__.py        # public API surface; update __all__ when adding exports
-  catalog.py         # UmbraCatalog: walks the static STAC tree, prunes by date
+  catalog.py         # UmbraCatalog: walks sar-data/tasks/ via S3 listings, prunes by date
   models.py          # UmbraItem dataclass + asset classification
   download.py        # download_url / download_asset / download_item (resume support)
   cli.py             # `umbra search | info | download`
@@ -154,10 +156,13 @@ Strong success criteria let you loop independently without check-ins.
 
 This is a SAR / geospatial project. A few facts that matter when writing code:
 
-- **STAC catalog is static.** `catalog.json` files form a tree
-  (`year/` → `year-month/` → `year-month-day/` → items). `UmbraCatalog._walk`
-  prunes whole branches whose date span can't overlap the query. **Do not**
-  flatten this into "fetch everything" — it's the whole point of the design.
+- **No STAC API; we list S3 directly.** Acquisitions live under
+  `sar-data/tasks/<task>/[<uuid>/]<acquisition>/`, each with a
+  `*.stac.v2.json` sidecar. `UmbraCatalog._walk` paginates S3 listings
+  level by level, pruning acquisition directories whose date prefix
+  (`YYYY-MM-DD-HH-MM-SS_PLATFORM`) falls outside the requested
+  `start` / `end` range. **Do not** flatten this into "fetch
+  everything" — without date pruning the walk takes minutes.
 - **Product types** (canonical, ordered easiest → rawest):
   `GEC, CSI, SIDD, SICD, CPHD`. See `constants.py:PRODUCT_ASSETS` and
   the README table. `GEC` is a cloud-optimized GeoTIFF and is the default
@@ -241,7 +246,7 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
    (without the extra) still imports `umbra_py` cleanly.
 
 ### Touching catalog traversal
-- Re-run `tests/test_catalog.py::test_search_date_filter_prunes_year` —
+- Re-run `tests/test_catalog.py::test_search_prunes_out_of_range_acquisitions` —
   pruning is a feature, regressing it makes the search orders of magnitude
   slower.
 

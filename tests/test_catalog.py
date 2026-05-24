@@ -2,155 +2,163 @@ from datetime import date
 
 import pytest
 
-from umbra_py.catalog import (
-    UmbraCatalog,
-    _spans_overlap,
-    _token_from_href,
-    _token_span,
-)
+from umbra_py.catalog import UmbraCatalog, _acq_date
 
 
 @pytest.mark.parametrize(
-    "token,expected",
+    "name,expected",
     [
-        ("2024", (date(2024, 1, 1), date(2024, 12, 31))),
-        ("2024-02", (date(2024, 2, 1), date(2024, 2, 29))),  # leap year
-        ("2023-02", (date(2023, 2, 1), date(2023, 2, 28))),
-        ("2024-01-15", (date(2024, 1, 15), date(2024, 1, 15))),
-        ("not-a-date", None),
+        ("sar-data/tasks/AIR/uuid/2025-12-06-07-52-28_UMBRA-10/", date(2025, 12, 6)),
+        ("2024-01-15-10-00-00_UMBRA-04/", date(2024, 1, 15)),
+        ("not-an-acquisition/", None),
+        ("sar-data/tasks/AIR/", None),
+        ("2024-13-40-99-99-99_BAD/", None),  # invalid date components
     ],
 )
-def test_token_span(token, expected):
-    assert _token_span(token) == expected
+def test_acq_date(name, expected):
+    assert _acq_date(name) == expected
 
 
-def test_spans_overlap():
-    span = (date(2024, 1, 1), date(2024, 1, 31))
-    assert _spans_overlap(span, date(2024, 1, 15), date(2024, 2, 1))
-    assert _spans_overlap(span, None, None)
-    assert not _spans_overlap(span, date(2024, 2, 1), None)
-    assert not _spans_overlap(span, None, date(2023, 12, 31))
-
-
-def test_token_from_href():
-    assert _token_from_href("./2024-01/catalog.json") == "2024-01"
-    assert _token_from_href("./2024/catalog.json") == "2024"
-    assert _token_from_href("./2024-01-01/catalog.json") == "2024-01-01"
-
-
-def _make_tree():
-    """A tiny in-memory catalog tree keyed by URL."""
-    item_a = {
-        "id": "a",
-        "bbox": [0, 0, 1, 1],
-        "properties": {"datetime": "2024-01-01T00:00:00Z", "sar:product_type": "GEC"},
-        "assets": {"GEC": {"href": "http://x/a_GEC.tif"}},
-    }
-    item_b = {
-        "id": "b",
-        "bbox": [10, 10, 11, 11],
-        "properties": {"datetime": "2024-02-01T00:00:00Z", "sar:product_type": "SICD"},
-        "assets": {"SICD": {"href": "http://x/b_SICD.nitf"}},
-    }
+# A minimal v2 STAC item document. We omit anything the walker doesn't need;
+# UmbraItem.from_dict tolerates missing fields.
+def _sidecar(item_id: str, dt: str, bbox: tuple) -> dict:
     return {
-        "root": {
-            "links": [
-                {"rel": "child", "href": "./2024/catalog.json", "title": "2024"},
-                {"rel": "child", "href": "./2023/catalog.json", "title": "2023"},
-            ]
+        "id": item_id,
+        "bbox": list(bbox),
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [bbox[0], bbox[1]],
+                    [bbox[2], bbox[1]],
+                    [bbox[2], bbox[3]],
+                    [bbox[0], bbox[3]],
+                    [bbox[0], bbox[1]],
+                ]
+            ],
         },
-        "./2024/catalog.json": {
-            "links": [
-                {"rel": "child", "href": "./2024-01/catalog.json", "title": "2024-01"},
-                {"rel": "child", "href": "./2024-02/catalog.json", "title": "2024-02"},
-            ]
-        },
-        "./2024-01/catalog.json": {"links": [{"rel": "item", "href": "./a.json"}]},
-        "./2024-02/catalog.json": {"links": [{"rel": "item", "href": "./b.json"}]},
-        "./2023/catalog.json": {"links": []},  # should never be fetched given date filter
-        "./a.json": item_a,
-        "./b.json": item_b,
+        "properties": {"datetime": dt, "sar:product_type": "GEC"},
+        # Sidecar hrefs point at a private bucket -- the walker rewrites them.
+        "assets": {"GEC": {"href": "s3://umbra-internal/private/foo_GEC.tif"}},
     }
 
 
 @pytest.fixture
-def fake_catalog(monkeypatch):
-    tree = _make_tree()
+def fake_bucket(monkeypatch):
+    """A tiny in-memory ``sar-data/tasks/`` tree with two acquisitions.
+
+    Layout:
+      sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/  -> item "a"
+      sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/      -> item "b"
+      sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/  -> out-of-range
+    """
+    listings = {
+        # Top level: two task directories.
+        "sar-data/tasks/": (
+            ["sar-data/tasks/AIR/", "sar-data/tasks/uuid-task/"],
+            [],
+        ),
+        # Named task (one extra UUID level).
+        "sar-data/tasks/AIR/": (["sar-data/tasks/AIR/aaaa-uuid/"], []),
+        "sar-data/tasks/AIR/aaaa-uuid/": (
+            [
+                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/",
+                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/",
+            ],
+            [],
+        ),
+        "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/": (
+            [],
+            [
+                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04.stac.v2.json",
+                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_GEC.tif",
+                "sar-data/tasks/AIR/aaaa-uuid/2024-01-15-10-00-00_UMBRA-04/2024-01-15-10-00-00_UMBRA-04_SICD.nitf",
+            ],
+        ),
+        "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/": (
+            [],
+            [
+                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04.stac.v2.json",
+                "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/2023-06-01-00-00-00_UMBRA-04_GEC.tif",
+            ],
+        ),
+        # UUID-style task (sidecar one level shallower).
+        "sar-data/tasks/uuid-task/": (
+            ["sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/"],
+            [],
+        ),
+        "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/": (
+            [],
+            [
+                "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09.stac.v2.json",
+                "sar-data/tasks/uuid-task/2024-02-10-12-00-00_UMBRA-09/2024-02-10-12-00-00_UMBRA-09_GEC.tif",
+            ],
+        ),
+    }
+    sidecars = {
+        "2024-01-15-10-00-00_UMBRA-04": _sidecar("a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)),
+        "2024-02-10-12-00-00_UMBRA-09": _sidecar("b", "2024-02-10T12:00:00Z", (10, 10, 11, 11)),
+        "2023-06-01-00-00-00_UMBRA-04": _sidecar("c", "2023-06-01T00:00:00Z", (5, 5, 6, 6)),
+    }
+
+    listed: list[str] = []
     fetched: list[str] = []
+
+    def fake_list(self, prefix):
+        listed.append(prefix)
+        if prefix not in listings:
+            raise KeyError(prefix)
+        return listings[prefix]
 
     def fake_get(self, url):
         fetched.append(url)
-        # Normalise absolute-ish urljoin output back to our tree keys.
-        for key in tree:
-            if url == key or url.endswith(key.lstrip("./")):
-                return tree[key]
+        for stem, doc in sidecars.items():
+            if url.endswith(f"{stem}.stac.v2.json"):
+                return doc
         raise KeyError(url)
 
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", fake_list)
     monkeypatch.setattr(UmbraCatalog, "_get", fake_get)
-    cat = UmbraCatalog(root_url="root")
+    cat = UmbraCatalog()
+    cat._listed = listed
     cat._fetched = fetched
     return cat
 
 
-def test_search_date_filter_prunes_year(fake_catalog):
-    items = list(fake_catalog.search(start="2024-01-01", end="2024-01-31"))
+def test_search_walks_named_and_uuid_tasks(fake_bucket):
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
+    assert sorted(i.id for i in items) == ["a", "b"]
+
+
+def test_search_prunes_out_of_range_acquisitions(fake_bucket):
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
+    # The 2023 acquisition directory must have been pruned -- never listed.
+    assert "sar-data/tasks/AIR/aaaa-uuid/2023-06-01-00-00-00_UMBRA-04/" not in fake_bucket._listed
+    # And its sidecar must never have been fetched.
+    assert not any("2023-06-01" in u for u in fake_bucket._fetched)
+    assert "c" not in {i.id for i in items}
+
+
+def test_search_assets_have_public_urls(fake_bucket):
+    [a] = [i for i in fake_bucket.search(start="2024-01-15", end="2024-01-15")]
+    href = a.asset_href("GEC")
+    assert href.startswith("https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/")
+    assert href.endswith("2024-01-15-10-00-00_UMBRA-04_GEC.tif")
+    # The private sidecar URL must not leak through.
+    assert "umbra-internal" not in href
+
+
+def test_search_bbox_filter(fake_bucket):
+    items = list(fake_bucket.search(bbox=(0, 0, 5, 5), start="2024-01-01", end="2024-12-31"))
     assert [i.id for i in items] == ["a"]
-    # The 2023 branch must have been pruned (never fetched).
-    assert not any("2023" in u for u in fake_catalog._fetched)
 
 
-def test_search_product_type_filter(fake_catalog):
-    items = list(fake_catalog.search(product_types=["SICD"]))
-    assert [i.id for i in items] == ["b"]
-
-
-def test_search_bbox_filter(fake_catalog):
-    items = list(fake_catalog.search(bbox=(0, 0, 5, 5)))
+def test_search_product_type_filter(fake_bucket):
+    # Item "b" exposes only GEC; item "a" exposes both GEC and SICD.
+    items = list(fake_bucket.search(product_types=["SICD"], start="2024-01-01", end="2024-12-31"))
     assert [i.id for i in items] == ["a"]
 
 
-def test_search_limit(fake_catalog):
-    items = list(fake_catalog.search(limit=1))
+def test_search_limit(fake_bucket):
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31", limit=1))
     assert len(items) == 1
-
-
-def test_fetch_available_task_ids_parses_s3_listing(monkeypatch):
-    """available_task_ids() lists the bucket prefix and keeps UUID-style dirs."""
-    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
-<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <IsTruncated>false</IsTruncated>
-  <CommonPrefixes><Prefix>sar-data/tasks/3e56976b-fa2b-4035-bb71-385efde84c4a/</Prefix></CommonPrefixes>
-  <CommonPrefixes><Prefix>sar-data/tasks/AIR/</Prefix></CommonPrefixes>
-  <CommonPrefixes><Prefix>sar-data/tasks/Allegiant Stadium/</Prefix></CommonPrefixes>
-  <CommonPrefixes><Prefix>sar-data/tasks/b35d4b50-1234-5678-9abc-def012345678/</Prefix></CommonPrefixes>
-</ListBucketResult>"""
-
-    class _FakeResp:
-        content = xml
-
-        def raise_for_status(self):
-            return None
-
-    cat = UmbraCatalog(root_url="root")
-    monkeypatch.setattr(cat.session, "get", lambda *a, **k: _FakeResp())
-
-    ids = cat.available_task_ids()
-    # Named tasks are filtered out; UUID-style directories are kept.
-    assert ids == {
-        "3e56976b-fa2b-4035-bb71-385efde84c4a",
-        "b35d4b50-1234-5678-9abc-def012345678",
-    }
-    # Cached on the instance: second call doesn't refetch.
-    assert cat.available_task_ids() is ids
-
-
-def test_search_data_available_only_filters_by_task_id(fake_catalog, monkeypatch):
-    """``data_available_only=True`` drops items whose task_id isn't published."""
-    # Force the bucket listing to claim only "task-aaa" is available.
-    monkeypatch.setattr(UmbraCatalog, "available_task_ids", lambda self: {"task-aaa"})
-
-    # Items in the fake tree have no umbra:task_id, so they should all be filtered.
-    assert list(fake_catalog.search(data_available_only=True)) == []
-
-    # Sanity: without the flag, search still returns the items as before.
-    assert {i.id for i in fake_catalog.search()} == {"a", "b"}
