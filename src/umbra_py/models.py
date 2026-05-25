@@ -203,6 +203,28 @@ class UmbraItem:
         )
 
     @property
+    def description(self) -> str | None:
+        """Free-text description of the acquisition, when the STAC item has one.
+
+        Checks the item's top-level ``description`` (STAC convention) and
+        ``properties.description``, then falls back to the description on
+        the primary image asset (GEC) so popups can surface whatever
+        human-readable blurb the catalog provides.
+        """
+        top = self.raw.get("description") if self.raw else None
+        if top:
+            return str(top)
+        prop = self.properties.get("description")
+        if prop:
+            return str(prop)
+        gec_key = self.asset_map.get("GEC")
+        if gec_key:
+            asset_desc = self.assets.get(gec_key, {}).get("description")
+            if asset_desc:
+                return str(asset_desc)
+        return None
+
+    @property
     def asset_map(self) -> dict[str, str]:
         """Map canonical product type -> actual STAC asset key.
 
