@@ -176,8 +176,27 @@ def download(item_url, assets, dest, overwrite) -> None:
     "of the same area, so '--max-per-task 1' returns one item per distinct "
     "site rather than every revisit.",
 )
+@click.option(
+    "--geocode/--no-geocode",
+    default=True,
+    show_default=True,
+    help="Reverse-geocode each footprint's centroid via OpenStreetMap "
+    "Nominatim and include the resulting place name in the popup. "
+    "Adds one HTTP request per item (throttled to ~1/sec to honor "
+    "Nominatim's usage policy); pass --no-geocode to skip the network "
+    "calls or when running offline.",
+)
 def map_cmd(
-    bbox, start, end, products, limit, out_path, imagery, imagery_max_size, max_per_task
+    bbox,
+    start,
+    end,
+    products,
+    limit,
+    out_path,
+    imagery,
+    imagery_max_size,
+    max_per_task,
+    geocode,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     catalog = UmbraCatalog()
@@ -205,11 +224,22 @@ def map_cmd(
             raise click.ClickException("--imagery only applies to HTML map output.")
         path = write_geojson(items, out_path)
     elif lower.endswith(".html") or lower.endswith(".htm"):
-        with OrbitSpinner(
-            f"Rendering {len(items)} footprint(s)" + (" with imagery" if imagery else "")
-        ):
+        extras = []
+        if imagery:
+            extras.append("imagery")
+        if geocode:
+            # Geocoding is the slow part (1 req/sec), so call it out so
+            # users aren't surprised when --geocode + a 100-item search
+            # spends a minute on Nominatim before the file appears.
+            extras.append(f"geocoding ~{len(items)}s")
+        suffix = (" with " + ", ".join(extras)) if extras else ""
+        with OrbitSpinner(f"Rendering {len(items)} footprint(s){suffix}"):
             path = save_footprint_map(
-                items, out_path, imagery=imagery, imagery_kwargs=imagery_kwargs
+                items,
+                out_path,
+                imagery=imagery,
+                imagery_kwargs=imagery_kwargs,
+                geocode=geocode,
             )
     else:
         raise click.ClickException(

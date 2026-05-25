@@ -132,7 +132,7 @@ def _union_bbox(features: list[dict[str, Any]]) -> tuple[float, float, float, fl
     )
 
 
-def _popup_html(item: UmbraItem) -> str:
+def _popup_html(item: UmbraItem, *, location: str | None = None) -> str:
     info = item.metadata_summary()
     rng, azi = info["resolution_range_m"], info["resolution_azimuth_m"]
 
@@ -154,6 +154,11 @@ def _popup_html(item: UmbraItem) -> str:
         ("Resolution (rng × azi)", f"{fmt(rng, ' m')} × {fmt(azi, ' m')}"),
         ("Assets", ", ".join(info["available_assets"]) or "&mdash;"),
     ]
+    if location:
+        # Slot "Location" right under the acquisition time so the popup
+        # reads "what / when / where" before drilling into instrument
+        # detail.
+        rows.insert(2, ("Location", html.escape(location)))
     body = "".join(
         f"<tr><th style='text-align:left;padding-right:8px'>{k}</th><td>{v}</td></tr>"
         for k, v in rows
@@ -174,6 +179,96 @@ def _centroid(item: UmbraItem) -> tuple[float, float] | None:
         return None
     minx, miny, maxx, maxy = item.bbox
     return ((miny + maxy) / 2.0, (minx + maxx) / 2.0)
+
+
+# OpenStreetMap's Nominatim service is the canonical free reverse-geocoder.
+# Its usage policy caps absolute traffic at one request per second and
+# requires a descriptive User-Agent. Both are honored below.
+_NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+_GEOCODE_MIN_INTERVAL = 1.05  # seconds; small margin over Nominatim's 1 req/s
+_GEOCODE_CACHE: dict[tuple[int, int, int], str | None] = {}
+_LAST_GEOCODE_AT = 0.0
+
+
+def _require_session_for_geocoding() -> Any:
+    """Build the shared HTTP session used for a batch of geocode calls.
+
+    Split into its own helper so tests can patch out the session creation
+    without monkey-patching ``_http``.
+    """
+    from ._http import default_session  # noqa: PLC0415
+
+    return default_session()
+
+
+def _reverse_geocode(
+    lat: float,
+    lon: float,
+    *,
+    zoom: int = 10,
+    session: Any = None,
+    timeout: float = 10.0,
+) -> str | None:
+    """Resolve ``(lat, lon)`` to a human-readable place name.
+
+    Calls OpenStreetMap's Nominatim reverse-geocoding endpoint and returns
+    the ``display_name`` (e.g. ``"Reykjavík, Iceland"``) or ``None`` if
+    the service is unreachable, returns malformed JSON, or has no record
+    for the coordinate. Failures never raise — the label is decorative
+    and missing it should not break a map render.
+
+    Results are cached in-process at ~1 km granularity, and the function
+    self-throttles to ≤1 request per second to comply with Nominatim's
+    usage policy. ``zoom`` controls the address granularity: 3 = country,
+    8 = county, 10 = city, 14 = suburb, 18 = building.
+    """
+    requests = _require("requests")
+    # ~1 km at the equator; nearby revisits collapse into one HTTP call.
+    cache_key = (round(lat * 100), round(lon * 100), zoom)
+    if cache_key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[cache_key]
+
+    global _LAST_GEOCODE_AT
+    import time  # noqa: PLC0415
+
+    elapsed = time.monotonic() - _LAST_GEOCODE_AT
+    if elapsed < _GEOCODE_MIN_INTERVAL:
+        time.sleep(_GEOCODE_MIN_INTERVAL - elapsed)
+
+    if session is None:
+        from ._http import default_session  # noqa: PLC0415
+
+        session = default_session()
+
+    label: str | None = None
+    try:
+        resp = session.get(
+            _NOMINATIM_REVERSE_URL,
+            params={
+                "lat": f"{lat:.6f}",
+                "lon": f"{lon:.6f}",
+                "format": "jsonv2",
+                "zoom": zoom,
+                "addressdetails": 0,
+            },
+            timeout=timeout,
+            headers={"Accept-Language": "en"},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError):
+        # Network hiccup, HTTP error, or non-JSON body -- leave label None
+        # and cache the miss so we don't hammer Nominatim on every retry.
+        payload = None
+    finally:
+        _LAST_GEOCODE_AT = time.monotonic()
+
+    if isinstance(payload, dict):
+        raw = payload.get("display_name") or payload.get("name")
+        if isinstance(raw, str) and raw.strip():
+            label = raw.strip()
+    _GEOCODE_CACHE[cache_key] = label
+    return label
 
 
 def _legend_html(total: int, with_imagery: int | None, color: str) -> str:
@@ -217,6 +312,8 @@ def footprint_map(
     zoom_start: int | None = None,
     imagery: bool = False,
     imagery_kwargs: dict[str, Any] | None = None,
+    geocode: bool = False,
+    geocode_zoom: int = 10,
 ):
     """Build an interactive Folium map of one or more Umbra acquisitions.
 
@@ -229,6 +326,16 @@ def footprint_map(
     the basemap. Items lacking a GEC asset are skipped silently; this
     needs ``rasterio`` (already in the ``viz`` extra). Pass per-overlay
     options via ``imagery_kwargs`` (e.g. ``{"max_size": 2048}``).
+
+    When ``geocode=True``, each footprint's centroid is reverse-geocoded
+    via OpenStreetMap Nominatim and the resulting place name is shown in
+    the popup. The call is throttled to ≤1 req/s per Nominatim's usage
+    policy and cached, so a 100-item map takes ~100 s of wall time on
+    first render; rerunning is fast. ``geocode_zoom`` controls
+    granularity (3 = country, 10 = city, 18 = building); see
+    https://nominatim.org/release-docs/develop/api/Reverse/ for the full
+    table. Off by default so library users don't make surprise network
+    calls.
 
     Requires the ``viz`` extra (``pip install "umbra-py[viz]"``). Returns
     a ``folium.Map`` you can ``.save("out.html")`` or display in Jupyter.
@@ -265,7 +372,27 @@ def footprint_map(
                     stacklevel=2,
                 )
 
+    # Resolve geocoded labels up front so we can reuse the same string in
+    # both the polygon popup and the centroid-marker popup without paying
+    # for the Nominatim call twice.
+    locations: dict[str, str] = {}
+    if geocode:
+        geocode_session = _require_session_for_geocoding()
+        for item, _ in features:
+            center_ll = _centroid(item)
+            if center_ll is None:
+                continue
+            label = _reverse_geocode(
+                center_ll[0],
+                center_ll[1],
+                zoom=geocode_zoom,
+                session=geocode_session,
+            )
+            if label:
+                locations[item.id] = label
+
     for item, geometry in features:
+        loc = locations.get(item.id)
         folium.GeoJson(
             {"type": "Feature", "geometry": geometry, "properties": {}},
             style_function=lambda _f, c=color, w=weight, fo=fill_opacity: {
@@ -274,7 +401,7 @@ def footprint_map(
                 "fillOpacity": fo,
             },
             tooltip=item.id,
-            popup=folium.Popup(_popup_html(item), max_width=420),
+            popup=folium.Popup(_popup_html(item, location=loc), max_width=420),
         ).add_to(m)
 
         # Always-visible centroid marker so a single tiny footprint is
@@ -291,7 +418,7 @@ def footprint_map(
                 fill_color=color if has_img else "white",
                 fill_opacity=0.9 if has_img else 0.7,
                 tooltip=item.id,
-                popup=folium.Popup(_popup_html(item), max_width=420),
+                popup=folium.Popup(_popup_html(item, location=loc), max_width=420),
             ).add_to(m)
 
     if features:

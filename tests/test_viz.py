@@ -243,3 +243,93 @@ def test_footprint_map_without_extra_raises(monkeypatch, sample_item_dict):
 
     with pytest.raises(MissingDependencyError):
         footprint_map([item])
+
+
+def _reset_geocode_state():
+    from umbra_py import viz as viz_mod
+
+    viz_mod._GEOCODE_CACHE.clear()
+    viz_mod._LAST_GEOCODE_AT = 0.0
+
+
+def test_reverse_geocode_returns_display_name(monkeypatch):
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+    calls: list[dict] = []
+
+    class _FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"display_name": "Reykjavík, Iceland"}
+
+    class _FakeSession:
+        def get(self, url, params=None, timeout=None, headers=None):
+            calls.append({"url": url, "params": params})
+            return _FakeResp()
+
+    # Avoid the 1 s throttle entirely in tests.
+    monkeypatch.setattr(__import__("time"), "sleep", lambda _s: None)
+
+    label = viz_mod._reverse_geocode(64.13, -21.94, session=_FakeSession())
+    assert label == "Reykjavík, Iceland"
+    assert calls and calls[0]["params"]["format"] == "jsonv2"
+
+    # Second call at the same (rounded) coordinate must hit the cache,
+    # not the network.
+    label2 = viz_mod._reverse_geocode(64.13, -21.94, session=_FakeSession())
+    assert label2 == "Reykjavík, Iceland"
+    assert len(calls) == 1, "second call should be cached, not re-requested"
+
+
+def test_reverse_geocode_swallows_network_errors(monkeypatch):
+    import requests
+
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+
+    class _BrokenSession:
+        def get(self, *_a, **_k):
+            raise requests.ConnectionError("boom")
+
+    monkeypatch.setattr(__import__("time"), "sleep", lambda _s: None)
+    label = viz_mod._reverse_geocode(0.0, 0.0, session=_BrokenSession())
+    assert label is None
+    # And the miss is cached so we don't hammer the service.
+    assert (0, 0, 10) in viz_mod._GEOCODE_CACHE
+
+
+def test_footprint_map_geocode_adds_location_row(monkeypatch, sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+    monkeypatch.setattr(
+        viz_mod,
+        "_reverse_geocode",
+        lambda lat, lon, **_kw: f"Somewhere near {lat:.1f},{lon:.1f}",
+    )
+    monkeypatch.setattr(viz_mod, "_require_session_for_geocoding", lambda: None)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    m = viz_mod.footprint_map([item], geocode=True)
+    html = m.get_root().render()
+    assert "Location" in html
+    assert "Somewhere near" in html
+
+
+def test_footprint_map_default_does_not_geocode(monkeypatch, sample_item_dict):
+    """The library default is opt-in; library callers don't pay for a
+    surprise network call when they just want a footprint map."""
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    def _boom(*_a, **_k):
+        raise AssertionError("_reverse_geocode must not be called by default")
+
+    monkeypatch.setattr(viz_mod, "_reverse_geocode", _boom)
+    item = UmbraItem.from_dict(sample_item_dict)
+    viz_mod.footprint_map([item])  # must not raise
