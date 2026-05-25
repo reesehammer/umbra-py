@@ -1,0 +1,387 @@
+# Generating Umbra maps
+
+`umbra-py` turns Umbra SAR acquisitions into maps you can open in a browser,
+drop into a notebook, or hand to another GIS tool. This document walks through
+every knob the library exposes for that — from the one-liner that renders a
+single footprint to the full interactive map with SAR imagery overlaid on top
+of an OpenStreetMap basemap.
+
+Everything below works against Umbra's public, anonymous-access catalog. The
+core install is enough for GeoJSON; the interactive HTML maps and SAR
+overlays need the `viz` extra:
+
+```bash
+pip install "umbra-py[viz]"
+```
+
+---
+
+## 1. The two output formats
+
+There are two fundamentally different things you can produce:
+
+| Output                  | What you get                                     | Extra needed | Best for                                                   |
+| ----------------------- | ------------------------------------------------ | ------------ | ---------------------------------------------------------- |
+| **GeoJSON FeatureCollection** | A `.geojson` / `.json` file of polygons + metadata | none         | QGIS, leafmap, Earth Engine, geopandas, deck.gl, scripts   |
+| **Interactive Folium map**   | A self-contained `.html` file (Leaflet + tiles)    | `viz`        | Quick visual exploration, sharing a link, embedding in a notebook |
+
+The interactive map can additionally embed each acquisition's **SAR image** as
+a base64 PNG overlay so the HTML stays a single self-contained file (no tile
+server, no external dependencies at view time). That needs `rasterio`, which
+the `viz` extra also pulls in.
+
+---
+
+## 2. The bare minimum
+
+```python
+from umbra_py import UmbraCatalog, footprint_map
+
+catalog = UmbraCatalog()
+items = list(catalog.search(start="2024-02-08", end="2024-02-08", limit=10))
+
+m = footprint_map(items)
+m.save("umbra.html")
+```
+
+This searches one day of Umbra's archive, then builds an interactive map
+that auto-fits to the union of all returned footprints. Each acquisition
+becomes a polygon with a popup showing the item's metadata (acquisition
+time, platform, mode, resolution, polarizations, available assets) and a
+link to the source STAC item.
+
+Items without a geometry or bbox are silently skipped — they can't be
+plotted.
+
+---
+
+## 3. Search-side options (what ends up on the map)
+
+The map only shows items the catalog search returns, so most of your
+control over what's on the map happens at search time. The relevant
+`UmbraCatalog.search` parameters:
+
+```python
+from umbra_py import UmbraCatalog
+
+catalog = UmbraCatalog()
+items = list(
+    catalog.search(
+        bbox=(-122.6, 37.5, -122.2, 37.9),   # spatial filter: SF Bay Area
+        start="2024-01-01",                  # inclusive date bounds (str or date)
+        end="2024-03-31",
+        product_types=["GEC"],               # keep only items with a GEC GeoTIFF
+        limit=50,                            # stop after this many matches
+        max_per_task=1,                      # one acquisition per tasking campaign
+    )
+)
+```
+
+A few notes that matter for cartographic results:
+
+- **`bbox`** is `(min_lon, min_lat, max_lon, max_lat)` in WGS-84 degrees.
+  An item is kept if its footprint overlaps the box at all (not strictly
+  contained).
+- **`product_types=["GEC"]`** is what you almost always want for visual
+  maps: GEC is the cloud-optimized GeoTIFF, and it's the only product
+  that the imagery overlay (§5) can render.
+- **`max_per_task=1`** is the difference between "twenty revisits of the
+  same airport" and "twenty distinct sites". Each Umbra "task" is a
+  tasking campaign over one area, so capping per-task replaces revisit
+  density with geographic diversity on the map.
+- **`limit`** stops the search early. Without it, an unbounded date
+  window iterates the entire archive — that's slow and produces a map so
+  dense it's unreadable.
+
+---
+
+## 4. Folium map styling options
+
+`footprint_map(items, ...)` accepts the following keyword arguments:
+
+```python
+m = footprint_map(
+    items,
+    tiles="OpenStreetMap",   # basemap: any Folium-recognised tile name or URL
+    color="#ff5500",         # polygon outline + centroid marker colour
+    weight=2,                # polygon outline width in pixels
+    fill_opacity=0.15,       # polygon fill opacity (0 = outline only)
+    zoom_start=None,         # initial zoom level; ignored if items have a bbox
+    imagery=False,           # render the SAR image overlay (§5)
+    imagery_kwargs=None,     # per-overlay kwargs, see §5
+)
+```
+
+### Basemap (`tiles`)
+
+Folium ships with several built-in basemap names. Common picks:
+
+- `"OpenStreetMap"` — the default; readable street labels worldwide.
+- `"CartoDB positron"` — pale, low-contrast map that lets bright
+  footprints and SAR overlays pop visually.
+- `"CartoDB dark_matter"` — dark mode; good for screenshots.
+- A custom XYZ tile URL — pass the template directly and Folium will
+  use it as-is.
+
+For any custom tile server, give Folium an attribution string by
+constructing a `folium.Map` yourself and passing the `tiles` /
+`attr` arguments — but for almost every map, the built-in names are
+fine.
+
+### Polygon styling
+
+- `color` accepts any CSS colour. The centroid marker uses the same
+  colour so a single tiny footprint stays findable at world zoom (a
+  filled dot for "imagery rendered", a hollow ring for "footprint only").
+- `weight=0` makes the outline disappear; combine with
+  `fill_opacity=0.4` for a softer, filled-only look.
+- `fill_opacity=0` makes the polygon an outline-only sketch — useful
+  when you want the basemap to remain fully visible underneath.
+
+### Initial zoom
+
+`zoom_start` is only used as a fallback when none of the items have a
+bbox. When items have bboxes (almost always), the map calls
+`fit_bounds` on the union of footprints instead, so `zoom_start` is
+ignored. To force a wider view, post-process the returned
+`folium.Map` (e.g. `m.fit_bounds(...)` with your own bounds).
+
+---
+
+## 5. SAR imagery overlay
+
+Setting `imagery=True` streams each item's GEC GeoTIFF via HTTP range
+requests, downsamples it, applies a percentile contrast stretch, and
+composites it onto the basemap as a base64-encoded PNG. The output HTML
+remains a single self-contained file — no tile server, no external
+references.
+
+```python
+m = footprint_map(
+    items,
+    imagery=True,
+    imagery_kwargs={
+        "max_size": 2048,            # max pixel dim per overlay (default 1024)
+        "percentile": (2.0, 98.0),   # contrast stretch percentiles
+        "opacity": 1.0,              # overlay opacity 0..1
+        "asset": "GEC",              # asset key (rarely changed)
+    },
+)
+```
+
+What each option does:
+
+- **`max_size`** — the largest dimension (width or height) the overlay
+  will be downsampled to. SAR data is inherently grainy (speckle), so
+  cranking this up reveals more detail *and* more noise. Default
+  `1024`; `2048` and `4096` are reasonable for one-or-two-item maps;
+  beyond that the HTML file size (quadratic in `max_size`) becomes
+  painful. Each overlay is fetched via HTTP range requests against a
+  cloud-optimized GeoTIFF, so only the bytes for the requested
+  resolution are downloaded.
+- **`percentile`** — the low/high cut for the contrast stretch. SAR
+  amplitudes span enormous dynamic range; a straight 0–255 scaling
+  looks almost black. The default `(2.0, 98.0)` clips the dimmest and
+  brightest 2 % of pixels for a punchy stretch. Try `(5.0, 95.0)` for
+  more contrast or `(0.5, 99.5)` for more highlight detail.
+- **`opacity`** — `1.0` for opaque imagery, `0.7` for a slight blend
+  with the basemap, `0.0` to hide overlays entirely while keeping the
+  polygons.
+- **`asset`** — defaults to `"GEC"`. Other asset types (`SICD`,
+  `CPHD`) aren't geocoded ground-plane rasters, so they won't overlay
+  meaningfully — leave this alone unless you have a reason.
+
+Items that don't have a GEC asset, or whose imagery can't be fetched
+(404, decode error, no valid pixels), are skipped with a warning. The
+footprint polygon and centroid marker still render. The legend in the
+top-right shows how many items had imagery vs footprint-only.
+
+---
+
+## 6. Working with a single item
+
+`UmbraItem.to_geojson()` returns a single GeoJSON `Feature` you can
+feed into any 2D-aware GIS tool:
+
+```python
+item = items[0]
+feature = item.to_geojson()           # dict
+print(feature["geometry"]["type"])    # 'Polygon'
+print(feature["properties"]["id"])
+```
+
+For a one-item interactive map, just pass a single-element list to
+`footprint_map`:
+
+```python
+m = footprint_map([item], imagery=True)
+m.save("one_item.html")
+```
+
+For a one-item, no-overlay image you can also call `image_overlay`
+directly and add it to a `folium.Map` you've built yourself — useful
+when composing the SAR layer alongside other Folium layers (markers,
+heatmaps, drawing tools):
+
+```python
+import folium
+from umbra_py import image_overlay
+
+m = folium.Map(location=(37.7, -122.4), zoom_start=11, tiles="CartoDB positron")
+overlay = image_overlay(item, max_size=2048, percentile=(2.0, 98.0), opacity=0.9)
+overlay.add_to(m)
+m.save("custom.html")
+```
+
+---
+
+## 7. Persisted outputs
+
+### Save a Folium map to HTML
+
+```python
+from umbra_py import save_footprint_map
+
+save_footprint_map(items, "out/umbra.html", imagery=True, color="#00aaff")
+```
+
+`save_footprint_map` is a thin wrapper that builds the map with the
+same kwargs as `footprint_map` and writes the resulting standalone
+HTML to disk, creating parent directories as needed.
+
+### Export GeoJSON
+
+```python
+from umbra_py import write_geojson, items_to_featurecollection
+
+# Write straight to disk
+write_geojson(items, "out/footprints.geojson", indent=2)
+
+# Or build the FeatureCollection dict in memory (e.g. to POST it somewhere)
+fc = items_to_featurecollection(items)
+```
+
+The exported GeoJSON has every item as a `Feature` with properties
+matching `UmbraItem.metadata_summary()` plus a `stac_href` pointing
+back at the source STAC item. Pass `indent=None` for a minified file.
+
+---
+
+## 8. CLI: maps without writing code
+
+The `umbra map` subcommand wraps the same search and rendering logic
+behind one command:
+
+```bash
+# Basic interactive map of a date window
+umbra map --start 2024-02-08 --end 2024-02-08 --limit 20 --out map.html
+
+# Spatial filter, GEC only, with SAR imagery overlay
+umbra map \
+    --bbox -122.6,37.5,-122.2,37.9 \
+    --start 2024-01-01 --end 2024-03-31 \
+    --product GEC \
+    --max-per-task 1 \
+    --imagery \
+    --imagery-max-size 2048 \
+    --limit 30 \
+    --out sf_bay.html
+
+# Same query but export GeoJSON for QGIS / geopandas instead
+umbra map \
+    --bbox -122.6,37.5,-122.2,37.9 \
+    --start 2024-01-01 --end 2024-03-31 \
+    --out sf_bay.geojson
+```
+
+The output extension picks the format: `.html` / `.htm` → Folium map;
+`.geojson` / `.json` → GeoJSON FeatureCollection. `--imagery` and
+`--imagery-max-size` only apply to HTML output. Every other flag
+maps directly to a `UmbraCatalog.search` parameter from §3.
+
+---
+
+## 9. Recipe gallery
+
+A handful of complete, copy-pasteable patterns for common needs.
+
+### One-site time series
+
+Plot every revisit of a tasking campaign on a single map. Useful for
+spotting how a site changed across the archive.
+
+```python
+items = list(catalog.search(
+    bbox=(-118.42, 33.90, -118.36, 33.96),   # LAX
+    start="2024-01-01", end="2024-12-31",
+    product_types=["GEC"],
+    limit=200,
+))
+m = footprint_map(items, color="#0066cc", fill_opacity=0.05, imagery=False)
+m.save("lax_revisits.html")
+```
+
+### Global diversity map
+
+One acquisition per tasking campaign, world-wide, no imagery (just
+footprints) — a quick overview of where Umbra has been collecting.
+
+```python
+items = list(catalog.search(
+    start="2024-06-01", end="2024-06-30",
+    product_types=["GEC"],
+    max_per_task=1,
+    limit=300,
+))
+save_footprint_map(items, "june_2024.html", tiles="CartoDB dark_matter",
+                   color="#00ff88", fill_opacity=0.3)
+```
+
+### High-fidelity SAR look at one acquisition
+
+Maximum overlay resolution, minimal map decoration.
+
+```python
+item = next(catalog.search(start="2024-02-08", end="2024-02-08",
+                           product_types=["GEC"], limit=1))
+m = footprint_map(
+    [item],
+    tiles="CartoDB positron",
+    fill_opacity=0,                       # no fill — let the imagery speak
+    weight=1,
+    imagery=True,
+    imagery_kwargs={"max_size": 4096, "percentile": (1.0, 99.0)},
+)
+m.save("hires.html")
+```
+
+### Pipe into geopandas
+
+```python
+import geopandas as gpd
+from umbra_py import items_to_featurecollection
+
+gdf = gpd.GeoDataFrame.from_features(items_to_featurecollection(items)["features"])
+gdf.set_crs("EPSG:4326", inplace=True)
+gdf.explore()        # geopandas' own folium-backed map, with full pandas tooling
+```
+
+---
+
+## 10. Troubleshooting
+
+- **Map is empty / `Wrote 0 footprints`** — your search returned
+  nothing. Loosen `bbox`, widen the date window, or drop
+  `product_types`. Run `umbra search` with the same flags to see what
+  the catalog actually has.
+- **"MissingDependencyError: 'folium' is required"** — install the
+  extra: `pip install "umbra-py[viz]"`.
+- **HTML opens but no SAR imagery shows** — check the warnings on
+  stderr; common causes are items without a `GEC` asset or transient
+  S3 fetch errors. The polygons render either way.
+- **HTML file is huge** — `max_size` is the lever; halve it (or drop
+  `imagery=True` entirely). Each overlay is embedded as a PNG, so a
+  map with 50 items at `max_size=4096` will be hundreds of MB.
+- **Polygon visible but no marker / no popup** — that item had no
+  bbox at all. Check `item.bbox`; if it's `None`, the STAC document
+  was missing both `bbox` and `geometry`.
