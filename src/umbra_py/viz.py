@@ -345,16 +345,18 @@ def _install_lazy_imagery(
     folium_map: Any,
     percentile: tuple[float, float],
 ) -> None:
-    """Inject the CDN libs + button driver into the map's HTML.
+    """Inject the per-page button driver into the map's HTML.
 
-    Adds the script tags to ``<head>`` and the per-page driver to the
-    body. Sample cap of 100k pixels keeps the in-browser percentile
-    pass under a second even on modest hardware.
+    The driver injects its own CDN ``<script>`` tags on first click
+    (see ``_lazy_imagery`` for the rationale -- short version: doing
+    it from ``<head>`` races against Folium's Leaflet bundle, and
+    georaster-layer-for-leaflet needs ``L.GridLayer`` defined before
+    it evaluates). Sample cap of 100k pixels keeps the in-browser
+    percentile pass under a second even on modest hardware.
     """
     folium = _require("folium")
-    from ._lazy_imagery import cdn_script_tags, driver_script  # noqa: PLC0415
+    from ._lazy_imagery import driver_script  # noqa: PLC0415
 
-    folium_map.get_root().header.add_child(folium.Element(cdn_script_tags()))
     folium_map.get_root().script.add_child(
         folium.Element(
             driver_script(

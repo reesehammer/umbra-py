@@ -56,20 +56,18 @@ def test_popup_button_html_escapes_attacker_controlled_attrs():
     assert 'onclick="umbraToggleSarImage(this)"' in out
 
 
-def test_cdn_script_tags_pin_versions():
+def test_cdn_urls_pin_versions():
     """A drifting CDN URL silently breaks browser-side decoding. The
     deps must be pinned so a release reproduces."""
-    from umbra_py._lazy_imagery import cdn_script_tags
+    from umbra_py import _lazy_imagery as li
 
-    tags = cdn_script_tags()
-    assert "georaster" in tags
-    assert "georaster-layer-for-leaflet" in tags
-    # Both URLs must carry an explicit @<version> segment.
-    assert re.search(r"georaster@\d+\.\d+", tags), tags
-    assert re.search(r"georaster-layer-for-leaflet@\d+\.\d+", tags), tags
+    assert re.search(r"georaster@\d+\.\d+", li.GEORASTER_JS), li.GEORASTER_JS
+    assert re.search(r"georaster-layer-for-leaflet@\d+\.\d+", li.GEORASTER_LAYER_JS), (
+        li.GEORASTER_LAYER_JS
+    )
 
 
-def test_cdn_script_tags_use_published_bundle_paths():
+def test_cdn_urls_use_published_bundle_paths():
     """Catch the obvious-but-painful failure mode: a CDN URL whose
     path doesn't correspond to a file the package actually publishes.
 
@@ -80,22 +78,30 @@ def test_cdn_script_tags_use_published_bundle_paths():
     unavailable``. Pin the path shape we depend on so this is caught
     at unit-test time, not by users.
     """
-    from umbra_py._lazy_imagery import cdn_script_tags
+    from umbra_py import _lazy_imagery as li
 
-    tags = cdn_script_tags()
-    assert "/dist/georaster.browser.bundle.min.js" in tags, tags
+    assert li.GEORASTER_JS.endswith("/dist/georaster.browser.bundle.min.js"), li.GEORASTER_JS
     # The layer package's `browser`/`unpkg` field in package.json
     # points at this exact nested path -- accept nothing shorter.
-    assert "/dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js" in tags, tags
+    assert li.GEORASTER_LAYER_JS.endswith(
+        "/dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
+    ), li.GEORASTER_LAYER_JS
 
 
-def test_driver_script_references_map_var():
-    """The driver looks the Folium map up by its (random) JS variable
-    name; if the substitution gets dropped, every click silently does
-    nothing."""
-    from umbra_py._lazy_imagery import driver_script
+def test_driver_script_lazy_loads_libs_and_references_map_var():
+    """The driver must:
 
-    js = driver_script(
+    1. Look the Folium map up by its (random) JS variable name -- if
+       that substitution is dropped, every click silently does nothing.
+    2. Carry the CDN URLs as JS string literals and inject them via
+       ``injectScript`` on first click, NOT rely on pre-existing
+       ``<script>`` tags. The previous design loaded the libs from
+       ``<head>``, which fired before Leaflet on the same page and
+       broke ``L.GridLayer`` extension.
+    """
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(
         map_var="map_abc123",
         percentile_low=2.0,
         percentile_high=98.0,
@@ -106,25 +112,56 @@ def test_driver_script_references_map_var():
     # Both percentile cuts must reach the percentile() call sites.
     assert "percentile(samples, 2.0)" in js
     assert "percentile(samples, 98.0)" in js
+    # The driver carries the pinned CDN URLs verbatim.
+    assert li.GEORASTER_JS in js
+    assert li.GEORASTER_LAYER_JS in js
+    # And injects them on demand, instead of expecting them in <head>.
+    assert "injectScript" in js
+    assert "document.head.appendChild" in js
 
 
-def test_footprint_map_lazy_imagery_emits_button_and_libs(sample_item_dict):
+def test_footprint_map_lazy_imagery_emits_button_and_driver(sample_item_dict):
     """End-to-end: rendering with lazy_imagery=True must include the
-    CDN libs, the driver, and a per-item button keyed by the item's
-    id."""
+    driver and a per-item button keyed by the item's id, AND must NOT
+    inject the CDN libs as bare ``<script src=...>`` tags into the
+    head (where they'd race against Folium's Leaflet bundle and break
+    ``L.GridLayer`` extension). The driver loads them on first click
+    instead."""
     pytest.importorskip("folium")
     from umbra_py import footprint_map
 
     item = UmbraItem.from_dict(sample_item_dict)
     html = footprint_map([item], lazy_imagery=True).get_root().render()
     assert "umbra-sar-btn" in html
-    assert "georaster-layer-for-leaflet" in html
     assert "umbraToggleSarImage" in html
     assert f'data-item-id="{item.id}"' in html
+    # No bare <script src="...georaster..."> tags -- the previous
+    # design did this and broke ordering against Folium's Leaflet.
+    assert not re.search(r'<script[^>]*src="[^"]*georaster[^"]*"', html), html[:500]
+
+
+def test_lazy_imagery_driver_loads_libs_on_click_not_in_head(sample_item_dict):
+    """Regression test for the script-ordering bug: lazy_imagery used
+    to inject ``<script src=georaster...>`` into ``<head>`` BEFORE
+    Folium's Leaflet bundle, causing
+    ``Cannot read properties of undefined (reading 'GridLayer')``
+    when georaster-layer-for-leaflet tried to extend ``L.GridLayer``.
+    The fix moved CDN loading into the driver itself."""
+    pytest.importorskip("folium")
+    from umbra_py import footprint_map
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = footprint_map([item], lazy_imagery=True).get_root().render()
+
+    # The URL appears inside the driver IIFE, not as a script src.
+    assert "unpkg.com/georaster" in html
+    assert 'src="https://unpkg.com/georaster' not in html
+    # And the driver carries the dynamic-injection helper.
+    assert "injectScript" in html
 
 
 def test_footprint_map_lazy_imagery_off_by_default(sample_item_dict):
-    """The default footprint_map call must NOT pull in the CDN libs
+    """The default footprint_map call must NOT pull in the driver
     or emit the button. Lazy imagery is opt-in."""
     pytest.importorskip("folium")
     from umbra_py import footprint_map
@@ -132,10 +169,11 @@ def test_footprint_map_lazy_imagery_off_by_default(sample_item_dict):
     item = UmbraItem.from_dict(sample_item_dict)
     html = footprint_map([item]).get_root().render()
     assert "umbra-sar-btn" not in html
+    assert "umbraToggleSarImage" not in html
     assert "georaster" not in html
 
 
-def test_timeline_map_lazy_imagery_emits_button_and_libs(sample_item_dict):
+def test_timeline_map_lazy_imagery_emits_button_and_driver(sample_item_dict):
     """The timeline view must work identically -- click any footprint
     mid-animation and get the same fetch-on-demand SAR overlay."""
     pytest.importorskip("folium")
@@ -144,8 +182,9 @@ def test_timeline_map_lazy_imagery_emits_button_and_libs(sample_item_dict):
     item = UmbraItem.from_dict(sample_item_dict)
     html = timeline_map([item], lazy_imagery=True).get_root().render()
     assert "umbra-sar-btn" in html
-    assert "georaster-layer-for-leaflet" in html
     assert "umbraToggleSarImage" in html
+    # Same ordering guarantee as for footprint_map.
+    assert not re.search(r'<script[^>]*src="[^"]*georaster[^"]*"', html)
 
 
 def test_footprint_map_imagery_and_lazy_imagery_mutually_exclusive(sample_item_dict):
@@ -176,8 +215,9 @@ def test_lazy_imagery_skips_items_with_no_resolvable_asset(monkeypatch, sample_i
     assert item.id in html
     assert "umbra-sar-btn" not in html
     # And the driver isn't installed when no item has a URL --
-    # otherwise we'd ship a 400 KB CDN bundle for nothing.
-    assert "georaster-layer-for-leaflet" not in html
+    # otherwise we'd ship a CDN-loading shim for nothing.
+    assert "umbraToggleSarImage" not in html
+    assert "georaster" not in html
 
 
 def test_cli_map_rejects_imagery_with_lazy_imagery(monkeypatch, tmp_path, sample_item_dict):

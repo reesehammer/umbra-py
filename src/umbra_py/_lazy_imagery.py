@@ -1,31 +1,42 @@
 """Browser-side lazy-fetch SAR overlays.
 
 The map's HTML carries a per-item ``Get SAR image`` button instead of a
-pre-baked PNG. On click, the page lazily loads
-``georaster-layer-for-leaflet`` (which pulls in ``geotiff.js``) from a
-CDN, streams the GEC cloud-optimized GeoTIFF directly from the Umbra
-public bucket via HTTP range requests, applies the same percentile
-stretch that :func:`umbra_py.viz._stretch_to_rgba` performs in Python,
-and adds the result as a :class:`L.GeoRasterLayer` on the running
-Folium map.
+pre-baked PNG. On the first click anywhere on the map, the page lazily
+fetches ``georaster-layer-for-leaflet`` (and the ``georaster`` /
+``geotiff.js`` chain it pulls in) by appending ``<script>`` tags from
+the driver, streams the GEC cloud-optimized GeoTIFF directly from the
+Umbra public bucket via HTTP range requests, applies the same
+percentile stretch that :func:`umbra_py.viz._stretch_to_rgba` performs
+in Python, and adds the result as a :class:`L.GeoRasterLayer` on the
+running Folium map.
 
-This lets a 200-item map weigh ~30 KB instead of hundreds of MB — the
-user only pays the fetch cost for the items they actually want to see.
+Two reasons we inject the CDN scripts from the driver instead of from
+the map's ``<head>``:
+
+1. **Ordering.** ``georaster-layer-for-leaflet`` extends
+   ``L.GridLayer`` at script-evaluation time, so it *must* run after
+   Leaflet. Folium pulls Leaflet itself into the page head, and we
+   don't get a hook in between -- so a naive ``<head>`` injection
+   races and the layer ends up broken
+   (``Cannot read properties of undefined (reading 'GridLayer')``).
+2. **Cost.** A 200-item map weighs ~30 KB and pays *nothing* for the
+   CDN until somebody actually clicks a button. Pages nobody clicks
+   stay free.
+
 The Umbra bucket already serves permissive CORS headers (``*`` origin,
 ``GET``/``HEAD`` methods, ``range`` headers) on every object, which is
-what makes browser-direct streaming possible.
+what makes the browser-direct streaming possible.
 
 The implementation here is intentionally a couple of JS string
 templates rather than a Jinja template module: the templates are short,
-they only ever land inside a ``<script>`` block at the bottom of the
-map, and keeping them inline keeps the rendering surface visible from
-Python.
+they only ever land inside a single ``<script>`` block at the bottom
+of the map, and keeping them inline keeps the rendering surface
+visible from Python.
 """
 
 from __future__ import annotations
 
 import html
-import json
 from typing import Any
 
 # Pinned to specific versions to keep release behavior reproducible.
@@ -36,22 +47,11 @@ from typing import Any
 # field in package.json points at -- naive guesses like
 # `dist/<pkg>.min.js` 404 on georaster-layer-for-leaflet, where the
 # real bundle lives several directories deep.
-_GEORASTER_JS = "https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"
-_GEORASTER_LAYER_JS = (
+GEORASTER_JS = "https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"
+GEORASTER_LAYER_JS = (
     "https://unpkg.com/georaster-layer-for-leaflet@3.10.0/"
     "dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
 )
-
-
-def cdn_script_tags() -> str:
-    """The ``<script>`` tags that pull the COG-loading libraries.
-
-    Injected once into the map's ``<head>``. The browser still won't
-    fetch the bytes until the first ``Get SAR image`` click triggers
-    ``parseGeoraster``, so the cost of a map that nobody clicks is two
-    tiny HTTP HEADs (handled by the browser's normal script cache).
-    """
-    return f'<script src="{_GEORASTER_JS}"></script>\n<script src="{_GEORASTER_LAYER_JS}"></script>'
 
 
 def driver_script(
@@ -78,12 +78,18 @@ def driver_script(
         percentile cut in the browser. SAR overviews are typically a
         few million pixels; sampling keeps the math sub-second on
         modest hardware.
+
+    The returned snippet embeds the CDN URLs (pinned at module level)
+    so a single ``<script>`` block injection from the Python side is
+    enough -- no extra ``<head>`` plumbing.
     """
     return _DRIVER_TEMPLATE.format(
         map_var=map_var,
         plo=percentile_low,
         phi=percentile_high,
         sample_cap=sample_cap,
+        georaster_url=GEORASTER_JS,
+        georaster_layer_url=GEORASTER_LAYER_JS,
     )
 
 
@@ -116,22 +122,19 @@ def popup_button_html(
     )
 
 
-def feature_url_map(
-    pairs: list[tuple[str, str]],
-) -> str:
-    """Serialize the ``{item_id: asset_url}`` map for the driver.
-
-    The driver script reads this at load time so it has a canonical
-    list even if the user dismisses the popup before clicking. Kept as
-    JSON to dodge JS-injection concerns from item IDs or filenames.
-    """
-    obj: dict[str, Any] = {pid: url for pid, url in pairs}
-    return json.dumps(obj, separators=(",", ":"))
+def _verbatim_url_set(*urls: str) -> dict[str, Any]:
+    # Kept as a function for tests to call when they want the set of URLs
+    # the driver injects, without parsing JS out of the template.
+    return {url: True for url in urls}
 
 
 # The template stays small on purpose. The flow:
-#  1. Click → loading state.
-#  2. parseGeoraster(url) streams the COG via HTTP range requests.
+#  1. First click anywhere on the map kicks off `loadLibs()`, which
+#     dynamically inserts the two CDN <script> tags into <head>. They
+#     run AFTER Leaflet (already loaded), so georaster-layer-for-leaflet
+#     finds L.GridLayer when it tries to extend it.
+#  2. Once both scripts have fired their `onload`, parseGeoraster(url)
+#     streams the COG via HTTP range requests.
 #  3. Sample the pixel values to compute percentile cuts.
 #  4. Build a GeoRasterLayer whose pixelValuesToColorFn does the stretch
 #     and emits transparent for invalid / non-positive pixels (matching
@@ -142,7 +145,52 @@ _DRIVER_TEMPLATE = """
 (function() {{
   if (window.umbraToggleSarImage) {{ return; }}  // idempotent across re-renders
   var layers = {{}};  // item_id -> L.GeoRasterLayer
+  var libsPromise = null;
+  var GEORASTER_URL = {georaster_url!r};
+  var GEORASTER_LAYER_URL = {georaster_layer_url!r};
+
   function findMap() {{ return window['{map_var}']; }}
+
+  function injectScript(src) {{
+    return new Promise(function(resolve, reject) {{
+      var existing = document.querySelector('script[src="' + src + '"]');
+      if (existing) {{
+        if (existing.dataset.umbraLoaded === '1') {{ resolve(); return; }}
+        existing.addEventListener('load', function() {{ resolve(); }});
+        existing.addEventListener('error', function() {{
+          reject(new Error('Failed to load ' + src));
+        }});
+        return;
+      }}
+      var s = document.createElement('script');
+      s.src = src;
+      s.async = false;  // preserve insertion order, just in case
+      s.onload = function() {{ s.dataset.umbraLoaded = '1'; resolve(); }};
+      s.onerror = function() {{ reject(new Error('Failed to load ' + src)); }};
+      document.head.appendChild(s);
+    }});
+  }}
+
+  function loadLibs() {{
+    if (libsPromise) return libsPromise;
+    // georaster-layer-for-leaflet extends L.GridLayer at evaluation
+    // time, so by the time we get here Leaflet must already be on the
+    // page -- which it is, because Folium loads it in <head> during
+    // initial page parse. The georaster bundle itself has no Leaflet
+    // dependency, so the two can load in parallel.
+    libsPromise = Promise.all([
+      injectScript(GEORASTER_URL),
+      injectScript(GEORASTER_LAYER_URL)
+    ]).then(function() {{
+      if (typeof parseGeoraster === 'undefined' ||
+          typeof GeoRasterLayer === 'undefined') {{
+        throw new Error(
+          'CDN libs loaded but expected globals (parseGeoraster, ' +
+          'GeoRasterLayer) are missing. Has a CDN URL drifted?');
+      }}
+    }});
+    return libsPromise;
+  }}
 
   function percentile(samples, p) {{
     var sorted = samples.slice().sort(function(a, b) {{ return a - b; }});
@@ -181,14 +229,9 @@ _DRIVER_TEMPLATE = """
     button.disabled = true;
     button.textContent = 'Loading SAR image…';
     button.setAttribute('data-state', 'loading');
-    if (typeof parseGeoraster === 'undefined' ||
-        typeof GeoRasterLayer === 'undefined') {{
-      button.disabled = false;
-      button.textContent = 'SAR libs unavailable';
-      button.setAttribute('data-state', 'error');
-      return;
-    }}
-    parseGeoraster(url).then(function(georaster) {{
+    loadLibs().then(function() {{
+      return parseGeoraster(url);
+    }}).then(function(georaster) {{
       var stretch = computeStretch(georaster);
       if (!stretch) {{
         button.disabled = false;
@@ -227,6 +270,7 @@ _DRIVER_TEMPLATE = """
       button.textContent = 'Fetch failed';
       button.setAttribute('data-state', 'error');
       button.title = String(err);
+      console.error('[umbra-py lazy SAR]', err);
     }});
   }}
 
