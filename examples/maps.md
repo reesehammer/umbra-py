@@ -235,19 +235,94 @@ m.save("custom.html")
 
 ---
 
+## 6.5 Animated timeline map
+
+Static maps answer *where*. The timeline map answers *when*. It's the
+same search results re-rendered as a TimestampedGeoJson layer with a
+play button and a slider beneath the map, so you can watch Umbra's
+coverage accumulate over your requested window.
+
+```python
+from umbra_py import UmbraCatalog, timeline_map
+
+items = list(UmbraCatalog().search(
+    start="2024-01-01", end="2024-06-30",
+    product_types=["GEC"],
+    max_per_task=1,
+    limit=200,
+))
+
+m = timeline_map(items, period="P7D")   # one tick = one week
+m.save("coverage.html")
+```
+
+What the knobs do:
+
+- **`period`** — ISO 8601 duration controlling the slider's step size.
+  Match it to the cadence of your search: `"PT1H"` for one day's
+  acquisitions, `"P1D"` for a month, `"P7D"` for a year. Too small and
+  the playhead crawls; too large and bursts collapse into a single
+  tick.
+- **`duration`** — how long each footprint stays visible after its
+  timestamp. `None` (the default) leaves footprints on the map once
+  revealed, so the animation accumulates coverage. Pass an ISO duration
+  like `"P1D"` for a "show each day's collection then fade" effect —
+  useful for spotting one-off events vs. sustained tasking.
+- **`auto_play`** — start the animation when the page loads. Default
+  `True`; flip to `False` if you'd rather the viewer press play.
+- **`loop`** — restart from the beginning when the slider reaches the
+  end.
+- **`transition_time`** — milliseconds between ticks during playback.
+  Lower = snappier animation; raise it for a more deliberate pace.
+- **`tiles`, `color`, `weight`, `fill_opacity`, `zoom_start`** —
+  identical to `footprint_map`.
+- **`geocode`, `geocode_zoom`** — identical to `footprint_map`. Each
+  footprint's centroid is reverse-geocoded via OpenStreetMap Nominatim
+  and the resulting place name appears as a "Location" row in the
+  popup. Off by default (so a library call doesn't make surprise
+  network requests); throttled to ~1 req/s and cached, so a 100-item
+  timeline takes ~100 s on first render and reruns are fast. The CLI's
+  `--geocode/--no-geocode` flag flows through to `--timeline` too.
+
+Items without a datetime *or* a geometry are silently skipped (they
+can't be placed on a time axis). Click any footprint mid-animation and
+you get the same metadata popup `footprint_map` renders.
+
+SAR imagery overlays aren't supported yet on the timeline view —
+animating base64 rasters across the slider is a bigger lift. For now,
+use the timeline to find the time / place you care about, then call
+`footprint_map([item], imagery=True)` on that single acquisition for
+the high-resolution look.
+
+CLI:
+
+```bash
+umbra map \
+    --start 2024-01-01 --end 2024-06-30 \
+    --product GEC \
+    --max-per-task 1 \
+    --limit 200 \
+    --timeline --timeline-period P7D \
+    --out coverage.html
+```
+
+---
+
 ## 7. Persisted outputs
 
 ### Save a Folium map to HTML
 
 ```python
-from umbra_py import save_footprint_map
+from umbra_py import save_footprint_map, save_timeline_map
 
 save_footprint_map(items, "out/umbra.html", imagery=True, color="#00aaff")
+save_timeline_map(items, "out/coverage.html", period="P7D")
 ```
 
-`save_footprint_map` is a thin wrapper that builds the map with the
-same kwargs as `footprint_map` and writes the resulting standalone
-HTML to disk, creating parent directories as needed.
+`save_footprint_map` and `save_timeline_map` are thin wrappers that
+build the map with the same kwargs as `footprint_map` /
+`timeline_map` respectively and write the resulting standalone HTML
+to disk, creating parent directories as needed.
 
 ### Export GeoJSON
 

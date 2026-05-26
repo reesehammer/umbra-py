@@ -15,7 +15,7 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import UmbraError
 from .models import UmbraItem
-from .viz import save_footprint_map, write_geojson
+from .viz import save_footprint_map, save_timeline_map, write_geojson
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -186,6 +186,24 @@ def download(item_url, assets, dest, overwrite) -> None:
     "Nominatim's usage policy); pass --no-geocode to skip the network "
     "calls or when running offline.",
 )
+@click.option(
+    "--timeline",
+    is_flag=True,
+    help="Render an animated timeline map instead of the static footprint "
+    "map. Footprints appear at their acquisition timestamps and the page "
+    "ships a play button + scrubber, so you can watch Umbra's coverage "
+    "accumulate over the requested window. HTML output only; --imagery "
+    "is not yet supported on this view.",
+)
+@click.option(
+    "--timeline-period",
+    default="P1D",
+    show_default=True,
+    help="ISO 8601 step for the timeline slider (e.g. PT1H, P1D, P7D). "
+    "Pick a period matching the cadence of your search: PT1H for one "
+    "day of acquisitions, P1D for a month, P7D for a year. Ignored "
+    "without --timeline.",
+)
 def map_cmd(
     bbox,
     start,
@@ -197,6 +215,8 @@ def map_cmd(
     imagery_max_size,
     max_per_task,
     geocode,
+    timeline,
+    timeline_period,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     catalog = UmbraCatalog()
@@ -222,25 +242,42 @@ def map_cmd(
     if lower.endswith((".geojson", ".json")):
         if imagery:
             raise click.ClickException("--imagery only applies to HTML map output.")
+        if timeline:
+            raise click.ClickException("--timeline only applies to HTML map output.")
         path = write_geojson(items, out_path)
     elif lower.endswith(".html") or lower.endswith(".htm"):
-        extras = []
-        if imagery:
-            extras.append("imagery")
-        if geocode:
-            # Geocoding is the slow part (1 req/sec), so call it out so
-            # users aren't surprised when --geocode + a 100-item search
-            # spends a minute on Nominatim before the file appears.
-            extras.append(f"geocoding ~{len(items)}s")
-        suffix = (" with " + ", ".join(extras)) if extras else ""
-        with OrbitSpinner(f"Rendering {len(items)} footprint(s){suffix}"):
-            path = save_footprint_map(
-                items,
-                out_path,
-                imagery=imagery,
-                imagery_kwargs=imagery_kwargs,
-                geocode=geocode,
+        if timeline and imagery:
+            raise click.ClickException(
+                "--timeline and --imagery can't be combined yet; animating SAR "
+                "rasters across the slider isn't supported. Drop one."
             )
+        if timeline:
+            suffix = f" with geocoding ~{len(items)}s" if geocode else ""
+            with OrbitSpinner(f"Rendering {len(items)} acquisition(s) on timeline{suffix}"):
+                path = save_timeline_map(
+                    items,
+                    out_path,
+                    period=timeline_period,
+                    geocode=geocode,
+                )
+        else:
+            extras = []
+            if imagery:
+                extras.append("imagery")
+            if geocode:
+                # Geocoding is the slow part (1 req/sec), so call it out so
+                # users aren't surprised when --geocode + a 100-item search
+                # spends a minute on Nominatim before the file appears.
+                extras.append(f"geocoding ~{len(items)}s")
+            suffix = (" with " + ", ".join(extras)) if extras else ""
+            with OrbitSpinner(f"Rendering {len(items)} footprint(s){suffix}"):
+                path = save_footprint_map(
+                    items,
+                    out_path,
+                    imagery=imagery,
+                    imagery_kwargs=imagery_kwargs,
+                    geocode=geocode,
+                )
     else:
         raise click.ClickException(
             "Unrecognized output extension. Use .html for a map or .geojson for data."

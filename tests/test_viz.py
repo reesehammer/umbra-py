@@ -333,3 +333,180 @@ def test_footprint_map_default_does_not_geocode(monkeypatch, sample_item_dict):
     monkeypatch.setattr(viz_mod, "_reverse_geocode", _boom)
     item = UmbraItem.from_dict(sample_item_dict)
     viz_mod.footprint_map([item])  # must not raise
+
+
+def test_timeline_map_emits_timestamped_geojson(sample_item_dict):
+    """The timeline map embeds each item as a TimestampedGeoJson feature
+    keyed by its acquisition datetime, with the metadata popup attached."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = timeline_map([item]).get_root().render()
+
+    # The plugin's JS bundle is loaded.
+    assert "leaflet.timedimension" in html.lower() or "TimeDimension" in html
+    # The item's ISO timestamp appears in the feature payload.
+    assert item.datetime.isoformat() in html
+    # The popup metadata is carried through (item id renders into the popup).
+    assert item.id in html
+
+
+def test_timeline_map_skips_items_missing_datetime_or_geometry():
+    """Items without a datetime or geometry can't be placed on the
+    timeline; they're silently dropped so a single bad item doesn't
+    blank the whole map."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+
+    no_geom = UmbraItem(id="no-geom", properties={"datetime": "2024-02-01T00:00:00Z"})
+    no_dt = UmbraItem(id="no-dt", bbox=(0.0, 0.0, 1.0, 1.0))
+    # Both must be skipped without raising. The empty-feature map still
+    # renders -- just without the slider control.
+    m = timeline_map([no_geom, no_dt])
+    assert m is not None
+
+
+def test_timeline_map_passes_period_through(sample_item_dict):
+    """Custom --timeline-period reaches the plugin so users can pick
+    PT1H vs P7D vs P1D depending on their search density."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = timeline_map([item], period="PT1H").get_root().render()
+    assert "PT1H" in html
+
+
+def test_save_timeline_map_writes_html(tmp_path, sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import save_timeline_map
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    out = save_timeline_map([item], tmp_path / "tl.html")
+    assert out.exists()
+    text = out.read_text()
+    assert "<html" in text.lower()
+    # Sanity: the timeline plugin was emitted, not a static footprint map.
+    assert "timedimension" in text.lower() or "TimeDimension" in text
+
+
+def test_cli_map_rejects_timeline_with_imagery(monkeypatch, tmp_path, sample_item_dict):
+    """--timeline + --imagery isn't supported yet; the CLI should reject
+    the combo with a clear error instead of producing a confused map."""
+    pytest.importorskip("folium")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    monkeypatch.setattr(
+        cli_mod.UmbraCatalog,
+        "search",
+        lambda self, **_kwargs: iter([item]),
+    )
+
+    runner = CliRunner()
+    out = tmp_path / "x.html"
+    result = runner.invoke(
+        cli_mod.cli,
+        ["map", "--timeline", "--imagery", "--out", str(out)],
+    )
+    assert result.exit_code != 0
+    assert "timeline" in result.output.lower() and "imagery" in result.output.lower()
+
+
+def test_timeline_map_geocode_threads_label_into_popup(monkeypatch, sample_item_dict):
+    """timeline_map(geocode=True) should resolve a place name per item
+    and bake it into the popup HTML that TimestampedGeoJson carries.
+    The plugin renders feature properties verbatim, so the label has
+    to be in place at generation time."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+    monkeypatch.setattr(
+        viz_mod,
+        "_reverse_geocode",
+        lambda lat, lon, **_kw: f"Somewhere near {lat:.1f},{lon:.1f}",
+    )
+    monkeypatch.setattr(viz_mod, "_require_session_for_geocoding", lambda: None)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = timeline_map([item], geocode=True).get_root().render()
+    assert "Location" in html
+    assert "Somewhere near" in html
+
+
+def test_timeline_map_default_does_not_geocode(monkeypatch, sample_item_dict):
+    """Library default stays opt-in: calling timeline_map() without
+    geocode=True must not hit the network."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+    from umbra_py import viz as viz_mod
+
+    def _boom(*_a, **_k):
+        raise AssertionError("_reverse_geocode must not be called by default")
+
+    monkeypatch.setattr(viz_mod, "_reverse_geocode", _boom)
+    item = UmbraItem.from_dict(sample_item_dict)
+    timeline_map([item])  # must not raise
+
+
+def test_cli_map_timeline_with_geocode_flows_through(monkeypatch, tmp_path, sample_item_dict):
+    """`umbra map --timeline --geocode` should reach save_timeline_map
+    with geocode=True. We patch the geocoder so the test stays offline."""
+    pytest.importorskip("folium")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+    # Stick to ASCII -- folium JSON-encodes popup properties with
+    # ensure_ascii=True, so non-ASCII labels arrive in the rendered
+    # HTML as \uXXXX escapes and would defeat a naive substring check.
+    monkeypatch.setattr(viz_mod, "_reverse_geocode", lambda lat, lon, **_kw: "Test Town")
+    monkeypatch.setattr(viz_mod, "_require_session_for_geocoding", lambda: None)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    monkeypatch.setattr(
+        cli_mod.UmbraCatalog,
+        "search",
+        lambda self, **_kwargs: iter([item]),
+    )
+
+    out = tmp_path / "tl.html"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["map", "--timeline", "--geocode", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text()
+    assert "Test Town" in text
+
+
+def test_cli_map_timeline_writes_animated_html(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end check: `umbra map --timeline` invokes the timeline
+    renderer (not the static map) and produces a slider-bearing HTML
+    file."""
+    pytest.importorskip("folium")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    monkeypatch.setattr(
+        cli_mod.UmbraCatalog,
+        "search",
+        lambda self, **_kwargs: iter([item]),
+    )
+
+    runner = CliRunner()
+    out = tmp_path / "tl.html"
+    result = runner.invoke(cli_mod.cli, ["map", "--timeline", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    text = out.read_text()
+    assert "timedimension" in text.lower() or "TimeDimension" in text

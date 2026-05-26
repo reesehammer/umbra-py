@@ -90,6 +90,11 @@ footprint_map(items).save("footprints.html")
 # self-contained.
 footprint_map(items, imagery=True).save("sar_map.html")
 
+# Animated timeline: watch Umbra's coverage accumulate across your search
+# window with a play button + slider underneath the map.
+from umbra_py import timeline_map
+timeline_map(items, period="P7D").save("coverage.html")
+
 # Or export to GeoJSON for QGIS, leafmap, Earth Engine, geopandas, deck.gl, ...
 write_geojson(items, "footprints.geojson")
 ```
@@ -112,6 +117,11 @@ umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.geo
 
 # Same, but overlay the actual SAR imagery on the basemap.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --imagery --out sar_map.html
+
+# Animated coverage: footprints appear at their acquisition timestamps
+# under a play button + slider. Pick --timeline-period to match search density.
+umbra map --start 2024-01-01 --end 2024-06-30 --product GEC --max-per-task 1 \
+    --timeline --timeline-period P7D --out coverage.html
 ```
 
 ## What the data looks like

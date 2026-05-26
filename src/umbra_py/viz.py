@@ -543,3 +543,170 @@ def save_footprint_map(
     dest.parent.mkdir(parents=True, exist_ok=True)
     footprint_map(items, **kwargs).save(str(dest))
     return dest
+
+
+def timeline_map(
+    items: Iterable[UmbraItem],
+    *,
+    tiles: str = "OpenStreetMap",
+    color: str = "#ff5500",
+    weight: int = 2,
+    fill_opacity: float = 0.35,
+    zoom_start: int = 2,
+    period: str = "P1D",
+    duration: str | None = None,
+    auto_play: bool = True,
+    loop: bool = False,
+    transition_time: int = 400,
+    geocode: bool = False,
+    geocode_zoom: int = 10,
+):
+    """Build an animated timeline map of Umbra acquisitions.
+
+    Each item is rendered as a polygon stamped with its acquisition
+    datetime. Folium's ``TimestampedGeoJson`` plugin draws a play
+    button and a time slider underneath the map: scrubbing through it
+    reveals how Umbra's coverage accumulates across the requested
+    window. Items without a datetime or geometry are skipped (they
+    can't be placed on a time axis).
+
+    This is a different lens on the same data ``footprint_map``
+    handles. The static map answers "what areas does this search
+    cover?"; the timeline map answers "when did Umbra image each of
+    them?". Use it to spot revisit cadence over a tasked site, the
+    sparsity vs. density of the archive across months, or the
+    geographic footprint of a single day's collection.
+
+    Parameters
+    ----------
+    items:
+        Items to plot. Order is irrelevant; the plugin sorts by time.
+    tiles, color, weight, fill_opacity, zoom_start:
+        Same meaning as in :func:`footprint_map`.
+    period:
+        ISO 8601 duration string for the slider's tick interval (e.g.
+        ``"PT1H"`` for hourly, ``"P1D"`` for daily, ``"P7D"`` for
+        weekly). Default ``"P1D"``.
+    duration:
+        How long each footprint stays visible after its timestamp
+        (ISO 8601 duration). ``None`` (default) keeps footprints on
+        the map once revealed -- so the animation accumulates coverage.
+        Pass e.g. ``"P1D"`` for a "show each day's acquisitions then
+        fade" look.
+    auto_play:
+        Start the animation when the page loads.
+    loop:
+        Restart from the beginning when the slider reaches the end.
+    transition_time:
+        Milliseconds between slider ticks during playback. Lower =
+        faster animation.
+    geocode, geocode_zoom:
+        Same semantics as :func:`footprint_map` -- reverse-geocode each
+        footprint's centroid via OpenStreetMap Nominatim and surface
+        the resulting place name in the popup. Throttled to ~1 req/s
+        and cached, so a 100-item timeline takes ~100 s on first
+        render. Off by default to avoid surprise network traffic.
+
+    Returns the underlying ``folium.Map``; ``.save("file.html")`` it
+    or display it in Jupyter. Requires the ``viz`` extra.
+    """
+    folium = _require("folium")
+    from folium.plugins import TimestampedGeoJson  # noqa: PLC0415
+
+    items = list(items)
+    plottable: list[UmbraItem] = []
+    geoms: dict[str, dict[str, Any]] = {}
+    for item in items:
+        geom = _geometry_for(item)
+        if geom is None or item.datetime is None:
+            continue
+        plottable.append(item)
+        geoms[item.id] = geom
+
+    # Resolve geocoded labels before the popup HTML is baked into the
+    # TimestampedGeoJson feature properties -- the plugin renders the
+    # popup string verbatim, so the location row has to be present at
+    # generation time.
+    locations: dict[str, str] = {}
+    if geocode:
+        geocode_session = _require_session_for_geocoding()
+        for item in plottable:
+            center_ll = _centroid(item)
+            if center_ll is None:
+                continue
+            label = _reverse_geocode(
+                center_ll[0],
+                center_ll[1],
+                zoom=geocode_zoom,
+                session=geocode_session,
+            )
+            if label:
+                locations[item.id] = label
+
+    features: list[dict[str, Any]] = []
+    bbox_inputs: list[dict[str, Any]] = []
+    for item in plottable:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geoms[item.id],
+                "properties": {
+                    "times": [item.datetime.isoformat()],
+                    "popup": _popup_html(item, location=locations.get(item.id)),
+                    "id": item.id,
+                    "style": {
+                        "color": color,
+                        "weight": weight,
+                        "fillColor": color,
+                        "fillOpacity": fill_opacity,
+                    },
+                    "icon": "circle",
+                    "iconstyle": {
+                        "fillColor": color,
+                        "fillOpacity": 0.85,
+                        "stroke": "true",
+                        "color": color,
+                        "radius": 6,
+                    },
+                },
+            }
+        )
+        bbox_inputs.append(item_to_feature(item))
+
+    bbox = _union_bbox(bbox_inputs)
+    if bbox is not None:
+        center = ((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2)
+    else:
+        center = (0.0, 0.0)
+
+    m = folium.Map(location=center, tiles=tiles, zoom_start=zoom_start)
+
+    if features:
+        TimestampedGeoJson(
+            {"type": "FeatureCollection", "features": features},
+            period=period,
+            duration=duration,
+            auto_play=auto_play,
+            loop=loop,
+            transition_time=transition_time,
+            add_last_point=False,
+            date_options="YYYY-MM-DD HH:mm UTC",
+            time_slider_drag_update=True,
+        ).add_to(m)
+
+    if bbox is not None:
+        m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])
+
+    return m
+
+
+def save_timeline_map(
+    items: Iterable[UmbraItem],
+    dest: str | os.PathLike,
+    **kwargs,
+) -> Path:
+    """Build a timeline map and write it to ``dest`` as standalone HTML."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timeline_map(items, **kwargs).save(str(dest))
+    return dest
