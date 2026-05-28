@@ -232,14 +232,29 @@ How it works:
   scene edges.
 - Click the button again to remove the overlay.
 
+**Open the page over http(s), not `file://`.** The COG-decoding
+library uses Web Workers, and Chromium-family browsers (Chrome,
+Brave, Edge) refuse to spawn workers from `file://` origins under
+unique-origin security rules. If you double-click the saved
+`.html`, every click shows **"Open via http://"** with a hint to
+run a local server. The fix is one line:
+
+```bash
+cd /path/to/your/maps
+python3 -m http.server      # then visit http://localhost:8000/lazy.html
+```
+
+Pre-baked `imagery=True` does work from `file://` because everything
+is inlined as base64.
+
 When to pick which:
 
 | Scenario                                 | Use            |
 | ---------------------------------------- | -------------- |
 | Single map, you want everything visible immediately | `imagery=True` |
-| Many items, exploring on demand          | `lazy_imagery=True` |
+| Many items, exploring on demand          | `lazy_imagery=True` (serve via http(s)) |
 | Animated timeline                        | `lazy_imagery=True` (works with `timeline_map`) |
-| Sharing a self-contained file that works offline | `imagery=True` |
+| Sharing a self-contained file that works offline or from `file://` | `imagery=True` |
 
 The two are mutually exclusive — both would try to add a SAR raster
 per item, so passing both raises `ValueError`.

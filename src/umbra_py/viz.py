@@ -351,8 +351,9 @@ def _install_lazy_imagery(
     (see ``_lazy_imagery`` for the rationale -- short version: doing
     it from ``<head>`` races against Folium's Leaflet bundle, and
     georaster-layer-for-leaflet needs ``L.GridLayer`` defined before
-    it evaluates). Sample cap of 100k pixels keeps the in-browser
-    percentile pass under a second even on modest hardware.
+    it evaluates). The driver finds the running map by DOM-traversal
+    from each clicked button, so it stays correct across Jupyter
+    cell reruns and multi-map pages.
     """
     folium = _require("folium")
     from ._lazy_imagery import driver_script  # noqa: PLC0415
@@ -360,10 +361,8 @@ def _install_lazy_imagery(
     folium_map.get_root().script.add_child(
         folium.Element(
             driver_script(
-                map_var=folium_map.get_name(),
                 percentile_low=percentile[0],
                 percentile_high=percentile[1],
-                sample_cap=100_000,
             )
         )
     )

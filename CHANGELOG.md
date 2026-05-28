@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Lazy SAR imagery now surfaces a clear **"Open via http://"**
+  message (with the exact `python3 -m http.server` command) when the
+  page is opened from a `file://` origin, instead of silently failing
+  -- Chromium-family browsers refuse to spawn the georaster bundle's
+  worker chunks from `file://` under unique-origin rules.
+- Degenerate-percentile fallback in the JS stretch no longer adds
+  an absolute `+1` (which rendered any normalized-amplitude raster
+  with values in `[0, 0.05]` as solid black); uses a relative epsilon
+  centered on the value so uniform-pixel scenes render as mid-gray.
+- The driver now resolves the running map by DOM-walking from the
+  clicked button to its enclosing `.folium-map` div, instead of
+  closing over a single `map_var` string. Fixes silent misrouting in
+  multi-map pages and after Jupyter cell reruns.
+- CDN URLs are emitted as JSON-encoded JS strings (was Python `repr`),
+  so a future bump to a URL with quotes or non-ASCII characters can't
+  silently break the driver template.
+- `noDataValue` is coerced to `Number` before equality comparison;
+  COGs that publish string-typed nodata no longer leak into the
+  percentile sample.
+- Percentile picks share one in-place sort instead of two `slice().sort()`
+  passes.
+
 ### Added
 - **Browser-side lazy SAR imagery** via a new `lazy_imagery=True` kwarg
   on `footprint_map` and `timeline_map`, plus a matching

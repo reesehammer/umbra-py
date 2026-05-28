@@ -27,17 +27,24 @@ The Umbra bucket already serves permissive CORS headers (``*`` origin,
 ``GET``/``HEAD`` methods, ``range`` headers) on every object, which is
 what makes the browser-direct streaming possible.
 
-The implementation here is intentionally a couple of JS string
-templates rather than a Jinja template module: the templates are short,
-they only ever land inside a single ``<script>`` block at the bottom
-of the map, and keeping them inline keeps the rendering surface
-visible from Python.
+**file:// origin limitation.** The georaster bundle uses Webpack
+worker chunks, which Chromium-family browsers refuse to spawn from
+``file://`` pages ("'file:' URLs are treated as unique security
+origins"). The driver detects ``file:`` at click time and surfaces a
+clear "open via http(s)" message instead of letting the click silently
+hang. For interactive use, serve the directory with
+``python3 -m http.server`` and open ``http://localhost:8000/<map>.html``.
+
+The implementation here is intentionally a JS string template rather
+than a Jinja template module: it's short, it lands inside a single
+``<script>`` block at the bottom of the map, and keeping it inline
+keeps the rendering surface visible from Python.
 """
 
 from __future__ import annotations
 
 import html
-from typing import Any
+import json
 
 # Pinned to specific versions to keep release behavior reproducible.
 # Bump deliberately -- COG decoding in the browser is a moving target
@@ -53,47 +60,41 @@ GEORASTER_LAYER_JS = (
     "dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
 )
 
+# Sample window for the in-browser percentile stretch. Hardcoded because
+# nobody tunes it -- 316 x 316 ~= 100k samples, percentile sort is
+# sub-second on modest hardware. The COG only ships the bytes for the
+# overview level that matches this resolution.
+_SAMPLE_DIM = 316
+
 
 def driver_script(
     *,
-    map_var: str,
     percentile_low: float,
     percentile_high: float,
-    sample_cap: int,
 ) -> str:
     """Return the JS module that wires every button to the COG fetcher.
 
     Parameters
     ----------
-    map_var:
-        Name of the global JS variable that holds the Folium ``L.Map``
-        instance. Folium picks a per-render random name like
-        ``map_a1b2c3``; the caller is responsible for resolving it
-        (e.g. via ``m.get_name()``).
     percentile_low, percentile_high:
         Contrast-stretch cuts, mirroring
         :func:`umbra_py.viz._stretch_to_rgba`'s defaults of ``(2, 98)``.
-    sample_cap:
-        Target pixel budget for the stretch-sample window. The
-        browser fetches a ``sqrt(sample_cap) x sqrt(sample_cap)``
-        downsampled view of the raster (clamped to ``[64, 1024]``)
-        via ``georaster.getValues`` -- HTTP range requests against
-        the appropriate COG overview level, no full read. Picks the
-        percentile cuts off that sample. 100_000 (~316 x 316) keeps
-        the math sub-second on modest hardware.
 
     The returned snippet embeds the CDN URLs (pinned at module level)
-    so a single ``<script>`` block injection from the Python side is
-    enough -- no extra ``<head>`` plumbing.
+    as JS string literals via ``json.dumps`` so any future URL with
+    quotes or non-ASCII characters stays a valid JS string. The driver
+    resolves the running Folium map at click time by walking the
+    button's DOM ancestry to the enclosing ``.folium-map`` element and
+    looking up ``window[<that-div-id>]`` -- robust against Jupyter cell
+    reruns and multi-map pages, where a single bound ``map_var``
+    closure would go stale.
     """
-    sample_dim = max(64, min(1024, int(sample_cap**0.5)))
     return _DRIVER_TEMPLATE.format(
-        map_var=map_var,
-        plo=percentile_low,
-        phi=percentile_high,
-        sample_dim=sample_dim,
-        georaster_url=GEORASTER_JS,
-        georaster_layer_url=GEORASTER_LAYER_JS,
+        plo=float(percentile_low),
+        phi=float(percentile_high),
+        sample_dim=_SAMPLE_DIM,
+        georaster_url=json.dumps(GEORASTER_JS),
+        georaster_layer_url=json.dumps(GEORASTER_LAYER_JS),
     )
 
 
@@ -112,24 +113,18 @@ def popup_button_html(
     DOM node on a "Remove image" click.
     """
     return (
-        f'<div class="umbra-sar-fetch" style="margin-top:6px">'
-        f'<button type="button" '
-        f'class="umbra-sar-btn" '
+        '<div class="umbra-sar-fetch" style="margin-top:6px">'
+        '<button type="button" '
+        'class="umbra-sar-btn" '
         f'data-item-id="{html.escape(item_id, quote=True)}" '
         f'data-asset-url="{html.escape(asset_url, quote=True)}" '
-        f'data-state="idle" '
-        f'onclick="umbraToggleSarImage(this)" '
-        f'style="font:12px/1.2 -apple-system,sans-serif;padding:4px 10px;'
-        f"border:1px solid #888;border-radius:3px;background:#f7f7f7;"
+        'data-state="idle" '
+        'onclick="umbraToggleSarImage(this)" '
+        'style="font:12px/1.2 -apple-system,sans-serif;padding:4px 10px;'
+        "border:1px solid #888;border-radius:3px;background:#f7f7f7;"
         f'cursor:pointer">{html.escape(label)}</button>'
-        f"</div>"
+        "</div>"
     )
-
-
-def _verbatim_url_set(*urls: str) -> dict[str, Any]:
-    # Kept as a function for tests to call when they want the set of URLs
-    # the driver injects, without parsing JS out of the template.
-    return {url: True for url in urls}
 
 
 # The template stays small on purpose. The flow:
@@ -155,42 +150,43 @@ _DRIVER_TEMPLATE = """
   if (window.umbraToggleSarImage) {{ return; }}  // idempotent across re-renders
   var layers = {{}};  // item_id -> L.GeoRasterLayer
   var libsPromise = null;
-  var GEORASTER_URL = {georaster_url!r};
-  var GEORASTER_LAYER_URL = {georaster_layer_url!r};
+  var GEORASTER_URL = {georaster_url};
+  var GEORASTER_LAYER_URL = {georaster_layer_url};
 
-  function findMap() {{ return window['{map_var}']; }}
-
-  function injectScript(src) {{
-    return new Promise(function(resolve, reject) {{
-      var existing = document.querySelector('script[src="' + src + '"]');
-      if (existing) {{
-        if (existing.dataset.umbraLoaded === '1') {{ resolve(); return; }}
-        existing.addEventListener('load', function() {{ resolve(); }});
-        existing.addEventListener('error', function() {{
-          reject(new Error('Failed to load ' + src));
-        }});
-        return;
-      }}
-      var s = document.createElement('script');
-      s.src = src;
-      s.async = false;  // preserve insertion order, just in case
-      s.onload = function() {{ s.dataset.umbraLoaded = '1'; resolve(); }};
-      s.onerror = function() {{ reject(new Error('Failed to load ' + src)); }};
-      document.head.appendChild(s);
-    }});
+  // Resolve the Folium map by walking up from the clicked button to
+  // the enclosing `.folium-map` div, then looking up its id on `window`
+  // (Folium publishes every map by id). Robust against Jupyter cell
+  // reruns and multi-map pages -- the IIFE installs `umbraToggleSarImage`
+  // once but each click resolves the right map fresh.
+  function findMapForButton(button) {{
+    var el = button;
+    while (el && (!el.classList || !el.classList.contains('folium-map'))) {{
+      el = el.parentElement;
+    }}
+    return (el && el.id) ? window[el.id] : null;
   }}
 
   function loadLibs() {{
     if (libsPromise) return libsPromise;
-    // georaster-layer-for-leaflet extends L.GridLayer at evaluation
-    // time, so by the time we get here Leaflet must already be on the
-    // page -- which it is, because Folium loads it in <head> during
-    // initial page parse. The georaster bundle itself has no Leaflet
-    // dependency, so the two can load in parallel.
-    libsPromise = Promise.all([
-      injectScript(GEORASTER_URL),
-      injectScript(GEORASTER_LAYER_URL)
-    ]).then(function() {{
+    // loadLibs is gated by `libsPromise`, so injection happens at most
+    // once per page lifetime -- no need for the inject-helper to dedup
+    // existing <script> tags. georaster-layer-for-leaflet extends
+    // L.GridLayer at evaluation time; by the time we run here Leaflet
+    // is already on the page (Folium loads it in <head> during initial
+    // parse). The georaster bundle has no Leaflet dependency, so the
+    // two scripts can load in parallel.
+    libsPromise = new Promise(function(resolve, reject) {{
+      var pending = 2;
+      function done() {{ if (--pending === 0) resolve(); }}
+      [GEORASTER_URL, GEORASTER_LAYER_URL].forEach(function(src) {{
+        var s = document.createElement('script');
+        s.src = src;
+        s.async = false;
+        s.onload = done;
+        s.onerror = function() {{ reject(new Error('Failed to load ' + src)); }};
+        document.head.appendChild(s);
+      }});
+    }}).then(function() {{
       if (typeof parseGeoraster === 'undefined' ||
           typeof GeoRasterLayer === 'undefined') {{
         throw new Error(
@@ -201,11 +197,18 @@ _DRIVER_TEMPLATE = """
     return libsPromise;
   }}
 
-  function percentile(samples, p) {{
-    var sorted = samples.slice().sort(function(a, b) {{ return a - b; }});
+  function pickPercentile(sorted, p) {{
     var idx = Math.max(0, Math.min(sorted.length - 1,
       Math.floor((p / 100.0) * (sorted.length - 1))));
     return sorted[idx];
+  }}
+
+  function normalizeNoData(raw) {{
+    // COGs sometimes declare noDataValue as a string; coerce to a
+    // number so the equality check downstream catches it.
+    if (raw === undefined || raw === null) return null;
+    var n = Number(raw);
+    return isFinite(n) ? n : null;
   }}
 
   function fetchSample(georaster) {{
@@ -240,21 +243,51 @@ _DRIVER_TEMPLATE = """
       if (!row) continue;
       for (var j = 0; j < row.length; j++) {{
         var v = row[j];
-        if (isFinite(v) && v > 0 && v !== noDataValue) {{
+        if (isFinite(v) && v > 0 && (noDataValue === null || v !== noDataValue)) {{
           samples.push(v);
         }}
       }}
     }}
     if (samples.length === 0) return null;
-    var lo = percentile(samples, {plo});
-    var hi = percentile(samples, {phi});
-    if (hi <= lo) hi = lo + 1;
+    // Sort once in place, pick both percentile cuts off the same
+    // sorted array.
+    samples.sort(function(a, b) {{ return a - b; }});
+    var lo = pickPercentile(samples, {plo});
+    var hi = pickPercentile(samples, {phi});
+    if (hi <= lo) {{
+      // Degenerate sample (e.g. one valid pixel, or all pixels equal).
+      // The previous absolute `lo + 1` fallback bricked normalized
+      // amplitude rasters whose values were <<1. Use a tiny range
+      // centered on the value so the image renders as mid-gray rather
+      // than solid black.
+      var delta = Math.max(Math.abs(lo), 1) * 1e-3;
+      lo = lo - delta;
+      hi = lo + 2 * delta;
+    }}
     return {{ lo: lo, hi: hi }};
   }}
 
   function loadCogAsLayer(button) {{
     var url = button.getAttribute('data-asset-url');
     var id = button.getAttribute('data-item-id');
+    if (window.location && window.location.protocol === 'file:') {{
+      // georaster's worker chunks can't spawn from file:// origins
+      // ("unique security origin"). Tell the user how to fix it
+      // instead of letting parseGeoraster hang or fail opaquely.
+      var file = (window.location.pathname || '').split('/').pop() || '';
+      button.disabled = false;
+      button.textContent = 'Open via http://';
+      button.title =
+        "Lazy SAR overlays need an http(s) origin. Open a terminal " +
+        "in this folder, run `python3 -m http.server`, then visit " +
+        "http://localhost:8000/" + file;
+      button.setAttribute('data-state', 'error');
+      console.warn(
+        '[umbra-py lazy SAR] file:// origin: open via a local web server. '
+        + 'Try `python3 -m http.server` and visit '
+        + 'http://localhost:8000/' + file);
+      return;
+    }}
     button.disabled = true;
     button.textContent = 'Loading SAR image…';
     button.setAttribute('data-state', 'loading');
@@ -265,7 +298,8 @@ _DRIVER_TEMPLATE = """
       grRef = georaster;
       return fetchSample(georaster);
     }}).then(function(sampleValues) {{
-      var stretch = computeStretchFromValues(sampleValues, grRef.noDataValue);
+      var noData = normalizeNoData(grRef.noDataValue);
+      var stretch = computeStretchFromValues(sampleValues, noData);
       if (!stretch) {{
         button.disabled = false;
         button.textContent = 'No valid SAR pixels';
@@ -277,7 +311,7 @@ _DRIVER_TEMPLATE = """
         opacity: 1.0,
         pixelValuesToColorFn: function(values) {{
           var v = values[0];
-          if (!isFinite(v) || v <= 0 || v === grRef.noDataValue) {{
+          if (!isFinite(v) || v <= 0 || (noData !== null && v === noData)) {{
             return null;  // transparent
           }}
           var s = Math.max(0, Math.min(255,
@@ -286,7 +320,7 @@ _DRIVER_TEMPLATE = """
         }},
         resolution: 256
       }});
-      var map = findMap();
+      var map = findMapForButton(button);
       if (!map) {{
         button.disabled = false;
         button.textContent = 'Map not ready';
@@ -311,7 +345,7 @@ _DRIVER_TEMPLATE = """
     var id = button.getAttribute('data-item-id');
     var layer = layers[id];
     if (layer) {{
-      var map = findMap();
+      var map = findMapForButton(button);
       if (map) {{ map.removeLayer(layer); }}
       delete layers[id];
     }}

@@ -88,35 +88,34 @@ def test_cdn_urls_use_published_bundle_paths():
     ), li.GEORASTER_LAYER_JS
 
 
-def test_driver_script_lazy_loads_libs_and_references_map_var():
+def test_driver_script_lazy_loads_libs_and_finds_map_via_dom():
     """The driver must:
 
-    1. Look the Folium map up by its (random) JS variable name -- if
-       that substitution is dropped, every click silently does nothing.
-    2. Carry the CDN URLs as JS string literals and inject them via
-       ``injectScript`` on first click, NOT rely on pre-existing
-       ``<script>`` tags. The previous design loaded the libs from
-       ``<head>``, which fired before Leaflet on the same page and
-       broke ``L.GridLayer`` extension.
+    1. Resolve the Folium map by DOM-walking from the clicked button
+       to the enclosing ``.folium-map`` div, NOT by closing over a
+       single ``map_var`` string. The closure approach went stale on
+       Jupyter cell reruns and silently misrouted clicks in multi-map
+       pages.
+    2. Carry the CDN URLs as JS string literals and dynamically
+       ``appendChild`` them on first click, NOT rely on pre-existing
+       ``<script>`` tags. The previous head-injection design fired
+       before Leaflet and broke ``L.GridLayer`` extension.
     """
     from umbra_py import _lazy_imagery as li
 
-    js = li.driver_script(
-        map_var="map_abc123",
-        percentile_low=2.0,
-        percentile_high=98.0,
-        sample_cap=100_000,
-    )
-    assert "window['map_abc123']" in js
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
     assert "umbraToggleSarImage" in js
-    # Both percentile cuts must reach the percentile() call sites.
-    assert "percentile(samples, 2.0)" in js
-    assert "percentile(samples, 98.0)" in js
-    # The driver carries the pinned CDN URLs verbatim.
-    assert li.GEORASTER_JS in js
-    assert li.GEORASTER_LAYER_JS in js
+    # DOM-traversal lookup, not a stale `window['<baked-in-var>']`.
+    assert "findMapForButton" in js
+    assert "folium-map" in js
+    # Both percentile cuts must reach the picker call sites.
+    assert "pickPercentile(samples, 2.0)" in js
+    assert "pickPercentile(samples, 98.0)" in js
+    # The driver carries the pinned CDN URLs as JSON-encoded JS strings
+    # so URLs with quotes or non-ASCII can't break the template.
+    assert '"' + li.GEORASTER_JS + '"' in js
+    assert '"' + li.GEORASTER_LAYER_JS + '"' in js
     # And injects them on demand, instead of expecting them in <head>.
-    assert "injectScript" in js
     assert "document.head.appendChild" in js
 
 
@@ -128,30 +127,69 @@ def test_driver_script_fetches_sample_via_getValues():
     """
     from umbra_py import _lazy_imagery as li
 
-    js = li.driver_script(
-        map_var="m",
-        percentile_low=2.0,
-        percentile_high=98.0,
-        sample_cap=100_000,
-    )
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
     assert "getValues" in js
-    # And the sample dimension is derived from sample_cap: sqrt(100k) ~ 316.
+    # Hardcoded sample dimension is the same for every render.
     assert "width: 316" in js
     assert "height: 316" in js
 
 
-def test_driver_script_sample_dim_is_clamped():
-    """Defensive: extreme sample_cap values must clamp to sensible
-    pixel-window dimensions so we don't make a 0x0 fetch or accidentally
-    pull the full raster."""
+def test_driver_script_detects_file_origin():
+    """A file:// page can't spawn georaster's worker chunks; the
+    driver must catch that at click time and surface a clear
+    'open via http(s)' message instead of letting clicks hang or
+    fail opaquely (which is what users hit in practice)."""
     from umbra_py import _lazy_imagery as li
 
-    tiny = li.driver_script(map_var="m", percentile_low=2, percentile_high=98, sample_cap=4)
-    huge = li.driver_script(
-        map_var="m", percentile_low=2, percentile_high=98, sample_cap=10_000_000
-    )
-    assert "width: 64" in tiny  # floor
-    assert "width: 1024" in huge  # ceiling
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "window.location.protocol === 'file:'" in js
+    assert "python3 -m http.server" in js
+
+
+def test_driver_script_handles_degenerate_stretch_without_blacking_out():
+    """Regression: the previous `hi = lo + 1` fallback was an
+    *absolute* +1, which renders any low-amplitude raster (normalized
+    SAR with values in [0, 0.05]) as solid black. Use a relative
+    epsilon centered on the value so the image renders mid-gray."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "hi = lo + 1" not in js  # the broken old fallback
+    # The new fallback derives delta from |lo| with a small relative
+    # factor; spot-check that the factor is present.
+    assert "Math.abs(lo)" in js
+    assert "1e-3" in js
+
+
+def test_driver_script_coerces_string_nodata_value():
+    """Some COGs emit `noDataValue` as a string ("0"); strict
+    `===` against a numeric pixel would leak nodata into samples.
+    The driver must Number()-coerce before comparing."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "normalizeNoData" in js
+    assert "Number(raw)" in js
+
+
+def test_driver_script_sorts_samples_once():
+    """The percentile picks share a single in-place sort instead of
+    `slice().sort()` per call."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    # Old version called `samples.slice().sort(...)` inside percentile();
+    # the new code sorts once in computeStretchFromValues.
+    assert "samples.slice().sort" not in js
+    assert "samples.sort(" in js
+
+
+def test_no_dead_helpers_exported():
+    """`_verbatim_url_set` was added speculatively and never called;
+    keep the module surface minimal."""
+    from umbra_py import _lazy_imagery as li
+
+    assert not hasattr(li, "_verbatim_url_set")
 
 
 def test_footprint_map_lazy_imagery_emits_button_and_driver(sample_item_dict):
@@ -190,8 +228,9 @@ def test_lazy_imagery_driver_loads_libs_on_click_not_in_head(sample_item_dict):
     # The URL appears inside the driver IIFE, not as a script src.
     assert "unpkg.com/georaster" in html
     assert 'src="https://unpkg.com/georaster' not in html
-    # And the driver carries the dynamic-injection helper.
-    assert "injectScript" in html
+    # And the driver carries the dynamic-injection logic that
+    # appendChild()s the <script> tags from JS on first click.
+    assert "document.head.appendChild" in html
 
 
 def test_footprint_map_lazy_imagery_off_by_default(sample_item_dict):
