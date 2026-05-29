@@ -219,42 +219,47 @@ m.save("lazy.html")
 
 How it works:
 
-- The HTML pulls `georaster-layer-for-leaflet` + `geotiff.js` from a
-  pinned CDN (`unpkg.com`). The bundles only load when the user
-  actually opens a popup and clicks the button.
-- The COG is fetched via HTTP range requests — only the bytes for the
-  chosen overview level are downloaded. Umbra's public bucket has
-  permissive CORS, which is what makes browser-direct streaming
-  possible.
+- The HTML pulls [`geotiff.js`](https://geotiffjs.github.io/) from a
+  pinned CDN (`unpkg.com`), but only when the user actually opens a
+  popup and clicks the button — pages nobody clicks pay nothing.
+- A low-resolution **overview** of the COG is fetched via HTTP range
+  requests — only the bytes for that overview level are downloaded.
+  Umbra's public bucket serves permissive CORS, which is what makes
+  browser-direct streaming possible.
+- geotiff.js decodes on the **main thread** (no Web Workers), so this
+  works whether the page is served over http(s) *or* opened straight
+  off disk (`file://`) — see the note below.
 - A small JS percentile pass over the decoded pixels picks the
   contrast cuts (same math as the Python overlay path). Invalid /
-  non-positive pixels render transparent so basemap shows through
-  scene edges.
-- Click the button again to remove the overlay.
+  non-positive / nodata pixels render transparent so the basemap shows
+  through scene edges.
+- The overlay is placed at the item's STAC footprint bounding box and
+  added as a plain Leaflet `L.imageOverlay`. Click the button again to
+  remove it.
 
-**Open the page over http(s), not `file://`.** The COG-decoding
-library uses Web Workers, and Chromium-family browsers (Chrome,
-Brave, Edge) refuse to spawn workers from `file://` origins under
-unique-origin security rules. If you double-click the saved
-`.html`, every click shows **"Open via http://"** with a hint to
-run a local server. The fix is one line:
+**Placement is a quick-look approximation.** Umbra GEC rasters are
+geocoded but in a projected CRS (UTM). The browser overlay is
+stretched to fill the item's lat/lon footprint bbox rather than
+reprojected, which introduces a small skew over a scene (sub-pixel to
+a few pixels for a typical few-km Umbra collect). For pixel-accurate
+overlays use `imagery=True`, which reprojects through GDAL's
+`WarpedVRT` in Python.
 
-```bash
-cd /path/to/your/maps
-python3 -m http.server      # then visit http://localhost:8000/lazy.html
-```
-
-Pre-baked `imagery=True` does work from `file://` because everything
-is inlined as base64.
+**Works from `file://`.** Earlier versions used a COG library that
+decoded inside Web Workers, which Chromium-family browsers refuse to
+spawn from `file://` pages. Switching to main-thread `geotiff.js`
+removed that limitation — double-clicking the saved `.html` works.
+(Serving over http(s) is still fine and slightly faster to warm the
+CDN cache.)
 
 When to pick which:
 
 | Scenario                                 | Use            |
 | ---------------------------------------- | -------------- |
 | Single map, you want everything visible immediately | `imagery=True` |
-| Many items, exploring on demand          | `lazy_imagery=True` (serve via http(s)) |
+| Many items, exploring on demand          | `lazy_imagery=True` |
 | Animated timeline                        | `lazy_imagery=True` (works with `timeline_map`) |
-| Sharing a self-contained file that works offline or from `file://` | `imagery=True` |
+| Pixel-accurate, reprojected overlay      | `imagery=True` |
 
 The two are mutually exclusive — both would try to add a SAR raster
 per item, so passing both raises `ValueError`.

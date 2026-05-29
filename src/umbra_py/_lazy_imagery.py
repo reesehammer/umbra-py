@@ -2,38 +2,34 @@
 
 The map's HTML carries a per-item ``Get SAR image`` button instead of a
 pre-baked PNG. On the first click anywhere on the map, the page lazily
-fetches ``georaster-layer-for-leaflet`` (and the ``georaster`` /
-``geotiff.js`` chain it pulls in) by appending ``<script>`` tags from
-the driver, streams the GEC cloud-optimized GeoTIFF directly from the
-Umbra public bucket via HTTP range requests, applies the same
-percentile stretch that :func:`umbra_py.viz._stretch_to_rgba` performs
-in Python, and adds the result as a :class:`L.GeoRasterLayer` on the
-running Folium map.
+fetches `geotiff.js <https://geotiffjs.github.io/>`_ from a pinned CDN,
+streams a low-resolution overview of the GEC cloud-optimized GeoTIFF
+directly from the Umbra public bucket via HTTP range requests, applies
+the same percentile stretch that :func:`umbra_py.viz._stretch_to_rgba`
+performs in Python, paints the result to a ``<canvas>``, and drops it
+on the map as a plain Leaflet ``L.imageOverlay``.
 
-Two reasons we inject the CDN scripts from the driver instead of from
-the map's ``<head>``:
+**Why bare geotiff.js and not georaster-layer-for-leaflet.** The
+georaster bundle decodes COGs inside Webpack-generated Web Workers.
+Chromium-family browsers refuse to spawn those worker chunks from a
+``file://`` page ("'file:' URLs are treated as unique security
+origins"), so a double-clicked map produced an opaque failure. geotiff.js
+decodes on the main thread when you don't hand it a ``Pool``, so it has
+no worker dependency and works whether the page is served over http(s)
+**or** opened straight off disk. The COG bytes themselves come from S3
+over HTTPS (CORS ``*``), which is allowed from a ``file://`` origin.
 
-1. **Ordering.** ``georaster-layer-for-leaflet`` extends
-   ``L.GridLayer`` at script-evaluation time, so it *must* run after
-   Leaflet. Folium pulls Leaflet itself into the page head, and we
-   don't get a hook in between -- so a naive ``<head>`` injection
-   races and the layer ends up broken
-   (``Cannot read properties of undefined (reading 'GridLayer')``).
-2. **Cost.** A 200-item map weighs ~30 KB and pays *nothing* for the
-   CDN until somebody actually clicks a button. Pages nobody clicks
-   stay free.
+**Placement is a quick-look approximation.** Umbra GEC rasters are
+geocoded but in a projected CRS (UTM). Rather than reproject in the
+browser, the overlay is stretched to fill the item's STAC footprint
+bounding box (the same lat/lon extent used to draw the polygon). Over a
+few-km Umbra scene the skew from stretching a north-up UTM grid onto its
+lat/lon bbox is small -- fine for "where/what does this look like"
+exploration. For pixel-accurate overlays use the Python ``imagery=True``
+path, which reprojects through GDAL's ``WarpedVRT``.
 
-The Umbra bucket already serves permissive CORS headers (``*`` origin,
-``GET``/``HEAD`` methods, ``range`` headers) on every object, which is
-what makes the browser-direct streaming possible.
-
-**file:// origin limitation.** The georaster bundle uses Webpack
-worker chunks, which Chromium-family browsers refuse to spawn from
-``file://`` pages ("'file:' URLs are treated as unique security
-origins"). The driver detects ``file:`` at click time and surfaces a
-clear "open via http(s)" message instead of letting the click silently
-hang. For interactive use, serve the directory with
-``python3 -m http.server`` and open ``http://localhost:8000/<map>.html``.
+A 200-item map weighs ~30 KB and pays *nothing* for the CDN until
+somebody clicks a button.
 
 The implementation here is intentionally a JS string template rather
 than a Jinja template module: it's short, it lands inside a single
@@ -46,25 +42,17 @@ from __future__ import annotations
 import html
 import json
 
-# Pinned to specific versions to keep release behavior reproducible.
+# Pinned to a specific version to keep release behavior reproducible.
 # Bump deliberately -- COG decoding in the browser is a moving target
-# and an unpinned CDN URL can regress without warning.
-#
-# Both URLs target the *exact* file the package's `unpkg` /`browser`
-# field in package.json points at -- naive guesses like
-# `dist/<pkg>.min.js` 404 on georaster-layer-for-leaflet, where the
-# real bundle lives several directories deep.
-GEORASTER_JS = "https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"
-GEORASTER_LAYER_JS = (
-    "https://unpkg.com/georaster-layer-for-leaflet@3.10.0/"
-    "dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
-)
+# and an unpinned CDN URL can regress without warning. The UMD bundle
+# publishes the `GeoTIFF` global; `dist-browser/geotiff.js` is the path
+# the package's own `unpkg` field points at.
+GEOTIFF_JS = "https://unpkg.com/geotiff@3.0.5/dist-browser/geotiff.js"
 
-# Sample window for the in-browser percentile stretch. Hardcoded because
-# nobody tunes it -- 316 x 316 ~= 100k samples, percentile sort is
-# sub-second on modest hardware. The COG only ships the bytes for the
-# overview level that matches this resolution.
-_SAMPLE_DIM = 316
+# Largest overview dimension we render at. geotiff.js picks the smallest
+# COG overview whose longest side is >= this, so the fetch stays a few
+# range requests rather than the full-res image.
+_MAX_RENDER_DIM = 1024
 
 
 def driver_script(
@@ -80,21 +68,19 @@ def driver_script(
         Contrast-stretch cuts, mirroring
         :func:`umbra_py.viz._stretch_to_rgba`'s defaults of ``(2, 98)``.
 
-    The returned snippet embeds the CDN URLs (pinned at module level)
-    as JS string literals via ``json.dumps`` so any future URL with
-    quotes or non-ASCII characters stays a valid JS string. The driver
+    The returned snippet embeds the CDN URL (pinned at module level) as
+    a JSON-encoded JS string literal, so a future bump to a URL with
+    quotes or non-ASCII characters can't break the template. The driver
     resolves the running Folium map at click time by walking the
-    button's DOM ancestry to the enclosing ``.folium-map`` element and
-    looking up ``window[<that-div-id>]`` -- robust against Jupyter cell
-    reruns and multi-map pages, where a single bound ``map_var``
-    closure would go stale.
+    button's DOM ancestry to the enclosing ``.folium-map`` element --
+    robust against Jupyter cell reruns and multi-map pages, where a
+    single bound ``map_var`` closure would go stale.
     """
     return _DRIVER_TEMPLATE.format(
         plo=float(percentile_low),
         phi=float(percentile_high),
-        sample_dim=_SAMPLE_DIM,
-        georaster_url=json.dumps(GEORASTER_JS),
-        georaster_layer_url=json.dumps(GEORASTER_LAYER_JS),
+        max_dim=_MAX_RENDER_DIM,
+        geotiff_url=json.dumps(GEOTIFF_JS),
     )
 
 
@@ -102,22 +88,29 @@ def popup_button_html(
     *,
     item_id: str,
     asset_url: str,
+    bounds: tuple[float, float, float, float],
     label: str = "Get SAR image",
 ) -> str:
     """Render the per-item button shown inside the polygon's popup.
 
-    The button is the entire UI surface for the lazy-fetch flow: no
-    extra controls, no separate panel. State (idle / loading / loaded)
-    is reflected by swapping ``data-state`` and the visible text. The
-    button is keyed by ``item_id`` so the driver can find the same
-    DOM node on a "Remove image" click.
+    ``bounds`` is the item's lat/lon footprint as
+    ``(min_lon, min_lat, max_lon, max_lat)`` -- the driver places the
+    decoded overlay there. State (idle / loading / loaded) is reflected
+    by swapping ``data-state`` and the visible text; the button is keyed
+    by ``item_id`` so the driver can find the same DOM node on a
+    "Remove image" click.
     """
+    min_lon, min_lat, max_lon, max_lat = bounds
+    # data-bounds is "south,west,north,east" to match Leaflet's
+    # [[south, west], [north, east]] LatLngBounds convention.
+    bounds_attr = f"{min_lat},{min_lon},{max_lat},{max_lon}"
     return (
         '<div class="umbra-sar-fetch" style="margin-top:6px">'
         '<button type="button" '
         'class="umbra-sar-btn" '
         f'data-item-id="{html.escape(item_id, quote=True)}" '
         f'data-asset-url="{html.escape(asset_url, quote=True)}" '
+        f'data-bounds="{bounds_attr}" '
         'data-state="idle" '
         'onclick="umbraToggleSarImage(this)" '
         'style="font:12px/1.2 -apple-system,sans-serif;padding:4px 10px;'
@@ -127,34 +120,27 @@ def popup_button_html(
     )
 
 
-# The template stays small on purpose. The flow:
-#  1. First click anywhere on the map kicks off `loadLibs()`, which
-#     dynamically inserts the two CDN <script> tags into <head>. They
-#     run AFTER Leaflet (already loaded), so georaster-layer-for-leaflet
-#     finds L.GridLayer when it tries to extend it.
-#  2. Once both scripts have fired their `onload`, parseGeoraster(url)
-#     opens the COG (only the headers are fetched at this point).
-#  3. fetchSample() pulls a downsampled view of the whole raster via
-#     georaster.getValues -- HTTP range requests against the right
-#     overview level, no full read. For COGs `georaster.values` is
-#     null/undefined, so the naive iterate-`values[0]` path returns
-#     no samples and fires "No valid SAR pixels".
-#  4. Sample the returned pixel values to compute percentile cuts.
-#  5. Build a GeoRasterLayer whose pixelValuesToColorFn does the stretch
-#     and emits transparent for invalid / non-positive pixels (matching
-#     _stretch_to_rgba in Python).
-#  6. Add to the map; cache the layer keyed by item id.
-#  7. Second click on the same button removes the layer.
+# The flow:
+#  1. First click loads geotiff.js once (dynamic <script>, no workers).
+#  2. GeoTIFF.fromUrl(url) opens the COG (headers only at first).
+#  3. pickOverview() chooses the smallest overview >= max_dim so the
+#     read is a handful of range requests, not the full-res image.
+#  4. readRasters() decodes that overview on the main thread.
+#  5. Percentile stretch over the first band (invalid / non-positive /
+#     nodata pixels -> transparent), matching _stretch_to_rgba.
+#  6. Paint to a canvas, toDataURL, drop on the map as L.imageOverlay
+#     placed at the item's STAC footprint bbox.
+#  7. Cache the layer keyed by item id; second click removes it.
 _DRIVER_TEMPLATE = """
 (function() {{
   if (window.umbraToggleSarImage) {{ return; }}  // idempotent across re-renders
-  var layers = {{}};  // item_id -> L.GeoRasterLayer
-  var libsPromise = null;
-  var GEORASTER_URL = {georaster_url};
-  var GEORASTER_LAYER_URL = {georaster_layer_url};
+  var layers = {{}};  // item_id -> L.imageOverlay
+  var libPromise = null;
+  var GEOTIFF_URL = {geotiff_url};
+  var MAX_DIM = {max_dim};
 
-  // Resolve the Folium map by walking up from the clicked button to
-  // the enclosing `.folium-map` div, then looking up its id on `window`
+  // Resolve the Folium map by walking up from the clicked button to the
+  // enclosing `.folium-map` div, then looking up its id on `window`
   // (Folium publishes every map by id). Robust against Jupyter cell
   // reruns and multi-map pages -- the IIFE installs `umbraToggleSarImage`
   // once but each click resolves the right map fresh.
@@ -166,35 +152,22 @@ _DRIVER_TEMPLATE = """
     return (el && el.id) ? window[el.id] : null;
   }}
 
-  function loadLibs() {{
-    if (libsPromise) return libsPromise;
-    // loadLibs is gated by `libsPromise`, so injection happens at most
-    // once per page lifetime -- no need for the inject-helper to dedup
-    // existing <script> tags. georaster-layer-for-leaflet extends
-    // L.GridLayer at evaluation time; by the time we run here Leaflet
-    // is already on the page (Folium loads it in <head> during initial
-    // parse). The georaster bundle has no Leaflet dependency, so the
-    // two scripts can load in parallel.
-    libsPromise = new Promise(function(resolve, reject) {{
-      var pending = 2;
-      function done() {{ if (--pending === 0) resolve(); }}
-      [GEORASTER_URL, GEORASTER_LAYER_URL].forEach(function(src) {{
-        var s = document.createElement('script');
-        s.src = src;
-        s.async = false;
-        s.onload = done;
-        s.onerror = function() {{ reject(new Error('Failed to load ' + src)); }};
-        document.head.appendChild(s);
-      }});
+  function loadLib() {{
+    if (libPromise) return libPromise;
+    libPromise = new Promise(function(resolve, reject) {{
+      var s = document.createElement('script');
+      s.src = GEOTIFF_URL;
+      s.async = false;
+      s.onload = resolve;
+      s.onerror = function() {{ reject(new Error('Failed to load ' + GEOTIFF_URL)); }};
+      document.head.appendChild(s);
     }}).then(function() {{
-      if (typeof parseGeoraster === 'undefined' ||
-          typeof GeoRasterLayer === 'undefined') {{
-        throw new Error(
-          'CDN libs loaded but expected globals (parseGeoraster, ' +
-          'GeoRasterLayer) are missing. Has a CDN URL drifted?');
+      if (typeof GeoTIFF === 'undefined' || typeof GeoTIFF.fromUrl !== 'function') {{
+        throw new Error('geotiff.js loaded but GeoTIFF.fromUrl is missing. '
+          + 'Has the CDN URL drifted?');
       }}
     }});
-    return libsPromise;
+    return libPromise;
   }}
 
   function pickPercentile(sorted, p) {{
@@ -204,62 +177,53 @@ _DRIVER_TEMPLATE = """
   }}
 
   function normalizeNoData(raw) {{
-    // COGs sometimes declare noDataValue as a string; coerce to a
-    // number so the equality check downstream catches it.
+    // GDAL_NODATA is stored as a string; coerce so the equality check
+    // downstream catches it. Returns null when absent / unparseable.
     if (raw === undefined || raw === null) return null;
     var n = Number(raw);
     return isFinite(n) ? n : null;
   }}
 
-  function fetchSample(georaster) {{
-    // For COGs, georaster.values is null and pixels have to be fetched
-    // on demand via getValues, which range-reads the appropriate
-    // overview level. For small in-memory rasters, georaster.values is
-    // already populated; use it directly to dodge the round trip.
-    if (georaster.values && georaster.values[0] && georaster.values[0].length) {{
-      return Promise.resolve(georaster.values);
-    }}
-    if (typeof georaster.getValues !== 'function') {{
-      return Promise.reject(new Error(
-        'georaster source exposes neither preloaded values nor getValues()'));
-    }}
-    return georaster.getValues({{
-      left: georaster.xmin,
-      right: georaster.xmax,
-      bottom: georaster.ymin,
-      top: georaster.ymax,
-      width: {sample_dim},
-      height: {sample_dim},
-      resampleMethod: 'nearest'
+  // Smallest overview whose longest side is >= MAX_DIM, else the
+  // largest image available (handles COGs whose overviews are all
+  // smaller than MAX_DIM, and is agnostic to IFD ordering).
+  function pickOverview(tiff) {{
+    return tiff.getImageCount().then(function(count) {{
+      var chain = Promise.resolve();
+      var chosen = null, chosenMax = Infinity;
+      var fallback = null, fallbackMax = -1;
+      for (var i = 0; i < count; i++) {{
+        (function(idx) {{
+          chain = chain.then(function() {{
+            return tiff.getImage(idx);
+          }}).then(function(img) {{
+            var m = Math.max(img.getWidth(), img.getHeight());
+            if (m >= MAX_DIM && m < chosenMax) {{ chosen = img; chosenMax = m; }}
+            if (m > fallbackMax) {{ fallback = img; fallbackMax = m; }}
+          }});
+        }})(i);
+      }}
+      return chain.then(function() {{ return chosen || fallback; }});
     }});
   }}
 
-  function computeStretchFromValues(values, noDataValue) {{
-    if (!values || !values[0]) return null;
-    var band = values[0];
+  function computeStretch(data, noData) {{
     var samples = [];
-    for (var i = 0; i < band.length; i++) {{
-      var row = band[i];
-      if (!row) continue;
-      for (var j = 0; j < row.length; j++) {{
-        var v = row[j];
-        if (isFinite(v) && v > 0 && (noDataValue === null || v !== noDataValue)) {{
-          samples.push(v);
-        }}
+    for (var i = 0; i < data.length; i++) {{
+      var v = data[i];
+      if (isFinite(v) && v > 0 && (noData === null || v !== noData)) {{
+        samples.push(v);
       }}
     }}
     if (samples.length === 0) return null;
-    // Sort once in place, pick both percentile cuts off the same
-    // sorted array.
     samples.sort(function(a, b) {{ return a - b; }});
     var lo = pickPercentile(samples, {plo});
     var hi = pickPercentile(samples, {phi});
     if (hi <= lo) {{
-      // Degenerate sample (e.g. one valid pixel, or all pixels equal).
-      // The previous absolute `lo + 1` fallback bricked normalized
-      // amplitude rasters whose values were <<1. Use a tiny range
-      // centered on the value so the image renders as mid-gray rather
-      // than solid black.
+      // Degenerate sample (one valid pixel, or all pixels equal). A
+      // flat `lo + 1` fallback blacks out normalized-amplitude rasters
+      // whose values are <<1; use a relative epsilon so uniform scenes
+      // render mid-gray instead.
       var delta = Math.max(Math.abs(lo), 1) * 1e-3;
       lo = lo - delta;
       hi = lo + 2 * delta;
@@ -267,66 +231,72 @@ _DRIVER_TEMPLATE = """
     return {{ lo: lo, hi: hi }};
   }}
 
+  function rasterToDataURL(data, width, height, stretch, noData) {{
+    var canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    var ctx = canvas.getContext('2d');
+    var img = ctx.createImageData(width, height);
+    var span = (stretch.hi - stretch.lo) || 1;
+    for (var i = 0; i < data.length; i++) {{
+      var v = data[i];
+      var o = i * 4;
+      if (!isFinite(v) || v <= 0 || (noData !== null && v === noData)) {{
+        img.data[o + 3] = 0;  // transparent
+        continue;
+      }}
+      var s = Math.max(0, Math.min(255,
+        Math.floor((v - stretch.lo) / span * 255)));
+      img.data[o] = s;
+      img.data[o + 1] = s;
+      img.data[o + 2] = s;
+      img.data[o + 3] = 255;
+    }}
+    ctx.putImageData(img, 0, 0);
+    return canvas.toDataURL('image/png');
+  }}
+
+  function parseBounds(button) {{
+    // "south,west,north,east" -> [[south, west], [north, east]]
+    var parts = (button.getAttribute('data-bounds') || '').split(',').map(Number);
+    if (parts.length !== 4 || parts.some(function(n) {{ return !isFinite(n); }})) {{
+      return null;
+    }}
+    return [[parts[0], parts[1]], [parts[2], parts[3]]];
+  }}
+
   function loadCogAsLayer(button) {{
     var url = button.getAttribute('data-asset-url');
     var id = button.getAttribute('data-item-id');
-    if (window.location && window.location.protocol === 'file:') {{
-      // georaster's worker chunks can't spawn from file:// origins
-      // ("unique security origin"). Tell the user how to fix it
-      // instead of letting parseGeoraster hang or fail opaquely.
-      var file = (window.location.pathname || '').split('/').pop() || '';
-      button.disabled = false;
-      button.textContent = 'Open via http://';
-      button.title =
-        "Lazy SAR overlays need an http(s) origin. Open a terminal " +
-        "in this folder, run `python3 -m http.server`, then visit " +
-        "http://localhost:8000/" + file;
+    var bounds = parseBounds(button);
+    var map = findMapForButton(button);
+    if (!map || !bounds) {{
+      button.textContent = 'Map not ready';
       button.setAttribute('data-state', 'error');
-      console.warn(
-        '[umbra-py lazy SAR] file:// origin: open via a local web server. '
-        + 'Try `python3 -m http.server` and visit '
-        + 'http://localhost:8000/' + file);
       return;
     }}
     button.disabled = true;
     button.textContent = 'Loading SAR image…';
     button.setAttribute('data-state', 'loading');
-    var grRef = null;
-    loadLibs().then(function() {{
-      return parseGeoraster(url);
-    }}).then(function(georaster) {{
-      grRef = georaster;
-      return fetchSample(georaster);
-    }}).then(function(sampleValues) {{
-      var noData = normalizeNoData(grRef.noDataValue);
-      var stretch = computeStretchFromValues(sampleValues, noData);
+    var noData = null;
+    loadLib().then(function() {{
+      return GeoTIFF.fromUrl(url);
+    }}).then(function(tiff) {{
+      return pickOverview(tiff);
+    }}).then(function(image) {{
+      noData = normalizeNoData(image.getGDALNoData());
+      return image.readRasters();
+    }}).then(function(rasters) {{
+      var data = rasters[0];
+      var stretch = computeStretch(data, noData);
       if (!stretch) {{
         button.disabled = false;
         button.textContent = 'No valid SAR pixels';
         button.setAttribute('data-state', 'error');
         return;
       }}
-      var layer = new GeoRasterLayer({{
-        georaster: grRef,
-        opacity: 1.0,
-        pixelValuesToColorFn: function(values) {{
-          var v = values[0];
-          if (!isFinite(v) || v <= 0 || (noData !== null && v === noData)) {{
-            return null;  // transparent
-          }}
-          var s = Math.max(0, Math.min(255,
-            Math.floor((v - stretch.lo) / (stretch.hi - stretch.lo) * 255)));
-          return 'rgb(' + s + ',' + s + ',' + s + ')';
-        }},
-        resolution: 256
-      }});
-      var map = findMapForButton(button);
-      if (!map) {{
-        button.disabled = false;
-        button.textContent = 'Map not ready';
-        button.setAttribute('data-state', 'error');
-        return;
-      }}
+      var dataUrl = rasterToDataURL(data, rasters.width, rasters.height, stretch, noData);
+      var layer = L.imageOverlay(dataUrl, bounds, {{ opacity: 1.0 }});
       layer.addTo(map);
       layers[id] = layer;
       button.disabled = false;

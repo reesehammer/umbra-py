@@ -1,10 +1,10 @@
 """Tests for the browser-side lazy SAR imagery overlay.
 
 These exercise the Python side of the contract -- the rendered HTML
-contains the right markers, the right URLs, and the right driver. The
-JS itself (georaster-layer-for-leaflet + geotiff.js) runs in a browser
-and isn't reachable from pytest, so we deliberately stop at "the page
-asks for the right things".
+contains the right markers, the right URL, and the right driver. The
+JS itself (geotiff.js) runs in a browser and isn't reachable from
+pytest, so we deliberately stop at "the page asks for the right
+things".
 """
 
 from __future__ import annotations
@@ -15,19 +15,26 @@ import pytest
 
 from umbra_py.models import UmbraItem
 
+# (min_lon, min_lat, max_lon, max_lat)
+_BOUNDS = (-68.0, 10.4, -67.9, 10.5)
 
-def test_popup_button_html_carries_id_and_url():
-    """Each per-item button has to carry both the item id (so the
-    driver can dedupe layers) and the asset URL (so the click handler
-    can stream the COG without a server round-trip)."""
+
+def test_popup_button_html_carries_id_url_and_bounds():
+    """Each per-item button has to carry the item id (so the driver
+    can dedupe layers), the asset URL (so the click handler can stream
+    the COG without a server round-trip), and the footprint bounds (so
+    the decoded overlay lands in the right place)."""
     from umbra_py._lazy_imagery import popup_button_html
 
     out = popup_button_html(
         item_id="abc-123",
         asset_url="https://example.com/scene.tif",
+        bounds=_BOUNDS,
     )
     assert 'data-item-id="abc-123"' in out
     assert 'data-asset-url="https://example.com/scene.tif"' in out
+    # data-bounds is "south,west,north,east".
+    assert 'data-bounds="10.4,-68.0,10.5,-67.9"' in out
     assert 'onclick="umbraToggleSarImage(this)"' in out
     # Default state must be idle so the driver's toggle works.
     assert 'data-state="idle"' in out
@@ -42,6 +49,7 @@ def test_popup_button_html_escapes_attacker_controlled_attrs():
     out = popup_button_html(
         item_id='evil" onclick="alert(1)',
         asset_url='https://example.com/"><script>x()</script>',
+        bounds=_BOUNDS,
     )
     # The literal quote must be escaped so the attribute boundary
     # holds. We don't care which escape style HTML uses (numeric vs
@@ -56,39 +64,26 @@ def test_popup_button_html_escapes_attacker_controlled_attrs():
     assert 'onclick="umbraToggleSarImage(this)"' in out
 
 
-def test_cdn_urls_pin_versions():
+def test_cdn_url_pins_version():
     """A drifting CDN URL silently breaks browser-side decoding. The
-    deps must be pinned so a release reproduces."""
+    dep must be pinned so a release reproduces."""
     from umbra_py import _lazy_imagery as li
 
-    assert re.search(r"georaster@\d+\.\d+", li.GEORASTER_JS), li.GEORASTER_JS
-    assert re.search(r"georaster-layer-for-leaflet@\d+\.\d+", li.GEORASTER_LAYER_JS), (
-        li.GEORASTER_LAYER_JS
-    )
+    assert re.search(r"geotiff@\d+\.\d+", li.GEOTIFF_JS), li.GEOTIFF_JS
 
 
-def test_cdn_urls_use_published_bundle_paths():
+def test_cdn_url_uses_published_browser_bundle_path():
     """Catch the obvious-but-painful failure mode: a CDN URL whose
     path doesn't correspond to a file the package actually publishes.
-
-    georaster-layer-for-leaflet's 3.x bundle, in particular, lives
-    several directories deep (``dist/v3/webpack/bundle/...``) rather
-    than the obvious ``dist/...``. If a future bump regresses the
-    path, the browser silently 404s and every popup shows ``SAR libs
-    unavailable``. Pin the path shape we depend on so this is caught
-    at unit-test time, not by users.
-    """
+    geotiff's UMD browser bundle lives at ``dist-browser/geotiff.js``
+    (the package's own ``unpkg`` field); a wrong path 404s and every
+    click fails."""
     from umbra_py import _lazy_imagery as li
 
-    assert li.GEORASTER_JS.endswith("/dist/georaster.browser.bundle.min.js"), li.GEORASTER_JS
-    # The layer package's `browser`/`unpkg` field in package.json
-    # points at this exact nested path -- accept nothing shorter.
-    assert li.GEORASTER_LAYER_JS.endswith(
-        "/dist/v3/webpack/bundle/georaster-layer-for-leaflet.min.js"
-    ), li.GEORASTER_LAYER_JS
+    assert li.GEOTIFF_JS.endswith("/dist-browser/geotiff.js"), li.GEOTIFF_JS
 
 
-def test_driver_script_lazy_loads_libs_and_finds_map_via_dom():
+def test_driver_script_finds_map_via_dom_and_loads_geotiff():
     """The driver must:
 
     1. Resolve the Folium map by DOM-walking from the clicked button
@@ -96,10 +91,9 @@ def test_driver_script_lazy_loads_libs_and_finds_map_via_dom():
        single ``map_var`` string. The closure approach went stale on
        Jupyter cell reruns and silently misrouted clicks in multi-map
        pages.
-    2. Carry the CDN URLs as JS string literals and dynamically
-       ``appendChild`` them on first click, NOT rely on pre-existing
-       ``<script>`` tags. The previous head-injection design fired
-       before Leaflet and broke ``L.GridLayer`` extension.
+    2. Carry the geotiff.js CDN URL as a JSON-encoded JS string literal
+       and ``appendChild`` it on first click (no workers, works from
+       file://), instead of relying on pre-existing ``<script>`` tags.
     """
     from umbra_py import _lazy_imagery as li
 
@@ -111,39 +105,38 @@ def test_driver_script_lazy_loads_libs_and_finds_map_via_dom():
     # Both percentile cuts must reach the picker call sites.
     assert "pickPercentile(samples, 2.0)" in js
     assert "pickPercentile(samples, 98.0)" in js
-    # The driver carries the pinned CDN URLs as JSON-encoded JS strings
-    # so URLs with quotes or non-ASCII can't break the template.
-    assert '"' + li.GEORASTER_JS + '"' in js
-    assert '"' + li.GEORASTER_LAYER_JS + '"' in js
-    # And injects them on demand, instead of expecting them in <head>.
+    # The driver carries the pinned CDN URL as a JSON-encoded JS string
+    # so a URL with quotes or non-ASCII can't break the template.
+    assert '"' + li.GEOTIFF_JS + '"' in js
+    # And injects it on demand.
     assert "document.head.appendChild" in js
 
 
-def test_driver_script_fetches_sample_via_getValues():
-    """COG sources expose pixels only via ``georaster.getValues()``,
-    not via the preloaded ``georaster.values`` 3D array. The driver
-    must call ``getValues`` (or it'll fall through to "No valid SAR
-    pixels" for every Umbra COG, which it did before this fix).
-    """
+def test_driver_script_decodes_with_main_thread_geotiff():
+    """The driver must use bare geotiff.js on the main thread:
+    ``GeoTIFF.fromUrl`` + ``readRasters`` + a canvas ``L.imageOverlay``.
+    The previous georaster-layer-for-leaflet path spawned Web Workers,
+    which Chromium refuses to start from ``file://`` -- the exact
+    failure users hit. No worker, no georaster references."""
     from umbra_py import _lazy_imagery as li
 
     js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
-    assert "getValues" in js
-    # Hardcoded sample dimension is the same for every render.
-    assert "width: 316" in js
-    assert "height: 316" in js
+    assert "GeoTIFF.fromUrl" in js
+    assert "readRasters" in js
+    assert "L.imageOverlay" in js
+    # The worker-spawning library must be gone entirely.
+    assert "georaster" not in js.lower()
+    assert "GeoRasterLayer" not in js
 
 
-def test_driver_script_detects_file_origin():
-    """A file:// page can't spawn georaster's worker chunks; the
-    driver must catch that at click time and surface a clear
-    'open via http(s)' message instead of letting clicks hang or
-    fail opaquely (which is what users hit in practice)."""
+def test_driver_script_picks_a_cog_overview():
+    """The driver must read a low-res overview, not the full-res image,
+    so the fetch stays a few range requests."""
     from umbra_py import _lazy_imagery as li
 
     js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
-    assert "window.location.protocol === 'file:'" in js
-    assert "python3 -m http.server" in js
+    assert "pickOverview" in js
+    assert "getImageCount" in js
 
 
 def test_driver_script_handles_degenerate_stretch_without_blacking_out():
@@ -162,9 +155,9 @@ def test_driver_script_handles_degenerate_stretch_without_blacking_out():
 
 
 def test_driver_script_coerces_string_nodata_value():
-    """Some COGs emit `noDataValue` as a string ("0"); strict
-    `===` against a numeric pixel would leak nodata into samples.
-    The driver must Number()-coerce before comparing."""
+    """Some COGs emit GDAL_NODATA as a string ("0"); strict ``===``
+    against a numeric pixel would leak nodata into samples. The driver
+    must Number()-coerce before comparing."""
     from umbra_py import _lazy_imagery as li
 
     js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
@@ -178,8 +171,6 @@ def test_driver_script_sorts_samples_once():
     from umbra_py import _lazy_imagery as li
 
     js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
-    # Old version called `samples.slice().sort(...)` inside percentile();
-    # the new code sorts once in computeStretchFromValues.
     assert "samples.slice().sort" not in js
     assert "samples.sort(" in js
 
@@ -195,10 +186,8 @@ def test_no_dead_helpers_exported():
 def test_footprint_map_lazy_imagery_emits_button_and_driver(sample_item_dict):
     """End-to-end: rendering with lazy_imagery=True must include the
     driver and a per-item button keyed by the item's id, AND must NOT
-    inject the CDN libs as bare ``<script src=...>`` tags into the
-    head (where they'd race against Folium's Leaflet bundle and break
-    ``L.GridLayer`` extension). The driver loads them on first click
-    instead."""
+    inject geotiff.js as a bare ``<script src=...>`` tag into the head
+    (it's loaded on demand from the driver instead)."""
     pytest.importorskip("folium")
     from umbra_py import footprint_map
 
@@ -207,18 +196,14 @@ def test_footprint_map_lazy_imagery_emits_button_and_driver(sample_item_dict):
     assert "umbra-sar-btn" in html
     assert "umbraToggleSarImage" in html
     assert f'data-item-id="{item.id}"' in html
-    # No bare <script src="...georaster..."> tags -- the previous
-    # design did this and broke ordering against Folium's Leaflet.
-    assert not re.search(r'<script[^>]*src="[^"]*georaster[^"]*"', html), html[:500]
+    # No bare <script src="...geotiff..."> tag in the head -- the driver
+    # appendChild()s it on first click.
+    assert not re.search(r'<script[^>]*src="[^"]*geotiff[^"]*"', html), html[:500]
 
 
-def test_lazy_imagery_driver_loads_libs_on_click_not_in_head(sample_item_dict):
-    """Regression test for the script-ordering bug: lazy_imagery used
-    to inject ``<script src=georaster...>`` into ``<head>`` BEFORE
-    Folium's Leaflet bundle, causing
-    ``Cannot read properties of undefined (reading 'GridLayer')``
-    when georaster-layer-for-leaflet tried to extend ``L.GridLayer``.
-    The fix moved CDN loading into the driver itself."""
+def test_lazy_imagery_driver_loads_lib_on_click_not_in_head(sample_item_dict):
+    """The CDN URL must live inside the driver IIFE (loaded on click),
+    not as a bare ``<script src>`` in the head."""
     pytest.importorskip("folium")
     from umbra_py import footprint_map
 
@@ -226,10 +211,10 @@ def test_lazy_imagery_driver_loads_libs_on_click_not_in_head(sample_item_dict):
     html = footprint_map([item], lazy_imagery=True).get_root().render()
 
     # The URL appears inside the driver IIFE, not as a script src.
-    assert "unpkg.com/georaster" in html
-    assert 'src="https://unpkg.com/georaster' not in html
+    assert "unpkg.com/geotiff" in html
+    assert 'src="https://unpkg.com/geotiff' not in html
     # And the driver carries the dynamic-injection logic that
-    # appendChild()s the <script> tags from JS on first click.
+    # appendChild()s the <script> tag from JS on first click.
     assert "document.head.appendChild" in html
 
 

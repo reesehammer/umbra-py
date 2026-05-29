@@ -137,6 +137,7 @@ def _popup_html(
     *,
     location: str | None = None,
     lazy_imagery_url: str | None = None,
+    lazy_imagery_bounds: tuple[float, float, float, float] | None = None,
 ) -> str:
     info = item.metadata_summary()
     rng, azi = info["resolution_range_m"], info["resolution_azimuth_m"]
@@ -176,10 +177,14 @@ def _popup_html(
         else ""
     )
     button = ""
-    if lazy_imagery_url:
+    if lazy_imagery_url and lazy_imagery_bounds is not None:
         from ._lazy_imagery import popup_button_html  # noqa: PLC0415
 
-        button = popup_button_html(item_id=item.id, asset_url=lazy_imagery_url)
+        button = popup_button_html(
+            item_id=item.id,
+            asset_url=lazy_imagery_url,
+            bounds=lazy_imagery_bounds,
+        )
     return (
         f"<table style='font-family:sans-serif;font-size:12px'>{body}</table>"
         f"{desc_html}{button}{link}"
@@ -319,26 +324,30 @@ def _resolve_lazy_urls(
     items: Iterable[UmbraItem],
     enabled: bool,
     asset: str,
-) -> dict[str, str]:
-    """Return ``{item_id: cog_url}`` for items that can be lazily fetched.
+) -> dict[str, tuple[str, tuple[float, float, float, float]]]:
+    """Return ``{item_id: (cog_url, bbox)}`` for lazily-fetchable items.
 
-    When ``enabled`` is False we short-circuit to an empty dict so the
-    caller doesn't have to repeat that check. Items missing the asset
-    or whose ``asset_href`` returns the empty string (no populated
-    href and no ``umbra:task_id`` to derive one) are silently dropped
-    -- the popup still renders for them, just without the button.
+    ``bbox`` is the item's lat/lon footprint, used to place the overlay
+    in the browser. When ``enabled`` is False we short-circuit to an
+    empty dict so the caller doesn't have to repeat that check. Items
+    are silently dropped (popup still renders, just without the button)
+    when they lack a bbox to place the overlay, or when ``asset_href``
+    can't be resolved -- missing asset, or an empty href with no
+    ``umbra:task_id`` to derive one.
     """
     if not enabled:
         return {}
-    urls: dict[str, str] = {}
+    resolved: dict[str, tuple[str, tuple[float, float, float, float]]] = {}
     for item in items:
+        if item.bbox is None:
+            continue
         try:
             href = item.asset_href(asset)
         except AssetNotFoundError:
             continue
         if href:
-            urls[item.id] = href
-    return urls
+            resolved[item.id] = (href, item.bbox)
+    return resolved
 
 
 def _install_lazy_imagery(
@@ -479,14 +488,15 @@ def footprint_map(
             if label:
                 locations[item.id] = label
 
-    # Resolve per-item COG URLs for the lazy-fetch button. Items whose
-    # asset_href can't be resolved (no populated href, no task_id) get
-    # no button -- the popup still works for everything else.
+    # Resolve per-item COG URLs + footprint bounds for the lazy-fetch
+    # button. Items whose asset_href can't be resolved, or that lack a
+    # bbox to place the overlay, get no button -- the popup still works
+    # for everything else.
     lazy_urls = _resolve_lazy_urls((i for i, _ in features), lazy_imagery, lazy_imagery_asset)
 
     for item, geometry in features:
         loc = locations.get(item.id)
-        lazy_url = lazy_urls.get(item.id)
+        lazy_url, lazy_bounds = lazy_urls.get(item.id, (None, None))
         folium.GeoJson(
             {"type": "Feature", "geometry": geometry, "properties": {}},
             style_function=lambda _f, c=color, w=weight, fo=fill_opacity: {
@@ -496,7 +506,12 @@ def footprint_map(
             },
             tooltip=item.id,
             popup=folium.Popup(
-                _popup_html(item, location=loc, lazy_imagery_url=lazy_url),
+                _popup_html(
+                    item,
+                    location=loc,
+                    lazy_imagery_url=lazy_url,
+                    lazy_imagery_bounds=lazy_bounds,
+                ),
                 max_width=420,
             ),
         ).add_to(m)
@@ -516,7 +531,12 @@ def footprint_map(
                 fill_opacity=0.9 if has_img else 0.7,
                 tooltip=item.id,
                 popup=folium.Popup(
-                    _popup_html(item, location=loc, lazy_imagery_url=lazy_url),
+                    _popup_html(
+                        item,
+                        location=loc,
+                        lazy_imagery_url=lazy_url,
+                        lazy_imagery_bounds=lazy_bounds,
+                    ),
                     max_width=420,
                 ),
             ).add_to(m)
@@ -761,6 +781,7 @@ def timeline_map(
     features: list[dict[str, Any]] = []
     bbox_inputs: list[dict[str, Any]] = []
     for item in plottable:
+        lazy_url, lazy_bounds = lazy_urls.get(item.id, (None, None))
         features.append(
             {
                 "type": "Feature",
@@ -770,7 +791,8 @@ def timeline_map(
                     "popup": _popup_html(
                         item,
                         location=locations.get(item.id),
-                        lazy_imagery_url=lazy_urls.get(item.id),
+                        lazy_imagery_url=lazy_url,
+                        lazy_imagery_bounds=lazy_bounds,
                     ),
                     "id": item.id,
                     "style": {

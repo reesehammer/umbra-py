@@ -6,48 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- Lazy SAR imagery now surfaces a clear **"Open via http://"**
-  message (with the exact `python3 -m http.server` command) when the
-  page is opened from a `file://` origin, instead of silently failing
-  -- Chromium-family browsers refuse to spawn the georaster bundle's
-  worker chunks from `file://` under unique-origin rules.
-- Degenerate-percentile fallback in the JS stretch no longer adds
-  an absolute `+1` (which rendered any normalized-amplitude raster
-  with values in `[0, 0.05]` as solid black); uses a relative epsilon
-  centered on the value so uniform-pixel scenes render as mid-gray.
-- The driver now resolves the running map by DOM-walking from the
-  clicked button to its enclosing `.folium-map` div, instead of
-  closing over a single `map_var` string. Fixes silent misrouting in
-  multi-map pages and after Jupyter cell reruns.
-- CDN URLs are emitted as JSON-encoded JS strings (was Python `repr`),
-  so a future bump to a URL with quotes or non-ASCII characters can't
-  silently break the driver template.
-- `noDataValue` is coerced to `Number` before equality comparison;
-  COGs that publish string-typed nodata no longer leak into the
-  percentile sample.
-- Percentile picks share one in-place sort instead of two `slice().sort()`
-  passes.
-
 ### Added
 - **Browser-side lazy SAR imagery** via a new `lazy_imagery=True` kwarg
   on `footprint_map` and `timeline_map`, plus a matching
   `umbra map --lazy-imagery` CLI flag. Each popup gets a "Get SAR
-  image" button; on click, the page streams the GEC cloud-optimized
-  GeoTIFF directly from the Umbra public bucket via HTTP range
-  requests using `georaster-layer-for-leaflet` + `geotiff.js` (pulled
-  in once from a pinned CDN). The contrast stretch runs in JS with the
-  same percentile-and-transparent-invalid-pixels logic Python's
-  `_stretch_to_rgba` uses; second click on the same button removes the
-  layer. A 200-item map weighs ~30 KB regardless of how many items it
-  carries, and users only pay the fetch cost for items they actually
-  open. Works with `--timeline` (scrub to a moment, click the
+  image" button; on click, the page lazily loads
+  [`geotiff.js`](https://geotiffjs.github.io/) (from a pinned CDN),
+  streams a low-resolution overview of the GEC cloud-optimized GeoTIFF
+  directly from the Umbra public bucket via HTTP range requests,
+  applies the same percentile-and-transparent-invalid-pixels stretch
+  Python's `_stretch_to_rgba` uses, and drops it on the map as a plain
+  Leaflet `L.imageOverlay` placed at the item's footprint. Second
+  click removes it. A 200-item map weighs ~30 KB regardless of how
+  many items it carries — users only pay the fetch cost for items they
+  actually open. Works with `--timeline` (scrub to a moment, click the
   polygon, see the actual SAR), and is mutually exclusive with the
-  pre-baked `--imagery` overlay path. Tunables:
-  `lazy_imagery_asset` (default `"GEC"`), `lazy_imagery_percentile`
-  (default `(2.0, 98.0)`). Items whose asset href can't be resolved
-  silently drop the button so we never ship a 400 KB CDN bundle for a
-  map with zero clickable items.
+  pre-baked `--imagery` overlay path. Tunables: `lazy_imagery_asset`
+  (default `"GEC"`), `lazy_imagery_percentile` (default `(2.0, 98.0)`).
+
+  Decoding runs on the main thread (no Web Workers), so the saved HTML
+  works whether opened over http(s) **or** straight off disk
+  (`file://`). Placement stretches the geocoded raster onto its
+  lat/lon footprint bbox rather than reprojecting — a quick-look
+  approximation; use `imagery=True` for a pixel-accurate, GDAL-
+  reprojected overlay.
 
 
 - `umbra_py.timeline_map` / `save_timeline_map` and a matching `umbra
