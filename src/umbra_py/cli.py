@@ -204,6 +204,17 @@ def download(item_url, assets, dest, overwrite) -> None:
     "day of acquisitions, P1D for a month, P7D for a year. Ignored "
     "without --timeline.",
 )
+@click.option(
+    "--lazy-imagery",
+    is_flag=True,
+    help="Add a 'Get SAR image' button to each popup. On click, the browser "
+    "streams that item's GEC cloud-optimized GeoTIFF directly from the "
+    "Umbra bucket via HTTP range requests (using georaster-layer-for-leaflet "
+    "+ geotiff.js from a CDN) and overlays it on the map. Unlike --imagery, "
+    "the HTML stays ~30 KB regardless of how many items it carries -- you "
+    "only pay the fetch cost for items you click. Works with --timeline. "
+    "HTML output only; mutually exclusive with --imagery.",
+)
 def map_cmd(
     bbox,
     start,
@@ -217,6 +228,7 @@ def map_cmd(
     geocode,
     timeline,
     timeline_period,
+    lazy_imagery,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     catalog = UmbraCatalog()
@@ -244,26 +256,43 @@ def map_cmd(
             raise click.ClickException("--imagery only applies to HTML map output.")
         if timeline:
             raise click.ClickException("--timeline only applies to HTML map output.")
+        if lazy_imagery:
+            raise click.ClickException("--lazy-imagery only applies to HTML map output.")
         path = write_geojson(items, out_path)
     elif lower.endswith(".html") or lower.endswith(".htm"):
         if timeline and imagery:
             raise click.ClickException(
                 "--timeline and --imagery can't be combined yet; animating SAR "
-                "rasters across the slider isn't supported. Drop one."
+                "rasters across the slider isn't supported. Use --lazy-imagery "
+                "for on-demand SAR overlays on the timeline."
+            )
+        if imagery and lazy_imagery:
+            raise click.ClickException(
+                "--imagery (pre-baked PNG overlays) and --lazy-imagery "
+                "(browser-side COG fetch on click) are mutually exclusive. "
+                "Pick one."
             )
         if timeline:
-            suffix = f" with geocoding ~{len(items)}s" if geocode else ""
+            extras = []
+            if geocode:
+                extras.append(f"geocoding ~{len(items)}s")
+            if lazy_imagery:
+                extras.append("lazy SAR overlays")
+            suffix = (" with " + ", ".join(extras)) if extras else ""
             with OrbitSpinner(f"Rendering {len(items)} acquisition(s) on timeline{suffix}"):
                 path = save_timeline_map(
                     items,
                     out_path,
                     period=timeline_period,
                     geocode=geocode,
+                    lazy_imagery=lazy_imagery,
                 )
         else:
             extras = []
             if imagery:
                 extras.append("imagery")
+            if lazy_imagery:
+                extras.append("lazy SAR overlays")
             if geocode:
                 # Geocoding is the slow part (1 req/sec), so call it out so
                 # users aren't surprised when --geocode + a 100-item search
@@ -277,6 +306,7 @@ def map_cmd(
                     imagery=imagery,
                     imagery_kwargs=imagery_kwargs,
                     geocode=geocode,
+                    lazy_imagery=lazy_imagery,
                 )
     else:
         raise click.ClickException(

@@ -132,7 +132,13 @@ def _union_bbox(features: list[dict[str, Any]]) -> tuple[float, float, float, fl
     )
 
 
-def _popup_html(item: UmbraItem, *, location: str | None = None) -> str:
+def _popup_html(
+    item: UmbraItem,
+    *,
+    location: str | None = None,
+    lazy_imagery_url: str | None = None,
+    lazy_imagery_bounds: tuple[float, float, float, float] | None = None,
+) -> str:
     info = item.metadata_summary()
     rng, azi = info["resolution_range_m"], info["resolution_azimuth_m"]
 
@@ -170,7 +176,19 @@ def _popup_html(item: UmbraItem, *, location: str | None = None) -> str:
         if item.href
         else ""
     )
-    return f"<table style='font-family:sans-serif;font-size:12px'>{body}</table>{desc_html}{link}"
+    button = ""
+    if lazy_imagery_url and lazy_imagery_bounds is not None:
+        from ._lazy_imagery import popup_button_html  # noqa: PLC0415
+
+        button = popup_button_html(
+            item_id=item.id,
+            asset_url=lazy_imagery_url,
+            bounds=lazy_imagery_bounds,
+        )
+    return (
+        f"<table style='font-family:sans-serif;font-size:12px'>{body}</table>"
+        f"{desc_html}{button}{link}"
+    )
 
 
 def _centroid(item: UmbraItem) -> tuple[float, float] | None:
@@ -302,6 +320,63 @@ def _legend_html(total: int, with_imagery: int | None, color: str) -> str:
     )
 
 
+def _resolve_lazy_urls(
+    items: Iterable[UmbraItem],
+    enabled: bool,
+    asset: str,
+) -> dict[str, tuple[str, tuple[float, float, float, float]]]:
+    """Return ``{item_id: (cog_url, bbox)}`` for lazily-fetchable items.
+
+    ``bbox`` is the item's lat/lon footprint, used to place the overlay
+    in the browser. When ``enabled`` is False we short-circuit to an
+    empty dict so the caller doesn't have to repeat that check. Items
+    are silently dropped (popup still renders, just without the button)
+    when they lack a bbox to place the overlay, or when ``asset_href``
+    can't be resolved -- missing asset, or an empty href with no
+    ``umbra:task_id`` to derive one.
+    """
+    if not enabled:
+        return {}
+    resolved: dict[str, tuple[str, tuple[float, float, float, float]]] = {}
+    for item in items:
+        if item.bbox is None:
+            continue
+        try:
+            href = item.asset_href(asset)
+        except AssetNotFoundError:
+            continue
+        if href:
+            resolved[item.id] = (href, item.bbox)
+    return resolved
+
+
+def _install_lazy_imagery(
+    folium_map: Any,
+    percentile: tuple[float, float],
+) -> None:
+    """Inject the per-page button driver into the map's HTML.
+
+    The driver injects its own CDN ``<script>`` tags on first click
+    (see ``_lazy_imagery`` for the rationale -- short version: doing
+    it from ``<head>`` races against Folium's Leaflet bundle, and
+    georaster-layer-for-leaflet needs ``L.GridLayer`` defined before
+    it evaluates). The driver finds the running map by DOM-traversal
+    from each clicked button, so it stays correct across Jupyter
+    cell reruns and multi-map pages.
+    """
+    folium = _require("folium")
+    from ._lazy_imagery import driver_script  # noqa: PLC0415
+
+    folium_map.get_root().script.add_child(
+        folium.Element(
+            driver_script(
+                percentile_low=percentile[0],
+                percentile_high=percentile[1],
+            )
+        )
+    )
+
+
 def footprint_map(
     items: Iterable[UmbraItem],
     *,
@@ -314,6 +389,9 @@ def footprint_map(
     imagery_kwargs: dict[str, Any] | None = None,
     geocode: bool = False,
     geocode_zoom: int = 10,
+    lazy_imagery: bool = False,
+    lazy_imagery_asset: str = "GEC",
+    lazy_imagery_percentile: tuple[float, float] = (2.0, 98.0),
 ):
     """Build an interactive Folium map of one or more Umbra acquisitions.
 
@@ -337,10 +415,29 @@ def footprint_map(
     table. Off by default so library users don't make surprise network
     calls.
 
+    When ``lazy_imagery=True``, each popup gets a "Get SAR image" button
+    that streams the cloud-optimized GeoTIFF directly in the browser
+    (via ``georaster-layer-for-leaflet`` + ``geotiff.js`` from a CDN)
+    instead of pre-baking a PNG into the HTML. The map stays small no
+    matter how many items it carries; users pay the fetch cost only for
+    items they click. Requires the Umbra bucket's permissive CORS (it
+    has it). ``lazy_imagery_asset`` selects the asset key (default
+    ``"GEC"``); ``lazy_imagery_percentile`` controls the in-browser
+    contrast stretch (default ``(2.0, 98.0)`` matches the Python
+    overlay path). Mutually exclusive with ``imagery=True`` — eager and
+    lazy imagery on the same item would compete for the same Leaflet
+    layer slot.
+
     Requires the ``viz`` extra (``pip install "umbra-py[viz]"``). Returns
     a ``folium.Map`` you can ``.save("out.html")`` or display in Jupyter.
     """
     folium = _require("folium")
+
+    if imagery and lazy_imagery:
+        raise ValueError(
+            "imagery=True and lazy_imagery=True can't be combined: both "
+            "would add a SAR raster for each item. Pick one."
+        )
 
     items = list(items)
     features = [(i, _geometry_for(i)) for i in items]
@@ -391,8 +488,15 @@ def footprint_map(
             if label:
                 locations[item.id] = label
 
+    # Resolve per-item COG URLs + footprint bounds for the lazy-fetch
+    # button. Items whose asset_href can't be resolved, or that lack a
+    # bbox to place the overlay, get no button -- the popup still works
+    # for everything else.
+    lazy_urls = _resolve_lazy_urls((i for i, _ in features), lazy_imagery, lazy_imagery_asset)
+
     for item, geometry in features:
         loc = locations.get(item.id)
+        lazy_url, lazy_bounds = lazy_urls.get(item.id, (None, None))
         folium.GeoJson(
             {"type": "Feature", "geometry": geometry, "properties": {}},
             style_function=lambda _f, c=color, w=weight, fo=fill_opacity: {
@@ -401,7 +505,15 @@ def footprint_map(
                 "fillOpacity": fo,
             },
             tooltip=item.id,
-            popup=folium.Popup(_popup_html(item, location=loc), max_width=420),
+            popup=folium.Popup(
+                _popup_html(
+                    item,
+                    location=loc,
+                    lazy_imagery_url=lazy_url,
+                    lazy_imagery_bounds=lazy_bounds,
+                ),
+                max_width=420,
+            ),
         ).add_to(m)
 
         # Always-visible centroid marker so a single tiny footprint is
@@ -418,8 +530,19 @@ def footprint_map(
                 fill_color=color if has_img else "white",
                 fill_opacity=0.9 if has_img else 0.7,
                 tooltip=item.id,
-                popup=folium.Popup(_popup_html(item, location=loc), max_width=420),
+                popup=folium.Popup(
+                    _popup_html(
+                        item,
+                        location=loc,
+                        lazy_imagery_url=lazy_url,
+                        lazy_imagery_bounds=lazy_bounds,
+                    ),
+                    max_width=420,
+                ),
             ).add_to(m)
+
+    if lazy_imagery and lazy_urls:
+        _install_lazy_imagery(m, lazy_imagery_percentile)
 
     if features:
         m.get_root().html.add_child(
@@ -560,6 +683,9 @@ def timeline_map(
     transition_time: int = 400,
     geocode: bool = False,
     geocode_zoom: int = 10,
+    lazy_imagery: bool = False,
+    lazy_imagery_asset: str = "GEC",
+    lazy_imagery_percentile: tuple[float, float] = (2.0, 98.0),
 ):
     """Build an animated timeline map of Umbra acquisitions.
 
@@ -606,6 +732,13 @@ def timeline_map(
         the resulting place name in the popup. Throttled to ~1 req/s
         and cached, so a 100-item timeline takes ~100 s on first
         render. Off by default to avoid surprise network traffic.
+    lazy_imagery, lazy_imagery_asset, lazy_imagery_percentile:
+        Same semantics as :func:`footprint_map`. Each popup gets a
+        "Get SAR image" button that streams the GEC cloud-optimized
+        GeoTIFF in the browser on click, so a 200-item timeline stays
+        ~30 KB instead of hundreds of MB. Pairs naturally with the
+        animation: scrub to the moment you care about, click the
+        polygon, see the actual SAR.
 
     Returns the underlying ``folium.Map``; ``.save("file.html")`` it
     or display it in Jupyter. Requires the ``viz`` extra.
@@ -643,16 +776,24 @@ def timeline_map(
             if label:
                 locations[item.id] = label
 
+    lazy_urls = _resolve_lazy_urls(plottable, lazy_imagery, lazy_imagery_asset)
+
     features: list[dict[str, Any]] = []
     bbox_inputs: list[dict[str, Any]] = []
     for item in plottable:
+        lazy_url, lazy_bounds = lazy_urls.get(item.id, (None, None))
         features.append(
             {
                 "type": "Feature",
                 "geometry": geoms[item.id],
                 "properties": {
                     "times": [item.datetime.isoformat()],
-                    "popup": _popup_html(item, location=locations.get(item.id)),
+                    "popup": _popup_html(
+                        item,
+                        location=locations.get(item.id),
+                        lazy_imagery_url=lazy_url,
+                        lazy_imagery_bounds=lazy_bounds,
+                    ),
                     "id": item.id,
                     "style": {
                         "color": color,
@@ -693,6 +834,9 @@ def timeline_map(
             date_options="YYYY-MM-DD HH:mm UTC",
             time_slider_drag_update=True,
         ).add_to(m)
+
+    if lazy_imagery and lazy_urls:
+        _install_lazy_imagery(m, lazy_imagery_percentile)
 
     if bbox is not None:
         m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])

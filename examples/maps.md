@@ -198,6 +198,94 @@ top-right shows how many items had imagery vs footprint-only.
 
 ---
 
+## 5.5 Lazy SAR imagery (fetch on click)
+
+`imagery=True` is great when you want everything overlaid up front,
+but the resulting HTML carries a base64 PNG per item — a 100-item map
+can weigh hundreds of MB. `lazy_imagery=True` is the opposite
+tradeoff: each popup ships with a "Get SAR image" button, and the
+COG is streamed straight from the Umbra bucket in the browser on
+click. The map weighs ~30 KB regardless of how many items it carries.
+
+```python
+m = footprint_map(
+    items,
+    lazy_imagery=True,
+    lazy_imagery_percentile=(2.0, 98.0),   # contrast stretch (same default)
+    lazy_imagery_asset="GEC",              # asset key (rarely changed)
+)
+m.save("lazy.html")
+```
+
+How it works:
+
+- The HTML pulls [`geotiff.js`](https://geotiffjs.github.io/) from a
+  pinned CDN (`unpkg.com`), but only when the user actually opens a
+  popup and clicks the button — pages nobody clicks pay nothing.
+- A low-resolution **overview** of the COG is fetched via HTTP range
+  requests — only the bytes for that overview level are downloaded.
+  Umbra's public bucket serves permissive CORS, which is what makes
+  browser-direct streaming possible.
+- geotiff.js decodes on the **main thread** (no Web Workers), so this
+  works whether the page is served over http(s) *or* opened straight
+  off disk (`file://`) — see the note below.
+- A small JS percentile pass over the decoded pixels picks the
+  contrast cuts (same math as the Python overlay path). Invalid /
+  non-positive / nodata pixels render transparent so the basemap shows
+  through scene edges.
+- The overlay is placed at the item's STAC footprint bounding box and
+  added as a plain Leaflet `L.imageOverlay`. Click the button again to
+  remove it.
+
+**Placement is a quick-look approximation.** Umbra GEC rasters are
+geocoded but in a projected CRS (UTM). The browser overlay is
+stretched to fill the item's lat/lon footprint bbox rather than
+reprojected, which introduces a small skew over a scene (sub-pixel to
+a few pixels for a typical few-km Umbra collect). For pixel-accurate
+overlays use `imagery=True`, which reprojects through GDAL's
+`WarpedVRT` in Python.
+
+**Works from `file://`.** Earlier versions used a COG library that
+decoded inside Web Workers, which Chromium-family browsers refuse to
+spawn from `file://` pages. Switching to main-thread `geotiff.js`
+removed that limitation — double-clicking the saved `.html` works.
+(Serving over http(s) is still fine and slightly faster to warm the
+CDN cache.)
+
+When to pick which:
+
+| Scenario                                 | Use            |
+| ---------------------------------------- | -------------- |
+| Single map, you want everything visible immediately | `imagery=True` |
+| Many items, exploring on demand          | `lazy_imagery=True` |
+| Animated timeline                        | `lazy_imagery=True` (works with `timeline_map`) |
+| Pixel-accurate, reprojected overlay      | `imagery=True` |
+
+The two are mutually exclusive — both would try to add a SAR raster
+per item, so passing both raises `ValueError`.
+
+CLI:
+
+```bash
+umbra map \
+    --start 2024-01-01 --end 2024-06-30 \
+    --product GEC --max-per-task 1 \
+    --limit 200 \
+    --lazy-imagery \
+    --out lazy.html
+
+# Combined with the timeline view: scrub to a moment, click the
+# polygon, see the actual SAR.
+umbra map \
+    --start 2024-01-01 --end 2024-06-30 \
+    --product GEC --max-per-task 1 \
+    --timeline --timeline-period P7D \
+    --lazy-imagery \
+    --out coverage_with_sar.html
+```
+
+---
+
 ## 6. Working with a single item
 
 `UmbraItem.to_geojson()` returns a single GeoJSON `Feature` you can
@@ -288,11 +376,11 @@ Items without a datetime *or* a geometry are silently skipped (they
 can't be placed on a time axis). Click any footprint mid-animation and
 you get the same metadata popup `footprint_map` renders.
 
-SAR imagery overlays aren't supported yet on the timeline view —
-animating base64 rasters across the slider is a bigger lift. For now,
-use the timeline to find the time / place you care about, then call
-`footprint_map([item], imagery=True)` on that single acquisition for
-the high-resolution look.
+Pre-baked `imagery=True` overlays aren't supported on the timeline
+(animating base64 rasters across the slider is a separate problem),
+but **`lazy_imagery=True` is** — every popup gets a "Get SAR image"
+button that streams the COG on click. Scrub the timeline to a moment,
+click the polygon, see the actual SAR. See §5.5 for the details.
 
 CLI:
 

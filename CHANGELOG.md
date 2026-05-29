@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Browser-side lazy SAR imagery** via a new `lazy_imagery=True` kwarg
+  on `footprint_map` and `timeline_map`, plus a matching
+  `umbra map --lazy-imagery` CLI flag. Each popup gets a "Get SAR
+  image" button; on click, the page lazily loads
+  [`geotiff.js`](https://geotiffjs.github.io/) (from a pinned CDN),
+  streams a low-resolution overview of the GEC cloud-optimized GeoTIFF
+  directly from the Umbra public bucket via HTTP range requests,
+  applies the same percentile-and-transparent-invalid-pixels stretch
+  Python's `_stretch_to_rgba` uses, and drops it on the map as a plain
+  Leaflet `L.imageOverlay` placed at the item's footprint. Second
+  click removes it. A 200-item map weighs ~30 KB regardless of how
+  many items it carries — users only pay the fetch cost for items they
+  actually open. Works with `--timeline` (scrub to a moment, click the
+  polygon, see the actual SAR), and is mutually exclusive with the
+  pre-baked `--imagery` overlay path. Tunables: `lazy_imagery_asset`
+  (default `"GEC"`), `lazy_imagery_percentile` (default `(2.0, 98.0)`).
+
+  Decoding runs on the main thread (no Web Workers), so the saved HTML
+  works whether opened over http(s) **or** straight off disk
+  (`file://`). Placement stretches the geocoded raster onto its
+  lat/lon footprint bbox rather than reprojecting — a quick-look
+  approximation; use `imagery=True` for a pixel-accurate, GDAL-
+  reprojected overlay.
+
+
 - `umbra_py.timeline_map` / `save_timeline_map` and a matching `umbra
   map --timeline` CLI flag: render search results as a
   TimestampedGeoJson layer so Umbra's coverage accumulates beneath a
