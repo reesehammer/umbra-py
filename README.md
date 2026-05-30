@@ -104,6 +104,21 @@ timeline_map(items, period="P7D", lazy_imagery=True).save("coverage.html")
 write_geojson(items, "footprints.geojson")
 ```
 
+Want to *see* a single acquisition without a map or a multi-GB download?
+`quicklook` streams a downsampled preview of the GEC GeoTIFF via HTTP range
+requests and hands you a `PIL.Image`:
+
+```python
+from umbra_py import save_quicklook
+
+# Grayscale linear stretch (the default).
+save_quicklook(items[0], "scene.png")
+
+# Decibel stretch + pseudo-color: the radiometrically-correct SAR look that
+# brings out terrain texture and urban structure.
+save_quicklook(items[0], "scene_db.png", db=True, colormap="magma")
+```
+
 ### Command line
 
 ```bash
@@ -115,6 +130,10 @@ umbra info <item-json-url>
 
 # Download specific asset(s).
 umbra download <item-json-url> --asset GEC --dest downloads/
+
+# Render a standalone SAR quicklook image -- no map, no full download.
+# Add --db for the decibel stretch and --colormap for pseudo-color.
+umbra quicklook <item-json-url> --out scene.png --db --colormap magma
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html

@@ -12,6 +12,11 @@ This module turns ``UmbraItem`` objects into:
   downsampled preview of the GEC asset via HTTP range requests and
   composite it onto the basemap. Self-contained — the resulting HTML
   embeds the image as a base64 PNG, no tile server required.
+- **Standalone SAR quicklooks** (requires ``viz`` + rasterio):
+  ``quicklook`` / ``save_quicklook`` turn one acquisition into a plain
+  image file — no map, no GIS, no full download — with optional decibel
+  scaling and matplotlib pseudo-color for the radiometrically-correct
+  SAR look.
 
 The first surface is the important one: Umbra acquisitions are points on
 the planet, and being able to *see* where a search landed before
@@ -562,7 +567,13 @@ def footprint_map(
     return m
 
 
-def _stretch_to_rgba(data: Any, *, percentile: tuple[float, float] = (2.0, 98.0)) -> Any:
+def _stretch_to_rgba(
+    data: Any,
+    *,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+    colormap: str | None = None,
+) -> Any:
     """Convert a 2D array of SAR amplitudes to an RGBA uint8 image.
 
     SAR data has enormous dynamic range; a straight 0-255 scaling looks
@@ -570,27 +581,109 @@ def _stretch_to_rgba(data: Any, *, percentile: tuple[float, float] = (2.0, 98.0)
     only, clip the rest to that range, and rescale. Pixels that were
     invalid (NaN / nodata / non-positive) become fully transparent so the
     basemap shows through scene edges.
+
+    When ``db`` is True the amplitudes are first converted to decibels
+    (``20*log10(amplitude)``) before the percentile stretch. This is the
+    radiometrically-meaningful way to view SAR: the log compresses the
+    huge dynamic range so terrain texture and urban structure that a
+    linear amplitude stretch crushes into near-black become visible.
+
+    When ``colormap`` names a matplotlib colormap (e.g. ``"viridis"``,
+    ``"magma"``) the stretched values are mapped through it for a
+    pseudo-colored quicklook instead of grayscale; this needs matplotlib
+    (already in the ``viz`` extra).
     """
     np = _require("numpy")
-    arr = np.asarray(data)
+    # float64 so the log and the rescale don't lose precision on integer
+    # amplitude rasters.
+    arr = np.asarray(data, dtype="float64")
     invalid = ~np.isfinite(arr) | (arr <= 0)
-    valid = arr[~invalid]
-    if valid.size == 0:
+    if invalid.all():
         raise ValueError("Image has no valid pixels to stretch.")
+    if db:
+        # amplitude -> decibels; only defined for the positive pixels we
+        # already flagged as valid. Invalid pixels become NaN and are
+        # masked out of the percentile below.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            arr = np.where(invalid, np.nan, 20.0 * np.log10(arr))
+    valid = arr[~invalid]
     lo, hi = np.percentile(valid, percentile)
     if hi <= lo:
         hi = lo + 1.0
-    # Replace invalid pixels with lo before the uint8 cast so NaN values
-    # don't trigger numpy's "invalid value encountered in cast" warning;
-    # they're set fully transparent below regardless.
+    # Replace invalid pixels with lo before scaling so NaN values don't
+    # trigger numpy warnings; they're set fully transparent below.
     safe = np.where(invalid, lo, arr)
-    scaled = np.clip((safe - lo) / (hi - lo) * 255.0, 0, 255).astype("uint8")
-    rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype="uint8")
-    rgba[..., 0] = scaled
-    rgba[..., 1] = scaled
-    rgba[..., 2] = scaled
-    rgba[..., 3] = np.where(invalid, 0, 255).astype("uint8")
-    return rgba
+    norm = np.clip((safe - lo) / (hi - lo), 0.0, 1.0)
+    alpha = np.where(invalid, 0, 255).astype("uint8")
+
+    if colormap:
+        rgb = _apply_colormap(norm, colormap)
+    else:
+        gray = (norm * 255.0).astype("uint8")
+        rgb = np.stack([gray, gray, gray], axis=-1)
+    return np.dstack([rgb, alpha])
+
+
+def _apply_colormap(norm: Any, name: str) -> Any:
+    """Map a [0,1]-normalised 2D array through a matplotlib colormap.
+
+    Returns an ``(H, W, 3)`` uint8 RGB array. Raised separately from
+    ``_stretch_to_rgba`` so the numpy-only grayscale path doesn't import
+    matplotlib.
+    """
+    _require("matplotlib")
+    from matplotlib import colormaps  # noqa: PLC0415
+
+    cmap = colormaps[name]
+    rgb = cmap(norm)[..., :3]  # drop the colormap's own alpha channel
+    return (rgb * 255.0).astype("uint8")
+
+
+def _read_sar_band(
+    item: UmbraItem,
+    asset: str,
+    max_size: int,
+    *,
+    reproject_to_4326: bool = False,
+) -> tuple[Any, Any]:
+    """Read a downsampled band 1 of an item's SAR GeoTIFF via range requests.
+
+    Returns ``(data, bounds)`` where ``data`` is a 2D numpy array and
+    ``bounds`` is the dataset's geographic bounds. Only the bytes for the
+    requested resolution are fetched (the asset is a cloud-optimized
+    GeoTIFF read through GDAL's ``/vsicurl/`` driver). When
+    ``reproject_to_4326`` is True the raster is warped to lon/lat so it
+    can be placed on a web map; for a standalone quicklook the native
+    projection is read as-is (no warp distortion).
+    """
+    rasterio = _require("rasterio")
+    _require("numpy")
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
+
+    url = item.asset_href(asset)
+    if not url:
+        raise AssetNotFoundError(
+            f"Item {item.id!r} has no resolvable URL for asset {asset!r} "
+            "(asset href is empty and no umbra:task_id available to derive one)."
+        )
+    with rasterio.open(f"/vsicurl/{url}") as src:
+        if reproject_to_4326:
+            epsg = src.crs.to_epsg() if src.crs else None
+            wrap = WarpedVRT(src, crs="EPSG:4326") if epsg != 4326 else None
+        else:
+            wrap = None
+        ds = wrap if wrap is not None else src
+        try:
+            scale = max(max(ds.width, ds.height) / max_size, 1.0)
+            out_w = max(int(ds.width / scale), 1)
+            out_h = max(int(ds.height / scale), 1)
+            data = ds.read(1, out_shape=(out_h, out_w), resampling=Resampling.average)
+            bounds = ds.bounds
+        finally:
+            if wrap is not None:
+                wrap.close()
+    return data, bounds
 
 
 def image_overlay(
@@ -613,36 +706,14 @@ def image_overlay(
     comes transitively via matplotlib).
     """
     folium = _require("folium")
-    rasterio = _require("rasterio")
-    _require("numpy")
     _require("PIL")
 
     import base64  # noqa: PLC0415
     import io  # noqa: PLC0415
 
     from PIL import Image  # noqa: PLC0415
-    from rasterio.enums import Resampling  # noqa: PLC0415
-    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
-    url = item.asset_href(asset)
-    if not url:
-        raise AssetNotFoundError(
-            f"Item {item.id!r} has no resolvable URL for asset {asset!r} "
-            "(asset href is empty and no umbra:task_id available to derive one)."
-        )
-    with rasterio.open(f"/vsicurl/{url}") as src:
-        epsg = src.crs.to_epsg() if src.crs else None
-        wrap = WarpedVRT(src, crs="EPSG:4326") if epsg != 4326 else None
-        ds = wrap if wrap is not None else src
-        try:
-            scale = max(max(ds.width, ds.height) / max_size, 1.0)
-            out_w = max(int(ds.width / scale), 1)
-            out_h = max(int(ds.height / scale), 1)
-            data = ds.read(1, out_shape=(out_h, out_w), resampling=Resampling.average)
-            bounds = ds.bounds
-        finally:
-            if wrap is not None:
-                wrap.close()
+    data, bounds = _read_sar_band(item, asset, max_size, reproject_to_4326=True)
 
     rgba = _stretch_to_rgba(data, percentile=percentile)
     buf = io.BytesIO()
@@ -665,6 +736,68 @@ def save_footprint_map(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     footprint_map(items, **kwargs).save(str(dest))
+    return dest
+
+
+def quicklook(
+    item: UmbraItem,
+    *,
+    asset: str = "GEC",
+    max_size: int = 2048,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+    colormap: str | None = None,
+):
+    """Render a standalone SAR quicklook image of an item.
+
+    Reads a downsampled preview of the cloud-optimized GeoTIFF via HTTP
+    range requests (only the bytes for the requested resolution are
+    fetched — no multi-gigabyte download), applies a percentile contrast
+    stretch tuned for SAR's dynamic range, and returns a ``PIL.Image`` you
+    can ``.save("scene.png")`` or display in a notebook.
+
+    This is the lowest-friction way to *see* an Umbra acquisition: no map,
+    no GIS, no full download. Unlike :func:`image_overlay`, the raster is
+    read in its native (already geocoded, north-up) projection rather than
+    warped to lon/lat — a faithful look at the pixels rather than a
+    map-placeable overlay.
+
+    ``db`` switches to a decibel (log-amplitude) stretch, the
+    radiometrically-correct way to view SAR — it reveals terrain texture
+    and urban structure that the default linear stretch crushes toward
+    black. ``colormap`` names a matplotlib colormap (``"viridis"``,
+    ``"magma"``, ...) for a pseudo-colored quicklook instead of grayscale.
+
+    ``asset`` defaults to ``"GEC"``, the detected single-band image; that
+    and ``"CSI"`` are the sensible targets (the complex SICD/CPHD products
+    aren't amplitude rasters). Requires the ``viz`` extra.
+    """
+    _require("PIL")
+    from PIL import Image  # noqa: PLC0415
+
+    data, _ = _read_sar_band(item, asset, max_size, reproject_to_4326=False)
+    rgba = _stretch_to_rgba(data, percentile=percentile, db=db, colormap=colormap)
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def save_quicklook(
+    item: UmbraItem,
+    dest: str | os.PathLike,
+    **kwargs,
+) -> Path:
+    """Render an item's SAR quicklook and write it to ``dest`` as an image.
+
+    The output format follows ``dest``'s extension (``.png``, ``.jpg``,
+    ...), per Pillow. See :func:`quicklook` for the rendering options.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    image = quicklook(item, **kwargs)
+    if dest.suffix.lower() in (".jpg", ".jpeg"):
+        # JPEG has no alpha channel; flatten transparent (invalid) pixels
+        # onto black so the save doesn't error.
+        image = image.convert("RGB")
+    image.save(str(dest))
     return dest
 
 

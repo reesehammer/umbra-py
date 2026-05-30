@@ -118,6 +118,132 @@ def test_stretch_to_rgba_all_invalid_raises():
         _stretch_to_rgba(data)
 
 
+def test_stretch_to_rgba_db_scaling_is_monotonic():
+    """dB scaling compresses dynamic range but preserves ordering: the
+    brightest valid pixel still maps to the highest grayscale value."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _stretch_to_rgba
+
+    # Geometric ramp spans several orders of magnitude -- the case dB
+    # scaling exists for. Linear and dB should agree on the extremes.
+    data = np.array([[1.0, 10.0], [100.0, 1000.0]], dtype="float32")
+    rgba = _stretch_to_rgba(data, percentile=(0, 100), db=True)
+
+    assert rgba.shape == (2, 2, 4)
+    assert rgba.dtype.name == "uint8"
+    assert rgba[0, 0, 0] == 0  # smallest amplitude -> darkest
+    assert rgba[1, 1, 0] == 255  # largest amplitude -> brightest
+    # All four pixels are positive/finite, so all opaque.
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_stretch_to_rgba_colormap_produces_color():
+    """A colormap turns the grayscale stretch into RGB where the channels
+    differ -- i.e. it's actually colored, not three equal gray channels."""
+    pytest.importorskip("matplotlib")
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _stretch_to_rgba
+
+    data = np.arange(1, 101, dtype="float32").reshape(10, 10)
+    rgba = _stretch_to_rgba(data, colormap="viridis")
+
+    assert rgba.shape == (10, 10, 4)
+    # viridis is not a grayscale ramp: somewhere the R/G/B channels diverge.
+    rgb = rgba[..., :3]
+    assert not (rgb[..., 0] == rgb[..., 1]).all()
+
+
+def test_quicklook_returns_pil_image(monkeypatch):
+    """quicklook reads a (mocked) band and returns a correctly-sized
+    RGBA PIL image without touching the network."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    data = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
+    monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
+
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0))
+    img = viz_mod.quicklook(item)
+    assert img.size == (4, 3)  # PIL is (width, height)
+    assert img.mode == "RGBA"
+
+
+def test_save_quicklook_writes_png(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    data = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
+
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_quicklook(item, tmp_path / "scene.png")
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic
+
+
+def test_save_quicklook_jpeg_flattens_alpha(monkeypatch, tmp_path):
+    """JPEG can't carry the transparency channel; the save must flatten to
+    RGB rather than raising."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    # Include an invalid (<=0) pixel so the RGBA image actually has alpha.
+    data = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")
+    monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
+
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_quicklook(item, tmp_path / "scene.jpg")
+    assert out.exists()
+
+
+def test_cli_quicklook_writes_image(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra quicklook <url>` fetches the item JSON, renders a
+    (mocked) band, and writes a PNG."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    data = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
+
+    out = tmp_path / "scene.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["quicklook", "http://example/item.json", "--out", str(out), "--db"],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Wrote quicklook" in result.output
+
+
+def test_cli_quicklook_rejects_bad_percentile(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "quicklook",
+            "http://example/item.json",
+            "--out",
+            str(tmp_path / "x.png"),
+            "--percentile",
+            "2",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "percentile" in result.output.lower()
+
+
 def test_centroid_from_bbox():
     from umbra_py.viz import _centroid
 
