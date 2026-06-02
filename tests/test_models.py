@@ -114,6 +114,42 @@ def test_asset_href_resolves_empty_href_via_task_id():
     assert sicd.endswith("/2025-06-22-23-57-52_UMBRA-10_SICD.nitf")
 
 
+def test_asset_href_rewrites_private_s3_href_to_public_sidecar_sibling():
+    """Umbra's published sidecars carry s3:// hrefs into a private bucket.
+    Built straight from the STAC JSON (umbra info / download / quicklook),
+    the item must still resolve a public, fetchable URL -- the sibling of the
+    sidecar in the open bucket. Regression for the named-task case, where
+    deriving from umbra:task_id alone points at a path that 404s."""
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Bingham%20Copper%20Mine/658ce57e/"
+        "2024-10-24-05-13-36_UMBRA-07/2024-10-24-05-13-36_UMBRA-07.stac.v2.json"
+    )
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "658ce57e"},
+            "assets": {
+                "2024-10-24-05-13-36_UMBRA-07_MM.tif": {
+                    "href": (
+                        "s3://prod-prod-processed-sar-data/2024-10-24/abc/"
+                        "2024-10-24-05-13-36_UMBRA-07_MM.tif"
+                    ),
+                    "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                }
+            },
+        },
+        href=sidecar,
+    )
+    gec = item.asset_href("GEC")
+    assert "prod-prod-processed-sar-data" not in gec
+    assert gec == (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Bingham%20Copper%20Mine/658ce57e/"
+        "2024-10-24-05-13-36_UMBRA-07/2024-10-24-05-13-36_UMBRA-07_GEC.tif"
+    )
+
+
 def test_asset_href_falls_back_to_empty_without_task_id():
     # Same item shape but no umbra:task_id -> nothing we can derive.
     raw = _new_style_item().raw

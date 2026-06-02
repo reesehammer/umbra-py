@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Standalone SAR quicklooks** via new `quicklook` / `save_quicklook`
+  functions and an `umbra quicklook <item-url> --out scene.png` CLI
+  command. This is the lowest-friction way to *see* an Umbra
+  acquisition: it streams a downsampled preview of the item's
+  cloud-optimized GeoTIFF via HTTP range requests (no multi-gigabyte
+  download, no Folium map, no GIS) and writes a plain image whose
+  format follows the output extension. The raster is read in its
+  native, already-geocoded projection — a faithful look at the pixels
+  rather than a map-placeable warp. Two SAR-specific rendering options:
+  `--db` switches to a decibel (log-amplitude) stretch — the
+  radiometrically-correct view that reveals terrain texture and urban
+  structure the default linear stretch crushes toward black — and
+  `--colormap NAME` (e.g. `viridis`, `magma`) pseudo-colors the result
+  through any matplotlib colormap. Tunables match the map overlays:
+  `--asset` (default `GEC`), `--max-size` (default 2048), `--percentile`
+  (default `2,98`). Requires the `viz` extra. The `_stretch_to_rgba`
+  helper grew matching `db` / `colormap` parameters, and the rasterio
+  read shared with `image_overlay` was factored into `_read_sar_band`.
 - **Browser-side lazy SAR imagery** via a new `lazy_imagery=True` kwarg
   on `footprint_map` and `timeline_map`, plus a matching
   `umbra map --lazy-imagery` CLI flag. Each popup gets a "Get SAR
@@ -64,6 +82,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra map` and `umbra search` to show the catalog walk is making
   progress. Auto-suppressed when stderr isn't a TTY (CI, piped output)
   so captured logs stay clean.
+
+### Fixed
+- `UmbraItem.asset_href` now resolves a public, fetchable HTTPS URL for
+  items built directly from a published STAC sidecar (i.e. `umbra info`,
+  `umbra download`, `umbra quicklook`, or `UmbraItem.from_dict(get_json(url))`).
+  Umbra's `*.stac.v2.json` sidecars list asset hrefs as `s3://` URLs into a
+  *private* processing bucket; the old code returned those verbatim, so
+  `rasterio`/CURL failed with `Protocol "s3" not supported` and downloads
+  pointed at an inaccessible bucket. The download products actually sit next
+  to the sidecar in the open bucket, so any non-HTTP(S) href is now rewritten
+  to the sibling public URL relative to the item's own sidecar `href` — which
+  also fixes named-task layouts (`tasks/<name>/<task_id>/<acq>/…`) where
+  reconstructing from `umbra:task_id` alone produced a 404. `UmbraCatalog.search`
+  was unaffected (it already rebuilt public hrefs while walking the bucket).
 
 ### Changed
 - **Breaking:** `UmbraCatalog.search` now walks Umbra's live data layout

@@ -28,7 +28,9 @@ from .viz import (
     image_overlay,
     item_to_feature,
     items_to_featurecollection,
+    quicklook,
     save_footprint_map,
+    save_quicklook,
     save_timeline_map,
     timeline_map,
     write_geojson,
@@ -55,6 +57,8 @@ __all__ = [
     "footprint_map",
     "save_footprint_map",
     "image_overlay",
+    "quicklook",
+    "save_quicklook",
     "timeline_map",
     "save_timeline_map",
 ]

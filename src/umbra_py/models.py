@@ -105,6 +105,19 @@ _V1_TO_DISK_SUFFIX: tuple[tuple[str, str], ...] = (
 )
 
 
+def _public_basename(key: str) -> str | None:
+    """Public on-disk filename for an asset whose STAC key uses v1 naming.
+
+    Maps the v1 suffix to the published suffix (e.g. ``..._MM.tif`` ->
+    ``..._GEC.tif``). Returns ``None`` for keys matching no known suffix
+    (sidecar metadata JSON, stray files).
+    """
+    for v1, disk in _V1_TO_DISK_SUFFIX:
+        if key.endswith(v1):
+            return key[: -len(v1)] + disk
+    return None
+
+
 def _derive_data_url(key: str, task_id: str) -> str | None:
     """Reconstruct the public-bucket URL for an asset whose STAC href is empty.
 
@@ -254,10 +267,15 @@ class UmbraItem:
     def asset_href(self, name: str) -> str:
         """Return the download URL for a product type (``"GEC"``) or asset key.
 
-        Recent Umbra STAC items publish every asset with ``href=""``; when that
-        happens we reconstruct the public-bucket URL from ``umbra:task_id`` and
-        the asset key's v1 naming convention. Older items with populated hrefs
-        are returned unchanged.
+        Umbra's published ``*.stac.v2.json`` sidecars reference assets either
+        with ``href=""`` or with an ``s3://`` URL into a *private* processing
+        bucket -- neither is anonymously fetchable. In both cases the public
+        copy sits next to the sidecar in the open-data bucket, so we
+        reconstruct a public HTTPS URL: first relative to the item's own
+        sidecar ``href`` (which correctly handles named-task layouts like
+        ``tasks/<name>/<task_id>/<acq>/``), then falling back to deriving from
+        ``umbra:task_id``. Hrefs already pointing at ``http(s)`` are returned
+        unchanged.
         """
         key = self.asset_map.get(name, name)
         try:
@@ -268,14 +286,35 @@ class UmbraItem:
                 f"Item {self.id!r} has no asset {name!r}. Available: {available}."
             ) from exc
         href = asset.get("href") or ""
-        if href:
+        if href.startswith(("http://", "https://")):
             return href
+        public = self._public_asset_url(key)
+        if public is not None:
+            return public
         task_id = self.properties.get("umbra:task_id")
         if task_id:
             derived = _derive_data_url(key, task_id)
             if derived is not None:
                 return derived
         return href
+
+    def _public_asset_url(self, key: str) -> str | None:
+        """Resolve an asset's public URL as a sibling of the item's sidecar.
+
+        The downloadable products live next to the ``*.stac.v2.json`` sidecar
+        in the public bucket, so given the item's own (public) ``href`` and
+        the asset's v1-style key we can build the sibling URL directly. This
+        handles named-task layouts that a ``umbra:task_id``-only
+        reconstruction can't. Returns ``None`` when there's no usable sidecar
+        href or the key isn't recognised.
+        """
+        if not self.href or not self.href.startswith(("http://", "https://")):
+            return None
+        basename = _public_basename(key)
+        if basename is None:
+            return None
+        base_dir = self.href.rsplit("/", 1)[0]
+        return f"{base_dir}/{basename}"
 
     def has_asset(self, name: str) -> bool:
         return name in self.asset_map or name in self.assets

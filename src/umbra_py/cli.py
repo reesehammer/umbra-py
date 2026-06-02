@@ -15,7 +15,7 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import UmbraError
 from .models import UmbraItem
-from .viz import save_footprint_map, save_timeline_map, write_geojson
+from .viz import save_footprint_map, save_quicklook, save_timeline_map, write_geojson
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -132,6 +132,82 @@ def download(item_url, assets, dest, overwrite) -> None:
             item, dest, assets=[name], overwrite=overwrite, progress=_progress_printer(name)
         )[0]
         click.echo(f"\n  -> {path}")
+
+
+def _parse_percentile(value: str) -> tuple[float, float]:
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise click.BadParameter("percentile must be 'low,high' (e.g. '2,98')")
+    try:
+        lo, hi = float(parts[0]), float(parts[1])
+    except ValueError as exc:
+        raise click.BadParameter("percentile values must be numbers") from exc
+    return (lo, hi)
+
+
+@cli.command()
+@click.argument("item_url")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output image file (extension picks the format, e.g. scene.png).",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to render. GEC (the detected GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=2048,
+    show_default=True,
+    help="Max pixel dimension of the quicklook. Larger is sharper but reveals "
+    "more SAR speckle and fetches more bytes (roughly quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look. Reveals terrain texture and structure that the default linear "
+    "stretch crushes toward black.",
+)
+@click.option(
+    "--colormap",
+    default=None,
+    help="Matplotlib colormap for a pseudo-colored quicklook (e.g. viridis, "
+    "magma, inferno). Default is grayscale.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for the contrast stretch.",
+)
+def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> None:
+    """Render a standalone SAR quicklook image from a STAC item URL.
+
+    Streams a downsampled preview of the item's cloud-optimized GeoTIFF via
+    HTTP range requests and writes it as an image -- no full download, no
+    map. Requires the viz extra (``pip install "umbra-py[viz]"``).
+    """
+    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    with OrbitSpinner(f"Rendering quicklook of {item.id}"):
+        path = save_quicklook(
+            item,
+            out_path,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            colormap=colormap or None,
+            percentile=_parse_percentile(percentile),
+        )
+    click.echo(f"Wrote quicklook to {path}")
 
 
 @cli.command(name="map")
