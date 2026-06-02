@@ -3,6 +3,12 @@
 Runnable end-to-end examples live here. v0.1 ships the building blocks; the
 notebooks below are planned for v0.2 and are great first contributions.
 
+Guides:
+
+- [`maps.md`](maps.md) — render search results as interactive maps or GeoJSON.
+- [`quicklook.md`](quicklook.md) — turn a single acquisition into a standalone
+  SAR image (CLI + Python), with decibel scaling and matplotlib pseudo-color.
+
 Planned:
 
 - `01_hello_umbra.ipynb` — search the catalog, summarize and visualize an item.
