@@ -83,6 +83,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   progress. Auto-suppressed when stderr isn't a TTY (CI, piped output)
   so captured logs stay clean.
 
+### Fixed
+- `UmbraItem.asset_href` now resolves a public, fetchable HTTPS URL for
+  items built directly from a published STAC sidecar (i.e. `umbra info`,
+  `umbra download`, `umbra quicklook`, or `UmbraItem.from_dict(get_json(url))`).
+  Umbra's `*.stac.v2.json` sidecars list asset hrefs as `s3://` URLs into a
+  *private* processing bucket; the old code returned those verbatim, so
+  `rasterio`/CURL failed with `Protocol "s3" not supported` and downloads
+  pointed at an inaccessible bucket. The download products actually sit next
+  to the sidecar in the open bucket, so any non-HTTP(S) href is now rewritten
+  to the sibling public URL relative to the item's own sidecar `href` — which
+  also fixes named-task layouts (`tasks/<name>/<task_id>/<acq>/…`) where
+  reconstructing from `umbra:task_id` alone produced a 404. `UmbraCatalog.search`
+  was unaffected (it already rebuilt public hrefs while walking the bucket).
+
 ### Changed
 - **Breaking:** `UmbraCatalog.search` now walks Umbra's live data layout
   at `sar-data/tasks/<task>/[<uuid>/]<acquisition>/` (each acquisition has
