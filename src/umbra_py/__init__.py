@@ -24,11 +24,13 @@ from .exceptions import (
 )
 from .models import UmbraItem
 from .viz import (
+    change_composite,
     footprint_map,
     image_overlay,
     item_to_feature,
     items_to_featurecollection,
     quicklook,
+    save_change_composite,
     save_footprint_map,
     save_quicklook,
     save_timeline_map,
@@ -59,6 +61,8 @@ __all__ = [
     "image_overlay",
     "quicklook",
     "save_quicklook",
+    "change_composite",
+    "save_change_composite",
     "timeline_map",
     "save_timeline_map",
 ]

@@ -244,6 +244,204 @@ def test_cli_quicklook_rejects_bad_percentile(monkeypatch, tmp_path, sample_item
     assert "percentile" in result.output.lower()
 
 
+def test_compose_change_rgba_identical_bands_are_gray():
+    """Two identical passes have no change, so every valid pixel lands on
+    the gray diagonal (R == G == B)."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    band = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
+    rgba = _compose_change_rgba([band, band])
+
+    assert rgba.shape == (4, 4, 4)
+    assert rgba.dtype.name == "uint8"
+    rgb = rgba[..., :3]
+    assert (rgb[..., 0] == rgb[..., 1]).all()
+    assert (rgb[..., 1] == rgb[..., 2]).all()
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_compose_change_rgba_two_dates_color_semantics():
+    """Backscatter that appears in the later pass reads green; backscatter
+    that vanishes reads magenta."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    # Pixel (0,0): bright then dark -> "lost". Pixel (0,1): dark then bright
+    # -> "gained". A spread of mid values gives the stretch something to
+    # work with at the percentile extremes.
+    t1 = np.array([[100.0, 1.0, 40.0], [50.0, 60.0, 70.0]], dtype="float32")
+    t2 = np.array([[1.0, 100.0, 40.0], [50.0, 60.0, 70.0]], dtype="float32")
+    rgba = _compose_change_rgba([t1, t2], percentile=(0, 100))
+
+    lost = rgba[0, 0]  # was bright, now dark
+    gained = rgba[0, 1]  # was dark, now bright
+    # Lost -> magenta: red and blue high, green low (R=t1, G=t2, B=t1).
+    assert lost[0] > lost[1] and lost[2] > lost[1]
+    # Gained -> green: green high, red and blue low.
+    assert gained[1] > gained[0] and gained[1] > gained[2]
+
+
+def test_compose_change_rgba_three_dates_map_to_rgb():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    # Each band needs internal contrast for the percentile stretch to bite.
+    # Pixel (0,0) is dark in t1/t3 and bright only in t2 -> green.
+    spread = [40.0, 50.0, 60.0, 70.0, 100.0]
+    t1 = np.array([[1.0, *spread[:2]], [*spread[2:]]], dtype="float32")
+    t2 = np.array([[100.0, *spread[:2]], [spread[2], spread[3], 1.0]], dtype="float32")
+    t3 = t1.copy()
+    rgba = _compose_change_rgba([t1, t2, t3], percentile=(0, 100))
+    px = rgba[0, 0]
+    assert px[1] > px[0] and px[1] > px[2]
+
+
+def test_compose_change_rgba_invalid_pixels_propagate():
+    """A pixel invalid in any one band is transparent in the composite."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    t1 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+    t2 = np.array([[np.nan, 2.0], [3.0, 4.0]], dtype="float32")
+    rgba = _compose_change_rgba([t1, t2])
+    assert rgba[0, 0, 3] == 0  # invalid in t2 -> transparent
+    assert rgba[1, 1, 3] == 255  # valid in both -> opaque
+
+
+def test_compose_change_rgba_rejects_bad_band_count():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    band = np.ones((2, 2), dtype="float32")
+    with pytest.raises(ValueError, match="2 or 3"):
+        _compose_change_rgba([band])
+    with pytest.raises(ValueError, match="2 or 3"):
+        _compose_change_rgba([band, band, band, band])
+
+
+def test_compose_change_rgba_rejects_mismatched_shapes():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    with pytest.raises(ValueError, match="same shape"):
+        _compose_change_rgba([np.ones((2, 2)), np.ones((2, 3))])
+
+
+def test_change_composite_returns_pil_image(monkeypatch):
+    """change_composite stacks (mocked) co-registered bands into an RGBA
+    PIL image without touching the network."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
+    t2 = t1[::-1].copy()
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2], (0, 0, 1, 1)))
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    img = viz_mod.change_composite([a, b])
+    assert img.size == (4, 3)  # PIL is (width, height)
+    assert img.mode == "RGBA"
+
+
+def test_change_composite_rejects_wrong_item_count(monkeypatch):
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    # Guard against the network: the count check must fire first.
+    monkeypatch.setattr(
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: pytest.fail("should not co-register a bad item count"),
+    )
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match="2 or 3"):
+        viz_mod.change_composite([item])
+
+
+def test_save_change_composite_writes_png(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_change_composite([a, b], tmp_path / "change.png")
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_save_change_composite_jpeg_flattens_alpha(monkeypatch, tmp_path):
+    """JPEG can't carry transparency; the save flattens rather than raising."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")  # has an invalid pixel
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1.copy()], (0, 0, 1, 1))
+    )
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_change_composite([a, b], tmp_path / "change.jpg")
+    assert out.exists()
+
+
+def test_cli_change_writes_image(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra change <url> <url>` fetches each item, stacks the
+    (mocked) co-registered bands, and writes a PNG."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    out = tmp_path / "change.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "change",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--out",
+            str(out),
+            "--db",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Wrote change composite" in result.output
+
+
+def test_cli_change_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "http://example/a.json", "--out", str(tmp_path / "x.png")],
+    )
+    assert result.exit_code != 0
+    assert "2 or 3" in result.output
+
+
 def test_centroid_from_bbox():
     from umbra_py.viz import _centroid
 

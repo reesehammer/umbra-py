@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Multi-temporal SAR change composites** via new `change_composite` /
+  `save_change_composite` functions and an `umbra change <url> <url>
+  [<url>] --out change.png` CLI command. Pass 2–3 acquisitions of the
+  same site (e.g. items from one Umbra task) in chronological order; the
+  bands are co-registered onto a shared lon/lat grid (each cloud-optimized
+  GeoTIFF is read at a downsampled resolution via HTTP range requests and
+  warped so the same output pixel is the same ground location on every
+  date), percentile-stretched, and assigned to color channels. Unchanged
+  ground stays gray while change is tinted by *when* it happened: for two
+  dates, **green** = backscatter that appeared in the later pass, **magenta**
+  = backscatter that vanished; for three dates, an earliest→latest red/green/
+  blue temporal-RGB. Only the area imaged on every pass is colored (pixels
+  missing from any acquisition are transparent), and `--db` switches to the
+  radiometrically-correct decibel stretch. This is SAR's signature change-
+  detection view with no manual co-registration. Requires the `viz` extra.
+  The percentile/dB stretch shared with the quicklook path was factored into
+  a `_normalize_band` helper.
 - **Standalone SAR quicklooks** via new `quicklook` / `save_quicklook`
   functions and an `umbra quicklook <item-url> --out scene.png` CLI
   command. This is the lowest-friction way to *see* an Umbra

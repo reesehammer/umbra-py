@@ -43,3 +43,29 @@ def test_quicklook_renders_real_cog(tmp_path):
     out = save_quicklook(items[0], tmp_path / "quicklook.png", max_size=256, db=True)
     assert out.exists()
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_change_composite_renders_real_task(tmp_path):
+    """End-to-end: find an Umbra task with 2+ acquisitions of the same area,
+    then render a co-registered change composite from two of them. Proves
+    the multi-date warp-to-common-grid + compositing pipeline works against
+    real cloud-optimized GeoTIFFs."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("PIL")
+    from umbra_py import save_change_composite
+
+    # Group a modest sample by task; a task is repeat imaging of one site,
+    # so two of its acquisitions are guaranteed to overlap.
+    by_task: dict[str, list] = {}
+    for item in UmbraCatalog().search(start="2024-01-01", end="2024-12-31", limit=12):
+        task = item.properties.get("umbra:task_id")
+        if task and "GEC" in item.available_assets:
+            by_task.setdefault(task, []).append(item)
+
+    pair = next((v[:2] for v in by_task.values() if len(v) >= 2), None)
+    if pair is None:
+        pytest.skip("no task with 2+ GEC acquisitions in the sampled window")
+
+    out = save_change_composite(pair, tmp_path / "change.png", max_size=256)
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

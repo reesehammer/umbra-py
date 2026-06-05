@@ -17,6 +17,12 @@ This module turns ``UmbraItem`` objects into:
   image file — no map, no GIS, no full download — with optional decibel
   scaling and matplotlib pseudo-color for the radiometrically-correct
   SAR look.
+- **Multi-temporal change composites** (requires ``viz`` + rasterio):
+  ``change_composite`` / ``save_change_composite`` co-register 2–3
+  acquisitions of the same site onto a shared grid and color-code them by
+  date, so unchanged ground stays gray while anything that appeared or
+  vanished between passes lights up — SAR's signature change-detection
+  view, with no manual co-registration.
 
 The first surface is the important one: Umbra acquisitions are points on
 the planet, and being able to *see* where a search landed before
@@ -567,31 +573,30 @@ def footprint_map(
     return m
 
 
-def _stretch_to_rgba(
+def _normalize_band(
     data: Any,
     *,
     percentile: tuple[float, float] = (2.0, 98.0),
     db: bool = False,
-    colormap: str | None = None,
-) -> Any:
-    """Convert a 2D array of SAR amplitudes to an RGBA uint8 image.
+) -> tuple[Any, Any]:
+    """Percentile-stretch a 2D SAR amplitude band to ``[0, 1]`` + a mask.
+
+    Returns ``(norm, invalid)``: ``norm`` is a float64 array in ``[0, 1]``
+    (invalid pixels clamped to 0) and ``invalid`` is a boolean mask of the
+    pixels that were NaN / nodata / non-positive.
 
     SAR data has enormous dynamic range; a straight 0-255 scaling looks
     almost black. We compute the low/high cut on positive, finite values
-    only, clip the rest to that range, and rescale. Pixels that were
-    invalid (NaN / nodata / non-positive) become fully transparent so the
-    basemap shows through scene edges.
+    only, clip the rest to that range, and rescale. When ``db`` is True the
+    amplitudes are first converted to decibels (``20*log10(amplitude)``)
+    before the percentile stretch -- the radiometrically-meaningful view:
+    the log compresses the huge dynamic range so terrain texture and urban
+    structure that a linear amplitude stretch crushes into near-black
+    become visible.
 
-    When ``db`` is True the amplitudes are first converted to decibels
-    (``20*log10(amplitude)``) before the percentile stretch. This is the
-    radiometrically-meaningful way to view SAR: the log compresses the
-    huge dynamic range so terrain texture and urban structure that a
-    linear amplitude stretch crushes into near-black become visible.
-
-    When ``colormap`` names a matplotlib colormap (e.g. ``"viridis"``,
-    ``"magma"``) the stretched values are mapped through it for a
-    pseudo-colored quicklook instead of grayscale; this needs matplotlib
-    (already in the ``viz`` extra).
+    Shared by the grayscale/pseudo-color quicklook path
+    (:func:`_stretch_to_rgba`) and the multi-temporal change composite
+    (:func:`_compose_change_rgba`).
     """
     np = _require("numpy")
     # float64 so the log and the rescale don't lose precision on integer
@@ -611,9 +616,33 @@ def _stretch_to_rgba(
     if hi <= lo:
         hi = lo + 1.0
     # Replace invalid pixels with lo before scaling so NaN values don't
-    # trigger numpy warnings; they're set fully transparent below.
+    # trigger numpy warnings; they're set fully transparent by callers.
     safe = np.where(invalid, lo, arr)
     norm = np.clip((safe - lo) / (hi - lo), 0.0, 1.0)
+    return norm, invalid
+
+
+def _stretch_to_rgba(
+    data: Any,
+    *,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+    colormap: str | None = None,
+) -> Any:
+    """Convert a 2D array of SAR amplitudes to an RGBA uint8 image.
+
+    Pixels that were invalid (NaN / nodata / non-positive) become fully
+    transparent so the basemap shows through scene edges. See
+    :func:`_normalize_band` for the percentile-stretch and optional dB
+    rationale.
+
+    When ``colormap`` names a matplotlib colormap (e.g. ``"viridis"``,
+    ``"magma"``) the stretched values are mapped through it for a
+    pseudo-colored quicklook instead of grayscale; this needs matplotlib
+    (already in the ``viz`` extra).
+    """
+    np = _require("numpy")
+    norm, invalid = _normalize_band(data, percentile=percentile, db=db)
     alpha = np.where(invalid, 0, 255).astype("uint8")
 
     if colormap:
@@ -795,6 +824,202 @@ def save_quicklook(
     image = quicklook(item, **kwargs)
     if dest.suffix.lower() in (".jpg", ".jpeg"):
         # JPEG has no alpha channel; flatten transparent (invalid) pixels
+        # onto black so the save doesn't error.
+        image = image.convert("RGB")
+    image.save(str(dest))
+    return dest
+
+
+def _compose_change_rgba(
+    bands: list[Any],
+    *,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+) -> Any:
+    """Stack 2-3 co-registered SAR bands into an RGBA change composite.
+
+    Each band is percentile-stretched independently, then assigned to a
+    color channel by acquisition order:
+
+    - **Two dates** map to ``R = t1, G = t2, B = t1``. An unchanged pixel
+      (``t1 == t2``) lands on the gray diagonal; a pixel that brightened
+      only in the later pass shows **green**; one that dimmed shows
+      **magenta**. This is the classic two-date SAR change product.
+    - **Three dates** map straight to ``R/G/B`` -- a temporal-RGB where
+      stationary scene stays gray and anything that changed between passes
+      is tinted by *when* it was bright.
+
+    All bands must already share a pixel grid (use :func:`_coregister_bands`).
+    A pixel invalid in *any* band is made transparent, so the composite
+    only colors ground seen on every pass.
+    """
+    np = _require("numpy")
+    n = len(bands)
+    if n not in (2, 3):
+        raise ValueError(f"change composite needs 2 or 3 bands, got {n}.")
+    shape = np.asarray(bands[0]).shape
+    if any(np.asarray(b).shape != shape for b in bands):
+        raise ValueError("all bands must share the same shape; co-register first.")
+
+    norms: list[Any] = []
+    invalid = np.zeros(shape, dtype=bool)
+    for band in bands:
+        norm, inv = _normalize_band(band, percentile=percentile, db=db)
+        norms.append(norm)
+        invalid |= inv
+
+    order = (0, 1, 0) if n == 2 else (0, 1, 2)
+    rgb = np.stack([(norms[i] * 255.0).astype("uint8") for i in order], axis=-1)
+    alpha = np.where(invalid, 0, 255).astype("uint8")
+    return np.dstack([rgb, alpha])
+
+
+def _coregister_bands(
+    items: list[UmbraItem],
+    asset: str,
+    max_size: int,
+) -> tuple[list[Any], tuple[float, float, float, float]]:
+    """Read each item's SAR band onto one shared EPSG:4326 grid.
+
+    Returns ``(bands, bounds)`` where ``bands`` is a list of 2D arrays --
+    one per item, all the same shape and pixel-aligned -- and ``bounds`` is
+    the geographic intersection ``(left, bottom, right, top)`` they cover.
+    Each source cloud-optimized GeoTIFF is read at a downsampled resolution
+    via range requests and warped to lon/lat so the same output pixel
+    refers to the same ground location across dates -- the prerequisite for
+    an honest change comparison.
+
+    Raises ``ValueError`` when the footprints don't overlap (nothing to
+    compare).
+    """
+    rasterio = _require("rasterio")
+    _require("numpy")
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.transform import from_bounds  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
+    from rasterio.warp import transform_bounds  # noqa: PLC0415
+
+    datasets: list[Any] = []
+    try:
+        for item in items:
+            url = item.asset_href(asset)
+            if not url:
+                raise AssetNotFoundError(
+                    f"Item {item.id!r} has no resolvable URL for asset {asset!r}."
+                )
+            datasets.append(rasterio.open(f"/vsicurl/{url}"))
+
+        # Intersection of every footprint, in lon/lat.
+        wgs: list[tuple[float, float, float, float]] = []
+        for ds in datasets:
+            b = ds.bounds
+            if ds.crs and ds.crs.to_epsg() != 4326:
+                b = transform_bounds(ds.crs, "EPSG:4326", *b)
+            wgs.append(tuple(b))
+        left = max(b[0] for b in wgs)
+        bottom = max(b[1] for b in wgs)
+        right = min(b[2] for b in wgs)
+        top = min(b[3] for b in wgs)
+        if left >= right or bottom >= top:
+            raise ValueError(
+                "Footprints do not overlap, so there's nothing to compare. "
+                "Change detection needs acquisitions of the same area "
+                "(e.g. items from one Umbra task)."
+            )
+
+        # Output grid: max_size on the longer side, aspect from the
+        # intersection's lon/lat extent. Same lat/lon-stretch quick-look
+        # approximation image_overlay uses -- fine at the scene scale,
+        # mildly distorted toward the poles.
+        w_deg, h_deg = right - left, top - bottom
+        if w_deg >= h_deg:
+            out_w = max_size
+            out_h = max(int(round(max_size * h_deg / w_deg)), 1)
+        else:
+            out_h = max_size
+            out_w = max(int(round(max_size * w_deg / h_deg)), 1)
+        transform = from_bounds(left, bottom, right, top, out_w, out_h)
+
+        bands: list[Any] = []
+        for ds in datasets:
+            with WarpedVRT(
+                ds,
+                crs="EPSG:4326",
+                transform=transform,
+                width=out_w,
+                height=out_h,
+                resampling=Resampling.average,
+            ) as vrt:
+                bands.append(vrt.read(1))
+    finally:
+        for ds in datasets:
+            ds.close()
+    return bands, (left, bottom, right, top)
+
+
+def change_composite(
+    items: Iterable[UmbraItem],
+    *,
+    asset: str = "GEC",
+    max_size: int = 2048,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+):
+    """Render a multi-temporal SAR change composite of 2-3 acquisitions.
+
+    SAR's killer app is change detection: the radar backscatter of a fixed
+    scene is remarkably stable between passes, so anything that *did* change
+    -- a ship that arrived, a field that flooded, a building that went up --
+    jumps out against the static background. This function turns 2 or 3
+    acquisitions of the same site into a single color image where unchanged
+    ground stays gray and change is tinted by *when* it happened.
+
+    Pass the items in **chronological order**. The bands are co-registered
+    onto a shared lon/lat grid (so the same pixel is the same place on every
+    date), each is percentile-stretched, and they're assigned to color
+    channels:
+
+    - **Two dates:** **green** = backscatter that appeared in the later pass
+      (new/brighter), **magenta** = backscatter that vanished (gone/dimmer),
+      gray/white = unchanged.
+    - **Three dates:** a temporal-RGB (earliest=red, middle=green,
+      latest=blue); a moving bright target leaves a red→green→blue trail.
+
+    Only the area imaged on *every* pass is colored; pixels missing from any
+    acquisition are transparent. ``db`` switches to a decibel stretch (the
+    radiometrically-correct SAR view). ``asset`` defaults to ``"GEC"`` (the
+    detected amplitude GeoTIFF); ``"CSI"`` also works. Only a downsampled
+    overview of each cloud-optimized GeoTIFF is fetched (range requests, no
+    full download). Returns a ``PIL.Image``. Requires the ``viz`` extra.
+    """
+    _require("PIL")
+    from PIL import Image  # noqa: PLC0415
+
+    items = list(items)
+    if len(items) not in (2, 3):
+        raise ValueError(f"change_composite needs 2 or 3 acquisitions, got {len(items)}.")
+
+    bands, _ = _coregister_bands(items, asset, max_size)
+    rgba = _compose_change_rgba(bands, percentile=percentile, db=db)
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def save_change_composite(
+    items: Iterable[UmbraItem],
+    dest: str | os.PathLike,
+    **kwargs,
+) -> Path:
+    """Render a SAR change composite and write it to ``dest`` as an image.
+
+    The output format follows ``dest``'s extension (``.png``, ``.jpg``,
+    ...), per Pillow. See :func:`change_composite` for the rendering
+    options and color semantics.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    image = change_composite(items, **kwargs)
+    if dest.suffix.lower() in (".jpg", ".jpeg"):
+        # JPEG has no alpha channel; flatten transparent (un-imaged) pixels
         # onto black so the save doesn't error.
         image = image.convert("RGB")
     image.save(str(dest))

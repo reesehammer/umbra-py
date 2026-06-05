@@ -15,7 +15,13 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import UmbraError
 from .models import UmbraItem
-from .viz import save_footprint_map, save_quicklook, save_timeline_map, write_geojson
+from .viz import (
+    save_change_composite,
+    save_footprint_map,
+    save_quicklook,
+    save_timeline_map,
+    write_geojson,
+)
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -208,6 +214,70 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
             percentile=_parse_percentile(percentile),
         )
     click.echo(f"Wrote quicklook to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1, required=True)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output image file (extension picks the format, e.g. change.png).",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to compare. GEC (the detected GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=2048,
+    show_default=True,
+    help="Max pixel dimension of the composite's shared grid. Larger is "
+    "sharper but fetches more bytes (roughly quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look. Reveals texture and structure the default linear stretch "
+    "crushes toward black.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for each date's contrast stretch.",
+)
+def change(item_urls, out_path, asset, max_size, db, percentile) -> None:
+    """Render a multi-temporal SAR change composite from 2-3 item URLs.
+
+    Pass the STAC JSON URLs in chronological order. The acquisitions are
+    co-registered onto a shared grid and color-coded by date: unchanged
+    ground stays gray, while backscatter that appeared between passes shows
+    green and backscatter that vanished shows magenta (two dates), or a
+    red/green/blue temporal trail (three dates). Only downsampled overviews
+    are streamed via HTTP range requests -- no full download. Requires the
+    viz extra (``pip install "umbra-py[viz]"``).
+    """
+    if not 2 <= len(item_urls) <= 3:
+        raise click.BadParameter("provide 2 or 3 item URLs, in chronological order.")
+    items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    with OrbitSpinner(f"Rendering change composite of {len(items)} acquisitions"):
+        path = save_change_composite(
+            items,
+            out_path,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            percentile=_parse_percentile(percentile),
+        )
+    click.echo(f"Wrote change composite to {path}")
 
 
 @cli.command(name="map")
