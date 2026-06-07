@@ -63,6 +63,15 @@ def cli() -> None:
     type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
     help="Keep items exposing this asset (repeatable).",
 )
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive name of an Umbra task/site to search (e.g. "
+    "'Centerfield'). Umbra files every pass of a site under one named "
+    "directory, so this returns just that area's acquisitions -- and skips "
+    "listing the rest, so it's much faster. The easy way to gather the "
+    "co-located passes that 'umbra change' needs.",
+)
 @click.option("--limit", type=int, default=20, show_default=True, help="Max results.")
 @click.option(
     "--max-per-task",
@@ -73,7 +82,7 @@ def cli() -> None:
     "site rather than every revisit.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit full STAC item JSON.")
-def search(bbox, start, end, products, limit, max_per_task, as_json) -> None:
+def search(bbox, start, end, products, area, limit, max_per_task, as_json) -> None:
     """Search the catalog by area, date and product type."""
     catalog = UmbraCatalog()
     results = catalog.search(
@@ -81,6 +90,7 @@ def search(bbox, start, end, products, limit, max_per_task, as_json) -> None:
         start=start,
         end=end,
         product_types=list(products) or None,
+        area=area,
         limit=limit,
         max_per_task=max_per_task,
     )

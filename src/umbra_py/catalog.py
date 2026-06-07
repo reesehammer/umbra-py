@@ -67,6 +67,13 @@ def _acq_date(prefix: str) -> date | None:
         return None
 
 
+def _task_name(task_prefix: str) -> str:
+    """Task directory name (the AOI label) from a ``sar-data/tasks/<name>/``
+    prefix, e.g. ``"Centerfield, Utah"``. S3 keys are unencoded, so the name
+    carries its literal spaces / commas."""
+    return task_prefix[len(_TASKS_PREFIX) :].rstrip("/")
+
+
 def _guess_media_type(basename: str) -> str:
     ext = basename.rsplit(".", 1)[-1].lower() if "." in basename else ""
     if ext in ("tif", "tiff"):
@@ -173,6 +180,7 @@ class UmbraCatalog:
         start: DateLike = None,
         end: DateLike = None,
         product_types: list[str] | None = None,
+        area: str | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -191,6 +199,15 @@ class UmbraCatalog:
         product_types:
             Keep only items exposing at least one of these assets
             (e.g. ``["GEC"]``).
+        area:
+            Case-insensitive substring matched against each
+            ``sar-data/tasks/<task>/`` directory name. Umbra files every
+            pass of a site under one named task directory (e.g.
+            ``"Centerfield, Utah"``), so ``area="centerfield"`` returns
+            just that site's acquisitions. Non-matching task directories
+            are skipped *before* they're listed, so this also makes the
+            search much faster -- the ergonomic way to gather the
+            co-located passes a change composite needs.
         limit:
             Stop after yielding this many items.
         max_per_task:
@@ -206,6 +223,9 @@ class UmbraCatalog:
         wanted = {p.upper() for p in product_types} if product_types else None
 
         task_subdirs, _ = self._list_prefix(_TASKS_PREFIX)
+        if area:
+            needle = area.lower()
+            task_subdirs = [t for t in task_subdirs if needle in _task_name(t).lower()]
 
         count = 0
         for task_prefix in task_subdirs:

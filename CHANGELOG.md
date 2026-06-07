@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Search by area name** via a new `area=` argument on
+  `UmbraCatalog.search` and an `umbra search --area "<name>"` CLI flag.
+  Umbra files every pass of a site under one named task directory (e.g.
+  `sar-data/tasks/Centerfield, Utah/`), so `--area centerfield` returns
+  just that site's acquisitions. The match is a case-insensitive substring
+  on the task-directory name, applied *before* each directory is listed, so
+  non-matching tasks are skipped entirely — making a name-scoped search much
+  faster than an unfiltered walk. This is the ergonomic way to gather the
+  co-located passes a change composite needs: `umbra search --area X` →
+  pick 2–3 same-polarization URLs → `umbra change`.
 - **Multi-temporal SAR change composites** via new `change_composite` /
   `save_change_composite` functions and an `umbra change <url> <url>
   [<url>] --out change.png` CLI command. Pass 2–3 acquisitions of the

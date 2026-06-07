@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from umbra_py.catalog import UmbraCatalog, _acq_date
+from umbra_py.catalog import UmbraCatalog, _acq_date, _task_name
 
 
 @pytest.mark.parametrize(
@@ -204,6 +204,48 @@ def test_search_max_per_task_caps_revisits(monkeypatch):
     items = list(cat.search(start="2024-01-01", end="2024-12-31", max_per_task=1))
     assert len(items) == 2
     assert {i.id for i in items} == {"a1", "b1"}
+
+
+def test_task_name_strips_prefix_and_slash():
+    assert _task_name("sar-data/tasks/Centerfield, Utah/") == "Centerfield, Utah"
+
+
+def test_search_area_filters_to_matching_task(fake_bucket):
+    """area= keeps only task directories whose name contains the substring."""
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31", area="AIR"))
+    assert {i.id for i in items} == {"a"}
+    # The non-matching task is pruned *before* listing -- never streamed.
+    assert fake_bucket._streamed == ["sar-data/tasks/AIR/"]
+
+
+def test_search_area_is_case_insensitive(fake_bucket):
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31", area="air"))
+    assert {i.id for i in items} == {"a"}
+
+
+def test_search_area_no_match_yields_nothing(fake_bucket):
+    items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31", area="nowhere"))
+    assert items == []
+    # Nothing matched, so no task was listed at all.
+    assert fake_bucket._streamed == []
+
+
+def test_cli_search_area_flows_through(monkeypatch):
+    """`umbra search --area X` reaches catalog.search with area=X."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def fake_search(self, **kwargs):
+        captured.update(kwargs)
+        return iter([])
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    result = CliRunner().invoke(cli_mod.cli, ["search", "--area", "Centerfield"])
+    assert result.exit_code == 0, result.output
+    assert captured["area"] == "Centerfield"
 
 
 def test_search_url_encodes_spaces_in_task_names(monkeypatch):

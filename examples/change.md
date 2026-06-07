@@ -69,19 +69,34 @@ one frame per pass; stationary scene stays gray.
 
 ## 3. Getting the item URLs
 
-Each URL is an item's `.stac.v2.json` sidecar. The easiest source is `umbra
-search`, which prints a `url:` line per result. Because change detection needs
-acquisitions of the *same area*, search within one task's repeat coverage:
+Each URL is an item's `.stac.v2.json` sidecar. Because change detection needs
+acquisitions of the *same area*, the easy path is `umbra search --area`: Umbra
+files every pass of a site under one named directory, so naming it returns just
+that site's acquisitions (and runs faster, since the rest of the catalog is
+skipped):
 
 ```bash
-umbra search --start 2024-01-01 --end 2024-12-31 --product GEC --limit 10
+umbra search --area "Centerfield" --product GEC --start 2024-01-01 --end 2024-12-31
 ```
 
-Look for several results sharing a location (an Umbra **task** is repeat
-imaging of one site), and copy two or three `url:` values in date order.
-**Quote them** — Umbra's named-task directories contain spaces (`%20`) and
-commas. `umbra info <url>` confirms a URL parses (and prints its `acquired`
+Copy two or three `url:` values in date order — ideally **matching
+polarization and resolution** (the `product` line shows `pol=`), so the
+composite reflects real change and not a polarization or look-geometry
+difference. **Quote the URLs** — named-task directories contain spaces (`%20`)
+and commas. `umbra info <url>` confirms a URL parses (and prints its `acquired`
 time) before you render.
+
+Don't know the site name? List the areas with repeat coverage first:
+
+```bash
+umbra search --start 2024-01-01 --end 2024-12-31 --product GEC --limit 500 \
+  | grep -o 'tasks/[^/]*/' | sort | uniq -c | sort -rn | head
+```
+
+Anything with a count ≥ 2 is a change-detection candidate; feed its name back
+to `--area`. Or, if you know coordinates, `umbra search --bbox
+min_lon,min_lat,max_lon,max_lat` constrains to a box — every result overlaps
+it.
 
 If the footprints don't overlap, `change` raises a clear error — there's
 nothing to compare. Pick acquisitions of the same place.
@@ -107,23 +122,18 @@ options as keyword arguments (`asset=`, `max_size=`, `db=`,
 
 ## 5. Recipe gallery
 
-### Search → composite the two latest passes of a task
+### Search a named site → composite its two earliest passes
 
 ```python
-from collections import defaultdict
 from umbra_py import UmbraCatalog, save_change_composite
 
-by_task = defaultdict(list)
-for item in UmbraCatalog().search(
-    start="2024-01-01", end="2024-12-31", product_types=["GEC"], limit=40,
-):
-    task = item.properties.get("umbra:task_id")
-    if task and "GEC" in item.available_assets:
-        by_task[task].append(item)
-
-# First task with at least two passes; oldest → newest.
-passes = next(v for v in by_task.values() if len(v) >= 2)
-passes.sort(key=lambda i: i.datetime)
+passes = sorted(
+    UmbraCatalog().search(
+        area="Centerfield", product_types=["GEC"],
+        start="2024-01-01", end="2024-12-31",
+    ),
+    key=lambda i: i.datetime,  # oldest → newest
+)
 save_change_composite(passes[:2], "change.png", db=True)
 ```
 
