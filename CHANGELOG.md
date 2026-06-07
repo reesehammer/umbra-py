@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **One-command change composites by site + time range.** `umbra change`
+  gained a search mode: instead of passing 2–3 STAC URLs, give
+  `--area "<site>"` (or `--bbox`) with `--start`/`--end` and it gathers the
+  site's acquisitions and auto-selects the dates to composite —
+  `umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+  --out change.png`. `--frames {2,3}` picks how many dates (default 2),
+  spread evenly from earliest to latest across the matched range. Selection
+  prefers a single polarization (the largest same-polarization group), since
+  compositing HH against VV would render the polarization difference as fake
+  "change"; if no same-polarization pair exists it falls back to comparing
+  across polarizations and warns. The chosen acquisitions are printed before
+  rendering. Exposed as a reusable `select_change_frames(items, frames=2)`
+  helper in the public API. The explicit-URL form still works; the two modes
+  are mutually exclusive.
 - **Search by area name** via a new `area=` argument on
   `UmbraCatalog.search` and an `umbra search --area "<name>"` CLI flag.
   Umbra files every pass of a site under one named task directory (e.g.

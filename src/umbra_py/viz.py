@@ -957,6 +957,55 @@ def _coregister_bands(
     return bands, (left, bottom, right, top)
 
 
+def select_change_frames(
+    items: Iterable[UmbraItem],
+    *,
+    frames: int = 2,
+) -> list[UmbraItem]:
+    """Pick 2-3 acquisitions spanning a time range for a change composite.
+
+    Given the acquisitions of a site (e.g. the result of
+    ``catalog.search(area=...)``), choose ``frames`` of them, evenly spaced
+    in time from the earliest to the latest so the composite captures change
+    across the whole window. ``frames`` is clamped to what's available.
+
+    To keep the comparison apples-to-apples, acquisitions are first grouped
+    by polarization and the largest single-polarization group is used --
+    compositing HH against VV would show the polarization difference as
+    fake "change". If every acquisition is a different polarization (so no
+    same-polarization pair exists), all are used as a fallback; the caller
+    can warn. Items without a datetime are dropped (they can't be ordered).
+
+    Raises ``ValueError`` if fewer than two dated acquisitions are available.
+    Returns the selection oldest-first, ready for :func:`change_composite`.
+    """
+    if frames not in (2, 3):
+        raise ValueError(f"frames must be 2 or 3, got {frames}.")
+    dated = [i for i in items if i.datetime is not None]
+    if len(dated) < 2:
+        raise ValueError(f"need at least 2 dated acquisitions to compare, got {len(dated)}.")
+
+    groups: dict[tuple[str, ...], list[UmbraItem]] = {}
+    for item in dated:
+        groups.setdefault(tuple(item.polarizations), []).append(item)
+    # Largest single-polarization group, deterministic on ties.
+    pool = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[0][1]
+    if len(pool) < 2:
+        pool = dated  # no same-pol pair exists; compare across pols instead.
+
+    pool = sorted(pool, key=lambda i: i.datetime)
+    n = min(frames, len(pool))
+    # Evenly spaced indices including both endpoints.
+    indices = [round(k * (len(pool) - 1) / (n - 1)) for k in range(n)]
+    chosen: list[UmbraItem] = []
+    seen: set[int] = set()
+    for j in indices:
+        if j not in seen:
+            seen.add(j)
+            chosen.append(pool[j])
+    return chosen
+
+
 def change_composite(
     items: Iterable[UmbraItem],
     *,

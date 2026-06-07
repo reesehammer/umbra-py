@@ -442,6 +442,157 @@ def test_cli_change_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
     assert "2 or 3" in result.output
 
 
+def _dated_item(item_id, dt, pol="VV"):
+    return UmbraItem(
+        id=item_id,
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        properties={"datetime": dt, "sar:polarizations": [pol]},
+    )
+
+
+def test_select_change_frames_spans_range_two():
+    """frames=2 returns the earliest and latest acquisition."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("b", "2024-02-01T00:00:00Z"),
+        _dated_item("d", "2024-04-01T00:00:00Z"),
+        _dated_item("a", "2024-01-01T00:00:00Z"),
+        _dated_item("c", "2024-03-01T00:00:00Z"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert [i.id for i in chosen] == ["a", "d"]
+
+
+def test_select_change_frames_three_picks_endpoints_and_middle():
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item(str(k), f"2024-0{k}-01T00:00:00Z") for k in range(1, 6)]
+    chosen = select_change_frames(items, frames=3)
+    # Five evenly-spaced dates -> first, middle, last.
+    assert [i.id for i in chosen] == ["1", "3", "5"]
+
+
+def test_select_change_frames_prefers_largest_polarization_group():
+    """Mixing HH and VV would show the polarization difference as fake
+    change, so the largest single-pol group wins."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("vv1", "2024-01-01T00:00:00Z", pol="VV"),
+        _dated_item("hh", "2024-02-01T00:00:00Z", pol="HH"),
+        _dated_item("vv2", "2024-03-01T00:00:00Z", pol="VV"),
+        _dated_item("vv3", "2024-04-01T00:00:00Z", pol="VV"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert [i.id for i in chosen] == ["vv1", "vv3"]
+    assert all(i.polarizations == ["VV"] for i in chosen)
+
+
+def test_select_change_frames_falls_back_to_mixed_pol_when_no_pair():
+    """If every acquisition is a different polarization, comparing across
+    them is the best available -- return them rather than failing."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("hh", "2024-01-01T00:00:00Z", pol="HH"),
+        _dated_item("vv", "2024-02-01T00:00:00Z", pol="VV"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert {i.id for i in chosen} == {"hh", "vv"}
+
+
+def test_select_change_frames_drops_undated_and_requires_two():
+    from umbra_py.viz import select_change_frames
+
+    undated = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), properties={})
+    one = _dated_item("a", "2024-01-01T00:00:00Z")
+    with pytest.raises(ValueError, match="at least 2"):
+        select_change_frames([undated, one], frames=2)
+
+
+def test_select_change_frames_rejects_bad_frames():
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item("a", "2024-01-01T00:00:00Z"), _dated_item("b", "2024-02-01T00:00:00Z")]
+    with pytest.raises(ValueError, match="2 or 3"):
+        select_change_frames(items, frames=4)
+
+
+def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
+    """`umbra change --area X` searches, auto-selects frames, and renders."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    found = [
+        _dated_item("old", "2024-01-01T00:00:00Z"),
+        _dated_item("mid", "2024-02-01T00:00:00Z"),
+        _dated_item("new", "2024-03-01T00:00:00Z"),
+    ]
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    out = tmp_path / "change.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "--area", "Centerfield", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    # The earliest and latest were chosen (frames defaults to 2).
+    assert "old" in result.output and "new" in result.output
+    assert "Wrote change composite" in result.output
+
+
+def test_cli_change_rejects_urls_and_search_together(monkeypatch, sample_item_dict, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "http://example/a.json", "--area", "X", "--out", str(tmp_path / "o.png")],
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output
+
+
+def test_cli_change_search_too_few_results(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod.UmbraCatalog,
+        "search",
+        lambda self, **_kw: iter([_dated_item("only", "2024-01-01T00:00:00Z")]),
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "--area", "Nowhere", "--out", str(tmp_path / "o.png")],
+    )
+    assert result.exit_code != 0
+    assert "at least 2" in result.output
+
+
+def test_cli_change_no_urls_no_search_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(cli_mod.cli, ["change", "--out", str(tmp_path / "o.png")])
+    assert result.exit_code != 0
+    assert "item URLs" in result.output
+
+
 def test_centroid_from_bbox():
     from umbra_py.viz import _centroid
 

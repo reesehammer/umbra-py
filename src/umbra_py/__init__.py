@@ -34,6 +34,7 @@ from .viz import (
     save_footprint_map,
     save_quicklook,
     save_timeline_map,
+    select_change_frames,
     timeline_map,
     write_geojson,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "save_quicklook",
     "change_composite",
     "save_change_composite",
+    "select_change_frames",
     "timeline_map",
     "save_timeline_map",
 ]

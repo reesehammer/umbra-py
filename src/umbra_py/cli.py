@@ -20,6 +20,7 @@ from .viz import (
     save_footprint_map,
     save_quicklook,
     save_timeline_map,
+    select_change_frames,
     write_geojson,
 )
 
@@ -227,12 +228,37 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
 
 
 @cli.command()
-@click.argument("item_urls", nargs=-1, required=True)
+@click.argument("item_urls", nargs=-1)
 @click.option(
     "--out",
     "out_path",
     required=True,
     help="Output image file (extension picks the format, e.g. change.png).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Search mode: name of an Umbra site (e.g. 'Centerfield') to gather "
+    "and composite automatically instead of passing URLs. Combine with "
+    "--start/--end to bound the time range and --frames for how many dates.",
+)
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--frames",
+    type=click.IntRange(2, 3),
+    default=2,
+    show_default=True,
+    help="Search mode: how many dates to composite (2 or 3), spread evenly "
+    "across the matched time range.",
+)
+@click.option(
+    "--max-search",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Search mode: cap how many acquisitions the search pulls before selecting frames.",
 )
 @click.option(
     "--asset",
@@ -264,20 +290,81 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
     show_default=True,
     help="Low,high percentile cut for each date's contrast stretch.",
 )
-def change(item_urls, out_path, asset, max_size, db, percentile) -> None:
-    """Render a multi-temporal SAR change composite from 2-3 item URLs.
+def change(
+    item_urls,
+    out_path,
+    area,
+    bbox,
+    start,
+    end,
+    frames,
+    max_search,
+    asset,
+    max_size,
+    db,
+    percentile,
+) -> None:
+    """Render a multi-temporal SAR change composite.
 
-    Pass the STAC JSON URLs in chronological order. The acquisitions are
-    co-registered onto a shared grid and color-coded by date: unchanged
-    ground stays gray, while backscatter that appeared between passes shows
-    green and backscatter that vanished shows magenta (two dates), or a
-    red/green/blue temporal trail (three dates). Only downsampled overviews
-    are streamed via HTTP range requests -- no full download. Requires the
-    viz extra (``pip install "umbra-py[viz]"``).
+    Two ways to choose what to compare:
+
+    \b
+    - Pass 2-3 STAC JSON URLs directly, in chronological order.
+    - Or search: give --area (or --bbox) with --start/--end and the command
+      gathers a site's acquisitions and auto-selects --frames dates spread
+      across the range (preferring a single polarization).
+
+    The acquisitions are co-registered onto a shared grid and color-coded by
+    date: unchanged ground stays gray, while backscatter that appeared between
+    passes shows green and backscatter that vanished shows magenta (two dates),
+    or a red/green/blue temporal trail (three dates). Only downsampled overviews
+    are streamed via HTTP range requests -- no full download. Requires the viz
+    extra (``pip install "umbra-py[viz]"``).
     """
-    if not 2 <= len(item_urls) <= 3:
-        raise click.BadParameter("provide 2 or 3 item URLs, in chronological order.")
-    items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    search_mode = any(v for v in (area, bbox, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+        )
+
+    if item_urls:
+        if not 2 <= len(item_urls) <= 3:
+            raise click.BadParameter("provide 2 or 3 item URLs, in chronological order.")
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox):
+            raise click.UsageError(
+                "Give --area or --bbox (optionally with --start/--end) to search, "
+                "or pass 2-3 item URLs directly."
+            )
+        with OrbitSpinner("Searching Umbra archive"):
+            found = list(
+                UmbraCatalog().search(
+                    bbox=_parse_bbox(bbox),
+                    start=start,
+                    end=end,
+                    area=area,
+                    product_types=[asset],
+                    limit=max_search,
+                )
+            )
+        if len(found) < 2:
+            raise click.ClickException(
+                f"Need at least 2 {asset} acquisitions to compare; the search "
+                f"found {len(found)}. Widen the date range or area."
+            )
+        items = select_change_frames(found, frames=frames)
+        if len({tuple(i.polarizations) for i in items}) > 1:
+            click.echo(
+                "warning: selected acquisitions have mixed polarizations; some "
+                "apparent change may be a polarization difference, not real change.",
+                err=True,
+            )
+        click.echo(f"Selected {len(items)} of {len(found)} acquisition(s):")
+        for it in items:
+            when = it.datetime.isoformat() if it.datetime else "unknown time"
+            click.echo(f"  {when}  {it.id}")
+
     with OrbitSpinner(f"Rendering change composite of {len(items)} acquisitions"):
         path = save_change_composite(
             items,

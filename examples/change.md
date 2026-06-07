@@ -19,22 +19,42 @@ pip install "umbra-py[viz]"
 
 ---
 
-## 1. The bare minimum
+## 1. The one-liner
 
-Pass the item URLs in **chronological order**:
+Name a site and a time range, and `umbra change` searches, picks the dates, and
+renders — no URL wrangling:
+
+```bash
+umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out change.png --db
+```
+
+It gathers that site's GEC acquisitions, selects two dates spanning the range
+(earliest and latest), and composites them. Add `--frames 3` for an
+earliest/middle/latest temporal trail. The selection prefers a single
+polarization (comparing HH against VV would show the polarization difference as
+fake change); the chosen acquisitions are printed before rendering. `--bbox
+min_lon,min_lat,max_lon,max_lat` works in place of `--area` if you prefer
+coordinates.
+
+## 2. The explicit form
+
+To choose exactly which acquisitions to compare, pass 2–3 STAC URLs in
+**chronological order**:
 
 ```bash
 umbra change "<earlier-url>" "<later-url>" --out change.png
 ```
 
 ```python
-from umbra_py import UmbraCatalog, save_change_composite
+from umbra_py import UmbraCatalog, save_change_composite, select_change_frames
 
-# Two acquisitions of the same Umbra task (same site, different days).
-items = list(UmbraCatalog().search(
-    start="2024-01-01", end="2024-12-31", product_types=["GEC"], limit=12,
+# Auto-select frames from a site's passes...
+passes = list(UmbraCatalog().search(
+    area="Centerfield", product_types=["GEC"], start="2024-01-01", end="2024-12-31",
 ))
-# ... pick two items from the same umbra:task_id, oldest first ...
+save_change_composite(select_change_frames(passes, frames=2), "change.png", db=True)
+
+# ...or hand-pick and pass them straight through (oldest first).
 save_change_composite([earlier, later], "change.png")
 ```
 
@@ -46,7 +66,7 @@ you'd rather display or post-process it in a notebook.
 
 ---
 
-## 2. Reading the colors
+## 3. Reading the colors
 
 Each date is mapped to a color channel, so an **unchanged** pixel — equal
 brightness on every pass — lands on the gray diagonal (gray/white/black). Only
@@ -67,7 +87,7 @@ one frame per pass; stationary scene stays gray.
 
 ---
 
-## 3. Getting the item URLs
+## 4. Getting the item URLs (explicit form)
 
 Each URL is an item's `.stac.v2.json` sidecar. Because change detection needs
 acquisitions of the *same area*, the easy path is `umbra search --area`: Umbra
@@ -103,16 +123,25 @@ nothing to compare. Pick acquisitions of the same place.
 
 ---
 
-## 4. Every option
+## 5. Every option
 
 | Flag | Domain | Default | Notes |
 | ---- | ------ | ------- | ----- |
-| `ITEM_URLS` (positional) | 2 or 3 STAC `.stac.v2.json` URLs | — | required; chronological order |
+| `ITEM_URLS` (positional) | 2 or 3 STAC `.stac.v2.json` URLs | — | explicit form; chronological order. Mutually exclusive with the search flags |
+| `--area` | task/site name substring | — | search form; gather a site's passes (see [`maps`](maps.md) / §4) |
+| `--bbox` | `min_lon,min_lat,max_lon,max_lat` | — | search form; alternative to `--area` |
+| `--start` / `--end` | `YYYY-MM-DD` | — | search form; bound the time range |
+| `--frames` | `2` or `3` | `2` | search form; how many dates to composite, spread across the range |
+| `--max-search` | positive integer | `50` | search form; cap acquisitions pulled before selecting frames |
 | `--out` | any path | — | required; **extension picks the format** (`.png`, `.jpg`, …) |
 | `--asset` | `GEC` \| `CSI` \| `SIDD` \| `SICD` \| `CPHD` | `GEC` | `GEC`/`CSI` are the sensible targets |
 | `--max-size` | positive integer (pixels) | `2048` | longer side of the shared grid; larger = sharper but more bytes (~quadratic) |
 | `--db` | flag | off | decibel (log-amplitude) stretch — the radiometrically-correct view |
 | `--percentile` | `"low,high"` | `"2,98"` | per-date contrast cut percentiles |
+
+Pass **either** item URLs **or** the search flags, not both. In search form,
+`--asset` doubles as the product filter (only acquisitions exposing it are
+considered).
 
 The Python `change_composite` / `save_change_composite` functions take the same
 options as keyword arguments (`asset=`, `max_size=`, `db=`,
@@ -120,7 +149,21 @@ options as keyword arguments (`asset=`, `max_size=`, `db=`,
 
 ---
 
-## 5. Recipe gallery
+## 6. Recipe gallery
+
+### One command: a site's change over a year
+
+```bash
+umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+    --out change.png --db
+```
+
+### Three-frame temporal trail over a range
+
+```bash
+umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+    --frames 3 --out trail.png --db
+```
 
 ### Search a named site → composite its two earliest passes
 
@@ -154,7 +197,7 @@ img.save("change.png")
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 - **`change_composite needs 2 or 3 acquisitions`** — pass exactly two or three
   item URLs.
