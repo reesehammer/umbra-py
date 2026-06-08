@@ -895,11 +895,10 @@ def _coregister_bands(
     rasterio = _require("rasterio")
     _require("numpy")
     from rasterio.enums import Resampling  # noqa: PLC0415
-    from rasterio.transform import from_bounds  # noqa: PLC0415
     from rasterio.vrt import WarpedVRT  # noqa: PLC0415
-    from rasterio.warp import transform_bounds  # noqa: PLC0415
 
     datasets: list[Any] = []
+    vrts: list[Any] = []
     try:
         for item in items:
             url = item.asset_href(asset)
@@ -907,19 +906,21 @@ def _coregister_bands(
                 raise AssetNotFoundError(
                     f"Item {item.id!r} has no resolvable URL for asset {asset!r}."
                 )
-            datasets.append(rasterio.open(f"/vsicurl/{url}"))
+            ds = rasterio.open(f"/vsicurl/{url}")
+            datasets.append(ds)
+            # A full-resolution warp to lon/lat. Cheap to construct -- nothing
+            # is read until we do a *decimated* windowed read below, which
+            # lets GDAL pull the matching cloud-optimized GeoTIFF overview
+            # instead of every full-res tile. (Reading a coarse WarpedVRT
+            # whole, by contrast, forces a full-res source read and thousands
+            # of range requests -- effectively a hang over the network.)
+            vrts.append(WarpedVRT(ds, crs="EPSG:4326", resampling=Resampling.average))
 
-        # Intersection of every footprint, in lon/lat.
-        wgs: list[tuple[float, float, float, float]] = []
-        for ds in datasets:
-            b = ds.bounds
-            if ds.crs and ds.crs.to_epsg() != 4326:
-                b = transform_bounds(ds.crs, "EPSG:4326", *b)
-            wgs.append(tuple(b))
-        left = max(b[0] for b in wgs)
-        bottom = max(b[1] for b in wgs)
-        right = min(b[2] for b in wgs)
-        top = min(b[3] for b in wgs)
+        # Intersection of the (already lon/lat) warped footprints.
+        left = max(v.bounds.left for v in vrts)
+        bottom = max(v.bounds.bottom for v in vrts)
+        right = min(v.bounds.right for v in vrts)
+        top = min(v.bounds.top for v in vrts)
         if left >= right or bottom >= top:
             raise ValueError(
                 "Footprints do not overlap, so there's nothing to compare. "
@@ -938,20 +939,18 @@ def _coregister_bands(
         else:
             out_h = max_size
             out_w = max(int(round(max_size * w_deg / h_deg)), 1)
-        transform = from_bounds(left, bottom, right, top, out_w, out_h)
 
+        # Each read targets the identical geographic window and output shape,
+        # so the returned arrays are pixel-aligned across dates.
         bands: list[Any] = []
-        for ds in datasets:
-            with WarpedVRT(
-                ds,
-                crs="EPSG:4326",
-                transform=transform,
-                width=out_w,
-                height=out_h,
-                resampling=Resampling.average,
-            ) as vrt:
-                bands.append(vrt.read(1))
+        for v in vrts:
+            window = v.window(left, bottom, right, top)
+            bands.append(
+                v.read(1, window=window, out_shape=(out_h, out_w), resampling=Resampling.average)
+            )
     finally:
+        for v in vrts:
+            v.close()
         for ds in datasets:
             ds.close()
     return bands, (left, bottom, right, top)
