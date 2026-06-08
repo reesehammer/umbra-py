@@ -69,3 +69,28 @@ def test_change_composite_renders_real_task(tmp_path):
     out = save_change_composite(pair, tmp_path / "change.png", max_size=256)
     assert out.exists()
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_change_animation_renders_real_task(tmp_path):
+    """End-to-end: co-register a real task's acquisitions into an animated
+    time-lapse GIF -- proves the multi-frame warp + GIF assembly works against
+    real cloud-optimized GeoTIFFs."""
+    pytest.importorskip("rasterio")
+    PIL = pytest.importorskip("PIL")  # noqa: N806
+    from umbra_py import save_change_animation
+
+    by_task: dict[str, list] = {}
+    for item in UmbraCatalog().search(start="2024-01-01", end="2024-12-31", limit=12):
+        task = item.properties.get("umbra:task_id")
+        if task and "GEC" in item.available_assets:
+            by_task.setdefault(task, []).append(item)
+
+    series = next((v for v in by_task.values() if len(v) >= 2), None)
+    if series is None:
+        pytest.skip("no task with 2+ GEC acquisitions in the sampled window")
+
+    out = save_change_animation(series, tmp_path / "lapse.gif", max_size=256, db=True)
+    assert out.exists()
+    assert out.read_bytes()[:4] == b"GIF8"
+    with PIL.Image.open(out) as im:
+        assert getattr(im, "n_frames", 1) >= 1

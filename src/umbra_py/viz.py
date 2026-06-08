@@ -41,6 +41,7 @@ import json
 import os
 import warnings
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -959,27 +960,30 @@ def _coregister_bands(
 def select_change_frames(
     items: Iterable[UmbraItem],
     *,
-    frames: int = 2,
+    frames: int | None = 2,
 ) -> list[UmbraItem]:
-    """Pick 2-3 acquisitions spanning a time range for a change composite.
+    """Pick acquisitions of a site for a change composite or time-lapse.
 
     Given the acquisitions of a site (e.g. the result of
     ``catalog.search(area=...)``), choose ``frames`` of them, evenly spaced
-    in time from the earliest to the latest so the composite captures change
-    across the whole window. ``frames`` is clamped to what's available.
+    in time from the earliest to the latest. ``frames=2`` or ``3`` feeds the
+    RGB :func:`change_composite`; ``frames=None`` returns the *whole* series
+    (oldest-first) for an animated time-lapse. ``frames`` is clamped to
+    what's available.
 
     To keep the comparison apples-to-apples, acquisitions are first grouped
     by polarization and the largest single-polarization group is used --
-    compositing HH against VV would show the polarization difference as
-    fake "change". If every acquisition is a different polarization (so no
-    same-polarization pair exists), all are used as a fallback; the caller
-    can warn. Items without a datetime are dropped (they can't be ordered).
+    mixing HH and VV would show the polarization difference as fake "change"
+    (and would make a time-lapse flicker between brightness regimes). If
+    every acquisition is a different polarization (so no same-polarization
+    pair exists), all are used as a fallback; the caller can warn. Items
+    without a datetime are dropped (they can't be ordered).
 
     Raises ``ValueError`` if fewer than two dated acquisitions are available.
-    Returns the selection oldest-first, ready for :func:`change_composite`.
+    Returns the selection oldest-first.
     """
-    if frames not in (2, 3):
-        raise ValueError(f"frames must be 2 or 3, got {frames}.")
+    if frames not in (2, 3, None):
+        raise ValueError(f"frames must be 2, 3, or None, got {frames}.")
     dated = [i for i in items if i.datetime is not None]
     if len(dated) < 2:
         raise ValueError(f"need at least 2 dated acquisitions to compare, got {len(dated)}.")
@@ -993,6 +997,8 @@ def select_change_frames(
         pool = dated  # no same-pol pair exists; compare across pols instead.
 
     pool = sorted(pool, key=lambda i: i.datetime)
+    if frames is None:
+        return pool  # whole series, for a time-lapse
     n = min(frames, len(pool))
     # Evenly spaced indices including both endpoints.
     indices = [round(k * (len(pool) - 1) / (n - 1)) for k in range(n)]
@@ -1071,6 +1077,116 @@ def save_change_composite(
         # onto black so the save doesn't error.
         image = image.convert("RGB")
     image.save(str(dest))
+    return dest
+
+
+def _label_font(px: int):
+    """Best-available bitmap font at roughly ``px`` height.
+
+    Pillow's built-in default font takes a ``size`` only on 10.1+; fall back
+    to the fixed-size default on older Pillow so we never need a font file.
+    """
+    from PIL import ImageFont  # noqa: PLC0415
+
+    try:
+        return ImageFont.load_default(size=px)
+    except TypeError:  # pragma: no cover - very old Pillow
+        return ImageFont.load_default()
+
+
+def _stamp_label(img: Any, text: str) -> None:
+    """Draw ``text`` in the top-left of ``img`` over a dark plate for contrast."""
+    from PIL import ImageDraw  # noqa: PLC0415
+
+    draw = ImageDraw.Draw(img)
+    font = _label_font(max(14, img.height // 36))
+    x, y = 6, 6
+    box = draw.textbbox((x, y), text, font=font)
+    draw.rectangle([box[0] - 3, box[1] - 2, box[2] + 3, box[3] + 2], fill=(0, 0, 0))
+    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+
+
+def change_animation(
+    items: Iterable[UmbraItem],
+    *,
+    asset: str = "GEC",
+    max_size: int = 1024,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+    colormap: str | None = None,
+    label: bool = True,
+) -> list[Any]:
+    """Render a co-registered SAR time-lapse: one frame per acquisition.
+
+    Where :func:`change_composite` collapses 2-3 dates into a single colored
+    image, this tracks change across *any* number of acquisitions by turning
+    the series into an animation. All frames are co-registered onto the
+    shared footprint intersection (see :func:`_coregister_bands`), so the
+    site stays put and only the scene content moves between frames -- the
+    point of a time-lapse. Each frame is a SAR quicklook (same percentile /
+    ``db`` / ``colormap`` controls as :func:`quicklook`); with ``label`` the
+    acquisition date is stamped in the corner so time is legible.
+
+    Items are ordered oldest-first by acquisition time. Returns a list of
+    ``PIL.Image`` frames (RGB); :func:`save_change_animation` writes them to
+    an animated GIF. Needs at least two acquisitions. Requires the ``viz``
+    extra.
+    """
+    _require("PIL")
+    from PIL import Image  # noqa: PLC0415
+
+    # Oldest-first so the animation plays forward in time; undated items
+    # (which can't be placed on the timeline) sort to the end.
+    items = sorted(items, key=lambda i: (i.datetime is None, i.datetime or datetime.min))
+    if len(items) < 2:
+        raise ValueError(f"animation needs at least 2 acquisitions, got {len(items)}.")
+
+    bands, _ = _coregister_bands(items, asset, max_size)
+    frames: list[Any] = []
+    for item, band in zip(items, bands, strict=True):
+        rgba = _stretch_to_rgba(band, percentile=percentile, db=db, colormap=colormap)
+        # Flatten onto black: GIF handles per-frame transparency poorly, and
+        # invalid pixels are already dark after the stretch.
+        frame = Image.fromarray(rgba, mode="RGBA").convert("RGB")
+        if label:
+            dt = item.datetime
+            _stamp_label(frame, dt.strftime("%Y-%m-%d") if dt else item.id[:12])
+        frames.append(frame)
+    return frames
+
+
+def save_change_animation(
+    items: Iterable[UmbraItem],
+    dest: str | os.PathLike,
+    *,
+    fps: float = 2.0,
+    loop: int = 0,
+    **kwargs,
+) -> Path:
+    """Render a SAR time-lapse and write it to ``dest`` as an animated GIF.
+
+    ``fps`` sets the playback speed (frames per second); ``loop=0`` (the
+    default) loops forever, any other value plays that many times. See
+    :func:`change_animation` for the per-frame rendering options.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    frames = change_animation(items, **kwargs)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    duration_ms = max(int(round(1000.0 / fps)), 1)
+    # Quantize to a palette first: Pillow's multi-frame GIF writer silently
+    # collapses RGB ``append_images`` to a single frame, but writes every
+    # palette-mode frame.
+    paletted = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in frames]
+    paletted[0].save(
+        str(dest),
+        save_all=True,
+        append_images=paletted[1:],
+        duration=duration_ms,
+        loop=loop,
+        disposal=2,
+    )
     return dest
 
 

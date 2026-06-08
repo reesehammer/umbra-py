@@ -4,8 +4,9 @@ SAR's signature trick is change detection. Radar backscatter from a fixed
 scene is remarkably stable between passes, so anything that *did* change
 between two acquisitions — a ship that arrived, a field that flooded, a
 building that went up — jumps out against the static background. `umbra
-change` turns 2–3 acquisitions of the same site into a single color image
-where unchanged ground stays gray and change is tinted by *when* it happened.
+change` turns acquisitions of the same site into either a single color image
+(2–3 dates, where unchanged ground stays gray and change is tinted by *when* it
+happened) or an animated time-lapse (any number of dates) — see §3.
 
 The [`quicklook`](quicklook.md) guide answers "*what does this one scene look
 like?*"; a change composite answers "*what moved between these passes?*" — and
@@ -66,7 +67,44 @@ you'd rather display or post-process it in a notebook.
 
 ---
 
-## 3. Reading the colors
+## 3. Animated time-lapses (`.gif`)
+
+A 2–3 date composite collapses time into color. To track change across **many**
+dates, write a `.gif` instead — every matched acquisition becomes a frame, all
+co-registered onto the shared footprint so the site stays put and only the
+scene evolves:
+
+```bash
+umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+    --out lapse.gif --db
+```
+
+```python
+from umbra_py import UmbraCatalog, save_change_animation
+
+series = list(UmbraCatalog().search(
+    area="Centerfield", product_types=["GEC"], start="2024-01-01", end="2024-12-31",
+))
+save_change_animation(series, "lapse.gif", db=True, fps=2)
+```
+
+Each frame is a SAR quicklook stamped with its acquisition date. `--fps`
+controls playback speed; `--colormap magma` pseudo-colors the frames;
+`--db` is usually worth it for legibility. The explicit-URL form works too and
+drops the 2–3 cap for `.gif` output — pass as many as you like, oldest first:
+
+```bash
+umbra change "<t1>" "<t2>" "<t3>" "<t4>" "<t5>" --out lapse.gif --db --fps 3
+```
+
+A time-lapse stacks many frames, so it defaults to a smaller `--max-size`
+(1024) than the composite (2048); raise it for sharper frames at the cost of a
+bigger file. Only the area imaged on **every** pass is shown (the intersection),
+so a long series of slightly-offset footprints yields a smaller common frame.
+
+---
+
+## 4. Reading the colors
 
 Each date is mapped to a color channel, so an **unchanged** pixel — equal
 brightness on every pass — lands on the gray diagonal (gray/white/black). Only
@@ -87,7 +125,7 @@ one frame per pass; stationary scene stays gray.
 
 ---
 
-## 4. Getting the item URLs (explicit form)
+## 5. Getting the item URLs (explicit form)
 
 Each URL is an item's `.stac.v2.json` sidecar. Because change detection needs
 acquisitions of the *same area*, the easy path is `umbra search --area`: Umbra
@@ -123,21 +161,23 @@ nothing to compare. Pick acquisitions of the same place.
 
 ---
 
-## 5. Every option
+## 6. Every option
 
 | Flag | Domain | Default | Notes |
 | ---- | ------ | ------- | ----- |
-| `ITEM_URLS` (positional) | 2 or 3 STAC `.stac.v2.json` URLs | — | explicit form; chronological order. Mutually exclusive with the search flags |
-| `--area` | task/site name substring | — | search form; gather a site's passes (see [`maps`](maps.md) / §4) |
+| `ITEM_URLS` (positional) | STAC `.stac.v2.json` URLs | — | explicit form, chronological order; 2–3 for a composite, 2+ for a `.gif`. Mutually exclusive with the search flags |
+| `--out` | path ending `.png`/`.jpg`/`.gif` | — | required; **extension picks the mode** — image = composite, `.gif` = time-lapse |
+| `--area` | task/site name substring | — | search form; gather a site's passes (see [`maps`](maps.md) / §5) |
 | `--bbox` | `min_lon,min_lat,max_lon,max_lat` | — | search form; alternative to `--area` |
 | `--start` / `--end` | `YYYY-MM-DD` | — | search form; bound the time range |
-| `--frames` | `2` or `3` | `2` | search form; how many dates to composite, spread across the range |
-| `--max-search` | positive integer | `50` | search form; cap acquisitions pulled before selecting frames |
-| `--out` | any path | — | required; **extension picks the format** (`.png`, `.jpg`, …) |
+| `--frames` | `2` or `3` | `2` | **composite only**; how many dates, spread across the range. A `.gif` uses every matched acquisition |
+| `--max-search` | positive integer | `50` | search form; cap acquisitions pulled |
 | `--asset` | `GEC` \| `CSI` \| `SIDD` \| `SICD` \| `CPHD` | `GEC` | `GEC`/`CSI` are the sensible targets |
-| `--max-size` | positive integer (pixels) | `2048` | longer side of the shared grid; larger = sharper but more bytes (~quadratic) |
+| `--max-size` | positive integer (pixels) | `2048` composite / `1024` gif | longer side of the shared grid; larger = sharper but more bytes (~quadratic) |
 | `--db` | flag | off | decibel (log-amplitude) stretch — the radiometrically-correct view |
-| `--percentile` | `"low,high"` | `"2,98"` | per-date contrast cut percentiles |
+| `--colormap` | matplotlib colormap name | — | **`.gif` only**; pseudo-color the frames (e.g. `magma`) |
+| `--fps` | positive number | `2` | **`.gif` only**; playback speed (frames per second) |
+| `--percentile` | `"low,high"` | `"2,98"` | per-frame contrast cut percentiles |
 
 Pass **either** item URLs **or** the search flags, not both. In search form,
 `--asset` doubles as the product filter (only acquisitions exposing it are
@@ -149,7 +189,7 @@ options as keyword arguments (`asset=`, `max_size=`, `db=`,
 
 ---
 
-## 6. Recipe gallery
+## 7. Recipe gallery
 
 ### One command: a site's change over a year
 
@@ -163,6 +203,13 @@ umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
 ```bash
 umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
     --frames 3 --out trail.png --db
+```
+
+### Animated time-lapse of a whole year, pseudo-colored
+
+```bash
+umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+    --out lapse.gif --db --colormap magma --fps 3
 ```
 
 ### Search a named site → composite its two earliest passes
@@ -197,7 +244,7 @@ img.save("change.png")
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 - **`change_composite needs 2 or 3 acquisitions`** — pass exactly two or three
   item URLs.

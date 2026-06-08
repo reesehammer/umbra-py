@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Animated SAR time-lapses across a whole series.** Where a change
+  composite collapses 2–3 dates into one colored image, `umbra change`
+  now also produces an animated GIF over *any* number of acquisitions when
+  `--out` ends in `.gif` —
+  `umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+  --out lapse.gif --db`. Every matched acquisition becomes a frame, all
+  co-registered onto the shared footprint intersection so the site stays put
+  and only the scene evolves; each frame is a SAR quicklook stamped with its
+  acquisition date. `--fps` sets playback speed and `--colormap` pseudo-colors
+  the frames. Explicit-URL mode lifts its 2–3 cap for `.gif` output (pass as
+  many as you like). New public `change_animation` / `save_change_animation`
+  functions; `select_change_frames(..., frames=None)` returns the whole
+  single-polarization series for this path. Requires the `viz` extra.
 - **One-command change composites by site + time range.** `umbra change`
   gained a search mode: instead of passing 2–3 STAC URLs, give
   `--area "<site>"` (or `--bbox`) with `--start`/`--end` and it gathers the

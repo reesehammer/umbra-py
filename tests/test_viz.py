@@ -515,8 +515,150 @@ def test_select_change_frames_rejects_bad_frames():
     from umbra_py.viz import select_change_frames
 
     items = [_dated_item("a", "2024-01-01T00:00:00Z"), _dated_item("b", "2024-02-01T00:00:00Z")]
-    with pytest.raises(ValueError, match="2 or 3"):
+    with pytest.raises(ValueError, match="2, 3, or None"):
         select_change_frames(items, frames=4)
+
+
+def test_select_change_frames_none_returns_whole_series():
+    """frames=None returns the full single-polarization series, oldest-first,
+    for an animated time-lapse."""
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item(str(k), f"2024-0{k}-01T00:00:00Z") for k in (4, 1, 3, 2)]
+    chosen = select_change_frames(items, frames=None)
+    assert [i.id for i in chosen] == ["1", "2", "3", "4"]
+
+
+def test_change_animation_returns_ordered_frames(monkeypatch):
+    """change_animation co-registers (mocked) and returns one RGB frame per
+    acquisition, oldest-first."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    later = _dated_item("late", "2024-03-01T00:00:00Z")
+    early = _dated_item("early", "2024-01-01T00:00:00Z")
+    bands = [np.arange(1, 13, dtype="float32").reshape(3, 4) for _ in range(2)]
+    captured = {}
+
+    def fake_coreg(items, asset, max_size):
+        captured["order"] = [i.id for i in items]
+        return bands, (0, 0, 1, 1)
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", fake_coreg)
+    frames = viz_mod.change_animation([later, early])
+    # Sorted oldest-first before co-registration so frames play forward.
+    assert captured["order"] == ["early", "late"]
+    assert len(frames) == 2
+    assert all(f.mode == "RGB" and f.size == (4, 3) for f in frames)
+
+
+def test_change_animation_requires_two(monkeypatch):
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: pytest.fail("should not co-register")
+    )
+    with pytest.raises(ValueError, match="at least 2"):
+        viz_mod.change_animation([_dated_item("only", "2024-01-01T00:00:00Z")])
+
+
+def test_save_change_animation_writes_animated_gif(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL")  # noqa: N806
+    from umbra_py import viz as viz_mod
+
+    # Distinct spatial patterns per frame (a rolled bright ramp) so the
+    # stretched frames really differ -- identical frames get optimized away.
+    base = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    bands = [np.roll(base, k, axis=0) for k in range(3)]
+    items = [_dated_item(str(k), f"2024-0{k + 1}-01T00:00:00Z") for k in range(3)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    out = viz_mod.save_change_animation(items, tmp_path / "lapse.gif", fps=4)
+    assert out.exists()
+    assert out.read_bytes()[:4] == b"GIF8"
+    with PIL.Image.open(out) as im:
+        assert getattr(im, "n_frames", 1) == 3  # one frame per acquisition
+
+
+def test_cli_change_gif_animates_search_results(monkeypatch, tmp_path):
+    """`umbra change --area X --out lapse.gif` animates every matched
+    acquisition (not just 2-3)."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    found = [_dated_item(str(k), f"2024-{k:02d}-01T00:00:00Z") for k in range(1, 6)]
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(5)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    out = tmp_path / "lapse.gif"
+    result = CliRunner().invoke(cli_mod.cli, ["change", "--area", "X", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    # All five matched frames were used (the 2-3 cap doesn't apply to .gif).
+    assert "Selected 5 of 5" in result.output
+    assert "Wrote time-lapse" in result.output
+
+
+def test_cli_change_gif_allows_many_explicit_urls(monkeypatch, tmp_path, sample_item_dict):
+    """The 2-3 URL cap is lifted for .gif output."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(4)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    urls = [f"http://example/{k}.json" for k in range(4)]
+    out = tmp_path / "lapse.gif"
+    result = CliRunner().invoke(cli_mod.cli, ["change", *urls, "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+
+
+def test_cli_change_png_still_caps_at_three(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    urls = [f"http://example/{k}.json" for k in range(4)]
+    result = CliRunner().invoke(cli_mod.cli, ["change", *urls, "--out", str(tmp_path / "c.png")])
+    assert result.exit_code != 0
+    assert "2 or 3" in result.output
+
+
+def test_cli_change_colormap_requires_gif(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "change",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--out",
+            str(tmp_path / "c.png"),
+            "--colormap",
+            "magma",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "colormap" in result.output.lower()
 
 
 def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
