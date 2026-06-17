@@ -5,6 +5,8 @@ notebooks below are planned for v0.2 and are great first contributions.
 
 Guides:
 
+- [`load.md`](load.md) — load an acquisition into a georeferenced `xarray`
+  DataArray for analysis (Python; uses the `load` extra).
 - [`maps.md`](maps.md) — render search results as interactive maps or GeoJSON.
 - [`quicklook.md`](quicklook.md) — turn a single acquisition into a standalone
   SAR image (CLI + Python), with decibel scaling and matplotlib pseudo-color.

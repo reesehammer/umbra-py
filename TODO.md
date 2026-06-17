@@ -9,6 +9,22 @@ the bottom if the history is useful).
 
 ---
 
+## README "See where your search landed" uses removed `data_available_only` kwarg
+
+- **Surfaced in:** the analysis-ready `to_xarray` PR (branch
+  `claude/kind-einstein-6bz3gj`).
+- **Code:** `README.md` "See where your search landed" snippet
+  (`UmbraCatalog().search(..., data_available_only=True)`).
+
+`search()` dropped the `data_available_only` flag when the catalog moved to
+the v2 walker (see the **Removed** section of `CHANGELOG.md`), but the README
+example still passes it, so the snippet now raises `TypeError`. The v2 walker
+only returns published items, so the flag is unnecessary.
+
+**Fix sketch:** delete `, data_available_only=True` (and the explanatory
+comment above it) from that snippet, matching the corrected
+`to_xarray` examples. Scoped out here to keep this PR to the load feature.
+
 ## Asset classifier: `"tif"` substring check can never match uppercased name
 
 - **Surfaced in:** [PR #2](https://github.com/theminiverse/umbra-py/pull/2) ("Notes for reviewers")
