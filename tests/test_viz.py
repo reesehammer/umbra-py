@@ -244,6 +244,497 @@ def test_cli_quicklook_rejects_bad_percentile(monkeypatch, tmp_path, sample_item
     assert "percentile" in result.output.lower()
 
 
+def test_compose_change_rgba_identical_bands_are_gray():
+    """Two identical passes have no change, so every valid pixel lands on
+    the gray diagonal (R == G == B)."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    band = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
+    rgba = _compose_change_rgba([band, band])
+
+    assert rgba.shape == (4, 4, 4)
+    assert rgba.dtype.name == "uint8"
+    rgb = rgba[..., :3]
+    assert (rgb[..., 0] == rgb[..., 1]).all()
+    assert (rgb[..., 1] == rgb[..., 2]).all()
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_compose_change_rgba_two_dates_color_semantics():
+    """Backscatter that appears in the later pass reads green; backscatter
+    that vanishes reads magenta."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    # Pixel (0,0): bright then dark -> "lost". Pixel (0,1): dark then bright
+    # -> "gained". A spread of mid values gives the stretch something to
+    # work with at the percentile extremes.
+    t1 = np.array([[100.0, 1.0, 40.0], [50.0, 60.0, 70.0]], dtype="float32")
+    t2 = np.array([[1.0, 100.0, 40.0], [50.0, 60.0, 70.0]], dtype="float32")
+    rgba = _compose_change_rgba([t1, t2], percentile=(0, 100))
+
+    lost = rgba[0, 0]  # was bright, now dark
+    gained = rgba[0, 1]  # was dark, now bright
+    # Lost -> magenta: red and blue high, green low (R=t1, G=t2, B=t1).
+    assert lost[0] > lost[1] and lost[2] > lost[1]
+    # Gained -> green: green high, red and blue low.
+    assert gained[1] > gained[0] and gained[1] > gained[2]
+
+
+def test_compose_change_rgba_three_dates_map_to_rgb():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    # Each band needs internal contrast for the percentile stretch to bite.
+    # Pixel (0,0) is dark in t1/t3 and bright only in t2 -> green.
+    spread = [40.0, 50.0, 60.0, 70.0, 100.0]
+    t1 = np.array([[1.0, *spread[:2]], [*spread[2:]]], dtype="float32")
+    t2 = np.array([[100.0, *spread[:2]], [spread[2], spread[3], 1.0]], dtype="float32")
+    t3 = t1.copy()
+    rgba = _compose_change_rgba([t1, t2, t3], percentile=(0, 100))
+    px = rgba[0, 0]
+    assert px[1] > px[0] and px[1] > px[2]
+
+
+def test_compose_change_rgba_invalid_pixels_propagate():
+    """A pixel invalid in any one band is transparent in the composite."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    t1 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+    t2 = np.array([[np.nan, 2.0], [3.0, 4.0]], dtype="float32")
+    rgba = _compose_change_rgba([t1, t2])
+    assert rgba[0, 0, 3] == 0  # invalid in t2 -> transparent
+    assert rgba[1, 1, 3] == 255  # valid in both -> opaque
+
+
+def test_compose_change_rgba_rejects_bad_band_count():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    band = np.ones((2, 2), dtype="float32")
+    with pytest.raises(ValueError, match="2 or 3"):
+        _compose_change_rgba([band])
+    with pytest.raises(ValueError, match="2 or 3"):
+        _compose_change_rgba([band, band, band, band])
+
+
+def test_compose_change_rgba_rejects_mismatched_shapes():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_change_rgba
+
+    with pytest.raises(ValueError, match="same shape"):
+        _compose_change_rgba([np.ones((2, 2)), np.ones((2, 3))])
+
+
+def test_change_composite_returns_pil_image(monkeypatch):
+    """change_composite stacks (mocked) co-registered bands into an RGBA
+    PIL image without touching the network."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
+    t2 = t1[::-1].copy()
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2], (0, 0, 1, 1)))
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    img = viz_mod.change_composite([a, b])
+    assert img.size == (4, 3)  # PIL is (width, height)
+    assert img.mode == "RGBA"
+
+
+def test_change_composite_rejects_wrong_item_count(monkeypatch):
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    # Guard against the network: the count check must fire first.
+    monkeypatch.setattr(
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: pytest.fail("should not co-register a bad item count"),
+    )
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match="2 or 3"):
+        viz_mod.change_composite([item])
+
+
+def test_save_change_composite_writes_png(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_change_composite([a, b], tmp_path / "change.png")
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_save_change_composite_jpeg_flattens_alpha(monkeypatch, tmp_path):
+    """JPEG can't carry transparency; the save flattens rather than raising."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")  # has an invalid pixel
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1.copy()], (0, 0, 1, 1))
+    )
+
+    a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
+    b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
+    out = viz_mod.save_change_composite([a, b], tmp_path / "change.jpg")
+    assert out.exists()
+
+
+def test_cli_change_writes_image(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra change <url> <url>` fetches each item, stacks the
+    (mocked) co-registered bands, and writes a PNG."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    out = tmp_path / "change.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "change",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--out",
+            str(out),
+            "--db",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Wrote change composite" in result.output
+
+
+def test_cli_change_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "http://example/a.json", "--out", str(tmp_path / "x.png")],
+    )
+    assert result.exit_code != 0
+    assert "2 or 3" in result.output
+
+
+def _dated_item(item_id, dt, pol="VV"):
+    return UmbraItem(
+        id=item_id,
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        properties={"datetime": dt, "sar:polarizations": [pol]},
+    )
+
+
+def test_select_change_frames_spans_range_two():
+    """frames=2 returns the earliest and latest acquisition."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("b", "2024-02-01T00:00:00Z"),
+        _dated_item("d", "2024-04-01T00:00:00Z"),
+        _dated_item("a", "2024-01-01T00:00:00Z"),
+        _dated_item("c", "2024-03-01T00:00:00Z"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert [i.id for i in chosen] == ["a", "d"]
+
+
+def test_select_change_frames_three_picks_endpoints_and_middle():
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item(str(k), f"2024-0{k}-01T00:00:00Z") for k in range(1, 6)]
+    chosen = select_change_frames(items, frames=3)
+    # Five evenly-spaced dates -> first, middle, last.
+    assert [i.id for i in chosen] == ["1", "3", "5"]
+
+
+def test_select_change_frames_prefers_largest_polarization_group():
+    """Mixing HH and VV would show the polarization difference as fake
+    change, so the largest single-pol group wins."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("vv1", "2024-01-01T00:00:00Z", pol="VV"),
+        _dated_item("hh", "2024-02-01T00:00:00Z", pol="HH"),
+        _dated_item("vv2", "2024-03-01T00:00:00Z", pol="VV"),
+        _dated_item("vv3", "2024-04-01T00:00:00Z", pol="VV"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert [i.id for i in chosen] == ["vv1", "vv3"]
+    assert all(i.polarizations == ["VV"] for i in chosen)
+
+
+def test_select_change_frames_falls_back_to_mixed_pol_when_no_pair():
+    """If every acquisition is a different polarization, comparing across
+    them is the best available -- return them rather than failing."""
+    from umbra_py.viz import select_change_frames
+
+    items = [
+        _dated_item("hh", "2024-01-01T00:00:00Z", pol="HH"),
+        _dated_item("vv", "2024-02-01T00:00:00Z", pol="VV"),
+    ]
+    chosen = select_change_frames(items, frames=2)
+    assert {i.id for i in chosen} == {"hh", "vv"}
+
+
+def test_select_change_frames_drops_undated_and_requires_two():
+    from umbra_py.viz import select_change_frames
+
+    undated = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), properties={})
+    one = _dated_item("a", "2024-01-01T00:00:00Z")
+    with pytest.raises(ValueError, match="at least 2"):
+        select_change_frames([undated, one], frames=2)
+
+
+def test_select_change_frames_rejects_bad_frames():
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item("a", "2024-01-01T00:00:00Z"), _dated_item("b", "2024-02-01T00:00:00Z")]
+    with pytest.raises(ValueError, match="2, 3, or None"):
+        select_change_frames(items, frames=4)
+
+
+def test_select_change_frames_none_returns_whole_series():
+    """frames=None returns the full single-polarization series, oldest-first,
+    for an animated time-lapse."""
+    from umbra_py.viz import select_change_frames
+
+    items = [_dated_item(str(k), f"2024-0{k}-01T00:00:00Z") for k in (4, 1, 3, 2)]
+    chosen = select_change_frames(items, frames=None)
+    assert [i.id for i in chosen] == ["1", "2", "3", "4"]
+
+
+def test_change_animation_returns_ordered_frames(monkeypatch):
+    """change_animation co-registers (mocked) and returns one RGB frame per
+    acquisition, oldest-first."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    later = _dated_item("late", "2024-03-01T00:00:00Z")
+    early = _dated_item("early", "2024-01-01T00:00:00Z")
+    bands = [np.arange(1, 13, dtype="float32").reshape(3, 4) for _ in range(2)]
+    captured = {}
+
+    def fake_coreg(items, asset, max_size):
+        captured["order"] = [i.id for i in items]
+        return bands, (0, 0, 1, 1)
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", fake_coreg)
+    frames = viz_mod.change_animation([later, early])
+    # Sorted oldest-first before co-registration so frames play forward.
+    assert captured["order"] == ["early", "late"]
+    assert len(frames) == 2
+    assert all(f.mode == "RGB" and f.size == (4, 3) for f in frames)
+
+
+def test_change_animation_requires_two(monkeypatch):
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: pytest.fail("should not co-register")
+    )
+    with pytest.raises(ValueError, match="at least 2"):
+        viz_mod.change_animation([_dated_item("only", "2024-01-01T00:00:00Z")])
+
+
+def test_save_change_animation_writes_animated_gif(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    PIL = pytest.importorskip("PIL")  # noqa: N806
+    from umbra_py import viz as viz_mod
+
+    # Distinct spatial patterns per frame (a rolled bright ramp) so the
+    # stretched frames really differ -- identical frames get optimized away.
+    base = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    bands = [np.roll(base, k, axis=0) for k in range(3)]
+    items = [_dated_item(str(k), f"2024-0{k + 1}-01T00:00:00Z") for k in range(3)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    out = viz_mod.save_change_animation(items, tmp_path / "lapse.gif", fps=4)
+    assert out.exists()
+    assert out.read_bytes()[:4] == b"GIF8"
+    with PIL.Image.open(out) as im:
+        assert getattr(im, "n_frames", 1) == 3  # one frame per acquisition
+
+
+def test_cli_change_gif_animates_search_results(monkeypatch, tmp_path):
+    """`umbra change --area X --out lapse.gif` animates every matched
+    acquisition (not just 2-3)."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    found = [_dated_item(str(k), f"2024-{k:02d}-01T00:00:00Z") for k in range(1, 6)]
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(5)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    out = tmp_path / "lapse.gif"
+    result = CliRunner().invoke(cli_mod.cli, ["change", "--area", "X", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    # All five matched frames were used (the 2-3 cap doesn't apply to .gif).
+    assert "Selected 5 of 5" in result.output
+    assert "Wrote time-lapse" in result.output
+
+
+def test_cli_change_gif_allows_many_explicit_urls(monkeypatch, tmp_path, sample_item_dict):
+    """The 2-3 URL cap is lifted for .gif output."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(4)]
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+
+    urls = [f"http://example/{k}.json" for k in range(4)]
+    out = tmp_path / "lapse.gif"
+    result = CliRunner().invoke(cli_mod.cli, ["change", *urls, "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+
+
+def test_cli_change_png_still_caps_at_three(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    urls = [f"http://example/{k}.json" for k in range(4)]
+    result = CliRunner().invoke(cli_mod.cli, ["change", *urls, "--out", str(tmp_path / "c.png")])
+    assert result.exit_code != 0
+    assert "2 or 3" in result.output
+
+
+def test_cli_change_colormap_requires_gif(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "change",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--out",
+            str(tmp_path / "c.png"),
+            "--colormap",
+            "magma",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "colormap" in result.output.lower()
+
+
+def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
+    """`umbra change --area X` searches, auto-selects frames, and renders."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    found = [
+        _dated_item("old", "2024-01-01T00:00:00Z"),
+        _dated_item("mid", "2024-02-01T00:00:00Z"),
+        _dated_item("new", "2024-03-01T00:00:00Z"),
+    ]
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+    )
+
+    out = tmp_path / "change.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "--area", "Centerfield", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    # The earliest and latest were chosen (frames defaults to 2).
+    assert "old" in result.output and "new" in result.output
+    assert "Wrote change composite" in result.output
+
+
+def test_cli_change_rejects_urls_and_search_together(monkeypatch, sample_item_dict, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "http://example/a.json", "--area", "X", "--out", str(tmp_path / "o.png")],
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output
+
+
+def test_cli_change_search_too_few_results(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod.UmbraCatalog,
+        "search",
+        lambda self, **_kw: iter([_dated_item("only", "2024-01-01T00:00:00Z")]),
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["change", "--area", "Nowhere", "--out", str(tmp_path / "o.png")],
+    )
+    assert result.exit_code != 0
+    assert "at least 2" in result.output
+
+
+def test_cli_change_no_urls_no_search_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(cli_mod.cli, ["change", "--out", str(tmp_path / "o.png")])
+    assert result.exit_code != 0
+    assert "item URLs" in result.output
+
+
 def test_centroid_from_bbox():
     from umbra_py.viz import _centroid
 

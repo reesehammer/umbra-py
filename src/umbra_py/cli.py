@@ -15,7 +15,15 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import UmbraError
 from .models import UmbraItem
-from .viz import save_footprint_map, save_quicklook, save_timeline_map, write_geojson
+from .viz import (
+    save_change_animation,
+    save_change_composite,
+    save_footprint_map,
+    save_quicklook,
+    save_timeline_map,
+    select_change_frames,
+    write_geojson,
+)
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -57,6 +65,15 @@ def cli() -> None:
     type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
     help="Keep items exposing this asset (repeatable).",
 )
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive name of an Umbra task/site to search (e.g. "
+    "'Centerfield'). Umbra files every pass of a site under one named "
+    "directory, so this returns just that area's acquisitions -- and skips "
+    "listing the rest, so it's much faster. The easy way to gather the "
+    "co-located passes that 'umbra change' needs.",
+)
 @click.option("--limit", type=int, default=20, show_default=True, help="Max results.")
 @click.option(
     "--max-per-task",
@@ -67,7 +84,7 @@ def cli() -> None:
     "site rather than every revisit.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit full STAC item JSON.")
-def search(bbox, start, end, products, limit, max_per_task, as_json) -> None:
+def search(bbox, start, end, products, area, limit, max_per_task, as_json) -> None:
     """Search the catalog by area, date and product type."""
     catalog = UmbraCatalog()
     results = catalog.search(
@@ -75,6 +92,7 @@ def search(bbox, start, end, products, limit, max_per_task, as_json) -> None:
         start=start,
         end=end,
         product_types=list(products) or None,
+        area=area,
         limit=limit,
         max_per_task=max_per_task,
     )
@@ -208,6 +226,207 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
             percentile=_parse_percentile(percentile),
         )
     click.echo(f"Wrote quicklook to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output file. An image extension (.png/.jpg) writes a 2-3 date color "
+    "composite; '.gif' writes an animated time-lapse across all the "
+    "acquisitions.",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Search mode: name of an Umbra site (e.g. 'Centerfield') to gather "
+    "automatically instead of passing URLs. Combine with --start/--end to "
+    "bound the time range.",
+)
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--frames",
+    type=click.IntRange(2, 3),
+    default=2,
+    show_default=True,
+    help="Composite (image) output only: how many dates to composite (2 or 3), "
+    "spread evenly across the matched time range. A .gif time-lapse uses every "
+    "matched acquisition.",
+)
+@click.option(
+    "--max-search",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Search mode: cap how many acquisitions the search pulls.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to compare. GEC (the detected GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=None,
+    help="Max pixel dimension of the shared grid. Default 2048 for a composite, "
+    "1024 for a .gif (a time-lapse stacks many frames, so smaller keeps the "
+    "file sane). Larger is sharper but fetches more bytes (~quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look. Reveals texture and structure the default linear stretch "
+    "crushes toward black.",
+)
+@click.option(
+    "--colormap",
+    default=None,
+    help="Time-lapse (.gif) only: matplotlib colormap for pseudo-colored frames "
+    "(e.g. viridis, magma). Default is grayscale.",
+)
+@click.option(
+    "--fps",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="Time-lapse (.gif) only: playback speed in frames per second.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for each frame's contrast stretch.",
+)
+def change(
+    item_urls,
+    out_path,
+    area,
+    bbox,
+    start,
+    end,
+    frames,
+    max_search,
+    asset,
+    max_size,
+    db,
+    colormap,
+    fps,
+    percentile,
+) -> None:
+    """Render multi-temporal SAR change: a color composite or a time-lapse.
+
+    Two outputs, picked by the --out extension:
+
+    \b
+    - An image (.png/.jpg) is a 2-3 date color composite: unchanged ground
+      stays gray, backscatter that appeared shows green and backscatter that
+      vanished shows magenta (two dates), or a red/green/blue trail (three).
+    - A .gif is an animated time-lapse over every matched acquisition, all
+      co-registered so the site stays put and only the scene evolves.
+
+    Two ways to choose what to render:
+
+    \b
+    - Pass STAC JSON URLs directly, in chronological order (2-3 for a
+      composite, 2+ for a .gif).
+    - Or search: give --area (or --bbox) with --start/--end and the command
+      gathers a site's acquisitions automatically (preferring a single
+      polarization).
+
+    Only downsampled overviews are streamed via HTTP range requests -- no full
+    download. Requires the viz extra (``pip install "umbra-py[viz]"``).
+    """
+    animate = out_path.lower().endswith(".gif")
+    if colormap and not animate:
+        raise click.UsageError("--colormap only applies to animated (.gif) output.")
+
+    search_mode = any(v for v in (area, bbox, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+        )
+
+    if item_urls:
+        if animate:
+            if len(item_urls) < 2:
+                raise click.BadParameter("a time-lapse needs 2 or more item URLs.")
+        elif not 2 <= len(item_urls) <= 3:
+            raise click.BadParameter("a composite needs 2 or 3 item URLs, in chronological order.")
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox):
+            raise click.UsageError(
+                "Give --area or --bbox (optionally with --start/--end) to search, "
+                "or pass item URLs directly."
+            )
+        with OrbitSpinner("Searching Umbra archive"):
+            found = list(
+                UmbraCatalog().search(
+                    bbox=_parse_bbox(bbox),
+                    start=start,
+                    end=end,
+                    area=area,
+                    product_types=[asset],
+                    limit=max_search,
+                )
+            )
+        if len(found) < 2:
+            raise click.ClickException(
+                f"Need at least 2 {asset} acquisitions to compare; the search "
+                f"found {len(found)}. Widen the date range or area."
+            )
+        # A .gif uses the whole series; a composite picks 2-3 spanning frames.
+        items = select_change_frames(found, frames=None if animate else frames)
+        if len({tuple(i.polarizations) for i in items}) > 1:
+            click.echo(
+                "warning: selected acquisitions have mixed polarizations; some "
+                "apparent change may be a polarization difference, not real change.",
+                err=True,
+            )
+        if animate:
+            span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+        else:
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s):")
+            for it in items:
+                when = it.datetime.isoformat() if it.datetime else "unknown time"
+                click.echo(f"  {when}  {it.id}")
+
+    grid = max_size if max_size is not None else (1024 if animate else 2048)
+    if animate:
+        with OrbitSpinner(f"Rendering {len(items)}-frame time-lapse"):
+            path = save_change_animation(
+                items,
+                out_path,
+                asset=asset,
+                max_size=grid,
+                db=db,
+                colormap=colormap or None,
+                percentile=_parse_percentile(percentile),
+                fps=fps,
+            )
+        click.echo(f"Wrote time-lapse to {path}")
+    else:
+        with OrbitSpinner(f"Rendering change composite of {len(items)} acquisitions"):
+            path = save_change_composite(
+                items,
+                out_path,
+                asset=asset,
+                max_size=grid,
+                db=db,
+                percentile=_parse_percentile(percentile),
+            )
+        click.echo(f"Wrote change composite to {path}")
 
 
 @cli.command(name="map")

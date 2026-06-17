@@ -7,6 +7,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Animated SAR time-lapses across a whole series.** Where a change
+  composite collapses 2–3 dates into one colored image, `umbra change`
+  now also produces an animated GIF over *any* number of acquisitions when
+  `--out` ends in `.gif` —
+  `umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+  --out lapse.gif --db`. Every matched acquisition becomes a frame, all
+  co-registered onto the shared footprint intersection so the site stays put
+  and only the scene evolves; each frame is a SAR quicklook stamped with its
+  acquisition date. `--fps` sets playback speed and `--colormap` pseudo-colors
+  the frames. Explicit-URL mode lifts its 2–3 cap for `.gif` output (pass as
+  many as you like). New public `change_animation` / `save_change_animation`
+  functions; `select_change_frames(..., frames=None)` returns the whole
+  single-polarization series for this path. Requires the `viz` extra.
+- **One-command change composites by site + time range.** `umbra change`
+  gained a search mode: instead of passing 2–3 STAC URLs, give
+  `--area "<site>"` (or `--bbox`) with `--start`/`--end` and it gathers the
+  site's acquisitions and auto-selects the dates to composite —
+  `umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+  --out change.png`. `--frames {2,3}` picks how many dates (default 2),
+  spread evenly from earliest to latest across the matched range. Selection
+  prefers a single polarization (the largest same-polarization group), since
+  compositing HH against VV would render the polarization difference as fake
+  "change"; if no same-polarization pair exists it falls back to comparing
+  across polarizations and warns. The chosen acquisitions are printed before
+  rendering. Exposed as a reusable `select_change_frames(items, frames=2)`
+  helper in the public API. The explicit-URL form still works; the two modes
+  are mutually exclusive.
+- **Search by area name** via a new `area=` argument on
+  `UmbraCatalog.search` and an `umbra search --area "<name>"` CLI flag.
+  Umbra files every pass of a site under one named task directory (e.g.
+  `sar-data/tasks/Centerfield, Utah/`), so `--area centerfield` returns
+  just that site's acquisitions. The match is a case-insensitive substring
+  on the task-directory name, applied *before* each directory is listed, so
+  non-matching tasks are skipped entirely — making a name-scoped search much
+  faster than an unfiltered walk. This is the ergonomic way to gather the
+  co-located passes a change composite needs: `umbra search --area X` →
+  pick 2–3 same-polarization URLs → `umbra change`.
+- **Multi-temporal SAR change composites** via new `change_composite` /
+  `save_change_composite` functions and an `umbra change <url> <url>
+  [<url>] --out change.png` CLI command. Pass 2–3 acquisitions of the
+  same site (e.g. items from one Umbra task) in chronological order; the
+  bands are co-registered onto a shared lon/lat grid (each cloud-optimized
+  GeoTIFF is read at a downsampled resolution via HTTP range requests and
+  warped so the same output pixel is the same ground location on every
+  date), percentile-stretched, and assigned to color channels. Unchanged
+  ground stays gray while change is tinted by *when* it happened: for two
+  dates, **green** = backscatter that appeared in the later pass, **magenta**
+  = backscatter that vanished; for three dates, an earliest→latest red/green/
+  blue temporal-RGB. Only the area imaged on every pass is colored (pixels
+  missing from any acquisition are transparent), and `--db` switches to the
+  radiometrically-correct decibel stretch. This is SAR's signature change-
+  detection view with no manual co-registration. Requires the `viz` extra.
+  The percentile/dB stretch shared with the quicklook path was factored into
+  a `_normalize_band` helper.
 - **Standalone SAR quicklooks** via new `quicklook` / `save_quicklook`
   functions and an `umbra quicklook <item-url> --out scene.png` CLI
   command. This is the lowest-friction way to *see* an Umbra
