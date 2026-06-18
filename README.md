@@ -14,7 +14,8 @@ approachable as working with Sentinel-1 or Landsat.
 
 > **Status:** v0.1 / early alpha. The discovery + download core works against
 > Umbra's live catalog today; processing helpers are intentionally minimal and
-> will grow (see the [roadmap](#roadmap)).
+> will grow (see the [roadmap](#roadmap)). Contributions are welcome — see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md) to get started.
 
 ## Why this exists
 
