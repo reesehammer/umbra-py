@@ -22,6 +22,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/vsicurl/`, only the requested window/resolution is streamed over HTTP range
   requests — no multi-gigabyte download. New `load` extra
   (`pip install "umbra-py[load]"`, pulls in `xarray` + `rasterio` + `numpy`).
+  A file-producing companion `to_geotiff(item, dest)` and an `umbra load
+  <item-url> --out scene.tif` CLI command write the same clipped/decimated
+  scene to a single-band float32 GeoTIFF (in the source CRS, nodata as `NaN`)
+  for QGIS / GDAL users who want a file rather than an in-memory array; both
+  honor `--bbox` / `--max-size` / `--db`.
 - **Animated SAR time-lapses across a whole series.** Where a change
   composite collapses 2–3 dates into one colored image, `umbra change`
   now also produces an animated GIF over *any* number of acquisitions when

@@ -19,6 +19,8 @@ Install with: ``pip install "umbra-py[load]"``
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .constants import ATTRIBUTION, DATA_LICENSE
@@ -207,3 +209,58 @@ def to_xarray(
         name="backscatter_db" if db else "amplitude",
         attrs={k: v for k, v in attrs.items() if v is not None},
     )
+
+
+def to_geotiff(
+    item: UmbraItem,
+    dest: str | os.PathLike,
+    *,
+    asset: str = "GEC",
+    bbox: BBox | None = None,
+    max_size: int | None = None,
+    db: bool = False,
+) -> Path:
+    """Load an Umbra SAR image and write it to ``dest`` as a GeoTIFF.
+
+    A file-producing companion to :func:`to_xarray` for users who want a
+    clipped / decimated raster on disk (for QGIS, GDAL, or any GIS) rather
+    than an in-memory array. Same windowing and resolution options: ``bbox``
+    clips to a lon/lat area, ``max_size`` decimates via the cloud-optimized
+    GeoTIFF overviews, ``db`` writes the decibel scale. Only the requested
+    window/resolution is streamed (no full download).
+
+    The output is a single-band ``float32`` GeoTIFF in the source raster's
+    native CRS, with nodata / non-positive pixels written as ``NaN``
+    (``nodata=NaN``) so masking survives the round-trip. Deflate-compressed
+    and tiled.
+    """
+    rasterio = _require("rasterio")
+    _require("numpy")
+    from affine import Affine  # noqa: PLC0415
+
+    da = to_xarray(item, asset=asset, bbox=bbox, max_size=max_size, db=db, masked=True)
+    data = da.values
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "height": data.shape[0],
+        "width": data.shape[1],
+        "count": 1,
+        "dtype": "float32",
+        "crs": da.attrs.get("crs"),
+        "transform": Affine(*da.attrs["transform"]),
+        "nodata": float("nan"),
+        "compress": "deflate",
+        "tiled": True,
+    }
+    with rasterio.open(dest, "w", **profile) as dst:
+        dst.write(data, 1)
+        dst.update_tags(
+            item_id=item.id,
+            units=da.attrs["units"],
+            license=DATA_LICENSE,
+            attribution=ATTRIBUTION,
+        )
+    return dest

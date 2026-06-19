@@ -149,6 +149,16 @@ affine transform, bounds, acquisition metadata, and the CC BY 4.0 attribution
 in `da.attrs` — so it round-trips through `rioxarray`
 (`da.rio.write_crs(da.attrs["crs"])`), `rasterio`, and `pyproj`.
 
+Want a file instead of an in-memory array (for QGIS, GDAL, ...)? `to_geotiff`
+writes the same clipped/decimated scene to a single-band float32 GeoTIFF —
+or use the `umbra load` CLI below:
+
+```python
+from umbra_py import to_geotiff
+
+to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
+```
+
 ### Command line
 
 ```bash
@@ -164,6 +174,10 @@ umbra download <item-json-url> --asset GEC --dest downloads/
 # Render a standalone SAR quicklook image -- no map, no full download.
 # Add --db for the decibel stretch and --colormap for pseudo-color.
 umbra quicklook <item-json-url> --out scene.png --db --colormap magma
+
+# Load an analysis-ready GeoTIFF -- clip to an area and/or decimate, no full
+# download. Streams only the requested window of the cloud-optimized GeoTIFF.
+umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-size 4096
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html

@@ -228,6 +228,60 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
     click.echo(f"Wrote quicklook to {path}")
 
 
+@cli.command(name="load")
+@click.argument("item_url")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output GeoTIFF path (e.g. scene.tif).",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to load. GEC (the geocoded GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option("--bbox", help="Clip to a lon/lat window: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--max-size",
+    type=int,
+    default=None,
+    help="Cap the longest output side in pixels (decimates via COG overviews). "
+    "Omit to write full resolution -- pair that with --bbox for a large scene.",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Write the decibel (log-amplitude) scale instead of linear amplitude.",
+)
+def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
+    """Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
+
+    Streams only the requested window/resolution of the item's cloud-optimized
+    GeoTIFF via HTTP range requests and writes an analysis-ready, single-band
+    float32 GeoTIFF in the source CRS -- no full download. For an in-memory
+    array instead, use ``umbra_py.to_xarray``. Requires the load extra
+    (``pip install "umbra-py[load]"``).
+    """
+    from .load import to_geotiff  # noqa: PLC0415
+
+    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    with OrbitSpinner(f"Loading {asset} of {item.id}"):
+        path = to_geotiff(
+            item,
+            out_path,
+            asset=asset,
+            bbox=_parse_bbox(bbox),
+            max_size=max_size,
+            db=db,
+        )
+    click.echo(f"Wrote GeoTIFF to {path}")
+
+
 @cli.command()
 @click.argument("item_urls", nargs=-1)
 @click.option(

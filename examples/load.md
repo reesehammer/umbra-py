@@ -83,7 +83,32 @@ returning an empty array.
 
 ---
 
-## 4. Decibels and masking
+## 4. Straight to a GeoTIFF (no array, or no Python)
+
+If you just want a clipped/decimated file on disk — for QGIS, GDAL, or a
+colleague who doesn't use Python — `to_geotiff` writes the same data without you
+touching the array. It takes the same `bbox` / `max_size` / `db` options and
+writes a single-band float32 GeoTIFF in the source CRS (nodata as `NaN`):
+
+```python
+from umbra_py import to_geotiff
+
+to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
+```
+
+There's a CLI for it too — point it at the item's `.stac.v2.json` URL:
+
+```bash
+umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-size 4096
+```
+
+Both stream only the requested window of the cloud-optimized GeoTIFF — no full
+download. (`to_xarray` is the in-memory path; `to_geotiff` / `umbra load` is the
+file path. Internally the second just calls the first and writes the result.)
+
+---
+
+## 5. Decibels and masking
 
 SAR amplitude has enormous dynamic range. `db=True` returns
 `20*log10(amplitude)`, the radiometrically meaningful scale, and masks the
@@ -100,7 +125,7 @@ work. Pass `masked=False` to get the raw values (zeros and all).
 
 ---
 
-## 5. From here
+## 6. From here
 
 Once it's a DataArray, the rest of the ecosystem is open: `dask` for
 out-of-core, `scikit-image` for filtering, `matplotlib`/`hvplot` for custom

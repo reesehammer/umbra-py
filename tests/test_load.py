@@ -143,3 +143,51 @@ def test_bbox_no_overlap_raises(tmp_path):
     tif, _, _ = _make_geotiff(tmp_path / "scene.tif")
     with pytest.raises(ValueError, match="does not overlap"):
         to_xarray(_item_for(tif), bbox=(0.0, 0.0, 0.001, 0.001))
+
+
+def test_to_geotiff_roundtrip(tmp_path):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_geotiff
+
+    src_tif, _, crs = _make_geotiff(tmp_path / "scene.tif")
+    out = to_geotiff(_item_for(src_tif), tmp_path / "out.tif")
+
+    assert out.exists()
+    with rasterio.open(out) as ds:
+        assert ds.count == 1
+        assert ds.dtypes[0] == "float32"
+        assert ds.crs == crs
+        assert (ds.width, ds.height) == (20, 10)
+        data = ds.read(1)
+        # The non-positive corner round-trips as NaN nodata.
+        assert np.isnan(ds.nodata)
+        assert np.isnan(data[0, 0])
+        assert ds.tags()["item_id"] == "test-acq"
+
+
+def test_cli_load_writes_geotiff(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src_tif, _, _ = _make_geotiff(tmp_path / "scene.tif")
+
+    # `umbra load` fetches the STAC JSON then resolves the asset href; stub both
+    # so the test stays offline and points at the local GeoTIFF.
+    monkeypatch.setattr(cli_mod, "get_json", lambda url: {"id": "cli-acq", "assets": {}})
+    monkeypatch.setattr(cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(src_tif))
+
+    out = tmp_path / "clipped.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["load", "http://example.com/item.json", "--out", str(out), "--max-size", "8"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    with rasterio.open(out) as ds:
+        assert ds.count == 1
+        assert max(ds.width, ds.height) <= 8
