@@ -74,12 +74,8 @@ Visualize footprints before downloading multi-GB SAR scenes:
 ```python
 from umbra_py import UmbraCatalog, footprint_map, write_geojson
 
-# Note: Umbra's STAC catalog references many acquisitions whose binary data
-# was never published to the open bucket. Add `data_available_only=True` to
-# get only items you can actually download / overlay.
 items = list(UmbraCatalog().search(
     start="2024-01-01", end="2025-12-31", limit=50,
-    data_available_only=True,
 ))
 
 # Interactive Folium map for notebooks / sharing (requires the `viz` extra).
