@@ -33,6 +33,7 @@ approachable as working with Sentinel-1 or Landsat.
 
 ```bash
 pip install umbra-py            # core: search + download + metadata
+pip install "umbra-py[load]"    # + analysis-ready xarray loading (xarray, rasterio)
 pip install "umbra-py[convert]" # + SICD amplitude extraction (sarpy, rasterio)
 pip install "umbra-py[viz]"     # + plotting/footprint helpers
 ```
@@ -119,6 +120,45 @@ save_quicklook(items[0], "scene.png")
 save_quicklook(items[0], "scene_db.png", db=True, colormap="magma")
 ```
 
+### Load a scene as analysis-ready data
+
+When you want the *pixels*, not a picture — to run your own analysis, clip to an
+area, or feed a model — load an acquisition straight into a georeferenced
+`xarray.DataArray`. Only the window and resolution you ask for stream over HTTP
+range requests against the cloud-optimized GeoTIFF, so you can pull a small area
+out of a multi-GB scene without downloading the whole thing (requires the
+`load` extra):
+
+```python
+from umbra_py import UmbraCatalog, to_xarray
+
+item = next(iter(UmbraCatalog().search(start="2024-02-08", end="2024-02-08", limit=1)))
+
+# Full scene, decimated to a manageable size, in decibels.
+da = to_xarray(item, max_size=2048, db=True)
+da.plot.imshow(cmap="gray")          # xarray's matplotlib accessor
+print(da.attrs["crs"], da.attrs["bounds"])
+
+# Or pull just an area of interest (lon/lat) at full resolution.
+aoi = to_xarray(item, bbox=(-68.05, 10.45, -68.00, 10.50))
+print(aoi.mean().item())             # straight into the scientific Python stack
+```
+
+The returned array has `y`/`x` axes in the raster's native CRS, with the CRS,
+affine transform, bounds, acquisition metadata, and the CC BY 4.0 attribution
+in `da.attrs` — so it round-trips through `rioxarray`
+(`da.rio.write_crs(da.attrs["crs"])`), `rasterio`, and `pyproj`.
+
+Want a file instead of an in-memory array (for QGIS, GDAL, ...)? `to_geotiff`
+writes the same clipped/decimated scene to a single-band float32 GeoTIFF —
+or use the `umbra load` CLI below:
+
+```python
+from umbra_py import to_geotiff
+
+to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
+```
+
 ### Command line
 
 ```bash
@@ -134,6 +174,10 @@ umbra download <item-json-url> --asset GEC --dest downloads/
 # Render a standalone SAR quicklook image -- no map, no full download.
 # Add --db for the decibel stretch and --colormap for pseudo-color.
 umbra quicklook <item-json-url> --out scene.png --db --colormap magma
+
+# Load an analysis-ready GeoTIFF -- clip to an area and/or decimate, no full
+# download. Streams only the requested window of the cloud-optimized GeoTIFF.
+umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-size 4096
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html

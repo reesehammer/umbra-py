@@ -22,6 +22,7 @@ from .exceptions import (
     MissingDependencyError,
     UmbraError,
 )
+from .load import to_geotiff, to_xarray
 from .models import UmbraItem
 from .viz import (
     change_animation,
@@ -45,6 +46,8 @@ __all__ = [
     "__version__",
     "UmbraCatalog",
     "UmbraItem",
+    "to_xarray",
+    "to_geotiff",
     "download_asset",
     "download_item",
     "download_url",

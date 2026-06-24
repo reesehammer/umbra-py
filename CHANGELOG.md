@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Analysis-ready loading into `xarray` (the "load" step).** New
+  `to_xarray(item)` turns a geocoded Umbra GeoTIFF into a georeferenced
+  `xarray.DataArray` — `y`/`x` coordinate axes in the raster's native CRS,
+  CRS / affine transform / bounds / acquisition metadata in `.attrs`, and the
+  CC BY 4.0 attribution carried along — so the data drops straight into the
+  scientific Python stack (`xarray`/`dask`/`matplotlib`/`scikit-image`/
+  `rioxarray`). This is the missing verb in the project's "discover, **load**,
+  download, analyze" tagline: previously you had to hand-roll `rasterio`
+  windowing and coordinate construction to get an array. `bbox=` reads only a
+  geographic sub-window (reprojected to the raster's CRS first), `max_size=`
+  decimates via the cloud-optimized GeoTIFF overviews, and `db=` returns the
+  radiometric decibel scale. Because the source is a COG read through
+  `/vsicurl/`, only the requested window/resolution is streamed over HTTP range
+  requests — no multi-gigabyte download. New `load` extra
+  (`pip install "umbra-py[load]"`, pulls in `xarray` + `rasterio` + `numpy`).
+  A file-producing companion `to_geotiff(item, dest)` and an `umbra load
+  <item-url> --out scene.tif` CLI command write the same clipped/decimated
+  scene to a single-band float32 GeoTIFF (in the source CRS, nodata as `NaN`)
+  for QGIS / GDAL users who want a file rather than an in-memory array; both
+  honor `--bbox` / `--max-size` / `--db`.
 - **Animated SAR time-lapses across a whole series.** Where a change
   composite collapses 2–3 dates into one colored image, `umbra change`
   now also produces an animated GIF over *any* number of acquisitions when
