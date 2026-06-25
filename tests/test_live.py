@@ -94,3 +94,29 @@ def test_change_animation_renders_real_task(tmp_path):
     assert out.read_bytes()[:4] == b"GIF8"
     with PIL.Image.open(out) as im:
         assert getattr(im, "n_frames", 1) >= 1
+
+
+def test_swipe_map_renders_real_task(tmp_path):
+    """End-to-end: build a before/after swipe map from two real acquisitions
+    of the same task -- proves both COG overlays stream and embed and the
+    side-by-side control is wired into the HTML."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import save_swipe_map
+
+    by_task: dict[str, list] = {}
+    for item in UmbraCatalog().search(start="2024-01-01", end="2024-12-31", limit=12):
+        task = item.properties.get("umbra:task_id")
+        if task and "GEC" in item.available_assets:
+            by_task.setdefault(task, []).append(item)
+
+    pair = next((v[:2] for v in by_task.values() if len(v) >= 2), None)
+    if pair is None:
+        pytest.skip("no task with 2+ GEC acquisitions in the sampled window")
+
+    out = save_swipe_map(pair[0], pair[1], tmp_path / "swipe.html", max_size=256, db=True)
+    assert out.exists()
+    text = out.read_text()
+    assert "L.control.sideBySide" in text
+    assert text.count("data:image/png;base64,") == 2

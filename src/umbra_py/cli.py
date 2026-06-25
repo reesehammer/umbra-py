@@ -20,6 +20,7 @@ from .viz import (
     save_change_composite,
     save_footprint_map,
     save_quicklook,
+    save_swipe_map,
     save_timeline_map,
     select_change_frames,
     write_geojson,
@@ -481,6 +482,150 @@ def change(
                 percentile=_parse_percentile(percentile),
             )
         click.echo(f"Wrote change composite to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output HTML file for the interactive swipe map.",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Search mode: name of an Umbra site (e.g. 'Centerfield') to gather "
+    "automatically instead of passing two URLs. Combine with --start/--end to "
+    "bound the time range; the earliest and latest passes are compared.",
+)
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--max-search",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Search mode: cap how many acquisitions the search pulls.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to compare. GEC (the detected GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=1024,
+    show_default=True,
+    help="Max pixel dimension of each overlay. Larger is sharper but fetches "
+    "more bytes (~quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look. Reveals texture and structure the default linear stretch "
+    "crushes toward black.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for each overlay's contrast stretch.",
+)
+def swipe(
+    item_urls,
+    out_path,
+    area,
+    bbox,
+    start,
+    end,
+    max_search,
+    asset,
+    max_size,
+    db,
+    percentile,
+) -> None:
+    """Render an interactive before/after swipe map of two SAR passes.
+
+    Drag the divider to wipe one acquisition over the other across the same
+    ground: SAR backscatter is stable between passes, so anything that
+    changed -- a ship that docked, a field that flooded, a building that
+    rose -- snaps in and out as you sweep the seam. The output is a single
+    self-contained HTML file.
+
+    Two ways to choose what to compare:
+
+    \b
+    - Pass exactly two STAC JSON URLs, in chronological order (before after).
+    - Or search: give --area (or --bbox) with --start/--end and the command
+      gathers a site's acquisitions and compares the earliest with the latest
+      (preferring a single polarization).
+
+    Only downsampled overviews are streamed via HTTP range requests -- no full
+    download. Requires the viz extra (``pip install "umbra-py[viz]"``).
+    """
+    search_mode = any(v for v in (area, bbox, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass two item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+        )
+
+    if item_urls:
+        if len(item_urls) != 2:
+            raise click.BadParameter("swipe needs exactly 2 item URLs (before after).")
+        before, after = (UmbraItem.from_dict(get_json(url), href=url) for url in item_urls)
+    else:
+        if not (area or bbox):
+            raise click.UsageError(
+                "Give --area or --bbox (optionally with --start/--end) to search, "
+                "or pass two item URLs directly."
+            )
+        with OrbitSpinner("Searching Umbra archive"):
+            found = list(
+                UmbraCatalog().search(
+                    bbox=_parse_bbox(bbox),
+                    start=start,
+                    end=end,
+                    area=area,
+                    product_types=[asset],
+                    limit=max_search,
+                )
+            )
+        if len(found) < 2:
+            raise click.ClickException(
+                f"Need at least 2 {asset} acquisitions to compare; the search "
+                f"found {len(found)}. Widen the date range or area."
+            )
+        before, after = select_change_frames(found, frames=2)
+        if tuple(before.polarizations) != tuple(after.polarizations):
+            click.echo(
+                "warning: the two acquisitions have different polarizations; some "
+                "apparent change may be a polarization difference, not real change.",
+                err=True,
+            )
+        click.echo(f"Comparing {len(found)} found acquisition(s):")
+        for it in (before, after):
+            when = it.datetime.isoformat() if it.datetime else "unknown time"
+            click.echo(f"  {when}  {it.id}")
+
+    with OrbitSpinner("Rendering swipe map"):
+        path = save_swipe_map(
+            before,
+            after,
+            out_path,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            percentile=_parse_percentile(percentile),
+        )
+    click.echo(f"Wrote swipe map to {path}")
 
 
 @cli.command(name="map")

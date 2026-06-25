@@ -23,6 +23,11 @@ This module turns ``UmbraItem`` objects into:
   date, so unchanged ground stays gray while anything that appeared or
   vanished between passes lights up — SAR's signature change-detection
   view, with no manual co-registration.
+- **Interactive before/after swipe maps** (requires ``viz`` + rasterio):
+  ``swipe_map`` / ``save_swipe_map`` place two passes of the same site on a
+  basemap behind a draggable divider, so you wipe one acquisition over the
+  other across the same ground — the interactive cousin of a change
+  composite.
 
 The first surface is the important one: Umbra acquisitions are points on
 the planet, and being able to *see* where a search landed before
@@ -723,6 +728,7 @@ def image_overlay(
     max_size: int = 1024,
     percentile: tuple[float, float] = (2.0, 98.0),
     opacity: float = 1.0,
+    db: bool = False,
 ):
     """Build a Folium ``ImageOverlay`` of an item's SAR image.
 
@@ -731,6 +737,10 @@ def image_overlay(
     fetched), applies a percentile contrast stretch for SAR amplitude,
     reprojects to lat/lon if necessary, and embeds the result as a base64
     PNG so the resulting map stays a single self-contained HTML file.
+
+    ``db`` switches to a decibel (log-amplitude) stretch -- the
+    radiometrically-correct SAR view that reveals texture the default
+    linear stretch crushes toward black.
 
     Requires the ``viz`` extra (which pulls in rasterio + numpy; Pillow
     comes transitively via matplotlib).
@@ -745,7 +755,7 @@ def image_overlay(
 
     data, bounds = _read_sar_band(item, asset, max_size, reproject_to_4326=True)
 
-    rgba = _stretch_to_rgba(data, percentile=percentile)
+    rgba = _stretch_to_rgba(data, percentile=percentile, db=db)
     buf = io.BytesIO()
     Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
     data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -1375,4 +1385,97 @@ def save_timeline_map(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     timeline_map(items, **kwargs).save(str(dest))
+    return dest
+
+
+# leaflet-side-by-side clips each layer via ``layer.getContainer()``, a method
+# Leaflet's GridLayer/TileLayer has but ImageOverlay does not (it exposes the
+# same <img> element through ``getElement()``). Alias the two on the prototype
+# so the swipe control can clip our SAR overlays. Emitted as a map child right
+# before the control so it runs inside the map's onload script -- after Leaflet
+# is loaded (head) and before ``L.control.sideBySide`` reads getContainer.
+_SWIPE_SHIM_JS = (
+    "{% macro script(this, kwargs) %}\n"
+    "if (L.ImageOverlay && !L.ImageOverlay.prototype.getContainer) {"
+    "L.ImageOverlay.prototype.getContainer = L.ImageOverlay.prototype.getElement;"
+    "}\n"
+    "{% endmacro %}"
+)
+
+
+def _image_overlay_swipe_shim():
+    """A Folium element that aliases ``ImageOverlay.getContainer`` at runtime."""
+    from branca.element import MacroElement  # noqa: PLC0415
+    from jinja2 import Template  # noqa: PLC0415
+
+    shim = MacroElement()
+    shim._name = "ImageOverlaySwipeShim"
+    shim._template = Template(_SWIPE_SHIM_JS)
+    return shim
+
+
+def swipe_map(
+    before: UmbraItem,
+    after: UmbraItem,
+    *,
+    asset: str = "GEC",
+    max_size: int = 1024,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+    tiles: str = "OpenStreetMap",
+):
+    """Build an interactive before/after *swipe* map of two SAR passes.
+
+    Where :func:`change_composite` bakes the comparison into one colored
+    still and :func:`change_animation` flips between dates, this renders a
+    draggable divider: the ``before`` acquisition fills the left of the
+    slider, ``after`` the right, and dragging the handle wipes one over the
+    other across the *same* ground. SAR's backscatter is stable between
+    passes, so anything that changed -- a ship that docked, a field that
+    flooded, a building that rose -- snaps in and out as you sweep the seam.
+    It is the most direct way to *feel* change in the archive, and the whole
+    thing is a single self-contained HTML file.
+
+    Both acquisitions are streamed as downsampled, georeferenced overlays
+    (HTTP range requests against the cloud-optimized GeoTIFFs -- no full
+    download) and placed by their own bounds, so they line up on the
+    basemap. Pass the two items in chronological order. ``db`` selects the
+    decibel stretch (the radiometrically-correct SAR look); ``asset``
+    defaults to ``"GEC"`` (the detected GeoTIFF), which along with ``"CSI"``
+    is the sensible target.
+
+    Requires the ``viz`` extra (``pip install "umbra-py[viz]"``). Returns a
+    ``folium.Map`` you can ``.save("swipe.html")`` or display in Jupyter.
+    """
+    folium = _require("folium")
+    from folium.plugins import SideBySideLayers  # noqa: PLC0415
+
+    overlay_kwargs = dict(asset=asset, max_size=max_size, percentile=percentile, db=db)
+    left = image_overlay(before, **overlay_kwargs)
+    right = image_overlay(after, **overlay_kwargs)
+
+    bbox = _union_bbox([item_to_feature(before), item_to_feature(after)])
+    center = ((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2) if bbox else (0.0, 0.0)
+
+    m = folium.Map(location=center, tiles=tiles, zoom_start=2)
+    left.add_to(m)
+    right.add_to(m)
+    _image_overlay_swipe_shim().add_to(m)
+    SideBySideLayers(layer_left=left, layer_right=right).add_to(m)
+
+    if bbox is not None:
+        m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])
+    return m
+
+
+def save_swipe_map(
+    before: UmbraItem,
+    after: UmbraItem,
+    dest: str | os.PathLike,
+    **kwargs,
+) -> Path:
+    """Build a before/after swipe map and write it to ``dest`` as HTML."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    swipe_map(before, after, **kwargs).save(str(dest))
     return dest

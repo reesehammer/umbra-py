@@ -12,6 +12,8 @@ Guides:
   SAR image (CLI + Python), with decibel scaling and matplotlib pseudo-color.
 - [`change.md`](change.md) — composite 2–3 acquisitions of the same site into
   a color change-detection image (CLI + Python).
+- [`swipe.md`](swipe.md) — compare two passes of a site with an interactive
+  before/after swipe map (CLI + Python).
 
 Planned:
 

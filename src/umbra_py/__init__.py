@@ -36,8 +36,10 @@ from .viz import (
     save_change_composite,
     save_footprint_map,
     save_quicklook,
+    save_swipe_map,
     save_timeline_map,
     select_change_frames,
+    swipe_map,
     timeline_map,
     write_geojson,
 )
@@ -74,4 +76,6 @@ __all__ = [
     "save_change_animation",
     "timeline_map",
     "save_timeline_map",
+    "swipe_map",
+    "save_swipe_map",
 ]
