@@ -862,6 +862,30 @@ def save_quicklook(
     return dest
 
 
+def _thumbnail_data_uri(
+    item: UmbraItem,
+    *,
+    asset: str = "GEC",
+    max_size: int = 256,
+    db: bool = True,
+) -> str:
+    """Render a small SAR quicklook and return it as a base64 PNG data URI.
+
+    Used by :class:`umbra_py.ItemCollection` to embed thumbnails inline in a
+    notebook gallery. ``db=True`` (the default here) gives the
+    radiometrically-correct decibel stretch, which reads better at thumbnail
+    size than the linear default. Only the bytes for ``max_size`` are streamed
+    from the cloud-optimized GeoTIFF. Requires the ``viz`` extra.
+    """
+    import base64  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    image = quicklook(item, asset=asset, max_size=max_size, db=db)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
 def _compose_change_rgba(
     bands: list[Any],
     *,

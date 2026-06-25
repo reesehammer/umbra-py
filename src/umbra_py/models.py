@@ -368,3 +368,64 @@ class UmbraItem:
             f"  product  : {info['product_type']}  pol={pol}  res~{res_str}\n"
             f"  assets   : {', '.join(info['available_assets']) or 'none'}"
         )
+
+    def _repr_html_(self) -> str:
+        """Rich HTML card for Jupyter: footprint sketch + metadata table.
+
+        Pure-stdlib and offline so it works in the core install and never
+        triggers a network read just from displaying an item. For the SAR
+        pixels, use :func:`umbra_py.quicklook` or an
+        :class:`ItemCollection` with ``thumbnails=True``.
+        """
+        from ._html import item_card_html  # noqa: PLC0415
+
+        return item_card_html(self)
+
+
+class ItemCollection(list):
+    """A list of :class:`UmbraItem` that renders as a gallery in notebooks.
+
+    Behaves exactly like a ``list`` (it *is* one), so existing code that
+    iterates search results is unaffected. The extra is a Jupyter
+    ``_repr_html_`` that lays the items out as a grid of metadata cards::
+
+        from umbra_py import UmbraCatalog, ItemCollection
+        results = ItemCollection(UmbraCatalog().search(area="rome", limit=8))
+        results  # -> gallery of cards (offline, no extras needed)
+
+    Pass ``thumbnails=True`` to stream a small SAR quicklook for each item
+    (needs the ``viz`` extra). Thumbnails are fetched lazily when the
+    collection is displayed; any item that can't be previewed falls back to
+    its footprint card, so displaying the collection never raises.
+    """
+
+    def __init__(
+        self,
+        items=(),
+        *,
+        thumbnails: bool = False,
+        max_size: int = 256,
+        db: bool = True,
+    ) -> None:
+        super().__init__(items)
+        self._thumbnails = thumbnails
+        self._max_size = max_size
+        self._db = db
+
+    def _repr_html_(self) -> str:
+        from ._html import gallery_html  # noqa: PLC0415
+
+        thumbs: dict[int, str | None] = {}
+        if self._thumbnails:
+            from .viz import _thumbnail_data_uri  # noqa: PLC0415
+
+            for i, item in enumerate(self):
+                # A repr must never raise (Jupyter would show a traceback
+                # instead of the object), and a thumbnail read can fail many
+                # ways -- no previewable asset, network, missing extra. On any
+                # failure we drop back to the item's footprint card.
+                try:
+                    thumbs[i] = _thumbnail_data_uri(item, max_size=self._max_size, db=self._db)
+                except Exception:
+                    thumbs[i] = None
+        return gallery_html(self, thumbnails=thumbs)

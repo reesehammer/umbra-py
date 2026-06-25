@@ -67,6 +67,23 @@ paths = download_item(first, dest_dir="downloads", assets=["GEC"])
 print(paths)
 ```
 
+### Browse results in a notebook
+
+In Jupyter, an `UmbraItem` renders as a card — a metadata table beside an
+inline sketch of its ground footprint — and `ItemCollection` lays a whole
+search out as a gallery. Both are offline and need no extras, so displaying
+results never downloads anything:
+
+```python
+from umbra_py import UmbraCatalog, ItemCollection
+
+results = ItemCollection(UmbraCatalog().search(area="rome", limit=8))
+results  # gallery of metadata cards
+
+# Opt in to streamed SAR quicklook thumbnails (decibel stretch; needs `viz`):
+ItemCollection(results, thumbnails=True)
+```
+
 ### See where your search landed
 
 Visualize footprints before downloading multi-GB SAR scenes:

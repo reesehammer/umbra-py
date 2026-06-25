@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Rich notebook rendering for items and search results.** `UmbraItem` now
+  has a Jupyter `_repr_html_`, so an item displayed in a notebook renders as a
+  card — a metadata table next to an inline SVG sketch of its ground footprint
+  (north up) — instead of a bare `repr`. The new `ItemCollection` (a drop-in
+  `list` subclass, exported from the package root) renders a *list* of results
+  as a wrapping gallery of those cards:
+
+  ```python
+  from umbra_py import UmbraCatalog, ItemCollection
+  results = ItemCollection(UmbraCatalog().search(area="rome", limit=8))
+  results  # -> gallery of metadata cards (offline, core install, no network)
+  ```
+
+  Both representations are pure-stdlib and offline by default — displaying an
+  item never triggers a network read, so notebooks stay snappy and the feature
+  works without any extras. Pass `ItemCollection(..., thumbnails=True)` to opt
+  into streamed SAR quicklook thumbnails (decibel-stretched, only the overview
+  bytes are fetched per the existing `quicklook` path; needs the `viz` extra).
+  Thumbnails are fetched lazily on display, and any item that can't be
+  previewed falls back to its footprint card, so a repr never raises. This is
+  the lowest-friction way to *see* what a search returned without leaving the
+  notebook.
 - **Interactive before/after SAR swipe maps.** New `umbra swipe` CLI command
   and `swipe_map` / `save_swipe_map` functions render two passes of the same
   site into a single self-contained HTML map with a draggable divider: the

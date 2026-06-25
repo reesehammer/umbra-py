@@ -23,7 +23,7 @@ from .exceptions import (
     UmbraError,
 )
 from .load import to_geotiff, to_xarray
-from .models import UmbraItem
+from .models import ItemCollection, UmbraItem
 from .viz import (
     change_animation,
     change_composite,
@@ -48,6 +48,7 @@ __all__ = [
     "__version__",
     "UmbraCatalog",
     "UmbraItem",
+    "ItemCollection",
     "to_xarray",
     "to_geotiff",
     "download_asset",
