@@ -12,6 +12,8 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
+from .constants import ATTRIBUTION
+
 if TYPE_CHECKING:
     from .models import UmbraItem
 
@@ -164,3 +166,121 @@ def gallery_html(items, *, thumbnails: dict[int, str | None] | None = None) -> s
         f"{count} item{plural}</div>"
     )
     return f'{_STYLE}{header}<div class="umbra-gallery">{cards}</div>'
+
+
+# A standalone dark "contact sheet": a thumbnail-dominant grid, distinct from
+# the metadata-card layout above (which is tuned for an inline notebook repr).
+_GALLERY_STYLE = """<style>
+:root{color-scheme:dark light}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#e6edf3;
+font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:18px 22px;border-bottom:1px solid #21262d}
+header h1{margin:0;font-size:18px;font-weight:600}
+header .sub{margin:4px 0 0;color:#8b949e;font-size:13px}
+main.umbra-grid{display:grid;gap:14px;padding:18px 22px;
+grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.umbra-tile{background:#161b22;border:1px solid #21262d;border-radius:8px;
+overflow:hidden;display:flex;flex-direction:column}
+.umbra-tile .thumb{display:flex;align-items:center;justify-content:center;
+aspect-ratio:1/1;background:#010409}
+.umbra-tile .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.umbra-tile .thumb svg{width:60%;height:60%}
+.umbra-tile .empty{color:#484f58;font-size:12px}
+.umbra-tile figcaption{padding:8px 10px;display:flex;gap:8px;align-items:flex-start}
+.umbra-tile .fp{flex:0 0 auto;line-height:0}
+.umbra-tile .meta{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px}
+.umbra-tile .tid{font-weight:600;font-size:12px;word-break:break-all}
+.umbra-tile .when{color:#8b949e;font-size:11px}
+.umbra-tile a{color:#58a6ff;text-decoration:none}
+.umbra-tile a:hover{text-decoration:underline}
+footer{padding:14px 22px;color:#6e7681;font-size:12px;border-top:1px solid #21262d}
+</style>"""
+
+
+def _gallery_tile_html(item: UmbraItem, *, thumbnail: str | None = None) -> str:
+    """Render one gallery tile: SAR thumbnail (or footprint fallback) + caption.
+
+    The thumbnail links to the item's STAC JSON. When a SAR preview is present
+    a small footprint sketch is shown beside the caption for spatial
+    orientation (the cover-cropped thumbnail loses the footprint's true shape);
+    when no preview could be fetched, the footprint sketch fills the picture
+    pane instead, so every tile still shows *something* placeable.
+    """
+    info = item.metadata_summary()
+    when = _esc(info["datetime"] or "—")
+    plat = info["platform"] or "—"
+    mode = info["instrument_mode"]
+    plat_line = _esc(f"{plat} · {mode}" if mode else plat)
+    href = item.href
+
+    if thumbnail:
+        pic = f'<img src="{_esc(thumbnail)}" loading="lazy" alt="SAR quicklook" />'
+        badge = footprint_svg(item, size=40)
+    else:
+        pic = footprint_svg(item) or '<span class="empty">no preview</span>'
+        badge = None  # the picture pane already shows the footprint
+
+    if href:
+        thumb = f'<a class="thumb" href="{_esc(href)}" target="_blank" rel="noopener">{pic}</a>'
+        link = f'<a href="{_esc(href)}" target="_blank" rel="noopener">STAC item ↗</a>'
+    else:
+        thumb = f'<span class="thumb">{pic}</span>'
+        link = ""
+
+    badge_html = f'<span class="fp" title="footprint (north up)">{badge}</span>' if badge else ""
+    return (
+        '<figure class="umbra-tile">'
+        f"{thumb}"
+        "<figcaption>"
+        f"{badge_html}"
+        '<span class="meta">'
+        f'<span class="tid">{_esc(item.id)}</span>'
+        f'<span class="when">{when}</span>'
+        f'<span class="when">{plat_line}</span>'
+        f"{link}"
+        "</span>"
+        "</figcaption>"
+        "</figure>"
+    )
+
+
+def standalone_gallery_html(
+    items,
+    *,
+    thumbnails: dict[int, str | None] | None = None,
+    title: str = "Umbra SAR gallery",
+    subtitle: str | None = None,
+) -> str:
+    """Render items as a self-contained HTML contact-sheet page.
+
+    Unlike :func:`gallery_html` (an inline fragment for a notebook repr), this
+    returns a *full* HTML document: a thumbnail grid you can open straight off
+    disk. ``thumbnails`` maps each item's index to a ``data:image/png`` URI;
+    tiles without one fall back to their footprint sketch.
+    """
+    items = list(items)
+    thumbnails = thumbnails or {}
+    tiles = "".join(
+        _gallery_tile_html(item, thumbnail=thumbnails.get(i)) for i, item in enumerate(items)
+    )
+
+    count = len(items)
+    plural = "" if count == 1 else "s"
+    n_thumbs = sum(1 for v in thumbnails.values() if v)
+    sub = f"{_esc(subtitle)} · " if subtitle else ""
+    head_sub = f"{sub}{count} acquisition{plural}"
+    if n_thumbs < count:
+        head_sub += f" · {n_thumbs} with SAR preview"
+
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{_esc(title)}</title>\n"
+        f"{_GALLERY_STYLE}\n</head>\n<body>\n"
+        f'<header><h1>{_esc(title)}</h1><p class="sub">{head_sub}</p></header>\n'
+        f'<main class="umbra-grid">{tiles}</main>\n'
+        f"<footer>{_esc(ATTRIBUTION)} Generated by umbra-py.</footer>\n"
+        "</body>\n</html>\n"
+    )

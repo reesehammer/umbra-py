@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Interactive search gallery / contact sheet.** New `umbra gallery` CLI
+  command and `gallery` / `save_gallery` functions take a search (area + dates,
+  or a bbox / product filter) and render a grid of streamed SAR quicklook
+  thumbnails into one self-contained HTML page — each tile linking to its STAC
+  item with a footprint sketch:
+
+  ```bash
+  umbra gallery --area Centerfield --out gallery.html
+  ```
+
+  It's the missing "browse the catalog visually" primitive: only downsampled
+  cloud-optimized GeoTIFF overviews are fetched (via HTTP range requests, in
+  parallel) — never a full download — so you can *see* what a search returned
+  before committing to multi-gigabyte SAR files. Thumbnails default to the
+  radiometrically-correct decibel stretch; any item that can't be previewed
+  falls back to its footprint sketch, so one bad acquisition never sinks the
+  page. Built directly on the existing `quicklook` + lazy-overview reader.
+  Requires the `viz` extra.
 - **Rich notebook rendering for items and search results.** `UmbraItem` now
   has a Jupyter `_repr_html_`, so an item displayed in a notebook renders as a
   card — a metadata table next to an inline SVG sketch of its ground footprint

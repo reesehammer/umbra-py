@@ -28,6 +28,7 @@ from .viz import (
     change_animation,
     change_composite,
     footprint_map,
+    gallery,
     image_overlay,
     item_to_feature,
     items_to_featurecollection,
@@ -35,6 +36,7 @@ from .viz import (
     save_change_animation,
     save_change_composite,
     save_footprint_map,
+    save_gallery,
     save_quicklook,
     save_swipe_map,
     save_timeline_map,
@@ -79,4 +81,6 @@ __all__ = [
     "save_timeline_map",
     "swipe_map",
     "save_swipe_map",
+    "gallery",
+    "save_gallery",
 ]

@@ -19,6 +19,7 @@ from .viz import (
     save_change_animation,
     save_change_composite,
     save_footprint_map,
+    save_gallery,
     save_quicklook,
     save_swipe_map,
     save_timeline_map,
@@ -626,6 +627,149 @@ def swipe(
             percentile=_parse_percentile(percentile),
         )
     click.echo(f"Wrote swipe map to {path}")
+
+
+def _search_subtitle(area, bbox, start, end) -> str | None:
+    """A short, human-readable description of a search, for a page header."""
+    parts: list[str] = []
+    if area:
+        parts.append(area)
+    elif bbox:
+        parts.append(f"bbox {bbox}")
+    if start or end:
+        parts.append(f"{start or '…'} → {end or '…'}")
+    return " · ".join(parts) or None
+
+
+@cli.command()
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive name of an Umbra task/site to gather (e.g. "
+    "'Centerfield'). Faster than a broad scan -- it lists just that area's "
+    "directory.",
+)
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Keep items exposing this asset (repeatable). Defaults to --asset so "
+    "every tile is renderable.",
+)
+@click.option("--limit", type=int, default=24, show_default=True, help="Max tiles.")
+@click.option(
+    "--max-per-task",
+    type=int,
+    default=None,
+    help="Cap items per Umbra task directory. '--max-per-task 1' gives one "
+    "tile per distinct site rather than every revisit -- a quick overview of "
+    "where the archive has imagery.",
+)
+@click.option("--out", "out_path", required=True, help="Output HTML file (e.g. gallery.html).")
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to render in each thumbnail. GEC (the detected "
+    "GeoTIFF) is the sensible default; CSI also works. The complex SICD/CPHD "
+    "products aren't amplitude rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=512,
+    show_default=True,
+    help="Max pixel dimension of each thumbnail. Larger is sharper but fetches "
+    "more bytes per tile (~quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look that reveals texture the default linear stretch crushes toward "
+    "black.",
+)
+@click.option(
+    "--colormap",
+    default=None,
+    help="Matplotlib colormap for pseudo-colored thumbnails (e.g. viridis, "
+    "magma). Default is grayscale.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for each thumbnail's contrast stretch.",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=8,
+    show_default=True,
+    help="How many thumbnails to stream in parallel.",
+)
+def gallery(
+    bbox,
+    start,
+    end,
+    area,
+    products,
+    limit,
+    max_per_task,
+    out_path,
+    asset,
+    max_size,
+    db,
+    colormap,
+    percentile,
+    workers,
+) -> None:
+    """Render search results as a browseable HTML SAR thumbnail gallery.
+
+    Searches the catalog, streams a small SAR quicklook for each match (only
+    downsampled overviews via HTTP range requests -- no full downloads), and
+    writes a single self-contained HTML contact sheet: a grid of thumbnails,
+    each tile linking to its STAC item with a footprint sketch. The missing
+    "browse the catalog visually" primitive. Requires the viz extra
+    (``pip install "umbra-py[viz]"``).
+    """
+    if not out_path.lower().endswith((".html", ".htm")):
+        raise click.ClickException("Gallery output must be an .html file.")
+
+    catalog = UmbraCatalog()
+    with OrbitSpinner("Searching Umbra archive"):
+        items = list(
+            catalog.search(
+                bbox=_parse_bbox(bbox),
+                start=start,
+                end=end,
+                area=area,
+                product_types=list(products) or [asset],
+                limit=limit,
+                max_per_task=max_per_task,
+            )
+        )
+    if not items:
+        raise click.ClickException("No items matched the search.")
+
+    with OrbitSpinner(f"Streaming {len(items)} SAR thumbnail(s)"):
+        path = save_gallery(
+            items,
+            out_path,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            colormap=colormap or None,
+            percentile=_parse_percentile(percentile),
+            max_workers=workers,
+            subtitle=_search_subtitle(area, bbox, start, end),
+        )
+    click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
 
 
 @cli.command(name="map")

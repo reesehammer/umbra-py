@@ -868,11 +868,13 @@ def _thumbnail_data_uri(
     asset: str = "GEC",
     max_size: int = 256,
     db: bool = True,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    colormap: str | None = None,
 ) -> str:
     """Render a small SAR quicklook and return it as a base64 PNG data URI.
 
-    Used by :class:`umbra_py.ItemCollection` to embed thumbnails inline in a
-    notebook gallery. ``db=True`` (the default here) gives the
+    Used by :class:`umbra_py.ItemCollection` and :func:`gallery` to embed
+    thumbnails inline. ``db=True`` (the default here) gives the
     radiometrically-correct decibel stretch, which reads better at thumbnail
     size than the linear default. Only the bytes for ``max_size`` are streamed
     from the cloud-optimized GeoTIFF. Requires the ``viz`` extra.
@@ -880,10 +882,128 @@ def _thumbnail_data_uri(
     import base64  # noqa: PLC0415
     import io  # noqa: PLC0415
 
-    image = quicklook(item, asset=asset, max_size=max_size, db=db)
+    image = quicklook(
+        item, asset=asset, max_size=max_size, db=db, percentile=percentile, colormap=colormap
+    )
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _render_gallery_thumbnails(
+    items: list[UmbraItem],
+    *,
+    asset: str,
+    max_size: int,
+    db: bool,
+    percentile: tuple[float, float],
+    colormap: str | None,
+    max_workers: int,
+) -> dict[int, str | None]:
+    """Stream a SAR quicklook thumbnail per item, in parallel.
+
+    Returns ``{index: data_uri_or_None}``. Each read is independent and
+    network-bound (a cloud-optimized GeoTIFF overview fetched via HTTP range
+    requests, which releases the GIL inside GDAL), so a small thread pool
+    collapses the wall time of an N-tile sheet from N serial fetches toward
+    N/workers. Any item that can't be previewed -- no GEC asset, decode error,
+    network blip -- maps to ``None`` so its tile falls back to a footprint
+    sketch and one bad acquisition never sinks the whole sheet.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    if not items:
+        return {}
+
+    def render(index_item: tuple[int, UmbraItem]) -> tuple[int, str | None]:
+        index, item = index_item
+        try:
+            return index, _thumbnail_data_uri(
+                item,
+                asset=asset,
+                max_size=max_size,
+                db=db,
+                percentile=percentile,
+                colormap=colormap,
+            )
+        except Exception:
+            # A single tile failing must not abort the whole sheet; the tile
+            # falls back to its footprint sketch. Mirrors ItemCollection's
+            # repr, which likewise never lets one bad thumbnail raise.
+            return index, None
+
+    workers = max(1, min(max_workers, len(items)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(render, enumerate(items)))
+
+
+def gallery(
+    items: Iterable[UmbraItem],
+    *,
+    asset: str = "GEC",
+    max_size: int = 512,
+    db: bool = True,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    colormap: str | None = None,
+    max_workers: int = 8,
+    title: str = "Umbra SAR gallery",
+    subtitle: str | None = None,
+) -> str:
+    """Render items as a self-contained HTML SAR thumbnail gallery (contact sheet).
+
+    Streams a small SAR quicklook for every item -- only a downsampled overview
+    of each cloud-optimized GeoTIFF is fetched via HTTP range requests, never a
+    full download -- and lays them out as a thumbnail grid in a single
+    standalone HTML page. Each tile links to its STAC item and carries a
+    footprint sketch, so you can *browse the catalog visually* before
+    committing to a multi-gigabyte download. Thumbnails are fetched in parallel
+    (``max_workers``); any item that can't be previewed falls back to its
+    footprint sketch rather than failing the page.
+
+    ``db=True`` (the default) uses the radiometrically-correct decibel stretch,
+    which reads better at thumbnail size than the linear default. ``asset``
+    selects the product to render (``"GEC"``, the detected amplitude GeoTIFF,
+    is the sensible default; ``"CSI"`` also works). ``colormap`` names a
+    matplotlib colormap for pseudo-colored thumbnails. ``subtitle`` is shown in
+    the page header (e.g. the search terms that produced the gallery).
+
+    Returns the HTML as a string; use :func:`save_gallery` to write it to disk.
+    Requires the ``viz`` extra (``pip install "umbra-py[viz]"``).
+    """
+    # Fail fast with a clear message if the viz extra is missing -- otherwise
+    # every thumbnail would silently fall back to a footprint and the page
+    # would quietly lose its whole point.
+    _require("rasterio")
+
+    items = list(items)
+    thumbnails = _render_gallery_thumbnails(
+        items,
+        asset=asset,
+        max_size=max_size,
+        db=db,
+        percentile=percentile,
+        colormap=colormap,
+        max_workers=max_workers,
+    )
+
+    from ._html import standalone_gallery_html  # noqa: PLC0415
+
+    return standalone_gallery_html(items, thumbnails=thumbnails, title=title, subtitle=subtitle)
+
+
+def save_gallery(
+    items: Iterable[UmbraItem],
+    dest: str | os.PathLike,
+    **kwargs,
+) -> Path:
+    """Render a SAR gallery and write it to ``dest`` as standalone HTML.
+
+    See :func:`gallery` for the rendering options.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(gallery(items, **kwargs))
+    return dest
 
 
 def _compose_change_rgba(

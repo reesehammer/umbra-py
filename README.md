@@ -84,6 +84,27 @@ results  # gallery of metadata cards
 ItemCollection(results, thumbnails=True)
 ```
 
+### Browse the catalog visually (HTML gallery)
+
+For a shareable contact sheet outside a notebook, `gallery` / `save_gallery`
+(and the `umbra gallery` CLI) take a search and render a grid of streamed SAR
+quicklook thumbnails into one self-contained HTML page — each tile linking to
+its STAC item with a footprint sketch. Only downsampled GeoTIFF overviews are
+fetched (via HTTP range requests, in parallel), so you *see* what a search
+returned before downloading anything (requires the `viz` extra):
+
+```python
+from umbra_py import UmbraCatalog, save_gallery
+
+items = list(UmbraCatalog().search(area="Centerfield", limit=24))
+save_gallery(items, "gallery.html")
+```
+
+```bash
+# Same thing from the shell:
+umbra gallery --area Centerfield --out gallery.html --db
+```
+
 ### See where your search landed
 
 Visualize footprints before downloading multi-GB SAR scenes:
@@ -187,6 +208,10 @@ umbra download <item-json-url> --asset GEC --dest downloads/
 # Render a standalone SAR quicklook image -- no map, no full download.
 # Add --db for the decibel stretch and --colormap for pseudo-color.
 umbra quicklook <item-json-url> --out scene.png --db --colormap magma
+
+# Browse a search visually: one self-contained HTML contact sheet of streamed
+# SAR thumbnails, each tile linking to its STAC item. No full downloads.
+umbra gallery --area "Centerfield" --out gallery.html --db
 
 # Load an analysis-ready GeoTIFF -- clip to an area and/or decimate, no full
 # download. Streams only the requested window of the cloud-optimized GeoTIFF.
