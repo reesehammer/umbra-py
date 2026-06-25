@@ -721,6 +721,32 @@ def _read_sar_band(
     return data, bounds
 
 
+def _rgba_overlay(rgba: Any, bounds: tuple[float, float, float, float], *, opacity: float = 1.0):
+    """Encode an RGBA array as a base64-PNG Folium ``ImageOverlay``.
+
+    ``bounds`` is ``(left, bottom, right, top)`` in EPSG:4326. Embedding the
+    PNG inline keeps the resulting map a single self-contained HTML file.
+    """
+    folium = _require("folium")
+    _require("PIL")
+
+    import base64  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    left, bottom, right, top = bounds
+    buf = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    return folium.raster_layers.ImageOverlay(
+        image=data_uri,
+        bounds=[[bottom, left], [top, right]],
+        opacity=opacity,
+    )
+
+
 def image_overlay(
     item: UmbraItem,
     *,
@@ -745,25 +771,10 @@ def image_overlay(
     Requires the ``viz`` extra (which pulls in rasterio + numpy; Pillow
     comes transitively via matplotlib).
     """
-    folium = _require("folium")
-    _require("PIL")
-
-    import base64  # noqa: PLC0415
-    import io  # noqa: PLC0415
-
-    from PIL import Image  # noqa: PLC0415
-
     data, bounds = _read_sar_band(item, asset, max_size, reproject_to_4326=True)
-
     rgba = _stretch_to_rgba(data, percentile=percentile, db=db)
-    buf = io.BytesIO()
-    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
-    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-
-    return folium.raster_layers.ImageOverlay(
-        image=data_uri,
-        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-        opacity=opacity,
+    return _rgba_overlay(
+        rgba, (bounds.left, bounds.bottom, bounds.right, bounds.top), opacity=opacity
     )
 
 
@@ -1436,35 +1447,38 @@ def swipe_map(
     It is the most direct way to *feel* change in the archive, and the whole
     thing is a single self-contained HTML file.
 
-    Both acquisitions are streamed as downsampled, georeferenced overlays
-    (HTTP range requests against the cloud-optimized GeoTIFFs -- no full
-    download) and placed by their own bounds, so they line up on the
-    basemap. Pass the two items in chronological order. ``db`` selects the
-    decibel stretch (the radiometrically-correct SAR look); ``asset``
-    defaults to ``"GEC"`` (the detected GeoTIFF), which along with ``"CSI"``
-    is the sensible target.
+    The two acquisitions are **co-registered** onto one shared lon/lat grid
+    -- their footprint intersection, read at a downsampled resolution via
+    HTTP range requests against the cloud-optimized GeoTIFFs (no full
+    download) -- so both overlays cover the *identical* ground at the
+    *identical* pixel scale. That alignment is what makes the swipe honest:
+    each pass would otherwise warp to a differently-rotated bounding box, and
+    the seam would compare different ground. Pass the two items in
+    chronological order. ``db`` selects the decibel stretch (the
+    radiometrically-correct SAR look); ``asset`` defaults to ``"GEC"`` (the
+    detected GeoTIFF), which along with ``"CSI"`` is the sensible target.
 
-    Requires the ``viz`` extra (``pip install "umbra-py[viz]"``). Returns a
-    ``folium.Map`` you can ``.save("swipe.html")`` or display in Jupyter.
+    Raises ``ValueError`` if the two footprints don't overlap (nothing to
+    compare). Requires the ``viz`` extra
+    (``pip install "umbra-py[viz]"``). Returns a ``folium.Map`` you can
+    ``.save("swipe.html")`` or display in Jupyter.
     """
     folium = _require("folium")
     from folium.plugins import SideBySideLayers  # noqa: PLC0415
 
-    overlay_kwargs = dict(asset=asset, max_size=max_size, percentile=percentile, db=db)
-    left = image_overlay(before, **overlay_kwargs)
-    right = image_overlay(after, **overlay_kwargs)
+    bands, bounds = _coregister_bands([before, after], asset, max_size)
+    left = _rgba_overlay(_stretch_to_rgba(bands[0], percentile=percentile, db=db), bounds)
+    right = _rgba_overlay(_stretch_to_rgba(bands[1], percentile=percentile, db=db), bounds)
 
-    bbox = _union_bbox([item_to_feature(before), item_to_feature(after)])
-    center = ((bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2) if bbox else (0.0, 0.0)
+    bleft, bbottom, bright, btop = bounds
+    center = ((bbottom + btop) / 2, (bleft + bright) / 2)
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=2)
     left.add_to(m)
     right.add_to(m)
     _image_overlay_swipe_shim().add_to(m)
     SideBySideLayers(layer_left=left, layer_right=right).add_to(m)
-
-    if bbox is not None:
-        m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])
+    m.fit_bounds([[bbottom, bleft], [btop, bright]])
     return m
 
 

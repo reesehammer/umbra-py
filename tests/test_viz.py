@@ -1143,13 +1143,11 @@ def _swipe_items():
     return a, b
 
 
-def _fake_sar_band(np):
-    """A mock for _read_sar_band: a small array + a lat/lon BoundingBox."""
-    import types
-
-    data = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
-    bounds = types.SimpleNamespace(left=0.0, bottom=0.0, right=1.0, top=1.0)
-    return lambda *a, **k: (data, bounds)
+def _fake_coregister(np):
+    """A mock for _coregister_bands: two pixel-aligned bands sharing bounds."""
+    t1 = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
+    t2 = t1[::-1].copy()
+    return lambda *a, **k: ([t1, t2], (0.0, 0.0, 1.0, 1.0))
 
 
 def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
@@ -1160,7 +1158,7 @@ def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
     pytest.importorskip("PIL")
     from umbra_py import viz as viz_mod
 
-    monkeypatch.setattr(viz_mod, "_read_sar_band", _fake_sar_band(np))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
 
     before, after = _swipe_items()
     m = viz_mod.swipe_map(before, after)
@@ -1174,13 +1172,13 @@ def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
 
 
 def test_swipe_map_db_reaches_stretch(monkeypatch):
-    """db=True must flow swipe_map -> image_overlay -> the dB stretch."""
+    """db=True must reach the dB stretch for both co-registered bands."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
     from umbra_py import viz as viz_mod
 
-    monkeypatch.setattr(viz_mod, "_read_sar_band", _fake_sar_band(np))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
     seen_db = []
     real_stretch = viz_mod._stretch_to_rgba
 
@@ -1195,13 +1193,29 @@ def test_swipe_map_db_reaches_stretch(monkeypatch):
     assert seen_db == [True, True]  # one per overlay
 
 
+def test_swipe_map_overlays_share_one_grid(monkeypatch):
+    """Both overlays must be placed on the *same* (co-registered) bounds so
+    the swipe compares identical ground -- the fix for the misaligned seam."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+    before, after = _swipe_items()
+    m = viz_mod.swipe_map(before, after)
+    overlays = [c for c in m._children.values() if c.__class__.__name__ == "ImageOverlay"]
+    assert len(overlays) == 2
+    assert overlays[0].bounds == overlays[1].bounds == [[0.0, 0.0], [1.0, 1.0]]
+
+
 def test_save_swipe_map_writes_html(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
     from umbra_py import viz as viz_mod
 
-    monkeypatch.setattr(viz_mod, "_read_sar_band", _fake_sar_band(np))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
     before, after = _swipe_items()
     out = viz_mod.save_swipe_map(before, after, tmp_path / "swipe.html")
     assert out.exists()
@@ -1219,7 +1233,7 @@ def test_cli_swipe_writes_html(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import viz as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
-    monkeypatch.setattr(viz_mod, "_read_sar_band", _fake_sar_band(np))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
 
     out = tmp_path / "swipe.html"
     result = CliRunner().invoke(

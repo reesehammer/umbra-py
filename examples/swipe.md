@@ -71,11 +71,17 @@ it inline in a notebook or add your own layers before saving.
 
 ## How it lines up
 
-Each acquisition is streamed as a georeferenced overlay (reprojected to lon/lat)
-and placed by its own bounds, so the two passes register against the basemap and
-against each other. Unlike a [change composite](change.md) — which warps both
-onto a shared pixel grid — the swipe relies on each scene's own geocoding, which
-is what you want for a visual before/after rather than a per-pixel difference.
+The two passes are **co-registered** onto one shared lon/lat grid — their
+footprint intersection — exactly like a [change composite](change.md). Both
+overlays then cover the *identical* ground at the *identical* pixel scale, so
+the same field or road is continuous across the seam and only genuine change
+moves as you drag. This matters because each SAR pass geocodes to a
+differently-rotated rectangle: placing each by its own bounds would leave the
+two sides misaligned at the divider. Only the requested overview resolution of
+each cloud-optimized GeoTIFF is streamed, so there's no full download.
+
+If the two footprints don't overlap, there's nothing to compare and the command
+raises an error.
 
 Pick `GEC` (the default, a detected GeoTIFF) or `CSI` with `--asset`; the
 complex `SICD`/`CPHD` products aren't amplitude rasters and won't render.
