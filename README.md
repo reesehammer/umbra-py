@@ -187,6 +187,10 @@ umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --imagery --out sar_
 # any footprint mid-animation.
 umbra map --start 2024-01-01 --end 2024-06-30 --product GEC --max-per-task 1 \
     --timeline --timeline-period P7D --lazy-imagery --out coverage.html
+
+# Interactive before/after swipe map: drag a divider to wipe the earliest
+# pass of a site over the latest and watch what changed. Self-contained HTML.
+umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe.html --db
 ```
 
 ## What the data looks like

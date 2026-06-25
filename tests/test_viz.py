@@ -1127,3 +1127,158 @@ def test_cli_map_timeline_writes_animated_html(monkeypatch, tmp_path, sample_ite
     assert out.exists()
     text = out.read_text()
     assert "timedimension" in text.lower() or "TimeDimension" in text
+
+
+def _swipe_items():
+    a = UmbraItem(
+        id="before",
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        properties={"datetime": "2024-01-01T00:00:00Z", "sar:polarizations": ["VV"]},
+    )
+    b = UmbraItem(
+        id="after",
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        properties={"datetime": "2024-06-01T00:00:00Z", "sar:polarizations": ["VV"]},
+    )
+    return a, b
+
+
+def _fake_coregister(np):
+    """A mock for _coregister_bands: two pixel-aligned bands sharing bounds."""
+    t1 = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
+    t2 = t1[::-1].copy()
+    return lambda *a, **k: ([t1, t2], (0.0, 0.0, 1.0, 1.0))
+
+
+def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
+    """swipe_map builds two image overlays and a side-by-side control,
+    plus the ImageOverlay.getContainer shim the plugin needs to clip them."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+
+    before, after = _swipe_items()
+    m = viz_mod.swipe_map(before, after)
+    html_text = m.get_root().render()
+
+    assert "L.control.sideBySide" in html_text
+    # The shim points getContainer at the overlay's pane so the plugin clips
+    # in the correct (layer-point) coordinate space.
+    assert "getContainer = function() { return this.getPane(); }" in html_text
+    # Each overlay lives in its own pane so the two clips stay independent.
+    assert '"sbsBefore"' in html_text and '"sbsAfter"' in html_text
+    # Two SAR overlays (the base64 PNGs) were embedded.
+    assert html_text.count("data:image/png;base64,") == 2
+
+
+def test_swipe_map_db_reaches_stretch(monkeypatch):
+    """db=True must reach the dB stretch for both co-registered bands."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+    seen_db = []
+    real_stretch = viz_mod._stretch_to_rgba
+
+    def spy(data, **kwargs):
+        seen_db.append(kwargs.get("db"))
+        return real_stretch(data, **kwargs)
+
+    monkeypatch.setattr(viz_mod, "_stretch_to_rgba", spy)
+
+    before, after = _swipe_items()
+    viz_mod.swipe_map(before, after, db=True)
+    assert seen_db == [True, True]  # one per overlay
+
+
+def test_swipe_map_overlays_share_one_grid(monkeypatch):
+    """Both overlays must be placed on the *same* (co-registered) bounds so
+    the swipe compares identical ground -- the fix for the misaligned seam."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+    before, after = _swipe_items()
+    m = viz_mod.swipe_map(before, after)
+    overlays = [c for c in m._children.values() if c.__class__.__name__ == "ImageOverlay"]
+    assert len(overlays) == 2
+    assert overlays[0].bounds == overlays[1].bounds == [[0.0, 0.0], [1.0, 1.0]]
+
+
+def test_save_swipe_map_writes_html(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+    before, after = _swipe_items()
+    out = viz_mod.save_swipe_map(before, after, tmp_path / "swipe.html")
+    assert out.exists()
+    assert "sideBySide" in out.read_text()
+
+
+def test_cli_swipe_writes_html(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra swipe <url> <url>` fetches both items and writes HTML."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+
+    out = tmp_path / "swipe.html"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["swipe", "http://example/a.json", "http://example/b.json", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Wrote swipe map" in result.output
+
+
+def test_cli_swipe_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["swipe", "http://example/a.json", "--out", str(tmp_path / "x.html")],
+    )
+    assert result.exit_code != 0
+    assert "exactly 2" in result.output
+
+
+def test_cli_swipe_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "swipe",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--area",
+            "Centerfield",
+            "--out",
+            str(tmp_path / "x.html"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output

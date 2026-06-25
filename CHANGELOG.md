@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Interactive before/after SAR swipe maps.** New `umbra swipe` CLI command
+  and `swipe_map` / `save_swipe_map` functions render two passes of the same
+  site into a single self-contained HTML map with a draggable divider: the
+  *before* acquisition fills the left of the seam, *after* the right, and
+  dragging the handle wipes one over the other across the same ground. SAR's
+  backscatter is stable between passes, so anything that changed — a ship that
+  docked, a field that flooded, a building that rose — snaps in and out as you
+  sweep the seam. Where `change_composite` bakes the comparison into one
+  colored still and `change_animation` flips between dates, this lets you
+  *feel* the change interactively. Like `umbra change`, it works two ways: pass
+  two STAC URLs in chronological order, or search a site by
+  `--area`/`--bbox` + `--start`/`--end` and it compares the earliest and latest
+  pass (preferring a single polarization). The two acquisitions are
+  co-registered onto their shared footprint intersection (the same warp
+  `change_composite` uses), so both sides cover identical ground at identical
+  scale and line up across the seam; only the requested overview resolution of
+  each cloud-optimized GeoTIFF is streamed, no full download. `--db` selects
+  the radiometrically-correct decibel stretch. `image_overlay` gained a
+  matching `db=` option. Requires the `viz` extra.
 - **Analysis-ready loading into `xarray` (the "load" step).** New
   `to_xarray(item)` turns a geocoded Umbra GeoTIFF into a georeferenced
   `xarray.DataArray` — `y`/`x` coordinate axes in the raster's native CRS,
