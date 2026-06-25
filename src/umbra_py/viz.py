@@ -721,11 +721,19 @@ def _read_sar_band(
     return data, bounds
 
 
-def _rgba_overlay(rgba: Any, bounds: tuple[float, float, float, float], *, opacity: float = 1.0):
+def _rgba_overlay(
+    rgba: Any,
+    bounds: tuple[float, float, float, float],
+    *,
+    opacity: float = 1.0,
+    pane: str | None = None,
+):
     """Encode an RGBA array as a base64-PNG Folium ``ImageOverlay``.
 
     ``bounds`` is ``(left, bottom, right, top)`` in EPSG:4326. Embedding the
     PNG inline keeps the resulting map a single self-contained HTML file.
+    ``pane`` places the overlay in a named Leaflet pane (used by the swipe
+    map so each layer can be clipped independently).
     """
     folium = _require("folium")
     _require("PIL")
@@ -740,10 +748,12 @@ def _rgba_overlay(rgba: Any, bounds: tuple[float, float, float, float], *, opaci
     Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
     data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
+    extra = {"pane": pane} if pane is not None else {}
     return folium.raster_layers.ImageOverlay(
         image=data_uri,
         bounds=[[bottom, left], [top, right]],
         opacity=opacity,
+        **extra,
     )
 
 
@@ -1399,17 +1409,18 @@ def save_timeline_map(
     return dest
 
 
-# leaflet-side-by-side clips each layer via ``layer.getContainer()``, a method
-# Leaflet's GridLayer/TileLayer has but ImageOverlay does not (it exposes the
-# same <img> element through ``getElement()``). Alias the two on the prototype
-# so the swipe control can clip our SAR overlays. Emitted as a map child right
-# before the control so it runs inside the map's onload script -- after Leaflet
-# is loaded (head) and before ``L.control.sideBySide`` reads getContainer.
+# leaflet-side-by-side clips each layer via ``layer.getContainer()`` (which
+# GridLayer/TileLayer has but ImageOverlay does not) using a rectangle in the
+# map's *layer-point* coordinate space. That space is the coordinate origin of
+# a Leaflet pane -- not of the overlay's <img>, which is translate()-d to the
+# image's position, so clipping the <img> directly is offset by that
+# translation. So we point getContainer at the overlay's pane instead, and the
+# swipe map puts each overlay in its own pane so the two clips stay
+# independent. Emitted as a map child right before the control so it runs
+# after Leaflet loads (head) and before ``L.control.sideBySide`` reads it.
 _SWIPE_SHIM_JS = (
     "{% macro script(this, kwargs) %}\n"
-    "if (L.ImageOverlay && !L.ImageOverlay.prototype.getContainer) {"
-    "L.ImageOverlay.prototype.getContainer = L.ImageOverlay.prototype.getElement;"
-    "}\n"
+    "L.ImageOverlay.prototype.getContainer = function() { return this.getPane(); };\n"
     "{% endmacro %}"
 )
 
@@ -1464,16 +1475,24 @@ def swipe_map(
     ``.save("swipe.html")`` or display in Jupyter.
     """
     folium = _require("folium")
+    from folium.map import CustomPane  # noqa: PLC0415
     from folium.plugins import SideBySideLayers  # noqa: PLC0415
 
     bands, bounds = _coregister_bands([before, after], asset, max_size)
-    left = _rgba_overlay(_stretch_to_rgba(bands[0], percentile=percentile, db=db), bounds)
-    right = _rgba_overlay(_stretch_to_rgba(bands[1], percentile=percentile, db=db), bounds)
+    left_rgba = _stretch_to_rgba(bands[0], percentile=percentile, db=db)
+    right_rgba = _stretch_to_rgba(bands[1], percentile=percentile, db=db)
 
     bleft, bbottom, bright, btop = bounds
     center = ((bbottom + btop) / 2, (bleft + bright) / 2)
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=2)
+    # One full-map pane per overlay so the side-by-side control can clip each
+    # independently in layer-point space (see _SWIPE_SHIM_JS). Panes must be
+    # created before the overlays that reference them.
+    CustomPane("sbsBefore", z_index=625).add_to(m)
+    CustomPane("sbsAfter", z_index=626).add_to(m)
+    left = _rgba_overlay(left_rgba, bounds, pane="sbsBefore")
+    right = _rgba_overlay(right_rgba, bounds, pane="sbsAfter")
     left.add_to(m)
     right.add_to(m)
     _image_overlay_swipe_shim().add_to(m)

@@ -1165,8 +1165,11 @@ def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
     html_text = m.get_root().render()
 
     assert "L.control.sideBySide" in html_text
-    # The shim aliases getContainer -> getElement so the plugin can clip overlays.
-    assert "getContainer = L.ImageOverlay.prototype.getElement" in html_text
+    # The shim points getContainer at the overlay's pane so the plugin clips
+    # in the correct (layer-point) coordinate space.
+    assert "getContainer = function() { return this.getPane(); }" in html_text
+    # Each overlay lives in its own pane so the two clips stay independent.
+    assert '"sbsBefore"' in html_text and '"sbsAfter"' in html_text
     # Two SAR overlays (the base64 PNGs) were embedded.
     assert html_text.count("data:image/png;base64,") == 2
 
