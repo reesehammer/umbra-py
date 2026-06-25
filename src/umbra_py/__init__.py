@@ -19,9 +19,11 @@ from .exceptions import (
     AssetNotFoundError,
     CatalogError,
     DownloadError,
+    GeocodeError,
     MissingDependencyError,
     UmbraError,
 )
+from .geocode import geocode_place
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
 from .viz import (
@@ -64,6 +66,8 @@ __all__ = [
     "AssetNotFoundError",
     "DownloadError",
     "MissingDependencyError",
+    "GeocodeError",
+    "geocode_place",
     "item_to_feature",
     "items_to_featurecollection",
     "write_geojson",

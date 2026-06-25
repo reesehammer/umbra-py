@@ -13,7 +13,8 @@ from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
-from .exceptions import UmbraError
+from .exceptions import GeocodeError, UmbraError
+from .geocode import geocode_place
 from .models import UmbraItem
 from .viz import (
     save_change_animation,
@@ -37,6 +38,27 @@ def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
     return (parts[0], parts[1], parts[2], parts[3])
 
 
+def _resolve_search_bbox(
+    bbox: str | None, place: str | None
+) -> tuple[float, float, float, float] | None:
+    """Resolve ``--bbox`` / ``--place`` into a single bounding box (or None).
+
+    ``--place`` is geocoded to a bounding box via Nominatim, and the resolved
+    place is echoed so the user can confirm the match before the search runs.
+    The two options are mutually exclusive.
+    """
+    if place and bbox:
+        raise click.UsageError("Pass --place or --bbox, not both.")
+    if place:
+        try:
+            resolved, label = geocode_place(place)
+        except GeocodeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Resolved '{place}' to {label}.")
+        return resolved
+    return _parse_bbox(bbox)
+
+
 def _progress_printer(label: str):
     def cb(done: int, total: int | None) -> None:
         if total:
@@ -58,6 +80,14 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding box "
+    "and search within it, via OpenStreetMap Nominatim. Mutually exclusive "
+    "with --bbox; the match is rectangular, so it can include nearby areas "
+    "outside the named place.",
+)
 @click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
 @click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
 @click.option(
@@ -86,11 +116,12 @@ def cli() -> None:
     "site rather than every revisit.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit full STAC item JSON.")
-def search(bbox, start, end, products, area, limit, max_per_task, as_json) -> None:
+def search(bbox, place, start, end, products, area, limit, max_per_task, as_json) -> None:
     """Search the catalog by area, date and product type."""
+    search_bbox = _resolve_search_bbox(bbox, place)
     catalog = UmbraCatalog()
     results = catalog.search(
-        bbox=_parse_bbox(bbox),
+        bbox=search_bbox,
         start=start,
         end=end,
         product_types=list(products) or None,
@@ -643,6 +674,13 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
 
 @cli.command()
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding box "
+    "and gather tiles within it, via OpenStreetMap Nominatim. Mutually "
+    "exclusive with --bbox.",
+)
 @click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
 @click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
 @click.option(
@@ -715,6 +753,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
 )
 def gallery(
     bbox,
+    place,
     start,
     end,
     area,
@@ -741,11 +780,12 @@ def gallery(
     if not out_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Gallery output must be an .html file.")
 
+    search_bbox = _resolve_search_bbox(bbox, place)
     catalog = UmbraCatalog()
     with OrbitSpinner("Searching Umbra archive"):
         items = list(
             catalog.search(
-                bbox=_parse_bbox(bbox),
+                bbox=search_bbox,
                 start=start,
                 end=end,
                 area=area,
@@ -767,13 +807,21 @@ def gallery(
             colormap=colormap or None,
             percentile=_parse_percentile(percentile),
             max_workers=workers,
-            subtitle=_search_subtitle(area, bbox, start, end),
+            subtitle=_search_subtitle(place or area, bbox, start, end),
         )
     click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
 
 
 @cli.command(name="map")
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding box "
+    "and plot items within it, via OpenStreetMap Nominatim. Mutually exclusive "
+    "with --bbox. (Distinct from --geocode, which labels each plotted "
+    "footprint with its place name.)",
+)
 @click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
 @click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
 @click.option(
@@ -855,6 +903,7 @@ def gallery(
 )
 def map_cmd(
     bbox,
+    place,
     start,
     end,
     products,
@@ -869,6 +918,7 @@ def map_cmd(
     lazy_imagery,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
+    search_bbox = _resolve_search_bbox(bbox, place)
     catalog = UmbraCatalog()
     imagery_kwargs: dict | None = None
     if imagery_max_size is not None:
@@ -877,7 +927,7 @@ def map_cmd(
     with OrbitSpinner("Searching Umbra archive"):
         items = list(
             catalog.search(
-                bbox=_parse_bbox(bbox),
+                bbox=search_bbox,
                 start=start,
                 end=end,
                 product_types=list(products) or None,

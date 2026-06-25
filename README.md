@@ -199,6 +199,10 @@ to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
 # Search by area, dates and product type.
 umbra search --bbox -68.1,10.4,-67.9,10.6 --start 2024-01-01 --end 2024-01-31 --product GEC
 
+# Or search by place name -- geocoded to a bounding box via OpenStreetMap.
+# Works on `search`, `map`, and `gallery`; mutually exclusive with --bbox.
+umbra search --place "California" --start 2024-01-01 --end 2024-12-31
+
 # Inspect a single item by its STAC JSON URL.
 umbra info <item-json-url>
 

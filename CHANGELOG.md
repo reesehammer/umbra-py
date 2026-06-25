@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Search by place name (`--place`).** The `search`, `map`, and `gallery`
+  commands now accept `--place` (and there's a public `geocode_place` function)
+  so you can search a fuzzy geography instead of hand-typing a bounding box:
+
+  ```bash
+  umbra gallery --place California --out california.html
+  umbra search --place "Tokyo" --start 2024-01-01 --end 2024-12-31
+  ```
+
+  The name is forward-geocoded to a bounding box via OpenStreetMap Nominatim
+  (the inverse of the existing reverse-geocoder used for map popups), and the
+  resolved place is echoed so you can confirm the match. The box is rectangular
+  — searching `California` also catches footprints in the box's corners that
+  fall just outside the state outline — matching the bbox-overlap semantics the
+  rest of the search already uses. Mutually exclusive with `--bbox`. Raises the
+  new `GeocodeError` when a name can't be resolved.
 - **Interactive search gallery / contact sheet.** New `umbra gallery` CLI
   command and `gallery` / `save_gallery` functions take a search (area + dates,
   or a bbox / product filter) and render a grid of streamed SAR quicklook
