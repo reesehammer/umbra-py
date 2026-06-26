@@ -29,7 +29,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   co-registration; only downsampled overviews are streamed via range requests.
   New public `timescan_composite` / `save_timescan_composite` functions.
   Requires the `viz` extra.
-
+- **Gallery groups acquisitions by task.** `umbra gallery` (and
+  `gallery` / `save_gallery`) now lay the contact sheet out as labelled
+  per-task sections, so repeat passes of one site sit next to each other under
+  the task's name (e.g. "Centerfield, Utah") instead of being scattered through
+  one flat grid. A single-task gallery stays a flat grid. The new
+  `UmbraItem.task` property exposes the task label an item belongs to.
 - **Search by place name (`--place`).** The `search`, `map`, and `gallery`
   commands now accept `--place` (and there's a public `geocode_place` function)
   so you can search a fuzzy geography instead of hand-typing a bounding box:
