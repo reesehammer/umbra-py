@@ -164,3 +164,43 @@ def test_standalone_gallery_tile_omits_url_panel_when_unresolvable():
     html = standalone_gallery_html([item])
     assert "bare" in html
     assert "<details" not in html
+
+
+def _task_item(item_id: str, task: str) -> UmbraItem:
+    href = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        f"sar-data/tasks/{task}/uuid/2024-01-01-00-00-00_UMBRA-01/"
+        "2024-01-01-00-00-00_UMBRA-01.stac.v2.json"
+    )
+    return UmbraItem.from_dict({"id": item_id}, href=href)
+
+
+def test_standalone_gallery_groups_items_by_task():
+    from umbra_py._html import standalone_gallery_html
+
+    items = [
+        _task_item("a1", "Centerfield"),
+        _task_item("b1", "Bingham"),
+        _task_item("a2", "Centerfield"),
+    ]
+    html = standalone_gallery_html(items)
+    # One labelled section per distinct task, with the human-readable headings.
+    assert html.count('class="umbra-group"') == 2
+    assert "Centerfield" in html
+    assert "Bingham" in html
+    # The two-pass Centerfield task reports its count; header notes the tasks.
+    assert "2 acquisitions" in html
+    assert "2 tasks" in html
+    # Same-task tiles sit together: a1 and a2 before b1 is not required, but
+    # both Centerfield ids must precede the Bingham id (grouped, not interleaved).
+    assert html.index("a1") < html.index("a2") < html.index("b1")
+
+
+def test_standalone_gallery_single_task_stays_flat():
+    from umbra_py._html import standalone_gallery_html
+
+    items = [_task_item("a1", "Centerfield"), _task_item("a2", "Centerfield")]
+    html = standalone_gallery_html(items)
+    # Nothing to separate -> flat grid, no per-task section wrapper.
+    assert 'class="umbra-group"' not in html
+    assert '<main class="umbra-grid">' in html
