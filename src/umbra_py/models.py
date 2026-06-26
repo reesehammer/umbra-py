@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from .constants import METADATA_ASSET, PRODUCT_ASSETS, S3_BUCKET, S3_REGION
 from .exceptions import AssetNotFoundError
@@ -236,6 +237,29 @@ class UmbraItem:
             if asset_desc:
                 return str(asset_desc)
         return None
+
+    @property
+    def task(self) -> str | None:
+        """The Umbra task (AOI campaign) this acquisition belongs to.
+
+        Umbra files every pass of a site under one ``sar-data/tasks/<task>/``
+        directory, so the task is the natural grouping for "the same place
+        over time". We read the task component straight from the item's
+        sidecar ``href`` (URL-decoded, e.g. ``"Centerfield, Utah"``), since
+        that carries the human-friendly label; when no usable href is present
+        we fall back to the ``umbra:task_id`` property. Returns ``None`` when
+        neither is available.
+        """
+        href = self.href or ""
+        marker = "/sar-data/tasks/"
+        idx = href.find(marker)
+        if idx != -1:
+            rest = href[idx + len(marker) :]
+            first = rest.split("/", 1)[0]
+            if first:
+                return unquote(first)
+        task_id = self.properties.get("umbra:task_id")
+        return str(task_id) if task_id else None
 
     @property
     def asset_map(self) -> dict[str, str]:

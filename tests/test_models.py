@@ -156,3 +156,25 @@ def test_asset_href_falls_back_to_empty_without_task_id():
     raw["properties"] = {"sar:product_type": "GEC"}
     item = UmbraItem.from_dict(raw)
     assert item.asset_href("GEC") == ""
+
+
+def test_task_reads_decoded_label_from_href():
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Bingham%20Copper%20Mine/658ce57e/"
+        "2024-10-24-05-13-36_UMBRA-07/2024-10-24-05-13-36_UMBRA-07.stac.v2.json"
+    )
+    item = UmbraItem.from_dict({"id": "x"}, href=sidecar)
+    assert item.task == "Bingham Copper Mine"
+
+
+def test_task_falls_back_to_task_id_property():
+    item = UmbraItem.from_dict(
+        {"id": "x", "properties": {"umbra:task_id": "658ce57e"}},
+        href="http://example/item.json",  # no /sar-data/tasks/ component
+    )
+    assert item.task == "658ce57e"
+
+
+def test_task_is_none_when_unknown():
+    assert UmbraItem(id="x").task is None
