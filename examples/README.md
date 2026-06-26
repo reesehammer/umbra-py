@@ -5,9 +5,14 @@ notebooks below are planned for v0.2 and are great first contributions.
 
 Guides:
 
+- [`gallery.md`](gallery.md) — browse a search as a contact sheet of streamed
+  SAR thumbnails in one self-contained HTML page, with copy-paste asset/STAC
+  URLs and place-name (`--place "California"`) search (CLI + Python; uses the
+  `viz` extra).
 - [`load.md`](load.md) — load an acquisition into a georeferenced `xarray`
   DataArray for analysis (Python; uses the `load` extra).
-- [`maps.md`](maps.md) — render search results as interactive maps or GeoJSON.
+- [`maps.md`](maps.md) — render search results as interactive maps or GeoJSON
+  (incl. searching by `--place` name).
 - [`quicklook.md`](quicklook.md) — turn a single acquisition into a standalone
   SAR image (CLI + Python), with decibel scaling and matplotlib pseudo-color.
 - [`change.md`](change.md) — composite 2–3 acquisitions of the same site into

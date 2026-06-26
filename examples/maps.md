@@ -82,6 +82,12 @@ A few notes that matter for cartographic results:
 - **`bbox`** is `(min_lon, min_lat, max_lon, max_lat)` in WGS-84 degrees.
   An item is kept if its footprint overlaps the box at all (not strictly
   contained).
+- **Place names (CLI).** Don't have coordinates handy? The `umbra
+  search | map | gallery` commands accept `--place "California"` instead of
+  `--bbox` — the name is geocoded to a bounding box via OpenStreetMap
+  Nominatim (mutually exclusive with `--bbox`). See the
+  [gallery guide](gallery.md#2-search-by-place-name). In Python, call
+  `geocode_place("California")` to get the same `(bbox, label)` yourself.
 - **`product_types=["GEC"]`** is what you almost always want for visual
   maps: GEC is the cloud-optimized GeoTIFF, and it's the only product
   that the imagery overlay (§5) can render.
@@ -455,12 +461,16 @@ umbra map \
     --bbox -122.6,37.5,-122.2,37.9 \
     --start 2024-01-01 --end 2024-03-31 \
     --out sf_bay.geojson
+
+# Search by place name instead of coordinates (geocoded to a bbox)
+umbra map --place "California" --start 2024-01-01 --end 2024-03-31 --out california.html
 ```
 
 The output extension picks the format: `.html` / `.htm` → Folium map;
 `.geojson` / `.json` → GeoJSON FeatureCollection. `--imagery` and
-`--imagery-max-size` only apply to HTML output. Every other flag
-maps directly to a `UmbraCatalog.search` parameter from §3.
+`--imagery-max-size` only apply to HTML output. `--place` geocodes a
+name to a bounding box (mutually exclusive with `--bbox`). Every other
+flag maps directly to a `UmbraCatalog.search` parameter from §3.
 
 ---
 
