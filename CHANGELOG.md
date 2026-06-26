@@ -22,8 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   went over the series — ships cycling through a berth, vehicles in a lot, a
   field flooding — has high variability and glows blue/cyan, turning a whole
   archive into one glanceable "where did activity happen" picture. Accepts 3+
-  STAC item URLs directly or a search (`--area`/`--bbox` + `--start`/`--end`,
-  preferring a single polarization). Reuses the change-detection
+  STAC item URLs directly or a search (`--area`/`--bbox`/`--place` +
+  `--start`/`--end`, preferring a single polarization). `--place` geocodes a
+  name to a bounding box like the other search commands. Reuses the
+  change-detection
   co-registration; only downsampled overviews are streamed via range requests.
   New public `timescan_composite` / `save_timescan_composite` functions.
   Requires the `viz` extra.

@@ -533,6 +533,14 @@ def change(
     "bound the time range.",
 )
 @click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Search mode: geocode a place name (e.g. 'California', 'Tokyo') to a "
+    "bounding box and summarise within it, via OpenStreetMap Nominatim. "
+    "Mutually exclusive with --bbox; the match is rectangular, so it can "
+    "include nearby areas outside the named place.",
+)
 @click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
 @click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
 @click.option(
@@ -576,6 +584,7 @@ def timescan(
     out_path,
     area,
     bbox,
+    place,
     start,
     end,
     max_search,
@@ -603,17 +612,17 @@ def timescan(
 
     \b
     - Pass 3+ STAC JSON URLs directly (order doesn't matter).
-    - Or search: give --area (or --bbox) with --start/--end and the command
-      gathers a site's acquisitions automatically (preferring a single
+    - Or search: give --area (or --bbox / --place) with --start/--end and the
+      command gathers a site's acquisitions automatically (preferring a single
       polarization).
 
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
-    search_mode = any(v for v in (area, bbox, start, end))
+    search_mode = any(v for v in (area, bbox, place, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
         )
 
     if item_urls:
@@ -621,15 +630,16 @@ def timescan(
             raise click.BadParameter("a timescan needs 3 or more item URLs of the same site.")
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox):
+        if not (area or bbox or place):
             raise click.UsageError(
-                "Give --area or --bbox (optionally with --start/--end) to search, "
-                "or pass item URLs directly."
+                "Give --area, --bbox or --place (optionally with --start/--end) to "
+                "search, or pass item URLs directly."
             )
+        search_bbox = _resolve_search_bbox(bbox, place)
         with OrbitSpinner("Searching Umbra archive"):
             found = list(
                 UmbraCatalog().search(
-                    bbox=_parse_bbox(bbox),
+                    bbox=search_bbox,
                     start=start,
                     end=end,
                     area=area,
