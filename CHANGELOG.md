@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Search by place name (`--place`).** The `search`, `map`, and `gallery`
+  commands now accept `--place` (and there's a public `geocode_place` function)
+  so you can search a fuzzy geography instead of hand-typing a bounding box:
+
+  ```bash
+  umbra gallery --place California --out california.html
+  umbra search --place "Tokyo" --start 2024-01-01 --end 2024-12-31
+  ```
+
+  The name is forward-geocoded to a bounding box via OpenStreetMap Nominatim
+  (the inverse of the existing reverse-geocoder used for map popups), and the
+  resolved place is echoed so you can confirm the match. The box is rectangular
+  — searching `California` also catches footprints in the box's corners that
+  fall just outside the state outline — matching the bbox-overlap semantics the
+  rest of the search already uses. Mutually exclusive with `--bbox`. Raises the
+  new `GeocodeError` when a name can't be resolved.
+- **Interactive search gallery / contact sheet.** New `umbra gallery` CLI
+  command and `gallery` / `save_gallery` functions take a search (area + dates,
+  or a bbox / product filter) and render a grid of streamed SAR quicklook
+  thumbnails into one self-contained HTML page — each tile linking to its STAC
+  item with a footprint sketch:
+
+  ```bash
+  umbra gallery --area Centerfield --out gallery.html
+  ```
+
+  It's the missing "browse the catalog visually" primitive: only downsampled
+  cloud-optimized GeoTIFF overviews are fetched (via HTTP range requests, in
+  parallel) — never a full download — so you can *see* what a search returned
+  before committing to multi-gigabyte SAR files. Thumbnails default to the
+  radiometrically-correct decibel stretch; any item that can't be previewed
+  falls back to its footprint sketch, so one bad acquisition never sinks the
+  page. Each tile also carries a collapsible **URLs** panel with the asset's
+  direct download URL (the GEC GeoTIFF, for `curl` / GDAL `/vsicurl`) and the
+  STAC item URL (for `umbra info | download | quicklook | load`), each in a
+  click-to-select box so you can copy a URL straight into another command.
+  Built directly on the existing `quicklook` + lazy-overview reader. Requires
+  the `viz` extra.
 - **Rich notebook rendering for items and search results.** `UmbraItem` now
   has a Jupyter `_repr_html_`, so an item displayed in a notebook renders as a
   card — a metadata table next to an inline SVG sketch of its ground footprint

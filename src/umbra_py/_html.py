@@ -12,6 +12,9 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
+from .constants import ATTRIBUTION
+from .exceptions import AssetNotFoundError
+
 if TYPE_CHECKING:
     from .models import UmbraItem
 
@@ -164,3 +167,174 @@ def gallery_html(items, *, thumbnails: dict[int, str | None] | None = None) -> s
         f"{count} item{plural}</div>"
     )
     return f'{_STYLE}{header}<div class="umbra-gallery">{cards}</div>'
+
+
+# A standalone dark "contact sheet": a thumbnail-dominant grid, distinct from
+# the metadata-card layout above (which is tuned for an inline notebook repr).
+_GALLERY_STYLE = """<style>
+:root{color-scheme:dark light}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#e6edf3;
+font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:18px 22px;border-bottom:1px solid #21262d}
+header h1{margin:0;font-size:18px;font-weight:600}
+header .sub{margin:4px 0 0;color:#8b949e;font-size:13px}
+main.umbra-grid{display:grid;gap:14px;padding:18px 22px;
+grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.umbra-tile{background:#161b22;border:1px solid #21262d;border-radius:8px;
+overflow:hidden;display:flex;flex-direction:column}
+.umbra-tile .thumb{display:flex;align-items:center;justify-content:center;
+aspect-ratio:1/1;background:#010409}
+.umbra-tile .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.umbra-tile .thumb svg{width:60%;height:60%}
+.umbra-tile .empty{color:#484f58;font-size:12px}
+.umbra-tile figcaption{padding:8px 10px;display:flex;gap:8px;align-items:flex-start}
+.umbra-tile .fp{flex:0 0 auto;line-height:0}
+.umbra-tile .meta{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px}
+.umbra-tile .tid{font-weight:600;font-size:12px;word-break:break-all}
+.umbra-tile .when{color:#8b949e;font-size:11px}
+.umbra-tile a{color:#58a6ff;text-decoration:none}
+.umbra-tile a:hover{text-decoration:underline}
+.umbra-tile details.urls{margin-top:4px;font-size:11px}
+.umbra-tile details.urls summary{cursor:pointer;color:#58a6ff}
+.umbra-tile .urow{margin-top:4px;display:flex;flex-direction:column;gap:1px}
+.umbra-tile .ulbl{color:#6e7681;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.umbra-tile code.u{display:block;background:#0d1117;border:1px solid #21262d;border-radius:4px;
+padding:3px 5px;color:#c9d1d9;word-break:break-all;user-select:all;
+font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace}
+footer{padding:14px 22px;color:#6e7681;font-size:12px;border-top:1px solid #21262d}
+</style>"""
+
+
+def _asset_url(item: UmbraItem, asset: str) -> str | None:
+    """The item's public URL for ``asset`` (e.g. the GEC GeoTIFF), or None.
+
+    :meth:`UmbraItem.asset_href` raises when the product isn't present and can
+    return an empty string when no public URL is derivable; collapse both to
+    ``None`` so a tile simply omits the row rather than showing a dead value.
+    """
+    try:
+        url = item.asset_href(asset)
+    except AssetNotFoundError:
+        return None
+    return url or None
+
+
+def _url_panel_html(item: UmbraItem, asset: str) -> str:
+    """A collapsible panel of copyable URLs for feeding into other commands.
+
+    Shows the rendered asset's direct download URL (e.g. the GEC GeoTIFF) and
+    the STAC item URL, each in a click-to-select code box (``user-select:all``,
+    so a single click grabs the whole string — no JavaScript). The STAC item
+    URL is what ``umbra info | download | quicklook | load`` consume; the asset
+    URL is the direct file for ``curl`` / GDAL ``/vsicurl`` / rasterio. Rows for
+    URLs that can't be resolved are simply omitted.
+    """
+    rows: list[tuple[str, str]] = []
+    asset_url = _asset_url(item, asset)
+    if asset_url:
+        rows.append((asset, asset_url))
+    if item.href:
+        rows.append(("STAC item", item.href))
+    if not rows:
+        return ""
+    body = "".join(
+        f'<div class="urow"><span class="ulbl">{_esc(label)}</span>'
+        f'<code class="u">{_esc(url)}</code></div>'
+        for label, url in rows
+    )
+    return f'<details class="urls"><summary>URLs</summary>{body}</details>'
+
+
+def _gallery_tile_html(item: UmbraItem, *, thumbnail: str | None = None, asset: str = "GEC") -> str:
+    """Render one gallery tile: SAR thumbnail (or footprint fallback) + caption.
+
+    The thumbnail links to the item's STAC JSON. When a SAR preview is present
+    a small footprint sketch is shown beside the caption for spatial
+    orientation (the cover-cropped thumbnail loses the footprint's true shape);
+    when no preview could be fetched, the footprint sketch fills the picture
+    pane instead, so every tile still shows *something* placeable. A
+    collapsible panel exposes the asset + STAC URLs for use in other commands
+    (see :func:`_url_panel_html`); ``asset`` selects which product's URL to show.
+    """
+    info = item.metadata_summary()
+    when = _esc(info["datetime"] or "—")
+    plat = info["platform"] or "—"
+    mode = info["instrument_mode"]
+    plat_line = _esc(f"{plat} · {mode}" if mode else plat)
+    href = item.href
+
+    if thumbnail:
+        pic = f'<img src="{_esc(thumbnail)}" loading="lazy" alt="SAR quicklook" />'
+        badge = footprint_svg(item, size=40)
+    else:
+        pic = footprint_svg(item) or '<span class="empty">no preview</span>'
+        badge = None  # the picture pane already shows the footprint
+
+    if href:
+        thumb = f'<a class="thumb" href="{_esc(href)}" target="_blank" rel="noopener">{pic}</a>'
+        link = f'<a href="{_esc(href)}" target="_blank" rel="noopener">STAC item ↗</a>'
+    else:
+        thumb = f'<span class="thumb">{pic}</span>'
+        link = ""
+
+    badge_html = f'<span class="fp" title="footprint (north up)">{badge}</span>' if badge else ""
+    return (
+        '<figure class="umbra-tile">'
+        f"{thumb}"
+        "<figcaption>"
+        f"{badge_html}"
+        '<span class="meta">'
+        f'<span class="tid">{_esc(item.id)}</span>'
+        f'<span class="when">{when}</span>'
+        f'<span class="when">{plat_line}</span>'
+        f"{link}"
+        f"{_url_panel_html(item, asset)}"
+        "</span>"
+        "</figcaption>"
+        "</figure>"
+    )
+
+
+def standalone_gallery_html(
+    items,
+    *,
+    thumbnails: dict[int, str | None] | None = None,
+    title: str = "Umbra SAR gallery",
+    subtitle: str | None = None,
+    asset: str = "GEC",
+) -> str:
+    """Render items as a self-contained HTML contact-sheet page.
+
+    Unlike :func:`gallery_html` (an inline fragment for a notebook repr), this
+    returns a *full* HTML document: a thumbnail grid you can open straight off
+    disk. ``thumbnails`` maps each item's index to a ``data:image/png`` URI;
+    tiles without one fall back to their footprint sketch. ``asset`` selects
+    which product's download URL each tile exposes in its URL panel.
+    """
+    items = list(items)
+    thumbnails = thumbnails or {}
+    tiles = "".join(
+        _gallery_tile_html(item, thumbnail=thumbnails.get(i), asset=asset)
+        for i, item in enumerate(items)
+    )
+
+    count = len(items)
+    plural = "" if count == 1 else "s"
+    n_thumbs = sum(1 for v in thumbnails.values() if v)
+    sub = f"{_esc(subtitle)} · " if subtitle else ""
+    head_sub = f"{sub}{count} acquisition{plural}"
+    if n_thumbs < count:
+        head_sub += f" · {n_thumbs} with SAR preview"
+
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{_esc(title)}</title>\n"
+        f"{_GALLERY_STYLE}\n</head>\n<body>\n"
+        f'<header><h1>{_esc(title)}</h1><p class="sub">{head_sub}</p></header>\n'
+        f'<main class="umbra-grid">{tiles}</main>\n'
+        f"<footer>{_esc(ATTRIBUTION)} Generated by umbra-py.</footer>\n"
+        "</body>\n</html>\n"
+    )

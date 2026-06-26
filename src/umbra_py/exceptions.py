@@ -21,3 +21,7 @@ class DownloadError(UmbraError):
 
 class MissingDependencyError(UmbraError):
     """Raised when an optional dependency (e.g. an extra) is not installed."""
+
+
+class GeocodeError(UmbraError):
+    """Raised when a place name cannot be resolved to a location."""

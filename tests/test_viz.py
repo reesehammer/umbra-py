@@ -244,6 +244,127 @@ def test_cli_quicklook_rejects_bad_percentile(monkeypatch, tmp_path, sample_item
     assert "percentile" in result.output.lower()
 
 
+# -- gallery (HTML contact sheet) ------------------------------------------
+
+
+def test_gallery_embeds_streamed_thumbnails(monkeypatch, sample_item_dict):
+    """gallery() streams a thumbnail per item and assembles a standalone page.
+
+    The thumbnail fetch and the viz-extra check are both mocked so the test
+    stays offline.
+    """
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        viz_mod,
+        "_thumbnail_data_uri",
+        lambda item, **_k: f"data:image/png;base64,{item.id}",
+    )
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    other = UmbraItem.from_dict({**sample_item_dict, "id": "second"})
+    html = viz_mod.gallery([item, other], subtitle="rome")
+
+    assert html.startswith("<!doctype html>")
+    assert f'src="data:image/png;base64,{item.id}"' in html
+    assert 'src="data:image/png;base64,second"' in html
+    assert "rome" in html
+
+
+def test_gallery_thumbnail_failure_falls_back_to_footprint(monkeypatch, sample_item_dict):
+    """A thumbnail that can't be fetched must not sink the sheet -- the tile
+    drops back to its footprint sketch."""
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", boom)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = viz_mod.gallery([item])  # must not raise
+    assert "data:image" not in html
+    assert "<svg" in html  # footprint fallback
+    assert item.id in html
+
+
+def test_save_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    out = viz_mod.save_gallery([item], tmp_path / "g.html")
+    assert out.exists()
+    assert out.read_text().startswith("<!doctype html>")
+
+
+def test_gallery_requires_viz_extra(monkeypatch, sample_item_dict):
+    """Without rasterio, gallery() should fail fast with a clear message rather
+    than quietly producing an all-footprint page."""
+    from umbra_py import viz as viz_mod
+    from umbra_py.exceptions import MissingDependencyError
+
+    def no_rasterio(module):
+        if module == "rasterio":
+            raise MissingDependencyError("rasterio missing")
+
+    monkeypatch.setattr(viz_mod, "_require", no_rasterio)
+    with pytest.raises(MissingDependencyError):
+        viz_mod.gallery([UmbraItem.from_dict(sample_item_dict)])
+
+
+def test_cli_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra gallery --area X` searches, streams (mocked)
+    thumbnails, and writes a self-contained HTML page."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([item]))
+
+    out = tmp_path / "gallery.html"
+    result = CliRunner().invoke(cli_mod.cli, ["gallery", "--area", "X", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "data:image/png;base64,Z" in out.read_text()
+    assert "Wrote gallery" in result.output
+
+
+def test_cli_gallery_rejects_non_html(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["gallery", "--area", "X", "--out", str(tmp_path / "x.png")]
+    )
+    assert result.exit_code != 0
+    assert "html" in result.output.lower()
+
+
+def test_cli_gallery_no_results(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([]))
+    result = CliRunner().invoke(
+        cli_mod.cli, ["gallery", "--area", "Nowhere", "--out", str(tmp_path / "g.html")]
+    )
+    assert result.exit_code != 0
+    assert "No items matched" in result.output
+
+
 def test_compose_change_rgba_identical_bands_are_gray():
     """Two identical passes have no change, so every valid pixel lands on
     the gray diagonal (R == G == B)."""
