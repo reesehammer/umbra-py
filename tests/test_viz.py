@@ -1403,3 +1403,203 @@ def test_cli_swipe_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample_it
     )
     assert result.exit_code != 0
     assert "not both" in result.output
+
+
+# --- timescan composite ------------------------------------------------------
+
+
+def test_compose_timescan_rgba_stable_series_has_no_blue():
+    """A scene that never changes has std ~ 0, so the variability (blue)
+    channel stays dark even where mean/max are bright."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_timescan_rgba
+
+    band = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
+    rgba = _compose_timescan_rgba([band, band, band], percentile=(0, 100))
+
+    assert rgba.shape == (4, 4, 4)
+    assert rgba.dtype.name == "uint8"
+    assert (rgba[..., 2] == 0).all()  # blue (std) channel dark everywhere
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_compose_timescan_rgba_variable_pixel_lights_up_blue():
+    """The pixel that swings most across the series gets the strongest blue
+    (highest temporal std); a steady pixel does not."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_timescan_rgba
+
+    # Pixel (0,0) flickers bright/dark; pixel (1,1) holds steady. Other pixels
+    # give the per-channel percentile stretch a spread to work against.
+    t1 = np.array([[100.0, 10.0, 20.0], [30.0, 50.0, 40.0]], dtype="float32")
+    t2 = np.array([[1.0, 12.0, 22.0], [32.0, 50.0, 42.0]], dtype="float32")
+    t3 = np.array([[100.0, 14.0, 24.0], [34.0, 50.0, 44.0]], dtype="float32")
+    rgba = _compose_timescan_rgba([t1, t2, t3], percentile=(0, 100))
+
+    flicker_blue = int(rgba[0, 0, 2])
+    steady_blue = int(rgba[1, 1, 2])
+    assert flicker_blue > steady_blue
+    assert flicker_blue == 255  # the most variable pixel tops the std stretch
+
+
+def test_compose_timescan_rgba_invalid_pixels_propagate():
+    """A pixel invalid on any one pass is transparent in the composite."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_timescan_rgba
+
+    t1 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+    t2 = np.array([[np.nan, 2.0], [3.0, 4.0]], dtype="float32")
+    t3 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+    rgba = _compose_timescan_rgba([t1, t2, t3])
+    assert rgba[0, 0, 3] == 0  # invalid in t2 -> transparent
+    assert rgba[1, 1, 3] == 255  # valid in all -> opaque
+
+
+def test_compose_timescan_rgba_requires_three_bands():
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_timescan_rgba
+
+    band = np.ones((2, 2), dtype="float32")
+    with pytest.raises(ValueError, match="at least 3"):
+        _compose_timescan_rgba([band, band])
+
+
+def test_compose_timescan_rgba_db_keeps_steady_pixel_dark():
+    """In the dB domain a steady pixel still has ~zero variability."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.viz import _compose_timescan_rgba
+
+    t1 = np.array([[100.0, 10.0], [50.0, 5.0]], dtype="float32")
+    t2 = np.array([[1.0, 10.0], [50.0, 5.0]], dtype="float32")
+    t3 = np.array([[100.0, 10.0], [50.0, 5.0]], dtype="float32")
+    rgba = _compose_timescan_rgba([t1, t2, t3], percentile=(0, 100), db=True)
+    # Steady pixels (anything but (0,0)) carry no variability.
+    assert rgba[0, 1, 2] == 0
+    assert rgba[1, 0, 2] == 0
+    assert rgba[0, 0, 2] == 255  # the flickering pixel tops the std stretch
+
+
+def test_timescan_composite_returns_pil_image(monkeypatch):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
+    t2 = t1[::-1].copy()
+    t3 = t1.copy()
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2, t3], (0, 0, 1, 1)))
+
+    items = [UmbraItem(id=c, bbox=(0.0, 0.0, 1.0, 1.0)) for c in "abc"]
+    img = viz_mod.timescan_composite(items)
+    assert img.size == (4, 3)  # PIL is (width, height)
+    assert img.mode == "RGBA"
+
+
+def test_timescan_composite_rejects_too_few_items(monkeypatch):
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: pytest.fail("should not co-register a bad item count"),
+    )
+    items = [UmbraItem(id=c, bbox=(0.0, 0.0, 1.0, 1.0)) for c in "ab"]
+    with pytest.raises(ValueError, match="at least 3"):
+        viz_mod.timescan_composite(items)
+
+
+def test_save_timescan_composite_writes_png(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+
+    t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
+    monkeypatch.setattr(
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1)),
+    )
+
+    items = [UmbraItem(id=c, bbox=(0.0, 0.0, 1.0, 1.0)) for c in "abc"]
+    out = viz_mod.save_timescan_composite(items, tmp_path / "timescan.png")
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_cli_timescan_writes_image(monkeypatch, tmp_path, sample_item_dict):
+    """End-to-end: `umbra timescan <url> <url> <url>` writes a PNG."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
+    monkeypatch.setattr(
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1)),
+    )
+
+    out = tmp_path / "timescan.png"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "timescan",
+            "http://example/a.json",
+            "http://example/b.json",
+            "http://example/c.json",
+            "--out",
+            str(out),
+            "--db",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Wrote timescan composite" in result.output
+
+
+def test_cli_timescan_rejects_too_few_urls(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "timescan",
+            "http://example/a.json",
+            "http://example/b.json",
+            "--out",
+            str(tmp_path / "x.png"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "3 or more" in result.output
+
+
+def test_cli_timescan_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "timescan",
+            "http://example/a.json",
+            "http://example/b.json",
+            "http://example/c.json",
+            "--area",
+            "Centerfield",
+            "--out",
+            str(tmp_path / "x.png"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output

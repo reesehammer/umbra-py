@@ -42,9 +42,11 @@ from .viz import (
     save_quicklook,
     save_swipe_map,
     save_timeline_map,
+    save_timescan_composite,
     select_change_frames,
     swipe_map,
     timeline_map,
+    timescan_composite,
     write_geojson,
 )
 
@@ -78,6 +80,8 @@ __all__ = [
     "save_quicklook",
     "change_composite",
     "save_change_composite",
+    "timescan_composite",
+    "save_timescan_composite",
     "select_change_frames",
     "change_animation",
     "save_change_animation",

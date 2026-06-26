@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Timescan composite (`umbra timescan`).** Collapse a site's *entire* time
+  series into a single temporal-statistics image, rather than the 2–3 dates
+  `umbra change` is limited to. Each pixel is summarised across all passes and
+  mapped to color — **red = mean** backscatter, **green = peak**, **blue =
+  temporal standard deviation (variability)**:
+
+  ```bash
+  umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+      --out timescan.png --db
+  ```
+
+  Stable terrain (no variability) renders gray/yellow; anything that came and
+  went over the series — ships cycling through a berth, vehicles in a lot, a
+  field flooding — has high variability and glows blue/cyan, turning a whole
+  archive into one glanceable "where did activity happen" picture. Accepts 3+
+  STAC item URLs directly or a search (`--area`/`--bbox` + `--start`/`--end`,
+  preferring a single polarization). Reuses the change-detection
+  co-registration; only downsampled overviews are streamed via range requests.
+  New public `timescan_composite` / `save_timescan_composite` functions.
+  Requires the `viz` extra.
+
 - **Search by place name (`--place`).** The `search`, `map`, and `gallery`
   commands now accept `--place` (and there's a public `geocode_place` function)
   so you can search a fuzzy geography instead of hand-typing a bounding box:
