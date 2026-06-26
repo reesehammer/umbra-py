@@ -39,8 +39,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before committing to multi-gigabyte SAR files. Thumbnails default to the
   radiometrically-correct decibel stretch; any item that can't be previewed
   falls back to its footprint sketch, so one bad acquisition never sinks the
-  page. Built directly on the existing `quicklook` + lazy-overview reader.
-  Requires the `viz` extra.
+  page. Each tile also carries a collapsible **URLs** panel with the asset's
+  direct download URL (the GEC GeoTIFF, for `curl` / GDAL `/vsicurl`) and the
+  STAC item URL (for `umbra info | download | quicklook | load`), each in a
+  click-to-select box so you can copy a URL straight into another command.
+  Built directly on the existing `quicklook` + lazy-overview reader. Requires
+  the `viz` extra.
 - **Rich notebook rendering for items and search results.** `UmbraItem` now
   has a Jupyter `_repr_html_`, so an item displayed in a notebook renders as a
   card — a metadata table next to an inline SVG sketch of its ground footprint

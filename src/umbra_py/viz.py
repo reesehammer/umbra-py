@@ -988,7 +988,9 @@ def gallery(
 
     from ._html import standalone_gallery_html  # noqa: PLC0415
 
-    return standalone_gallery_html(items, thumbnails=thumbnails, title=title, subtitle=subtitle)
+    return standalone_gallery_html(
+        items, thumbnails=thumbnails, title=title, subtitle=subtitle, asset=asset
+    )
 
 
 def save_gallery(
