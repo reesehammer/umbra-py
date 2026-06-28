@@ -141,6 +141,46 @@ def test_cli_map_place_resolves_to_bbox(monkeypatch, tmp_path):
     assert captured["bbox"] == _CALIFORNIA_EXPECTED
 
 
+def test_cli_timescan_place_resolves_to_bbox(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def fake_search(self, **kwargs):
+        captured.update(kwargs)
+        return iter([])
+
+    monkeypatch.setattr(cli_mod, "geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California"))
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+
+    # No items -> ClickException ("need at least 3"), but the geocode + bbox
+    # wiring still ran first.
+    result = CliRunner().invoke(
+        cli_mod.cli, ["timescan", "--place", "California", "--out", str(tmp_path / "t.png")]
+    )
+    assert "Resolved 'California'" in result.output
+    assert captured["bbox"] == _CALIFORNIA_EXPECTED
+
+
+def test_cli_timescan_place_and_bbox_conflict(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    def boom(_q):  # pragma: no cover - must not be reached
+        raise AssertionError("geocode should not run when both options are given")
+
+    monkeypatch.setattr(cli_mod, "geocode_place", boom)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["timescan", "--place", "X", "--bbox", "0,0,1,1", "--out", str(tmp_path / "t.png")],
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output.lower()
+
+
 def test_cli_gallery_place_resolves_and_labels_page(monkeypatch, tmp_path):
     from click.testing import CliRunner
 

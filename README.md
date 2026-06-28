@@ -200,7 +200,8 @@ to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
 umbra search --bbox -68.1,10.4,-67.9,10.6 --start 2024-01-01 --end 2024-01-31 --product GEC
 
 # Or search by place name -- geocoded to a bounding box via OpenStreetMap.
-# Works on `search`, `map`, and `gallery`; mutually exclusive with --bbox.
+# Works on `search`, `map`, `gallery`, and `timescan`; mutually exclusive
+# with --bbox.
 umbra search --place "California" --start 2024-01-01 --end 2024-12-31
 
 # Inspect a single item by its STAC JSON URL.
@@ -237,6 +238,11 @@ umbra map --start 2024-01-01 --end 2024-06-30 --product GEC --max-per-task 1 \
 # Interactive before/after swipe map: drag a divider to wipe the earliest
 # pass of a site over the latest and watch what changed. Self-contained HTML.
 umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe.html --db
+
+# Timescan: collapse a whole time series of a site into one image. Per pixel,
+# red=mean, green=peak, blue=temporal variability. Stable ground reads
+# gray/yellow; anything that came and went over the series glows blue/cyan.
+umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out timescan.png --db
 ```
 
 ## What the data looks like

@@ -24,6 +24,7 @@ from .viz import (
     save_quicklook,
     save_swipe_map,
     save_timeline_map,
+    save_timescan_composite,
     select_change_frames,
     write_geojson,
 )
@@ -514,6 +515,164 @@ def change(
                 percentile=_parse_percentile(percentile),
             )
         click.echo(f"Wrote change composite to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output image file (.png/.jpg) for the temporal-statistics composite.",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Search mode: name of an Umbra site (e.g. 'Centerfield') to gather "
+    "automatically instead of passing URLs. Combine with --start/--end to "
+    "bound the time range.",
+)
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Search mode: geocode a place name (e.g. 'California', 'Tokyo') to a "
+    "bounding box and summarise within it, via OpenStreetMap Nominatim. "
+    "Mutually exclusive with --bbox; the match is rectangular, so it can "
+    "include nearby areas outside the named place.",
+)
+@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
+@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--max-search",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Search mode: cap how many acquisitions the search pulls into the stack.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to summarise. GEC (the detected GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=2048,
+    show_default=True,
+    help="Max pixel dimension of the shared grid. Larger is sharper but fetches "
+    "more bytes (~quadratic).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Summarise in the decibel (log-amplitude) domain -- the "
+    "radiometrically-correct SAR look, measuring variability in log space.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for each statistic's contrast stretch.",
+)
+def timescan(
+    item_urls,
+    out_path,
+    area,
+    bbox,
+    place,
+    start,
+    end,
+    max_search,
+    asset,
+    max_size,
+    db,
+    percentile,
+) -> None:
+    """Collapse a whole SAR time series into one temporal-statistics image.
+
+    Where `umbra change` compares 2-3 dates, this summarises the *entire*
+    stack of a site's acquisitions per pixel and maps the statistics to color:
+
+    \b
+    - red   = average backscatter
+    - green = peak backscatter
+    - blue  = temporal variability (standard deviation)
+
+    Stable terrain renders gray/yellow; anything that came and went across the
+    series -- ships cycling through a berth, vehicles in a lot, a field
+    flooding -- glows blue/cyan. The whole archive of a site becomes one
+    glanceable "where did activity happen" picture.
+
+    Two ways to choose what to summarise:
+
+    \b
+    - Pass 3+ STAC JSON URLs directly (order doesn't matter).
+    - Or search: give --area (or --bbox / --place) with --start/--end and the
+      command gathers a site's acquisitions automatically (preferring a single
+      polarization).
+
+    Only downsampled overviews are streamed via HTTP range requests -- no full
+    download. Requires the viz extra (``pip install "umbra-py[viz]"``).
+    """
+    search_mode = any(v for v in (area, bbox, place, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+        )
+
+    if item_urls:
+        if len(item_urls) < 3:
+            raise click.BadParameter("a timescan needs 3 or more item URLs of the same site.")
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox or place):
+            raise click.UsageError(
+                "Give --area, --bbox or --place (optionally with --start/--end) to "
+                "search, or pass item URLs directly."
+            )
+        search_bbox = _resolve_search_bbox(bbox, place)
+        with OrbitSpinner("Searching Umbra archive"):
+            found = list(
+                UmbraCatalog().search(
+                    bbox=search_bbox,
+                    start=start,
+                    end=end,
+                    area=area,
+                    product_types=[asset],
+                    limit=max_search,
+                )
+            )
+        if len(found) < 3:
+            raise click.ClickException(
+                f"Need at least 3 {asset} acquisitions to summarise; the search "
+                f"found {len(found)}. Widen the date range or area."
+            )
+        # The whole series (single-polarization where possible), oldest-first.
+        items = select_change_frames(found, frames=None)
+        if len({tuple(i.polarizations) for i in items}) > 1:
+            click.echo(
+                "warning: selected acquisitions have mixed polarizations; some "
+                "apparent variability may be a polarization difference, not real change.",
+                err=True,
+            )
+        span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
+        click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+
+    with OrbitSpinner(f"Rendering timescan of {len(items)} acquisitions"):
+        path = save_timescan_composite(
+            items,
+            out_path,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            percentile=_parse_percentile(percentile),
+        )
+    click.echo(f"Wrote timescan composite to {path}")
 
 
 @cli.command()
