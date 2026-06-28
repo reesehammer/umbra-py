@@ -35,6 +35,7 @@ acquisitions via paginated S3 listings.
 src/umbra_py/
   __init__.py        # public API surface; update __all__ when adding exports
   catalog.py         # UmbraCatalog: walks sar-data/tasks/ via S3 listings, prunes by date
+  index.py           # CatalogIndex: local SQLite index of items for fast offline/repeat search
   models.py          # UmbraItem dataclass + asset classification
   download.py        # download_url / download_asset / download_item (resume support)
   cli.py             # `umbra search | info | download`

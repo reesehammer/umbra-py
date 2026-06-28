@@ -193,9 +193,44 @@ from umbra_py import to_geotiff
 to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
 ```
 
+### Fast, repeatable search with a local index
+
+Umbra publishes no STAC API, so every search re-walks the public S3 bucket —
+fine once, slow when you search the same data again and again. `CatalogIndex`
+persists what a walk discovers into a local SQLite database and answers
+searches from SQL, turning repeat (and overlapping) searches into near-instant
+local queries. It's a first-class building block: walk once, then query offline
+— or build the `.db` on a schedule and ship it as a prebuilt catalog for a
+service layered on top.
+
+```python
+from umbra_py import CatalogIndex
+
+# Walk S3 once and persist the slice you care about (idempotent: safe to re-run
+# to refresh and grow it incrementally).
+with CatalogIndex("umbra.db") as index:
+    index.build(area="centerfield", start="2024-01-01", end="2024-12-31")
+
+    # Now query locally — same filters as UmbraCatalog.search, no network.
+    for item in index.search(area="centerfield", product_types=["GEC"]):
+        print(item.summary())
+```
+
+`CatalogIndex.search` mirrors `UmbraCatalog.search` (bbox / date / product /
+area / limit / max_per_task), so you can swap the live walk for the index
+without changing anything else. With no path it uses `$UMBRA_INDEX_DB` or
+`~/.cache/umbra-py/catalog.db`.
+
 ### Command line
 
 ```bash
+# Build a local index once (scope it with the usual search flags), then search
+# it offline with --local for near-instant repeats. `umbra index info` reports
+# what it holds.
+umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+umbra search --local --area "Centerfield" --product GEC
+umbra index info
+
 # Search by area, dates and product type.
 umbra search --bbox -68.1,10.4,-67.9,10.6 --start 2024-01-01 --end 2024-01-31 --product GEC
 

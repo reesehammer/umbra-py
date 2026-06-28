@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import click
 
@@ -15,6 +16,7 @@ from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .geocode import geocode_place
+from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
 from .viz import (
     save_change_animation,
@@ -58,6 +60,24 @@ def _resolve_search_bbox(
         click.echo(f"Resolved '{place}' to {label}.")
         return resolved
     return _parse_bbox(bbox)
+
+
+def _index_path(db_path: str | None) -> Path:
+    """Resolve the index database path from an explicit ``--db`` or the default."""
+    return Path(db_path) if db_path else default_index_path()
+
+
+def _search_source(local: bool, db_path: str | None) -> tuple[object, bool]:
+    """Pick the search backend: the local index (when ``--local``/``--db`` is
+    given) or a live :class:`UmbraCatalog`. Returns ``(source, is_index)``."""
+    if local or db_path is not None:
+        path = _index_path(db_path)
+        if not path.exists():
+            raise click.ClickException(
+                f"No index at {path}. Build one first with 'umbra index build'."
+            )
+        return CatalogIndex(path), True
+    return UmbraCatalog(), False
 
 
 def _progress_printer(label: str):
@@ -117,39 +137,57 @@ def cli() -> None:
     "site rather than every revisit.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit full STAC item JSON.")
-def search(bbox, place, start, end, products, area, limit, max_per_task, as_json) -> None:
+@click.option(
+    "--local",
+    is_flag=True,
+    help="Search a local SQLite index built with 'umbra index build' instead "
+    "of walking S3 live -- near-instant for repeat searches. Only returns "
+    "acquisitions already present in the index.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Path to the local index database (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Implies --local.",
+)
+def search(bbox, place, start, end, products, area, limit, max_per_task, as_json, local, db_path):
     """Search the catalog by area, date and product type."""
     search_bbox = _resolve_search_bbox(bbox, place)
-    catalog = UmbraCatalog()
-    results = catalog.search(
-        bbox=search_bbox,
-        start=start,
-        end=end,
-        product_types=list(products) or None,
-        area=area,
-        limit=limit,
-        max_per_task=max_per_task,
-    )
-    found = 0
-    spinner = OrbitSpinner("Searching Umbra archive")
-    spinner.__enter__()
+    source, index = _search_source(local, db_path)
     try:
-        for item in results:
-            # Stop the spinner the moment we have something to print so the
-            # streaming output isn't fighting the animation's cursor moves.
+        results = source.search(
+            bbox=search_bbox,
+            start=start,
+            end=end,
+            product_types=list(products) or None,
+            area=area,
+            limit=limit,
+            max_per_task=max_per_task,
+        )
+        found = 0
+        spinner = OrbitSpinner("Searching local index" if index else "Searching Umbra archive")
+        spinner.__enter__()
+        try:
+            for item in results:
+                # Stop the spinner the moment we have something to print so the
+                # streaming output isn't fighting the animation's cursor moves.
+                spinner.stop()
+                found += 1
+                if as_json:
+                    click.echo(json.dumps(item.raw))
+                else:
+                    click.echo(item.summary())
+                    if item.href:
+                        click.echo(f"  url      : {item.href}")
+                    click.echo("")
+        finally:
             spinner.stop()
-            found += 1
-            if as_json:
-                click.echo(json.dumps(item.raw))
-            else:
-                click.echo(item.summary())
-                if item.href:
-                    click.echo(f"  url      : {item.href}")
-                click.echo("")
+        if not as_json:
+            click.echo(f"{found} item(s).")
     finally:
-        spinner.stop()
-    if not as_json:
-        click.echo(f"{found} item(s).")
+        if index:
+            source.close()
 
 
 @cli.command()
@@ -1160,6 +1198,90 @@ def map_cmd(
             "Unrecognized output extension. Use .html for a map or .geojson for data."
         )
     click.echo(f"Wrote {len(items)} footprint(s) to {path}")
+
+
+@cli.group()
+def index() -> None:
+    """Build and inspect a local SQLite catalog index for fast offline search.
+
+    Umbra has no STAC API, so a live search re-walks S3 every time. Index the
+    archive once into a local database, then run 'umbra search --local' for
+    near-instant repeat searches over the same data.
+    """
+
+
+@index.command("build")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Output index database (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Created if missing; existing rows are "
+    "refreshed and new ones added (incremental).",
+)
+@click.option("--bbox", help="Scope the build to a footprint: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Scope the build to a geocoded place name (mutually exclusive with --bbox).",
+)
+@click.option("--start", help="Scope to acquisitions on/after this date (YYYY-MM-DD).")
+@click.option("--end", help="Scope to acquisitions on/before this date (YYYY-MM-DD).")
+@click.option(
+    "--area",
+    default=None,
+    help="Scope to one Umbra task/site by name (e.g. 'Centerfield'). Much "
+    "faster than a full walk -- it lists just that task.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap how many acquisitions to index this run (default: no cap -- index "
+    "everything in scope).",
+)
+def index_build(db_path, bbox, place, start, end, area, limit) -> None:
+    """Walk Umbra's archive and persist matching acquisitions into the index.
+
+    With no scope flags this indexes the whole bucket, which lists every task
+    and takes a while; pass --area/--bbox/--place/--start/--end to index just
+    the slice you care about.
+    """
+    search_bbox = _resolve_search_bbox(bbox, place)
+    path = _index_path(db_path)
+    with OrbitSpinner(f"Indexing Umbra archive into {path}"):
+        with CatalogIndex(path) as idx:
+            written = idx.build(
+                bbox=search_bbox,
+                start=start,
+                end=end,
+                area=area,
+                limit=limit,
+            )
+            total = len(idx)
+    click.echo(f"Indexed {written} acquisition(s); index now holds {total}. ({path})")
+
+
+@index.command("info")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index database to inspect (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
+)
+def index_info(db_path) -> None:
+    """Show what a local index holds: item count, date span and task count."""
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
+    with CatalogIndex(path) as idx:
+        s = idx.stats()
+    size_mb = path.stat().st_size / 1e6
+    click.echo(f"Index: {path}")
+    click.echo(f"  items : {s['items']}")
+    click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
+    click.echo(f"  tasks : {s['tasks']}")
+    click.echo(f"  size  : {size_mb:.1f} MB")
 
 
 def main() -> None:
