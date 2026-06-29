@@ -265,6 +265,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so captured logs stay clean.
 
 ### Fixed
+- **NumPy 2.5 `DeprecationWarning` from raster reads.** `to_xarray` /
+  `to_geotiff` and the viz overview readers (`quicklook`, change/swipe
+  composites) read a single band via rasterio's scalar-index `read(1, …)`
+  path, which squeezes the band axis with an in-place `ndarray.shape`
+  assignment — deprecated in NumPy 2.5, so every read emitted a warning on
+  Python 3.12+/NumPy ≥2.5. These now read with a list index into a 3-D
+  `out_shape` and drop the band axis explicitly (`read([1], …)[0]`), which
+  returns the identical array with no in-place reshape. Output is unchanged;
+  the warnings are gone.
 - `UmbraItem.asset_href` now resolves a public, fetchable HTTPS URL for
   items built directly from a published STAC sidecar (i.e. `umbra info`,
   `umbra download`, `umbra quicklook`, or `UmbraItem.from_dict(get_json(url))`).

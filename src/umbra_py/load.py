@@ -154,12 +154,16 @@ def to_xarray(
         out_w = max(round(window.width / scale), 1)
         out_h = max(round(window.height / scale), 1)
 
+        # Read band 1 via a list index into a 3-D out_shape and drop the band
+        # axis ourselves. Rasterio's scalar-index + 2-D out_shape path squeezes
+        # the result in place with an ndarray.shape assignment, which NumPy 2.5
+        # deprecates; a list index returns a 3-D array with no in-place reshape.
         data = src.read(
-            1,
+            [1],
             window=window,
-            out_shape=(out_h, out_w),
+            out_shape=(1, out_h, out_w),
             resampling=Resampling.average,
-        ).astype("float32")
+        )[0].astype("float32")
 
         nodata = src.nodata
         crs = src.crs
