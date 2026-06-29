@@ -1249,9 +1249,16 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
     """
     search_bbox = _resolve_search_bbox(bbox, place)
     path = _index_path(db_path)
-    with OrbitSpinner(f"Indexing Umbra archive into {path}"):
+    scope = "Umbra archive" if not any((search_bbox, start, end, area)) else "matching acquisitions"
+    with OrbitSpinner(f"Indexing {scope}") as spinner:
+        # A full-bucket build runs for a while, so show a live tally instead of
+        # an inscrutable spinner. The spinner repaints its label each frame.
+        def tally(n: int) -> None:
+            spinner.label = f"Indexing {scope} ({n} so far)"
+
         with CatalogIndex(path) as idx:
             written = idx.build(
+                progress=tally,
                 bbox=search_bbox,
                 start=start,
                 end=end,

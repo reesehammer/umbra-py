@@ -27,6 +27,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       list(index.search(area="centerfield"))     # local, no network
   ```
 
+  Run `umbra index build` (or `CatalogIndex.build()`) with **no filters to
+  index the whole catalog** — one long, one-time crawl that makes every later
+  `--local` search instant — or pass the usual `--area`/`--bbox`/`--start`/
+  `--end` to scope it to a slice. The CLI shows a live running tally while it
+  walks (a `progress` callback on `build`).
+
   Each acquisition is one row keyed by its sidecar URL, carrying the columns
   the filters need (acquisition date, bounding box, task, product assets) plus
   the full STAC JSON so items rebuild without another network round trip.

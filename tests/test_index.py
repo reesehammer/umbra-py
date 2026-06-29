@@ -181,6 +181,19 @@ def test_build_from_catalog(tmp_path):
         assert {i.id for i in idx.search()} == {"a", "b", "c"}
 
 
+def test_build_reports_progress(tmp_path):
+    """build(progress=...) reports the running count, ending at the total."""
+
+    class FakeCatalog:
+        def search(self, **kwargs):
+            return iter([_A, _B, _C])
+
+    seen: list[int] = []
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        idx.build(FakeCatalog(), progress=seen.append)
+    assert seen == [1, 2, 3]
+
+
 def test_default_index_path_env_override(tmp_path, monkeypatch):
     target = tmp_path / "custom.db"
     monkeypatch.setenv("UMBRA_INDEX_DB", str(target))

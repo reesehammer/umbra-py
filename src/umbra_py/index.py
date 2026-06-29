@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
@@ -173,15 +173,25 @@ class CatalogIndex:
         )
         return True
 
-    def build(self, catalog: UmbraCatalog | None = None, **search_kwargs: object) -> int:
+    def build(
+        self,
+        catalog: UmbraCatalog | None = None,
+        *,
+        progress: Callable[[int], None] | None = None,
+        **search_kwargs: object,
+    ) -> int:
         """Walk the live catalog and persist every matching item.
 
         Accepts the same keyword filters as :meth:`UmbraCatalog.search`
         (``bbox``, ``start``, ``end``, ``area``, ``product_types``, ``limit``,
-        ``max_per_task``) to scope the build, or none to index the whole
-        bucket. Idempotent -- re-running refreshes existing rows and adds new
-        ones -- so an index can be grown incrementally. Returns the number of
-        acquisitions written.
+        ``max_per_task``) to scope the build. **Pass no filters to index the
+        whole bucket** -- the one-time crawl that makes every later
+        ``search(local)`` instant. Idempotent: re-running refreshes existing
+        rows and adds new ones, so an index can be grown incrementally.
+
+        ``progress``, if given, is called with the running count of items
+        written -- a full-bucket build lists every task and takes a while, so
+        the CLI uses this to show a live tally. Returns the total written.
         """
         catalog = catalog or UmbraCatalog()
         written = 0
@@ -190,6 +200,8 @@ class CatalogIndex:
                 written += 1
                 if written % 200 == 0:
                     self._conn.commit()
+            if progress is not None:
+                progress(written)
         self._conn.commit()
         return written
 

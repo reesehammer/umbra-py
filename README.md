@@ -206,10 +206,14 @@ service layered on top.
 ```python
 from umbra_py import CatalogIndex
 
-# Walk S3 once and persist the slice you care about (idempotent: safe to re-run
-# to refresh and grow it incrementally).
 with CatalogIndex("umbra.db") as index:
-    index.build(area="centerfield", start="2024-01-01", end="2024-12-31")
+    # Pass no filters to index the WHOLE catalog — one crawl, then everything
+    # is queryable offline. It's a long, one-time walk (no STAC API, so it
+    # lists every task); re-running just refreshes and extends the same db.
+    index.build()
+
+    # ...or scope the build to the slice you care about (much faster):
+    # index.build(area="centerfield", start="2024-01-01", end="2024-12-31")
 
     # Now query locally — same filters as UmbraCatalog.search, no network.
     for item in index.search(area="centerfield", product_types=["GEC"]):
@@ -224,12 +228,16 @@ without changing anything else. With no path it uses `$UMBRA_INDEX_DB` or
 ### Command line
 
 ```bash
-# Build a local index once (scope it with the usual search flags), then search
-# it offline with --local for near-instant repeats. `umbra index info` reports
-# what it holds.
-umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+# Index the ENTIRE catalog once (no flags = whole bucket), then search it
+# offline with --local for near-instant repeats. The full build is a long,
+# one-time crawl; re-run any time to refresh. `umbra index info` reports what
+# it holds.
+umbra index build
 umbra search --local --area "Centerfield" --product GEC
 umbra index info
+
+# Or scope the build to just a slice (much faster than the whole bucket):
+umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 
 # Search by area, dates and product type.
 umbra search --bbox -68.1,10.4,-67.9,10.6 --start 2024-01-01 --end 2024-01-31 --product GEC
