@@ -713,7 +713,10 @@ def _read_sar_band(
             scale = max(max(ds.width, ds.height) / max_size, 1.0)
             out_w = max(int(ds.width / scale), 1)
             out_h = max(int(ds.height / scale), 1)
-            data = ds.read(1, out_shape=(out_h, out_w), resampling=Resampling.average)
+            # List index + 3-D out_shape, dropping the band axis here. Rasterio's
+            # scalar-index + 2-D out_shape path squeezes in place with an
+            # ndarray.shape assignment, deprecated in NumPy 2.5.
+            data = ds.read([1], out_shape=(1, out_h, out_w), resampling=Resampling.average)[0]
             bounds = ds.bounds
         finally:
             if wrap is not None:
@@ -1215,8 +1218,13 @@ def _coregister_bands(
         bands: list[Any] = []
         for v in vrts:
             window = v.window(left, bottom, right, top)
+            # List index + 3-D out_shape, dropping the band axis here. Rasterio's
+            # scalar-index path squeezes in place with an ndarray.shape
+            # assignment, deprecated in NumPy 2.5.
             bands.append(
-                v.read(1, window=window, out_shape=(out_h, out_w), resampling=Resampling.average)
+                v.read(
+                    [1], window=window, out_shape=(1, out_h, out_w), resampling=Resampling.average
+                )[0]
             )
     finally:
         for v in vrts:

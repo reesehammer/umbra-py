@@ -160,7 +160,7 @@ def test_to_geotiff_roundtrip(tmp_path):
         assert ds.dtypes[0] == "float32"
         assert ds.crs == crs
         assert (ds.width, ds.height) == (20, 10)
-        data = ds.read(1)
+        data = ds.read([1])[0]  # list index avoids rasterio's NumPy 2.5 in-place reshape
         # The non-positive corner round-trips as NaN nodata.
         assert np.isnan(ds.nodata)
         assert np.isnan(data[0, 0])
