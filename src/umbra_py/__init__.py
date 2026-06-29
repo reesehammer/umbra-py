@@ -24,6 +24,7 @@ from .exceptions import (
     UmbraError,
 )
 from .geocode import geocode_place
+from .index import CatalogIndex, default_index_path
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
 from .viz import (
@@ -53,6 +54,8 @@ from .viz import (
 __all__ = [
     "__version__",
     "UmbraCatalog",
+    "CatalogIndex",
+    "default_index_path",
     "UmbraItem",
     "ItemCollection",
     "to_xarray",

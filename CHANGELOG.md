@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Local catalog index (`CatalogIndex`, `umbra index`).** Umbra has no STAC
+  API, so every search re-walks the public S3 bucket — fine once, slow on
+  repeat. The new `CatalogIndex` persists the items a walk discovers into a
+  local SQLite database and answers searches from SQL, so a repeat (or
+  overlapping) search is a near-instant local query instead of a fresh crawl:
+
+  ```bash
+  umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+  umbra search --local --area "Centerfield" --product GEC
+  umbra index info
+  ```
+
+  ```python
+  from umbra_py import CatalogIndex
+
+  with CatalogIndex("umbra.db") as index:
+      index.build(area="centerfield")            # walk S3 once, persist
+      list(index.search(area="centerfield"))     # local, no network
+  ```
+
+  Run `umbra index build` (or `CatalogIndex.build()`) with **no filters to
+  index the whole catalog** — one long, one-time crawl that makes every later
+  `--local` search instant — or pass the usual `--area`/`--bbox`/`--start`/
+  `--end` to scope it to a slice. The CLI shows a live running tally while it
+  walks (a `progress` callback on `build`).
+
+  Each acquisition is one row keyed by its sidecar URL, carrying the columns
+  the filters need (acquisition date, bounding box, task, product assets) plus
+  the full STAC JSON so items rebuild without another network round trip.
+  `CatalogIndex.search` mirrors `UmbraCatalog.search` (bbox / date / product /
+  area / limit / max_per_task); `build` is an idempotent upsert, so an index
+  refreshes and grows incrementally. It's a deliberate, reusable building block
+  — the substrate for a shared, prebuilt catalog (walk once, ship the `.db`) or
+  a service layered on this library. `umbra search` gains `--local` / `--db`
+  to query an index instead of S3; the index path defaults to `$UMBRA_INDEX_DB`
+  or `~/.cache/umbra-py/catalog.db`. New public `CatalogIndex` and
+  `default_index_path`. No new dependencies (SQLite is stdlib).
 - **Timescan composite (`umbra timescan`).** Collapse a site's *entire* time
   series into a single temporal-statistics image, rather than the 2–3 dates
   `umbra change` is limited to. Each pixel is summarised across all passes and
