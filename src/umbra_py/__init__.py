@@ -13,6 +13,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .catalog import UmbraCatalog
+from .ccd import ccd_image, coherence, coherent_change, save_ccd
 from .constants import ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_asset, download_item, download_url
 from .exceptions import (
@@ -94,4 +95,8 @@ __all__ = [
     "save_swipe_map",
     "gallery",
     "save_gallery",
+    "coherence",
+    "coherent_change",
+    "ccd_image",
+    "save_ccd",
 ]

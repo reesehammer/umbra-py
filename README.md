@@ -286,6 +286,13 @@ umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe
 # red=mean, green=peak, blue=temporal variability. Stable ground reads
 # gray/yellow; anything that came and went over the series glows blue/cyan.
 umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out timescan.png --db
+
+# Coherent change detection: did the ground itself get disturbed between two
+# passes? Two complex SICD images of a site decorrelate where the surface
+# moved -- tire tracks, dug earth -- change invisible to amplitude. Bright =
+# unchanged, dark = changed (add --invert to flip). Needs the SICD asset, so
+# pass two local SICD files or two STAC item URLs (auto-downloaded).
+umbra ccd <ref-stac-url> <sec-stac-url> --out ccd.png --colormap magma
 ```
 
 ## What the data looks like
@@ -297,7 +304,7 @@ most raw:
 |-------|------------|------------|
 | `GEC`  | Geocoded Ellipsoid Corrected, cloud-optimized GeoTIFF | Quick, map-ready imagery. **Start here.** |
 | `SIDD` | Geocoded detected image (NITF) | Detected imagery in a standard format |
-| `SICD` | Complex data in the radar slant plane (NITF) | Phase-preserving analysis, InSAR inputs |
+| `SICD` | Complex data in the radar slant plane (NITF) | Phase-preserving analysis, coherent change detection (`umbra ccd`), InSAR inputs |
 | `CPHD` | Compensated phase history (raw signal) | Custom image formation |
 
 ## Data license & attribution

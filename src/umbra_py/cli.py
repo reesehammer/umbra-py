@@ -12,8 +12,9 @@ from . import __version__
 from ._http import get_json
 from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
+from .ccd import save_ccd
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
-from .download import download_item
+from .download import download_asset, download_item
 from .exceptions import GeocodeError, UmbraError
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
@@ -711,6 +712,111 @@ def timescan(
             percentile=_parse_percentile(percentile),
         )
     click.echo(f"Wrote timescan composite to {path}")
+
+
+def _resolve_sicd_arg(arg: str, dest: str) -> str:
+    """Turn a ``ccd`` positional into a local SICD path.
+
+    A STAC item URL is resolved and its ``SICD`` asset downloaded into
+    ``dest`` (sarpy needs a local file -- the complex NITF can't be streamed
+    like the GEC overviews). Anything else is treated as a local path.
+    """
+    if arg.startswith(("http://", "https://")):
+        item = UmbraItem.from_dict(get_json(arg), href=arg)
+        click.echo(f"Downloading SICD for {item.id} ...")
+        return str(download_asset(item, "SICD", dest))
+    return arg
+
+
+@cli.command()
+@click.argument("reference")
+@click.argument("secondary")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output image file (.png/.jpg) for the coherence map.",
+)
+@click.option(
+    "--window",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Coherence estimation window (odd). Larger smooths noise but blurs fine change.",
+)
+@click.option(
+    "--upsample",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Sub-pixel coregistration precision (1/N of a pixel). Coherence is "
+    "very sensitive to misregistration, so don't drop this much.",
+)
+@click.option(
+    "--colormap",
+    default=None,
+    help="Matplotlib colormap (e.g. viridis, magma) for the coherence map. Default is grayscale.",
+)
+@click.option(
+    "--invert",
+    is_flag=True,
+    help="Show change bright instead of stable bright (display 1 - coherence).",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=2048,
+    show_default=True,
+    help="Max pixel dimension of the written image. Coherence is still "
+    "estimated at full resolution, then resized for display.",
+)
+@click.option(
+    "--dest",
+    default=".",
+    show_default=True,
+    help="Directory to save SICDs auto-downloaded when item URLs are passed.",
+)
+def ccd(reference, secondary, out_path, window, upsample, colormap, invert, max_size, dest) -> None:
+    """Coherent change detection from a pair of complex SICD acquisitions.
+
+    Where `umbra change` compares how *bright* a scene is, this compares
+    whether the ground itself was physically disturbed between two passes.
+    Two complex SICD images of the same site share a speckle phase pattern
+    unless something at the surface moved; their normalised correlation, the
+    coherence in [0, 1], maps that:
+
+    \b
+    - bright / high coherence = unchanged ground
+    - dark   / low coherence  = disturbed ground (tire tracks, dug earth,
+      moved foliage/water) -- or a weak, incoherent return (shadow, smooth
+      water). Use --invert to make change the bright signal.
+
+    This reveals sub-resolution change that leaves no amplitude signature at
+    all -- the one product a general GIS pipeline can't reproduce, because it
+    needs the preserved phase only SICD carries.
+
+    REFERENCE and SECONDARY are each either a local SICD (NITF) file or a STAC
+    item JSON URL (its SICD asset is downloaded into --dest first). The pair
+    must be the same site from the same collection geometry (an Umbra
+    repeat-pass); a single global sub-pixel shift is corrected automatically.
+
+    Requires the convert + viz extras
+    (``pip install "umbra-py[convert,viz]"``).
+    """
+    ref_path = _resolve_sicd_arg(reference, dest)
+    sec_path = _resolve_sicd_arg(secondary, dest)
+    with OrbitSpinner("Estimating coherence"):
+        path = save_ccd(
+            ref_path,
+            sec_path,
+            out_path,
+            window=window,
+            upsample=upsample,
+            colormap=colormap or None,
+            invert=invert,
+            max_size=max_size,
+        )
+    click.echo(f"Wrote coherent change map to {path}")
 
 
 @cli.command()

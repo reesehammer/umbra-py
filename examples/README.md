@@ -19,6 +19,10 @@ Guides:
   a color change-detection image (CLI + Python).
 - [`swipe.md`](swipe.md) — compare two passes of a site with an interactive
   before/after swipe map (CLI + Python).
+- [`ccd.md`](ccd.md) — coherent change detection from a complex `SICD` pair:
+  map where the ground was *physically disturbed* between two passes, including
+  sub-resolution change invisible to amplitude (CLI + Python; uses the
+  `convert` + `viz` extras).
 
 Planned:
 

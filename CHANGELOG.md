@@ -7,6 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Coherent change detection (`umbra ccd`, `coherence`, `coherent_change`,
+  `save_ccd`).** The amplitude change products compare how *bright* a scene is;
+  CCD compares whether the ground itself was physically disturbed between two
+  passes. Two complex `SICD` images of the same site, from the same collection
+  geometry, share a speckle phase pattern unless something at the surface
+  moved, so their normalised complex correlation — the **coherence** in
+  `[0, 1]` — maps that directly:
+
+  ```bash
+  # Two local SICD files (or pass two STAC item URLs to auto-download them):
+  umbra ccd ref.nitf sec.nitf --out ccd.png
+  umbra ccd <ref-stac-url> <sec-stac-url> --out ccd.png --colormap magma --invert
+  ```
+
+  ```python
+  from umbra_py import coherent_change, save_ccd
+
+  coh = coherent_change("ref.nitf", "sec.nitf")   # float32 [0,1] map
+  save_ccd("ref.nitf", "sec.nitf", "ccd.png")      # render straight to an image
+  ```
+
+  Bright/high coherence is unchanged ground; dark/low coherence is disturbed
+  ground (tire tracks, dug earth, moved foliage or water) — or a weak,
+  incoherent return (shadow, smooth water). This reveals sub-resolution change
+  that leaves no amplitude signature at all, the one product a general GIS
+  pipeline can't reproduce because it needs the preserved phase only `SICD`
+  carries. Coherence is estimated in the slant plane over a boxcar window;
+  the pair is co-registered by correcting a single global sub-pixel shift
+  (coherence is acutely sensitive to misregistration, so this runs by default).
+  Pure-NumPy math (integral-image boxcar, phase-cross-correlation registration,
+  Fourier sub-pixel shift); reading the `SICD` needs `sarpy` and rendering needs
+  Pillow, so install `pip install "umbra-py[convert,viz]"`. New public
+  `coherence` / `coherent_change` / `ccd_image` / `save_ccd`.
 - **Local catalog index (`CatalogIndex`, `umbra index`).** Umbra has no STAC
   API, so every search re-walks the public S3 bucket — fine once, slow on
   repeat. The new `CatalogIndex` persists the items a walk discovers into a
