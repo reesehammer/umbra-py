@@ -584,6 +584,7 @@ def _normalize_band(
     *,
     percentile: tuple[float, float] = (2.0, 98.0),
     db: bool = False,
+    cuts: tuple[float, float] | None = None,
 ) -> tuple[Any, Any]:
     """Percentile-stretch a 2D SAR amplitude band to ``[0, 1]`` + a mask.
 
@@ -600,6 +601,13 @@ def _normalize_band(
     structure that a linear amplitude stretch crushes into near-black
     become visible.
 
+    ``cuts`` supplies an explicit ``(lo, hi)`` stretch range (in the chosen
+    domain -- amplitude, or dB when ``db`` is True) instead of computing the
+    percentiles from this band. The tile viewer uses it to apply *one* global
+    stretch -- derived once from a whole-scene overview via
+    :func:`_amplitude_cuts` -- to every tile, so neighbouring tiles share
+    contrast and don't seam.
+
     Shared by the grayscale/pseudo-color quicklook path
     (:func:`_stretch_to_rgba`) and the multi-temporal change composite
     (:func:`_compose_change_rgba`).
@@ -610,6 +618,11 @@ def _normalize_band(
     arr = np.asarray(data, dtype="float64")
     invalid = ~np.isfinite(arr) | (arr <= 0)
     if invalid.all():
+        # With an explicit global stretch a fully-invalid tile is normal (a
+        # tile off the edge of the scene), not an error -- return an all-zero
+        # band that callers render fully transparent via the mask.
+        if cuts is not None:
+            return np.zeros(arr.shape, dtype="float64"), invalid
         raise ValueError("Image has no valid pixels to stretch.")
     if db:
         # amplitude -> decibels; only defined for the positive pixels we
@@ -617,8 +630,11 @@ def _normalize_band(
         # masked out of the percentile below.
         with np.errstate(divide="ignore", invalid="ignore"):
             arr = np.where(invalid, np.nan, 20.0 * np.log10(arr))
-    valid = arr[~invalid]
-    lo, hi = np.percentile(valid, percentile)
+    if cuts is None:
+        valid = arr[~invalid]
+        lo, hi = np.percentile(valid, percentile)
+    else:
+        lo, hi = cuts
     if hi <= lo:
         hi = lo + 1.0
     # Replace invalid pixels with lo before scaling so NaN values don't
@@ -628,12 +644,42 @@ def _normalize_band(
     return norm, invalid
 
 
+def _amplitude_cuts(
+    data: Any,
+    *,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    db: bool = False,
+) -> tuple[float, float]:
+    """Percentile stretch cuts ``(lo, hi)`` for a SAR amplitude band.
+
+    Returns the low/high bounds of the contrast stretch in the chosen domain
+    (amplitude, or dB when ``db`` is True), computed over the finite, positive
+    pixels only. Feed the result back as the ``cuts`` argument of
+    :func:`_normalize_band` / :func:`_stretch_to_rgba` to apply the *same*
+    stretch to many bands -- the tile viewer computes it once from a
+    whole-scene overview so every tile shares contrast.
+    """
+    np = _require("numpy")
+    arr = np.asarray(data, dtype="float64")
+    invalid = ~np.isfinite(arr) | (arr <= 0)
+    if invalid.all():
+        raise ValueError("Image has no valid pixels to stretch.")
+    if db:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            arr = np.where(invalid, np.nan, 20.0 * np.log10(arr))
+    lo, hi = np.percentile(arr[~invalid], percentile)
+    if hi <= lo:
+        hi = lo + 1.0
+    return float(lo), float(hi)
+
+
 def _stretch_to_rgba(
     data: Any,
     *,
     percentile: tuple[float, float] = (2.0, 98.0),
     db: bool = False,
     colormap: str | None = None,
+    cuts: tuple[float, float] | None = None,
 ) -> Any:
     """Convert a 2D array of SAR amplitudes to an RGBA uint8 image.
 
@@ -646,9 +692,13 @@ def _stretch_to_rgba(
     ``"magma"``) the stretched values are mapped through it for a
     pseudo-colored quicklook instead of grayscale; this needs matplotlib
     (already in the ``viz`` extra).
+
+    ``cuts`` supplies an explicit ``(lo, hi)`` stretch range (see
+    :func:`_normalize_band`) so the tile viewer can apply one global stretch
+    across every tile.
     """
     np = _require("numpy")
-    norm, invalid = _normalize_band(data, percentile=percentile, db=db)
+    norm, invalid = _normalize_band(data, percentile=percentile, db=db, cuts=cuts)
     alpha = np.where(invalid, 0, 255).astype("uint8")
 
     if colormap:

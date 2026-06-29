@@ -27,6 +27,7 @@ from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
+from .viewer import make_viewer_server, view
 from .viz import (
     change_animation,
     change_composite,
@@ -94,4 +95,6 @@ __all__ = [
     "save_swipe_map",
     "gallery",
     "save_gallery",
+    "view",
+    "make_viewer_server",
 ]
