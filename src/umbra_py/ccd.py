@@ -192,14 +192,60 @@ def coherence(
     return np.clip(gamma, 0.0, 1.0).astype("float32")
 
 
-def _read_sicd(src: str | os.PathLike) -> Any:
-    """Read a complex ``SICD`` NITF into a 2D array via ``sarpy``."""
+def _sicd_shape(src: str | os.PathLike) -> tuple[int, int]:
+    """Return a SICD's ``(rows, cols)`` from its header, without reading pixels."""
+    _require("sarpy")
+    from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
+
+    ds = open_complex(str(src)).data_size
+    # data_size is (rows, cols) for a single-image SICD, else a tuple of those.
+    if len(ds) and isinstance(ds[0], (tuple, list)):
+        ds = ds[0]
+    return int(ds[0]), int(ds[1])
+
+
+def _read_sicd(src: str | os.PathLike, window: tuple[int, int, int, int] | None = None) -> Any:
+    """Read a complex ``SICD`` NITF into a 2D array via ``sarpy``.
+
+    ``window`` is an optional ``(row0, row1, col0, col1)`` pixel box; when
+    given, only that block is read, so a large scene can be processed without
+    loading the whole complex image into memory.
+    """
     _require("sarpy")
     np = _require("numpy")
     from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
 
     reader = open_complex(str(src))
-    return np.asarray(reader[:, :])
+    if window is None:
+        return np.asarray(reader[:, :])
+    r0, r1, c0, c1 = window
+    return np.asarray(reader[r0:r1, c0:c1])
+
+
+def _resolve_crop(
+    shape: tuple[int, int], crop: int | tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Resolve a crop spec against ``(rows, cols)`` to a pixel window.
+
+    ``crop`` is either an ``int`` -- a centered ``crop x crop`` window -- or an
+    explicit ``(col, row, width, height)`` box. The result is clipped to the
+    image and returned as ``(row0, row1, col0, col1)``. Raises ``ValueError``
+    if the window is empty or lands entirely outside the image.
+    """
+    rows, cols = shape
+    if isinstance(crop, int):
+        w = h = crop
+        c0 = max((cols - w) // 2, 0)
+        r0 = max((rows - h) // 2, 0)
+    else:
+        c0, r0, w, h = crop
+    r0 = max(int(r0), 0)
+    c0 = max(int(c0), 0)
+    r1 = min(r0 + int(h), rows)
+    c1 = min(c0 + int(w), cols)
+    if r1 <= r0 or c1 <= c0:
+        raise ValueError("crop window is empty or falls outside the image.")
+    return r0, r1, c0, c1
 
 
 def coherent_change(
@@ -208,17 +254,35 @@ def coherent_change(
     *,
     window: int = 5,
     upsample: int = 10,
+    crop: int | tuple[int, int, int, int] | None = None,
 ) -> Any:
     """Read two ``SICD`` files and return their coherence map.
 
     Convenience wrapper over :func:`coherence` that handles the ``sarpy`` read.
-    The whole complex image of each is read into memory (SICDs are large; this
-    matches ``sicd_to_amplitude_geotiff``), so expect the cost to scale with
-    scene size. Returns a ``float32`` ``[0, 1]`` array; see :func:`coherence`
-    for the interpretation.
+    By default the whole complex image of each is read into memory (SICDs are
+    large; this matches ``sicd_to_amplitude_geotiff``), so cost scales with
+    scene size -- a multi-gigabyte port scene needs a lot of RAM.
+
+    ``crop`` bounds that: an ``int`` reads a centered ``crop x crop`` pixel
+    window, or ``(col, row, width, height)`` an explicit one. The *same* pixel
+    window is read from both files, so this assumes the pair is co-framed (a
+    same-geometry repeat pass) -- then the window covers the same ground up to
+    the small shift the coregistration removes. The download is still the whole
+    NITF (``sarpy`` needs the local file); ``crop`` bounds memory and compute,
+    not bytes fetched. Returns a ``float32`` ``[0, 1]`` array; see
+    :func:`coherence` for the interpretation.
     """
-    ref = _read_sicd(reference)
-    sec = _read_sicd(secondary)
+    if crop is None:
+        ref = _read_sicd(reference)
+        sec = _read_sicd(secondary)
+    else:
+        shape = (
+            min(_sicd_shape(reference)[0], _sicd_shape(secondary)[0]),
+            min(_sicd_shape(reference)[1], _sicd_shape(secondary)[1]),
+        )
+        win = _resolve_crop(shape, crop)
+        ref = _read_sicd(reference, window=win)
+        sec = _read_sicd(secondary, window=win)
     return coherence(ref, sec, window=window, upsample=upsample)
 
 
@@ -269,15 +333,18 @@ def save_ccd(
     colormap: str | None = None,
     invert: bool = False,
     max_size: int | None = 2048,
+    crop: int | tuple[int, int, int, int] | None = None,
 ) -> Path:
     """Compute a SICD-pair coherent change map and write it as an image.
 
     The output format follows ``dest``'s extension (``.png``, ``.jpg``, ...).
     ``max_size`` caps the written image's longer side (the coherence is still
-    estimated at full resolution, then resized for display). See
-    :func:`coherent_change` and :func:`ccd_image` for the options.
+    estimated at full resolution over the analysed area, then resized for
+    display). ``crop`` restricts that area to a sub-window to bound memory on
+    large scenes -- see :func:`coherent_change`. See :func:`ccd_image` for the
+    rendering options.
     """
-    coh = coherent_change(reference, secondary, window=window, upsample=upsample)
+    coh = coherent_change(reference, secondary, window=window, upsample=upsample, crop=crop)
     if max_size is not None:
         coh = _downsample(coh, max_size)
     image = ccd_image(coh, colormap=colormap, invert=invert)

@@ -12,7 +12,7 @@ from . import __version__
 from ._http import get_json
 from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
-from .ccd import save_ccd
+from .ccd import _sicd_shape, save_ccd
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_asset, download_item
 from .exceptions import GeocodeError, UmbraError
@@ -714,6 +714,21 @@ def timescan(
     click.echo(f"Wrote timescan composite to {path}")
 
 
+def _parse_crop(ctx, param, value):
+    """Parse ``--crop`` into an int (centered SIZExSIZE) or a 4-tuple window."""
+    if not value:
+        return None
+    try:
+        nums = [int(p) for p in value.split(",")]
+    except ValueError as exc:
+        raise click.BadParameter("crop must be integers: SIZE or COL,ROW,WIDTH,HEIGHT") from exc
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 4:
+        return tuple(nums)
+    raise click.BadParameter("crop is either SIZE or COL,ROW,WIDTH,HEIGHT")
+
+
 def _resolve_sicd_arg(arg: str, dest: str) -> str:
     """Turn a ``ccd`` positional into a local SICD path.
 
@@ -771,12 +786,22 @@ def _resolve_sicd_arg(arg: str, dest: str) -> str:
     "estimated at full resolution, then resized for display.",
 )
 @click.option(
+    "--crop",
+    callback=_parse_crop,
+    help="Process only a sub-window, to bound memory on large (multi-GB) "
+    "scenes: a single SIZE for a centered SIZExSIZE box, or "
+    "COL,ROW,WIDTH,HEIGHT for an explicit window. In pixels. The whole NITF is "
+    "still downloaded; this bounds memory and compute, not bytes fetched.",
+)
+@click.option(
     "--dest",
     default=".",
     show_default=True,
     help="Directory to save SICDs auto-downloaded when item URLs are passed.",
 )
-def ccd(reference, secondary, out_path, window, upsample, colormap, invert, max_size, dest) -> None:
+def ccd(
+    reference, secondary, out_path, window, upsample, colormap, invert, max_size, crop, dest
+) -> None:
     """Coherent change detection from a pair of complex SICD acquisitions.
 
     Where `umbra change` compares how *bright* a scene is, this compares
@@ -800,11 +825,18 @@ def ccd(reference, secondary, out_path, window, upsample, colormap, invert, max_
     must be the same site from the same collection geometry (an Umbra
     repeat-pass); a single global sub-pixel shift is corrected automatically.
 
+    Port and other large scenes run to several GB and don't fit in memory whole
+    -- pass --crop to process a sub-window (e.g. a set of berths) at full
+    resolution. The printed scene dimensions tell you the pixel coordinate
+    space for an explicit COL,ROW,WIDTH,HEIGHT crop.
+
     Requires the convert + viz extras
     (``pip install "umbra-py[convert,viz]"``).
     """
     ref_path = _resolve_sicd_arg(reference, dest)
     sec_path = _resolve_sicd_arg(secondary, dest)
+    rows, cols = _sicd_shape(ref_path)
+    click.echo(f"Reference scene: {rows} x {cols} px (rows x cols).")
     with OrbitSpinner("Estimating coherence"):
         path = save_ccd(
             ref_path,
@@ -815,6 +847,7 @@ def ccd(reference, secondary, out_path, window, upsample, colormap, invert, max_
             colormap=colormap or None,
             invert=invert,
             max_size=max_size,
+            crop=crop,
         )
     click.echo(f"Wrote coherent change map to {path}")
 

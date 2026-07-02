@@ -36,6 +36,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carries. Coherence is estimated in the slant plane over a boxcar window;
   the pair is co-registered by correcting a single global sub-pixel shift
   (coherence is acutely sensitive to misregistration, so this runs by default).
+  Large scenes (a port SICD runs to several GB) don't fit in memory whole, so
+  `--crop` / the `crop=` argument processes a sub-window at full resolution --
+  a centered `SIZE` box or an explicit `COL,ROW,WIDTH,HEIGHT` (pixels), read
+  straight from the NITF so only that block is loaded (the command prints the
+  scene's pixel dimensions to guide the window).
   Pure-NumPy math (integral-image boxcar, phase-cross-correlation registration,
   Fourier sub-pixel shift); reading the `SICD` needs `sarpy` and rendering needs
   Pillow, so install `pip install "umbra-py[convert,viz]"`. New public

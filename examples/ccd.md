@@ -69,6 +69,38 @@ yourself), call `coherence(reference, secondary)` directly — it does the
 co-registration and the windowed coherence estimate and returns the `[0, 1]`
 map.
 
+## Large scenes: `--crop`
+
+A port SICD is enormous — several **gigabytes** of complex data — and
+`coherent_change` reads the whole image into memory by default, which won't fit
+on a laptop. `--crop` processes just a sub-window, at full resolution:
+
+```bash
+# Print the scene size first (the command echoes "Reference scene: R x C px"),
+# then a centered 4096x4096 box:
+umbra ccd "$REF" "$SEC" --out berths.png --crop 4096 --dest ./sicd_cache
+
+# Or target a specific area once you know its pixel coordinates
+# (COL,ROW,WIDTH,HEIGHT):
+umbra ccd "$REF" "$SEC" --out berths.png --crop 8000,3000,3000,2000 --invert
+```
+
+The *same* pixel window is read from both files via `sarpy`, so only that
+block is loaded — memory and compute scale with the crop, not the scene. This
+assumes the pair is co-framed (a same-geometry repeat pass), which is exactly
+the pairing CCD needs anyway; the coregistration still removes the residual
+sub-pixel shift. Note the **download** is still the whole NITF — `sarpy` needs
+the local file — so `--crop` bounds memory, not bytes fetched. A cropped berth
+is where ship decorrelation looks most striking.
+
+From Python it's the `crop=` argument:
+
+```python
+from umbra_py import coherent_change
+coh = coherent_change("ref.nitf", "sec.nitf", crop=4096)          # centered box
+coh = coherent_change("ref.nitf", "sec.nitf", crop=(8000, 3000, 3000, 2000))
+```
+
 ---
 
 ## How it works (and what to watch for)
@@ -94,5 +126,6 @@ map.
   bring in the amplitude image to tell *disturbance* from *no signal*.
 
 `--max-size` caps the written image's longer side (coherence is still estimated
-at full resolution, then resized for display). The whole complex image of each
-`SICD` is read into memory, so cost scales with scene size.
+at full resolution over the analysed area, then resized for display). Without
+`--crop` the whole complex image of each `SICD` is read into memory, so cost
+scales with scene size — use `--crop` on large (port-scale) scenes.

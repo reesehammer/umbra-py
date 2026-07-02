@@ -110,6 +110,38 @@ def test_ccd_image_grayscale_and_colormap_and_invert():
     assert colored.mode == "RGB"
 
 
+def test_resolve_crop_centered_explicit_and_clipping():
+    # Centered SIZExSIZE window.
+    assert ccd._resolve_crop((100, 200), 40) == (30, 70, 80, 120)
+    # Explicit (col, row, width, height) -> (row0, row1, col0, col1).
+    assert ccd._resolve_crop((100, 200), (10, 20, 30, 40)) == (20, 60, 10, 40)
+    # Oversized centered crop clips to the full image (row0, row1, col0, col1).
+    assert ccd._resolve_crop((100, 200), 999) == (0, 100, 0, 200)
+    # A window entirely outside the image is an error.
+    with pytest.raises(ValueError):
+        ccd._resolve_crop((100, 200), (500, 500, 10, 10))
+
+
+def test_coherent_change_crop_reads_only_the_window(monkeypatch):
+    np = pytest.importorskip("numpy")
+    rng = np.random.default_rng(6)
+    scene = rng.standard_normal((200, 200)) + 1j * rng.standard_normal((200, 200))
+
+    monkeypatch.setattr(ccd, "_sicd_shape", lambda src: (200, 200))
+    seen = []
+
+    def fake_read(src, window=None):
+        seen.append(window)
+        r0, r1, c0, c1 = window
+        return scene[r0:r1, c0:c1]
+
+    monkeypatch.setattr(ccd, "_read_sicd", fake_read)
+    coh = ccd.coherent_change("ref", "sec", crop=50)
+    # Same centered window read from both files; coherence is that window's size.
+    assert seen == [(75, 125, 75, 125), (75, 125, 75, 125)]
+    assert coh.shape == (50, 50)
+
+
 def test_save_ccd_writes_image(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
