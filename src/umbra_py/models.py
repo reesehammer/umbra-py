@@ -27,6 +27,14 @@ def _classify_asset(key: str, asset: dict[str, Any]) -> str | None:
     """
     name = f"{key} {asset.get('href', '')}".upper()
     media = (asset.get("type") or "").lower()
+
+    # A product's companion metadata sidecar (e.g. *_SICD_MM.xml beside the
+    # *_SICD_MM.nitf complex data) carries the product's name but is not the
+    # downloadable product, and its href points into a private bucket. Don't let
+    # it claim the product slot (it would shadow the real data file).
+    if "xml" in media or key.lower().endswith(".xml"):
+        return None
+
     is_geotiff = "tif" in name or "geotiff" in media
 
     if "CPHD" in name:

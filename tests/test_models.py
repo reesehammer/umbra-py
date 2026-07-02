@@ -150,6 +150,42 @@ def test_asset_href_rewrites_private_s3_href_to_public_sidecar_sibling():
     )
 
 
+def test_sicd_resolves_to_nitf_not_xml_metadata_sidecar():
+    """The SICD product ships a companion *_SICD_MM.xml metadata file next to
+    the *_SICD_MM.nitf complex data. Both carry 'SICD' in the name, but only the
+    NITF is the downloadable product -- the XML sidecar's href points into the
+    private processing bucket. Regression: the XML must not claim the SICD slot
+    (which broke `umbra ccd`, whose download then hit an s3:// href)."""
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Centerfield%2C%20Utah/086dffb8/"
+        "2025-05-01-04-50-30_UMBRA-07/2025-05-01-04-50-30_UMBRA-07.stac.v2.json"
+    )
+    priv = "s3://prod-prod-processed-sar-data/2025-05-01/abc/08d17370/"
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "086dffb8"},
+            "assets": {
+                # NITF first, XML second -- the ordering that overwrote the slot.
+                "2025-05-01-04-50-30_UMBRA-07_SICD_MM.nitf": {
+                    "href": priv + "2025-05-01-04-50-30_UMBRA-07_SICD_MM.nitf",
+                    "type": "application/vnd.nitf",
+                },
+                "2025-05-01-04-50-30_UMBRA-07_SICD_MM.xml": {
+                    "href": priv + "2025-05-01-04-50-30_UMBRA-07_SICD_MM.xml",
+                    "type": "application/xml",
+                },
+            },
+        },
+        href=sidecar,
+    )
+    assert item.available_assets == ["SICD"]
+    sicd = item.asset_href("SICD")
+    assert "prod-prod-processed-sar-data" not in sicd
+    assert sicd.endswith("/2025-05-01-04-50-30_UMBRA-07_SICD.nitf")
+
+
 def test_asset_href_falls_back_to_empty_without_task_id():
     # Same item shape but no umbra:task_id -> nothing we can derive.
     raw = _new_style_item().raw
