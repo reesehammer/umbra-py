@@ -114,16 +114,18 @@ _V1_TO_DISK_SUFFIX: tuple[tuple[str, str], ...] = (
 )
 
 
-def _public_basename(key: str) -> str | None:
-    """Public on-disk filename for an asset whose STAC key uses v1 naming.
+def _disk_suffix(key: str) -> str | None:
+    """Published on-disk suffix (e.g. ``_SICD.nitf``) for a v1-style asset key.
 
-    Maps the v1 suffix to the published suffix (e.g. ``..._MM.tif`` ->
-    ``..._GEC.tif``). Returns ``None`` for keys matching no known suffix
-    (sidecar metadata JSON, stray files).
+    Maps the v1 suffix to the published suffix (``..._MM.tif`` -> ``_GEC.tif``).
+    Returns ``None`` for keys matching no known suffix (sidecar metadata JSON,
+    stray files). Only the *suffix* is derived from the key; the filename stem
+    comes from the acquisition directory, which Umbra occasionally timestamps
+    differently from the asset key.
     """
     for v1, disk in _V1_TO_DISK_SUFFIX:
         if key.endswith(v1):
-            return key[: -len(v1)] + disk
+            return disk
     return None
 
 
@@ -334,19 +336,23 @@ class UmbraItem:
         """Resolve an asset's public URL as a sibling of the item's sidecar.
 
         The downloadable products live next to the ``*.stac.v2.json`` sidecar
-        in the public bucket, so given the item's own (public) ``href`` and
-        the asset's v1-style key we can build the sibling URL directly. This
-        handles named-task layouts that a ``umbra:task_id``-only
-        reconstruction can't. Returns ``None`` when there's no usable sidecar
-        href or the key isn't recognised.
+        in the public bucket and share its filename stem, so we build the
+        sibling URL from the sidecar's directory stem plus the asset's product
+        suffix. Taking the stem from the directory (not the asset key) is
+        deliberate: Umbra occasionally timestamps an acquisition's asset keys a
+        few seconds off from the directory, and the published files follow the
+        directory. This also handles named-task layouts that a
+        ``umbra:task_id``-only reconstruction can't. Returns ``None`` when
+        there's no usable sidecar href or the key isn't recognised.
         """
         if not self.href or not self.href.startswith(("http://", "https://")):
             return None
-        basename = _public_basename(key)
-        if basename is None:
+        suffix = _disk_suffix(key)
+        if suffix is None:
             return None
         base_dir = self.href.rsplit("/", 1)[0]
-        return f"{base_dir}/{basename}"
+        stem = base_dir.rsplit("/", 1)[-1]
+        return f"{base_dir}/{stem}{suffix}"
 
     def has_asset(self, name: str) -> bool:
         return name in self.asset_map or name in self.assets

@@ -186,6 +186,41 @@ def test_sicd_resolves_to_nitf_not_xml_metadata_sidecar():
     assert sicd.endswith("/2025-05-01-04-50-30_UMBRA-07_SICD.nitf")
 
 
+def test_asset_href_uses_acquisition_dir_stem_not_mismatched_key_stem():
+    """Umbra sometimes names an acquisition's asset keys with a slightly
+    different timestamp than the acquisition directory itself (e.g. dir
+    ...-32-25 but asset key ...-32-18). The published files follow the
+    directory, so the public URL's stem must come from the sidecar's directory,
+    not the asset key -- otherwise the download 404s (regression for `umbra
+    ccd` against such an item)."""
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Port%20of%20Antwerp%2C%20Belgium/7ad79d24/"
+        "2025-08-24-21-32-25_UMBRA-10/2025-08-24-21-32-25_UMBRA-10.stac.v2.json"
+    )
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "7ad79d24"},
+            "assets": {
+                "2025-08-24-21-32-18_UMBRA-10_SICD_MM.nitf": {
+                    "href": (
+                        "s3://prod-prod-processed-sar-data/2025-08-24/z/"
+                        "2025-08-24-21-32-18_UMBRA-10_SICD_MM.nitf"
+                    ),
+                    "type": "application/vnd.nitf",
+                },
+            },
+        },
+        href=sidecar,
+    )
+    assert item.asset_href("SICD") == (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/tasks/Port%20of%20Antwerp%2C%20Belgium/7ad79d24/"
+        "2025-08-24-21-32-25_UMBRA-10/2025-08-24-21-32-25_UMBRA-10_SICD.nitf"
+    )
+
+
 def test_asset_href_falls_back_to_empty_without_task_id():
     # Same item shape but no umbra:task_id -> nothing we can derive.
     raw = _new_style_item().raw
