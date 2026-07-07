@@ -30,6 +30,19 @@ extras:
 pip install "umbra-py[convert,viz]"
 ```
 
+> **Important — coregistration limitation.** Coherence forms only between two
+> images on a *shared pixel grid*. The built-in coregistration is a single
+> global sub-pixel **translation**, which suffices only for a coherent collect
+> on near-identical geometry. Two *independently focused* Umbra SICDs of the
+> same site are each formed on their own slant plane, so a translation cannot
+> align them — every pixel decorrelates and the coherence map is just noise.
+> The command **warns** when it detects a noise-floor result rather than letting
+> it read as "everything changed". Making arbitrary repeat-pass pairs work needs
+> full sensor-model coregistration (resampling onto a common grid via the SICD
+> geometry and a DEM), which is not implemented. In practice this means CCD here
+> is usable on a genuinely coherent pair already on a shared grid; the current
+> Umbra open-data catalog does not appear to publish such pairs.
+
 ---
 
 ## 1. The one-liner

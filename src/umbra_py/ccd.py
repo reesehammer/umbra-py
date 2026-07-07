@@ -20,14 +20,20 @@ the preserved phase that only the complex ``SICD`` product carries.
 
 Scope (v1)
 ----------
-Coherence is estimated in the image (slant) plane, not geocoded. The pair is
-assumed to come from the **same collection geometry** (an Umbra repeat-pass of
-one site); the two images are co-registered by correcting a single global
-sub-pixel translation -- the dominant misregistration for a small, high-
-resolution scene. Spatially varying misregistration (terrain parallax, large
-rotations) is not modeled. Coherence is sensitive to even a fraction of a pixel
-of misregistration, so the sub-pixel step is not optional -- it is done by
-default.
+Coherence is estimated in the image (slant) plane, not geocoded. The two images
+are co-registered by correcting a single global sub-pixel **translation**.
+
+**This only works on a pair that already shares a pixel grid** -- a coherent
+collect on near-identical geometry, where a translation is the whole
+misregistration. Two *independently focused* Umbra SICDs of the same site do
+**not** share a grid: each is focused to its own slant plane, so the mapping
+between them includes scale/rotation/higher-order terms a translation cannot
+capture. On such a pair every pixel decorrelates and the coherence sits at its
+noise floor everywhere -- :func:`coherent_change` warns when it detects this.
+Making arbitrary repeat-pass pairs work would need full sensor-model
+coregistration (resampling the secondary onto the reference's grid via the SICD
+geometry and a DEM), which is out of scope here. Coherence is acutely sensitive
+to misregistration, so the sub-pixel translation runs by default.
 
 Install with: ``pip install "umbra-py[convert,viz]"`` (``convert`` reads the
 SICD via ``sarpy``; ``viz`` renders the map).
@@ -36,6 +42,7 @@ SICD via ``sarpy``; ``viz`` renders the map).
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -283,7 +290,37 @@ def coherent_change(
         win = _resolve_crop(shape, crop)
         ref = _read_sicd(reference, window=win)
         sec = _read_sicd(secondary, window=win)
-    return coherence(ref, sec, window=window, upsample=upsample)
+    coh = coherence(ref, sec, window=window, upsample=upsample)
+    _warn_if_decorrelated(coh)
+    return coh
+
+
+def _warn_if_decorrelated(coh: Any) -> None:
+    """Warn when a coherence map is indistinguishable from noise.
+
+    The built-in coregistration is a single global sub-pixel *translation*. It
+    aligns a pair only when the two images already share a pixel grid -- i.e. a
+    coherent collect on near-identical geometry. Two independent Umbra SICD
+    collects are each focused to their own slant plane, so a translation
+    generally cannot align them and every pixel decorrelates: the coherence
+    magnitude then sits near its zero-truth noise floor everywhere and the map
+    is meaningless. Rather than let that pass as "everything changed", flag it.
+    A genuinely coherent pair keeps stable targets (roads, buildings) bright, so
+    a healthy map has *some* strongly coherent pixels.
+    """
+    np = _require("numpy")
+    if coh.size == 0:
+        return
+    if float(np.percentile(coh, 99)) < 0.5:
+        warnings.warn(
+            "Coherence is at the noise floor across the whole scene: even the "
+            "99th percentile is < 0.5, so no area is meaningfully coherent. The "
+            "pair almost certainly did not coregister -- the built-in "
+            "global-translation alignment only works on a coherent collect "
+            "already on a shared grid, not two independently-focused SICDs. Treat "
+            "this map as noise, not 'all change'.",
+            stacklevel=2,
+        )
 
 
 def _downsample(coh: Any, max_size: int) -> Any:

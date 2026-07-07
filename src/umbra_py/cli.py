@@ -821,9 +821,14 @@ def ccd(
     needs the preserved phase only SICD carries.
 
     REFERENCE and SECONDARY are each either a local SICD (NITF) file or a STAC
-    item JSON URL (its SICD asset is downloaded into --dest first). The pair
-    must be the same site from the same collection geometry (an Umbra
-    repeat-pass); a single global sub-pixel shift is corrected automatically.
+    item JSON URL (its SICD asset is downloaded into --dest first).
+
+    Coregistration is a single global sub-pixel translation, which only aligns a
+    pair that already shares a pixel grid -- a coherent collect on near-
+    identical geometry. Two independently-focused SICDs of the same site
+    generally do NOT share a grid, so they decorrelate everywhere and the map is
+    just noise; the command warns when it detects that. Full sensor-model
+    coregistration for arbitrary repeat-pass pairs is not implemented.
 
     Port and other large scenes run to several GB and don't fit in memory whole
     -- pass --crop to process a sub-window (e.g. a set of berths) at full

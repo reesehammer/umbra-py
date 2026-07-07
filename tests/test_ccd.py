@@ -142,6 +142,29 @@ def test_coherent_change_crop_reads_only_the_window(monkeypatch):
     assert coh.shape == (50, 50)
 
 
+def test_coherent_change_warns_when_decorrelated(monkeypatch):
+    np = pytest.importorskip("numpy")
+    rng = np.random.default_rng(7)
+    # Two unrelated scenes -> coherence sits at the noise floor everywhere.
+    a = rng.standard_normal((160, 160)) + 1j * rng.standard_normal((160, 160))
+    b = rng.standard_normal((160, 160)) + 1j * rng.standard_normal((160, 160))
+    reads = iter([a, b])
+    monkeypatch.setattr(ccd, "_read_sicd", lambda src, window=None: next(reads))
+    with pytest.warns(UserWarning, match="noise floor"):
+        ccd.coherent_change("a.nitf", "b.nitf")
+
+
+def test_coherent_change_quiet_when_coherent(monkeypatch, recwarn):
+    np = pytest.importorskip("numpy")
+    rng = np.random.default_rng(8)
+    a = _bandlimited(rng, 160, 160)
+    b = ccd._fourier_shift(a, (0.3, -0.4))  # a genuinely coherent pair
+    reads = iter([a, b])
+    monkeypatch.setattr(ccd, "_read_sicd", lambda src, window=None: next(reads))
+    ccd.coherent_change("a.nitf", "b.nitf")
+    assert not [w for w in recwarn if "noise floor" in str(w.message)]
+
+
 def test_save_ccd_writes_image(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")

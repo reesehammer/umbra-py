@@ -34,8 +34,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that leaves no amplitude signature at all, the one product a general GIS
   pipeline can't reproduce because it needs the preserved phase only `SICD`
   carries. Coherence is estimated in the slant plane over a boxcar window;
-  the pair is co-registered by correcting a single global sub-pixel shift
+  the pair is co-registered by correcting a single global sub-pixel translation
   (coherence is acutely sensitive to misregistration, so this runs by default).
+  **Limitation:** that translation only aligns a pair already on a shared pixel
+  grid (a coherent collect on near-identical geometry). Two independently-focused
+  SICDs of one site are each on their own slant plane, so they decorrelate
+  everywhere and the map is noise; `coherent_change` **warns** when the result
+  is at the noise floor rather than letting it read as "all change". Full
+  sensor-model coregistration for arbitrary repeat-pass pairs is out of scope.
   Large scenes (a port SICD runs to several GB) don't fit in memory whole, so
   `--crop` / the `crop=` argument processes a sub-window at full resolution --
   a centered `SIZE` box or an explicit `COL,ROW,WIDTH,HEIGHT` (pixels), read

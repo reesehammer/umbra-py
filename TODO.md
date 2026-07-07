@@ -9,6 +9,29 @@ the bottom if the history is useful).
 
 ---
 
+## CCD: sensor-model coregistration for arbitrary repeat-pass SICD pairs
+
+- **Surfaced in:** PR #23 (coherent change detection), during live QA.
+- **Code:** `src/umbra_py/ccd.py` (`_register_shift` / `coherence` / `coherent_change`).
+
+`umbra ccd` coregisters a pair with a single global sub-pixel **translation**.
+That only aligns images already on a shared pixel grid (a coherent collect on
+near-identical geometry). Two independently-focused Umbra SICDs of one site are
+each formed on their own slant plane, so the mapping between them has
+scale/rotation/higher-order terms a translation can't capture: full-resolution
+amplitude correlation between such a pair measured ~0.02 (coarse, 6x-decimated,
+~0.49), and coherence pins at the noise floor everywhere. `coherent_change` now
+*warns* on a noise-floor result, but the pair still can't be processed.
+
+No near-simultaneous same-platform SICD pairs (< 30 min apart) exist in the open
+catalog, so a genuinely coherent, grid-sharing pair may not be available in the
+open data at all — verify before investing.
+
+**Fix sketch:** resample the secondary onto the reference's grid via the SICD
+sensor model (+ a DEM) before the coherence estimate — i.e. proper InSAR-grade
+coregistration (see `sarpy`'s projection/ortho helpers). Large effort; gate it
+on finding at least one open-data pair that actually coheres.
+
 ## Asset classifier: `"tif"` substring check can never match uppercased name
 
 - **Surfaced in:** [PR #2](https://github.com/theminiverse/umbra-py/pull/2) ("Notes for reviewers")
