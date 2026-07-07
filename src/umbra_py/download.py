@@ -87,7 +87,13 @@ def download_asset(
 ) -> Path:
     """Download a single named asset (e.g. ``"GEC"``) of an item."""
     url = item.asset_href(asset)
-    return download_url(url, Path(dest_dir), **kwargs)
+    # dest_dir is unambiguously a directory here. Create it so download_url
+    # treats it as one and joins the server filename -- otherwise a not-yet-
+    # existing dest_dir looks like a file path and every asset collides into
+    # a single file named after the directory.
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return download_url(url, dest_dir, **kwargs)
 
 
 def download_item(
