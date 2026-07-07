@@ -150,6 +150,38 @@ def test_make_viewer_server_serves_page_and_tile(tmp_path):
         httpd.server_close()
 
 
+def test_proj_env_options_points_at_bundled_db():
+    pytest.importorskip("rasterio")
+    import os
+
+    from umbra_py.viewer import _proj_env_options
+
+    opts = _proj_env_options()
+    # When rasterio ships bundled PROJ data (wheels do), we force PROJ_DATA at
+    # it so a stale shell PROJ_LIB/PROJ_DATA can't break reprojection.
+    if opts:
+        assert os.path.exists(os.path.join(opts["PROJ_DATA"], "proj.db"))
+
+
+def test_send_swallows_client_disconnect():
+    """A browser that cancels a tile mid-write must not crash the handler."""
+    from umbra_py.viewer import _ViewerHandler
+
+    handler = _ViewerHandler.__new__(_ViewerHandler)
+    handler.command = "GET"
+    handler.send_response = lambda *a, **k: None
+    handler.send_header = lambda *a, **k: None
+    handler.end_headers = lambda: None
+
+    class _Boom:
+        def write(self, _body):
+            raise BrokenPipeError
+
+    handler.wfile = _Boom()
+    # Should return quietly rather than propagate the BrokenPipeError.
+    handler._send(200, "image/png", b"payload")
+
+
 def test_cli_view_boots_and_stops(tmp_path, monkeypatch):
     pytest.importorskip("rasterio")
     from click.testing import CliRunner

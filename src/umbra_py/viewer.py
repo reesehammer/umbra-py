@@ -64,6 +64,27 @@ def _open_path(url: str) -> str:
     return url
 
 
+def _proj_env_options() -> dict[str, str]:
+    """GDAL/PROJ options that force PROJ to find its database.
+
+    A recurring failure (especially on macOS) is a stale ``PROJ_LIB`` /
+    ``PROJ_DATA`` in the shell -- left by a Homebrew or conda GDAL -- that
+    shadows the ``proj.db`` rasterio ships in its own wheel. GDAL then prints
+    ``PROJ: Cannot find proj.db`` and the tile reprojection to Web Mercator
+    fails, so tiles land wrong or blank. Pointing ``PROJ_DATA`` at rasterio's
+    bundled data for our own raster ops makes the viewer self-contained
+    regardless of the ambient environment. Returns an empty dict when the
+    bundled data can't be located (leave the environment untouched).
+    """
+    import os.path  # noqa: PLC0415
+
+    rasterio = _require("rasterio")
+    bundled = os.path.join(os.path.dirname(rasterio.__file__), "proj_data")
+    if os.path.exists(os.path.join(bundled, "proj.db")):
+        return {"PROJ_DATA": bundled}
+    return {}
+
+
 def _tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     """Web-Mercator bounds ``(minx, miny, maxx, maxy)`` of XYZ tile ``z/x/y``.
 
@@ -121,16 +142,21 @@ class SceneTiler:
         self.colormap = colormap
         self._path = _open_path(url)
         self._local = threading.local()
+        self._env_opts = _proj_env_options()
 
         # Read a downsampled whole-scene overview once: it fixes the global
         # contrast stretch shared by every tile, and gives us the lon/lat
         # footprint for the page's initial view. Only a COG overview's worth of
         # bytes is fetched, not the full scene.
-        with rasterio.open(self._path) as src:
+        with rasterio.Env(**self._env_opts), rasterio.open(self._path) as src:
             self._nodata = src.nodata
             if src.crs is None:
                 raise ValueError(f"Item {item.id!r} asset {asset!r} has no CRS to map.")
             self.bounds_4326 = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+            # Cache the footprint in Web Mercator now, under this Env, so the
+            # per-tile intersection test never has to reproject on a worker
+            # thread (and can't trip over a mis-set PROJ path there).
+            self._b3857 = transform_bounds("EPSG:4326", "EPSG:3857", *self.bounds_4326)
             scale = max(max(src.width, src.height) / sample_size, 1.0)
             out_w = max(int(src.width / scale), 1)
             out_h = max(int(src.height / scale), 1)
@@ -159,6 +185,7 @@ class SceneTiler:
         the server answers 404 without warping empty ground. A tile that
         intersects but lands entirely on nodata pixels also returns ``None``.
         """
+        rasterio = _require("rasterio")
         np = _require("numpy")
         from affine import Affine  # noqa: PLC0415
         from rasterio.enums import Resampling  # noqa: PLC0415
@@ -171,18 +198,23 @@ class SceneTiler:
 
         # Warp the source straight into this tile's exact grid. Handing GDAL a
         # coarse target transform makes it read the matching COG overview, so a
-        # tile is a few range requests rather than a full-res read.
+        # tile is a few range requests rather than a full-res read. The Env
+        # forces PROJ's data path (see _proj_env_options) so the reprojection
+        # doesn't fail on a machine with a stale PROJ_LIB/PROJ_DATA.
         dst_transform = Affine(
             (maxx - minx) / TILE_SIZE, 0.0, minx, 0.0, (miny - maxy) / TILE_SIZE, maxy
         )
-        with WarpedVRT(
-            src,
-            crs="EPSG:3857",
-            transform=dst_transform,
-            width=TILE_SIZE,
-            height=TILE_SIZE,
-            resampling=Resampling.bilinear,
-        ) as vrt:
+        with (
+            rasterio.Env(**self._env_opts),
+            WarpedVRT(
+                src,
+                crs="EPSG:3857",
+                transform=dst_transform,
+                width=TILE_SIZE,
+                height=TILE_SIZE,
+                resampling=Resampling.bilinear,
+            ) as vrt,
+        ):
             data = vrt.read([1], out_shape=(1, TILE_SIZE, TILE_SIZE))[0].astype("float64")
 
         if self._nodata is not None:
@@ -197,17 +229,8 @@ class SceneTiler:
 
     def _intersects_3857(self, minx: float, miny: float, maxx: float, maxy: float) -> bool:
         """Whether a Web-Mercator box overlaps the scene footprint."""
-        w, s, e, n = self._bounds_3857()
+        w, s, e, n = self._b3857  # precomputed in __init__ under the PROJ Env
         return not (maxx <= w or minx >= e or maxy <= s or miny >= n)
-
-    def _bounds_3857(self) -> tuple[float, float, float, float]:
-        bounds = getattr(self, "_b3857", None)
-        if bounds is None:
-            from rasterio.warp import transform_bounds  # noqa: PLC0415
-
-            bounds = transform_bounds("EPSG:4326", "EPSG:3857", *self.bounds_4326)
-            self._b3857 = bounds
-        return bounds
 
 
 def _encode_png(rgba: Any) -> bytes:
@@ -240,14 +263,21 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        if status == 200 and content_type == "image/png":
-            self.send_header("Cache-Control", "max-age=3600")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        # Panning fires many tile requests and the browser routinely cancels
+        # the ones that scroll out of view before we finish writing, closing
+        # the socket under us. That's normal, not an error -- swallow the
+        # resulting connection errors so they don't spew a traceback per pan.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            if status == 200 and content_type == "image/png":
+                self.send_header("Cache-Control", "max-age=3600")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         path = urlparse(self.path).path
