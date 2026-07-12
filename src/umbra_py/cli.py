@@ -15,6 +15,7 @@ from .catalog import UmbraCatalog
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
+from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
@@ -1347,6 +1348,41 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
             )
             total = len(idx)
     click.echo(f"Indexed {written} acquisition(s); index now holds {total}. ({path})")
+
+
+@index.command("export")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index database to export (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output stac-geoparquet file (e.g. umbra-open-data.parquet).",
+)
+def index_export(db_path, out_path) -> None:
+    """Export a local index to stac-geoparquet for serverless catalog search.
+
+    Writes every indexed acquisition as one row of a stac-geoparquet file —
+    the whole catalog searchable in seconds with DuckDB, geopandas or pyarrow,
+    no server and no crawl. Each row carries the full STAC item plus a 'self'
+    link back to its sidecar JSON, so results lead straight to the data files.
+    Build the index first with 'umbra index build'. Requires the export extra
+    (``pip install "umbra-py[export]"``).
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
+    with CatalogIndex(path) as idx:
+        total = len(idx)
+        with OrbitSpinner(f"Exporting {total} item(s) to geoparquet"):
+            written = export_geoparquet(idx.search(), out_path)
+    skipped = total - written
+    note = f" ({skipped} without a footprint skipped)" if skipped else ""
+    click.echo(f"Exported {written} of {total} item(s) to {out_path}{note}.")
 
 
 @index.command("info")

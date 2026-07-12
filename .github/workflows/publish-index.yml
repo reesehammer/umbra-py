@@ -1,0 +1,69 @@
+name: Publish catalog index
+
+# Umbra publishes no STAC API, so searching its open-data catalog normally
+# means crawling the S3 bucket. This workflow does that crawl once on a
+# schedule — `umbra index build` over the whole bucket — then publishes the
+# result in two forms on the rolling `catalog-index` release:
+#
+#   - umbra-open-data.parquet  stac-geoparquet: the whole catalog searchable
+#                              in seconds by DuckDB / geopandas / pyarrow /
+#                              rustac, no umbra-py install required
+#   - catalog.db               the SQLite index, ready for
+#                              `umbra search --local --db catalog.db`
+#
+# Weekly is deliberate: frequent enough to pick up new acquisitions, polite
+# to Umbra's open-data bucket.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC, off the whole-hour spike
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Don't crawl Umbra's bucket from forks; schedules there stay off anyway.
+    if: github.repository == 'reesehammer/umbra-py'
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install umbra-py with the export extra
+        run: pip install -e ".[export]"
+
+      - name: Build full catalog index
+        run: umbra index build --db catalog.db
+
+      - name: Export stac-geoparquet
+        run: umbra index export --db catalog.db --out umbra-open-data.parquet
+
+      - name: Publish to the rolling catalog-index release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          summary="$(umbra index info --db catalog.db)"
+          notes="Rolling snapshot of Umbra's open-data STAC catalog \
+          (rebuilt weekly; last rebuilt $(date -u +%Y-%m-%d)).
+
+          - \`umbra-open-data.parquet\` — [stac-geoparquet](https://stac-geoparquet.org/): query it directly with DuckDB, geopandas, pyarrow or rustac.
+          - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`.
+
+          \`\`\`
+          $summary
+          \`\`\`
+
+          Data © [Umbra](https://umbra.space/open-data/), CC BY 4.0."
+          if gh release view catalog-index >/dev/null 2>&1; then
+            gh release edit catalog-index --notes "$notes"
+          else
+            gh release create catalog-index \
+              --title "Umbra open-data catalog index" --notes "$notes"
+          fi
+          gh release upload catalog-index catalog.db umbra-open-data.parquet --clobber

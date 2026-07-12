@@ -36,6 +36,7 @@ pip install umbra-py            # core: search + download + metadata
 pip install "umbra-py[load]"    # + analysis-ready xarray loading (xarray, rasterio)
 pip install "umbra-py[convert]" # + SICD amplitude extraction (sarpy, rasterio)
 pip install "umbra-py[viz]"     # + plotting/footprint helpers
+pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 ```
 
 Requires Python 3.10+.
@@ -247,6 +248,27 @@ area / limit / max_per_task), so you can swap the live walk for the index
 without changing anything else. With no path it uses `$UMBRA_INDEX_DB` or
 `~/.cache/umbra-py/catalog.db`.
 
+### Share the search: export to stac-geoparquet
+
+One crawl shouldn't be everyone's crawl. `export_geoparquet` (or `umbra index
+export`; requires the `export` extra) writes an index out as a single
+[stac-geoparquet](https://stac-geoparquet.org/) file — the entire catalog
+searchable in seconds with DuckDB, geopandas, pyarrow or rustac, no server,
+no crawl, and no umbra-py install needed on the consuming side. Each row is a
+full STAC item with a `self` link back to its sidecar JSON, so query results
+lead straight to the data files. A [scheduled GitHub
+Action](.github/workflows/publish-index.yml) rebuilds the full index weekly
+and publishes `umbra-open-data.parquet` (plus the SQLite `catalog.db`) on the
+rolling [`catalog-index`
+release](https://github.com/reesehammer/umbra-py/releases/tag/catalog-index).
+
+```python
+from umbra_py import CatalogIndex, export_geoparquet
+
+with CatalogIndex("umbra.db") as index:
+    export_geoparquet(index.search(), "umbra-open-data.parquet")
+```
+
 ### Command line
 
 ```bash
@@ -257,6 +279,10 @@ without changing anything else. With no path it uses `$UMBRA_INDEX_DB` or
 umbra index build
 umbra search --local --area "Centerfield" --product GEC
 umbra index info
+
+# Export the index as one stac-geoparquet file: the whole catalog searchable
+# in seconds by DuckDB / geopandas / pyarrow, no server (needs [export]).
+umbra index export --out umbra-open-data.parquet
 
 # Or scope the build to just a slice (much faster than the whole bucket):
 umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31

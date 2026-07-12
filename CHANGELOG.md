@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **stac-geoparquet catalog export (`export_geoparquet`, `umbra index
+  export`).** A local `CatalogIndex` makes *your* searches fast, but everyone
+  still pays for their own crawl of Umbra's bucket. The new export writes an
+  index out as a single [stac-geoparquet](https://stac-geoparquet.org/) file —
+  the entire catalog searchable in seconds with DuckDB, geopandas, pyarrow or
+  rustac, no server, no crawl, no umbra-py needed on the consuming side. Each
+  row is the full STAC item, with a `self` link injected back to its sidecar
+  JSON so query results lead straight to the data files (items without a
+  footprint geometry are skipped and counted):
+
+  ```bash
+  umbra index build                                  # walk S3 once
+  umbra index export --out umbra-open-data.parquet   # ship the catalog
+  ```
+
+  ```python
+  from umbra_py import CatalogIndex, export_geoparquet
+
+  with CatalogIndex("umbra.db") as index:
+      export_geoparquet(index.search(), "umbra-open-data.parquet")
+  ```
+
+  A new scheduled workflow (`.github/workflows/publish-index.yml`) rebuilds
+  the full index weekly and publishes `umbra-open-data.parquet` + `catalog.db`
+  on the rolling `catalog-index` GitHub release, so users can search the whole
+  catalog without ever crawling it. New public `export_geoparquet`; new
+  `export` extra (`stac-geoparquet`). Project strategy notes tracking this and
+  related ideas live in `docs/umbra-value-notes.md`.
 - **Interactive full-resolution viewer (`view`, `umbra view`).** Every other
   rendering surface collapses a scene to a fixed picture — `quicklook` writes
   one downsampled PNG — which throws away the resolution that makes Umbra
