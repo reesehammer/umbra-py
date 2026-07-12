@@ -154,6 +154,28 @@ save_quicklook(items[0], "scene.png")
 save_quicklook(items[0], "scene_db.png", db=True, colormap="magma")
 ```
 
+### Explore a scene at full resolution (interactive viewer)
+
+A quicklook is one downsampled PNG — it throws away the resolution that makes
+Umbra special (a GEC scene is ~25 cm imagery, tens of thousands of pixels on a
+side). `view` lets you actually *roam* it: it starts a tiny local tile server
+and opens a Leaflet map in the browser. As you pan and zoom, only the tiles in
+view stream from the cloud-optimized GeoTIFF via HTTP range requests (at the COG
+overview matching your zoom) and are warped onto the web map — native-resolution
+exploration with no full download (needs the `viz` extra):
+
+```python
+from umbra_py import view
+
+view(items[0])                  # opens the browser; Ctrl-C to stop
+view(items[0], db=True)         # decibel stretch, the radiometric SAR look
+```
+
+The contrast stretch is computed once over a whole-scene overview and shared by
+every tile, so neighbouring tiles don't seam. Tiles are warped through GDAL into
+true Web Mercator, so the imagery lines up with the OpenStreetMap basemap. Or
+run it from the shell with `umbra view` (below).
+
 ### Load a scene as analysis-ready data
 
 When you want the *pixels*, not a picture — to run your own analysis, clip to an
@@ -256,6 +278,11 @@ umbra download <item-json-url> --asset GEC --dest downloads/
 # Render a standalone SAR quicklook image -- no map, no full download.
 # Add --db for the decibel stretch and --colormap for pseudo-color.
 umbra quicklook <item-json-url> --out scene.png --db --colormap magma
+
+# Explore one scene at full resolution in the browser: a local tile server
+# streams only the tiles in view from the COG and warps them onto a Leaflet
+# map. Pan/zoom to native resolution, no full download. Ctrl-C to stop.
+umbra view <item-json-url> --db
 
 # Browse a search visually: one self-contained HTML contact sheet of streamed
 # SAR thumbnails, each tile linking to its STAC item. No full downloads.

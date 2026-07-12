@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Interactive full-resolution viewer (`view`, `umbra view`).** Every other
+  rendering surface collapses a scene to a fixed picture — `quicklook` writes
+  one downsampled PNG — which throws away the resolution that makes Umbra
+  special (a GEC scene is ~25 cm imagery). `view` starts a tiny local tile
+  server and opens a Leaflet map in the browser; as you pan and zoom, only the
+  tiles in view stream from the cloud-optimized GeoTIFF via HTTP range requests
+  (at the COG overview matching your zoom) and are warped into the Web-Mercator
+  map grid — native-resolution exploration with no full download:
+
+  ```bash
+  umbra view <item-json-url> --db        # Ctrl-C to stop
+  ```
+
+  ```python
+  from umbra_py import view
+  view(item, db=True)                    # opens the browser
+  ```
+
+  The contrast stretch is computed once over a whole-scene overview and shared
+  by every tile, so neighbouring tiles don't seam; tiles are warped through
+  GDAL into true Web Mercator, so the imagery lines up with the OpenStreetMap
+  basemap (unlike the bbox-stretch quick-look approximation used by the
+  browser-side lazy overlay). `make_viewer_server(item, ...)` returns the
+  unstarted server for embedding. Requires the `viz` extra.
 - **Local catalog index (`CatalogIndex`, `umbra index`).** Umbra has no STAC
   API, so every search re-walks the public S3 bucket — fine once, slow on
   repeat. The new `CatalogIndex` persists the items a walk discovers into a

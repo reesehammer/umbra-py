@@ -300,6 +300,86 @@ def quicklook(item_url, out_path, asset, max_size, db, colormap, percentile) -> 
     click.echo(f"Wrote quicklook to {path}")
 
 
+@cli.command()
+@click.argument("item_url")
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to view. GEC (the geocoded GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Host to bind the server to.")
+@click.option(
+    "--port",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Port to bind (0 picks a free one).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Use a decibel (log-amplitude) stretch -- the radiometrically-correct "
+    "SAR look. Reveals terrain texture and structure that the default linear "
+    "stretch crushes toward black.",
+)
+@click.option(
+    "--colormap",
+    default=None,
+    help="Matplotlib colormap for a pseudo-colored view (e.g. viridis, magma, "
+    "inferno). Default is grayscale.",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for the global contrast stretch.",
+)
+@click.option("--no-browser", is_flag=True, help="Don't open the viewer in a browser.")
+def view(item_url, asset, host, port, db, colormap, percentile, no_browser) -> None:
+    """Explore one SAR scene at full resolution in an interactive web viewer.
+
+    Starts a local tile server and opens a Leaflet map in the browser. Pan and
+    zoom to roam the acquisition's cloud-optimized GeoTIFF at native resolution
+    -- only the tiles in view are streamed via HTTP range requests and warped
+    onto the web map, so there's no full download. Where ``umbra quicklook``
+    collapses the scene to one downsampled PNG, this keeps every pixel a zoom
+    away. Runs until you press Ctrl-C. Requires the viz extra
+    (``pip install "umbra-py[viz]"``).
+    """
+    from .viewer import make_viewer_server  # noqa: PLC0415
+
+    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    with OrbitSpinner(f"Opening {asset} of {item.id}"):
+        httpd, url = make_viewer_server(
+            item,
+            asset=asset,
+            host=host,
+            port=port,
+            db=db,
+            colormap=colormap or None,
+            percentile=_parse_percentile(percentile),
+        )
+    click.echo(f"Serving SAR viewer for {item.id} at {url}")
+    click.echo("Press Ctrl-C to stop.")
+    if not no_browser:
+        import webbrowser  # noqa: PLC0415
+
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nStopping viewer.")
+    finally:
+        # serve_forever has already returned, so close the socket directly --
+        # shutdown() is for stopping the loop from another thread and would
+        # deadlock here.
+        httpd.server_close()
+
+
 @cli.command(name="load")
 @click.argument("item_url")
 @click.option(
