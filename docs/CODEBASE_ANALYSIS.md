@@ -1,0 +1,400 @@
+# umbra-py — Codebase Analysis & Prioritized Recommendations
+
+*Analysis date: 2026-07-02 · Codebase at commit `a89b5e9` (v0.1.0, ~5,000 lines of
+source, ~3,600 lines of tests). All claims below were verified against the code,
+the live Umbra bucket, PyPI, and a clean local run of the project's own checks
+(`ruff check`, `ruff format --check`, `pytest -q` — all green).*
+
+---
+
+## 1. Executive summary
+
+`umbra-py` is an unusually healthy early-alpha codebase. The architecture is
+coherent (a thin, dependency-light core with heavy geospatial deps isolated
+behind extras and lazy imports), the documentation culture is exceptional for a
+v0.1 (module docstrings explain *why*, `AGENTS.md` is a model agent-onboarding
+file, `TODO.md` is an honest ledger of known debt), and the offline test suite
+is fast and well-patterned.
+
+The findings that matter most are not style issues — they are:
+
+1. **A confirmed, live correctness bug**: the S3 listing code paginates with a
+   ListObjects **V2** parameter against what is effectively a **V1** API call,
+   so any task directory with more than 1,000 keys is **silently truncated**.
+   This was reproduced against the live bucket during this analysis
+   (`Centerfield, Utah` returns `IsTruncated=true` with 1,000 keys and no
+   continuation token the code can read). Search results are quietly incomplete
+   today.
+2. **The package is not on PyPI** even though the README's first instruction is
+   `pip install umbra-py` (verified: PyPI returns 404 for `umbra-py`). For an
+   open-source adoption strategy this is the single highest-leverage gap — and
+   an unclaimed name is a squatting risk.
+3. **CI never exercises ~a third of the test suite**: 72 of 212 tests skip
+   because the `viz`/`load` extras are never installed in CI, so the largest
+   module (`viz.py`, 1,827 lines) ships effectively untested by CI.
+
+Everything else is incremental hardening: download integrity, HTML-output
+escaping, retry/backoff, repo metadata hygiene, and open-source scaffolding
+(releases, security policy, docs site).
+
+---
+
+## 2. Code quality assessment
+
+### 2.1 Strengths (worth preserving deliberately)
+
+- **Layering is clean and honest.** `catalog.py` (discovery) → `models.py`
+  (representation) → `download.py`/`load.py` (retrieval) → `viz.py`
+  (presentation), with `cli.py` as a thin-ish shell. The CLI subcommands map
+  1:1 to library functions, as `AGENTS.md` promises.
+- **The lazy-import discipline is real, not aspirational.** `rasterio`,
+  `numpy`, `matplotlib`, `folium`, `sarpy`, `xarray` are all imported inside
+  the functions that need them via the `_require()` pattern; the core install
+  is genuinely `requests` + `click` only. This was verified by the passing
+  core-only test run.
+- **Domain correctness is documented where it bites.** Docstrings explain dB
+  vs. linear stretch, slant vs. ground plane, polarization-mixing warnings in
+  change products, and why co-registration must precede comparison. This is
+  rare and valuable in a SAR library.
+- **Test patterns are sound.** HTTP is mocked with `responses`; catalog walks
+  are tested against an in-memory fake tree; network tests are marked and
+  excluded by default; pruning behavior (the key performance property) has a
+  dedicated regression test (`test_search_prunes_out_of_range_acquisitions`).
+- **`AGENTS.md` + `TODO.md` + Keep-a-Changelog discipline** make the repo
+  highly navigable for both humans and coding agents.
+
+### 2.2 Weaknesses
+
+- **`cli.py` is a 1,309-line monolith and business logic is leaking into it.**
+  The "search mode vs. URL mode" resolution, frame selection, polarization
+  warnings, and output-extension dispatch in `change`, `timescan`, `swipe`,
+  `gallery`, and `map` are duplicated across subcommands (the
+  `item_urls XOR search flags` validation block appears four times, nearly
+  verbatim). This contradicts the project's own rule ("don't put business
+  logic in the CLI") and makes each new command more expensive. Extract a
+  shared `_gather_items(urls, area, bbox, place, start, end, ...)` helper and a
+  shared set of reusable click option groups (click supports composing options
+  via decorators).
+- **`viz.py` is 1,827 lines and carries five distinct concerns**: GeoJSON
+  export, Folium maps, raster reading/stretching, change/timescan compositing,
+  and gallery/animation rendering. It is still readable, but it is the next
+  module that will become `cli.py`. A `viz/` package split
+  (`geojson.py`, `maps.py`, `raster.py`, `composites.py`, `gallery.py`) with
+  re-exports preserved in `viz/__init__.py` would be behavior-neutral.
+- **Manual context-manager plumbing in `cli.search`**: the spinner is driven
+  with `spinner.__enter__()` and paired `finally: spinner.stop()` instead of a
+  `with` block (cli.py:170-185). It works, but it's the kind of code that
+  breaks silently under refactoring.
+- **Version is duplicated** in `pyproject.toml` (`version = "0.1.0"`) and
+  `src/umbra_py/__init__.py` (`__version__ = "0.1.0"`). Use hatchling's
+  dynamic version (`[tool.hatch.version] path = "src/umbra_py/__init__.py"`)
+  so they cannot drift.
+- **No `py.typed` marker.** The codebase is consistently and modernly typed
+  (`from __future__ import annotations`, `X | None`, `list[str]`), but without
+  `src/umbra_py/py.typed` no downstream type checker can consume any of it.
+  One empty file + one line in the wheel config fixes this.
+- **No type-checking in CI.** ruff catches lint, but nothing runs mypy or
+  pyright. The `# type: ignore[arg-type]` in `index.build` (index.py:198) and
+  the loosely-typed `**kwargs` pass-throughs in `download.py`/`viz.py` save
+  functions would benefit from a checker keeping them honest.
+- **Known dead-code bug, already ledgered**: `_classify_asset`'s
+  `"tif" in name` check can never match an uppercased string
+  (`models.py:30`; tracked in `TODO.md`). It is masked today by the media-type
+  check, but an item declaring plain `image/tiff` would silently lose its GEC
+  classification. The fix plus regression test is ~5 lines — it should stop
+  being a TODO.
+- **`ItemCollection` subclasses `list` but its constructor options are lost on
+  slicing/`+`** (a slice returns a plain `list`, dropping `thumbnails`
+  state). Minor, but worth a docstring note or a `__getitem__` override before
+  users depend on it.
+
+### 2.3 Test-coverage observations
+
+- Offline suite: 140 passed, 5 network-deselected, **72 skipped** in a
+  core-only environment. The skips are the entire `viz`/`load`/`lazy_imagery`
+  /`html` surface — i.e. the majority of feature code added since v0.1's core.
+- CI (`.github/workflows/ci.yml`) installs only `.[dev]`, so **CI runs exactly
+  this reduced suite**. The 1,600-line `test_viz.py` has never gated a merge.
+- `pytest-cov` is declared as a dev dependency but coverage is never measured
+  in CI, so there is no signal when coverage regresses.
+
+---
+
+## 3. Security review
+
+Context matters: this library reads from a public bucket with anonymous HTTPS,
+writes local files, and generates static HTML. There is no auth surface, no
+server, and no secret handling — the attack surface is (a) remote content it
+parses, (b) files it writes, and (c) HTML/JS it emits. Findings in rough order
+of severity:
+
+### 3.1 Unescaped remote metadata is interpolated into generated HTML (moderate)
+
+`viz._popup_html` escapes `location` and `description` but interpolates
+`item.id`, `platform`, `product_type`, `instrument_mode`, and `item.href` into
+popup HTML **without escaping** (viz.py:159-208 — `rows` values pass through
+`fmt()` which does no escaping, and `item.href` is placed raw inside
+`<a href='{...}'>`). These values originate from STAC JSON fetched from the
+bucket. The trust chain today is "Umbra's bucket," but the same code paths
+accept **arbitrary item URLs** (`umbra info <url>`, `umbra map`, `swipe`,
+`change` all take user-supplied STAC URLs), so a malicious STAC document can
+inject script into an HTML artifact the user then opens locally (a `file://`
+origin, where exfiltration constraints are weak). `_html.py` gets this right
+(everything funnels through `escape()`); `viz.py` should match it.
+**Fix:** `html.escape()` every remote-derived string in `_popup_html` and
+validate `item.href` scheme (`http(s)`) before emitting it as a link.
+
+### 3.2 Download integrity is not verified (moderate)
+
+`download_url` (download.py:24-79):
+
+- After streaming, the `.part` file is renamed to the final name **without
+  checking received bytes against `Content-Length`**. A dropped connection
+  mid-body raises inside `iter_content` in the common case, but a proxy or
+  server that closes cleanly early yields a silently truncated "complete"
+  file. For multi-GB SAR products this is painful and hard to diagnose.
+- Resume uses a `Range` header **without `If-Range`/ETag validation**. If the
+  remote object changed between attempts, the resumed file is a corrupt splice
+  of two different objects. S3 provides ETags; send `If-Range` with the stored
+  ETag (persist it next to the `.part`), and fall back to a restart on
+  mismatch.
+- No checksum verification. S3 exposes ETag (MD5 for single-part uploads) via
+  HEAD; verifying when available is cheap insurance.
+
+### 3.3 XML parsing with stdlib `ElementTree` (low, defense-in-depth)
+
+`catalog._list_prefix`/`_stream_keys` parse bucket-listing XML with
+`xml.etree.ElementTree.fromstring` (catalog.py:129, 163). Python 3.8+ disables
+external entity resolution by default, so classic XXE doesn't apply, but
+entity-expansion (billion-laughs) style inputs are still a hazard if `bucket`
+is ever pointed at a hostile endpoint (the constructor accepts arbitrary
+`bucket`/`region`). Using `defusedxml.ElementTree` is a one-line hardening
+with no dependency weight concerns (it's pure Python), or document the
+trust assumption explicitly.
+
+### 3.4 Third-party CDN scripts without Subresource Integrity (low-moderate)
+
+Generated lazy-imagery maps load `geotiff.js` from unpkg pinned to a version
+(`_lazy_imagery.py:50`) — good — but **without an SRI hash**, and Folium's own
+CDN assets (leaflet, jquery, bootstrap) also ship hashless. A compromised CDN
+or package release could execute script in every map a user has generated.
+Pinning + `integrity=`/`crossorigin=` attributes on the injected `<script>`
+tag closes this for the code the project controls.
+
+### 3.5 No security policy or dependency monitoring (process gap)
+
+- No `SECURITY.md` / disclosure channel.
+- No Dependabot/Renovate config; `requests`, `click`, and the heavy extras
+  drift silently.
+- No `pip-audit` (or similar) step in CI.
+
+### 3.6 Non-findings worth recording
+
+- SQL in `index.py` is fully parameterized, and `LIKE` wildcards are escaped
+  (`_escape_like`) — done correctly.
+- `_filename_from_url` cannot path-traverse (it takes the final `/`-segment
+  and never URL-decodes), so a hostile URL can't escape `dest_dir`.
+- Nominatim usage honors the 1 req/s policy with a descriptive User-Agent, and
+  geocoding is opt-in on library paths (no surprise network calls).
+- No credentials anywhere by design ("anonymous HTTPS only") — this is a
+  genuine security *feature* of the architecture.
+
+---
+
+## 4. Scalability & robustness
+
+### 4.1 **Confirmed bug: S3 pagination silently truncates large tasks** (critical)
+
+`_list_prefix` and `_stream_keys` build URLs like
+`https://s3.<region>.amazonaws.com/<bucket>/?prefix=...&continuation-token=...`
+(catalog.py:121, 155) — but **never send `list-type=2`**. Without that
+parameter S3 serves the **ListObjects V1** API, which ignores
+`continuation-token` and responds with `<Marker>`/`<NextMarker>` semantics.
+The code then looks for `<NextContinuationToken>`, finds none, and breaks out
+of the pagination loop after the first 1,000 keys.
+
+Verified live during this analysis:
+
+```
+GET /?prefix=sar-data/tasks/Centerfield,%20Utah/
+→ 1000 <Key> elements, <IsTruncated>true</IsTruncated>, no NextContinuationToken
+→ (response is V1: contains <Marker>, not <KeyCount>)
+```
+
+Consequences today:
+
+- Any task with >1,000 objects (Centerfield, Utah already is one) has
+  acquisitions **silently missing from every search, index build, gallery,
+  timescan, and change detection**.
+- The top-level `sar-data/tasks/` listing currently fits in one page, but the
+  moment Umbra publishes its 1,001st task, **whole tasks disappear** from
+  discovery with no error.
+
+**Fix:** append `&list-type=2` to both listing URLs (then
+`NextContinuationToken` works exactly as the code expects). Add an offline
+regression test that serves two fake truncated pages and asserts both are
+consumed, and a `network`-marked test asserting a >1,000-key task yields more
+than 1,000 keys. This is a two-line production fix.
+
+### 4.2 The N+1 sidecar fetch is serial (high impact on UX)
+
+`_walk_task` fetches one `*.stac.v2.json` per in-range acquisition,
+sequentially (catalog.py:283-291). A 50-item search pays ~50 round trips at
+full latency each. The gallery module already demonstrates the fix in-repo
+(`_render_gallery_thumbnails` uses a small `ThreadPoolExecutor`); applying the
+same bounded pool (6–8 workers) to sidecar GETs would cut live-search wall
+time by roughly the worker count — with the caveat that `search()` is a
+generator and per-task batching keeps ordering deterministic.
+
+### 4.3 No retries or backoff anywhere on the HTTP path
+
+`_http.default_session()` mounts no `HTTPAdapter` with retries; one transient
+S3 503/connection-reset fails an entire search, index build, or download.
+`urllib3.util.retry.Retry(total=3, backoff_factor=0.5,
+status_forcelist=(429, 500, 502, 503, 504))` on the shared session is the
+standard, low-risk fix and lands in one place because everything already goes
+through `default_session()` (a deliberate and correct design choice).
+
+### 4.4 Whole-bucket operations need the index to be the default path
+
+The live walk lists every task to answer unscoped searches; the README rightly
+warns a full index build "takes a while." Two structural improvements:
+
+- **Publish a prebuilt index.** The `index.py` docstring already names this
+  ("walk once, ship the `.db`"). A scheduled GitHub Action that runs
+  `umbra index build` nightly and attaches `catalog.db` (a few MB compressed)
+  to a rolling release turns every user's first search from minutes to
+  milliseconds — and is the substrate for the STAC-API/MCP ideas in the
+  companion document.
+- **Read-through caching.** When an index exists, `UmbraCatalog.search` could
+  consult it first and only walk prefixes newer than the index's max
+  `acq_date`. Today the user must choose live-vs-local manually per call.
+
+### 4.5 SQLite index details
+
+- `CatalogIndex` uses a single connection with default settings: no WAL mode,
+  no `check_same_thread=False` handling, no busy timeout. Fine single-process;
+  document that, or set `PRAGMA journal_mode=WAL` for concurrent readers
+  (which the prebuilt-index use case will invite).
+- **No schema version marker.** The first time the schema changes, existing
+  user DBs will break confusingly. Add `PRAGMA user_version = 1` now and check
+  it on open — trivially cheap before there are deployed DBs, expensive after.
+- bbox queries do a full table scan with range predicates. At the current
+  catalog scale (thousands of items) this is irrelevant; if the index grows to
+  hundreds of thousands, SQLite's built-in R*Tree module is the natural
+  upgrade and the schema-version marker makes that migration possible.
+
+### 4.6 Miscellaneous robustness
+
+- `geocode` module-level state (`_GEOCODE_CACHE` unbounded, `_LAST_GEOCODE_AT`
+  global, not thread-safe) is acceptable for CLI usage; note it or guard it if
+  geocoding ever moves onto the gallery's thread pool.
+- `download_url` returns early if `dest` exists (`overwrite=False`) without
+  any completeness check — combined with §3.2, a truncated previous download
+  is never repaired. Verifying size against a HEAD request would fix both.
+
+---
+
+## 5. Open-source strategy review
+
+### 5.1 Where the project already leads
+
+- Apache-2.0 code / CC-BY-4.0 data distinction is explained clearly, and the
+  attribution string is propagated into `xarray` attrs and GeoTIFF tags —
+  license hygiene most geo libraries get wrong.
+- CONTRIBUTING.md, issue templates, PR template, pre-commit config, and a
+  three-version CI matrix all exist at v0.1. The "good first issues" section
+  names genuinely approachable areas.
+- `AGENTS.md` as the canonical agent guide (with CLAUDE.md pointing to it) is
+  ahead of most of the ecosystem.
+
+### 5.2 Gaps, in order of strategic cost
+
+1. **Not on PyPI (verified 404).** The README's install command fails for
+   every prospective user — the single biggest adoption blocker, and the name
+   is claimable by anyone. Even a `0.1.0a1` pre-release claims the name,
+   enables `pip install`, and unlocks conda-forge later. Pair with a
+   `release.yml` using PyPI **Trusted Publishing** (OIDC — no long-lived
+   token secret) triggered on GitHub Releases.
+2. **Repository metadata points to the wrong org.** `pyproject.toml` URLs
+   reference `github.com/theminiverse/umbra-py`, but this repository is
+   `reesehammer/umbra-py`. Whichever is canonical, PyPI metadata, README
+   badges, and CONTRIBUTING clone instructions must agree, or issues/PRs land
+   in the wrong place.
+3. **No releases, no tags.** The changelog is all "Unreleased" and there are
+   no git tags, so there is no way to pin, bisect, or communicate stability.
+   Cutting `v0.1.0` (matching the existing version string) costs minutes.
+4. **CI doesn't test what users use** (§2.3): add a second CI job installing
+   `.[all,dev]` so the viz/load suite actually runs; add Python 3.13 to the
+   matrix (3.13 has been stable for ~20 months); wire `pytest --cov` +
+   Codecov and put the badge in the README.
+5. **Missing community/security scaffolding:** `SECURITY.md` (§3.5),
+   `CODE_OF_CONDUCT.md` (expected by GitHub's community profile and by many
+   orgs' adoption checklists), Dependabot config, and optionally
+   `CITATION.cff` — research users of SAR data cite their tools.
+6. **No rendered documentation site.** The README is excellent but is now 328
+   lines doing the job of a docs site. mkdocs-material + mkdocstrings can
+   generate API docs from the existing (high-quality) docstrings nearly for
+   free, published via GitHub Pages. This also creates the anchor for the
+   `llms.txt` idea in the companion document.
+7. **Ecosystem listing:** once on PyPI, register in the STAC ecosystem tools
+   list, the AWS Open Data registry's usage-examples section for the Umbra
+   dataset, and pyOpenSci — each is a durable discovery channel for exactly
+   the audience this library serves.
+
+---
+
+## 6. Recommendations, ordered by priority
+
+**P0 — correctness & existence (do first, all are small)**
+
+| # | Recommendation | Where | Effort |
+|---|---|---|---|
+| 1 | Add `list-type=2` to both S3 listing URLs; add truncated-pagination regression tests (offline fake + `network` test) | `catalog.py:121,155` | ~2 lines + tests |
+| 2 | Publish to PyPI (even as alpha) and add a Trusted-Publishing release workflow; tag `v0.1.0` | `pyproject.toml`, `.github/workflows/release.yml` | half a day |
+| 3 | Fix `pyproject.toml`/README/CONTRIBUTING repo URLs to the canonical org | `pyproject.toml:52-56` | minutes |
+| 4 | Add a CI job with `.[all,dev]` so the 72 skipped viz/load tests run; add Python 3.13 | `.github/workflows/ci.yml` | ~10 lines |
+
+**P1 — user-facing robustness**
+
+| # | Recommendation | Where | Effort |
+|---|---|---|---|
+| 5 | Verify downloads: compare received bytes to `Content-Length` before renaming `.part`; use `If-Range` + stored ETag on resume | `download.py` | small |
+| 6 | Mount retry/backoff (`Retry(total=3, backoff_factor=0.5, status_forcelist=…)`) on `default_session()` | `_http.py` | ~5 lines |
+| 7 | Escape all remote-derived strings in `viz._popup_html`; validate href scheme | `viz.py:159-208` | small |
+| 8 | Fix the ledgered `_classify_asset` `"tif"` dead-branch bug with a regression test; delete the TODO entry | `models.py:30`, `TODO.md` | ~5 lines |
+| 9 | Parallelize sidecar GETs with a bounded thread pool (mirror the gallery pattern) | `catalog.py:_walk_task` | medium |
+| 10 | Add `PRAGMA user_version` schema versioning to `CatalogIndex` before any DBs are in the wild | `index.py` | small |
+
+**P2 — hardening & hygiene**
+
+| # | Recommendation | Where | Effort |
+|---|---|---|---|
+| 11 | Ship `py.typed`; add mypy (or pyright) to CI | package + CI | small |
+| 12 | Add SRI hashes to the injected geotiff.js `<script>` tag | `_lazy_imagery.py` | small |
+| 13 | Parse listing XML with `defusedxml` (or document the trust boundary) | `catalog.py` | small |
+| 14 | Add `SECURITY.md`, `CODE_OF_CONDUCT.md`, Dependabot config, `pip-audit` CI step | `.github/` | small |
+| 15 | Single-source the version via hatchling dynamic version | `pyproject.toml`, `__init__.py` | small |
+| 16 | Wire `pytest --cov` + Codecov badge into CI | CI | small |
+| 17 | Publish a nightly prebuilt `catalog.db` as a rolling release artifact (scheduled Action) | new workflow | medium |
+
+**P3 — structural investments (schedule, don't rush)**
+
+| # | Recommendation | Where | Effort |
+|---|---|---|---|
+| 18 | Extract shared search-vs-URLs gathering + common option groups from the five CLI commands that duplicate them | `cli.py` | medium |
+| 19 | Split `viz.py` into a `viz/` package (geojson / maps / raster / composites / gallery) with re-exports preserved | `viz.py` | medium |
+| 20 | Stand up mkdocs-material + mkdocstrings docs site on GitHub Pages | new `docs/` config | medium |
+| 21 | Read-through index caching in `UmbraCatalog.search` (consult local index before walking) | `catalog.py`/`index.py` | larger; design first |
+| 22 | Add `CITATION.cff`; register with STAC ecosystem list, AWS Open Data registry examples, pyOpenSci | repo root | small each |
+
+---
+
+## 7. Closing note
+
+The project's stated philosophy — "a small, well-documented layer," surgical
+changes, offline-first tests — is visible in the code, which is the best
+predictor of long-term maintainability. The P0 list is deliberately tiny:
+one two-line protocol fix, one publishing task, one metadata correction, and
+one CI job. Landing those four converts this from a well-built repository
+into a dependable, installable, discoverable open-source project.
