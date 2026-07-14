@@ -28,6 +28,27 @@ def test_search_returns_items():
     assert href.startswith("https://")
 
 
+def test_large_task_paginates_past_1000_keys():
+    """Regression for the S3 pagination bug: without ``list-type=2`` the
+    lister silently truncated every task at its first 1,000 keys. Centerfield,
+    Utah is a task large enough to span multiple pages, so streaming it must
+    yield well over 1,000 keys once the ListObjectsV2 protocol is used.
+    """
+    catalog = UmbraCatalog()
+    prefix = "sar-data/tasks/Centerfield, Utah/"
+    count = 0
+    for _ in catalog._stream_keys(prefix):
+        count += 1
+        if count > 1000:
+            break  # proven multi-page; no need to drain the whole listing
+    if count == 0:
+        pytest.skip(f"task {prefix!r} not present in the live bucket anymore")
+    assert count > 1000, (
+        f"only {count} keys under {prefix!r}; pagination is truncating "
+        "(is list-type=2 still on the listing URL?)"
+    )
+
+
 def test_quicklook_renders_real_cog(tmp_path):
     """End-to-end: search the live bucket, then render one acquisition's GEC
     to a PNG via range requests. Proves the /vsicurl/ read + SAR stretch

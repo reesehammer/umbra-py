@@ -1,6 +1,8 @@
 from datetime import date
+from urllib.parse import parse_qs, urlparse
 
 import pytest
+import responses
 
 from umbra_py.catalog import UmbraCatalog, _acq_date, _task_name
 
@@ -277,3 +279,105 @@ def test_search_url_encodes_spaces_in_task_names(monkeypatch):
     href = item.asset_href("GEC")
     assert " " not in href
     assert "Allegiant%20Stadium" in href
+
+
+# -- S3 pagination protocol regression --------------------------------------
+#
+# Umbra's bucket is listed with the anonymous S3 REST API. The lister must send
+# ``list-type=2`` (ListObjectsV2); without it S3 serves the V1 API, which
+# ignores ``continuation-token`` and never returns ``NextContinuationToken`` --
+# so any task with more than 1,000 keys was silently truncated to its first
+# page. These tests drive the real ``_list_prefix`` / ``_stream_keys`` (not the
+# monkeypatched fakes the other tests use) against a fake two-page bucket.
+
+_S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+_NEXT_TOKEN = "PAGE2TOKEN"
+
+
+def _list_result(*, contents=(), common_prefixes=(), next_token=None):
+    """Build a minimal ListObjectsV2 XML response body."""
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>', f'<ListBucketResult xmlns="{_S3_NS}">']
+    for p in common_prefixes:
+        parts.append(f"<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>")
+    for k in contents:
+        parts.append(f"<Contents><Key>{k}</Key></Contents>")
+    if next_token is not None:
+        parts.append("<IsTruncated>true</IsTruncated>")
+        parts.append(f"<NextContinuationToken>{next_token}</NextContinuationToken>")
+    else:
+        parts.append("<IsTruncated>false</IsTruncated>")
+    parts.append("</ListBucketResult>")
+    return "".join(parts)
+
+
+def _make_paged_callback(page1, page2, seen_urls):
+    """Return a ``responses`` callback that serves page1 then page2.
+
+    Which page is served is decided by the presence of ``continuation-token``
+    in the request (exactly how a real V2 client paginates). Every request URL
+    is recorded in ``seen_urls`` so tests can assert ``list-type=2`` was sent.
+    """
+
+    def _callback(request):
+        qs = parse_qs(urlparse(request.url).query)
+        seen_urls.append(request.url)
+        body = page2 if "continuation-token" in qs else page1
+        return (200, {}, body)
+
+    return _callback
+
+
+@responses.activate
+def test_stream_keys_follows_continuation_token():
+    """A truncated task listing is fully consumed across both pages."""
+    cat = UmbraCatalog()
+    prefix = "sar-data/tasks/Big Task/"
+    page1_keys = [f"{prefix}k{i}" for i in range(1000)]
+    page2_keys = [f"{prefix}k1000", f"{prefix}k1001"]
+    seen_urls = []
+    responses.add_callback(
+        responses.GET,
+        f"{cat._list_base}/",
+        callback=_make_paged_callback(
+            _list_result(contents=page1_keys, next_token=_NEXT_TOKEN),
+            _list_result(contents=page2_keys),
+            seen_urls,
+        ),
+    )
+
+    keys = list(cat._stream_keys(prefix))
+
+    assert len(keys) == 1002  # both pages, not truncated at 1000
+    assert keys[-1] == f"{prefix}k1001"
+    assert len(seen_urls) == 2
+    # Both requests must be V2 and the second must carry the continuation token.
+    assert all("list-type=2" in url for url in seen_urls)
+    assert "continuation-token=" in seen_urls[1]
+
+
+@responses.activate
+def test_list_prefix_follows_continuation_token():
+    """A truncated delimited listing returns every subdir and file, paged."""
+    cat = UmbraCatalog()
+    prefix = "sar-data/tasks/"
+    page1_prefixes = [f"{prefix}task{i}/" for i in range(1000)]
+    page2_prefixes = [f"{prefix}task1000/"]
+    seen_urls = []
+    responses.add_callback(
+        responses.GET,
+        f"{cat._list_base}/",
+        callback=_make_paged_callback(
+            _list_result(common_prefixes=page1_prefixes, next_token=_NEXT_TOKEN),
+            _list_result(common_prefixes=page2_prefixes),
+            seen_urls,
+        ),
+    )
+
+    subdirs, _files = cat._list_prefix(prefix)
+
+    assert len(subdirs) == 1001  # both pages
+    assert f"{prefix}task1000/" in subdirs
+    assert len(seen_urls) == 2
+    assert all("list-type=2" in url for url in seen_urls)
+    # The delimiter must survive alongside list-type=2 on the first request.
+    assert "delimiter=" in seen_urls[0]

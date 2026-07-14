@@ -18,13 +18,14 @@ is fast and well-patterned.
 
 The findings that matter most are not style issues — they are:
 
-1. **A confirmed, live correctness bug**: the S3 listing code paginates with a
-   ListObjects **V2** parameter against what is effectively a **V1** API call,
-   so any task directory with more than 1,000 keys is **silently truncated**.
-   This was reproduced against the live bucket during this analysis
-   (`Centerfield, Utah` returns `IsTruncated=true` with 1,000 keys and no
-   continuation token the code can read). Search results are quietly incomplete
-   today.
+1. **A confirmed, live correctness bug** *(✅ fixed in PR #29)*: the S3 listing
+   code sent a ListObjects **V2** continuation parameter against what was
+   effectively a **V1** API call (it never sent `list-type=2`), so any task
+   directory with more than 1,000 keys was **silently truncated**. This was
+   reproduced against the live bucket during this analysis (`Centerfield, Utah`
+   returns `IsTruncated=true` with 1,000 keys and no continuation token the old
+   code could read). Both listers now send `list-type=2`; search results are
+   complete again.
 2. **The package is not on PyPI** even though the README's first instruction is
    `pip install umbra-py` (verified: PyPI returns 404 for `umbra-py`). For an
    open-source adoption strategy this is the single highest-leverage gap — and
@@ -203,7 +204,14 @@ tag closes this for the code the project controls.
 
 ## 4. Scalability & robustness
 
-### 4.1 **Confirmed bug: S3 pagination silently truncates large tasks** (critical)
+### 4.1 **Confirmed bug: S3 pagination silently truncates large tasks** (critical) — **fixed** (PR #29)
+
+> **Status:** ✅ Fixed. Both `_list_prefix` and `_stream_keys` now send
+> `&list-type=2`, so ListObjectsV2 pagination works as the code expects.
+> Offline regression tests drive both listers across two truncated pages, and a
+> `network`-marked test confirms a >1,000-key task (*Centerfield, Utah*) now
+> streams past its first page against the live bucket. The description below is
+> retained as the record of the original defect.
 
 `_list_prefix` and `_stream_keys` build URLs like
 `https://s3.<region>.amazonaws.com/<bucket>/?prefix=...&continuation-token=...`
@@ -350,7 +358,7 @@ warns a full index build "takes a while." Two structural improvements:
 
 | # | Recommendation | Where | Effort |
 |---|---|---|---|
-| 1 | Add `list-type=2` to both S3 listing URLs; add truncated-pagination regression tests (offline fake + `network` test) | `catalog.py:121,155` | ~2 lines + tests |
+| 1 | ✅ **Done (PR #29).** Added `list-type=2` to both S3 listing URLs; added truncated-pagination regression tests (offline two-page fakes + `network` test) | `catalog.py:121,155` | ~2 lines + tests |
 | 2 | Publish to PyPI (even as alpha) and add a Trusted-Publishing release workflow; tag `v0.1.0` | `pyproject.toml`, `.github/workflows/release.yml` | half a day |
 | 3 | Fix `pyproject.toml`/README/CONTRIBUTING repo URLs to the canonical org | `pyproject.toml:52-56` | minutes |
 | 4 | Add a CI job with `.[all,dev]` so the 72 skipped viz/load tests run; add Python 3.13 | `.github/workflows/ci.yml` | ~10 lines |

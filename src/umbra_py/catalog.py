@@ -118,7 +118,11 @@ class UmbraCatalog:
         files: list[str] = []
         token: str | None = None
         while True:
-            url = f"{self._list_base}/?prefix={quote(prefix)}&delimiter=/"
+            # ``list-type=2`` selects the ListObjectsV2 API. Without it S3
+            # falls back to V1, which ignores ``continuation-token`` and never
+            # returns ``NextContinuationToken`` -- so listings would silently
+            # truncate at the first 1,000 keys.
+            url = f"{self._list_base}/?list-type=2&prefix={quote(prefix)}&delimiter=/"
             if token:
                 url += f"&continuation-token={quote(token)}"
             try:
@@ -152,7 +156,10 @@ class UmbraCatalog:
         """
         token: str | None = None
         while True:
-            url = f"{self._list_base}/?prefix={quote(prefix)}"
+            # ``list-type=2`` selects ListObjectsV2 so ``continuation-token``
+            # is honored and ``NextContinuationToken`` is returned; without it
+            # a task with >1,000 keys is silently truncated to its first page.
+            url = f"{self._list_base}/?list-type=2&prefix={quote(prefix)}"
             if token:
                 url += f"&continuation-token={quote(token)}"
             try:

@@ -31,6 +31,13 @@ These goals reinforce each other. The honest pitch to Umbra is not "no one
 can do this without us"; it's *"everyone who does this without us writes the
 same 500 lines of glue first, and many give up."*
 
+> **Critical-path note (2026-07-14):** the S3 pagination bug that silently
+> truncated every listing at 1,000 keys — the prerequisite the analysis, demo,
+> and AI-integration docs all named for any "full catalog" work — is fixed
+> (PR #29). Whole-catalog search, index builds, and renders are complete again,
+> which unblocks the prebuilt-index consume side (workstream 5.2) and the demo /
+> MCP / STAC-API layers downstream.
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

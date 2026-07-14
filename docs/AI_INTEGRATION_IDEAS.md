@@ -264,9 +264,11 @@ and contributors.
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on
-the fixed S3 pagination and the prebuilt index from the analysis document —
-ship those first or agents will faithfully amplify today's silently-truncated
-search results.
+correct S3 pagination and the prebuilt index from the analysis document. The
+pagination half is now done (PR #29 added `list-type=2`, so agents no longer
+amplify silently-truncated search results); the prebuilt-index *consume* side
+(`umbra index fetch`, `TODO.md`) is the remaining prerequisite to ship before
+either interface.
 
 ---
 

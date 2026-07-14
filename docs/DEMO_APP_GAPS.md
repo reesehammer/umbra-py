@@ -65,14 +65,15 @@ question — worth confirming before building:
 
 ## 3. The gaps, ordered by how hard they block the target
 
-### G1 — The catalog you'd render is silently incomplete (blocker; fix exists)
+### G1 — The catalog you'd render is silently incomplete (blocker) — **fixed** (PR #29)
 
-The S3 pagination bug verified in `CODEBASE_ANALYSIS.md` §4.1 (`list-type=2`
-missing → V1 responses → truncation at 1,000 keys/task) means any
-"full library" build today **omits acquisitions from the largest, most
-demo-worthy tasks** (Centerfield, Utah already truncates). A full-catalog demo
-is the exact use case that makes this bug visible. Two-line fix + tests;
-nothing else in this document is worth doing before it.
+✅ **Resolved.** The S3 pagination bug from `CODEBASE_ANALYSIS.md` §4.1
+(`list-type=2` missing → V1 responses → truncation at 1,000 keys/task) is
+fixed: both listers now send `list-type=2`, so full-library builds include the
+largest, most demo-worthy tasks (Centerfield, Utah verified streaming past
+1,000 keys against the live bucket). This was the single prerequisite everything
+else in this document waited on — the remaining gaps (G2–G8) are now the
+critical path to a demo application.
 
 ### G2 — No published full-catalog dataset, and the index only feeds `search`
 
@@ -173,7 +174,7 @@ small JS app, not a bigger Folium template.
 No servers, hostable on GitHub Pages, and every piece builds on something
 already in the repo:
 
-1. Fix G1 (`list-type=2`) — prerequisite.
+1. ✅ Fix G1 (`list-type=2`) — prerequisite, **done in PR #29**.
 2. Wire `--local`/`--db` into the visual CLI commands (G2, small).
 3. **Build pipeline** (new, scheduled GitHub Action):
    `umbra index build` → export `catalog.geojson` (exists) → tile to
@@ -230,11 +231,13 @@ Adds on-demand capability over Path A rather than replacing it:
   comparisons, timescans) that show off every capability one file at a time.
 - **Not today**: a self-serve, full-catalog, interactive application — the
   repo has no API/server layer, the visual commands can't use the local
-  index, the full-catalog data itself is silently truncated by the pagination
-  bug, and Folium HTML doesn't scale to the whole archive or to app-grade UX.
+  index, and Folium HTML doesn't scale to the whole archive or to app-grade
+  UX. (The full-catalog data is no longer truncated: the pagination bug that
+  blocked everything here is fixed in PR #29.)
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the
   STAC-API server (Path B) as the shared foundation this document and the AI
   integration plan both want. The single prerequisite for anything labeled
-  "full catalog" is the two-line pagination fix.
+  "full catalog" — the two-line pagination fix — is now landed (PR #29), so
+  Path A's remaining steps are unblocked.
