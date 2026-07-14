@@ -23,6 +23,7 @@ from .exceptions import (
     MissingDependencyError,
     UmbraError,
 )
+from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .load import to_geotiff, to_xarray
@@ -57,6 +58,7 @@ __all__ = [
     "UmbraCatalog",
     "CatalogIndex",
     "default_index_path",
+    "export_geoparquet",
     "UmbraItem",
     "ItemCollection",
     "to_xarray",
