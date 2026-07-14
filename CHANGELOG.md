@@ -34,7 +34,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the rolling `catalog-index` GitHub release, so users can search the whole
   catalog without ever crawling it. New public `export_geoparquet`; new
   `export` extra (`stac-geoparquet`). Project strategy notes tracking this and
-  related ideas live in `docs/umbra-value-notes.md`.
+  related ideas live in `docs/STRATEGY.md`.
 - **Interactive full-resolution viewer (`view`, `umbra view`).** Every other
   rendering surface collapses a scene to a fixed picture — `quicklook` writes
   one downsampled PNG — which throws away the resolution that makes Umbra
