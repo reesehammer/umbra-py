@@ -1,0 +1,62 @@
+name: Live catalog canary
+
+# Umbra's open-data catalog is an external dependency that drifts: bucket
+# layout, sidecar naming, asset keys (models.py already handles two naming
+# generations). The offline suite can't see that drift, so this runs the
+# `-m network` integration tests against the live catalog on a schedule.
+# A failure here usually means "Umbra changed something", not "a PR broke
+# it" — it opens (or comments on) a tracking issue instead of failing PRs.
+
+on:
+  schedule:
+    - cron: "43 5 * * 1" # Mondays 05:43 UTC, ahead of the index publish
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  live-tests:
+    runs-on: ubuntu-latest
+    # Don't hit Umbra's bucket from forks; schedules there stay off anyway.
+    if: github.repository == 'reesehammer/umbra-py'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install package with all extras
+        run: uv pip install --system -e ".[dev,all]"
+
+      - name: Run live tests against Umbra's public catalog
+        run: pytest -m network -q
+
+      - name: Open or update a tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body="The scheduled \`pytest -m network\` run against Umbra's public
+          catalog failed on $(date -u +%Y-%m-%d) — likely catalog drift
+          (bucket layout, sidecar naming, asset keys) rather than a code
+          regression. See the [failed run]($run_url)."
+          existing=$(gh issue list --state open \
+            --search 'Live catalog canary failed in:title' \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Live catalog canary failed" --body "$body"
+          fi

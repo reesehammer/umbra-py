@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Keep workflow actions fresh (checkout, setup-python, setup-uv, ...).
+  # Grouped so a week's bumps arrive as one PR, not five.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Python deps are open-ended ranges in pyproject.toml, so this mostly
+  # surfaces new majors that fall outside a range — low traffic by design.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]

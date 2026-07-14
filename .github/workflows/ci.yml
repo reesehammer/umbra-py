@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A superseded push's runs are dead feedback; cancel them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,6 +27,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
 
       - name: Install package
         run: uv pip install --system -e ".[dev]"
@@ -33,4 +41,29 @@ jobs:
         run: ruff format --check .
 
       - name: Test (offline)
+        run: pytest -q
+
+  # The core matrix installs only [dev], so every test needing an optional
+  # extra (viz / load / convert / export) importorskips there — silently.
+  # This job installs everything so those tests actually run on every PR.
+  test-all-extras:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install package with all extras
+        run: uv pip install --system -e ".[dev,all]"
+
+      - name: Test (offline, all extras)
         run: pytest -q
