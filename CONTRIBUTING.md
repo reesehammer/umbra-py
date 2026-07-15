@@ -10,7 +10,7 @@ We use [`uv`](https://github.com/astral-sh/uv) (or plain `pip`) and
 [`ruff`](https://github.com/astral-sh/ruff).
 
 ```bash
-git clone https://github.com/theminiverse/umbra-py
+git clone https://github.com/reesehammer/umbra-py
 cd umbra-py
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"

@@ -252,6 +252,27 @@ same 500 lines of glue first, and many give up."*
 > (5.4) and taking adoption visible where Umbra looks (5.3) — including opening
 > the "talk to Umbra" conversation (5.6), which is now concrete: the funnel runs
 > end to end from free bucket to paid archive in one library.
+>
+> **Update:** the **release plumbing for the funnel's front door has shipped**
+> (`CODEBASE_ANALYSIS.md` P0 #2/#3, P2 #11/#15). With the whole funnel now built
+> — free-bucket search through the paid Canopy archive, all in one library — the
+> binding constraint on §1's thesis ("widen the funnel — more people successfully
+> using the open data") is no longer a missing *capability*; it is that the
+> README's first instruction, `pip install umbra-py`, still fails because the
+> package isn't on PyPI. The analysis doc names that the single highest-leverage
+> adoption gap, and it gates the two remaining strategic workstreams (5.3 "make
+> adoption visible" — every registry listing assumes an installable package — and,
+> after it, 5.6 "talk to Umbra"). This lands the code half of that gap: a
+> Trusted-Publishing (OIDC, no stored token) `release.yml` that builds, `twine
+> check`s, and guards the tag/version before publishing on a GitHub Release; a
+> single-sourced version (hatchling dynamic version, so `pyproject.toml` and
+> `__version__` can't drift); the `py.typed` marker so downstream type checkers
+> consume the inline types; and the fix to the stale `theminiverse`→`reesehammer`
+> repository-identity mismatch across `pyproject.toml`, `CHANGELOG`, and
+> `CONTRIBUTING`. What remains is a maintainer action, not code: register the PyPI
+> Trusted Publisher and cut the `v0.1.0` release, which fires the workflow. With
+> that, `pip install umbra-py` works and 5.3's registry/ecosystem listings become
+> unblocked.
 
 ## 2. The landscape: life without umbra-py
 
@@ -442,8 +463,13 @@ Strategy is only as credible as the project's reliability. In place:
 - **CI hygiene** — dependency caching, superseded-run cancellation,
   grouped Dependabot updates for Actions and pip.
 
-Still open (from the same review): a PyPI release workflow with trusted
-publishing + single-sourced version, SessionStart hook / permission
-allowlist for remote agent sessions, and resolving the
-`theminiverse`/`reesehammer` repository-identity mismatch in
-`pyproject.toml`.
+Now shipped from the same review: the **PyPI release workflow with trusted
+publishing** (`.github/workflows/release.yml` — OIDC, no stored token, tag/version
+guard) plus a **single-sourced version** (hatchling dynamic version from
+`__version__`), the **`py.typed` marker**, and the fix to the
+`theminiverse`/`reesehammer` **repository-identity mismatch** across
+`pyproject.toml`, `CHANGELOG.md`, and `CONTRIBUTING.md`. The one remaining
+step is a maintainer action, not code: register the PyPI Trusted Publisher for
+`reesehammer/umbra-py` and cut the `v0.1.0` GitHub Release (which fires the
+workflow and claims the name). Still open otherwise: a SessionStart hook /
+permission allowlist for remote agent sessions.

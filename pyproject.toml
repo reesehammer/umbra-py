@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "umbra-py"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Python-first toolkit to make Umbra SAR open data easy to discover, load, download, and analyze."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -65,9 +65,9 @@ dev = [
 all = ["umbra-py[convert,load,viz,export]"]
 
 [project.urls]
-Homepage = "https://github.com/theminiverse/umbra-py"
-Repository = "https://github.com/theminiverse/umbra-py"
-Issues = "https://github.com/theminiverse/umbra-py/issues"
+Homepage = "https://github.com/reesehammer/umbra-py"
+Repository = "https://github.com/reesehammer/umbra-py"
+Issues = "https://github.com/reesehammer/umbra-py/issues"
 "Umbra Open Data" = "https://umbra.space/open-data/"
 
 [project.scripts]
@@ -75,8 +75,15 @@ umbra = "umbra_py.cli:main"
 umbra-py = "umbra_py.cli:main"
 umbra-mcp = "umbra_py.mcp_server:main"
 
+# Single-source the version from the package so it can never drift from
+# `__version__` (the value `umbra.__version__` and `umbra --version` report).
+[tool.hatch.version]
+path = "src/umbra_py/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/umbra_py"]
+# Ship the PEP 561 marker so downstream type checkers consume the inline types.
+artifacts = ["src/umbra_py/py.typed"]
 
 [tool.ruff]
 line-length = 100
