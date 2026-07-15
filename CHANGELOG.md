@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra chips`: turn SAR scenes into georeferenced ML training tiles
+  (`docs/AI_INTEGRATION_IDEAS.md` C4 / `docs/STRATEGY.md` 5.5 — the ML
+  dataset-preparation layer).** For the model-*training* audience, the missing
+  verb is *chipping*. The new `umbra_py.chips` module (`[load]` extra, mirroring
+  `umbra_py.load`) walks a search result and cuts each acquisition's geocoded
+  GeoTIFF into fixed-size, georeferenced tiles with a manifest that carries the
+  per-chip metadata a training pipeline needs. `chip_item()` reads band 1 of the
+  item's COG one window at a time through GDAL's `/vsicurl/` driver — so only the
+  bytes for each tile stream over HTTP range requests (no multi-gigabyte
+  download, memory bounded to one chip) — and emits full `chip_size` × `chip_size`
+  tiles as GeoTIFF (georeferenced) or `.npy` (bare `float32`); partial edge tiles
+  are dropped so every chip has the exact shape a loader expects, `stride`
+  controls overlap for dense inference / augmentation, and `min_valid` drops the
+  mostly-nodata corners of a rotated footprint. `write_chips()` chips a whole
+  search into a dataset and writes a manifest — `.jsonl` (one `ChipRecord` per
+  line, the standard ML format) or `.geojson` (a `FeatureCollection` of chip
+  footprints for QGIS / geopandas), both stdlib-only — where every record carries
+  the chip's geographic bbox, CRS, affine transform, grid position and source
+  pixel window plus the acquisition's datetime, place, platform, polarization,
+  incidence angle and resolution, stamped with the CC-BY attribution (the same
+  license discipline the library applies to GeoTIFF tags and xarray attrs). The
+  `umbra chips` command mirrors `umbra change`'s search-vs-URLs interface (pass
+  STAC URLs directly, or `--area`/`--bbox` with `--start`/`--end`, plus
+  `--local`/`--index-db` to gather from a prebuilt index) with `--chip-size`,
+  `--stride`, `--format`, `--db`, `--min-valid`, `--manifest` and a `--json`
+  dataset summary. No model is called — chipping is pure raster iteration +
+  manifest logic in the deterministic core — so the whole feature is
+  offline-testable with a real on-disk GeoTIFF and no network.
 - **`umbra watch`: idempotent delta detection for standing site monitoring
   (`docs/AI_INTEGRATION_IDEAS.md` C3 — the first "agent as a standing analyst"
   primitive).** SAR re-images a site pass after pass, so the natural way to

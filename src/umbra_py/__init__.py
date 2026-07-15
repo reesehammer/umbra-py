@@ -13,6 +13,14 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .catalog import UmbraCatalog
+from .chips import (
+    CHIPPABLE_ASSETS,
+    ChipDataset,
+    ChipRecord,
+    chip_item,
+    write_chips,
+    write_manifest,
+)
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .dates import parse_date_bound
@@ -92,6 +100,12 @@ __all__ = [
     "ItemCollection",
     "to_xarray",
     "to_geotiff",
+    "chip_item",
+    "write_chips",
+    "write_manifest",
+    "ChipRecord",
+    "ChipDataset",
+    "CHIPPABLE_ASSETS",
     "download_asset",
     "download_item",
     "download_url",

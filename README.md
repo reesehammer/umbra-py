@@ -417,6 +417,9 @@ umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe
 # red=mean, green=peak, blue=temporal variability. Stable ground reads
 # gray/yellow; anything that came and went over the series glows blue/cyan.
 umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out timescan.png --db
+
+# Chip a site's passes into fixed-size georeferenced ML tiles + a manifest.
+umbra chips --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out chips/ --chip-size 512 --db
 ```
 
 ### Ask in plain language (`umbra ask`)
@@ -569,6 +572,36 @@ attribution) whose items are ready to hand to `umbra describe` or `umbra change
 derived from the query otherwise), `--state-db` chooses where state lives,
 `--reset` re-establishes the baseline, and `--local` diffs a prebuilt index
 snapshot instead of walking S3 live.
+
+### Prepare an ML training set (`umbra chips`)
+
+Building a model on SAR? `umbra chips` walks a search and cuts each scene's
+geocoded GeoTIFF into fixed-size, georeferenced tiles with a manifest that
+carries the metadata a training pipeline needs — chip path, geographic bbox,
+CRS, transform, datetime, place, polarization, incidence angle, resolution, and
+the CC-BY license — one record per chip.
+
+```bash
+# Chip a site's passes into 512-px GeoTIFF tiles + a JSONL manifest.
+umbra chips --area "Centerfield, Utah" --start 2024-01-01 --end 2024-12-31 \
+    --out chips/ --chip-size 512 --db
+
+# NumPy arrays with overlapping tiles, dropping mostly-empty footprint corners;
+# emit a GeoJSON manifest you can drop straight into QGIS.
+umbra chips --area "Centerfield" --out chips/ --format npy \
+    --chip-size 256 --stride 128 --min-valid 0.5 --manifest chips.geojson
+
+# Or chip specific items directly, and print the dataset summary as JSON.
+umbra chips <item-json-url> --out chips/ --json
+```
+
+Only the bytes for each tile stream over HTTP range requests — no full download,
+and memory stays bounded to one chip. Fixed-size is a promise (partial edge tiles
+are dropped), so every chip has the exact shape a loader expects; `--stride`
+overlaps tiles for dense inference / augmentation, and `--min-valid` drops the
+mostly-nodata corners of a rotated footprint. **No model is called** — chipping is
+pure raster iteration + manifest logic. Requires the load extra
+(`pip install "umbra-py[load]"`).
 
 ### Drive it from an AI agent (MCP)
 

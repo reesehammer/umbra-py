@@ -13,6 +13,7 @@ from . import __version__
 from ._http import get_json
 from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
+from .chips import CHIPPABLE_ASSETS
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .download import download_item
@@ -987,6 +988,189 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
             db=db,
         )
     click.echo(f"Wrote GeoTIFF to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--out",
+    "out_dir",
+    required=True,
+    help="Output directory for the chips and manifest (created if needed).",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(CHIPPABLE_ASSETS, case_sensitive=False),
+    help="Which product to chip. GEC (the geocoded GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters and can't be chipped.",
+)
+@click.option(
+    "--chip-size",
+    type=int,
+    default=512,
+    show_default=True,
+    help="Tile edge in pixels. Only full tiles are written; a partial edge "
+    "strip is dropped, so every chip has this exact shape.",
+)
+@click.option(
+    "--stride",
+    type=int,
+    default=None,
+    help="Step between tile origins in pixels (default: --chip-size, "
+    "non-overlapping). A smaller stride overlaps tiles for dense inference "
+    "or augmentation.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["geotiff", "npy"], case_sensitive=False),
+    default="geotiff",
+    show_default=True,
+    help="Chip file format: georeferenced GeoTIFF, or a bare float32 .npy "
+    "array (geo metadata then lives only in the manifest).",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Write the decibel (log-amplitude) scale instead of linear amplitude.",
+)
+@click.option(
+    "--min-valid",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Drop a tile whose fraction of valid (finite, positive) pixels is "
+    "below this. 0.0 keeps every full tile; e.g. 0.5 drops the mostly-nodata "
+    "corners of a rotated footprint.",
+)
+@click.option(
+    "--manifest",
+    default="manifest.jsonl",
+    show_default=True,
+    help="Manifest filename inside --out. A .jsonl writes one chip record per "
+    "line (the ML default); a .geojson writes a FeatureCollection of chip "
+    "footprints for QGIS / geopandas.",
+)
+@click.option(
+    "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
+)
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--start",
+    help="Earliest acquisition date (YYYY-MM-DD or a relative expression).",
+)
+@click.option("--end", help="Latest acquisition date (same formats as --start).")
+@click.option(
+    "--max-search",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Max acquisitions to gather when searching (ignored with item URLs).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the dataset summary as JSON.")
+@_fuzzy_option
+@_local_index_options
+def chips(
+    item_urls,
+    out_dir,
+    asset,
+    chip_size,
+    stride,
+    fmt,
+    db,
+    min_valid,
+    manifest,
+    area,
+    bbox,
+    start,
+    end,
+    max_search,
+    as_json,
+    fuzzy,
+    local,
+    db_path,
+) -> None:
+    """Cut SAR scenes into fixed-size, georeferenced ML training tiles.
+
+    Walks the chosen acquisitions and writes each one's geocoded GeoTIFF as a
+    grid of full chip-size tiles (GeoTIFF or .npy), plus a manifest carrying
+    per-chip geo + acquisition metadata (bbox, CRS, transform, datetime,
+    polarization, incidence angle, resolution, license) -- the data-loading
+    layer for SAR foundation-model and change-detection research.
+
+    Two ways to choose what to chip:
+
+    \b
+    - Pass STAC JSON URLs directly.
+    - Or search: give --area (or --bbox) with --start/--end and the command
+      gathers a site's acquisitions automatically.
+
+    Only the bytes for each tile are streamed via HTTP range requests -- no full
+    download, and memory stays bounded to one chip. Requires the load extra
+    (``pip install "umbra-py[load]"``).
+    """
+    from .chips import write_chips
+
+    search_mode = any(v for v in (area, bbox, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+        )
+
+    if item_urls:
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox):
+            raise click.UsageError(
+                "Give --area or --bbox (optionally with --start/--end) to search, "
+                "or pass item URLs directly."
+            )
+        items = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=_parse_bbox(bbox),
+            start=start,
+            end=end,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=[asset],
+            limit=max_search,
+        )
+        if not items:
+            raise click.ClickException(
+                f"Search found no {asset} acquisitions. Widen the date range or area."
+            )
+        click.echo(f"Chipping {len(items)} acquisition(s) into {out_dir} ...")
+
+    def _report(index: int, total: int, item, written: int) -> None:
+        click.echo(f"  [{index}/{total}] {item.id}: {written} chip(s)")
+
+    with OrbitSpinner(f"Chipping into {out_dir}"):
+        dataset = write_chips(
+            items,
+            out_dir,
+            asset=asset,
+            chip_size=chip_size,
+            stride=stride,
+            db=db,
+            fmt=fmt,
+            min_valid=min_valid,
+            manifest=manifest,
+            progress=None if as_json else _report,
+        )
+
+    if as_json:
+        click.echo(json.dumps(dataset.to_dict(), indent=2))
+        return
+    click.echo(
+        f"Wrote {dataset.chip_count} chip(s) from {len({r.item_id for r in dataset.records})} "
+        f"acquisition(s) to {dataset.out_dir}"
+    )
+    if dataset.manifest_path:
+        click.echo(f"  manifest -> {dataset.manifest_path}")
 
 
 @cli.command()
