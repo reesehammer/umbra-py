@@ -32,6 +32,7 @@ from .index import CatalogIndex, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
+from .planner import AskError, SearchPlan, ask, parse_plan
 from .viewer import make_viewer_server, view
 from .viz import (
     change_animation,
@@ -74,6 +75,10 @@ __all__ = [
     "DATA_LICENSE",
     "ATTRIBUTION",
     "llm_context",
+    "ask",
+    "parse_plan",
+    "SearchPlan",
+    "AskError",
     "parse_date_bound",
     "task_matches",
     "matching_tasks",

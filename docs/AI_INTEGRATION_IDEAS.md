@@ -107,6 +107,26 @@ builds capabilities that assume an AI in the loop.
 > Semantic aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) is
 > deliberately left to the future embedding index; the LLM-planned `umbra ask`
 > is now the last open C1 piece.
+>
+> **Update:** the **LLM-planned `umbra ask` has now shipped** — the capstone of
+> C1 and the *first feature in the package that calls a model*. `umbra ask "…"`
+> (`src/umbra_py/planner.py`, `[ai]` extra) hands the user's sentence plus the
+> `llm_context()` document to a configured model (Anthropic or any
+> OpenAI-compatible endpoint, user-supplied key, `requests` only — no SDK) and
+> gets back the search *parameters* it maps to. The model **only plans**: the new
+> `parse_plan` re-validates every field deterministically — dates through
+> `parse_date_bound`, product types against `PRODUCT_ASSETS`, the bbox
+> range-checked, `place`/`bbox` mutually exclusive — so **nothing the model emits
+> becomes a filter without passing the deterministic layer**, and the resolved
+> `umbra search` command is printed before it runs (`--run` executes it,
+> `--json` emits the plan). This is exactly the honest "the LLM plans; the
+> library executes; the user audits" design §C1 describes, and it stays inside
+> the determinism boundary (§A4, §6.1): the feature is opt-in behind `[ai]`,
+> never runs implicitly, and its planning step is an injectable callable so the
+> whole thing is offline-testable with no network. With `umbra ask` done, the one
+> remaining C1 piece is the **semantic embedding index** (`sqlite-vec`) — the
+> offline, no-round-trip answer to task aliasing that plain string similarity
+> can't fake.
 
 ---
 
@@ -296,11 +316,18 @@ in, deterministic filter out, no model required at runtime*:
   task names + descriptions (sqlite-vec inside the existing `catalog.db`,
   `[ai]` extra) so `area="grain storage north dakota"` finds the beet pilers —
   the semantic layer plain string similarity can't and shouldn't fake.
-- **`umbra ask "…"`** (`[ai]` extra): a single command that hands the user's
-  sentence plus the A2 context document to a configured model (Anthropic/
-  OpenAI-compatible, user-supplied key) and returns the *deterministic command
-  it maps to* — showing the command before running it. The LLM plans; the
-  library executes; the user audits. This is the honest version of NL search.
+- ✅ **`umbra ask "…"` (shipped)** (`[ai]` extra): a single command that hands
+  the user's sentence plus the A2 context document to a configured model
+  (Anthropic / any OpenAI-compatible endpoint, user-supplied key, `requests`
+  only) and returns the *deterministic command it maps to* — printing that
+  command before running it. The model **only plans**; `umbra_py.planner`'s
+  `parse_plan` re-validates every field (dates via `parse_date_bound`, product
+  types via `PRODUCT_ASSETS`, the bbox range-checked), so nothing the model
+  emits becomes a filter without passing the deterministic layer. The LLM plans;
+  the library executes; the user audits — the honest version of NL search. It is
+  also where range keywords with hemisphere-dependent meaning (`"last winter"`)
+  that `parse_date_bound` deliberately rejects belong: the model resolves the
+  season to concrete dates the deterministic layer then validates.
 
 ### C2. Scene description & change narration (VLM-in-the-loop)
 
@@ -366,7 +393,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ⬜ C1 semantic aliasing + `umbra ask` · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ⬜ C1 semantic aliasing (embedding index) · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 

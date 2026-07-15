@@ -39,6 +39,7 @@ pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
+pip install "umbra-py[ai]"      # + umbra ask: model-planned natural-language search
 ```
 
 Requires Python 3.10+.
@@ -417,6 +418,39 @@ umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe
 # gray/yellow; anything that came and went over the series glows blue/cyan.
 umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out timescan.png --db
 ```
+
+### Ask in plain language (`umbra ask`)
+
+The deterministic resolvers above (relative dates, fuzzy site names) turn some
+natural language into a filter with no model at all. `umbra ask` covers the
+rest — *"what did Umbra image at Centerfield, Utah last spring?"* — by letting a
+model **plan** the search while the library still **executes** it deterministically:
+
+```bash
+pip install "umbra-py[ai]"
+export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
+umbra ask "what did Umbra image at Centerfield, Utah last spring?"
+```
+
+```text
+Plan: named site over the northern-hemisphere spring window
+umbra search --area 'Centerfield, Utah' --fuzzy --start 2024-03-01 --end 2024-05-31 --product GEC
+
+Re-run with --run to execute this search.
+```
+
+The model only ever returns the *search parameters* it thinks your sentence maps
+to; the library then re-validates every one of them — dates through the same
+deterministic resolver, product types against the known set, the bounding box
+range-checked — and prints the exact `umbra search` command before it runs.
+**Nothing the model says becomes a filter without passing that check**, so a
+hallucinated date or product type is a clear error, not a silently wrong query.
+The LLM plans, the library executes, and you audit the command. Add `--run` to
+execute it (against a live walk, or a prebuilt index with `--local`), `--json`
+to get the resolved plan as JSON, or `--model` / `UMBRA_ASK_MODEL` to choose the
+model. It's the one place a model is called — opt-in behind `[ai]`, never
+implicit — so seasons and other phrasing the deterministic core rejects
+(`"last winter"`) get resolved to concrete dates the deterministic layer checks.
 
 ### Drive it from an AI agent (MCP)
 

@@ -104,6 +104,21 @@ same 500 lines of glue first, and many give up."*
 > type a site name while the core stays deterministic — pure funnel-widening
 > (§1). The remaining C1 pieces (semantic/embedding aliasing and the LLM-planned
 > `umbra ask`) are the model-backed layer that builds on this deterministic base.
+>
+> **Update:** the **LLM-planned `umbra ask` has shipped** (`AI_INTEGRATION_IDEAS.md`
+> C1 — the capstone of natural-language search and the first feature in the
+> package that calls a model). `umbra ask "…"` (`umbra_py.planner`, `[ai]` extra)
+> sends the user's sentence plus the `llm_context()` document to a configured
+> model (Anthropic or any OpenAI-compatible endpoint, user-supplied key) and gets
+> back the search *parameters* it maps to — but the model **only plans**: every
+> field is re-validated deterministically (`parse_plan`) and the resolved `umbra
+> search` command is shown before it runs. This is the honest funnel-widener the
+> whole C1 line was building toward (§1): a newcomer who can't yet name the
+> product type or phrase a bbox describes what they want in a sentence and gets a
+> real, auditable search — while the deterministic core, its testability, and the
+> trust of the scientific audience (the "model plans, library executes" boundary,
+> §3 novelty) are all preserved. The one open C1 piece is now the semantic
+> embedding index — the offline answer to task aliasing.
 
 ## 2. The landscape: life without umbra-py
 

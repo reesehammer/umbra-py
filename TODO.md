@@ -72,16 +72,18 @@ follow-ons:
 
 ---
 
-## Finish C1 natural-language search (`umbra ask` + semantic task aliasing)
+## Finish C1 natural-language search (semantic task aliasing)
 
-- **Surfaced in:** the relative-date-bounds PR and the fuzzy-task-matching PR
-  (`AI_INTEGRATION_IDEAS.md` C1 — the two deterministic first steps have shipped
-  in `src/umbra_py/dates.py` and `src/umbra_py/fuzzy.py`).
+- **Surfaced in:** the relative-date-bounds PR, the fuzzy-task-matching PR, and
+  the `umbra ask` PR (`AI_INTEGRATION_IDEAS.md` C1 — three of the four C1 steps
+  have shipped in `src/umbra_py/dates.py`, `src/umbra_py/fuzzy.py` and
+  `src/umbra_py/planner.py`).
 - **Code:** `src/umbra_py/fuzzy.py` (deterministic matcher), `catalog.py` /
-  `index.py` (`fuzzy=` on `search`), `pyproject.toml` (a future `[ai]` extra).
+  `index.py` (`fuzzy=` on `search`).
 
-The relative-date resolver and the deterministic first step of fuzzy task
-matching are both done. What remains of C1:
+The relative-date resolver, the deterministic fuzzy task matcher, and the
+model-planned `umbra ask` are all done. What remains of C1 is the one piece
+plain string similarity can't (and shouldn't) fake:
 
 - ✅ **Fuzzy task matching (string-similarity step, done).** `area=` stays a
   literal case-insensitive substring by default; `fuzzy=True` (CLI `--fuzzy`)
@@ -90,17 +92,26 @@ matching are both done. What remains of C1:
   of the substring path (so nothing regresses), shared by the live and index
   backends and the MCP `search_catalog` tool. Offline tests cover both paths and
   assert they agree.
+- ✅ **`umbra ask "…"` (`[ai]` extra, done).** `src/umbra_py/planner.py` hands
+  the user's sentence plus the `llm_context()` document to a configured model
+  and returns the *deterministic command it maps to*, shown before running. The
+  model only plans; `parse_plan` re-validates every field (dates via
+  `parse_date_bound`, product types via `PRODUCT_ASSETS`, bbox range-checked)
+  before it can become a filter; the user audits the printed command. This is
+  where range keywords with hemisphere-dependent meaning (`"last winter"`) that
+  the deterministic `parse_date_bound` rejects belong — the model resolves the
+  season to concrete dates the deterministic layer then validates. Provider is
+  Anthropic or any OpenAI-compatible endpoint (user-supplied key, `requests`
+  only). Follow-ons: a LangChain/LlamaIndex tool wrapper reusing `SearchPlan`,
+  and an optional `--run` confirmation prompt for destructive-scope searches.
 - ⬜ **Semantic / alias task matching.** The string-similarity step deliberately
   does *not* reach `area="grain storage north dakota"` → "Beet Piler - ND" —
   that needs an embedding index over task names/descriptions (sqlite-vec inside
   `catalog.db`, `[ai]` extra). Build it on top of `fuzzy.matching_tasks` as the
   optional, model-backed layer, keeping the deterministic matcher as the default.
-- ⬜ **`umbra ask "…"` (`[ai]` extra).** Hand the user's sentence plus the A2
-  `llm_context()` document to a configured model and return the *deterministic
-  command it maps to*, shown before running. The LLM plans; the library
-  executes; the user audits. This is the home for range keywords with
-  hemisphere-dependent meaning (`"last winter"`) that the deterministic
-  `parse_date_bound` intentionally rejects.
+  (`umbra ask` partly covers this today: a model *can* map "grain storage north
+  dakota" to `area="Beet Piler - ND"` when it knows the site — but a persistent
+  embedding index is the offline, no-round-trip answer.)
 
 ---
 
