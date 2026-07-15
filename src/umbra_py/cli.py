@@ -293,6 +293,31 @@ def context() -> None:
     click.echo(json.dumps(llm_context(), indent=2))
 
 
+@cli.command(name="llms-txt")
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Emit the expanded llms-full.txt bundle (domain knowledge, the full CLI "
+    "reference, the AI-native interfaces and a per-module map) instead of the "
+    "concise llms.txt index.",
+)
+def llms_txt_cmd(full: bool) -> None:
+    """Print the project's llms.txt context bundle to stdout.
+
+    The `llms.txt convention <https://llmstxt.org/>`_ document — a Markdown guide
+    a language model pulls in to learn how to *drive* umbra-py (the counterpart
+    to the machine-readable ``umbra context`` JSON). ``--full`` emits the
+    self-contained ``llms-full.txt``. The committed repo-root ``llms.txt`` /
+    ``llms-full.txt`` are regenerated from this command::
+
+        umbra llms-txt > llms.txt
+        umbra llms-txt --full > llms-full.txt
+    """
+    from .llms_txt import llms_full_txt, llms_txt
+
+    click.echo(llms_full_txt() if full else llms_txt())
+
+
 @cli.command()
 def mcp() -> None:
     """Run the umbra Model Context Protocol server (stdio transport).

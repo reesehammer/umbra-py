@@ -65,9 +65,20 @@ builds capabilities that assume an AI in the loop.
 > (landing/conformance/collections/items + `GET`/`POST /search`, with a free
 > OpenAPI doc at `/docs`), so the standard STAC tooling — `pystac-client`, the
 > QGIS STAC plugin, `stac-browser`, leafmap — and OpenAPI-driven agents can now
-> query Umbra's open archive. The remaining Phase 2 item (A2 `llms.txt` docs
-> bundle) and Phase 3's Tier C AI-infused capabilities are the next critical
-> path.
+> query Umbra's open archive.
+>
+> **Update:** the **A2 `llms.txt` docs bundle has now shipped** — the last open
+> Phase 2 item, and the *user* agent guide that completes the AI-legible
+> surface. `umbra_py.llms_txt()` / `llms_full_txt()` (CLI: `umbra llms-txt
+> [--full]`, `[mcp]`/`[serve]` not required — it is stdlib-only) render the
+> [llms.txt-convention](https://llmstxt.org/) Markdown a model pulls in to learn
+> how to *drive* the library, and the committed `llms.txt` / `llms-full.txt` at
+> the repo root are that rendered output (a golden test keeps them in sync).
+> `llms-full.txt` is assembled entirely from facts already in the package — the
+> A2 `llm_context()` domain document, the live CLI command tree, and each core
+> module's explanatory docstring (read via `ast`, so the generator never imports
+> a heavy extra). With Phase 2 complete, **Phase 3's Tier C AI-infused
+> capabilities (C1 NL search first) are the next critical path.**
 
 ---
 
@@ -90,20 +101,26 @@ builds capabilities that assume an AI in the loop.
 The spinner already no-ops on non-TTY output — good agent hygiene by accident;
 keep that guarantee explicit in a test.
 
-### A2. An LLM context bundle in the package and the docs
+### A2. An LLM context bundle in the package and the docs — **shipped**
 
-- **`llms.txt`** at the docs-site root (and repo root): the emerging
-  convention for "here is the condensed, LLM-ready description of this
-  project." Generate `llms-full.txt` from the module docstrings — they are
-  already written in exactly the right explanatory register (e.g. the
-  `catalog.py` and `index.py` preambles).
-- The repo already has a strong `AGENTS.md` — treat it as the *contributor*
-  agent guide, and make `llms.txt` the *user* agent guide ("how to drive this
-  library," not "how to modify it").
+- ✅ **`llms.txt`** at the repo root: the emerging convention for "here is the
+  condensed, LLM-ready description of this project." `llms-full.txt` is
+  generated from the module docstrings — already written in exactly the right
+  explanatory register (e.g. the `catalog.py` and `index.py` preambles) — read
+  via `ast` so the stdlib-only generator never imports a heavy extra.
+- ✅ The repo's strong `AGENTS.md` is the *contributor* agent guide; `llms.txt`
+  is now the *user* agent guide ("how to drive this library," not "how to
+  modify it").
 - ✅ **shipped:** `umbra_py.llm_context()` (CLI: `umbra context`) returns the
   product-type table, search parameter semantics, and license/attribution
-  rules as one JSON document an agent can pull into context at runtime. The
-  `llms.txt` docs-bundle half remains open (Phase 2).
+  rules as one JSON document an agent can pull into context at runtime.
+- ✅ **shipped:** `umbra_py.llms_txt()` / `llms_full_txt()` (CLI: `umbra
+  llms-txt [--full]`) render the [llms.txt-convention](https://llmstxt.org/)
+  Markdown. `llms-full.txt` bundles the domain knowledge (reusing
+  `llm_context()`), the full CLI command reference (introspected from the live
+  command tree, so it never drifts), the AI-native interfaces, and a per-module
+  map. The committed repo-root `llms.txt` / `llms-full.txt` are that output,
+  kept in sync by a golden test.
 
 ### A3. Item-level "context cards" for models — **shipped**
 
@@ -311,7 +328,7 @@ and contributors.
 | Phase | Items | Effort | Rationale |
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
-| 2 | ✅ **B1 MCP server (shipped)** · nightly prebuilt index (shipped) · ⬜ A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
+| 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ⬜ C1 NL search (fuzzy/date parts first) · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |

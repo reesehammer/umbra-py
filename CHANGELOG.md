@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`llms.txt` context bundle (`docs/AI_INTEGRATION_IDEAS.md` A2 — the last open
+  Phase 2 item).** `umbra_py.llms_txt()` / `llms_full_txt()` (CLI: `umbra
+  llms-txt [--full]`) render the [llms.txt-convention](https://llmstxt.org/)
+  Markdown that a language model pulls in to learn how to *drive* the library —
+  the *user* agent guide, complementing `AGENTS.md` (the contributor guide) and
+  the machine-readable `umbra context` JSON. The concise `llms.txt` is the
+  index; `llms-full.txt` is the self-contained bundle: the determinism boundary,
+  the domain knowledge (reusing `llm_context()`), the full CLI command reference
+  introspected from the live command tree, the AI-native interfaces, and each
+  core module's explanatory docstring. It is assembled entirely from facts
+  already in the package — module docstrings are read via `ast` rather than by
+  importing the modules, so the generator is deterministic and stdlib-only and
+  runs in the bare core install without pulling in a heavy extra. The committed
+  repo-root `llms.txt` / `llms-full.txt` are that rendered output; a golden test
+  keeps them from drifting (regenerate with `umbra llms-txt > llms.txt && umbra
+  llms-txt --full > llms-full.txt`).
 - **Local-index rendering for the visual commands (`docs/DEMO_APP_GAPS.md` G2 /
   Path A step 2).** `umbra map`, `gallery`, `swipe`, `change` and `timescan` now
   accept the same `--local` / `--index-db` options as `umbra search`, so they

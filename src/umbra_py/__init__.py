@@ -27,6 +27,7 @@ from .exceptions import (
 from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
+from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
 from .viewer import make_viewer_server, view
@@ -71,6 +72,8 @@ __all__ = [
     "DATA_LICENSE",
     "ATTRIBUTION",
     "llm_context",
+    "llms_txt",
+    "llms_full_txt",
     "UmbraError",
     "CatalogError",
     "AssetNotFoundError",
