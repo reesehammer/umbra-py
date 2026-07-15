@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The shared HTTP session now retries transient failures, and downloads verify
+  their integrity (`docs/CODEBASE_ANALYSIS.md` P1 #5/#6, §3.2/§4.3).** The
+  library's core job is fetching data from a public bucket; these harden that
+  path from alpha-fragile to dependable, and every caller inherits them because
+  everything routes through `_http.default_session()`.
+  - **Retry/backoff on the shared session.** `default_session()` now mounts an
+    `HTTPAdapter` with `urllib3` `Retry(total=3, backoff_factor=0.5,
+    status_forcelist=(429, 500, 502, 503, 504))` on idempotent `GET`/`HEAD`
+    requests. A single transient S3 hiccup no longer fails an entire
+    multi-minute index build, catalog walk, or download.
+  - **Download integrity is verified before finalizing.** `download_url` now
+    compares the received byte count against `Content-Length` and raises
+    `DownloadError` on a short read (a cleanly-closed truncated body that
+    previously renamed a silently-incomplete `.part` into place), and converts a
+    mid-stream connection break into `DownloadError` — in both cases leaving the
+    `.part` on disk so a later call resumes rather than discarding progress.
+  - **Resume is validated with `If-Range`.** A resumed download stores the
+    object's `ETag` next to its `.part` and sends it as `If-Range` on the next
+    `Range` request, so if the remote object changed the server returns the whole
+    new object (a clean restart) instead of splicing bytes from two different
+    objects into a corrupt file.
+
 ### Added
 - **Archive scene embeddings — visual similarity search (`docs/AI_INTEGRATION_IDEAS.md`
   C5, the last open AI item).** Every other search matches *metadata* (a date, a

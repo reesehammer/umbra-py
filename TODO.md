@@ -223,6 +223,22 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ---
 
+## Download: verify the ETag checksum, not just the byte count
+
+- **Surfaced in:** the HTTP/download hardening PR (`docs/CODEBASE_ANALYSIS.md`
+  P1 #5 / §3.2).
+- **Code:** `src/umbra_py/download.py` (`download_url`).
+
+`download_url` now verifies the received byte count against `Content-Length` and
+uses `If-Range` + a stored ETag so a resume can't splice two different objects.
+The remaining §3.2 item is *content* verification: S3's ETag is the MD5 of the
+object for single-part uploads (no `-` suffix), so hashing the finished file and
+comparing to the stored ETag would catch on-the-wire corruption that a correct
+length can't. Skip the check when the ETag is multipart (`"<hash>-<n>"`), where
+it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
+
+---
+
 ## Done
 
 - **`umbra embed`: archive scene embeddings / visual similarity search (C5).**
