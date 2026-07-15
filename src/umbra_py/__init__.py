@@ -15,6 +15,7 @@ __version__ = "0.1.0"
 from .catalog import UmbraCatalog
 from .constants import ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
+from .dates import parse_date_bound
 from .download import download_asset, download_item, download_url
 from .exceptions import (
     AssetNotFoundError,
@@ -72,6 +73,7 @@ __all__ = [
     "DATA_LICENSE",
     "ATTRIBUTION",
     "llm_context",
+    "parse_date_bound",
     "llms_txt",
     "llms_full_txt",
     "UmbraError",

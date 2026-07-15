@@ -72,6 +72,31 @@ follow-ons:
 
 ---
 
+## Finish C1 natural-language search (fuzzy task matching + `umbra ask`)
+
+- **Surfaced in:** the relative-date-bounds PR (`AI_INTEGRATION_IDEAS.md` C1 —
+  deterministic first step now shipped in `src/umbra_py/dates.py`).
+- **Code:** `src/umbra_py/catalog.py` / `index.py` (`area` matching),
+  `pyproject.toml` (a future `[ai]` extra).
+
+The relative-date resolver is done; the other two C1 pieces named in the doc are
+still open:
+
+- **Fuzzy / alias task matching.** `area=` is a literal case-insensitive
+  substring today (live and index paths agree). Add fuzzy/alias matching so
+  `area="grain storage north dakota"` can reach the "Beet Piler - ND" task —
+  first with plain string similarity, then optionally an embedding index over
+  task names/descriptions (sqlite-vec inside `catalog.db`, `[ai]` extra). Keep
+  the deterministic substring path as the default so nothing regresses.
+- **`umbra ask "…"` (`[ai]` extra).** Hand the user's sentence plus the A2
+  `llm_context()` document to a configured model and return the *deterministic
+  command it maps to*, shown before running. The LLM plans; the library
+  executes; the user audits. This is the home for range keywords with
+  hemisphere-dependent meaning (`"last winter"`) that the deterministic
+  `parse_date_bound` intentionally rejects.
+
+---
+
 ## Done
 
 - **Bootstrap local search from the published catalog snapshot.** Added

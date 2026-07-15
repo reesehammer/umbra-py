@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Natural-language date bounds for search (`docs/AI_INTEGRATION_IDEAS.md` C1 —
+  the deterministic first step of Phase 3).** `--start` / `--end` (and the
+  `UmbraCatalog.search` / `CatalogIndex.search` keyword arguments, and the MCP
+  `search_catalog` tool) now accept human date expressions in addition to
+  `YYYY-MM-DD`: a bare year or year-month (`2024`, `2024-03`), the keywords
+  `today` / `yesterday` / `tomorrow`, a relative offset (`3 months ago`,
+  `a week ago`), or a period (`this month`, `last year`). Resolution is a new
+  stdlib-only `umbra_py.dates.parse_date_bound` (exported at the top level) that
+  uses plain calendar arithmetic — **no model call at runtime**, so it stays
+  inside the library's determinism boundary and is fully offline-testable. It is
+  *bound-aware*: a span expression snaps to its first day as a `--start` and its
+  last day as an `--end`, so `--start 2024 --end 2024` covers the whole year and
+  `--end last month` includes the last day of that month. Because every command
+  that takes a date range funnels through the single `_coerce_date` choke point,
+  `search`, `index build`, `change`, `timescan`, `swipe`, `map` and `gallery`
+  all gain this at once. Full ISO dates behave exactly as before.
 - **`llms.txt` context bundle (`docs/AI_INTEGRATION_IDEAS.md` A2 — the last open
   Phase 2 item).** `umbra_py.llms_txt()` / `llms_full_txt()` (CLI: `umbra
   llms-txt [--full]`) render the [llms.txt-convention](https://llmstxt.org/)

@@ -134,8 +134,11 @@ def search_catalog(
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
-    task (site) name; ``start``/``end`` as ``YYYY-MM-DD`` acquisition-date
-    bounds; ``products`` to restrict to product types
+    task (site) name; ``start``/``end`` as acquisition-date bounds -- an ISO
+    ``YYYY-MM-DD`` date, a bare year/month (``2024``, ``2024-03``), or a
+    relative expression (``today``, ``yesterday``, ``3 months ago``,
+    ``last month``), resolved deterministically with no model call;
+    ``products`` to restrict to product types
     (any of GEC, SICD, SIDD, CPHD); ``limit`` to cap results; ``max_per_task``
     to cap items per site (use 1 for a one-pin-per-site overview).
 
