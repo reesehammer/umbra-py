@@ -176,6 +176,25 @@ same 500 lines of glue first, and many give up."*
 > complete, the AI critical path moves to Tier C's C3 watch loops / C4 `umbra chips`
 > and the B3 example notebooks; the single highest-value strategic move overall
 > remains the unstarted Canopy backend (5.1).
+>
+> **Update:** the **first C3 capability has shipped** — `umbra watch`
+> (`AI_INTEGRATION_IDEAS.md` C3), the "agent as a standing analyst" primitive.
+> SAR's value for monitoring is its cadence, so the funnel-widening move (§1) is
+> to make *standing* monitoring trivial: run the same search on a schedule and act
+> only on what is **new**. `umbra watch` (`umbra_py.watch`) packages the
+> idempotent delta — it searches (live or from the index), diffs against the set
+> of acquisitions previous runs already reported, returns only the new ones, and
+> remembers them in the index's `meta` table — while the scheduler (cron, a GitHub
+> Action, an agent loop) supplies the "when". It is machine-readable first
+> (`--json` delta, `--exit-code` for a shell `if`), so a monitoring pipeline needs
+> no glue. It preserves the boundary and novelty the scientific audience needs
+> (§3): **no model is called** — this is pure set arithmetic over the deterministic
+> search — and it layers on the same discovery moat the whole project is built on,
+> so it stays graceful under upstream obsolescence. Paired with the shipped
+> `umbra change --narrate`, the standing-analyst loop (new pass → composite →
+> narration → notify) is now assemblable end-to-end. The AI critical path moves to
+> C4 `umbra chips` and the B3 example notebooks; the single highest-value strategic
+> move overall remains the unstarted Canopy backend (5.1).
 
 ## 2. The landscape: life without umbra-py
 

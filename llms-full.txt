@@ -66,6 +66,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra swipe` — Render an interactive before/after swipe map of two SAR passes.
 - `umbra timescan` — Collapse a whole SAR time series into one temporal-statistics image.
 - `umbra view` — Explore one SAR scene at full resolution in an interactive web viewer.
+- `umbra watch` — Report only acquisitions new since the last run -- standing site monitoring.
 
 ## AI-native interfaces
 

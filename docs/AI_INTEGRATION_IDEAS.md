@@ -192,6 +192,32 @@ builds capabilities that assume an AI in the loop.
 > and the render an injectable `ChangeRenderer`, so it is fully offline-testable
 > with no network. With C2 complete, the AI critical path is now **C3 watch loops**,
 > **C4 `umbra chips`**, and the **B3 example notebooks**.
+>
+> **Update:** the **first C3 capability has shipped** — `umbra watch`
+> (`src/umbra_py/watch.py`), the "agent as a standing analyst" primitive. SAR's
+> value for monitoring is its cadence, so the natural workflow is *standing*: run
+> the same search on a schedule and act only on what is **new**. `umbra watch`
+> packages the delta, not the schedule — the scheduler (cron, a GitHub Action, an
+> agent loop) supplies the "when"; `watch()` supplies the idempotent "what
+> changed". It searches an injected source (a live `UmbraCatalog` or a
+> `CatalogIndex`), diffs the results against the set of acquisition keys previous
+> runs already reported, returns only the new ones, and folds them into a small
+> state store (`MetaWatchStore`, kept in the `CatalogIndex` `meta` table — no
+> schema change, so a fetched snapshot is a valid store; `InMemoryWatchStore` for
+> tests). The delta is an exact set difference over sidecar hrefs, not a date
+> watermark, so it is truly idempotent (a re-run with no new data reports zero)
+> and never misses a late upload dated earlier than acquisitions already seen. It
+> stays inside the determinism boundary (§A4, §6.1): **no model is called** — this
+> is pure set arithmetic over the deterministic search the library already does —
+> and the source and store are injectable, so it is fully offline-testable. It is
+> machine-readable first: `--json` emits `{new_count, new_items: [context cards],
+> ...}` (carrying the CC-BY attribution) for a scheduler to branch on, and
+> `--exit-code` turns "are there new acquisitions?" into a process exit status a
+> shell `if` can test. Paired with the shipped `umbra change --narrate` /
+> `umbra describe`, it completes the standing-analyst loop C3 describes: new pass
+> lands → composite against the previous pass → narration. The remaining C3 piece
+> is optional (surfacing the same delta as an MCP tool/prompt); **C4 `umbra
+> chips`** and the **B3 example notebooks** stay on the critical path.
 
 ---
 
@@ -440,15 +466,27 @@ Build on the artifacts that already exist:
 SAR's revisit cadence + change detection + an agent = site monitoring. Package
 the loop, not the agent:
 
-- `umbra watch --area "…" --since-last-run` → exits with a machine-readable
-  "N new acquisitions" delta (state in the local index). Cron/GitHub Actions/
-  agent frameworks supply the scheduling; the library supplies idempotent
-  delta detection.
+- ✅ **`umbra watch` (shipped)** (`umbra_py.watch`): run the same search on a
+  schedule and report only the acquisitions **new** since the last run — state
+  in the local index, exact set-difference delta (not a date watermark, so a
+  late upload is never missed), fully idempotent. `--json` emits a machine
+  readable `{new_count, new_items: [context cards], ...}` delta (with CC-BY
+  attribution) for a scheduler to act on; `--exit-code` turns "any new?" into a
+  process exit status a shell `if` can branch on. Cron / GitHub Actions / agent
+  frameworks supply the scheduling; the library supplies the idempotent delta
+  detection. No model is called — the search source and state store are both
+  injectable, so the whole feature is deterministic and offline-testable (§A4,
+  §6.1). State is kept in the `CatalogIndex` `meta` table (`MetaWatchStore`), so
+  a fetched snapshot is a valid store with no schema change.
 - Pair with C2 so the standing workflow is: *new pass lands → composite
   against previous pass → VLM narration → notification with image + text*.
-  This is the "decrease the barrier" story in one demo: a port authority,
-  journalist, or humanitarian analyst gets SAR-based monitoring without
-  knowing what a sigma-naught is.
+  With `umbra watch` and `umbra change --narrate` both shipped, this loop is now
+  assemblable end-to-end. This is the "decrease the barrier" story in one demo:
+  a port authority, journalist, or humanitarian analyst gets SAR-based
+  monitoring without knowing what a sigma-naught is.
+- ⬜ **Optional next step**: surface the same delta as an MCP `watch_site` tool /
+  prompt so an MCP client can run the standing check conversationally, reusing
+  the `watch()` function unchanged.
 
 ### C4. ML dataset preparation (`umbra chips`)
 
@@ -480,7 +518,7 @@ and contributors.
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
-| 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ⬜ C3 watch loops · ⬜ C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
+| 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ✅ **C3 `umbra watch` (shipped)** · ⬜ C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on
