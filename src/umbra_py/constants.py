@@ -28,6 +28,46 @@ S3_REGION = "us-west-2"
 #: - ``CPHD`` : Compensated Phase History Data, the raw signal phase history.
 PRODUCT_ASSETS = ("GEC", "CSI", "SIDD", "SICD", "CPHD")
 
+#: One-line, plain-language explanation of each product type. The docstring on
+#: :data:`PRODUCT_ASSETS` above documents these for humans reading the source;
+#: this table is the machine-readable version a language model (or an
+#: :meth:`umbra_py.UmbraItem.to_llm_context` card) pulls in so it can reason
+#: about which product to ask for without external SAR literacy.
+PRODUCT_TYPE_EXPLANATIONS: dict[str, str] = {
+    "GEC": (
+        "Geocoded Ellipsoid Corrected image: a cloud-optimized GeoTIFF, "
+        "map-projected and analysis-ready. The easiest product to use and the "
+        "usual starting point."
+    ),
+    "CSI": (
+        "Color Sub-aperture Image: a quick-look RGB GeoTIFF that colorizes "
+        "sub-aperture/frequency content. Good for eyeballing a scene, not for "
+        "radiometric measurement."
+    ),
+    "SIDD": (
+        "Sensor Independent Derived Data: a geocoded, detected (amplitude) "
+        "image in NITF. Map-projected like GEC but in the standard NGA format."
+    ),
+    "SICD": (
+        "Sensor Independent Complex Data: full complex data in the slant "
+        "plane (not map-projected). Needed for interferometry and advanced "
+        "processing; not a display image."
+    ),
+    "CPHD": (
+        "Compensated Phase History Data: the raw signal phase history, the "
+        "least-processed product. For signal-level work, not for viewing."
+    ),
+}
+
+#: The caveat that must travel with an item's polarizations whenever a model
+#: might reason about change detection. Two acquisitions in different
+#: polarizations image different scattering physics and must not be differenced.
+POLARIZATION_CAVEAT = (
+    "Polarizations are not interchangeable: an HH scene and a VV scene of the "
+    "same place measure different scattering and must not be differenced for "
+    "change detection. Compare like polarization with like."
+)
+
 #: Canonical name for the per-acquisition metadata sidecar JSON.
 METADATA_ASSET = "metadata"
 ALL_ASSETS = (*PRODUCT_ASSETS, METADATA_ASSET)

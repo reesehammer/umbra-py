@@ -184,6 +184,13 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 - **SAR correctness matters.** Silent errors are easy in this domain. If a
   transform or parameter choice has consequences (units, slant vs ground
   plane, dB scaling), say so in a docstring.
+- **Deterministic core, AI at the edges.** The library searches, downloads and
+  renders deterministically and offline-testably; it must never call a language
+  model implicitly. Anything that *invokes* a model (describe/narrate/NL-search)
+  belongs behind a future `[ai]` extra and runs only when the user asks. The
+  AI-*legible* surface — `UmbraItem.to_llm_context()`, `llm_context()`,
+  `__geo_interface__`, `--json` output — is pure data with no model call, so it
+  stays in the core. See `docs/AI_INTEGRATION_IDEAS.md` §A4/§6.
 
 ---
 

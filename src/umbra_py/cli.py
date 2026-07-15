@@ -14,6 +14,7 @@ from ._http import get_json
 from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
 from .constants import DATA_LICENSE, PRODUCT_ASSETS
+from .context import llm_context
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
@@ -207,11 +208,36 @@ def search(bbox, place, start, end, products, area, limit, max_per_task, as_json
 
 @cli.command()
 @click.argument("item_url")
-def info(item_url) -> None:
-    """Show a readable summary of a STAC item given its JSON URL."""
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the item's LLM context card as JSON instead of a readable summary.",
+)
+def info(item_url, as_json) -> None:
+    """Show a summary of a STAC item given its JSON URL.
+
+    ``--json`` emits the explanation-rich context card
+    (:meth:`umbra_py.UmbraItem.to_llm_context`) — a compact object an agent
+    can consume directly, with per-product explanations and the license line.
+    """
     item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    if as_json:
+        click.echo(json.dumps(item.to_llm_context(), indent=2))
+        return
     click.echo(item.summary())
     click.echo(f"\nData license: {DATA_LICENSE} (attribution required).")
+
+
+@cli.command()
+def context() -> None:
+    """Print the library's LLM context document as JSON.
+
+    The product-type table, search-parameter semantics, and license rules an
+    agent needs to drive umbra-py — see :func:`umbra_py.llm_context`. Pipe it
+    into a model's context at the start of a session.
+    """
+    click.echo(json.dumps(llm_context(), indent=2))
 
 
 @cli.command()

@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **AI-legible surface (Tier A groundwork): context cards, an `llm_context()`
+  document, and `__geo_interface__`.** The friction in using Umbra's open data
+  is interpretive — knowing *what to ask for* — which is exactly what a language
+  model answers well when it has the domain facts in context. This lands the
+  zero-dependency, deterministic groundwork the flagship MCP server and every
+  later AI phase consume (`docs/AI_INTEGRATION_IDEAS.md` Phase 1):
+
+  - `UmbraItem.to_llm_context()` — a compact, explanation-rich context card:
+    like `metadata_summary()` but every present product type carries a one-line
+    explanation, the polarizations carry the change-detection caveat, and the
+    CC-BY attribution line travels with the data. Surfaced on the CLI as
+    `umbra info <url> --json`.
+  - `umbra_py.llm_context()` / `umbra context` — the library's self-describing
+    document (product-type table, search-parameter semantics, license rules) an
+    agent pulls into context to drive umbra-py in one shot.
+  - `UmbraItem.__geo_interface__` / `ItemCollection.__geo_interface__` — the
+    Python geo-interface protocol, so geopandas / shapely / leafmap ingest a
+    search with zero glue (`gpd.GeoDataFrame.from_features(results)`).
+
+  All of it is deterministic and offline (no network, no model call); the
+  determinism boundary is now written into `AGENTS.md`.
 - **Fetch the prebuilt catalog index (`CatalogIndex.from_release`, `umbra index
   fetch`).** The weekly workflow already publishes a `catalog.db` snapshot on
   the rolling `catalog-index` release, but a fresh install still had to crawl

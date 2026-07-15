@@ -322,6 +322,12 @@ umbra search --place "California" --start 2024-01-01 --end 2024-12-31
 # Inspect a single item by its STAC JSON URL.
 umbra info <item-json-url>
 
+# Feed an agent: `info --json` emits an explanation-rich context card (per-
+# product explanations, the polarization caveat, the CC-BY line); `umbra
+# context` prints the library's product-type table and search semantics.
+umbra info <item-json-url> --json
+umbra context
+
 # Download specific asset(s).
 umbra download <item-json-url> --asset GEC --dest downloads/
 

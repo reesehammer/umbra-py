@@ -53,6 +53,37 @@ def test_metadata_summary_keys(sample_item_dict):
     assert set(summary) >= {"id", "datetime", "product_type", "bbox", "available_assets"}
 
 
+def test_to_llm_context_has_explanations_and_license(sample_item_dict):
+    ctx = UmbraItem.from_dict(sample_item_dict, href="http://ex/item.json").to_llm_context()
+    assert ctx["id"] == sample_item_dict["id"]
+    assert ctx["license"] == "CC-BY-4.0"
+    assert "CC BY 4.0" in ctx["attribution"]
+    # The polarization caveat travels with the polarizations.
+    assert ctx["polarizations"] == ["VV"]
+    assert "polarization" in ctx["polarization_caveat"].lower()
+    # Each present product carries a type, a non-empty explanation, and a URL.
+    products = {p["type"]: p for p in ctx["products"]}
+    assert "GEC" in products
+    assert products["GEC"]["explanation"]
+    assert products["GEC"]["url"].endswith("_GEC.tif")
+
+
+def test_geo_interface_item_is_a_feature(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict)
+    geo = item.__geo_interface__
+    assert geo["type"] == "Feature"
+    assert geo == item.to_geojson()
+
+
+def test_geo_interface_collection_is_a_featurecollection(sample_item_dict):
+    from umbra_py.models import ItemCollection
+
+    coll = ItemCollection([UmbraItem.from_dict(sample_item_dict)])
+    geo = coll.__geo_interface__
+    assert geo["type"] == "FeatureCollection"
+    assert len(geo["features"]) == 1
+
+
 @pytest.mark.parametrize(
     "key,disk_suffix",
     [
