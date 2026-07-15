@@ -273,6 +273,27 @@ same 500 lines of glue first, and many give up."*
 > Trusted Publisher and cut the `v0.1.0` release, which fires the workflow. With
 > that, `pip install umbra-py` works and 5.3's registry/ecosystem listings become
 > unblocked.
+>
+> **Update:** the **example notebook gallery has shipped** (workstream 5.4 /
+> `AI_INTEGRATION_IDEAS.md` B3 — the last standing item on the AI critical path
+> and "the thing DevRel links first"). Every AI-infused capability (C1–C4) and
+> the whole funnel (free bucket → paid Canopy archive) are built; what was still
+> missing was the *runnable, rendered* front door that turns a curious analyst
+> into a user. Three self-contained notebooks under `examples/` now supply it —
+> `01_hello_umbra` (search → summarize → quicklook, plus the geopandas /
+> `to_llm_context` paths), `02_download_and_open_gec` (stream a GEC into
+> analysis-ready `xarray`), and `03_change_detection` (composite two passes of a
+> repeat-imaged site). They hold the project's culture exactly (§3): each is a
+> *small deterministic search with `assert`s in its cells*, so it is a live eval
+> as much as a tutorial, and `tests/test_examples.py` keeps them from rotting
+> with a stdlib-only offline CI guard (well-formed, cells parse, only public
+> `umbra_py` symbols, CC-BY attribution present) plus an opt-in
+> `pytest -m network` execution against the live bucket. This is pure
+> funnel-widening (§1): the greatest-hits SAR workflows are now marketing Umbra
+> doesn't have to write, and the first thing a newcomer or a coding agent runs.
+> With the notebooks landed, the remaining strategic gaps are the SICD → geocoded
+> COG format work (5.5) and the maintainer-side adoption moves (5.3 registries,
+> 5.6 talking to Umbra) — the code funnel now runs end to end.
 
 ## 2. The landscape: life without umbra-py
 
@@ -407,13 +428,27 @@ One crawl shouldn't be everyone's crawl.
   publications using Umbra data are what an open data program exists to
   generate, and companies count them.
 
-### 5.4 Demo notebooks that create SAR converts — **not started**
+### 5.4 Demo notebooks that create SAR converts — **partial**
 
 An `examples/` gallery for the greatest hits: change detection over one of
 Umbra's time-series sites, an amplitude time series, detection chips
 (ship/aircraft). Each notebook is marketing Umbra doesn't have to write and
 the thing DevRel links first. The markdown walkthroughs in `examples/` are a
 start; notebooks with rendered output travel further.
+
+- ✅ **The first three notebooks have shipped** — `01_hello_umbra.ipynb`
+  (search → summarize → quicklook, plus the geopandas / `to_llm_context` paths),
+  `02_download_and_open_gec.ipynb` (stream a GEC into analysis-ready `xarray`),
+  and `03_change_detection.ipynb` (composite two passes of a repeat-imaged
+  site). Each is *self-checking* — small deterministic searches, `assert`s in
+  the code cells — so it doubles as a live eval, and `tests/test_examples.py`
+  keeps them from drifting: an offline, stdlib-only CI guard (well-formed, cells
+  parse, only public `umbra_py` symbols, CC-BY present) plus an opt-in
+  `pytest -m network` end-to-end execution.
+- ⬜ Remaining: an amplitude time-series notebook, a detection-chips notebook
+  (`umbra chips`), and `04_sicd_amplitude.ipynb` (paired with the SICD →
+  geocoded COG work in 5.5). Rendering pre-baked output into the committed
+  notebooks (they currently ship with cleared cells) is a later polish step.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 

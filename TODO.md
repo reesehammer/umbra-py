@@ -162,9 +162,12 @@ called. The remaining C3 pieces build on it:
   deterministic callable; wrapping it as an MCP tool (returning the same JSON
   delta) would let an MCP client run the standing check conversationally, reusing
   the state store unchanged.
-- **A packaged monitoring recipe/notebook.** Wire `umbra watch --json` →
-  `select_change_frames` → `umbra change --narrate` into one runnable example
-  (`examples/`, `B3`) so the "new pass lands → composite → narration → notify"
+- **A packaged monitoring recipe/notebook.** The base example gallery has
+  shipped (`examples/01_hello_umbra.ipynb`, `02_download_and_open_gec.ipynb`,
+  `03_change_detection.ipynb`; `B3` / `STRATEGY.md` 5.4, guarded offline by
+  `tests/test_examples.py`). Still open: a *standing-analyst* notebook that wires
+  `umbra watch --json` → `select_change_frames` → `umbra change --narrate` into
+  one runnable example so the "new pass lands → composite → narration → notify"
   loop ships as a copy-pasteable standing analyst, not just a set of primitives.
 
 ---
