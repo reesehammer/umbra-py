@@ -71,7 +71,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 
 ## AI-native interfaces
 
-- **MCP server** (`umbra mcp` / `uvx umbra-mcp`, `[mcp]` extra) — exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, `quicklook`, `change_composite`, `timescan` and `download_asset` as MCP tools. The imagery tools return the rendered PNG as an MCP image block. Also serves a `umbra://context` resource and the `monitor-site` / `survey-region` prompts.
+- **MCP server** (`umbra mcp` / `uvx umbra-mcp`, `[mcp]` extra) — exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, `quicklook`, `change_composite`, `timescan`, `download_asset` and `watch_site` (report only passes new since the last check) as MCP tools. The imagery tools return the rendered PNG as an MCP image block. Also serves a `umbra://context` resource and the `monitor-site` / `watch-site` / `survey-region` prompts.
 - **STAC API** (`umbra serve`, `[serve]` extra) — a read-only STAC API over the same `CatalogIndex`: landing page, `/conformance`, `/collections`, `/collections/{id}`, `/collections/{id}/items`, `/collections/{id}/items/{item_id}`, and item search over `GET /search` and `POST /search` (bbox, datetime interval, ids, limit, token pagination), with an OpenAPI doc at `/docs`.
 
 ## Module guide

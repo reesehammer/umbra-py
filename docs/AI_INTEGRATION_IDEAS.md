@@ -245,6 +245,25 @@ builds capabilities that assume an AI in the loop.
 > archive-embedding work (which builds directly on these chips); the **B3 example
 > notebooks** stay on the critical path, and the single highest-value strategic
 > move overall remains the unstarted Canopy backend (`STRATEGY.md` 5.1).
+>
+> **Update:** the **optional C3 MCP surface has shipped, so C3 is now fully
+> complete** — the `umbra watch` delta is exposed as a `watch_site` tool and a
+> `watch-site` prompt on the flagship `umbra-mcp` server, reusing the `watch()`
+> function unchanged (§C3's "optional next step"). This makes the standing-analyst
+> loop *conversational*: an MCP client asks "what's new at Centerfield, Utah?",
+> `watch_site` returns only the passes published since the last check (all of them
+> on the first run, just the delta after) as context cards, and those cards feed
+> straight into the already-present `change_composite` / `timescan` tools — new
+> pass → composite → describe, all in one conversation and with no glue. It holds
+> the same determinism boundary as the rest of the server (§A4, §6.1): **no model
+> is called** (pure set arithmetic over the deterministic search), watch state
+> persists in the local index's `meta` table (`MetaWatchStore`) so a watch
+> survives across sessions with no schema change, and the search source and store
+> are both injectable so the whole tool is offline-testable without the SDK. With
+> every C1–C4 item and this C3 follow-up done, the remaining AI work is the
+> exploratory **C5 archive-embedding** and the **B3 example notebooks**; the single
+> highest-value strategic move overall remains the unstarted Canopy backend
+> (`STRATEGY.md` 5.1).
 
 ---
 
@@ -511,9 +530,15 @@ the loop, not the agent:
   assemblable end-to-end. This is the "decrease the barrier" story in one demo:
   a port authority, journalist, or humanitarian analyst gets SAR-based
   monitoring without knowing what a sigma-naught is.
-- ⬜ **Optional next step**: surface the same delta as an MCP `watch_site` tool /
-  prompt so an MCP client can run the standing check conversationally, reusing
-  the `watch()` function unchanged.
+- ✅ **`watch_site` MCP tool + `watch-site` prompt (shipped)**: the same delta
+  is now surfaced over the `umbra-mcp` server, reusing the `watch()` function
+  unchanged, so an MCP client can run the standing check conversationally. The
+  tool takes the same filters as `search_catalog`, persists state in the local
+  index's `meta` table (so a watch survives across sessions), and returns the
+  new acquisitions as context cards ready to hand straight to `change_composite`
+  / `timescan` — closing the standing-analyst loop (new pass → composite →
+  describe) inside one conversation. No model is called; the source and store
+  stay injectable, so it is fully offline-testable.
 
 ### C4. ML dataset preparation (`umbra chips`) — **shipped**
 

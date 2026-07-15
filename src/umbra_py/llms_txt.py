@@ -201,10 +201,11 @@ def llms_txt() -> str:
     lines.append(
         "- MCP server (`umbra mcp` / `uvx umbra-mcp`, the `[mcp]` extra): exposes "
         "`search_catalog`, `get_item`, `geocode_place`, `index_stats`, "
-        "`quicklook`, `change_composite`, `timescan` and `download_asset` as MCP "
+        "`quicklook`, `change_composite`, `timescan`, `download_asset` and "
+        "`watch_site` (report only passes new since the last check) as MCP "
         "tools; the imagery tools return the rendered PNG as an image block, so "
         "the agent *sees* the scene. Ships a `umbra://context` resource and "
-        "`monitor-site` / `survey-region` prompts."
+        "`monitor-site` / `watch-site` / `survey-region` prompts."
     )
     lines.append(
         "- STAC API (`umbra serve`, the `[serve]` extra): a read-only STAC API "
@@ -319,10 +320,11 @@ def llms_full_txt() -> str:
     lines.append(
         "- **MCP server** (`umbra mcp` / `uvx umbra-mcp`, `[mcp]` extra) — "
         "exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, "
-        "`quicklook`, `change_composite`, `timescan` and `download_asset` as MCP "
+        "`quicklook`, `change_composite`, `timescan`, `download_asset` and "
+        "`watch_site` (report only passes new since the last check) as MCP "
         "tools. The imagery tools return the rendered PNG as an MCP image block. "
         "Also serves a `umbra://context` resource and the `monitor-site` / "
-        "`survey-region` prompts."
+        "`watch-site` / `survey-region` prompts."
     )
     lines.append(
         "- **STAC API** (`umbra serve`, `[serve]` extra) — a read-only STAC API "
