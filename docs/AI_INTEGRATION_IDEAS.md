@@ -218,6 +218,33 @@ builds capabilities that assume an AI in the loop.
 > lands → composite against the previous pass → narration. The remaining C3 piece
 > is optional (surfacing the same delta as an MCP tool/prompt); **C4 `umbra
 > chips`** and the **B3 example notebooks** stay on the critical path.
+>
+> **Update:** **C4 `umbra chips` has shipped** — the ML dataset-preparation layer
+> (`src/umbra_py/chips.py`, `[load]` extra). For the model-*training* audience the
+> missing verb was *chipping*, and this supplies it: `chip_item` walks an
+> acquisition's geocoded GeoTIFF one window at a time via GDAL's `/vsicurl/`
+> driver (only each tile's bytes stream over HTTP range requests — no full
+> download, memory bounded to one chip) and emits full `chip_size` × `chip_size`
+> tiles as GeoTIFF or `.npy`; `write_chips` chips a whole search into a dataset
+> with a manifest — `.jsonl` (one record per line, the standard ML format) or
+> `.geojson` (chip footprints for QGIS / geopandas). Every `ChipRecord` carries
+> the chip's geographic bbox, CRS, affine transform, grid position and source
+> pixel window plus the acquisition's datetime, place, platform, polarization,
+> incidence angle and resolution, stamped with the CC-BY attribution — the
+> look-angle / resolution / polarization metadata §C4 asked for, attached per
+> tile. It holds the determinism boundary the scientific audience needs (§A4,
+> §6.1): **no model is called** — chipping is pure raster iteration + manifest
+> logic in the deterministic core, mirroring `umbra_py.load`, so the whole
+> feature is offline-testable with a real on-disk GeoTIFF and no network. Fixed
+> size is a promise (partial edge tiles are dropped), `stride` produces
+> overlapping tiles for dense inference / augmentation, and `min_valid` drops the
+> mostly-nodata corners of a rotated footprint so a dataset isn't padded with
+> black squares. This positions umbra-py as the data-loading layer for SAR
+> foundation-model and change-detection research — the audience most likely to
+> contribute back. With C4 done, the remaining Tier C item is the exploratory C5
+> archive-embedding work (which builds directly on these chips); the **B3 example
+> notebooks** stay on the critical path, and the single highest-value strategic
+> move overall remains the unstarted Canopy backend (`STRATEGY.md` 5.1).
 
 ---
 
@@ -488,15 +515,25 @@ the loop, not the agent:
   prompt so an MCP client can run the standing check conversationally, reusing
   the `watch()` function unchanged.
 
-### C4. ML dataset preparation (`umbra chips`)
+### C4. ML dataset preparation (`umbra chips`) — **shipped**
 
-For the model-*training* audience: a chipping API that walks search results
-and emits fixed-size, georeferenced tiles (GeoTIFF or NumPy) with a manifest
-(GeoParquet/JSONL: chip path, item id, datetime, bbox, polarization,
-resolution, license). `to_xarray` already does windowed reads, so this is
-mostly iteration + manifest logic. It positions umbra-py as the data-loading
-layer for SAR foundation-model and change-detection research — the audience
-most likely to contribute back.
+✅ **shipped** (`umbra_py.chips`, `[load]` extra): a chipping API that walks
+search results and emits fixed-size, georeferenced tiles (GeoTIFF or NumPy)
+with a manifest (JSONL — chip path, item id, datetime, place, bbox, CRS,
+transform, source pixel window, polarization, incidence angle, resolution,
+license — or a `.geojson` `FeatureCollection` of chip footprints). `chip_item`
+reads band 1 of the item's COG one window at a time via GDAL's `/vsicurl/`
+driver (mirroring `umbra_py.load`), so only each tile's bytes stream over HTTP
+range requests and memory stays bounded to one chip. Fixed size is a promise
+(partial edge tiles are dropped), `stride` produces overlapping tiles for dense
+inference / augmentation, and `min_valid` drops the mostly-nodata corners of a
+rotated footprint. `write_chips` chips a whole search into a dataset + manifest;
+the `umbra chips` CLI mirrors `umbra change`'s search-vs-URLs interface (plus
+`--local`/`--index-db`). No model is called — pure raster iteration + manifest
+logic in the deterministic core — so it is fully offline-testable. It positions
+umbra-py as the data-loading layer for SAR foundation-model and change-detection
+research — the audience most likely to contribute back — and it is the
+prerequisite the exploratory C5 archive-embedding work builds on.
 
 ### C5. Embedding the archive itself (exploratory)
 
@@ -518,8 +555,8 @@ and contributors.
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
-| 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ✅ **C3 `umbra watch` (shipped)** · ⬜ C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
-| 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
+| 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ✅ **C3 `umbra watch` (shipped)** · ✅ **C4 `umbra chips` (shipped)** | ongoing | AI-infused capabilities; each is independently shippable |
+| 5 | C5 embeddings (builds on C4 chips) | exploratory | Flagship differentiator once the base is solid |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on
 correct S3 pagination and the prebuilt index from the analysis document. Both

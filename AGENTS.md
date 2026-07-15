@@ -41,6 +41,7 @@ src/umbra_py/
   cli.py             # `umbra search | info | download`
   constants.py       # bucket, STAC root URL, canonical product types
   convert.py         # optional SICD -> amplitude GeoTIFF (behind [convert] extra)
+  chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call)
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
   serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])

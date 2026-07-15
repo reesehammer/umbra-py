@@ -138,8 +138,47 @@ called. The remaining C3 pieces build on it:
 
 ---
 
+## C4/C5 ML dataset follow-ons (`umbra chips` shipped)
+
+- **Surfaced in:** the `umbra chips` PR (`AI_INTEGRATION_IDEAS.md` C4 /
+  `STRATEGY.md` 5.5).
+- **Code:** `src/umbra_py/chips.py`, `umbra chips` in `cli.py`.
+
+`umbra chips` (fixed-size, georeferenced ML tiles + a `.jsonl`/`.geojson`
+manifest, `[load]` extra, no model call) is shipped. Follow-ons that build on it,
+not blockers:
+
+- **C5 archive embeddings (exploratory).** Chips are the prerequisite for
+  precomputing per-acquisition image embeddings and a `search_similar(item)` /
+  text-to-scene capability (`AI_INTEGRATION_IDEAS.md` C5). Publish the embedding
+  table with the nightly index so no user recomputes it.
+- **Publish the chip manifest as stac-geoparquet.** The manifest is JSONL /
+  GeoJSON today; a `.parquet` option (reusing the `[export]` extra's
+  stac-geoparquet plumbing) would let DuckDB / geopandas query a large chip set
+  without loading every line.
+- **Chip the complex products.** The chipper reads amplitude rasters (GEC/CSI);
+  chipping SICD/CPHD would need the slant-plane handling that `convert.py`
+  begins — related to the still-open SICD → geocoded COG gap in `STRATEGY.md` 5.5.
+
+---
+
 ## Done
 
+- **`umbra chips`: ML dataset preparation (C4).** Added `src/umbra_py/chips.py`
+  (`[load]` extra). `chip_item` walks an acquisition's geocoded GeoTIFF one window
+  at a time via GDAL's `/vsicurl/` driver (only each tile's bytes stream over HTTP
+  range requests — no full download, memory bounded to one chip) and writes full
+  `chip_size` × `chip_size` tiles as GeoTIFF or `.npy`; `write_chips` chips a whole
+  search into a dataset + manifest (`.jsonl` — one `ChipRecord` per line — or a
+  `.geojson` `FeatureCollection` of chip footprints). Every record carries the
+  chip's geographic bbox, CRS, transform, grid position and source pixel window
+  plus the acquisition's datetime, place, platform, polarization, incidence angle
+  and resolution, stamped with the CC-BY attribution. Fixed size is a promise
+  (partial edge tiles dropped), `stride` overlaps tiles, and `min_valid` drops
+  mostly-nodata corners. No model is called — pure raster iteration + manifest
+  logic, mirroring `umbra_py.load` — so it is fully offline-testable with a real
+  on-disk GeoTIFF. The `umbra chips` CLI mirrors `umbra change`'s search-vs-URLs
+  interface plus `--local`/`--index-db`.
 - **`umbra describe`: VLM scene description (first C2 piece).** Added
   `src/umbra_py/describe.py` (`[ai]` + `[viz]` extras) and the
   `constants.AI_PROVENANCE` note. `umbra describe <item-url>` renders the item's

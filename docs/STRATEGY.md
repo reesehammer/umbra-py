@@ -195,6 +195,26 @@ same 500 lines of glue first, and many give up."*
 > narration → notify) is now assemblable end-to-end. The AI critical path moves to
 > C4 `umbra chips` and the B3 example notebooks; the single highest-value strategic
 > move overall remains the unstarted Canopy backend (5.1).
+>
+> **Update:** **`umbra chips` has shipped** (`AI_INTEGRATION_IDEAS.md` C4 / the
+> ML-dataset-prep half of workstream 5.5). Umbra sells into ML-heavy analytics, so
+> the funnel-widening move (§1) is to make Umbra data trivially *trainable*:
+> `umbra chips` (`umbra_py.chips`, `[load]` extra) walks a search result and cuts
+> each scene's geocoded GeoTIFF into fixed-size, georeferenced training tiles
+> (GeoTIFF or `.npy`) with a manifest (`.jsonl` or `.geojson`) that attaches the
+> look-angle / resolution / polarization / license metadata a training pipeline
+> needs to every chip. It streams only each tile's bytes via `/vsicurl/` range
+> reads (no full download, memory bounded to one chip), drops partial edges and
+> mostly-nodata corners, and supports overlapping tiles via `stride`. It preserves
+> the boundary and novelty the scientific audience needs (§3): **no model is
+> called** — chipping is pure raster iteration + manifest logic in the
+> deterministic core — and it layers on the same discovery moat the project is
+> built on, so it stays graceful under upstream obsolescence. It makes umbra-py the
+> data-loading layer for SAR foundation-model and change-detection research (the
+> audience most likely to contribute back) and is the prerequisite the exploratory
+> archive-embedding work (C5) builds on. The remaining AI item is the B3 example
+> notebooks; the single highest-value strategic move overall remains the unstarted
+> Canopy backend (5.1).
 
 ## 2. The landscape: life without umbra-py
 
@@ -321,11 +341,16 @@ start; notebooks with rendered output travel further.
 ### 5.5 Close the format gaps that generate support burden — **partial**
 
 SICD → geocoded COG one-liner, RTC recipes (interop with MultiRTC), and ML
-dataset prep: chipping scenes into training tiles with look-angle /
-resolution / polarization metadata attached. Umbra sells into ML-heavy
-analytics; tooling that makes Umbra data trivially trainable increases
-demand for Umbra pixels. (`convert.py` has amplitude extraction; the rest is
-open.)
+dataset prep. Umbra sells into ML-heavy analytics; tooling that makes Umbra
+data trivially trainable increases demand for Umbra pixels.
+
+- ✅ **ML dataset prep shipped** (`umbra chips` / `umbra_py.chips`, `[load]`
+  extra): chips scenes into fixed-size, georeferenced training tiles with the
+  look-angle / resolution / polarization / license metadata attached per chip in
+  a `.jsonl` (or `.geojson`) manifest. See `AI_INTEGRATION_IDEAS.md` C4.
+- ⬜ SICD → geocoded COG one-liner and RTC recipes (interop with MultiRTC) are
+  still open. (`convert.py` has slant-plane amplitude extraction; full geocoding
+  of the complex products is the remaining gap.)
 
 ### 5.6 Then actually talk to Umbra — **not started**
 
