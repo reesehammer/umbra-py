@@ -101,8 +101,11 @@ critical path to a demo application.
 The repo's output surface is Folium-rendered, self-contained HTML. For an
 application you need one of:
 
-- **a queryable API** (the `umbra serve` STAC-API façade proposed in
-  `AI_INTEGRATION_IDEAS.md` §B2 — does not exist yet), or
+- **a queryable API.** For *AI* clients this now exists: the `umbra-mcp` MCP
+  server (`AI_INTEGRATION_IDEAS.md` §B1, shipped) is a queryable, schema'd tool
+  surface over the catalog. For a *browser* front end the relevant façade is
+  still the `umbra serve` read-only STAC API proposed in §B2 — **not built
+  yet**; it would share `CatalogIndex` with the MCP server, or
 - **a static data export + JS front end** (GeoJSON/PMTiles + MapLibre — the
   export half exists as `write_geojson`; the front end does not).
 

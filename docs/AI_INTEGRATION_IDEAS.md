@@ -48,9 +48,17 @@ builds capabilities that assume an AI in the loop.
 > `umbra_py.llm_context()` / `umbra context` (A2) is the runtime context
 > document; `UmbraItem`/`ItemCollection` now implement `__geo_interface__` (B3);
 > the determinism boundary (A4) is written into `AGENTS.md`; and `umbra info
-> --json` extends the structured-output guarantee (A1). This unblocks the
-> flagship MCP server (B1) — its `search_catalog`/`get_item` tools return the A3
-> cards, and its schemas reuse the A2 document — which is now the critical path.
+> --json` extends the structured-output guarantee (A1).
+>
+> **The flagship MCP server (B1) is now shipped** — the highest-leverage single
+> artifact in this document. `umbra-mcp` (`umbra mcp` / `uvx umbra-mcp`, `[mcp]`
+> extra) exposes `search_catalog`/`get_item`/`geocode_place`/`index_stats`/
+> `quicklook`/`change_composite`/`timescan`/`download_asset` as MCP tools (the
+> imagery tools return PNG image blocks), a `umbra://context` resource, and the
+> `monitor-site`/`survey-region` prompts — reusing the A3 cards and the A2
+> document exactly as planned. The remaining Phase 2 items (A2 `llms.txt` docs
+> bundle, the nightly-index publisher already exists) and Phase 3's
+> `umbra serve` STAC façade are the next critical path.
 
 ---
 
@@ -111,11 +119,22 @@ still allowing everything below.
 
 ## 3. Tier B — AI-native interfaces (MCP, STAC API, notebooks)
 
-### B1. `umbra-mcp`: an MCP server over the library (the flagship idea)
+### B1. `umbra-mcp`: an MCP server over the library (the flagship idea) — **shipped**
+
+> **Status:** ✅ Shipped as `umbra_py.mcp_server` behind the `[mcp]` extra,
+> runnable as `umbra mcp`, `umbra-mcp`, or `uvx umbra-mcp` (stdio transport).
+> The tools, resources and prompts below are all live; the imagery tools return
+> the rendered PNG as an MCP image block. The tool *logic* lives in plain,
+> deterministic functions (offline-testable without the SDK) that
+> `build_server()` registers, so the server stays within the library's
+> determinism boundary. Not-yet-done follow-ups: registering in the public MCP
+> registries / Anthropic's directory (part of the deliverable, tracked in
+> `TODO.md`), and a LangChain/LlamaIndex wrapper reusing these tool shapes.
 
 The CLI subcommands already map 1:1 to library functions — which means the
-tool inventory for an MCP server is already designed. Ship a separate package
-(`umbra-mcp`, runnable via `uvx umbra-mcp`, stdio transport) exposing:
+tool inventory for an MCP server is already designed. Shipped as a submodule
+(`umbra_py.mcp_server`, runnable via `uvx umbra-mcp`, stdio transport)
+exposing:
 
 **Tools** (thin wrappers over existing functions):
 
@@ -269,7 +288,7 @@ and contributors.
 | Phase | Items | Effort | Rationale |
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
-| 2 | **B1 MCP server** · A2 `llms.txt` + docs bundle · nightly prebuilt index (analysis doc #17) | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
+| 2 | ✅ **B1 MCP server (shipped)** · nightly prebuilt index (shipped) · ⬜ A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | B2 `umbra serve` STAC API · C1 NL search (fuzzy/date parts first) · B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
@@ -281,7 +300,8 @@ amplify silently-truncated search results), and the prebuilt-index *consume*
 side has shipped — `umbra index fetch` / `CatalogIndex.from_release()` pulls the
 weekly `catalog.db` snapshot, so an MCP or STAC-API layer can bootstrap a
 whole-catalog index in seconds instead of crawling on first run. Both
-interfaces are now unblocked.
+interfaces were thereby unblocked; the MCP server (B1) is now shipped, and the
+STAC façade (B2) remains open.
 
 ---
 

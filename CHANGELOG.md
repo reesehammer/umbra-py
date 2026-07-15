@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra-mcp`: a Model Context Protocol server over the library (the flagship
+  AI-integration deliverable, `docs/AI_INTEGRATION_IDEAS.md` B1 / Phase 2).**
+  Umbra publishes no STAC API, so this library *is* the query layer — and this
+  server exposes it over MCP, turning any MCP client (Claude Desktop / Code and
+  others) into a zero-install, natural-language front door to a 17+ TB public
+  SAR archive. Run it with `umbra mcp`, `umbra-mcp`, or `uvx umbra-mcp` (stdio
+  transport); needs the new `[mcp]` extra (`pip install "umbra-py[mcp]"`).
+
+  - **Tools** (thin wrappers over the existing public API): `search_catalog`
+    (returns compact `to_llm_context()` cards, not full STAC JSON, to protect
+    the context window), `get_item`, `geocode_place`, `index_stats`,
+    `quicklook`, `change_composite`, `timescan`, and `download_asset` (gated by
+    a two-step size-confirmation handshake). The three imagery tools return the
+    rendered PNG as an MCP **image content block**, so the model *sees* the
+    radar scene.
+  - **Resources:** `umbra://context` (the `llm_context()` document) and
+    `umbra://index/stats`. **Prompts:** packaged `monitor-site` and
+    `survey-region` workflows.
+  - **Deterministic core, AI at the edges** (the `[ai]`/determinism policy in
+    `AGENTS.md`): nothing here calls a model — the server searches, geocodes and
+    renders; the client's model plans and narrates. `change_composite` refuses
+    to mix polarizations (HH vs VV are not comparable), and the CC-BY
+    attribution line travels with every result.
 - **AI-legible surface (Tier A groundwork): context cards, an `llm_context()`
   document, and `__geo_interface__`.** The friction in using Umbra's open data
   is interpretive — knowing *what to ask for* — which is exactly what a language

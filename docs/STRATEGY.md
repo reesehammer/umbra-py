@@ -8,7 +8,7 @@ Companion docs: [`CODEBASE_ANALYSIS.md`](CODEBASE_ANALYSIS.md) (code-level
 priorities), [`AI_INTEGRATION_IDEAS.md`](AI_INTEGRATION_IDEAS.md) (AI/MCP
 direction), [`DEMO_APP_GAPS.md`](DEMO_APP_GAPS.md) (demo-app readiness).*
 
-*Last updated: 2026-07-14.*
+*Last updated: 2026-07-15.*
 
 ---
 
@@ -41,6 +41,13 @@ same 500 lines of glue first, and many give up."*
 > whole-catalog `--local` search with no crawl. That was the last shared
 > prerequisite the demo / MCP / STAC-API layers were waiting on — those are now
 > unblocked.
+>
+> **Update:** the **`umbra-mcp` MCP server has shipped** (`AI_INTEGRATION_IDEAS.md`
+> B1 — the flagship AI deliverable). Every MCP-enabled client is now a
+> zero-install natural-language front door to the archive; the imagery tools
+> return radar pictures, not just JSON. Getting it *listed* in the MCP
+> registries and Anthropic's directory is now part of workstream 5.3 ("make
+> adoption visible where Umbra looks").
 
 ## 2. The landscape: life without umbra-py
 

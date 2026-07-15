@@ -241,6 +241,24 @@ def context() -> None:
 
 
 @cli.command()
+def mcp() -> None:
+    """Run the umbra Model Context Protocol server (stdio transport).
+
+    Exposes search / geocode / quicklook / change / timescan as MCP tools so an
+    MCP client (Claude Desktop / Code and others) can drive the archive in
+    natural language. Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``);
+    also runnable as ``umbra-mcp`` or ``uvx umbra-mcp``.
+    """
+    from .exceptions import MissingDependencyError
+    from .mcp_server import main as run_server
+
+    try:
+        run_server()
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
 @click.argument("item_url")
 @click.option(
     "--asset",

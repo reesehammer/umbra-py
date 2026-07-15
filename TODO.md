@@ -31,6 +31,21 @@ plain `image/tiff` and whose href ends in `.tif`.
 
 ---
 
+## Register `umbra-mcp` in the MCP registries and Anthropic's directory
+
+- **Surfaced in:** the `umbra-mcp` MCP server PR (`AI_INTEGRATION_IDEAS.md` B1).
+- **Code:** `src/umbra_py/mcp_server.py`, `pyproject.toml` (`[mcp]` extra,
+  `umbra-mcp` console script).
+
+The server itself is shipped and runnable (`umbra mcp` / `uvx umbra-mcp`), but
+registering it in the public MCP registries and Anthropic's directory — the
+discovery half of the deliverable — is still open. Follow-ons named in the B1
+doc: a LangChain/LlamaIndex community tool wrapper reusing the same tool shapes,
+and returning the polarization-mixing warning as structured text alongside the
+`change_composite` image block.
+
+---
+
 ## Done
 
 - **Bootstrap local search from the published catalog snapshot.** Added
