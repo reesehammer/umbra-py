@@ -44,6 +44,8 @@ src/umbra_py/
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
   serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
+  context.py         # llm_context(): domain knowledge as a machine-readable JSON dict (`umbra context`)
+  llms_txt.py        # llms_txt()/llms_full_txt(): llms.txt-convention agent guide (`umbra llms-txt`); stdlib-only
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/

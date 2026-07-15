@@ -69,6 +69,19 @@ same 500 lines of glue first, and many give up."*
 > critical path: it was the last "the index does nothing for the visual output"
 > gap, and it is the fast-render substrate the static-first demo (Path A) builds
 > on next.
+>
+> **Update:** the **`llms.txt` context bundle has shipped**
+> (`AI_INTEGRATION_IDEAS.md` A2 — the last open Phase 2 item). `umbra llms-txt
+> [--full]` renders the [llms.txt-convention](https://llmstxt.org/) Markdown —
+> the *user* agent guide ("how to drive the library"), complementing `AGENTS.md`
+> (the contributor guide) and the machine-readable `umbra context` JSON — and
+> the committed repo-root `llms.txt` / `llms-full.txt` are that output. It is
+> pure adoption plumbing (widen the funnel, §1): any agent or newcomer can now
+> fetch one file and know which product to ask for, how to search, and that
+> attribution is mandatory — without reading the source. `llms-full.txt` is
+> assembled from facts already in the package (the domain document, the live CLI
+> tree, the module docstrings), so it can never drift from the code it
+> describes.
 
 ## 2. The landscape: life without umbra-py
 

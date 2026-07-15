@@ -1,0 +1,30 @@
+# umbra-py
+
+> A Python-first toolkit for Umbra's open SAR (synthetic aperture radar) data. It searches Umbra's static STAC catalog -- which publishes no upstream search API -- streams cloud-optimized products, and renders quicklooks, footprint maps, change composites and timescans. Because there is no Umbra STAC API, this library is the de-facto programmatic front door to a public, multi-terabyte SAR archive.
+
+umbra-py collapses two kinds of friction. The *mechanical* friction -- searching a catalog with no search endpoint, resuming multi-GB downloads, streaming cloud-optimized GeoTIFFs -- is handled by the deterministic core (`requests` + `click`, no heavy dependency in the base install). The *interpretive* friction -- which product type to ask for, why two polarizations must not be differenced, what a decibel stretch means -- is handled by making the library AI-legible: the CLI emits JSON, items expose `to_llm_context()` context cards, `umbra context` prints the domain document machine-readably, and the archive is reachable through two AI-native front doors -- an MCP server (`umbra mcp`) and a read-only STAC API (`umbra serve`). Heavy geospatial dependencies (rasterio, matplotlib, folium, xarray, sarpy) live behind extras and load lazily, so an agent can search and reason over metadata with nothing extra installed.
+
+Determinism boundary: the core library is deterministic and never calls a model. Anything AI-facing (this document, the context cards, the MCP server, the STAC API) either describes the library or exposes it as tools -- models plan, describe and narrate; the library searches, downloads and renders. A model output never becomes a coordinate, a URL or a filter without passing through the deterministic layer.
+
+## Start here
+
+- [llms-full.txt](https://raw.githubusercontent.com/reesehammer/umbra-py/main/llms-full.txt): the complete, self-contained guide to driving umbra-py -- domain knowledge, the full CLI command reference, the AI-native interfaces, and a per-module map. Fetch this first.
+- [README](https://raw.githubusercontent.com/reesehammer/umbra-py/main/README.md): human-facing install instructions and a quick-start tour of every command.
+- `umbra context` / `umbra_py.llm_context()`: the same domain knowledge as a machine-readable JSON document, for programmatic use.
+
+## AI-native interfaces
+
+- MCP server (`umbra mcp` / `uvx umbra-mcp`, the `[mcp]` extra): exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, `quicklook`, `change_composite`, `timescan` and `download_asset` as MCP tools; the imagery tools return the rendered PNG as an image block, so the agent *sees* the scene. Ships a `umbra://context` resource and `monitor-site` / `survey-region` prompts.
+- STAC API (`umbra serve`, the `[serve]` extra): a read-only STAC API over the catalog index -- landing page, `/conformance`, `/collections`, `/collections/{id}/items`, and item search over `GET`/`POST /search` -- with an OpenAPI doc at `/docs`. Speaks the protocol `pystac-client`, the QGIS STAC plugin, `stac-browser`, leafmap and OpenAPI-driven agents already understand.
+
+## More docs
+
+- [AGENTS.md](https://raw.githubusercontent.com/reesehammer/umbra-py/main/AGENTS.md): the contributor-agent guide -- how to *modify* the library (repo map, conventions, testing rules).
+- [CONTRIBUTING.md](https://raw.githubusercontent.com/reesehammer/umbra-py/main/CONTRIBUTING.md): development setup, linting and the test workflow.
+- [Changelog](https://raw.githubusercontent.com/reesehammer/umbra-py/main/CHANGELOG.md): what has shipped, most recent first.
+
+## Optional
+
+- [Strategy](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/STRATEGY.md): where the project sits in the SAR ecosystem and why.
+- [AI integration ideas](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/AI_INTEGRATION_IDEAS.md): the MCP / STAC-API / AI-capability roadmap this bundle is part of.
+

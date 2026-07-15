@@ -1,0 +1,111 @@
+# umbra-py — full LLM context
+
+> A Python-first toolkit for Umbra's open SAR (synthetic aperture radar) data. It searches Umbra's static STAC catalog -- which publishes no upstream search API -- streams cloud-optimized products, and renders quicklooks, footprint maps, change composites and timescans. Because there is no Umbra STAC API, this library is the de-facto programmatic front door to a public, multi-terabyte SAR archive.
+
+umbra-py collapses two kinds of friction. The *mechanical* friction -- searching a catalog with no search endpoint, resuming multi-GB downloads, streaming cloud-optimized GeoTIFFs -- is handled by the deterministic core (`requests` + `click`, no heavy dependency in the base install). The *interpretive* friction -- which product type to ask for, why two polarizations must not be differenced, what a decibel stretch means -- is handled by making the library AI-legible: the CLI emits JSON, items expose `to_llm_context()` context cards, `umbra context` prints the domain document machine-readably, and the archive is reachable through two AI-native front doors -- an MCP server (`umbra mcp`) and a read-only STAC API (`umbra serve`). Heavy geospatial dependencies (rasterio, matplotlib, folium, xarray, sarpy) live behind extras and load lazily, so an agent can search and reason over metadata with nothing extra installed.
+
+Determinism boundary: the core library is deterministic and never calls a model. Anything AI-facing (this document, the context cards, the MCP server, the STAC API) either describes the library or exposes it as tools -- models plan, describe and narrate; the library searches, downloads and renders. A model output never becomes a coordinate, a URL or a filter without passing through the deterministic layer.
+
+## Product types
+
+Ordered easiest-to-use first (GEC) to rawest (CPHD). Prefer GEC unless the task needs complex or phase data.
+
+- **GEC** — Geocoded Ellipsoid Corrected image: a cloud-optimized GeoTIFF, map-projected and analysis-ready. The easiest product to use and the usual starting point.
+- **CSI** — Color Sub-aperture Image: a quick-look RGB GeoTIFF that colorizes sub-aperture/frequency content. Good for eyeballing a scene, not for radiometric measurement.
+- **SIDD** — Sensor Independent Derived Data: a geocoded, detected (amplitude) image in NITF. Map-projected like GEC but in the standard NGA format.
+- **SICD** — Sensor Independent Complex Data: full complex data in the slant plane (not map-projected). Needed for interferometry and advanced processing; not a display image.
+- **CPHD** — Compensated Phase History Data: the raw signal phase history, the least-processed product. For signal-level work, not for viewing.
+
+Polarization caveat: Polarizations are not interchangeable: an HH scene and a VV scene of the same place measure different scattering and must not be differenced for change detection. Compare like polarization with like.
+
+## Search parameters
+
+Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogIndex.search`. Build a valid query in one shot:
+
+- **bbox** — Footprint filter as (min_lon, min_lat, max_lon, max_lat) in WGS84 degrees. Items whose footprint overlaps the box are returned.
+- **place** — Free-text place name (e.g. 'Port of Long Beach'). Geocoded to a bbox via Nominatim; resolve it yourself with geocode_place if you want to inspect the box first. Mutually informative with bbox, not required.
+- **area** — Substring match against the Umbra task (AOI campaign) name, e.g. 'Centerfield, Utah'. Tasks group every pass of one site over time.
+- **start** — Earliest acquisition date, inclusive, as YYYY-MM-DD.
+- **end** — Latest acquisition date, inclusive, as YYYY-MM-DD.
+- **products** — Restrict to items exposing these product types (any of GEC, CSI, SIDD, SICD, CPHD). Omit to accept all.
+- **limit** — Maximum number of items to return.
+- **max_per_task** — Cap items per task. Use 1 for a 'one pin per site' world view; omit for the full time series of each site.
+
+## License and attribution
+
+All Umbra open data is licensed CC-BY-4.0. Attribution is mandatory and must survive every derived product -- including model-generated text describing the data. Use the string: "Contains Umbra open data, licensed under CC BY 4.0."
+
+## CLI command reference
+
+The CLI subcommands map 1:1 to library functions. Run any command with `--help` for its full options; `--json` is available where a structured result makes sense (`search`, `info`).
+
+- `umbra change` — Render multi-temporal SAR change: a color composite or a time-lapse.
+- `umbra context` — Print the library's LLM context document as JSON.
+- `umbra download` — Download asset(s) of an item given its STAC JSON URL.
+- `umbra gallery` — Render search results as a browseable HTML SAR thumbnail gallery.
+- `umbra index` — Build and inspect a local SQLite catalog index for fast offline search.
+- `umbra index build` — Walk Umbra's archive and persist matching acquisitions into the index.
+- `umbra index export` — Export a local index to stac-geoparquet for serverless catalog search.
+- `umbra index fetch` — Download the published prebuilt catalog index for instant local search.
+- `umbra index info` — Show what a local index holds: item count, date span and task count.
+- `umbra info` — Show a summary of a STAC item given its JSON URL.
+- `umbra llms-txt` — Print the project's llms.txt context bundle to stdout.
+- `umbra load` — Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
+- `umbra map` — Render search results as an interactive map or GeoJSON file.
+- `umbra mcp` — Run the umbra Model Context Protocol server (stdio transport).
+- `umbra quicklook` — Render a standalone SAR quicklook image from a STAC item URL.
+- `umbra search` — Search the catalog by area, date and product type.
+- `umbra serve` — Run a read-only STAC API over the catalog index (HTTP server).
+- `umbra swipe` — Render an interactive before/after swipe map of two SAR passes.
+- `umbra timescan` — Collapse a whole SAR time series into one temporal-statistics image.
+- `umbra view` — Explore one SAR scene at full resolution in an interactive web viewer.
+
+## AI-native interfaces
+
+- **MCP server** (`umbra mcp` / `uvx umbra-mcp`, `[mcp]` extra) — exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, `quicklook`, `change_composite`, `timescan` and `download_asset` as MCP tools. The imagery tools return the rendered PNG as an MCP image block. Also serves a `umbra://context` resource and the `monitor-site` / `survey-region` prompts.
+- **STAC API** (`umbra serve`, `[serve]` extra) — a read-only STAC API over the same `CatalogIndex`: landing page, `/conformance`, `/collections`, `/collections/{id}`, `/collections/{id}/items`, `/collections/{id}/items/{item_id}`, and item search over `GET /search` and `POST /search` (bbox, datetime interval, ids, limit, token pagination), with an OpenAPI doc at `/docs`.
+
+## Module guide
+
+The library's layers, each with the opening of its source docstring. Read top-to-bottom to follow a scene from discovery to presentation.
+
+### `umbra_py/catalog.py` (UmbraCatalog)
+
+Search Umbra's published open SAR data.
+
+### `umbra_py/index.py` (CatalogIndex)
+
+A local SQLite index of Umbra acquisitions for fast, repeatable search.
+
+### `umbra_py/models.py` (UmbraItem)
+
+Lightweight representations of Umbra STAC items.
+
+### `umbra_py/download.py` (download_asset)
+
+Download Umbra data assets over anonymous HTTPS, with resume support.
+
+### `umbra_py/load.py` (to_xarray / to_geotiff)
+
+Analysis-ready loading of Umbra SAR imagery into ``xarray`` (the *load* step).
+
+### `umbra_py/viz.py` (quicklook / maps / change / timescan / gallery)
+
+Visualization helpers for Umbra search results.
+
+### `umbra_py/context.py` (llm_context)
+
+Self-describing context for language-model consumers.
+
+### `umbra_py/mcp_server.py` (umbra-mcp)
+
+``umbra-mcp`` — a Model Context Protocol server over :mod:`umbra_py`.
+
+### `umbra_py/serve.py` (umbra serve)
+
+``umbra serve`` -- a read-only STAC API façade over the local catalog index.
+
+---
+
+Contains Umbra open data, licensed under CC BY 4.0.
+

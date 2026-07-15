@@ -346,9 +346,14 @@ umbra info <item-json-url>
 
 # Feed an agent: `info --json` emits an explanation-rich context card (per-
 # product explanations, the polarization caveat, the CC-BY line); `umbra
-# context` prints the library's product-type table and search semantics.
+# context` prints the library's product-type table and search semantics as
+# JSON; `umbra llms-txt` prints the same as an llms.txt-convention Markdown
+# guide (add --full for the self-contained bundle: domain knowledge + the full
+# CLI reference + a per-module map). The committed llms.txt / llms-full.txt at
+# the repo root are that output.
 umbra info <item-json-url> --json
 umbra context
+umbra llms-txt --full
 
 # Download specific asset(s).
 umbra download <item-json-url> --asset GEC --dest downloads/
