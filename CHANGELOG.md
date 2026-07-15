@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Fuzzy task matching for `--area` search (`docs/AI_INTEGRATION_IDEAS.md` C1 —
+  the second deterministic step of Phase 3).** `--area` (and the
+  `UmbraCatalog.search` / `CatalogIndex.search` `area=` argument, and the MCP
+  `search_catalog` tool) stays a literal case-insensitive substring by default;
+  passing `--fuzzy` / `fuzzy=True` widens it to a token-wise match resolved by a
+  new stdlib-only `umbra_py.fuzzy` module (`task_matches` / `matching_tasks`,
+  exported at the top level). The fuzzy match is **word-order- and
+  punctuation-independent and tolerant of a small typo** — so `"utah
+  centerfield"`, `"centerfield utah"` and `"centrfield"` all still reach
+  `"Centerfield, Utah"` — while requiring *every* query token to match, which
+  keeps precision. It is a **strict superset** of the substring match (it never
+  drops a result), and the live (`UmbraCatalog`) and indexed (`CatalogIndex`)
+  search paths share the one matcher and are tested to agree. **No model is
+  called at runtime**, so it stays inside the library's determinism boundary and
+  is fully offline-testable. `--fuzzy` is available on `search` and on the
+  area-taking render commands (`change`, `timescan`, `swipe`, `gallery`).
+  Semantic aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) is
+  deliberately out of scope — it needs the future embedding index, not plain
+  string similarity.
 - **Natural-language date bounds for search (`docs/AI_INTEGRATION_IDEAS.md` C1 —
   the deterministic first step of Phase 3).** `--start` / `--end` (and the
   `UmbraCatalog.search` / `CatalogIndex.search` keyword arguments, and the MCP

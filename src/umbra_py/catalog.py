@@ -28,6 +28,7 @@ from ._http import default_session, get_json
 from .constants import S3_BUCKET, S3_REGION
 from .dates import parse_date_bound
 from .exceptions import CatalogError
+from .fuzzy import task_matches
 from .models import BBox, UmbraItem
 
 DateLike = str | date | datetime | None
@@ -198,6 +199,7 @@ class UmbraCatalog:
         end: DateLike = None,
         product_types: list[str] | None = None,
         area: str | None = None,
+        fuzzy: bool = False,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -225,6 +227,14 @@ class UmbraCatalog:
             are skipped *before* they're listed, so this also makes the
             search much faster -- the ergonomic way to gather the
             co-located passes a change composite needs.
+        fuzzy:
+            Widen ``area`` from a literal substring to a deterministic
+            token-wise fuzzy match (:func:`umbra_py.fuzzy.task_matches`):
+            word-order- and punctuation-independent, tolerant of a small
+            typo, and a strict superset of the substring match (it never
+            drops a result). So ``area="utah centerfield"`` or
+            ``area="centrfield"`` still reaches ``"Centerfield, Utah"``.
+            No model call -- see ``docs/AI_INTEGRATION_IDEAS.md`` C1.
         limit:
             Stop after yielding this many items.
         max_per_task:
@@ -241,8 +251,9 @@ class UmbraCatalog:
 
         task_subdirs, _ = self._list_prefix(_TASKS_PREFIX)
         if area:
-            needle = area.lower()
-            task_subdirs = [t for t in task_subdirs if needle in _task_name(t).lower()]
+            task_subdirs = [
+                t for t in task_subdirs if task_matches(area, _task_name(t), fuzzy=fuzzy)
+            ]
 
         count = 0
         for task_prefix in task_subdirs:

@@ -93,6 +93,20 @@ builds capabilities that assume an AI in the loop.
 > exactly the "NL in, deterministic filter out, no model required at runtime"
 > philosophy §C1 describes; fuzzy task matching and the LLM-planned `umbra ask`
 > are the remaining C1 pieces.
+>
+> **Update:** the **deterministic fuzzy task matching step of C1 has now
+> shipped** — the second "NL in, deterministic filter out" resolver. `area=`
+> stays a literal case-insensitive substring by default; `fuzzy=True` (CLI
+> `--fuzzy` on `search`/`change`/`timescan`/`swipe`/`gallery`, and the MCP
+> `search_catalog` tool) widens it to a token-wise match in the new
+> stdlib-only `umbra_py.fuzzy` — word-order- and punctuation-independent and
+> typo-tolerant, so `"utah centerfield"` or `"centrfield"` still reach
+> `"Centerfield, Utah"`. It is a **strict superset** of the substring match (it
+> never drops a result), the live (`UmbraCatalog`) and indexed (`CatalogIndex`)
+> paths share the one matcher and are tested to agree, and no model is called.
+> Semantic aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) is
+> deliberately left to the future embedding index; the LLM-planned `umbra ask`
+> is now the last open C1 piece.
 
 ---
 
@@ -273,11 +287,15 @@ in, deterministic filter out, no model required at runtime*:
   whole year. Range keywords with hemisphere-dependent meaning (`"last winter"`)
   are deliberately deferred — they belong to the LLM-planned `umbra ask` below,
   not the deterministic resolver.
-- **Fuzzy task matching**: task names are human labels ("Beet Piler - ND",
-  "Atmospheric-River_Nov-2025"); today `area=` is a substring match. Add
-  fuzzy/alias matching, then optionally an embedding index over task names +
-  descriptions (sqlite-vec inside the existing `catalog.db`, `[ai]` extra) so
-  `area="grain storage north dakota"` finds the beet pilers.
+- ✅ **Fuzzy task matching (shipped)**: task names are human labels ("Beet
+  Piler - ND", "Atmospheric-River_Nov-2025"); `area=` is a substring match by
+  default, and `fuzzy=True` now widens it to a deterministic token-wise match
+  (`umbra_py.fuzzy`) that is word-order- and punctuation-independent and
+  typo-tolerant — a strict superset of the substring path, shared by the live
+  and index backends, no model call. Still open: an **embedding index** over
+  task names + descriptions (sqlite-vec inside the existing `catalog.db`,
+  `[ai]` extra) so `area="grain storage north dakota"` finds the beet pilers —
+  the semantic layer plain string similarity can't and shouldn't fake.
 - **`umbra ask "…"`** (`[ai]` extra): a single command that hands the user's
   sentence plus the A2 context document to a configured model (Anthropic/
   OpenAI-compatible, user-supplied key) and returns the *deterministic command
@@ -348,7 +366,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ⬜ C1 fuzzy task matching + `umbra ask` · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ⬜ C1 semantic aliasing + `umbra ask` · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 

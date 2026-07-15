@@ -149,6 +149,20 @@ def _local_index_options(func):
     return func
 
 
+def _fuzzy_option(func):
+    """Attach the shared ``--fuzzy`` flag that widens ``--area`` from a literal
+    substring to the deterministic token-wise match in :mod:`umbra_py.fuzzy`
+    (word-order- and punctuation-independent, typo-tolerant, no model call)."""
+    return click.option(
+        "--fuzzy",
+        is_flag=True,
+        help="Match --area loosely: word-order- and punctuation-independent and "
+        "typo-tolerant (so 'utah centerfield' or 'centrfield' still reach "
+        "'Centerfield, Utah'). Deterministic, no model call; a strict superset "
+        "of the substring match.",
+    )(func)
+
+
 def _progress_printer(label: str):
     def cb(done: int, total: int | None) -> None:
         if total:
@@ -205,6 +219,14 @@ def cli() -> None:
     "listing the rest, so it's much faster. The easy way to gather the "
     "co-located passes that 'umbra change' needs.",
 )
+@click.option(
+    "--fuzzy",
+    is_flag=True,
+    help="Match --area loosely: word-order- and punctuation-independent, and "
+    "tolerant of a small typo (so 'utah centerfield' or 'centrfield' still "
+    "reach 'Centerfield, Utah'). Deterministic, no model call; a strict "
+    "superset of the default substring match, so it never drops a result.",
+)
 @click.option("--limit", type=int, default=20, show_default=True, help="Max results.")
 @click.option(
     "--max-per-task",
@@ -229,7 +251,9 @@ def cli() -> None:
     help="Path to the local index database (default: $UMBRA_INDEX_DB or "
     "~/.cache/umbra-py/catalog.db). Implies --local.",
 )
-def search(bbox, place, start, end, products, area, limit, max_per_task, as_json, local, db_path):
+def search(
+    bbox, place, start, end, products, area, fuzzy, limit, max_per_task, as_json, local, db_path
+):
     """Search the catalog by area, date and product type."""
     search_bbox = _resolve_search_bbox(bbox, place)
     source, index = _search_source(local, db_path)
@@ -240,6 +264,7 @@ def search(bbox, place, start, end, products, area, limit, max_per_task, as_json
             end=end,
             product_types=list(products) or None,
             area=area,
+            fuzzy=fuzzy,
             limit=limit,
             max_per_task=max_per_task,
         )
@@ -703,10 +728,12 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     help="Low,high percentile cut for each frame's contrast stretch.",
 )
 @_local_index_options
+@_fuzzy_option
 def change(
     item_urls,
     out_path,
     area,
+    fuzzy,
     bbox,
     start,
     end,
@@ -774,6 +801,7 @@ def change(
             start=start,
             end=end,
             area=area,
+            fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
         )
@@ -896,10 +924,12 @@ def change(
     help="Low,high percentile cut for each statistic's contrast stretch.",
 )
 @_local_index_options
+@_fuzzy_option
 def timescan(
     item_urls,
     out_path,
     area,
+    fuzzy,
     bbox,
     place,
     start,
@@ -962,6 +992,7 @@ def timescan(
             start=start,
             end=end,
             area=area,
+            fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
         )
@@ -1056,10 +1087,12 @@ def timescan(
     help="Low,high percentile cut for each overlay's contrast stretch.",
 )
 @_local_index_options
+@_fuzzy_option
 def swipe(
     item_urls,
     out_path,
     area,
+    fuzzy,
     bbox,
     start,
     end,
@@ -1113,6 +1146,7 @@ def swipe(
             start=start,
             end=end,
             area=area,
+            fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
         )
@@ -1247,12 +1281,14 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     help="How many thumbnails to stream in parallel.",
 )
 @_local_index_options
+@_fuzzy_option
 def gallery(
     bbox,
     place,
     start,
     end,
     area,
+    fuzzy,
     products,
     limit,
     max_per_task,
@@ -1286,6 +1322,7 @@ def gallery(
         start=start,
         end=end,
         area=area,
+        fuzzy=fuzzy,
         product_types=list(products) or [asset],
         limit=limit,
         max_per_task=max_per_task,

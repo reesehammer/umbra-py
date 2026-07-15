@@ -122,6 +122,7 @@ def search_catalog(
     bbox: list[float] | None = None,
     place: str | None = None,
     area: str | None = None,
+    fuzzy: bool = False,
     start: str | None = None,
     end: str | None = None,
     products: list[str] | None = None,
@@ -134,7 +135,10 @@ def search_catalog(
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
-    task (site) name; ``start``/``end`` as acquisition-date bounds -- an ISO
+    task (site) name (set ``fuzzy`` to match it loosely -- word-order- and
+    punctuation-independent and typo-tolerant, resolved deterministically with
+    no model call, so ``"utah centerfield"`` still reaches ``"Centerfield,
+    Utah"``); ``start``/``end`` as acquisition-date bounds -- an ISO
     ``YYYY-MM-DD`` date, a bare year/month (``2024``, ``2024-03``), or a
     relative expression (``today``, ``yesterday``, ``3 months ago``,
     ``last month``), resolved deterministically with no model call;
@@ -160,6 +164,7 @@ def search_catalog(
             end=end,
             product_types=list(products) if products else None,
             area=area,
+            fuzzy=fuzzy,
             limit=limit,
             max_per_task=max_per_task,
         )

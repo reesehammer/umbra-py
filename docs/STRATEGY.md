@@ -92,6 +92,18 @@ same 500 lines of glue first, and many give up."*
 > funnel-widening (§1): the query surface newcomers *and* agents reach for
 > reads the way people actually describe time, while the core stays fully
 > deterministic and offline-testable.
+>
+> **Update:** the **deterministic fuzzy task matching step of natural-language
+> search has shipped** (`AI_INTEGRATION_IDEAS.md` C1). `area=` stays a literal
+> substring by default; `fuzzy=True` / `--fuzzy` widens it to a stdlib-only
+> token-wise match (`umbra_py.fuzzy`) — word-order- and punctuation-independent
+> and typo-tolerant, so `"utah centerfield"` or `"centrfield"` still reach
+> `"Centerfield, Utah"` with no model call. It is a strict superset of the
+> substring match and the live and index backends share the one matcher, so the
+> query surface newcomers and agents reach for tolerates how people actually
+> type a site name while the core stays deterministic — pure funnel-widening
+> (§1). The remaining C1 pieces (semantic/embedding aliasing and the LLM-planned
+> `umbra ask`) are the model-backed layer that builds on this deterministic base.
 
 ## 2. The landscape: life without umbra-py
 

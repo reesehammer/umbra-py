@@ -232,6 +232,51 @@ def test_search_area_no_match_yields_nothing(fake_bucket):
     assert fake_bucket._streamed == []
 
 
+def _one_task_catalog(monkeypatch, task_name):
+    """A catalog with a single named task holding one 2024 acquisition.
+
+    Returns the catalog; the task is pruned before listing unless ``area``
+    matches, so ``cat._streamed`` reveals whether the query matched.
+    """
+    prefix = f"sar-data/tasks/{task_name}/"
+    acq = "2024-01-15-10-00-00_UMBRA-04"
+    keys = [f"{prefix}uuid/{acq}/{acq}.stac.v2.json", f"{prefix}uuid/{acq}/{acq}_GEC.tif"]
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", lambda self, p: ([prefix], []))
+    streamed: list[str] = []
+
+    def fake_stream(self, p):
+        streamed.append(p)
+        return iter(keys)
+
+    monkeypatch.setattr(UmbraCatalog, "_stream_keys", fake_stream)
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_get",
+        lambda self, url: _sidecar("hit", "2024-01-15T10:00:00Z", (0, 0, 1, 1)),
+    )
+    cat = UmbraCatalog()
+    cat._streamed = streamed
+    return cat
+
+
+def test_search_fuzzy_matches_word_order_and_typos(monkeypatch):
+    """fuzzy=True widens area to a word-order-independent, typo-tolerant match."""
+    cat = _one_task_catalog(monkeypatch, "Centerfield, Utah")
+    for query in ("utah centerfield", "centerfield utah", "centrfield"):
+        cat._streamed.clear()
+        items = list(cat.search(start="2024-01-01", end="2024-12-31", area=query, fuzzy=True))
+        assert {i.id for i in items} == {"hit"}, query
+
+
+def test_search_fuzzy_off_keeps_substring_only(monkeypatch):
+    """Without fuzzy, a reordered query does not match and the task is pruned."""
+    cat = _one_task_catalog(monkeypatch, "Centerfield, Utah")
+    items = list(cat.search(start="2024-01-01", end="2024-12-31", area="utah centerfield"))
+    assert items == []
+    # Pruned before listing -- never streamed.
+    assert cat._streamed == []
+
+
 def test_cli_search_area_flows_through(monkeypatch):
     """`umbra search --area X` reaches catalog.search with area=X."""
     from click.testing import CliRunner
@@ -248,6 +293,25 @@ def test_cli_search_area_flows_through(monkeypatch):
     result = CliRunner().invoke(cli_mod.cli, ["search", "--area", "Centerfield"])
     assert result.exit_code == 0, result.output
     assert captured["area"] == "Centerfield"
+    assert captured["fuzzy"] is False
+
+
+def test_cli_search_fuzzy_flag_flows_through(monkeypatch):
+    """`umbra search --area X --fuzzy` reaches catalog.search with fuzzy=True."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def fake_search(self, **kwargs):
+        captured.update(kwargs)
+        return iter([])
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    result = CliRunner().invoke(cli_mod.cli, ["search", "--area", "utah centerfield", "--fuzzy"])
+    assert result.exit_code == 0, result.output
+    assert captured["fuzzy"] is True
 
 
 def test_search_url_encodes_spaces_in_task_names(monkeypatch):
