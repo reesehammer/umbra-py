@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Local-index rendering for the visual commands (`docs/DEMO_APP_GAPS.md` G2 /
+  Path A step 2).** `umbra map`, `gallery`, `swipe`, `change` and `timescan` now
+  accept the same `--local` / `--index-db` options as `umbra search`, so they
+  render from a prebuilt catalog index (`umbra index fetch` / `umbra index
+  build`) instead of re-walking S3 on every invocation. Previously only `umbra
+  search` could use the index; a fully built `catalog.db` did nothing for the
+  visual commands, which each re-crawled the bucket live — the gap
+  `DEMO_APP_GAPS.md` named as the next step to a fast, self-serve demo (R5). The
+  search backend is chosen by the shared `_gather_items` helper (the same
+  `CatalogIndex`-vs-live `UmbraCatalog` split `search` already used), so every
+  filter behaves identically to the live path; only acquisitions already in the
+  index are returned. The path flag is `--index-db` (not `--db`) because the
+  render commands already use `--db` for the decibel stretch. Without `--local`
+  the commands walk S3 live exactly as before.
 - **`umbra serve`: a read-only STAC API façade over the catalog index
   (`docs/AI_INTEGRATION_IDEAS.md` B2 / `docs/DEMO_APP_GAPS.md` Path B step 1).**
   Umbra publishes a *static* STAC catalog and **no** search API, which is

@@ -289,6 +289,26 @@ with CatalogIndex.from_release() as index:   # download the weekly snapshot, the
 `umbra index info` reports the snapshot's build date and age, so you know how
 fresh it is; re-run the fetch any time to refresh.
 
+### Render from the index too, not just `search`
+
+The visual commands — `map`, `gallery`, `swipe`, `change`, `timescan` — take the
+same `--local` / `--index-db` flags as `search`, so once you've fetched or built
+an index they render from it instead of re-walking S3. That turns every repeat
+render into a near-instant, offline operation (and is the fast path a demo or
+gallery flow needs). The path flag is `--index-db` rather than `--db` because the
+render commands already use `--db` for the decibel stretch.
+
+```bash
+umbra index fetch                                  # one-time (or 'index build')
+umbra map --local --out catalog.geojson            # whole catalog, from SQL, no crawl
+umbra gallery --local --area "Centerfield" --out gallery.html --db
+umbra change --local --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out change.png
+```
+
+Only acquisitions already in the index are used, so keep it fresh with `umbra
+index fetch` (or an incremental `umbra index build`). Without `--local` the
+commands walk S3 live exactly as before.
+
 ### Command line
 
 ```bash
