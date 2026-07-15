@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import sys
 
-import numpy as np
 import pytest
 from click.testing import CliRunner
 
@@ -187,6 +186,8 @@ def test_describe_raises_when_reply_has_no_json(sample_item_dict):
 
 
 def test_render_quicklook_png_returns_png_bytes(monkeypatch, sample_item_dict):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
     import umbra_py.viz as viz_mod
 
     item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
@@ -198,6 +199,7 @@ def test_render_quicklook_png_returns_png_bytes(monkeypatch, sample_item_dict):
 
 
 def test_render_quicklook_png_wraps_read_errors(monkeypatch, sample_item_dict):
+    pytest.importorskip("PIL")
     import umbra_py.viz as viz_mod
 
     item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
