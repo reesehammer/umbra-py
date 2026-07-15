@@ -15,6 +15,20 @@ S3_BUCKET = "umbra-open-data-catalog"
 #: AWS region the bucket lives in.
 S3_REGION = "us-west-2"
 
+#: Canopy is Umbra's authenticated commercial product. Unlike the open-data
+#: bucket -- a *static* STAC catalog with no search endpoint -- Canopy exposes a
+#: real STAC API ``/search`` over Umbra's full commercial archive. Passing a
+#: ``token`` to :class:`umbra_py.UmbraCatalog` searches this endpoint (the same
+#: ``search()`` interface, the same :class:`~umbra_py.UmbraItem` results) instead
+#: of crawling the open bucket, so a user onboarded on the free data is already
+#: holding the tool they'd use as a paying customer. Requires a Canopy account
+#: and token; see https://docs.canopy.umbra.space/.
+CANOPY_ARCHIVE_URL = "https://api.canopy.umbra.space/archive/search"
+
+#: Environment variable the CLI reads a Canopy token from when ``--token`` is
+#: not passed explicitly, so a token never has to appear in shell history.
+CANOPY_TOKEN_ENV = "UMBRA_CANOPY_TOKEN"
+
 #: Canonical Umbra product types, ordered from most processed / easiest to use
 #: (GEC, a cloud-optimized GeoTIFF) to most raw (CPHD). Different catalog
 #: generations name their STAC assets differently (e.g. an explicit ``"GEC"``

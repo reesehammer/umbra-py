@@ -330,6 +330,41 @@ Only acquisitions already in the index are used, so keep it fresh with `umbra
 index fetch` (or an incremental `umbra index build`). Without `--local` the
 commands walk S3 live exactly as before.
 
+### Search the commercial archive too (Canopy)
+
+The open data is a slice of what Umbra images. Umbra's commercial product,
+[Canopy](https://docs.canopy.umbra.space/), exposes a *real* STAC API over the
+full archive — so if you have a Canopy token, the **same `search()` call** can
+query it. Pass a `token` and nothing else changes: the same filters, the same
+`UmbraItem` results, so every downstream verb (download, quicklook, change,
+chips, …) works unchanged.
+
+```python
+from umbra_py import UmbraCatalog
+
+# Open data (default) — no account needed.
+open_hits = UmbraCatalog().search(area="Centerfield", limit=5)
+
+# Commercial archive — same call, one extra argument.
+archive = UmbraCatalog(token="your-canopy-token")
+for item in archive.search(bbox=(-118.3, 33.7, -118.1, 33.8), start="2024", limit=5):
+    print(item.summary())
+```
+
+On the command line, `--token` (or the `UMBRA_CANOPY_TOKEN` environment
+variable) switches `umbra search` to the commercial archive:
+
+```bash
+export UMBRA_CANOPY_TOKEN=your-canopy-token
+umbra search --start "3 months ago" --bbox="-118.3,33.7,-118.1,33.8" --limit 5
+```
+
+`bbox` and the date bounds are sent to the STAC API; `--product` and
+`--area`/`--fuzzy` are applied to the returned items exactly as on the open-data
+path. The token is only ever sent to the Canopy endpoint, never the open bucket.
+Learn what you built on the free data, then point the same three lines at the
+archive you pay for.
+
 ### Command line
 
 ```bash

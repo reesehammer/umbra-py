@@ -14,7 +14,7 @@ from ._http import get_json
 from ._spinner import OrbitSpinner
 from .catalog import UmbraCatalog
 from .chips import CHIPPABLE_ASSETS
-from .constants import DATA_LICENSE, PRODUCT_ASSETS
+from .constants import CANOPY_TOKEN_ENV, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
@@ -84,9 +84,12 @@ def _built_note(built_at: object) -> str:
     return f"{built_at} ({age} day(s) ago)"
 
 
-def _search_source(local: bool, db_path: str | None) -> tuple[object, bool]:
+def _search_source(
+    local: bool, db_path: str | None, token: str | None = None
+) -> tuple[object, bool]:
     """Pick the search backend: the local index (when ``--local``/``--db`` is
-    given) or a live :class:`UmbraCatalog`. Returns ``(source, is_index)``."""
+    given), the Canopy commercial archive (when a ``token`` is given), or a live
+    open-data :class:`UmbraCatalog`. Returns ``(source, is_index)``."""
     if local or db_path is not None:
         path = _index_path(db_path)
         if not path.exists():
@@ -94,6 +97,8 @@ def _search_source(local: bool, db_path: str | None) -> tuple[object, bool]:
                 f"No index at {path}. Build one first with 'umbra index build'."
             )
         return CatalogIndex(path), True
+    if token:
+        return UmbraCatalog(token=token), False
     return UmbraCatalog(), False
 
 
@@ -252,12 +257,43 @@ def cli() -> None:
     help="Path to the local index database (default: $UMBRA_INDEX_DB or "
     "~/.cache/umbra-py/catalog.db). Implies --local.",
 )
+@click.option(
+    "--token",
+    default=None,
+    envvar=CANOPY_TOKEN_ENV,
+    help="Canopy API token. When given, search Umbra's authenticated COMMERCIAL "
+    "archive (a real STAC API) instead of the open bucket -- the same filters, "
+    "the same results, over the paid catalog. Falls back to the "
+    f"${CANOPY_TOKEN_ENV} environment variable. Mutually exclusive with --local.",
+)
 def search(
-    bbox, place, start, end, products, area, fuzzy, limit, max_per_task, as_json, local, db_path
+    bbox,
+    place,
+    start,
+    end,
+    products,
+    area,
+    fuzzy,
+    limit,
+    max_per_task,
+    as_json,
+    local,
+    db_path,
+    token,
 ):
-    """Search the catalog by area, date and product type."""
+    """Search the catalog by area, date and product type.
+
+    Searches Umbra's open data by default. Pass --token (or set
+    $UMBRA_CANOPY_TOKEN) to search Umbra's commercial Canopy archive instead --
+    same query, same output, over the paid catalog.
+    """
+    if token and (local or db_path is not None):
+        raise click.ClickException(
+            "--token searches the live Canopy archive and cannot be combined "
+            "with --local / --db (which read a local open-data index)."
+        )
     search_bbox = _resolve_search_bbox(bbox, place)
-    source, index = _search_source(local, db_path)
+    source, index = _search_source(local, db_path, token)
     try:
         results = source.search(
             bbox=search_bbox,
@@ -270,7 +306,13 @@ def search(
             max_per_task=max_per_task,
         )
         found = 0
-        spinner = OrbitSpinner("Searching local index" if index else "Searching Umbra archive")
+        if index:
+            spinner_label = "Searching local index"
+        elif token:
+            spinner_label = "Searching Canopy archive"
+        else:
+            spinner_label = "Searching Umbra archive"
+        spinner = OrbitSpinner(spinner_label)
         spinner.__enter__()
         try:
             for item in results:
