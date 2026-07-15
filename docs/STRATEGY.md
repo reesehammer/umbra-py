@@ -316,6 +316,18 @@ same 500 lines of glue first, and many give up."*
 > done, the remaining strategic gaps are unchanged and non-AI: the SICD → geocoded
 > COG format work (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6
 > talking to Umbra).
+>
+> **Update:** the **HTTP/download path is now hardened** (`CODEBASE_ANALYSIS.md`
+> P1 #5/#6, §3.2/§4.3 — supporting infrastructure, §7). Strategy is only as
+> credible as the project's reliability, and the library's core job is fetching
+> data from a public bucket: `_http.default_session()` now retries transient S3
+> failures with backoff (so a single 503 no longer fails a multi-minute index
+> build — every caller inherits it), and `download_url` verifies each download
+> against `Content-Length` and validates a resume with `If-Range` (so a
+> truncated body fails loudly instead of renaming a silently-incomplete file, and
+> a changed remote object restarts cleanly instead of splicing). Not a new
+> capability — the reliability floor under every capability already shipped. The
+> strategic gaps above are unchanged.
 
 ## 2. The landscape: life without umbra-py
 

@@ -46,19 +46,41 @@ def download_url(
         return dest
 
     part = dest.with_suffix(dest.suffix + ".part")
+    # The remote validator (S3 ETag) of the in-progress object, stashed next to
+    # the .part so a resumed request can prove — via If-Range — that it is still
+    # appending to the *same* object. Without this, a Range resume against a
+    # changed object silently splices two different files together.
+    etag_path = part.with_suffix(part.suffix + ".etag")
     existing = part.stat().st_size if (resume and part.exists()) else 0
 
-    headers = {"Range": f"bytes={existing}-"} if existing else {}
+    headers = {}
+    if existing:
+        headers["Range"] = f"bytes={existing}-"
+        stored_etag = etag_path.read_text().strip() if etag_path.exists() else ""
+        if stored_etag:
+            headers["If-Range"] = stored_etag
     try:
         resp = sess.get(url, stream=True, headers=headers, timeout=DEFAULT_TIMEOUT)
         resp.raise_for_status()
     except requests.RequestException as exc:
         raise DownloadError(f"Failed to download {url!r}: {exc}") from exc
 
-    # If the server ignored our Range request, restart from the beginning.
+    # A 206 means the server honored our Range (If-Range matched); anything else
+    # (a 200 because the object changed or the server ignored Range) restarts
+    # from the beginning.
     append = existing > 0 and resp.status_code == 206
     if existing and not append:
         existing = 0
+
+    # Persist the validator for a future resume. On a 200 the ETag describes the
+    # whole object we're about to write; on a 206 we keep the one we already
+    # sent (still valid).
+    if not append:
+        etag = resp.headers.get("ETag")
+        if etag:
+            etag_path.write_text(etag)
+        elif etag_path.exists():
+            etag_path.unlink()
 
     total: int | None = None
     if "Content-Length" in resp.headers:
@@ -66,16 +88,33 @@ def download_url(
 
     downloaded = existing
     mode = "ab" if append else "wb"
-    with open(part, mode) as fh:
-        for chunk in resp.iter_content(chunk_size=_CHUNK):
-            if not chunk:
-                continue
-            fh.write(chunk)
-            downloaded += len(chunk)
-            if progress is not None:
-                progress(downloaded, total)
+    try:
+        with open(part, mode) as fh:
+            for chunk in resp.iter_content(chunk_size=_CHUNK):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                downloaded += len(chunk)
+                if progress is not None:
+                    progress(downloaded, total)
+    except requests.RequestException as exc:
+        # A dropped connection mid-body. The bytes fetched so far are flushed to
+        # the .part, so leave it in place for a later resume rather than losing
+        # the progress.
+        raise DownloadError(f"Interrupted download of {url!r}: {exc}") from exc
+
+    # Guard against a silently truncated body (a proxy or server that closes the
+    # connection cleanly mid-stream, so no exception is raised). Leave the .part
+    # in place so a later call can resume it rather than discarding the bytes
+    # already fetched.
+    if total is not None and downloaded != total:
+        raise DownloadError(
+            f"Incomplete download of {url!r}: got {downloaded} bytes, expected {total}"
+        )
 
     part.replace(dest)
+    if etag_path.exists():
+        etag_path.unlink()
     return dest
 
 

@@ -9,16 +9,37 @@ from __future__ import annotations
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from . import __version__
 
 DEFAULT_TIMEOUT = 30
 
+# A single transient S3 hiccup (a 503, a dropped connection) shouldn't fail an
+# entire multi-minute index build or a large download. Retry idempotent GETs a
+# few times with exponential backoff on the status codes S3 uses for throttling
+# and transient faults. Mounted on the shared session, so every caller
+# (catalog walk, sidecar fetch, geocode, download) inherits it.
+_RETRY = Retry(
+    total=3,
+    connect=3,
+    read=3,
+    backoff_factor=0.5,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=("GET", "HEAD"),
+    raise_on_status=False,
+)
+
 
 def default_session() -> requests.Session:
-    """Return a :class:`requests.Session` with a descriptive user agent."""
+    """Return a :class:`requests.Session` with a descriptive user agent and
+    retry/backoff on transient HTTP failures."""
     session = requests.Session()
     session.headers.update({"User-Agent": f"umbra-py/{__version__}"})
+    adapter = HTTPAdapter(max_retries=_RETRY)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     return session
 
 
