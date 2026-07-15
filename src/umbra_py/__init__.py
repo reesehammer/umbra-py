@@ -73,6 +73,14 @@ from .viz import (
     timescan_composite,
     write_geojson,
 )
+from .watch import (
+    InMemoryWatchStore,
+    MetaWatchStore,
+    WatchResult,
+    WatchStore,
+    watch,
+    watch_key,
+)
 
 __all__ = [
     "__version__",
@@ -146,4 +154,10 @@ __all__ = [
     "save_gallery",
     "view",
     "make_viewer_server",
+    "watch",
+    "watch_key",
+    "WatchResult",
+    "WatchStore",
+    "MetaWatchStore",
+    "InMemoryWatchStore",
 ]

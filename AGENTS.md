@@ -50,6 +50,7 @@ src/umbra_py/
   semantic.py        # umbra semantic: embedding index over task names for meaning-based --area aliasing ([ai])
   describe.py        # umbra describe: vision model reads a rendered quicklook -> structured, provenance-stamped scene description ([ai]+[viz])
   narrate.py         # umbra change --narrate: vision model narrates change, grounded in a deterministic per-block dB-delta grid ([ai]+[viz])
+  watch.py           # umbra watch: idempotent delta detection for standing site monitoring (state in the index meta table; no model call)
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/

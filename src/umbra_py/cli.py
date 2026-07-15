@@ -293,6 +293,189 @@ def search(
             source.close()
 
 
+def _print_watch_result(result) -> None:
+    """Human-readable rendering of a :class:`~umbra_py.watch.WatchResult`."""
+    if result.new_count == 0:
+        click.echo(f"No new acquisitions since last run for watch '{result.name}'.")
+        click.echo(f"Tracking {result.total_seen} acquisition(s) total.")
+        return
+    if result.first_run:
+        click.echo(
+            f"First run for watch '{result.name}': "
+            f"{result.new_count} acquisition(s) now tracked (baseline)."
+        )
+    else:
+        click.echo(
+            f"{result.new_count} new acquisition(s) since last run for watch '{result.name}':"
+        )
+    click.echo("")
+    for item in result.new_items:
+        click.echo(item.summary())
+        if item.href:
+            click.echo(f"  url      : {item.href}")
+        click.echo("")
+    click.echo(f"Tracking {result.total_seen} acquisition(s) total.")
+
+
+@cli.command("watch")
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name to a bounding box to watch (mutually exclusive with --bbox).",
+)
+@click.option(
+    "--start",
+    help="Earliest acquisition date (YYYY-MM-DD, a year/month, or a relative "
+    "expression like '3 months ago'). Same formats as 'umbra search'.",
+)
+@click.option("--end", help="Latest acquisition date (same formats as --start).")
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Watch only acquisitions exposing this asset (repeatable).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Name of an Umbra task/site to watch (e.g. 'Centerfield'). The usual "
+    "way to monitor one site -- it lists just that task, so a scheduled check is "
+    "fast.",
+)
+@_fuzzy_option
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap acquisitions inspected per run (default: no cap -- watch everything in scope).",
+)
+@click.option(
+    "--name",
+    default=None,
+    help="Stable identifier for this watch's state. Defaults to a slug derived "
+    "from the query, so repeat runs of the same search line up automatically; "
+    "set it explicitly to run several distinct watches over overlapping areas.",
+)
+@click.option(
+    "--state-db",
+    "state_db",
+    default=None,
+    help="SQLite database that stores this watch's memory of already-reported "
+    "acquisitions (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db). "
+    "Reuses the catalog index's metadata table; the acquisition rows are untouched.",
+)
+@click.option(
+    "--local",
+    is_flag=True,
+    help="Search a prebuilt local index instead of walking S3 live -- e.g. to "
+    "diff two index snapshots. The default (live) is usually what you want, "
+    "since monitoring is about newly published acquisitions.",
+)
+@click.option(
+    "--index-db",
+    "index_db",
+    default=None,
+    help="Path to the local index to search when --local is set (default: the "
+    "same catalog.db as --state-db). Implies --local.",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Forget this watch's prior state and re-establish a baseline -- every "
+    "acquisition found this run is reported as new.",
+)
+@click.option(
+    "--exit-code",
+    "use_exit_code",
+    is_flag=True,
+    help="Exit 10 when there are new acquisitions and 0 when there are none, so a "
+    "scheduler's shell 'if' can branch without parsing output.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the delta as JSON.")
+def watch_cmd(
+    bbox,
+    place,
+    start,
+    end,
+    products,
+    area,
+    fuzzy,
+    limit,
+    name,
+    state_db,
+    local,
+    index_db,
+    reset,
+    use_exit_code,
+    as_json,
+) -> None:
+    """Report only acquisitions new since the last run -- standing site monitoring.
+
+    SAR re-images a site pass after pass, so the natural way to monitor one is to
+    run the same search on a schedule and act only on what's new. This command is
+    that primitive: it searches, compares against what previous runs already
+    reported (state kept in a local SQLite database), prints only the new
+    acquisitions, and remembers them. It is idempotent -- an immediate re-run with
+    no newly published data reports nothing -- so cron, a GitHub Action, or an
+    agent loop can supply the schedule and this supplies the delta.
+
+    Pair it with 'umbra change --narrate' or 'umbra describe' for a standing
+    analyst: new pass lands -> composite against the previous pass -> narration.
+    """
+    from .watch import MetaWatchStore, watch, watch_key
+
+    search_bbox = _resolve_search_bbox(bbox, place)
+    product_types = list(products) or None
+    watch_name = name or watch_key(
+        area=area,
+        place=place,
+        bbox=search_bbox,
+        product_types=product_types,
+        start=start,
+        end=end,
+        fuzzy=fuzzy,
+    )
+
+    state_path = _index_path(state_db)
+    source, is_index = _search_source(local, index_db)
+    reuse = is_index and Path(getattr(source, "path", "")) == state_path
+    store_index = source if reuse else CatalogIndex(state_path)
+    store = MetaWatchStore(store_index)
+
+    try:
+        label = "Checking local index" if is_index else "Checking Umbra archive"
+        with OrbitSpinner(f"{label} for new acquisitions"):
+            result = watch(
+                source,
+                name=watch_name,
+                store=store,
+                reset=reset,
+                bbox=search_bbox,
+                start=start,
+                end=end,
+                product_types=product_types,
+                area=area,
+                fuzzy=fuzzy,
+                limit=limit,
+            )
+    finally:
+        if is_index:
+            source.close()
+        if not reuse:
+            store_index.close()
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_watch_result(result)
+        click.echo(f"State: {state_path}")
+
+    if use_exit_code and result.new_count > 0:
+        raise SystemExit(10)
+
+
 @cli.command()
 @click.argument("item_url")
 @click.option(

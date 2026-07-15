@@ -116,6 +116,28 @@ open and builds on the same boundary:
 
 ---
 
+## C3 monitoring follow-ons (`umbra watch` shipped)
+
+- **Surfaced in:** the `umbra watch` PR (`AI_INTEGRATION_IDEAS.md` C3).
+- **Code:** `src/umbra_py/watch.py`, `umbra watch` in `cli.py`.
+
+`umbra watch` (idempotent delta detection) is shipped — it searches, diffs the
+results against the set of acquisitions previous runs already reported (state in
+the `CatalogIndex` `meta` table), returns only the new ones, and remembers them,
+so cron / a GitHub Action / an agent loop can supply the schedule. No model is
+called. The remaining C3 pieces build on it:
+
+- **MCP `watch_site` tool / prompt.** The `watch()` function is a plain,
+  deterministic callable; wrapping it as an MCP tool (returning the same JSON
+  delta) would let an MCP client run the standing check conversationally, reusing
+  the state store unchanged.
+- **A packaged monitoring recipe/notebook.** Wire `umbra watch --json` →
+  `select_change_frames` → `umbra change --narrate` into one runnable example
+  (`examples/`, `B3`) so the "new pass lands → composite → narration → notify"
+  loop ships as a copy-pasteable standing analyst, not just a set of primitives.
+
+---
+
 ## Done
 
 - **`umbra describe`: VLM scene description (first C2 piece).** Added

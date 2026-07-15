@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra watch`: idempotent delta detection for standing site monitoring
+  (`docs/AI_INTEGRATION_IDEAS.md` C3 — the first "agent as a standing analyst"
+  primitive).** SAR re-images a site pass after pass, so the natural way to
+  monitor one is to run the same search on a schedule and act only on what is
+  *new*. The new `umbra_py.watch` module packages the delta, not the schedule:
+  `watch()` searches an injected source (a live `UmbraCatalog` or a
+  `CatalogIndex`), compares the results against the set of acquisition keys
+  previous runs already reported, returns only the new ones, and folds them back
+  into a small state store. It is idempotent — an immediate re-run with no newly
+  published data reports zero — because the delta is an exact set difference over
+  sidecar hrefs, not a date watermark (which would miss a late upload dated
+  earlier than acquisitions already seen). State persists in a `CatalogIndex`'s
+  existing `meta` table (`MetaWatchStore`, no schema change, so a fetched
+  snapshot is a valid store); `InMemoryWatchStore` is the offline-testable
+  stand-in. The `umbra watch` command mirrors `umbra search`'s query flags plus
+  `--name` (stable watch identity, auto-derived from the query via `watch_key`
+  when omitted), `--state-db`, `--reset` (re-baseline), `--json` (a machine
+  readable delta whose `new_items` are `to_llm_context` cards, carrying the CC-BY
+  attribution), and `--exit-code` (exit 10 when there are new acquisitions, so a
+  scheduler's shell `if` can branch without parsing output). Cron, a GitHub
+  Action, or an agent loop supplies the schedule; this supplies the delta — pair
+  it with `umbra change --narrate` / `umbra describe` for the full standing
+  analyst (new pass lands → composite against the previous pass → narration). The
+  search source and state store are both injectable, so the whole feature is
+  deterministic and offline-testable with no network and no model call.
 - **`umbra change --narrate`: a vision model narrates *what changed* between two
   SAR passes, grounded in a deterministic per-block decibel-change grid
   (`docs/AI_INTEGRATION_IDEAS.md` C2 — the second Tier C VLM-in-the-loop

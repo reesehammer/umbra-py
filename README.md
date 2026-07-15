@@ -532,6 +532,44 @@ caveats[]}` object, `--asset` / `--no-db` / `--max-size` to control the render,
 or `--model` to pick the model. Like `umbra ask`, it stays behind the `[ai]`
 extra and never runs implicitly.
 
+### Monitor a site for new passes (`umbra watch`)
+
+SAR re-images a site pass after pass, so the natural way to monitor one is to run
+the same search on a schedule and act only on what is *new*. `umbra watch` is
+that primitive: it searches, compares against what previous runs already
+reported (state kept in the local index), prints only the new acquisitions, and
+remembers them — so it's idempotent, and a run with no newly published data is a
+clean no-op.
+
+```bash
+# First run establishes the baseline; later runs report only what's new.
+umbra watch --area "Centerfield, Utah"
+
+# In a cron job / GitHub Action: exit 10 when there's something new, else 0.
+umbra watch --area "Centerfield, Utah" --exit-code --json
+```
+
+```text
+1 new acquisition(s) since last run for watch 'centerfield-utah-3f9a1c2e':
+
+2024-03-01-00-00-00_UMBRA-04
+  acquired : 2024-03-01T00:00:00+00:00
+  product  : GEC  pol=VV  res~0.50 m
+  url      : https://.../2024-03-01-.../...stac.v2.json
+
+Tracking 12 acquisition(s) total.
+```
+
+The scheduler (cron, a GitHub Action, an agent loop) supplies the *when*; the
+library supplies the idempotent *what changed* — **no model is called**, it's an
+exact set difference over the deterministic search. `--json` emits a machine
+readable `{new_count, new_items: [...], ...}` delta (carrying the CC-BY
+attribution) whose items are ready to hand to `umbra describe` or `umbra change
+--narrate` for a standing analyst. `--name` sets a stable watch identity (auto
+derived from the query otherwise), `--state-db` chooses where state lives,
+`--reset` re-establishes the baseline, and `--local` diffs a prebuilt index
+snapshot instead of walking S3 live.
+
 ### Drive it from an AI agent (MCP)
 
 Umbra publishes no STAC API, so this library *is* the query layer — and
