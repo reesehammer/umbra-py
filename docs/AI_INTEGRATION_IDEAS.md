@@ -79,6 +79,20 @@ builds capabilities that assume an AI in the loop.
 > module's explanatory docstring (read via `ast`, so the generator never imports
 > a heavy extra). With Phase 2 complete, **Phase 3's Tier C AI-infused
 > capabilities (C1 NL search first) are the next critical path.**
+>
+> **Update:** the **deterministic first step of C1 (natural-language date
+> bounds) has now shipped.** `--start` / `--end` — and the `search()` keyword
+> arguments and the MCP `search_catalog` tool — accept human date expressions
+> (`2024`, `2024-03`, `today`, `yesterday`, `3 months ago`, `last month`,
+> `this year`) alongside `YYYY-MM-DD`, resolved by a new stdlib-only
+> `umbra_py.dates.parse_date_bound` with plain calendar arithmetic and **no model
+> call**. It is bound-aware — a span snaps to its first day as a start and its
+> last day as an end, so `--start 2024 --end 2024` is the whole year — and lands
+> in the single `_coerce_date` choke point, so `search`, `index build`,
+> `change`, `timescan`, `swipe`, `map` and `gallery` all gain it at once. This is
+> exactly the "NL in, deterministic filter out, no model required at runtime"
+> philosophy §C1 describes; fuzzy task matching and the LLM-planned `umbra ask`
+> are the remaining C1 pieces.
 
 ---
 
@@ -252,8 +266,13 @@ no operational cost and no abuse surface.
 `--place` already geocodes fuzzy geography. Extend the same philosophy — *NL
 in, deterministic filter out, no model required at runtime*:
 
-- **Relative dates**: `--start "3 months ago"`, `--when "last winter"` via
-  plain date arithmetic (no LLM needed).
+- ✅ **Relative dates (shipped)**: `--start "3 months ago"`, `--start 2024`,
+  `--end "last month"`, `today`/`yesterday`, `this year` via plain date
+  arithmetic (no LLM needed), in `umbra_py.dates.parse_date_bound`. Bound-aware
+  (spans snap to their first/last day), so `--start 2024 --end 2024` is the
+  whole year. Range keywords with hemisphere-dependent meaning (`"last winter"`)
+  are deliberately deferred — they belong to the LLM-planned `umbra ask` below,
+  not the deterministic resolver.
 - **Fuzzy task matching**: task names are human labels ("Beet Piler - ND",
   "Atmospheric-River_Nov-2025"); today `area=` is a substring match. Add
   fuzzy/alias matching, then optionally an embedding index over task names +
@@ -329,7 +348,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ⬜ C1 NL search (fuzzy/date parts first) · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ⬜ C1 fuzzy task matching + `umbra ask` · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 

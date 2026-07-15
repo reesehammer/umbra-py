@@ -82,6 +82,16 @@ same 500 lines of glue first, and many give up."*
 > assembled from facts already in the package (the domain document, the live CLI
 > tree, the module docstrings), so it can never drift from the code it
 > describes.
+>
+> **Update:** the **deterministic first step of natural-language search has
+> shipped** (`AI_INTEGRATION_IDEAS.md` C1). `--start` / `--end` now accept human
+> date expressions (`2024`, `today`, `3 months ago`, `last month`) alongside
+> `YYYY-MM-DD`, resolved by a stdlib-only bound-aware calendar parser with no
+> model call. It lands in the single date choke point every command shares, so
+> `search`, `index build`, and all the visual commands gain it at once — pure
+> funnel-widening (§1): the query surface newcomers *and* agents reach for
+> reads the way people actually describe time, while the core stays fully
+> deterministic and offline-testable.
 
 ## 2. The landscape: life without umbra-py
 

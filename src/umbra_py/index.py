@@ -272,7 +272,7 @@ class CatalogIndex:
         it with :meth:`build` first.
         """
         start_d = _coerce_date(start)
-        end_d = _coerce_date(end)
+        end_d = _coerce_date(end, is_end=True)
         conditions: list[str] = []
         params: list[object] = []
 

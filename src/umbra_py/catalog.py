@@ -26,6 +26,7 @@ import requests
 
 from ._http import default_session, get_json
 from .constants import S3_BUCKET, S3_REGION
+from .dates import parse_date_bound
 from .exceptions import CatalogError
 from .models import BBox, UmbraItem
 
@@ -44,14 +45,23 @@ _JSON_MEDIA = "application/json"
 _OCTET_MEDIA = "application/octet-stream"
 
 
-def _coerce_date(value: DateLike) -> date | None:
+def _coerce_date(value: DateLike, *, is_end: bool = False) -> date | None:
+    """Resolve a search date bound to a concrete :class:`date`.
+
+    Accepts ``date`` / ``datetime`` objects and, for strings, the full
+    natural-language grammar in :func:`umbra_py.dates.parse_date_bound` (ISO
+    dates, bare years/months, ``today``/``yesterday``, ``"3 months ago"``,
+    ``"last month"``, ...). ``is_end`` snaps span expressions (a bare year,
+    year-month, or period keyword) to their last day rather than their first,
+    so an ``end`` bound covers the whole named period.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    return date.fromisoformat(value)
+    return parse_date_bound(value, is_end=is_end)
 
 
 def _acq_date(prefix: str) -> date | None:
@@ -226,7 +236,7 @@ class UmbraCatalog:
             map.
         """
         start_d = _coerce_date(start)
-        end_d = _coerce_date(end)
+        end_d = _coerce_date(end, is_end=True)
         wanted = {p.upper() for p in product_types} if product_types else None
 
         task_subdirs, _ = self._list_prefix(_TASKS_PREFIX)

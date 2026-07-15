@@ -44,8 +44,17 @@ _SEARCH_PARAMETERS: dict[str, str] = {
         "Substring match against the Umbra task (AOI campaign) name, e.g. "
         "'Centerfield, Utah'. Tasks group every pass of one site over time."
     ),
-    "start": "Earliest acquisition date, inclusive, as YYYY-MM-DD.",
-    "end": "Latest acquisition date, inclusive, as YYYY-MM-DD.",
+    "start": (
+        "Earliest acquisition date, inclusive. An ISO YYYY-MM-DD date, a bare "
+        "year or year-month (2024, 2024-03), or a relative expression resolved "
+        "deterministically with no model call: 'today', 'yesterday', "
+        "'3 months ago', 'last month'. Spans snap to their first day."
+    ),
+    "end": (
+        "Latest acquisition date, inclusive. Same formats as start; a bare "
+        "year, month or period ('2024', 'last month') snaps to that span's "
+        "last day, so start='2024' end='2024' covers the whole year."
+    ),
     "products": (
         "Restrict to items exposing these product types (any of "
         f"{', '.join(PRODUCT_ASSETS)}). Omit to accept all."

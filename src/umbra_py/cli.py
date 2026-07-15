@@ -178,8 +178,17 @@ def cli() -> None:
     "with --bbox; the match is rectangular, so it can include nearby areas "
     "outside the named place.",
 )
-@click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
+    "(2024, 2024-03), or a relative expression ('today', 'yesterday', "
+    "'3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year, month "
+    "or period like 'last month' snaps to that span's last day).",
+)
 @click.option(
     "--product",
     "products",
@@ -625,8 +634,15 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "bound the time range.",
 )
 @click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
-@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
+    "(2024, 2024-03), or relative ('3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Search mode: latest acquisition date (same formats as --start).",
+)
 @click.option(
     "--frames",
     type=click.IntRange(2, 3),
@@ -834,8 +850,15 @@ def change(
     "Mutually exclusive with --bbox; the match is rectangular, so it can "
     "include nearby areas outside the named place.",
 )
-@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
+    "(2024, 2024-03), or relative ('3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Search mode: latest acquisition date (same formats as --start).",
+)
 @click.option(
     "--max-search",
     type=int,
@@ -986,8 +1009,15 @@ def timescan(
     "bound the time range; the earliest and latest passes are compared.",
 )
 @click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
-@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Search mode: latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
+    "(2024, 2024-03), or relative ('3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Search mode: latest acquisition date (same formats as --start).",
+)
 @click.option(
     "--max-search",
     type=int,
@@ -1137,8 +1167,17 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     "and gather tiles within it, via OpenStreetMap Nominatim. Mutually "
     "exclusive with --bbox.",
 )
-@click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
+    "(2024, 2024-03), or a relative expression ('today', 'yesterday', "
+    "'3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year, month "
+    "or period like 'last month' snaps to that span's last day).",
+)
 @click.option(
     "--area",
     default=None,
@@ -1279,8 +1318,17 @@ def gallery(
     "with --bbox. (Distinct from --geocode, which labels each plotted "
     "footprint with its place name.)",
 )
-@click.option("--start", help="Earliest acquisition date (YYYY-MM-DD).")
-@click.option("--end", help="Latest acquisition date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
+    "(2024, 2024-03), or a relative expression ('today', 'yesterday', "
+    "'3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year, month "
+    "or period like 'last month' snaps to that span's last day).",
+)
 @click.option(
     "--product",
     "products",
@@ -1486,8 +1534,15 @@ def index() -> None:
     default=None,
     help="Scope the build to a geocoded place name (mutually exclusive with --bbox).",
 )
-@click.option("--start", help="Scope to acquisitions on/after this date (YYYY-MM-DD).")
-@click.option("--end", help="Scope to acquisitions on/before this date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    help="Scope to acquisitions on/after this date. YYYY-MM-DD, a year/month, "
+    "or relative ('3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Scope to acquisitions on/before this date (same formats as --start).",
+)
 @click.option(
     "--area",
     default=None,
