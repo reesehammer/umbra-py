@@ -354,6 +354,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so captured logs stay clean.
 
 ### Fixed
+- **Critical: S3 listings silently truncated at 1,000 keys.** The bucket
+  lister built `ListObjects` URLs without the `list-type=2` parameter, so S3
+  served the **V1** API — which ignores the `continuation-token` the code
+  sends and never returns the `NextContinuationToken` it looks for. Every
+  listing therefore stopped after its first page: any task directory with more
+  than 1,000 objects (e.g. *Centerfield, Utah*) had acquisitions **silently
+  missing from every search, index build, gallery, timescan, and change
+  detection**, and once Umbra publishes its 1,001st task, whole tasks would
+  vanish from top-level discovery with no error. Both `_list_prefix` (delimited
+  task discovery) and `_stream_keys` (per-task streaming) now send
+  `list-type=2`, so `continuation-token` is honored and every page is consumed.
+  Covered by offline regression tests that drive both listers across two
+  truncated pages, plus a `network`-marked test asserting a >1,000-key task
+  streams past its first page against the live bucket. This is the prerequisite
+  the strategy/demo/AI-integration docs name for any "full catalog" work —
+  search results are complete again.
 - **NumPy 2.5 `DeprecationWarning` from raster reads.** `to_xarray` /
   `to_geotiff` and the viz overview readers (`quicklook`, change/swipe
   composites) read a single band via rasterio's scalar-index `read(1, …)`
