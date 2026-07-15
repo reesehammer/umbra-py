@@ -44,6 +44,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     objects into a corrupt file.
 
 ### Added
+- **`umbra demo` — a self-serve interactive catalog explorer in one HTML page
+  (`docs/DEMO_APP_GAPS.md` G3/G4, Path A front end).** Every other visual command
+  emits a *one-shot* artifact — change a filter and you re-run the CLI and open a
+  new file. `umbra_py.demo` (`umbra demo`, `[viz]` extra) produces the missing
+  *application*: a single self-contained page (no extra required — the page is
+  pure HTML and the map runs browser-side) over a whole slice of the catalog
+  with the interactive controls the gap analysis names as absent today —
+  client-side **faceted filters** (free-text site/id search, a date-range slider
+  bounded to the data, product-type chips), **marker clustering** so it scales
+  past a Folium map's few-hundred-polygon ceiling, and a click-to-quicklook SAR
+  overlay streamed on demand.
+  - **Static, single file, no server.** Leaflet + Leaflet.markercluster from
+    pinned CDNs, the catalog embedded as JSON, all filtering in the browser — it
+    opens from `file://` or any static host (GitHub Pages), exactly like
+    `umbra swipe` / `umbra gallery` output. This is Path A's front end delivered
+    as an artifact; the productized FastAPI server app remains Path B.
+  - **Reads the fast index.** Like the other visual commands it routes through
+    `_gather_items`, so `--local` builds the page from a prebuilt index
+    (`umbra index fetch` / `umbra index build`) in milliseconds instead of
+    re-walking S3 — the "no multi-minute walk in the user's critical path"
+    requirement a demo needs. `--max-per-task 1` gives a one-marker-per-site
+    whole-archive overview.
+  - **Reuses the proven COG driver.** The per-item "Get SAR image" button drives
+    the same browser-side geotiff.js fetcher as `umbra map --lazy-imagery`; the
+    only addition is a `window.umbraLazyMap` fallback in `_lazy_imagery` so the
+    shared driver resolves a plain Leaflet map on this non-Folium page (the
+    Folium DOM-walk path is untouched). Pass `--no-lazy-imagery` for a
+    metadata-only explorer with no CDN dependency at click time.
+  - **Safe by construction.** The catalog arrives as a JSON global
+    (`window.UMBRA_DEMO`, with `</` neutralised against a `</script>` break-out)
+    and the application JavaScript is a *static* string that reads it — remote
+    metadata is placed into the DOM with `textContent` / `setAttribute`, never
+    parsed as HTML. The generator is stdlib-only, so it runs in a core install
+    and is fully offline-testable.
 - **Archive scene embeddings — visual similarity search (`docs/AI_INTEGRATION_IDEAS.md`
   C5, the last open AI item).** Every other search matches *metadata* (a date, a
   bbox, a task name); this matches *appearance*. `umbra_py.embed`

@@ -43,6 +43,8 @@ src/umbra_py/
   convert.py         # optional SICD -> amplitude GeoTIFF (behind [convert] extra)
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call)
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
+  demo.py            # umbra demo: one self-contained interactive catalog explorer (Leaflet + markercluster, client-side facets, lazy SAR overlays); stdlib-only generator
+  _lazy_imagery.py   # browser-side geotiff.js COG-fetch driver shared by `umbra map --lazy-imagery` and `umbra demo`
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
   serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
   context.py         # llm_context(): domain knowledge as a machine-readable JSON dict (`umbra context`)

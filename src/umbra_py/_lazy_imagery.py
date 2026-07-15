@@ -149,7 +149,12 @@ _DRIVER_TEMPLATE = """
     while (el && (!el.classList || !el.classList.contains('folium-map'))) {{
       el = el.parentElement;
     }}
-    return (el && el.id) ? window[el.id] : null;
+    if (el && el.id && window[el.id]) {{ return window[el.id]; }}
+    // Fallback for non-Folium host pages (e.g. the `umbra demo` explorer):
+    // a plain Leaflet page publishes its single map as `window.umbraLazyMap`,
+    // so the same COG-fetch driver drives it unchanged. Folium pages never set
+    // it, so their DOM-walk resolution above is untouched.
+    return window.umbraLazyMap || null;
   }}
 
   function loadLib() {{
