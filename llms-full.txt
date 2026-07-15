@@ -44,6 +44,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra change` — Render multi-temporal SAR change: a color composite or a time-lapse.
 - `umbra chips` — Cut SAR scenes into fixed-size, georeferenced ML training tiles.
 - `umbra context` — Print the library's LLM context document as JSON.
+- `umbra demo` — Build a self-serve interactive catalog explorer as one HTML page.
 - `umbra describe` — Describe a SAR scene in plain language with a vision model.
 - `umbra download` — Download asset(s) of an item given its STAC JSON URL.
 - `umbra embed` — Visual similarity search over the archive (embedding-based, C5).

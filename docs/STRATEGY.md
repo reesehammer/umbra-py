@@ -342,6 +342,34 @@ same 500 lines of glue first, and many give up."*
 > floor under the core operation every user and agent reaches for first. The
 > strategic gaps above are unchanged: SICD → geocoded COG (5.5) and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update:** the **first self-serve interactive demo application has shipped** —
+> `umbra demo` (`DEMO_APP_GAPS.md` G3/G4, Path A's front end). Every prior visual
+> command emits a *one-shot* artifact; the demo-gap analysis names the missing
+> piece as an *application* — a self-serve, full-catalog, interactive UX — and
+> this is that piece, delivered in the library's own grain: one self-contained
+> HTML page (Leaflet + `Leaflet.markercluster`, browser-side, no Python extra) over a whole
+> gathered slice of the catalog, with the client-side controls the doc flagged as
+> absent (free-text site search, a date-range slider, product-type chips), marker
+> **clustering** that scales past the Folium polygon ceiling, and a
+> click-to-quicklook SAR overlay reusing the proven `_lazy_imagery` geotiff.js
+> driver. It routes through the shared `_gather_items` helper, so `--local` builds
+> it from the prebuilt index in milliseconds — the "no multi-minute walk in the
+> user's critical path" a demo needs. This is the sharpest funnel-widener since
+> the notebooks (§1): the "make Umbra's SAR feel as approachable as Sentinel-1"
+> thesis is best sold by a page a curious analyst can *explore*, not a command
+> they must run — and it is the shared front end a Pages-hosted showcase (the
+> natural companion to 5.3's adoption moves) now builds on. It preserves the
+> project's grain and testability (§3): the generator is stdlib-only and fully
+> offline-testable, remote metadata reaches the page only as JSON placed via
+> `textContent`/`setAttribute` (never parsed as HTML), and it layers on the same
+> discovery substrate the whole project rests on, so it stays graceful under
+> upstream obsolescence. Remaining demo-app gaps are unchanged and additive:
+> PMTiles tiling for the *whole* acquisition set and R4's on-demand
+> change/swipe/timescan renders from the UI (`DEMO_APP_GAPS.md` Path A step 3 /
+> Path B). The higher-level strategic gaps are also unchanged: SICD → geocoded COG
+> (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
+> Umbra).
 
 ## 2. The landscape: life without umbra-py
 

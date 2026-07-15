@@ -1977,6 +1977,136 @@ def gallery(
     click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
 
 
+@cli.command()
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding box "
+    "and gather items within it, via OpenStreetMap Nominatim. Mutually "
+    "exclusive with --bbox.",
+)
+@click.option(
+    "--start",
+    help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
+    "(2024, 2024-03), or a relative expression ('today', 'yesterday', "
+    "'3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year, month "
+    "or period like 'last month' snaps to that span's last day).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive name of an Umbra task/site to gather (e.g. "
+    "'Centerfield'). Faster than a broad scan -- it lists just that area's "
+    "directory.",
+)
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Keep items exposing this asset (repeatable). The explorer also lets "
+    "you toggle product types client-side once the page is open.",
+)
+@click.option("--limit", type=int, default=500, show_default=True, help="Max acquisitions to load.")
+@click.option(
+    "--max-per-task",
+    type=int,
+    default=None,
+    help="Cap items per Umbra task directory. '--max-per-task 1' gives one "
+    "marker per distinct site -- a fast whole-archive overview.",
+)
+@click.option("--out", "out_path", required=True, help="Output HTML file (e.g. demo.html).")
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Product the on-click 'Get SAR image' button streams. GEC (the "
+    "detected GeoTIFF) is the sensible default; CSI also works.",
+)
+@click.option(
+    "--no-lazy-imagery",
+    "lazy_imagery",
+    is_flag=True,
+    default=True,
+    flag_value=False,
+    help="Build a metadata-only explorer without the on-click SAR overlay "
+    "button (no geotiff.js CDN dependency at click time).",
+)
+@click.option(
+    "--percentile",
+    default="2,98",
+    show_default=True,
+    help="Low,high percentile cut for the on-click SAR overlay's contrast stretch.",
+)
+@_local_index_options
+@_fuzzy_option
+def demo(
+    bbox,
+    place,
+    start,
+    end,
+    area,
+    fuzzy,
+    products,
+    limit,
+    max_per_task,
+    out_path,
+    asset,
+    lazy_imagery,
+    percentile,
+    local,
+    db_path,
+) -> None:
+    """Build a self-serve interactive catalog explorer as one HTML page.
+
+    Unlike the one-shot artifacts the other visual commands emit, this is an
+    *application*: a single self-contained page over the whole gathered slice of
+    the catalog with client-side filters (search box, date range, product-type
+    chips), clustered markers that scale past a plain map's polygon ceiling, and
+    a click-to-quicklook SAR overlay streamed on demand. Reads a prebuilt index
+    with --local for a near-instant, offline build. Needs no extra: the page is
+    pure HTML, and Leaflet + the on-click COG decode run browser-side from
+    pinned CDNs.
+    """
+    if not out_path.lower().endswith((".html", ".htm")):
+        raise click.ClickException("Explorer output must be an .html file.")
+
+    from .demo import save_demo  # noqa: PLC0415
+
+    search_bbox = _resolve_search_bbox(bbox, place)
+    items = _gather_items(
+        local=local,
+        db_path=db_path,
+        bbox=search_bbox,
+        start=start,
+        end=end,
+        area=area,
+        fuzzy=fuzzy,
+        product_types=list(products) or None,
+        limit=limit,
+        max_per_task=max_per_task,
+    )
+    if not items:
+        raise click.ClickException("No items matched the search.")
+
+    with OrbitSpinner(f"Building explorer over {len(items)} acquisition(s)"):
+        path = save_demo(
+            items,
+            out_path,
+            asset=asset,
+            lazy_imagery=lazy_imagery,
+            percentile=_parse_percentile(percentile),
+            subtitle=_search_subtitle(place or area, bbox, start, end),
+        )
+    click.echo(f"Wrote interactive explorer over {len(items)} acquisition(s) to {path}")
+
+
 @cli.command(name="map")
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
 @click.option(

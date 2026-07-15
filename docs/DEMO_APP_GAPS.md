@@ -97,10 +97,28 @@ critical path to a demo application.
   at render time), no cached thumbnail. Baking these in at build time turns
   the index into a real demo backend.
 
-### G3 — No application layer: static HTML generator, not an app
+### G3 — Application layer: a self-serve static explorer now ships (`umbra demo`)
 
-The repo's output surface is Folium-rendered, self-contained HTML. For an
-application you need one of:
+> **Update (2026-07-15):** the first **self-serve interactive application** has
+> shipped as `umbra demo` (`umbra_py.demo`, no extra required) — Path A's front end
+> (step 4), delivered as a self-contained artifact rather than a separate JS
+> build toolchain, so it holds the repo's "one hostable HTML file" grain. One
+> page over a whole gathered slice of the catalog now carries the interactive
+> controls this section and G4 named as absent: **client-side faceted filters**
+> (free-text site/id search, a data-bounded date-range slider, product-type
+> chips), **marker clustering** (`Leaflet.markercluster`) so it scales past the
+> Folium polygon ceiling, a detail panel that draws the selected footprint, and
+> the click-to-quicklook SAR overlay (reusing the proven `_lazy_imagery`
+> geotiff.js driver via a `window.umbraLazyMap` fallback). It routes through the
+> same `_gather_items` helper, so `--local` builds it from the prebuilt index in
+> milliseconds (R5). This meets **R1–R3, R6–R7** for the gathered slice with zero
+> runtime infrastructure. What is still open below is R4's *render actions over
+> any site* (change/swipe/timescan from the UI), which needs either the curated
+> precompute of Path A step 3 or the on-demand endpoints of Path B, and the
+> full-acquisition-set PMTiles tiling for the truly whole-catalog view.
+
+For the *server-backed* end state (Path B), the remaining options for the
+application layer are one of:
 
 - **a queryable API.** This now exists for both client classes. For *AI*
   clients: the `umbra-mcp` MCP server (`AI_INTEGRATION_IDEAS.md` §B1, shipped)
@@ -125,9 +143,13 @@ is the front end (a MapLibre/leafmap client) and — for R4's render actions ove
 ### G4 — Scale ceiling of the current map rendering
 
 - A Folium HTML embeds every footprint + popup in the DOM; at full-catalog
-  scale (thousands of polygons) load time and interaction degrade. No
-  clustering (`MarkerCluster`), no vector tiling, no level-of-detail strategy
-  exists in the repo.
+  scale (thousands of polygons) load time and interaction degrade. ✅ **Partly
+  addressed:** `umbra demo` clusters item centroids with
+  `Leaflet.markercluster` and draws a footprint polygon only for the *selected*
+  item (a level-of-detail strategy — thousands of clustered points instead of
+  thousands of DOM polygons), so it scales far past the Folium map. Vector
+  tiling (PMTiles) for the truly whole-acquisition-set view is still the
+  build-pipeline step in Path A.
 - `--imagery` (eager overlays) base64-embeds a PNG per item — unusable beyond
   a few dozen items (the docstrings say so honestly). `--lazy-imagery` is the
   right pattern and already proven in-repo; a demo app should generalize it
@@ -198,12 +220,17 @@ already in the repo:
    **PMTiles** with tippecanoe for the full acquisition set → bake per-item
    thumbnails + place labels into a static `assets/` tree → render showcase
    artifacts (swipe/change/timescan/gallery) for ~6–10 curated sites.
-4. **Front end** (new, `demo/` directory): a small **MapLibre GL** app —
-   PMTiles source, cluster layer, date-range slider and product-type chips
-   filtering client-side, item click → baked thumbnail + metadata card +
-   "open STAC item" + lazy COG overlay (port of the existing, proven
-   `_lazy_imagery` geotiff.js driver), showcase sites get "Swipe / Change /
-   Timescan" buttons linking the precomputed artifacts.
+4. ✅ **Front end (done, delivered as an artifact): `umbra demo`.** Rather than a
+   separate `demo/` MapLibre build toolchain, the front end ships as a
+   self-contained HTML generator (`umbra_py.demo`) in the library's own grain: a
+   Leaflet + `Leaflet.markercluster` page with a cluster layer, a date-range
+   slider and product-type chips filtering client-side, a free-text site search,
+   an item click → metadata card + "open STAC item" + the lazy COG overlay
+   (reusing the proven `_lazy_imagery` geotiff.js driver). It reads the prebuilt
+   index (`--local`), so the whole build is offline and near-instant. Still open
+   for the *fully* whole-catalog view: a PMTiles source for the full acquisition
+   set (step 3's tiling), baked thumbnails/labels, and showcase "Swipe / Change /
+   Timescan" buttons linking precomputed artifacts (R4 for curated sites).
 5. Publish via Pages from the same Action.
 
 Meets R1–R3, R5–R7 fully; meets R4 for curated sites only. Zero runtime
@@ -230,29 +257,33 @@ Adds on-demand capability over Path A rather than replacing it:
 
 ### Requirement coverage
 
-| Req | Today | Path A | Path B |
+| Req | Today (`umbra demo`) | Path A | Path B |
 |---|---|---|---|
-| R1 full catalog on map | ✗ (truncated + slow + Folium ceiling) | ✓ | ✓ |
-| R2 interactive filters | ✗ | ✓ (client-side) | ✓ (server queries) |
-| R3 click → quicklook | partial (lazy-imagery popup) | ✓ (baked + lazy) | ✓ |
+| R1 full catalog on map | ✓ gathered slice, clustered (PMTiles tiling pending for the full acquisition set) | ✓ | ✓ |
+| R2 interactive filters | ✓ (client-side: search, date range, product chips) | ✓ (client-side) | ✓ (server queries) |
+| R3 click → quicklook | ✓ (lazy COG overlay + metadata card) | ✓ (baked + lazy) | ✓ |
 | R4 product demos from UI | ✗ | curated sites only | ✓ any site |
-| R5 fast | ✗ (live S3 walk) | ✓ (prebuilt data) | ✓ |
-| R6 hostable URL | ✗ (local files) | ✓ (Pages) | ✓ (container) |
-| R7 polish | ✗ | ✓ | ✓ |
+| R5 fast | ✓ (`--local` prebuilt index) | ✓ (prebuilt data) | ✓ |
+| R6 hostable URL | ✓ (one static HTML file) | ✓ (Pages) | ✓ (container) |
+| R7 polish | ✓ (filters, attribution, loading states) | ✓ | ✓ |
 
 ---
 
 ## 5. Bottom line
 
-- **Today**: supported as an *operator-driven* demo — the CLI produces
-  genuinely impressive artifacts (lazy-imagery timeline maps, swipe
-  comparisons, timescans) that show off every capability one file at a time.
-- **Not today**: a self-serve, full-catalog, interactive application — Folium
-  HTML doesn't scale to the whole archive or to app-grade UX, and the curated
-  on-demand render endpoints (Path B) aren't built. (Two former blockers are
-  gone: the pagination bug that truncated the catalog is fixed in PR #29, and
-  the visual commands can now render from the prebuilt local index via
-  `--local` instead of re-walking S3.)
+- **Today**: supported as an *operator-driven* demo (the CLI produces impressive
+  one-file artifacts) **and now as a self-serve explorer for a gathered slice of
+  the catalog** — `umbra demo` emits a single interactive page with client-side
+  filters, clustered markers, and click-to-quicklook SAR, hostable as one static
+  file. This closes R1–R3 and R5–R7 for the gathered slice with zero runtime
+  infrastructure (G3 met, G4 partly met).
+- **Not yet**: the *truly whole-catalog* view (PMTiles tiling of the full
+  acquisition set, Path A step 3) and R4's on-demand product renders
+  (change/swipe/timescan) from the UI over *any* site — that needs curated
+  precompute (Path A) or the server-backed artifact endpoints (Path B). (Former
+  blockers gone: the pagination bug is fixed in PR #29, the visual commands
+  render from the prebuilt index via `--local`, and the self-serve front end now
+  ships as `umbra demo`.)
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the

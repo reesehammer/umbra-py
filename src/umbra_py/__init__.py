@@ -24,6 +24,7 @@ from .chips import (
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .dates import parse_date_bound
+from .demo import build_demo, save_demo
 from .describe import DescribeError, SceneDescription, describe, parse_description
 from .download import download_asset, download_item, download_url
 from .embed import (
@@ -183,6 +184,8 @@ __all__ = [
     "swipe_map",
     "save_swipe_map",
     "gallery",
+    "build_demo",
+    "save_demo",
     "save_gallery",
     "view",
     "make_viewer_server",
