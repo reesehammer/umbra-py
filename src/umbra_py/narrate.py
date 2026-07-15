@@ -623,16 +623,18 @@ def render_change_png(
     composite's ``db`` display stretch -- ``db`` only affects the picture's
     contrast, not the physics. Requires the ``viz`` extra.
     """
+    # Validate the input before requiring the viz extra, so a bad item count is
+    # the same ValueError with or without the extra installed.
+    items = list(items)
+    if len(items) not in (2, 3):
+        raise ValueError(f"change narration needs 2 or 3 acquisitions, got {len(items)}.")
+
     from io import BytesIO  # noqa: PLC0415
 
     from .viz import _compose_change_rgba, _coregister_bands, _require  # noqa: PLC0415
 
     _require("PIL")
     from PIL import Image  # noqa: PLC0415
-
-    items = list(items)
-    if len(items) not in (2, 3):
-        raise ValueError(f"change narration needs 2 or 3 acquisitions, got {len(items)}.")
 
     try:
         bands, bounds = _coregister_bands(items, asset, max_size)
