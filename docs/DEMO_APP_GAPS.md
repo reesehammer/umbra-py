@@ -75,11 +75,15 @@ largest, most demo-worthy tasks (Centerfield, Utah verified streaming past
 else in this document waited on — the remaining gaps (G2–G8) are now the
 critical path to a demo application.
 
-### G2 — No published full-catalog dataset, and the index only feeds `search`
+### G2 — The prebuilt dataset is now fetchable; the index still only feeds `search`
 
-- A full `umbra index build` is a long crawl every operator must run
-  themselves; there is no published nightly `catalog.db` (or GeoJSON /
-  PMTiles export) to download. **R1/R5 need a prebuilt dataset.**
+- ✅ **Prebuilt dataset now downloadable.** The weekly workflow publishes a
+  `catalog.db` snapshot on the rolling `catalog-index` release, and
+  `umbra index fetch` / `CatalogIndex.from_release()` pulls it to the default
+  index path — so an operator no longer runs the long crawl to satisfy R1/R5,
+  and a build pipeline can bootstrap from the snapshot in seconds. (A
+  GeoJSON / PMTiles export for a JS front end is still the build-pipeline step
+  in Path A below.)
 - Verified in `cli.py`: **only `umbra search` accepts `--local`/`--db`**. The
   visual commands (`map`, `gallery`, `swipe`, `change`, `timescan`) each
   instantiate `UmbraCatalog()` and re-walk S3 live (cli.py:981, 1119, 500,

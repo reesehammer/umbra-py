@@ -141,3 +141,21 @@ def test_swipe_map_renders_real_task(tmp_path):
     text = out.read_text()
     assert "L.control.sideBySide" in text
     assert text.count("data:image/png;base64,") == 2
+
+
+def test_fetch_prebuilt_index_from_release(tmp_path):
+    """The published catalog-index release serves a downloadable catalog.db
+    that `CatalogIndex.from_release` opens into a searchable index -- the
+    consume side of the weekly publish workflow, hit against the real release.
+    """
+    from umbra_py import CatalogIndex
+
+    dest = tmp_path / "catalog.db"
+    with CatalogIndex.from_release(dest) as idx:
+        if len(idx) == 0:
+            pytest.skip("catalog-index release has no items yet")
+        assert dest.exists()
+        # A prebuilt snapshot must answer a local search without any live walk.
+        first = next(idx.search(limit=1), None)
+        assert first is not None
+        assert first.id

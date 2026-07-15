@@ -269,13 +269,37 @@ with CatalogIndex("umbra.db") as index:
     export_geoparquet(index.search(), "umbra-open-data.parquet")
 ```
 
+### Skip the crawl entirely: fetch the prebuilt index
+
+Because that weekly workflow already ships a `catalog.db`, you never have to
+run the full-bucket crawl yourself. `CatalogIndex.from_release` (or `umbra
+index fetch`) downloads the latest snapshot to your default index path, and
+`--local` search works immediately:
+
+```python
+from umbra_py import CatalogIndex
+
+with CatalogIndex.from_release() as index:   # download the weekly snapshot, then open it
+    for item in index.search(area="centerfield", product_types=["GEC"]):
+        print(item.summary())
+```
+
+`umbra index info` reports the snapshot's build date and age, so you know how
+fresh it is; re-run the fetch any time to refresh.
+
 ### Command line
 
 ```bash
-# Index the ENTIRE catalog once (no flags = whole bucket), then search it
-# offline with --local for near-instant repeats. The full build is a long,
-# one-time crawl; re-run any time to refresh. `umbra index info` reports what
-# it holds.
+# Fastest start: download the weekly prebuilt snapshot instead of crawling,
+# then search it offline. `umbra index info` shows what it holds and how old
+# the snapshot is.
+umbra index fetch
+umbra search --local --area "Centerfield" --product GEC
+umbra index info
+
+# Or build the index yourself: index the ENTIRE catalog once (no flags = whole
+# bucket), then search offline with --local for near-instant repeats. The full
+# build is a long, one-time crawl; re-run any time to refresh.
 umbra index build
 umbra search --local --area "Centerfield" --product GEC
 umbra index info

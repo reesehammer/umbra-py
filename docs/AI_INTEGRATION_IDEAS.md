@@ -264,11 +264,13 @@ and contributors.
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on
-correct S3 pagination and the prebuilt index from the analysis document. The
-pagination half is now done (PR #29 added `list-type=2`, so agents no longer
-amplify silently-truncated search results); the prebuilt-index *consume* side
-(`umbra index fetch`, `TODO.md`) is the remaining prerequisite to ship before
-either interface.
+correct S3 pagination and the prebuilt index from the analysis document. Both
+prerequisites are now done: PR #29 added `list-type=2` (so agents no longer
+amplify silently-truncated search results), and the prebuilt-index *consume*
+side has shipped — `umbra index fetch` / `CatalogIndex.from_release()` pulls the
+weekly `catalog.db` snapshot, so an MCP or STAC-API layer can bootstrap a
+whole-catalog index in seconds instead of crawling on first run. Both
+interfaces are now unblocked.
 
 ---
 

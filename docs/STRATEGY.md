@@ -31,12 +31,16 @@ These goals reinforce each other. The honest pitch to Umbra is not "no one
 can do this without us"; it's *"everyone who does this without us writes the
 same 500 lines of glue first, and many give up."*
 
-> **Critical-path note (2026-07-14):** the S3 pagination bug that silently
+> **Critical-path note (2026-07-15):** the S3 pagination bug that silently
 > truncated every listing at 1,000 keys — the prerequisite the analysis, demo,
 > and AI-integration docs all named for any "full catalog" work — is fixed
-> (PR #29). Whole-catalog search, index builds, and renders are complete again,
-> which unblocks the prebuilt-index consume side (workstream 5.2) and the demo /
-> MCP / STAC-API layers downstream.
+> (PR #29). Whole-catalog search, index builds, and renders are complete again.
+> Building on that, the **prebuilt-index consume side is now shipped**
+> (workstream 5.2): `umbra index fetch` / `CatalogIndex.from_release()` pulls
+> the weekly `catalog.db` snapshot, so a fresh install gets instant
+> whole-catalog `--local` search with no crawl. That was the last shared
+> prerequisite the demo / MCP / STAC-API layers were waiting on — those are now
+> unblocked.
 
 ## 2. The landscape: life without umbra-py
 
@@ -132,9 +136,12 @@ One crawl shouldn't be everyone's crawl.
 - ✅ `.github/workflows/publish-index.yml` rebuilds the full index weekly
   and publishes `umbra-open-data.parquet` + `catalog.db` on the rolling
   `catalog-index` GitHub release.
-- ⬜ **Next:** the consume side — `umbra index fetch` (or
-  `CatalogIndex.from_release()`) bootstraps `--local` search from the
-  published snapshot instead of crawling (tracked in `TODO.md`).
+- ✅ **Consume side shipped:** `umbra index fetch` /
+  `CatalogIndex.from_release()` downloads the published `catalog.db` snapshot
+  to the default index path (via the resume-safe `download_url`), so a fresh
+  install runs whole-catalog `--local` search out of the box — no crawl.
+  `umbra index build` now stamps a `built_at` date and `umbra index info`
+  reports snapshot staleness.
 - ⬜ **Then offer it upstream:** "here's the pipeline; host the parquet next
   to `catalog.json` in your bucket and the whole ecosystem gets a search API
   for free." If Umbra adopts it, this project is part of their data
