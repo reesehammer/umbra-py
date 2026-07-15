@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra describe "…"`: a vision model reads a SAR scene in plain language
+  (`docs/AI_INTEGRATION_IDEAS.md` C2 — the first Tier C VLM-in-the-loop
+  capability).** Searching gets you the scene; *reading* SAR is a separate skill
+  (why is water dark? is that black patch shadow or an empty field?). The new
+  `umbra_py.describe` module (`[ai]` + `[viz]` extras) renders an item's quicklook
+  and sends that PNG plus the `UmbraItem.to_llm_context()` metadata card to a
+  configured vision model, returning a structured `SceneDescription`:
+  `{summary, observed_features[], confidence, caveats[]}`. `umbra describe
+  <item-url>` prints the reading (`--json` for the object; `--asset` / `--no-db` /
+  `--max-size` control the render; `--model` picks the model). The SAR literacy a
+  general vision model lacks — backscatter ≠ brightness, speckle, layover/shadow,
+  one-frame ≠ change — is encoded once in the packaged prompt. The model **only
+  interprets**: the picture and metadata are produced deterministically, its
+  reply passes the `parse_description` boundary and never becomes a filter, a URL,
+  or a coordinate, and every description carries the CC-BY attribution plus a new
+  `AI_PROVENANCE` note so a model's reading of radar is never mistaken for a
+  measurement. Like `umbra ask`, the model call is an injectable `Describer` (and
+  the render an injectable `Renderer`) chosen from `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` (`OPENAI_BASE_URL` / `UMBRA_DESCRIBE_MODEL`), `requests` only —
+  no heavy SDK — so the whole feature is offline-testable with no network. It
+  stays behind the `[ai]` extra and never runs implicitly. `describe`,
+  `SceneDescription`, `parse_description`, `DescribeError` and `AI_PROVENANCE` are
+  exported at the top level.
 - **Semantic task-name aliasing: the embedding layer of natural-language search
   (`docs/AI_INTEGRATION_IDEAS.md` C1 — the last open C1 piece, completing Phase
   3's natural-language-search line).** `--fuzzy` matches by the *words* in a task
