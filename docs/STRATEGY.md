@@ -137,6 +137,24 @@ same 500 lines of glue first, and many give up."*
 > VLM-in-the-loop capabilities (scene description / change narration) and the
 > example notebooks; the single highest-value strategic move overall remains the
 > unstarted Canopy backend (5.1).
+>
+> **Update:** the **first Tier C VLM-in-the-loop capability has shipped** —
+> `umbra describe` (`AI_INTEGRATION_IDEAS.md` C2). This is where the project's
+> AI thesis (§3 novelty) becomes a product: the library's outputs are *images
+> with precise metadata*, so `umbra describe <item-url>` renders an item's
+> quicklook, sends it plus the metadata context card to a configured vision model
+> (Anthropic or any OpenAI-compatible endpoint, user key), and returns a
+> structured, plain-language reading — `{summary, observed_features[], confidence,
+> caveats[]}`. It widens the funnel the honest way (§1): a newcomer who can search
+> but can't *read* SAR (why is water dark? is that shadow or an empty field?) now
+> gets the scene explained, with the SAR literacy encoded once in the packaged
+> prompt. It preserves the boundary and trust the scientific audience needs (§3):
+> the model **only interprets** — the picture and metadata are deterministic, the
+> reply is re-validated, and every description carries the CC-BY attribution plus
+> an explicit "AI-generated interpretation" provenance note, so a model's reading
+> of radar is never mistaken for a measurement. The remaining C2 piece is change
+> narration (`umbra change --narrate`); the example notebooks and the unstarted
+> Canopy backend (5.1) remain the higher-level critical path.
 
 ## 2. The landscape: life without umbra-py
 

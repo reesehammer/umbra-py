@@ -13,9 +13,10 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .catalog import UmbraCatalog
-from .constants import ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
+from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .dates import parse_date_bound
+from .describe import DescribeError, SceneDescription, describe, parse_description
 from .download import download_asset, download_item, download_url
 from .exceptions import (
     AssetNotFoundError,
@@ -81,11 +82,16 @@ __all__ = [
     "PRODUCT_ASSETS",
     "DATA_LICENSE",
     "ATTRIBUTION",
+    "AI_PROVENANCE",
     "llm_context",
     "ask",
     "parse_plan",
     "SearchPlan",
     "AskError",
+    "describe",
+    "parse_description",
+    "SceneDescription",
+    "DescribeError",
     "SemanticTaskIndex",
     "SemanticMatch",
     "SemanticError",

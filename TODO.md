@@ -91,8 +91,47 @@ log). Optional follow-ons that build on them, not blockers:
 
 ---
 
+## C2 VLM-in-the-loop follow-ons (`umbra describe` shipped)
+
+- **Surfaced in:** the `umbra describe` PR (`AI_INTEGRATION_IDEAS.md` C2).
+- **Code:** `src/umbra_py/describe.py` (`[ai]` + `[viz]` extras),
+  `constants.AI_PROVENANCE`.
+
+`umbra describe` (scene description) is shipped — a vision model reads the
+rendered quicklook plus the A3 context card and returns a provenance-stamped
+`{summary, observed_features[], confidence, caveats[]}`. The rest of C2 is still
+open and builds on the same boundary:
+
+- **`umbra change --narrate`** (the second half of C2): after writing a change
+  composite, send it with the color-semantics legend and a coarse per-block
+  |Δ|-in-dB sidecar to a VLM and return a plain-language, number-grounded change
+  report — so the narration cites the deterministic statistics, not vibes. Reuse
+  `describe.py`'s `Describer`/`parse_*` boundary and the `AI_PROVENANCE` stamp.
+- **MCP `describe_scene` tool.** The MCP server already returns imagery; a
+  `describe_scene` tool wrapping `describe()` would let an agent get the
+  structured reading directly (gated, like the CLI, on the `[ai]` key).
+- **A `describe` render is a fresh S3 read every call.** When the demo/thumbnail
+  bake (`DEMO_APP_GAPS.md` G6) lands, feed the cached quicklook into `describe`
+  via its injectable `render=` hook instead of re-streaming the COG.
+
+---
+
 ## Done
 
+- **`umbra describe`: VLM scene description (first C2 piece).** Added
+  `src/umbra_py/describe.py` (`[ai]` + `[viz]` extras) and the
+  `constants.AI_PROVENANCE` note. `umbra describe <item-url>` renders the item's
+  quicklook, sends that PNG plus the `UmbraItem.to_llm_context()` card to a
+  configured vision model (Anthropic or any OpenAI-compatible endpoint,
+  user-supplied key, `requests` only), and returns a validated
+  `SceneDescription` — `{summary, observed_features[], confidence, caveats[]}`.
+  The model *only* interprets: the picture and metadata are produced
+  deterministically, the reply passes the `parse_description` boundary, and every
+  description is stamped with the CC-BY attribution and the AI-provenance note, so
+  a reading of radar is never mistaken for a measurement. Like `planner.py`, the
+  model call is an injectable `Describer` and the render an injectable
+  `Renderer`, so the whole feature is offline-testable with no network and no
+  model.
 - **Semantic task-name aliasing (last open C1 piece).** Added
   `src/umbra_py/semantic.py` (`[ai]` extra): `SemanticTaskIndex` embeds the
   catalog index's distinct task names once (`umbra semantic build`) into a

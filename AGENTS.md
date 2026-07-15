@@ -48,6 +48,7 @@ src/umbra_py/
   llms_txt.py        # llms_txt()/llms_full_txt(): llms.txt-convention agent guide (`umbra llms-txt`); stdlib-only
   planner.py         # umbra ask: model plans a search, library re-validates + executes it ([ai])
   semantic.py        # umbra semantic: embedding index over task names for meaning-based --area aliasing ([ai])
+  describe.py        # umbra describe: vision model reads a rendered quicklook -> structured, provenance-stamped scene description ([ai]+[viz])
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/

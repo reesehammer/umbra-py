@@ -507,6 +507,74 @@ def ask(question, run, model, limit, as_json, local, db_path) -> None:
 @click.argument("item_url")
 @click.option(
     "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to read. GEC (the geocoded GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override the vision model (default: $UMBRA_DESCRIBE_MODEL, else the "
+    "provider default). The provider is chosen by which API key is set — "
+    "ANTHROPIC_API_KEY or OPENAI_API_KEY (with optional OPENAI_BASE_URL).",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=1024,
+    show_default=True,
+    help="Max pixel dimension of the quicklook sent to the model. Larger is "
+    "sharper but fetches more bytes and costs more tokens.",
+)
+@click.option(
+    "--db/--no-db",
+    "db",
+    default=True,
+    show_default=True,
+    help="Use a decibel (log-amplitude) stretch — the radiometrically-correct "
+    "SAR look the model reads best. --no-db uses a linear stretch.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the structured description as JSON.")
+def describe(item_url, asset, model, max_size, db, as_json) -> None:
+    """Describe a SAR scene in plain language with a vision model.
+
+    Renders the item's quicklook, sends that picture plus the library's metadata
+    context card to a configured vision model, and returns a structured reading:
+    a summary, observed features, the model's confidence, and SAR-specific
+    caveats. The model *only* interprets the imagery — every description is
+    stamped as an AI interpretation and carries the mandatory CC-BY attribution,
+    and nothing the model says becomes a filter, a URL, or a coordinate.
+
+    Requires the ``ai`` extra for the model call and ``viz`` for the render
+    (``pip install 'umbra-py[ai,viz]'``) plus a vision model API key: set
+    ANTHROPIC_API_KEY, or OPENAI_API_KEY (optionally with OPENAI_BASE_URL for a
+    compatible endpoint). Example::
+
+        umbra describe https://.../<item>/<id>.json
+    """
+    from .describe import DescribeError
+    from .describe import describe as describe_scene
+
+    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    try:
+        with OrbitSpinner(f"Describing {item.id}"):
+            description = describe_scene(item, model=model, asset=asset, max_size=max_size, db=db)
+    except (DescribeError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps(description.to_dict(), indent=2))
+    else:
+        click.echo(description.to_text())
+
+
+@cli.command()
+@click.argument("item_url")
+@click.option(
+    "--asset",
     "assets",
     multiple=True,
     type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),

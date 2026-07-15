@@ -94,3 +94,14 @@ DATA_LICENSE = "CC-BY-4.0"
 
 #: Suggested attribution string for derived products.
 ATTRIBUTION = "Contains Umbra open data, licensed under CC BY 4.0."
+
+#: Provenance note that must travel with any model-generated interpretation of
+#: the data (a scene description, a change narration). It marks the text as an
+#: AI reading of the imagery -- not a measurement -- so a downstream reader never
+#: mistakes the narration for ground truth. The same license discipline the
+#: library applies to GeoTIFF tags and xarray attrs, extended to model outputs.
+AI_PROVENANCE = (
+    "AI-generated interpretation of SAR imagery. Descriptions are a model's "
+    "reading of the scene, not verified measurements, and may be wrong; verify "
+    "against the source data before relying on them."
+)
