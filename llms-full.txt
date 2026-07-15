@@ -40,6 +40,7 @@ All Umbra open data is licensed CC-BY-4.0. Attribution is mandatory and must sur
 
 The CLI subcommands map 1:1 to library functions. Run any command with `--help` for its full options; `--json` is available where a structured result makes sense (`search`, `info`).
 
+- `umbra ask` — Plan a catalog search from a plain-language question with a model.
 - `umbra change` — Render multi-temporal SAR change: a color composite or a time-lapse.
 - `umbra context` — Print the library's LLM context document as JSON.
 - `umbra download` — Download asset(s) of an item given its STAC JSON URL.

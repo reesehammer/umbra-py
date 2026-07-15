@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra ask "…"`: model-planned, deterministically executed natural-language
+  search (`docs/AI_INTEGRATION_IDEAS.md` C1 — the capstone of the
+  natural-language-search direction, and the first feature that calls a model).**
+  A configured model reads the user's sentence plus the `llm_context()` domain
+  document and returns the search *parameters* it maps to; the new
+  `umbra_py.planner` module then re-validates every one of them deterministically
+  (`parse_plan`) — dates through `parse_date_bound`, product types against
+  `PRODUCT_ASSETS`, the bounding box range-checked, `place`/`bbox` enforced
+  mutually exclusive — and prints the exact `umbra search` command it resolves
+  to. **Nothing the model emits becomes a filter without passing that
+  deterministic layer**, and the command is shown before it runs: the LLM plans,
+  the library executes, the user audits. By default `umbra ask` only prints the
+  plan; `--run` executes it (against a live walk or `--local` index), `--json`
+  emits the resolved plan, and `--limit` overrides the model's cap. The feature
+  lives behind a new `[ai]` extra and **never runs implicitly** — only `umbra
+  ask` reaches a model, and only with a user-supplied key: `ANTHROPIC_API_KEY`,
+  or `OPENAI_API_KEY` (with optional `OPENAI_BASE_URL` for any OpenAI-compatible
+  endpoint), with `UMBRA_ASK_MODEL` / `--model` to pick the model. The provider
+  call uses only the already-core `requests` (no heavy SDK). The planning step is
+  an injectable callable (`ask(question, planner=…)`), so the whole feature —
+  prompt building, plan validation, command rendering, provider selection, and
+  the CLI — is fully offline-testable with no network. `ask`, `parse_plan`,
+  `SearchPlan` and `AskError` are exported at the top level. Semantic task
+  aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) remains the
+  one open C1 piece — it needs the future embedding index, not a model round
+  trip on every query.
 - **Fuzzy task matching for `--area` search (`docs/AI_INTEGRATION_IDEAS.md` C1 —
   the second deterministic step of Phase 3).** `--area` (and the
   `UmbraCatalog.search` / `CatalogIndex.search` `area=` argument, and the MCP

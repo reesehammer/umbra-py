@@ -407,6 +407,103 @@ def serve(host, port, index_path, live) -> None:
 
 
 @cli.command()
+@click.argument("question")
+@click.option(
+    "--run",
+    "-r",
+    is_flag=True,
+    help="Execute the planned search instead of only printing it. The command "
+    "is always shown first, so you see exactly what will run.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override the planning model (default: $UMBRA_ASK_MODEL, else the "
+    "provider default). The provider is chosen by which API key is set — "
+    "ANTHROPIC_API_KEY or OPENAI_API_KEY (with optional OPENAI_BASE_URL).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap results, overriding whatever limit the model chose (only affects --run).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the resolved plan as JSON.")
+@click.option(
+    "--local",
+    is_flag=True,
+    help="Run the planned search against a prebuilt local index instead of a "
+    "live S3 walk (see 'umbra index fetch'). Only affects --run.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index database for --run --local (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Implies --local.",
+)
+def ask(question, run, model, limit, as_json, local, db_path) -> None:
+    """Plan a catalog search from a plain-language question with a model.
+
+    A configured model reads your sentence plus the library's domain context
+    and returns the *search parameters* it maps to; the library then re-validates
+    every one of them deterministically (dates, product types, bounding box) and
+    prints the exact 'umbra search' command it resolves to. The LLM plans, the
+    library executes, and you audit the command before it runs — nothing the
+    model says becomes a filter without passing the deterministic layer.
+
+    By default it only prints the plan; pass --run to execute it. Requires the
+    ``ai`` extra (``pip install 'umbra-py[ai]'``) and a model API key: set
+    ANTHROPIC_API_KEY, or OPENAI_API_KEY (optionally with OPENAI_BASE_URL for a
+    compatible endpoint). Example::
+
+        umbra ask "what did Umbra image at Centerfield, Utah last spring?"
+    """
+    from .planner import AskError
+    from .planner import ask as plan_search
+
+    try:
+        plan = plan_search(question, model=model)
+    except (AskError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if limit is not None:
+        plan.limit = limit
+
+    if as_json:
+        click.echo(json.dumps(plan.to_dict(), indent=2))
+    else:
+        if plan.rationale:
+            click.echo(f"Plan: {plan.rationale}")
+        click.echo(plan.to_command())
+
+    if not run:
+        if not as_json:
+            click.echo("\nRe-run with --run to execute this search.")
+        return
+
+    search_bbox = _resolve_search_bbox(None, plan.place) if plan.place else plan.bbox
+    if not as_json:
+        click.echo("")
+    found = _gather_items(
+        local=local,
+        db_path=db_path,
+        bbox=search_bbox,
+        **plan.to_search_kwargs(),
+    )
+    for item in found:
+        if as_json:
+            click.echo(json.dumps(item.raw))
+        else:
+            click.echo(item.summary())
+            if item.href:
+                click.echo(f"  url      : {item.href}")
+            click.echo("")
+    if not as_json:
+        click.echo(f"{len(found)} item(s).")
+
+
+@cli.command()
 @click.argument("item_url")
 @click.option(
     "--asset",
