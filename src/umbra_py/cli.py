@@ -892,6 +892,20 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     show_default=True,
     help="Low,high percentile cut for each frame's contrast stretch.",
 )
+@click.option(
+    "--narrate",
+    is_flag=True,
+    help="Composite (image) output only: after rendering, have a vision model "
+    "narrate WHAT changed, grounded in a per-block decibel-change grid. Writes a "
+    "machine-readable '<out>.narration.json' sidecar and prints the reading. "
+    "Needs the 'ai' extra and a model API key (ANTHROPIC_API_KEY / OPENAI_API_KEY).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="--narrate only: override the vision model (default: $UMBRA_NARRATE_MODEL, "
+    "else the provider default). The provider is chosen by which API key is set.",
+)
 @_local_index_options
 @_fuzzy_option
 def change(
@@ -910,6 +924,8 @@ def change(
     colormap,
     fps,
     percentile,
+    narrate,
+    model,
     local,
     db_path,
 ) -> None:
@@ -933,12 +949,22 @@ def change(
       gathers a site's acquisitions automatically (preferring a single
       polarization).
 
+    Add --narrate (composite output only) to have a vision model describe *what*
+    changed, grounded in a per-block decibel-change grid written alongside the
+    image as '<out>.narration.json' (needs the ai extra and a model API key).
+
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
     animate = out_path.lower().endswith(".gif")
     if colormap and not animate:
         raise click.UsageError("--colormap only applies to animated (.gif) output.")
+    if narrate and animate:
+        raise click.UsageError(
+            "--narrate applies to a change composite (.png/.jpg), not a .gif time-lapse."
+        )
+    if model and not narrate:
+        raise click.UsageError("--model only applies together with --narrate.")
 
     search_mode = any(v for v in (area, bbox, start, end))
     if item_urls and search_mode:
@@ -1006,6 +1032,38 @@ def change(
                 fps=fps,
             )
         click.echo(f"Wrote time-lapse to {path}")
+    elif narrate:
+        # Render the composite ONCE (the expensive co-registration) and reuse the
+        # exact bytes for both the written file and the model, so the narration is
+        # grounded in the picture the user keeps -- no second S3 walk.
+        from .narrate import NarrateError, render_change_png, save_change_scene
+        from .narrate import narrate as narrate_change
+
+        try:
+            with OrbitSpinner(f"Rendering and narrating change of {len(items)} acquisitions"):
+                image_png, stats = render_change_png(
+                    items,
+                    asset=asset,
+                    max_size=grid,
+                    db=db,
+                    percentile=_parse_percentile(percentile),
+                )
+                path = save_change_scene(image_png, out_path)
+                narration = narrate_change(
+                    items,
+                    render=lambda _its: (image_png, stats),
+                    model=model,
+                    asset=asset,
+                )
+        except (NarrateError, UmbraError) as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        click.echo(f"Wrote change composite to {path}")
+        sidecar = Path(out_path).with_suffix(".narration.json")
+        sidecar.write_text(json.dumps(narration.to_dict(), indent=2))
+        click.echo(f"Wrote change narration to {sidecar}")
+        click.echo("")
+        click.echo(narration.to_text())
     else:
         with OrbitSpinner(f"Rendering change composite of {len(items)} acquisitions"):
             path = save_change_composite(

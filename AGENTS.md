@@ -49,6 +49,7 @@ src/umbra_py/
   planner.py         # umbra ask: model plans a search, library re-validates + executes it ([ai])
   semantic.py        # umbra semantic: embedding index over task names for meaning-based --area aliasing ([ai])
   describe.py        # umbra describe: vision model reads a rendered quicklook -> structured, provenance-stamped scene description ([ai]+[viz])
+  narrate.py         # umbra change --narrate: vision model narrates change, grounded in a deterministic per-block dB-delta grid ([ai]+[viz])
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/

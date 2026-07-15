@@ -155,6 +155,27 @@ same 500 lines of glue first, and many give up."*
 > of radar is never mistaken for a measurement. The remaining C2 piece is change
 > narration (`umbra change --narrate`); the example notebooks and the unstarted
 > Canopy backend (5.1) remain the higher-level critical path.
+>
+> **Update:** the **second Tier C VLM capability has shipped, completing C2** —
+> `umbra change --narrate` (`AI_INTEGRATION_IDEAS.md` C2). Where `umbra describe`
+> reads one scene, this narrates the *change* between two passes — and it is the
+> honest version §3's novelty demands, because the narration is grounded in a
+> **deterministic per-block dB sidecar**, not just the picture. `umbra_py.narrate`
+> computes a coarse north-up grid of the mean *signed* backscatter change in
+> decibels (positive = brightened/appeared — the composite's green; negative =
+> dimmed/vanished — its magenta) and hands the model *both* the composite PNG and
+> that grid, so it narrates only change the numbers support; the grid ships next to
+> the image as `<out>.narration.json`, making every statement auditable against a
+> value a test can recompute. It widens the funnel the honest way (§1): a newcomer
+> who can render a change composite but can't *read* it now gets "what changed,
+> where, and how much (in dB)" in plain language. It preserves the boundary and
+> trust the scientific audience needs (§3): the picture and the numbers are
+> deterministic, the model **only interprets** (its reply passes the
+> `parse_narration` boundary and never becomes a filter or a measurement), and every
+> narration carries the CC-BY attribution plus the `AI_PROVENANCE` note. With C2
+> complete, the AI critical path moves to Tier C's C3 watch loops / C4 `umbra chips`
+> and the B3 example notebooks; the single highest-value strategic move overall
+> remains the unstarted Canopy backend (5.1).
 
 ## 2. The landscape: life without umbra-py
 
