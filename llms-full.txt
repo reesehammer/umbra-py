@@ -46,6 +46,11 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra context` — Print the library's LLM context document as JSON.
 - `umbra describe` — Describe a SAR scene in plain language with a vision model.
 - `umbra download` — Download asset(s) of an item given its STAC JSON URL.
+- `umbra embed` — Visual similarity search over the archive (embedding-based, C5).
+- `umbra embed build` — Render and embed acquisition quicklooks into a scene-similarity index.
+- `umbra embed info` — Show what a scene index holds: scene-vector count, model and dimension.
+- `umbra embed search` — Find archived scenes matching a plain-language QUERY ("ships at a berth").
+- `umbra embed similar` — Find archived scenes that look like the acquisition at ITEM_URL.
 - `umbra gallery` — Render search results as a browseable HTML SAR thumbnail gallery.
 - `umbra index` — Build and inspect a local SQLite catalog index for fast offline search.
 - `umbra index build` — Walk Umbra's archive and persist matching acquisitions into the index.

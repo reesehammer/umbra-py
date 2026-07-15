@@ -7,6 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Archive scene embeddings — visual similarity search (`docs/AI_INTEGRATION_IDEAS.md`
+  C5, the last open AI item).** Every other search matches *metadata* (a date, a
+  bbox, a task name); this matches *appearance*. `umbra_py.embed`
+  (`umbra embed`, `[ai]` + `[viz]` extras) embeds each acquisition's rendered
+  quicklook into a vector once and then ranks scenes by cosine similarity, so
+  "find scenes that look like this one" becomes plain offline arithmetic over the
+  stored vectors — a capability nothing in the Umbra ecosystem offers.
+  - **`umbra embed build`** renders each item's quicklook once (only downsampled
+    overviews stream over HTTP — no full download) and embeds it, keyed by item
+    id so a rebuild only embeds what is new. It takes the same search-vs-URLs
+    interface as `umbra change` (plus `--local`/`--index-db`), and skips a scene
+    whose asset won't render rather than aborting the batch.
+  - **`umbra embed similar <item-url>`** renders and embeds the query item, then
+    returns the archived scenes that look most like it (the query is excluded from
+    its own results) — image-to-image search.
+  - **`umbra embed search "a flooded field"`** ranks the stored *image* vectors
+    against a text query — text-to-scene search, given a joint CLIP-family model
+    whose text and image encoders share a space.
+  - **`umbra embed info`** reports the scene-vector count, model and dimension.
+
+  It holds the library's determinism boundary (`docs/AI_INTEGRATION_IDEAS.md` §A4,
+  §6.1): the *only* model calls are turning an image or a text query into a
+  vector (injectable `ImageEmbedder` / text `Embedder`, default an
+  OpenAI-compatible multimodal `/embeddings` endpoint via the already-core
+  `requests`, user-supplied key, never implicit). Rendering, storage, cosine
+  ranking and thresholding are stdlib-only (no `numpy`, no `sqlite-vec`), so the
+  whole feature is offline-testable with a deterministic stand-in embedder and
+  renderer. The vectors live in a schema-versioned sidecar `catalog.embed.db`
+  beside the catalog index — never inside `catalog.db` — so the deterministic
+  index and its published snapshot never carry model-derived data a core install
+  can't use (the same boundary `umbra semantic` uses). A `SceneMatch` is a pointer
+  back to a real acquisition (id, task, datetime, STAC href), never a
+  model-authored fact.
 - **Example notebook gallery (`docs/STRATEGY.md` 5.4 / `docs/AI_INTEGRATION_IDEAS.md`
   B3) — the demo notebooks DevRel links first.** Three self-contained, self-checking
   Jupyter notebooks under `examples/`, each driven by a small deterministic search

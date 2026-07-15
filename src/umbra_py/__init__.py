@@ -26,6 +26,16 @@ from .context import llm_context
 from .dates import parse_date_bound
 from .describe import DescribeError, SceneDescription, describe, parse_description
 from .download import download_asset, download_item, download_url
+from .embed import (
+    EmbedError,
+    ImageEmbedder,
+    SceneEmbeddingIndex,
+    SceneMatch,
+    default_image_embedder,
+    default_scene_embed_path,
+    default_text_embedder,
+    resolve_scene_model,
+)
 from .exceptions import (
     AssetNotFoundError,
     CatalogError,
@@ -133,6 +143,14 @@ __all__ = [
     "SemanticError",
     "cosine_similarity",
     "default_embedder",
+    "SceneEmbeddingIndex",
+    "SceneMatch",
+    "EmbedError",
+    "ImageEmbedder",
+    "default_image_embedder",
+    "default_text_embedder",
+    "default_scene_embed_path",
+    "resolve_scene_model",
     "parse_date_bound",
     "task_matches",
     "matching_tasks",

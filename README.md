@@ -39,7 +39,7 @@ pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
-pip install "umbra-py[ai]"      # + umbra ask / semantic / describe: model-backed NL search & scene reading
+pip install "umbra-py[ai]"      # + umbra ask / semantic / describe / embed: model-backed NL search, scene reading & visual similarity
 ```
 
 Requires Python 3.10+.
@@ -455,6 +455,10 @@ umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out ti
 
 # Chip a site's passes into fixed-size georeferenced ML tiles + a manifest.
 umbra chips --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out chips/ --chip-size 512 --db
+
+# Visual similarity: embed a site's quicklooks, then find scenes that look alike.
+umbra embed build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
+umbra embed similar <item-json-url>
 ```
 
 ### Ask in plain language (`umbra ask`)
@@ -637,6 +641,36 @@ overlaps tiles for dense inference / augmentation, and `--min-valid` drops the
 mostly-nodata corners of a rotated footprint. **No model is called** — chipping is
 pure raster iteration + manifest logic. Requires the load extra
 (`pip install "umbra-py[load]"`).
+
+### Find scenes that *look alike* (`umbra embed`)
+
+Every other search matches metadata — a date, a bbox, a task name. `umbra embed`
+matches *appearance*: it embeds each acquisition's rendered quicklook into a
+vector once, then ranks scenes by cosine similarity. *"Find scenes that look like
+this flooded field"* — a search over pixels, not metadata, and a capability
+nothing in the Umbra ecosystem offers.
+
+```bash
+# Embed a site's quicklooks once into a scene-similarity index (sidecar DB).
+umbra embed build --area "Centerfield, Utah" --start 2024-01-01 --end 2024-12-31
+
+# Image-to-image: archived scenes that look most like a given acquisition.
+umbra embed similar https://.../<item>/<id>.stac.v2.json
+
+# Text-to-scene (needs a joint CLIP-family model): describe what you're after.
+umbra embed search "a flooded agricultural field" --json
+
+umbra embed info                     # scene-vector count, model and dimension
+```
+
+The vectors live in a sidecar `catalog.embed.db` beside the local index, keyed by
+item id (a rebuild only embeds what is new). Only turning an image or a text query
+into a vector calls a model — an OpenAI-compatible multimodal `/embeddings`
+endpoint (set `OPENAI_API_KEY`, optionally `OPENAI_BASE_URL` /
+`UMBRA_SCENE_EMBED_MODEL`); rendering, storage and cosine ranking are
+deterministic and offline. Every match is a pointer back to a real acquisition
+(id, task, datetime, STAC href), never a model-authored fact. Requires the ai and
+viz extras (`pip install "umbra-py[ai,viz]"`).
 
 ### Drive it from an AI agent (MCP)
 

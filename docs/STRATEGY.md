@@ -294,6 +294,28 @@ same 500 lines of glue first, and many give up."*
 > With the notebooks landed, the remaining strategic gaps are the SICD → geocoded
 > COG format work (5.5) and the maintainer-side adoption moves (5.3 registries,
 > 5.6 talking to Umbra) — the code funnel now runs end to end.
+>
+> **Update:** the **archive scene-embedding capability has shipped**
+> (`AI_INTEGRATION_IDEAS.md` C5 — the last open AI item, so every idea in that
+> document is now built). `umbra embed` (`umbra_py.embed`, `[ai]` + `[viz]` extras)
+> embeds one quicklook per acquisition and ranks scenes by cosine similarity, so
+> `umbra embed similar <url>` finds acquisitions that *look like* a given one and
+> `umbra embed search "a flooded field"` finds them from a text description. This
+> is the project's novelty (§3) at its sharpest: a **genuinely new capability over
+> the archive** — visual similarity search that nothing in the Umbra ecosystem
+> offers, and that no amount of metadata search can fake. It also stays graceful
+> under the "moat is leased" risk (§3): it layers on the same discovery substrate
+> the whole project is built on, and the embedding table is exactly the kind of
+> artifact worth *offering upstream* (5.2) — publish it beside the nightly index and
+> the ecosystem gets scene-similarity search for free. It preserves the boundary
+> the scientific audience needs (§3): the only model call is turning an image or a
+> query into a vector (injectable, `[ai]` extra, never implicit), while rendering,
+> storage, cosine ranking and thresholding are stdlib-only — and the vectors live
+> in a sidecar `catalog.embed.db`, never inside the deterministic `catalog.db`, so a
+> core install is never asked to carry model-derived data it can't use. With C5
+> done, the remaining strategic gaps are unchanged and non-AI: the SICD → geocoded
+> COG format work (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6
+> talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
