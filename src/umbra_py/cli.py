@@ -96,6 +96,59 @@ def _search_source(local: bool, db_path: str | None) -> tuple[object, bool]:
     return UmbraCatalog(), False
 
 
+def _gather_items(
+    *,
+    local: bool = False,
+    db_path: str | None = None,
+    live_label: str = "Searching Umbra archive",
+    **search_kwargs: object,
+) -> list[UmbraItem]:
+    """Run a search and return the results as a list, choosing the backend the
+    same way ``umbra search`` does: a prebuilt local index when ``--local`` /
+    ``--index-db`` is given, otherwise a live :class:`UmbraCatalog` S3 walk.
+
+    The visual commands (``map``, ``gallery``, ``swipe``, ``change``,
+    ``timescan``) used to re-walk S3 on every render; routing them through here
+    lets ``--local`` answer from an already-built index (``umbra index fetch`` /
+    ``umbra index build``) instead — near-instant, and the fast path a demo or
+    repeat-render flow needs.
+    """
+    source, is_index = _search_source(local, db_path)
+    label = "Searching local index" if is_index else live_label
+    try:
+        with OrbitSpinner(label):
+            return list(source.search(**search_kwargs))  # type: ignore[attr-defined]
+    finally:
+        if is_index:
+            source.close()  # type: ignore[attr-defined]
+
+
+def _local_index_options(func):
+    """Attach the shared ``--local`` / ``--index-db`` options that point a
+    visual command at a prebuilt index instead of a live S3 walk.
+
+    The path option is ``--index-db`` rather than ``--db`` because the render
+    commands already use ``--db`` for the decibel stretch; the flag/behaviour
+    otherwise mirror ``umbra search``'s ``--local`` / ``--db``.
+    """
+    func = click.option(
+        "--index-db",
+        "db_path",
+        default=None,
+        help="Path to the local index database to read (default: $UMBRA_INDEX_DB "
+        "or ~/.cache/umbra-py/catalog.db). Implies --local. Named --index-db "
+        "because --db already means the decibel stretch on render commands.",
+    )(func)
+    func = click.option(
+        "--local",
+        is_flag=True,
+        help="Gather items from a prebuilt local index (see 'umbra index fetch' "
+        "/ 'umbra index build') instead of walking S3 live -- near-instant, the "
+        "fast path for repeat renders. Only uses acquisitions already indexed.",
+    )(func)
+    return func
+
+
 def _progress_printer(label: str):
     def cb(done: int, total: int | None) -> None:
         if total:
@@ -608,6 +661,7 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     show_default=True,
     help="Low,high percentile cut for each frame's contrast stretch.",
 )
+@_local_index_options
 def change(
     item_urls,
     out_path,
@@ -623,6 +677,8 @@ def change(
     colormap,
     fps,
     percentile,
+    local,
+    db_path,
 ) -> None:
     """Render multi-temporal SAR change: a color composite or a time-lapse.
 
@@ -670,17 +726,16 @@ def change(
                 "Give --area or --bbox (optionally with --start/--end) to search, "
                 "or pass item URLs directly."
             )
-        with OrbitSpinner("Searching Umbra archive"):
-            found = list(
-                UmbraCatalog().search(
-                    bbox=_parse_bbox(bbox),
-                    start=start,
-                    end=end,
-                    area=area,
-                    product_types=[asset],
-                    limit=max_search,
-                )
-            )
+        found = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=_parse_bbox(bbox),
+            start=start,
+            end=end,
+            area=area,
+            product_types=[asset],
+            limit=max_search,
+        )
         if len(found) < 2:
             raise click.ClickException(
                 f"Need at least 2 {asset} acquisitions to compare; the search "
@@ -792,6 +847,7 @@ def change(
     show_default=True,
     help="Low,high percentile cut for each statistic's contrast stretch.",
 )
+@_local_index_options
 def timescan(
     item_urls,
     out_path,
@@ -805,6 +861,8 @@ def timescan(
     max_size,
     db,
     percentile,
+    local,
+    db_path,
 ) -> None:
     """Collapse a whole SAR time series into one temporal-statistics image.
 
@@ -849,17 +907,16 @@ def timescan(
                 "search, or pass item URLs directly."
             )
         search_bbox = _resolve_search_bbox(bbox, place)
-        with OrbitSpinner("Searching Umbra archive"):
-            found = list(
-                UmbraCatalog().search(
-                    bbox=search_bbox,
-                    start=start,
-                    end=end,
-                    area=area,
-                    product_types=[asset],
-                    limit=max_search,
-                )
-            )
+        found = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=search_bbox,
+            start=start,
+            end=end,
+            area=area,
+            product_types=[asset],
+            limit=max_search,
+        )
         if len(found) < 3:
             raise click.ClickException(
                 f"Need at least 3 {asset} acquisitions to summarise; the search "
@@ -943,6 +1000,7 @@ def timescan(
     show_default=True,
     help="Low,high percentile cut for each overlay's contrast stretch.",
 )
+@_local_index_options
 def swipe(
     item_urls,
     out_path,
@@ -955,6 +1013,8 @@ def swipe(
     max_size,
     db,
     percentile,
+    local,
+    db_path,
 ) -> None:
     """Render an interactive before/after swipe map of two SAR passes.
 
@@ -991,17 +1051,16 @@ def swipe(
                 "Give --area or --bbox (optionally with --start/--end) to search, "
                 "or pass two item URLs directly."
             )
-        with OrbitSpinner("Searching Umbra archive"):
-            found = list(
-                UmbraCatalog().search(
-                    bbox=_parse_bbox(bbox),
-                    start=start,
-                    end=end,
-                    area=area,
-                    product_types=[asset],
-                    limit=max_search,
-                )
-            )
+        found = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=_parse_bbox(bbox),
+            start=start,
+            end=end,
+            area=area,
+            product_types=[asset],
+            limit=max_search,
+        )
         if len(found) < 2:
             raise click.ClickException(
                 f"Need at least 2 {asset} acquisitions to compare; the search "
@@ -1123,6 +1182,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     show_default=True,
     help="How many thumbnails to stream in parallel.",
 )
+@_local_index_options
 def gallery(
     bbox,
     place,
@@ -1139,6 +1199,8 @@ def gallery(
     colormap,
     percentile,
     workers,
+    local,
+    db_path,
 ) -> None:
     """Render search results as a browseable HTML SAR thumbnail gallery.
 
@@ -1153,19 +1215,17 @@ def gallery(
         raise click.ClickException("Gallery output must be an .html file.")
 
     search_bbox = _resolve_search_bbox(bbox, place)
-    catalog = UmbraCatalog()
-    with OrbitSpinner("Searching Umbra archive"):
-        items = list(
-            catalog.search(
-                bbox=search_bbox,
-                start=start,
-                end=end,
-                area=area,
-                product_types=list(products) or [asset],
-                limit=limit,
-                max_per_task=max_per_task,
-            )
-        )
+    items = _gather_items(
+        local=local,
+        db_path=db_path,
+        bbox=search_bbox,
+        start=start,
+        end=end,
+        area=area,
+        product_types=list(products) or [asset],
+        limit=limit,
+        max_per_task=max_per_task,
+    )
     if not items:
         raise click.ClickException("No items matched the search.")
 
@@ -1273,6 +1333,7 @@ def gallery(
     "only pay the fetch cost for items you click. Works with --timeline. "
     "HTML output only; mutually exclusive with --imagery.",
 )
+@_local_index_options
 def map_cmd(
     bbox,
     place,
@@ -1288,25 +1349,25 @@ def map_cmd(
     timeline,
     timeline_period,
     lazy_imagery,
+    local,
+    db_path,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     search_bbox = _resolve_search_bbox(bbox, place)
-    catalog = UmbraCatalog()
     imagery_kwargs: dict | None = None
     if imagery_max_size is not None:
         imagery_kwargs = {"max_size": imagery_max_size}
 
-    with OrbitSpinner("Searching Umbra archive"):
-        items = list(
-            catalog.search(
-                bbox=search_bbox,
-                start=start,
-                end=end,
-                product_types=list(products) or None,
-                limit=limit,
-                max_per_task=max_per_task,
-            )
-        )
+    items = _gather_items(
+        local=local,
+        db_path=db_path,
+        bbox=search_bbox,
+        start=start,
+        end=end,
+        product_types=list(products) or None,
+        limit=limit,
+        max_per_task=max_per_task,
+    )
     if not items:
         raise click.ClickException("No items matched the search.")
 

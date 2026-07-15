@@ -60,6 +60,15 @@ same 500 lines of glue first, and many give up."*
 > search-over-a-catalog-with-no-search-API primitive is now reachable from every
 > STAC client, not just this library's own API — and it is exactly the kind of
 > component that would be graceful to *offer upstream* to Umbra (5.2).
+>
+> **Update:** the **visual commands now render from the prebuilt index**
+> (`DEMO_APP_GAPS.md` G2 / Path A step 2). `umbra map`, `gallery`, `swipe`,
+> `change` and `timescan` take the same `--local` / `--index-db` flags as
+> `search`, so a fetched `catalog.db` turns whole-catalog maps and galleries into
+> instant, offline renders instead of a live S3 re-walk. Small but on the
+> critical path: it was the last "the index does nothing for the visual output"
+> gap, and it is the fast-render substrate the static-first demo (Path A) builds
+> on next.
 
 ## 2. The landscape: life without umbra-py
 

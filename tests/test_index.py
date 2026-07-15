@@ -386,3 +386,70 @@ def test_cli_search_local_missing_index_errors(tmp_path):
     result = CliRunner().invoke(cli_mod.cli, ["search", "--local", "--db", db])
     assert result.exit_code != 0
     assert "No index" in result.output
+
+
+def _no_live_walk(*_a, **_k):
+    """Stand-in for UmbraCatalog.search that fails if a command walks S3 while
+    it was told to read the local index."""
+    raise AssertionError("live S3 walk happened despite --local")
+
+
+def test_cli_map_local_reads_index_without_walking_s3(tmp_path, monkeypatch):
+    """`umbra map --local` renders from a prebuilt index and never touches S3."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    with _index(tmp_path, items=(_A, _B)):
+        pass
+    db = str(tmp_path / "catalog.db")
+
+    # Any live walk is a bug when --local is set: make it explode.
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+
+    out = tmp_path / "map.geojson"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["map", "--local", "--index-db", db, "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text()
+    assert '"a"' in text and '"b"' in text
+    assert "Wrote 2 footprint(s)" in result.output
+
+
+def test_cli_map_local_missing_index_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = str(tmp_path / "missing.db")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["map", "--local", "--index-db", db, "--out", str(tmp_path / "m.geojson")]
+    )
+    assert result.exit_code != 0
+    assert "No index" in result.output
+
+
+def test_cli_gallery_local_reads_index(tmp_path, monkeypatch):
+    """`umbra gallery --local` streams thumbnails for items pulled from the
+    index, without a live S3 walk."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    with _index(tmp_path, items=(_A, _B)):
+        pass
+    db = str(tmp_path / "catalog.db")
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+
+    out = tmp_path / "gallery.html"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["gallery", "--local", "--index-db", db, "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Wrote gallery of 2 acquisition(s)" in result.output
+    assert "data:image/png;base64,Z" in out.read_text()

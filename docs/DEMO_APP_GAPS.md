@@ -75,7 +75,7 @@ largest, most demo-worthy tasks (Centerfield, Utah verified streaming past
 else in this document waited on — the remaining gaps (G2–G8) are now the
 critical path to a demo application.
 
-### G2 — The prebuilt dataset is now fetchable; the index still only feeds `search`
+### G2 — The prebuilt dataset is fetchable and now feeds the visual commands too
 
 - ✅ **Prebuilt dataset now downloadable.** The weekly workflow publishes a
   `catalog.db` snapshot on the rolling `catalog-index` release, and
@@ -84,13 +84,14 @@ critical path to a demo application.
   and a build pipeline can bootstrap from the snapshot in seconds. (A
   GeoJSON / PMTiles export for a JS front end is still the build-pipeline step
   in Path A below.)
-- Verified in `cli.py`: **only `umbra search` accepts `--local`/`--db`**. The
-  visual commands (`map`, `gallery`, `swipe`, `change`, `timescan`) each
-  instantiate `UmbraCatalog()` and re-walk S3 live (cli.py:981, 1119, 500,
-  679, 821). Even with a fully built index, `umbra map` cannot use it. The
-  library layer is fine (viz functions take item lists, and
-  `CatalogIndex.search` yields `UmbraItem`s), so this is CLI wiring, not
-  architecture — but it's required before any fast demo flow exists.
+- ✅ **The visual commands now read the index (Path A step 2, done).** `map`,
+  `gallery`, `swipe`, `change` and `timescan` accept the same `--local` /
+  `--index-db` options as `search` and route through a shared `_gather_items`
+  helper, so a fully built/fetched index renders whole-catalog maps and galleries
+  from local SQL in milliseconds instead of re-walking S3. Previously only
+  `umbra search` could use the index. (The path flag is `--index-db` because the
+  render commands already use `--db` for the decibel stretch.) This was the
+  "required before any fast demo flow exists" wiring — it is now in place.
 - The index lacks demo-oriented denormalizations: no precomputed centroid,
   no cached place label (Nominatim at 1 req/s cannot label thousands of items
   at render time), no cached thumbnail. Baking these in at build time turns
@@ -190,7 +191,8 @@ No servers, hostable on GitHub Pages, and every piece builds on something
 already in the repo:
 
 1. ✅ Fix G1 (`list-type=2`) — prerequisite, **done in PR #29**.
-2. Wire `--local`/`--db` into the visual CLI commands (G2, small).
+2. ✅ Wire `--local`/`--index-db` into the visual CLI commands (G2, small) —
+   **done**: `map`/`gallery`/`swipe`/`change`/`timescan` render from the index.
 3. **Build pipeline** (new, scheduled GitHub Action):
    `umbra index build` → export `catalog.geojson` (exists) → tile to
    **PMTiles** with tippecanoe for the full acquisition set → bake per-item
@@ -245,11 +247,12 @@ Adds on-demand capability over Path A rather than replacing it:
 - **Today**: supported as an *operator-driven* demo — the CLI produces
   genuinely impressive artifacts (lazy-imagery timeline maps, swipe
   comparisons, timescans) that show off every capability one file at a time.
-- **Not today**: a self-serve, full-catalog, interactive application — the
-  repo has no API/server layer, the visual commands can't use the local
-  index, and Folium HTML doesn't scale to the whole archive or to app-grade
-  UX. (The full-catalog data is no longer truncated: the pagination bug that
-  blocked everything here is fixed in PR #29.)
+- **Not today**: a self-serve, full-catalog, interactive application — Folium
+  HTML doesn't scale to the whole archive or to app-grade UX, and the curated
+  on-demand render endpoints (Path B) aren't built. (Two former blockers are
+  gone: the pagination bug that truncated the catalog is fixed in PR #29, and
+  the visual commands can now render from the prebuilt local index via
+  `--local` instead of re-walking S3.)
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the
