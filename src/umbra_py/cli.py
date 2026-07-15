@@ -1818,6 +1818,242 @@ def index_info(db_path) -> None:
     click.echo(f"  built : {_built_note(s['built_at'])}")
 
 
+@cli.group()
+def semantic() -> None:
+    """Semantic (embedding-based) task-name search -- the model-backed layer of
+    natural-language search.
+
+    The deterministic matchers ('umbra search --area' and '--fuzzy') match by the
+    words in a task label. Some queries share no word with the label they mean --
+    "grain storage north dakota" means "Beet Piler - ND" -- and only a model that
+    has read about the world can bridge that. This embeds the task names once
+    ('umbra semantic build') so 'umbra semantic search' can rank them by meaning.
+
+    Requires the ``ai`` extra (``pip install 'umbra-py[ai]'``) and an embedding
+    API key: set OPENAI_API_KEY (optionally OPENAI_BASE_URL for a compatible
+    endpoint, UMBRA_EMBED_MODEL to pick the model). Embeddings only rank task
+    names; the resolved search still runs deterministically.
+    """
+
+
+def _semantic_path(sem_db: str | None, db_path: str | None):
+    """Resolve the semantic vector DB path: an explicit ``--semantic-db``, else
+    the sibling of the (explicit or default) catalog index."""
+    from .semantic import default_semantic_path
+
+    if sem_db:
+        return Path(sem_db)
+    return default_semantic_path(db_path)
+
+
+@semantic.command("build")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Catalog index to read task names from (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Build or fetch it first with 'umbra index "
+    "build' / 'umbra index fetch'.",
+)
+@click.option(
+    "--semantic-db",
+    "sem_db",
+    default=None,
+    help="Where to write the embedding index (default: the catalog index's "
+    "sibling, e.g. catalog.semantic.db).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Embedding model (default: $UMBRA_EMBED_MODEL, else "
+    "text-embedding-3-small). The provider is an OpenAI-compatible /embeddings "
+    "endpoint chosen by OPENAI_API_KEY / OPENAI_BASE_URL.",
+)
+def semantic_build(db_path, sem_db, model) -> None:
+    """Embed the index's task names into a semantic search index.
+
+    Reads the distinct task/site names from the catalog index and stores an
+    embedding vector for each (idempotent -- a rebuild only embeds names not seen
+    before). One embedding call per batch of names; nothing else touches a model.
+    """
+    from . import semantic as sem
+    from .exceptions import MissingDependencyError
+
+    path = _semantic_path(sem_db, db_path)
+    try:
+        model_name = sem.resolve_embed_model(model)
+        embedder = sem.default_embedder(model=model_name)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        with OrbitSpinner("Embedding task names") as spinner:
+
+            def tally(done: int, total: int) -> None:
+                spinner.label = f"Embedding task names ({done}/{total})"
+
+            with sem.SemanticTaskIndex(path) as index:
+                written = index.build(
+                    embedder=embedder,
+                    index_path=db_path,
+                    model=model_name,
+                    progress=tally,
+                )
+                total = len(index)
+    except (sem.SemanticError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Embedded {written} new task name(s); semantic index now holds {total} "
+        f"({model_name}). ({path})"
+    )
+
+
+@semantic.command("search")
+@click.argument("query")
+@click.option(
+    "--semantic-db",
+    "sem_db",
+    default=None,
+    help="Embedding index to query (default: the catalog index's sibling, e.g. "
+    "catalog.semantic.db). Build it first with 'umbra semantic build'.",
+)
+@click.option(
+    "--top-k", type=int, default=5, show_default=True, help="How many ranked matches to show."
+)
+@click.option(
+    "--min-score",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Drop matches below this cosine score (0=unrelated, 1=identical).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Embedding model for the query -- must match the model the index was "
+    "built with (default: $UMBRA_EMBED_MODEL, else text-embedding-3-small).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+@click.option(
+    "--run",
+    "-r",
+    is_flag=True,
+    help="Run 'umbra search --area <best match>' for the top result. The command "
+    "is always shown first, so you see exactly what will run.",
+)
+@click.option("--limit", type=int, default=None, help="Cap results when --run executes the search.")
+@click.option(
+    "--local",
+    is_flag=True,
+    help="With --run, search a prebuilt local index instead of walking S3 live.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Catalog index for --run --local (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Implies --local.",
+)
+def semantic_search(query, sem_db, top_k, min_score, model, as_json, run, limit, local, db_path):
+    """Rank Umbra task/site names by how well they match a plain-language QUERY.
+
+    Embeds the query and scores it against the stored task embeddings, printing
+    the closest names -- the semantic answer to a site you can describe but can't
+    name. Prints the exact 'umbra search --area ...' command for the best match;
+    pass --run to execute it (you audit the command first, as with 'umbra ask').
+    """
+    import shlex
+
+    from . import semantic as sem
+    from .exceptions import MissingDependencyError
+
+    path = _semantic_path(sem_db, db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No semantic index at {path}. Build one first with 'umbra semantic build'."
+        )
+    try:
+        embedder = sem.default_embedder(model=model)
+        with sem.SemanticTaskIndex(path) as index:
+            matches = index.matching_tasks(query, embedder, top_k=top_k, min_score=min_score)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (sem.SemanticError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        payload = {
+            "query": query,
+            "matches": [{"task": m.task, "score": round(m.score, 6)} for m in matches],
+        }
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        if not matches:
+            click.echo("No task names cleared the score threshold.")
+        for m in matches:
+            click.echo(f"  {m.score:.3f}  {m.task}")
+
+    if not matches:
+        return
+
+    best = matches[0].task
+    command = f"umbra search --area {shlex.quote(best)}"
+    if not as_json:
+        click.echo(f"\nBest match: {best}")
+        click.echo(command)
+
+    if not run:
+        if not as_json:
+            click.echo("\nRe-run with --run to search the best match.")
+        return
+
+    if not as_json:
+        click.echo("")
+    found = _gather_items(local=local, db_path=db_path, area=best, limit=limit)
+    for item in found:
+        if as_json:
+            click.echo(json.dumps(item.raw))
+        else:
+            click.echo(item.summary())
+            if item.href:
+                click.echo(f"  url      : {item.href}")
+            click.echo("")
+    if not as_json:
+        click.echo(f"{len(found)} item(s).")
+
+
+@semantic.command("info")
+@click.option(
+    "--semantic-db",
+    "sem_db",
+    default=None,
+    help="Embedding index to inspect (default: the catalog index's sibling).",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Catalog index whose sibling semantic index to inspect (default path).",
+)
+def semantic_info(sem_db, db_path) -> None:
+    """Show what a semantic index holds: task-vector count, model and dimension."""
+    from . import semantic as sem
+
+    path = _semantic_path(sem_db, db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No semantic index at {path}. Build one with 'umbra semantic build'."
+        )
+    with sem.SemanticTaskIndex(path) as index:
+        s = index.stats()
+    size_mb = path.stat().st_size / 1e6
+    click.echo(f"Semantic index: {path}")
+    click.echo(f"  tasks : {s['tasks']}")
+    click.echo(f"  model : {s['model'] or '?'}")
+    click.echo(f"  dim   : {s['dim'] or '?'}")
+    click.echo(f"  size  : {size_mb:.1f} MB")
+
+
 def main() -> None:
     """Console entry point with friendly error reporting."""
     try:

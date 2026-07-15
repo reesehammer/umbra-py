@@ -57,6 +57,10 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra mcp` — Run the umbra Model Context Protocol server (stdio transport).
 - `umbra quicklook` — Render a standalone SAR quicklook image from a STAC item URL.
 - `umbra search` — Search the catalog by area, date and product type.
+- `umbra semantic` — Semantic (embedding-based) task-name search -- the model-backed layer of natural-language search.
+- `umbra semantic build` — Embed the index's task names into a semantic search index.
+- `umbra semantic info` — Show what a semantic index holds: task-vector count, model and dimension.
+- `umbra semantic search` — Rank Umbra task/site names by how well they match a plain-language QUERY.
 - `umbra serve` — Run a read-only STAC API over the catalog index (HTTP server).
 - `umbra swipe` — Render an interactive before/after swipe map of two SAR passes.
 - `umbra timescan` — Collapse a whole SAR time series into one temporal-statistics image.

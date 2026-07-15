@@ -46,6 +46,8 @@ src/umbra_py/
   serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
   context.py         # llm_context(): domain knowledge as a machine-readable JSON dict (`umbra context`)
   llms_txt.py        # llms_txt()/llms_full_txt(): llms.txt-convention agent guide (`umbra llms-txt`); stdlib-only
+  planner.py         # umbra ask: model plans a search, library re-validates + executes it ([ai])
+  semantic.py        # umbra semantic: embedding index over task names for meaning-based --area aliasing ([ai])
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/
