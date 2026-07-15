@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra change --narrate`: a vision model narrates *what changed* between two
+  SAR passes, grounded in a deterministic per-block decibel-change grid
+  (`docs/AI_INTEGRATION_IDEAS.md` C2 — the second Tier C VLM-in-the-loop
+  capability, completing C2).** `umbra describe` reads one scene; this reads the
+  *change* between two. The new `umbra_py.narrate` module (`[ai]` + `[viz]`
+  extras) computes `compute_change_stats` — a coarse grid of the mean *signed*
+  backscatter change in dB (`20·log10(later) − 20·log10(earlier)`: positive =
+  brightened/appeared, the composite's green; negative = dimmed/vanished, its
+  magenta) plus per-block change fractions — and hands the model both the change
+  composite PNG and that grid, so the narration cites numbers rather than
+  hallucinating change the pixels don't support. Add `--narrate` to `umbra change`
+  (composite output only): it renders the composite once, writes it, prints a
+  structured `ChangeNarration` (`{summary, changes[], confidence, caveats[]}`),
+  and writes the machine-readable grid alongside as `<out>.narration.json` so
+  every statement is auditable against a number a test can recompute. The model
+  **only interprets**: the picture and the dB grid are produced deterministically,
+  the reply passes the `parse_narration` boundary and never becomes a filter, a
+  URL, or a measurement, and every narration carries the CC-BY attribution and the
+  `AI_PROVENANCE` note. Like `umbra describe`, the model call is an injectable
+  `Narrator` (and the render an injectable `ChangeRenderer`) reusing the same
+  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` provider plumbing (`OPENAI_BASE_URL` /
+  `UMBRA_NARRATE_MODEL`, `--model`), `requests` only — no heavy SDK — so the whole
+  feature is offline-testable with no network. It stays behind the `[ai]` extra
+  and never runs implicitly. `narrate`, `parse_narration`, `compute_change_stats`,
+  `ChangeNarration`, `ChangeStats` and `NarrateError` are exported at the top
+  level.
 - **`umbra describe "…"`: a vision model reads a SAR scene in plain language
   (`docs/AI_INTEGRATION_IDEAS.md` C2 — the first Tier C VLM-in-the-loop
   capability).** Searching gets you the scene; *reading* SAR is a separate skill

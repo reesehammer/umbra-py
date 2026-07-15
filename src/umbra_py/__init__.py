@@ -33,6 +33,14 @@ from .index import CatalogIndex, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
+from .narrate import (
+    ChangeNarration,
+    ChangeStats,
+    NarrateError,
+    compute_change_stats,
+    narrate,
+    parse_narration,
+)
 from .planner import AskError, SearchPlan, ask, parse_plan
 from .semantic import (
     SemanticError,
@@ -92,6 +100,12 @@ __all__ = [
     "parse_description",
     "SceneDescription",
     "DescribeError",
+    "narrate",
+    "parse_narration",
+    "compute_change_stats",
+    "ChangeNarration",
+    "ChangeStats",
+    "NarrateError",
     "SemanticTaskIndex",
     "SemanticMatch",
     "SemanticError",
