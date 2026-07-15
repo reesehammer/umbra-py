@@ -148,6 +148,27 @@ builds capabilities that assume an AI in the loop.
 > snapshot never carry model-derived data a core install can't use. With C1 done,
 > the next critical path is **Tier C's VLM-in-the-loop capabilities** (C2 scene
 > description / change narration) and the **B3 example notebooks**.
+>
+> **Update:** the **first C2 VLM-in-the-loop capability has shipped** — `umbra
+> describe` (`src/umbra_py/describe.py`, `[ai]` + `[viz]` extras), the moment the
+> library's superpower for AI (its outputs are *images with precise metadata*)
+> becomes a product. `umbra describe <item-url>` renders the item's quicklook,
+> sends that PNG plus the A3 `to_llm_context()` card to a configured vision model
+> (Anthropic or any OpenAI-compatible endpoint, user-supplied key, `requests`
+> only — no SDK), and returns a structured `SceneDescription`: `{summary,
+> observed_features[], confidence, caveats[]}`. It holds the same determinism
+> boundary as `umbra ask` (§A4, §6.1): the picture and the metadata are produced
+> deterministically, the model **only interprets** (its reply passes the
+> `parse_description` boundary and never becomes a filter, a URL, or a
+> coordinate), and the SAR literacy the model needs — backscatter ≠ brightness,
+> speckle, layover/shadow — is encoded once in the packaged prompt. Provenance is
+> non-negotiable (§6.4): every description carries the CC-BY attribution *and* a
+> new `AI_PROVENANCE` note ("AI-generated interpretation … not verified
+> measurements"), so a model's reading of radar is never mistaken for ground
+> truth. The model call is an injectable `Describer` and the render an injectable
+> `Renderer`, so the whole feature is offline-testable with no network. The
+> remaining C2 piece is **`umbra change --narrate`** (change narration grounded in
+> a per-block dB sidecar); **B3 example notebooks** stay on the critical path.
 
 ---
 
@@ -363,11 +384,16 @@ in, deterministic filter out, no model required at runtime*:
 
 Build on the artifacts that already exist:
 
-- `umbra describe <item-url>`: render the quicklook, send it with the A3
-  context card to a VLM, return a structured description (`{summary,
-  observed_features[], confidence, caveats[]}`). The prompt must carry SAR
-  literacy: layover/shadow, speckle, dB stretch semantics — encode that
-  domain knowledge once, in the packaged prompt, where it benefits every user.
+- ✅ **`umbra describe <item-url>` (shipped)** (`umbra_py.describe`, `[ai]` +
+  `[viz]` extras): renders the quicklook, sends it with the A3 context card to a
+  VLM, and returns a structured description (`{summary, observed_features[],
+  confidence, caveats[]}`). The packaged prompt carries the SAR literacy —
+  backscatter ≠ brightness, speckle, layover/shadow, one-frame ≠ change — so a
+  general vision model reads the radar correctly. The model **only interprets**
+  (its reply passes the deterministic `parse_description` boundary), and every
+  description is stamped with the CC-BY attribution and an `AI_PROVENANCE` note.
+  The model call is an injectable `Describer` and the render an injectable
+  `Renderer`, so it is fully offline-testable.
 - `umbra change --narrate`: after writing the composite, produce a
   plain-language change report grounded in the color semantics the library
   already documents ("green = appeared after ⟨date₁⟩ …"). Attach the
@@ -424,7 +450,7 @@ and contributors.
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
-| 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
+| 4 | ✅ **C2 `umbra describe` (shipped)** · ⬜ C2 `change --narrate` · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on

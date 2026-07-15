@@ -39,7 +39,7 @@ pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
-pip install "umbra-py[ai]"      # + umbra ask / semantic: model-backed natural-language search
+pip install "umbra-py[ai]"      # + umbra ask / semantic / describe: model-backed NL search & scene reading
 ```
 
 Requires Python 3.10+.
@@ -487,6 +487,50 @@ so you audit it; add `--run` to execute it, `--json` for machine output, or
 `--top-k` / `--min-score` to tune the ranking. It stays behind the `[ai]` extra
 and never runs implicitly — the deterministic `--area` / `--fuzzy` matchers
 remain the default search path; this is the optional layer on top of them.
+
+### Read a scene in plain language (`umbra describe`)
+
+Searching gets you the scene; *reading* SAR is a different skill (why is water
+dark? is that black patch shadow or an empty field?). `umbra describe` renders an
+item's quicklook, sends that picture plus the metadata context card to a
+configured vision model, and returns a structured, plain-language reading — with
+the SAR literacy baked into the packaged prompt so the model reads radar
+correctly, not as an optical photo.
+
+```bash
+pip install "umbra-py[ai,viz]"       # the model call + the quicklook render
+export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
+umbra describe https://.../<item>/<id>.json
+```
+
+```text
+A bright industrial complex sits amid darker, smooth agricultural fields, with a
+linear road network cutting across the northeast. The strong returns concentrate
+in a rectangular cluster of structures near the center.
+
+Observed features:
+  - bright rectangular structures near the center
+  - dark smooth fields to the south and west
+
+Caveats:
+  - the dark fields could be low-backscatter crops or bare soil, not water
+
+Confidence: medium
+
+AI-generated interpretation of SAR imagery. Descriptions are a model's reading of
+the scene, not verified measurements, and may be wrong; verify against the source
+data before relying on them.
+Contains Umbra open data, licensed under CC BY 4.0.
+```
+
+The model **only interprets** — the picture and the metadata are produced
+deterministically, and nothing the model says becomes a filter, a URL, or a
+coordinate. Every description is stamped with the CC-BY attribution *and* an
+explicit AI-provenance note, so a model's reading of radar is never mistaken for
+ground truth. Add `--json` for a `{summary, observed_features[], confidence,
+caveats[]}` object, `--asset` / `--no-db` / `--max-size` to control the render,
+or `--model` to pick the model. Like `umbra ask`, it stays behind the `[ai]`
+extra and never runs implicitly.
 
 ### Drive it from an AI agent (MCP)
 
