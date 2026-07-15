@@ -119,6 +119,24 @@ same 500 lines of glue first, and many give up."*
 > trust of the scientific audience (the "model plans, library executes" boundary,
 > §3 novelty) are all preserved. The one open C1 piece is now the semantic
 > embedding index — the offline answer to task aliasing.
+>
+> **Update:** the **semantic embedding index has shipped** (`AI_INTEGRATION_IDEAS.md`
+> C1 — the last open C1 piece, so **natural-language search is now complete**).
+> `umbra semantic build` embeds the catalog index's task names once, and `umbra
+> semantic search "grain storage north dakota"` ranks them by meaning to reach
+> `"Beet Piler - ND"` — the alias a query shares no word with, which the
+> deterministic `--fuzzy` matcher can't and shouldn't fake. It is the persistent,
+> offline, no-round-trip answer `umbra ask` only approximated, and it holds the
+> same funnel-widening line (§1): a newcomer who can *describe* a site but can't
+> *name* it now gets there. It also preserves the project's boundary and novelty
+> (§3): the only model call is turning text into a vector (an injectable embedder,
+> `[ai]` extra, never implicit), while storage, cosine ranking and the
+> audit-then-run command are all deterministic — and it stays graceful under
+> upstream obsolescence, since it layers on the same task list Umbra could publish
+> an index for tomorrow. With C1 done, the AI critical path moves to Tier C's
+> VLM-in-the-loop capabilities (scene description / change narration) and the
+> example notebooks; the single highest-value strategic move overall remains the
+> unstarted Canopy backend (5.1).
 
 ## 2. The landscape: life without umbra-py
 

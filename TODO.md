@@ -72,51 +72,41 @@ follow-ons:
 
 ---
 
-## Finish C1 natural-language search (semantic task aliasing)
+## C1 natural-language search follow-ons (all four steps now shipped)
 
-- **Surfaced in:** the relative-date-bounds PR, the fuzzy-task-matching PR, and
-  the `umbra ask` PR (`AI_INTEGRATION_IDEAS.md` C1 — three of the four C1 steps
-  have shipped in `src/umbra_py/dates.py`, `src/umbra_py/fuzzy.py` and
-  `src/umbra_py/planner.py`).
-- **Code:** `src/umbra_py/fuzzy.py` (deterministic matcher), `catalog.py` /
-  `index.py` (`fuzzy=` on `search`).
+The four C1 steps — relative dates (`dates.py`), the deterministic fuzzy task
+matcher (`fuzzy.py`), the model-planned `umbra ask` (`planner.py`), and the
+semantic embedding index (`semantic.py`) — are all shipped (see the **Done**
+log). Optional follow-ons that build on them, not blockers:
 
-The relative-date resolver, the deterministic fuzzy task matcher, and the
-model-planned `umbra ask` are all done. What remains of C1 is the one piece
-plain string similarity can't (and shouldn't) fake:
-
-- ✅ **Fuzzy task matching (string-similarity step, done).** `area=` stays a
-  literal case-insensitive substring by default; `fuzzy=True` (CLI `--fuzzy`)
-  widens it to the deterministic token-wise match in `umbra_py.fuzzy` —
-  word-order- and punctuation-independent and typo-tolerant, a strict superset
-  of the substring path (so nothing regresses), shared by the live and index
-  backends and the MCP `search_catalog` tool. Offline tests cover both paths and
-  assert they agree.
-- ✅ **`umbra ask "…"` (`[ai]` extra, done).** `src/umbra_py/planner.py` hands
-  the user's sentence plus the `llm_context()` document to a configured model
-  and returns the *deterministic command it maps to*, shown before running. The
-  model only plans; `parse_plan` re-validates every field (dates via
-  `parse_date_bound`, product types via `PRODUCT_ASSETS`, bbox range-checked)
-  before it can become a filter; the user audits the printed command. This is
-  where range keywords with hemisphere-dependent meaning (`"last winter"`) that
-  the deterministic `parse_date_bound` rejects belong — the model resolves the
-  season to concrete dates the deterministic layer then validates. Provider is
-  Anthropic or any OpenAI-compatible endpoint (user-supplied key, `requests`
-  only). Follow-ons: a LangChain/LlamaIndex tool wrapper reusing `SearchPlan`,
-  and an optional `--run` confirmation prompt for destructive-scope searches.
-- ⬜ **Semantic / alias task matching.** The string-similarity step deliberately
-  does *not* reach `area="grain storage north dakota"` → "Beet Piler - ND" —
-  that needs an embedding index over task names/descriptions (sqlite-vec inside
-  `catalog.db`, `[ai]` extra). Build it on top of `fuzzy.matching_tasks` as the
-  optional, model-backed layer, keeping the deterministic matcher as the default.
-  (`umbra ask` partly covers this today: a model *can* map "grain storage north
-  dakota" to `area="Beet Piler - ND"` when it knows the site — but a persistent
-  embedding index is the offline, no-round-trip answer.)
+- **LangChain/LlamaIndex tool wrapper** reusing `SearchPlan` / the semantic
+  matcher (same shapes, different registration) — worth doing for reach.
+- **MCP `search_catalog` semantic mode.** The MCP tool exposes `fuzzy=`; a
+  `semantic=` mode (resolving a query to task names via `SemanticTaskIndex`
+  before searching) would give agents the same aliasing the CLI now has — gated,
+  like the CLI, on the `[ai]` embedding key being configured.
+- **Embed task *descriptions*, not just names.** The current index embeds the
+  task label; if Umbra publishes per-task descriptions, embedding those too would
+  widen recall further.
 
 ---
 
 ## Done
 
+- **Semantic task-name aliasing (last open C1 piece).** Added
+  `src/umbra_py/semantic.py` (`[ai]` extra): `SemanticTaskIndex` embeds the
+  catalog index's distinct task names once (`umbra semantic build`) into a
+  schema-versioned SQLite file beside `catalog.db`, and `umbra semantic search`
+  ranks them against a query by cosine similarity, printing the `umbra search
+  --area …` command for the best match to audit before `--run`. The only model
+  call is the injectable `Embedder` (default: an OpenAI-compatible `/embeddings`
+  endpoint via `requests`); storage, cosine and ranking are stdlib-only (no
+  `numpy`, no `sqlite-vec`), so it is fully offline-testable with a stand-in
+  embedder. Resolves `area="grain storage north dakota"` → "Beet Piler - ND",
+  which plain string similarity can't and shouldn't fake. Chose a sidecar
+  `catalog.semantic.db` over embedding vectors *inside* `catalog.db` so the
+  deterministic index and its published snapshot never carry model-derived data a
+  core install can't use.
 - **Bootstrap local search from the published catalog snapshot.** Added
   `CatalogIndex.from_release()` / `umbra index fetch` (downloads the rolling
   `catalog-index` release's `catalog.db` via the resume-safe `download_url`),

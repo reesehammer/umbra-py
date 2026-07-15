@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Semantic task-name aliasing: the embedding layer of natural-language search
+  (`docs/AI_INTEGRATION_IDEAS.md` C1 — the last open C1 piece, completing Phase
+  3's natural-language-search line).** `--fuzzy` matches by the *words* in a task
+  label; some queries share no word with the label they mean (Umbra's
+  North-Dakota grain-storage site is named *"Beet Piler - ND"*), which only a
+  model that has read about the world can bridge. The new `umbra_py.semantic`
+  module (`[ai]` extra) embeds the catalog index's task names once and ranks them
+  by meaning: `umbra semantic build` stores one vector per distinct task name in
+  a small SQLite file beside `catalog.db` (schema-versioned with `PRAGMA
+  user_version`; idempotent — a rebuild only embeds new names), and `umbra
+  semantic search "grain storage north dakota"` embeds the query, ranks the
+  stored vectors by cosine similarity, and prints the closest task names plus the
+  exact `umbra search --area …` command for the best match (`--run` executes it,
+  `--json` emits the ranking, `--top-k` / `--min-score` tune it) — the same
+  "model proposes, library executes, user audits" boundary as `umbra ask`. The
+  **only** model call is turning text into a vector: an injectable `Embedder`
+  callable (default: an OpenAI-compatible `/embeddings` endpoint via the
+  already-core `requests`, `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
+  `UMBRA_EMBED_MODEL`, no heavy SDK). Storage, cosine ranking and thresholding
+  are stdlib-only — no `numpy`, no `sqlite-vec` binary dependency — so the whole
+  feature is offline-testable with a deterministic stand-in embedder. It stays
+  behind the `[ai]` extra and never runs implicitly; the deterministic `--area` /
+  `--fuzzy` matchers remain the default search path. `SemanticTaskIndex`,
+  `SemanticMatch`, `SemanticError`, `cosine_similarity` and `default_embedder`
+  are exported at the top level.
 - **`umbra ask "…"`: model-planned, deterministically executed natural-language
   search (`docs/AI_INTEGRATION_IDEAS.md` C1 — the capstone of the
   natural-language-search direction, and the first feature that calls a model).**
@@ -30,9 +55,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt building, plan validation, command rendering, provider selection, and
   the CLI — is fully offline-testable with no network. `ask`, `parse_plan`,
   `SearchPlan` and `AskError` are exported at the top level. Semantic task
-  aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) remains the
-  one open C1 piece — it needs the future embedding index, not a model round
-  trip on every query.
+  aliasing (`"grain storage north dakota"` → `"Beet Piler - ND"`) is the
+  persistent, offline embedding-index answer to the same aliasing — see the
+  `umbra semantic` entry above, which closes out C1.
 - **Fuzzy task matching for `--area` search (`docs/AI_INTEGRATION_IDEAS.md` C1 —
   the second deterministic step of Phase 3).** `--area` (and the
   `UmbraCatalog.search` / `CatalogIndex.search` `area=` argument, and the MCP

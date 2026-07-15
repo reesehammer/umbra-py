@@ -39,7 +39,7 @@ pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
-pip install "umbra-py[ai]"      # + umbra ask: model-planned natural-language search
+pip install "umbra-py[ai]"      # + umbra ask / semantic: model-backed natural-language search
 ```
 
 Requires Python 3.10+.
@@ -451,6 +451,42 @@ to get the resolved plan as JSON, or `--model` / `UMBRA_ASK_MODEL` to choose the
 model. It's the one place a model is called — opt-in behind `[ai]`, never
 implicit — so seasons and other phrasing the deterministic core rejects
 (`"last winter"`) get resolved to concrete dates the deterministic layer checks.
+
+### Find a site you can describe but can't name (`umbra semantic`)
+
+`--fuzzy` matches by the *words* in a task label. Some queries share no word
+with the label they mean — Umbra's grain-storage site in North Dakota is
+literally named *"Beet Piler - ND"* — and only a model that has read about the
+world can bridge that. `umbra semantic` embeds the task names once so a query can
+be ranked by **meaning**, not spelling:
+
+```bash
+pip install "umbra-py[ai]"
+export OPENAI_API_KEY=...            # or OPENAI_BASE_URL for any compatible endpoint
+umbra index fetch                    # (or build) so there are task names to embed
+umbra semantic build                 # embed the index's task names once
+umbra semantic search "grain storage north dakota"
+```
+
+```text
+  0.612  Beet Piler - ND
+  0.088  Grand Forks Airfield
+
+Best match: Beet Piler - ND
+umbra search --area 'Beet Piler - ND'
+
+Re-run with --run to search the best match.
+```
+
+The embedding step is the *only* part that calls a model, and it runs once at
+build time; the query embeds a single sentence and everything else — storing the
+vectors (a small SQLite file beside `catalog.db`), the cosine ranking, the
+threshold — is deterministic and offline. As with `umbra ask`, it prints the
+exact `umbra search --area …` command for the top match before running anything,
+so you audit it; add `--run` to execute it, `--json` for machine output, or
+`--top-k` / `--min-score` to tune the ranking. It stays behind the `[ai]` extra
+and never runs implicitly — the deterministic `--area` / `--fuzzy` matchers
+remain the default search path; this is the optional layer on top of them.
 
 ### Drive it from an AI agent (MCP)
 

@@ -127,6 +127,27 @@ builds capabilities that assume an AI in the loop.
 > remaining C1 piece is the **semantic embedding index** (`sqlite-vec`) — the
 > offline, no-round-trip answer to task aliasing that plain string similarity
 > can't fake.
+>
+> **Update:** the **semantic embedding index has shipped** — the last open C1
+> piece, so **C1 (natural-language search) is now complete**. `umbra_py.semantic`
+> (`[ai]` extra) embeds the catalog index's task names once (`umbra semantic
+> build`) and ranks them against a query by cosine similarity (`umbra semantic
+> search "grain storage north dakota"` → "Beet Piler - ND"), printing the `umbra
+> search --area …` command for the best match to audit before `--run` — the same
+> "model proposes, library executes, user audits" boundary as `umbra ask`. The
+> **only** model call is turning text into a vector (an injectable `Embedder`,
+> default an OpenAI-compatible `/embeddings` endpoint via the already-core
+> `requests`); storage, cosine ranking and thresholding are stdlib-only — no
+> `numpy`, and deliberately *no* `sqlite-vec` binary dependency (a brute-force
+> scan over a few thousand task vectors is instant, and the schema leaves room to
+> swap in a vector extension later) — so the whole feature is offline-testable
+> with a deterministic stand-in embedder. It stays behind `[ai]` and never runs
+> implicitly; the deterministic `--area` / `--fuzzy` matchers remain the default.
+> One implementation note: the vectors live in a sidecar `catalog.semantic.db`
+> rather than *inside* `catalog.db`, so the deterministic index and its published
+> snapshot never carry model-derived data a core install can't use. With C1 done,
+> the next critical path is **Tier C's VLM-in-the-loop capabilities** (C2 scene
+> description / change narration) and the **B3 example notebooks**.
 
 ---
 
@@ -312,10 +333,19 @@ in, deterministic filter out, no model required at runtime*:
   default, and `fuzzy=True` now widens it to a deterministic token-wise match
   (`umbra_py.fuzzy`) that is word-order- and punctuation-independent and
   typo-tolerant — a strict superset of the substring path, shared by the live
-  and index backends, no model call. Still open: an **embedding index** over
-  task names + descriptions (sqlite-vec inside the existing `catalog.db`,
-  `[ai]` extra) so `area="grain storage north dakota"` finds the beet pilers —
-  the semantic layer plain string similarity can't and shouldn't fake.
+  and index backends, no model call.
+- ✅ **Semantic aliasing (shipped)** (`[ai]` extra): an **embedding index** over
+  the task names (`umbra_py.semantic`) so `area="grain storage north dakota"`
+  finds the beet pilers — the semantic layer plain string similarity can't and
+  shouldn't fake. `umbra semantic build` embeds each distinct task name once into
+  a schema-versioned sidecar SQLite DB (`catalog.semantic.db`); `umbra semantic
+  search` embeds the query and ranks by cosine similarity, printing the `umbra
+  search --area …` command for the best match to audit before `--run`. The only
+  model call is the injectable `Embedder` (default: an OpenAI-compatible
+  `/embeddings` endpoint via `requests`); storage, cosine and ranking are
+  stdlib-only (no `numpy`, no `sqlite-vec` — brute force is instant at catalog
+  scale, and the schema leaves room to add a vector extension later), so it is
+  fully offline-testable with a stand-in embedder.
 - ✅ **`umbra ask "…"` (shipped)** (`[ai]` extra): a single command that hands
   the user's sentence plus the A2 context document to a configured model
   (Anthropic / any OpenAI-compatible endpoint, user-supplied key, `requests`
@@ -393,7 +423,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ⬜ C1 semantic aliasing (embedding index) · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 

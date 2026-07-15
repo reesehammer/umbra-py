@@ -33,6 +33,13 @@ from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
 from .planner import AskError, SearchPlan, ask, parse_plan
+from .semantic import (
+    SemanticError,
+    SemanticMatch,
+    SemanticTaskIndex,
+    cosine_similarity,
+    default_embedder,
+)
 from .viewer import make_viewer_server, view
 from .viz import (
     change_animation,
@@ -79,6 +86,11 @@ __all__ = [
     "parse_plan",
     "SearchPlan",
     "AskError",
+    "SemanticTaskIndex",
+    "SemanticMatch",
+    "SemanticError",
+    "cosine_similarity",
+    "default_embedder",
     "parse_date_bound",
     "task_matches",
     "matching_tasks",
