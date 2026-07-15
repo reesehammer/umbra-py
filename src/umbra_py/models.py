@@ -12,7 +12,16 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
 
-from .constants import METADATA_ASSET, PRODUCT_ASSETS, S3_BUCKET, S3_REGION
+from .constants import (
+    ATTRIBUTION,
+    DATA_LICENSE,
+    METADATA_ASSET,
+    POLARIZATION_CAVEAT,
+    PRODUCT_ASSETS,
+    PRODUCT_TYPE_EXPLANATIONS,
+    S3_BUCKET,
+    S3_REGION,
+)
 from .exceptions import AssetNotFoundError
 
 # (min_lon, min_lat, max_lon, max_lat)
@@ -366,6 +375,44 @@ class UmbraItem:
             "available_assets": self.available_assets,
         }
 
+    def to_llm_context(self) -> dict[str, Any]:
+        """A compact, explanation-rich context card for prompting a model.
+
+        Like :meth:`metadata_summary` but tuned for a language model rather
+        than a human: every present product type carries a one-line
+        explanation, the polarizations carry the change-detection caveat, and
+        the mandatory CC-BY attribution line travels with the data. The
+        differences from ``metadata_summary`` are exactly the things a model
+        needs spelled out and a human already knows — so an agent can reason
+        about the scene, and cite the right product, with no external SAR
+        literacy. Deterministic and offline (no network, no model call).
+        """
+        rng, azi = self.resolution
+        return {
+            "id": self.id,
+            "datetime": self.datetime.isoformat() if self.datetime else None,
+            "place": self.task,
+            "bbox": list(self.bbox) if self.bbox else None,
+            "platform": self.platform,
+            "instrument_mode": self.instrument_mode,
+            "incidence_angle_deg": self.incidence_angle,
+            "resolution_range_m": rng,
+            "resolution_azimuth_m": azi,
+            "polarizations": self.polarizations,
+            "polarization_caveat": POLARIZATION_CAVEAT,
+            "products": [
+                {
+                    "type": name,
+                    "explanation": PRODUCT_TYPE_EXPLANATIONS.get(name, ""),
+                    "url": self.asset_href(name),
+                }
+                for name in self.available_assets
+            ],
+            "stac_href": self.href,
+            "license": DATA_LICENSE,
+            "attribution": ATTRIBUTION,
+        }
+
     def to_geojson(self) -> dict[str, Any]:
         """Return a GeoJSON ``Feature`` representing this item.
 
@@ -377,6 +424,18 @@ class UmbraItem:
         from .viz import item_to_feature  # noqa: PLC0415
 
         return item_to_feature(self)
+
+    @property
+    def __geo_interface__(self) -> dict[str, Any]:
+        """GeoJSON ``Feature`` mapping for the Python geo-interface protocol.
+
+        Lets geopandas / shapely / leafmap ingest an item with zero glue
+        (``shapely.geometry.shape(item)``,
+        ``gpd.GeoDataFrame.from_features([item])``) — and agent-written
+        analysis code "just works" on the first try. Delegates to
+        :meth:`to_geojson`, so the 2D-footprint behaviour is identical.
+        """
+        return self.to_geojson()
 
     def summary(self) -> str:
         """A one-paragraph readable description for the CLI / notebooks."""
@@ -435,6 +494,18 @@ class ItemCollection(list):
         self._thumbnails = thumbnails
         self._max_size = max_size
         self._db = db
+
+    @property
+    def __geo_interface__(self) -> dict[str, Any]:
+        """GeoJSON ``FeatureCollection`` for the Python geo-interface protocol.
+
+        Mirrors :attr:`UmbraItem.__geo_interface__` at the collection level, so
+        ``gpd.GeoDataFrame.from_features(results)`` ingests a whole search with
+        zero code. Delegates to :func:`umbra_py.viz.items_to_featurecollection`.
+        """
+        from .viz import items_to_featurecollection  # noqa: PLC0415
+
+        return items_to_featurecollection(self)
 
     def _repr_html_(self) -> str:
         from ._html import gallery_html  # noqa: PLC0415

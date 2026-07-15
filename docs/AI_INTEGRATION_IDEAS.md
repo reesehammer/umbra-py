@@ -42,6 +42,16 @@ The ideas are organized in three tiers by ambition. Tier A makes the existing
 library legible to AI; Tier B exposes it through AI-native interfaces; Tier C
 builds capabilities that assume an AI in the loop.
 
+> **Status (2026-07-15):** the **Tier A / Phase 1 groundwork is shipped** — the
+> zero-dependency, deterministic prerequisite every later phase consumes.
+> `UmbraItem.to_llm_context()` (A3) returns an explanation-rich context card;
+> `umbra_py.llm_context()` / `umbra context` (A2) is the runtime context
+> document; `UmbraItem`/`ItemCollection` now implement `__geo_interface__` (B3);
+> the determinism boundary (A4) is written into `AGENTS.md`; and `umbra info
+> --json` extends the structured-output guarantee (A1). This unblocks the
+> flagship MCP server (B1) — its `search_catalog`/`get_item` tools return the A3
+> cards, and its schemas reuse the A2 document — which is now the critical path.
+
 ---
 
 ## 2. Tier A — Make the existing surface AI-legible (low effort, immediate payoff)
@@ -50,9 +60,9 @@ builds capabilities that assume an AI in the loop.
 
 `umbra search --json` exists; extend the guarantee to the whole CLI:
 
-- `--json` on `info`, `index info`, `download` (emit `{asset, path, bytes,
-  sha256}` records), and the render commands (emit `{output, items_used:
-  [ids], parameters}` manifests).
+- `--json` on `info` (✅ shipped — emits the A3 context card), `index info`,
+  `download` (emit `{asset, path, bytes, sha256}` records), and the render
+  commands (emit `{output, items_used: [ids], parameters}` manifests).
 - Machine-readable errors: on failure, print a single JSON object to stderr
   (`{"error": "CatalogError", "message": ..., "hint": ...}`) when `--json` is
   active. Agents recover from `hint` fields dramatically better than from
@@ -73,14 +83,15 @@ keep that guarantee explicit in a test.
 - The repo already has a strong `AGENTS.md` — treat it as the *contributor*
   agent guide, and make `llms.txt` the *user* agent guide ("how to drive this
   library," not "how to modify it").
-- Add a `umbra_py.llm_context()` helper (or `umbra --help-json`) returning the
+- ✅ **shipped:** `umbra_py.llm_context()` (CLI: `umbra context`) returns the
   product-type table, search parameter semantics, and license/attribution
-  rules as one JSON document an agent can pull into context at runtime.
+  rules as one JSON document an agent can pull into context at runtime. The
+  `llms.txt` docs-bundle half remains open (Phase 2).
 
-### A3. Item-level "context cards" for models
+### A3. Item-level "context cards" for models — **shipped**
 
-`UmbraItem.metadata_summary()` is close; add an explicit
-`UmbraItem.to_llm_context()` that returns a compact, token-efficient dict
+✅ `UmbraItem.to_llm_context()` ships (surfaced on the CLI as `umbra info
+<url> --json`). It returns a compact, token-efficient dict
 designed for prompting: id, ISO datetime, place (task name), bbox, product
 types with one-line explanations, resolution, polarization *with the caveat
 string* ("HH and VV cannot be compared for change"), the asset URLs, and the
@@ -161,10 +172,10 @@ no operational cost and no abuse surface.
 
 ### B3. Notebook & framework affordances
 
-- `_repr_html_` cards already exist (excellent). Add `__geo_interface__` to
-  `UmbraItem`/`ItemCollection` (trivially derived from the existing
-  `to_geojson`) so geopandas/shapely/leafmap ingest results with zero code —
-  and so agent-written analysis code "just works" on the first try.
+- `_repr_html_` cards already exist (excellent). ✅ **shipped:**
+  `UmbraItem`/`ItemCollection` now implement `__geo_interface__` (derived from
+  the existing `to_geojson`) so geopandas/shapely/leafmap ingest results with
+  zero code — and so agent-written analysis code "just works" on the first try.
 - Publish two or three **agent-executable example notebooks** (the planned
   `examples/*.ipynb`) with deterministic, small-area searches. Coding agents
   learn a library from its examples; runnable, self-checking examples are
@@ -257,7 +268,7 @@ and contributors.
 
 | Phase | Items | Effort | Rationale |
 |---|---|---|---|
-| 1 (next release) | A1 structured CLI output · A3 context cards · A4 determinism policy · B3 `__geo_interface__` | days | Zero-dependency groundwork every later phase consumes |
+| 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | **B1 MCP server** · A2 `llms.txt` + docs bundle · nightly prebuilt index (analysis doc #17) | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | B2 `umbra serve` STAC API · C1 NL search (fuzzy/date parts first) · B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
