@@ -253,7 +253,19 @@ regression test that serves two fake truncated pages and asserts both are
 consumed, and a `network`-marked test asserting a >1,000-key task yields more
 than 1,000 keys. This is a two-line production fix.
 
-### 4.2 The N+1 sidecar fetch is serial (high impact on UX)
+### 4.2 The N+1 sidecar fetch is serial (high impact on UX) — **fixed**
+
+> **Status:** ✅ Fixed. `_walk_task` now collects each task's in-range
+> acquisitions in date order and resolves their `*.stac.v2.json` sidecars
+> through a bounded `ThreadPoolExecutor` (`_SIDECAR_WORKERS = 8`, mirroring the
+> gallery pool) in `UmbraCatalog._items_from_sidecars`, yielding strictly in the
+> sorted order — so live-search wall time drops from N serial fetches toward
+> N/workers with the deterministic ordering preserved. Fetches run in windows so
+> an early `limit`/`max_per_task` wastes at most one window, and the shared
+> session's connection pool was sized up (`pool_maxsize=16`) to hold the
+> fan-out. Regression tests cover order-under-out-of-order-completion, genuine
+> parallelism, the bounded over-fetch, and the single-acquisition fast path.
+> Original finding retained below.
 
 `_walk_task` fetches one `*.stac.v2.json` per in-range acquisition,
 sequentially (catalog.py:283-291). A 50-item search pays ~50 round trips at
@@ -389,7 +401,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 6 | ✅ **Done.** `default_session()` mounts an `HTTPAdapter` with `Retry(total=3, backoff_factor=0.5, status_forcelist=(429,500,502,503,504))` on `GET`/`HEAD`; every caller inherits it | `_http.py` | ~5 lines |
 | 7 | Escape all remote-derived strings in `viz._popup_html`; validate href scheme | `viz.py:159-208` | small |
 | 8 | Fix the ledgered `_classify_asset` `"tif"` dead-branch bug with a regression test; delete the TODO entry | `models.py:30`, `TODO.md` | ~5 lines |
-| 9 | Parallelize sidecar GETs with a bounded thread pool (mirror the gallery pattern) | `catalog.py:_walk_task` | medium |
+| 9 | ✅ **Done.** `_walk_task` collects in-range acquisitions in date order and fetches their sidecars through a bounded `ThreadPoolExecutor` (`_items_from_sidecars`, `_SIDECAR_WORKERS=8`), yielding in sorted order; windowed so `limit` caps over-fetch, session `pool_maxsize` raised to 16 | `catalog.py:_walk_task`, `_http.py` | medium |
 | 10 | Add `PRAGMA user_version` schema versioning to `CatalogIndex` before any DBs are in the wild | `index.py` | small |
 
 **P2 — hardening & hygiene**
