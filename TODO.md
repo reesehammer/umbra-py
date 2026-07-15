@@ -72,6 +72,37 @@ follow-ons:
 
 ---
 
+## Canopy commercial-archive backend follow-ons (`UmbraCatalog(token=...)` shipped)
+
+- **Surfaced in:** the Canopy backend PR (`docs/STRATEGY.md` 5.1).
+- **Code:** `src/umbra_py/catalog.py` (`_search_archive` / `_archive_page`),
+  `src/umbra_py/constants.py` (`CANOPY_ARCHIVE_URL`), `umbra search --token`.
+
+The commercial archive is now searchable behind the same `search()` interface
+(bearer token → STAC API POST search + `rel="next"` pagination, offline-tested
+against a mocked API). Open follow-ons, none a blocker:
+
+- **Push `product_types` / `area` down as STAC query/filter extensions.** They
+  are applied client-side today (exact parity with the open-bucket path). Once
+  the concrete Canopy field names are confirmed against the live API, sending
+  them as a STAC *query*/*filter* body would let the server pre-filter and cut
+  transferred pages. This needs a real token to verify, so it is deliberately
+  deferred rather than guessed.
+- **`get_item(id)` against the archive.** `UmbraCatalog.search` covers listing;
+  a keyed single-item fetch (`GET /collections/{id}/items/{item_id}` or an `ids`
+  search) would round out the interface for the MCP `get_item` tool over the
+  commercial archive.
+- **Verify request/response shapes against the live Canopy API.** The client is
+  built to the STAC API *standard*; confirm the exact search body, collection
+  ids, and pagination link shape Canopy emits, and adjust if it deviates. Add a
+  `network`-marked smoke test gated on a `UMBRA_CANOPY_TOKEN` secret.
+- **Wire `--token` into the visual commands.** `umbra search` takes `--token`;
+  the render commands (`map`/`gallery`/`change`/…) route through `_gather_items`
+  and could accept it too, so a paying user renders the commercial archive with
+  the same flags.
+
+---
+
 ## C1 natural-language search follow-ons (all four steps now shipped)
 
 The four C1 steps — relative dates (`dates.py`), the deterministic fuzzy task

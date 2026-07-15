@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Canopy commercial-archive backend behind the same `search()` interface
+  (`docs/STRATEGY.md` 5.1 — the single highest-value strategic move).** Umbra's
+  open data is a static STAC catalog with no search API (which is why this
+  library crawls S3); its *commercial* product, Canopy, exposes a real,
+  authenticated STAC API over the full archive. `UmbraCatalog` now accepts a
+  Canopy `token` (plus optional `archive_url` / `collections`), and when one is
+  given the **same `search()` call** queries
+  `api.canopy.umbra.space/archive/search` instead of walking the open bucket —
+  *the same filters, the same `UmbraItem` results*, so every downstream verb
+  (download, quicklook, change, chips, …) works unchanged against either
+  archive. This is the funnel made literal: a user onboarded on the free data is
+  already holding the exact tool they'd use as a paying customer. `bbox` and the
+  date bounds are pushed down to the STAC API; `product_types` and
+  `area`/`fuzzy` are applied to the returned items exactly as on the open path,
+  so the interface is identical across both. The client speaks the STAC API
+  standard — a POST item-search body plus `rel="next"` pagination (POST-merge or
+  GET token links) — and the bearer token is only ever sent to the Canopy
+  endpoint, never the open bucket; a 401/403 surfaces as a clear "token
+  rejected" `CatalogError`. The CLI exposes it as `umbra search --token …`
+  (falling back to `$UMBRA_CANOPY_TOKEN`), mutually exclusive with
+  `--local`/`--db`. No model is involved and no credentials are needed to test
+  it: the whole path is offline-testable against a mocked STAC API
+  (`tests/test_canopy.py`).
 - **`watch_site` MCP tool + `watch-site` prompt: the standing-analyst delta,
   now conversational (`docs/AI_INTEGRATION_IDEAS.md` C3 — the last open C3
   piece).** The `umbra watch` idempotent delta is now surfaced over the flagship

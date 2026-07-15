@@ -232,6 +232,26 @@ same 500 lines of glue first, and many give up."*
 > change, and the source and store stay injectable, so it is fully offline-testable
 > without the SDK. The remaining AI item is the B3 example notebooks; the single
 > highest-value strategic move overall remains the unstarted Canopy backend (5.1).
+>
+> **Update:** the **single highest-value strategic move has shipped — the Canopy
+> commercial-archive backend behind the same `search()` interface** (workstream
+> 5.1). `UmbraCatalog(token=…)` (and `umbra search --token …` /
+> `$UMBRA_CANOPY_TOKEN`) now searches Umbra's authenticated commercial archive
+> over its real STAC API (`api.canopy.umbra.space/archive/search`) instead of
+> crawling the open bucket — *the same call, one extra argument*, yielding the
+> same `UmbraItem`s so every downstream verb (download, quicklook, change,
+> chips, …) works unchanged against either archive. This is the funnel made
+> literal (§1): a user who learned the library on the free data is already
+> holding the exact tool they'd use as a paying Canopy customer, with no new
+> API to learn. It is the honest, standards-based version of the pitch — the
+> client speaks the STAC API standard (POST search body, `rel="next"`
+> pagination), the token is only ever sent to the Canopy endpoint (never the
+> open bucket), and the whole path is offline-testable against a mocked API with
+> no credentials, so it holds the library's testability and trust (§3). With
+> 5.1 landed, the two remaining strategic gaps are the B3 example notebooks
+> (5.4) and taking adoption visible where Umbra looks (5.3) — including opening
+> the "talk to Umbra" conversation (5.6), which is now concrete: the funnel runs
+> end to end from free bucket to paid archive in one library.
 
 ## 2. The landscape: life without umbra-py
 
@@ -307,14 +327,33 @@ yes to.
 
 ## 5. Workstreams, ranked by leverage
 
-### 5.1 Canopy backend behind the same `search()` interface — **not started**
+### 5.1 Canopy backend behind the same `search()` interface — **shipped** (PR #45)
 
-The single highest-value move. Same three lines of code against the open
-bucket by default, `UmbraCatalog(token=...)` against
-`api.canopy.umbra.space/archive/search` (a real STAC API) for the
-commercial archive. Every user onboarded on open data is then already
-holding the tool they'd use as a paying customer — the funnel, made
-literal.
+The single highest-value move, now landed. Same three lines of code against
+the open bucket by default; pass a Canopy token —
+`UmbraCatalog(token=...)`, or `umbra search --token …` / `$UMBRA_CANOPY_TOKEN`
+— and the *same* `search()` interface queries
+`api.canopy.umbra.space/archive/search` (a real STAC API) over the
+commercial archive instead. Every user onboarded on open data is then already
+holding the tool they'd use as a paying customer — the funnel, made literal.
+
+Design notes that keep it honest and testable:
+
+- **One interface, two archives.** `bbox` and the date bounds are pushed down
+  to the STAC API; `product_types` and `area`/`fuzzy` are applied to the
+  returned items exactly as on the open-bucket path, so the filters mean the
+  same thing on both. Both paths yield `UmbraItem`s, so every downstream verb
+  (download, quicklook, change, chips, …) works unchanged against either.
+- **STAC-API standard, not a bespoke wrapper.** The client POSTs a standard
+  STAC item-search body and follows `rel="next"` pagination (POST-merge or GET
+  token links), so it is offline-testable against a mocked API with no
+  credentials — and it degrades to a clear "token rejected" error on 401/403.
+- **The token never touches the open bucket.** Bearer auth is only ever sent
+  to the configured Canopy endpoint.
+
+Open follow-ons (not blockers): pushing `product_types` down as a STAC
+query/filter extension once the exact Canopy field names are confirmed, and a
+`get_item(id)` archive lookup. See `TODO.md`.
 
 ### 5.2 Continuously rebuilt, published catalog index — **shipped** (PR #26)
 
