@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Fetch the prebuilt catalog index (`CatalogIndex.from_release`, `umbra index
+  fetch`).** The weekly workflow already publishes a `catalog.db` snapshot on
+  the rolling `catalog-index` release, but a fresh install still had to crawl
+  the whole S3 bucket before `umbra search --local` returned anything. The new
+  fetch step downloads that snapshot straight to the default index path via the
+  existing resume-safe `download_url`, so whole-catalog local search works out
+  of the box — no crawl:
+
+  ```bash
+  umbra index fetch                 # download the weekly snapshot (seconds)
+  umbra search --local --area "Centerfield, Utah"   # instant, offline
+  ```
+
+  ```python
+  from umbra_py import CatalogIndex
+
+  with CatalogIndex.from_release() as index:   # download + open
+      for item in index.search(area="centerfield"):
+          print(item.summary())
+  ```
+
+  `umbra index build` now stamps the index with a `built_at` date, and
+  `umbra index info` reports it with staleness (e.g. `built : 2026-07-14 (1
+  day(s) ago)`) so a downloaded snapshot's age is visible. This is the consume
+  side of the publish workflow shipped in PR #26 — the last prerequisite the
+  strategy, demo, and AI-integration docs named before the demo / MCP / STAC-API
+  layers.
 - **stac-geoparquet catalog export (`export_geoparquet`, `umbra index
   export`).** A local `CatalogIndex` makes *your* searches fast, but everyone
   still pays for their own crawl of Umbra's bucket. The new export writes an

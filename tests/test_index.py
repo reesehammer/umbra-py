@@ -194,6 +194,88 @@ def test_build_reports_progress(tmp_path):
     assert seen == [1, 2, 3]
 
 
+def test_build_stamps_built_at(tmp_path):
+    """build() records today's date so `index info` can report staleness."""
+    from datetime import date
+
+    class FakeCatalog:
+        def search(self, **kwargs):
+            return iter([_A, _B])
+
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        idx.build(FakeCatalog())
+        assert idx.get_meta("built_at") == date.today().isoformat()
+        assert idx.stats()["built_at"] == date.today().isoformat()
+
+
+def test_meta_round_trip_and_missing(tmp_path):
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        assert idx.get_meta("built_at") is None
+        idx.set_meta("built_at", "2026-07-01")
+        idx.set_meta("built_at", "2026-07-08")  # upsert, not duplicate
+        assert idx.get_meta("built_at") == "2026-07-08"
+
+
+def test_from_release_downloads_and_opens(tmp_path):
+    """from_release() fetches the published .db and opens a working index."""
+    import responses
+
+    # A real, populated SQLite index serialized to bytes stands in for the
+    # asset the publish workflow uploads to the catalog-index release.
+    src = tmp_path / "published.db"
+    with CatalogIndex(src) as built:
+        for it in (_A, _B, _C):
+            built.add(it)
+    payload = src.read_bytes()
+
+    url = "https://example.com/catalog-index/catalog.db"
+    dest = tmp_path / "fetched" / "catalog.db"
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        with CatalogIndex.from_release(dest, url=url) as idx:
+            return {i.id for i in idx.search()}
+
+    assert run() == {"a", "b", "c"}
+    assert dest.exists()
+
+
+def test_from_release_overwrites_existing(tmp_path):
+    """A re-fetch replaces an older snapshot at the same path."""
+    import responses
+
+    dest = tmp_path / "catalog.db"
+    dest.write_bytes(b"stale-not-a-db")
+
+    fresh = tmp_path / "fresh.db"
+    with CatalogIndex(fresh) as built:
+        built.add(_A)
+    payload = fresh.read_bytes()
+
+    url = "https://example.com/catalog.db"
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        with CatalogIndex.from_release(dest, url=url) as idx:
+            return {i.id for i in idx.search()}
+
+    assert run() == {"a"}
+
+
 def test_default_index_path_env_override(tmp_path, monkeypatch):
     target = tmp_path / "custom.db"
     monkeypatch.setenv("UMBRA_INDEX_DB", str(target))
@@ -235,6 +317,64 @@ def test_cli_index_build_then_search_local(tmp_path, monkeypatch):
     info = runner.invoke(cli_mod.cli, ["index", "info", "--db", db])
     assert info.exit_code == 0, info.output
     assert "items : 2" in info.output
+
+
+def test_cli_index_fetch_then_search_local(tmp_path):
+    """`umbra index fetch` downloads the published .db and `search --local`
+    reads it, without any live crawl."""
+    import responses
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "published.db"
+    with CatalogIndex(src) as built:
+        for it in (_A, _B):
+            built.add(it)
+        built.set_meta("built_at", "2026-07-01")
+    payload = src.read_bytes()
+
+    url = "https://example.com/catalog-index/catalog.db"
+    db = str(tmp_path / "fetched.db")
+    runner = CliRunner()
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        return runner.invoke(cli_mod.cli, ["index", "fetch", "--db", db, "--url", url])
+
+    fetched = run()
+    assert fetched.exit_code == 0, fetched.output
+    assert "Fetched prebuilt index: 2 acquisition(s), built 2026-07-01" in fetched.output
+
+    found = runner.invoke(cli_mod.cli, ["search", "--local", "--db", db])
+    assert found.exit_code == 0, found.output
+    assert "2 item(s)." in found.output
+
+    info = runner.invoke(cli_mod.cli, ["index", "info", "--db", db])
+    assert info.exit_code == 0, info.output
+    assert "built : 2026-07-01" in info.output
+
+
+def test_cli_index_info_built_unknown(tmp_path):
+    """An index with no build stamp reports an honest 'unknown'."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_A)
+
+    info = CliRunner().invoke(cli_mod.cli, ["index", "info", "--db", str(db)])
+    assert info.exit_code == 0, info.output
+    assert "built : unknown" in info.output
 
 
 def test_cli_search_local_missing_index_errors(tmp_path):

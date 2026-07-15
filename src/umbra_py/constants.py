@@ -32,6 +32,23 @@ PRODUCT_ASSETS = ("GEC", "CSI", "SIDD", "SICD", "CPHD")
 METADATA_ASSET = "metadata"
 ALL_ASSETS = (*PRODUCT_ASSETS, METADATA_ASSET)
 
+#: GitHub repository that hosts this project and its rolling catalog snapshot.
+GITHUB_REPO = "reesehammer/umbra-py"
+
+#: Rolling GitHub release tag carrying the weekly-rebuilt catalog snapshots
+#: (see ``.github/workflows/publish-index.yml``).
+CATALOG_INDEX_RELEASE = "catalog-index"
+
+#: Name of the prebuilt SQLite index asset on the ``catalog-index`` release.
+CATALOG_DB_ASSET = "catalog.db"
+
+#: Stable download URL for the prebuilt SQLite index. GitHub redirects this
+#: ``/releases/download/<tag>/<asset>`` path to the current asset, so it always
+#: points at the latest weekly snapshot without an API call.
+CATALOG_INDEX_DB_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/{CATALOG_INDEX_RELEASE}/{CATALOG_DB_ASSET}"
+)
+
 #: License Umbra applies to all open data.
 DATA_LICENSE = "CC-BY-4.0"
 

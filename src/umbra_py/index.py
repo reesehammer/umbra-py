@@ -32,6 +32,7 @@ from datetime import date
 from pathlib import Path
 
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
+from .constants import CATALOG_INDEX_DB_URL
 from .models import BBox, UmbraItem
 
 _SCHEMA = """
@@ -51,6 +52,10 @@ CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
     asset TEXT NOT NULL,
     PRIMARY KEY (href, asset)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_items_acq_date ON items(acq_date);
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
@@ -119,6 +124,33 @@ class CatalogIndex:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
+    @classmethod
+    def from_release(
+        cls,
+        path: str | os.PathLike | None = None,
+        *,
+        url: str | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> CatalogIndex:
+        """Download the published prebuilt index and open it.
+
+        Umbra has no STAC API, so a fresh install would otherwise crawl the
+        whole S3 bucket (minutes) before ``search`` returns anything. This
+        fetches the weekly-rebuilt ``catalog.db`` snapshot from the project's
+        rolling ``catalog-index`` GitHub release straight to ``path`` (default:
+        :func:`default_index_path`) and returns an open index over it, so
+        whole-catalog local search works out of the box -- no crawl. Re-run any
+        time to refresh; the download is resume-safe and always overwrites the
+        existing file. ``url`` overrides the release asset location (e.g. to
+        pull from a fork or a mirror).
+        """
+        from .download import download_url  # local dependency; keep the import cheap
+
+        dest = Path(path) if path is not None else default_index_path()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        download_url(url or CATALOG_INDEX_DB_URL, dest, overwrite=True, progress=progress)
+        return cls(dest)
+
     # -- lifecycle -------------------------------------------------------------
 
     def commit(self) -> None:
@@ -136,6 +168,17 @@ class CatalogIndex:
 
     def __len__(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+
+    # -- metadata --------------------------------------------------------------
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Record a key/value note about this index (does not commit)."""
+        self._conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+    def get_meta(self, key: str) -> str | None:
+        """Read a metadata note, or ``None`` if it was never set."""
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
 
     # -- writing ---------------------------------------------------------------
 
@@ -202,6 +245,10 @@ class CatalogIndex:
                     self._conn.commit()
             if progress is not None:
                 progress(written)
+        # Stamp the build date so `umbra index info` (and a fetched snapshot)
+        # can report staleness -- the acquisition span alone doesn't say when
+        # the crawl last ran.
+        self.set_meta("built_at", date.today().isoformat())
         self._conn.commit()
         return written
 
@@ -273,8 +320,15 @@ class CatalogIndex:
 
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
-        span, and number of distinct tasks."""
+        span, number of distinct tasks, and the date the index was last built
+        (``built_at``, ``None`` for an index written before build stamping)."""
         items, start, end, tasks = self._conn.execute(
             "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), COUNT(DISTINCT task) FROM items"
         ).fetchone()
-        return {"items": items, "start": start, "end": end, "tasks": tasks}
+        return {
+            "items": items,
+            "start": start,
+            "end": end,
+            "tasks": tasks,
+            "built_at": self.get_meta("built_at"),
+        }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import click
@@ -66,6 +67,19 @@ def _resolve_search_bbox(
 def _index_path(db_path: str | None) -> Path:
     """Resolve the index database path from an explicit ``--db`` or the default."""
     return Path(db_path) if db_path else default_index_path()
+
+
+def _built_note(built_at: object) -> str:
+    """Human-readable build date with staleness for ``umbra index info``."""
+    if not built_at:
+        return "unknown (built before build stamping, or hand-assembled)"
+    try:
+        age = (date.today() - date.fromisoformat(str(built_at))).days
+    except ValueError:
+        return str(built_at)
+    if age <= 0:
+        return f"{built_at} (today)"
+    return f"{built_at} ({age} day(s) ago)"
 
 
 def _search_source(local: bool, db_path: str | None) -> tuple[object, bool]:
@@ -1350,6 +1364,47 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
     click.echo(f"Indexed {written} acquisition(s); index now holds {total}. ({path})")
 
 
+@index.command("fetch")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Where to write the index (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Overwritten if it already exists.",
+)
+@click.option(
+    "--url",
+    default=None,
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+)
+def index_fetch(db_path, url) -> None:
+    """Download the published prebuilt catalog index for instant local search.
+
+    Umbra has no STAC API, so the first 'umbra index build' crawls the whole
+    bucket (minutes). This instead fetches the weekly-rebuilt snapshot from the
+    project's rolling catalog-index GitHub release, so 'umbra search --local'
+    works immediately -- no crawl. Re-run any time to refresh.
+    """
+    path = _index_path(db_path)
+
+    with OrbitSpinner("Fetching prebuilt catalog index") as spinner:
+
+        def tally(done: int, total: int | None) -> None:
+            if total:
+                spinner.label = f"Fetching prebuilt catalog index ({done / total:.0%})"
+            else:
+                spinner.label = f"Fetching prebuilt catalog index ({done / 1e6:.0f} MB)"
+
+        with CatalogIndex.from_release(path, url=url, progress=tally) as idx:
+            s = idx.stats()
+    built = s["built_at"]
+    built_note = f", built {built}" if built else ""
+    click.echo(
+        f"Fetched prebuilt index: {s['items']} acquisition(s){built_note}. ({path})\n"
+        "Search it now with 'umbra search --local'."
+    )
+
+
 @index.command("export")
 @click.option(
     "--db",
@@ -1405,6 +1460,7 @@ def index_info(db_path) -> None:
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
     click.echo(f"  tasks : {s['tasks']}")
     click.echo(f"  size  : {size_mb:.1f} MB")
+    click.echo(f"  built : {_built_note(s['built_at'])}")
 
 
 def main() -> None:
