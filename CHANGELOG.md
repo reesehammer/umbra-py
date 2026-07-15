@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Example notebook gallery (`docs/STRATEGY.md` 5.4 / `docs/AI_INTEGRATION_IDEAS.md`
+  B3) — the demo notebooks DevRel links first.** Three self-contained, self-checking
+  Jupyter notebooks under `examples/`, each driven by a small deterministic search
+  and ending its code cells with `assert`s, so running one top-to-bottom is both a
+  tutorial and a live smoke test:
+  - `01_hello_umbra.ipynb` — search → summarize → quicklook, plus the zero-glue
+    geopandas (`__geo_interface__`) and model-ready (`to_llm_context`) paths.
+  - `02_download_and_open_gec.ipynb` — stream a GEC into an analysis-ready
+    `xarray.DataArray` (no full download), analyze it, and round-trip the CRS with
+    `rioxarray`.
+  - `03_change_detection.ipynb` — find a repeat-imaged site, pick two passes, and
+    composite the change into one color image.
+
+  The notebooks ship with cleared outputs. `tests/test_examples.py` guards them
+  **offline on every CI run** using only the stdlib (`json` + `ast`): each notebook
+  must be well-formed, its code cells must parse, every `umbra_py` symbol it
+  references must be public (drift protection — a renamed export turns the build
+  red), and the CC-BY attribution line must be present. The same test executes the
+  notebooks end-to-end under `pytest -m network` when `nbclient` and the render
+  extras are available, so the weekly canary can prove the documented flows still
+  run against the live bucket.
 - **PyPI release readiness — the single highest-leverage adoption gap
   (`docs/CODEBASE_ANALYSIS.md` P0 #2/#3, P2 #11/#15).** The whole funnel is
   built (free-bucket search → paid Canopy archive, all in one library), but the

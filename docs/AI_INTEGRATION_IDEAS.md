@@ -264,6 +264,23 @@ builds capabilities that assume an AI in the loop.
 > exploratory **C5 archive-embedding** and the **B3 example notebooks**; the single
 > highest-value strategic move overall remains the unstarted Canopy backend
 > (`STRATEGY.md` 5.1).
+>
+> **Update:** the **B3 example notebooks have shipped** — the last open Tier B
+> item and, with the Canopy backend since landed (`STRATEGY.md` 5.1), the last
+> code item on the whole AI critical path. Three self-contained, self-checking
+> notebooks (`examples/01_hello_umbra.ipynb`, `02_download_and_open_gec.ipynb`,
+> `03_change_detection.ipynb`) each run a small deterministic search and `assert`
+> their own results, so they are the "runnable, self-checking examples =
+> effectively free eval + documentation" this document called for — a coding
+> agent learns the library from them and a green run proves the flow still works.
+> They hold the determinism boundary (§6.1): no model is called, and
+> `tests/test_examples.py` guards them **offline** on every CI run with the stdlib
+> alone (`json` + `ast` — well-formed, code cells parse, every referenced
+> `umbra_py` symbol is public so a rename turns the build red, CC-BY attribution
+> present), then executes them end-to-end under `pytest -m network` when
+> `nbclient` and the render extras are present. With B3 done, the only remaining
+> AI item is the exploratory **C5 archive-embedding** (research-grade, trails the
+> rest by design).
 
 ---
 
@@ -420,10 +437,15 @@ no operational cost and no abuse surface.
   `UmbraItem`/`ItemCollection` now implement `__geo_interface__` (derived from
   the existing `to_geojson`) so geopandas/shapely/leafmap ingest results with
   zero code — and so agent-written analysis code "just works" on the first try.
-- Publish two or three **agent-executable example notebooks** (the planned
-  `examples/*.ipynb`) with deterministic, small-area searches. Coding agents
-  learn a library from its examples; runnable, self-checking examples are
-  effectively free eval + documentation.
+- ✅ **shipped:** three **agent-executable example notebooks**
+  (`examples/01_hello_umbra.ipynb`, `02_download_and_open_gec.ipynb`,
+  `03_change_detection.ipynb`) with deterministic, small-area searches and
+  `assert`s in every code cell — so, exactly as this line hoped, they are
+  effectively free eval + documentation: a coding agent learns the library from
+  them, and running one is a live check that the flow still works.
+  `tests/test_examples.py` keeps them honest offline (stdlib `json`/`ast`: well
+  formed, cells parse, only public `umbra_py` symbols, CC-BY present) and
+  executes them end-to-end under `pytest -m network`.
 - A LangChain/LlamaIndex community tool wrapper is low-cost once the MCP tool
   schemas exist (same shapes, different registration) — worth doing for reach,
   after MCP.
@@ -579,7 +601,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ✅ **B3 notebooks (shipped)** | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ✅ **C3 `umbra watch` (shipped)** · ✅ **C4 `umbra chips` (shipped)** | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings (builds on C4 chips) | exploratory | Flagship differentiator once the base is solid |
 
