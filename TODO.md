@@ -46,6 +46,32 @@ and returning the polarization-mixing warning as structured text alongside the
 
 ---
 
+## Grow the `umbra serve` STAC API (query extensions + a hosted instance)
+
+- **Surfaced in:** the `umbra serve` STAC API PR (`AI_INTEGRATION_IDEAS.md` B2 /
+  `DEMO_APP_GAPS.md` Path B).
+- **Code:** `src/umbra_py/serve.py`, `pyproject.toml` (`[serve]` extra).
+
+The read-only STAC API is shipped (landing / conformance / collections / items /
+`GET`+`POST /search` with bbox, datetime, ids and token pagination). Open
+follow-ons:
+
+- **Query extensions.** `/search` currently supports the STAC core filters; the
+  index also filters by free-text `area` (task/site substring) and
+  `product_types`, which aren't yet exposed over the API. Wiring the STAC
+  *query*/*filter* extension (or simple extra query params) would let clients
+  use them. Geometry `intersects` needs more than the stored footprint bbox.
+- **Single-item lookup cost.** `/collections/{id}/items/{item_id}` filters by id
+  in the serve layer (a scan of the ordered result set). At catalog scale that's
+  fine; if the index grows, add a `CatalogIndex.get(item_id)` keyed lookup and
+  call it from `get_item`.
+- **A hosted community instance.** The local-first server has no operational
+  cost; a public instance is a policy decision (COG-streaming egress) that would
+  make the archive queryable with zero install — pair it with the demo front end
+  in `DEMO_APP_GAPS.md` Path B.
+
+---
+
 ## Done
 
 - **Bootstrap local search from the published catalog snapshot.** Added

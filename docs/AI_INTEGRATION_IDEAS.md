@@ -56,9 +56,18 @@ builds capabilities that assume an AI in the loop.
 > `quicklook`/`change_composite`/`timescan`/`download_asset` as MCP tools (the
 > imagery tools return PNG image blocks), a `umbra://context` resource, and the
 > `monitor-site`/`survey-region` prompts — reusing the A3 cards and the A2
-> document exactly as planned. The remaining Phase 2 items (A2 `llms.txt` docs
-> bundle, the nightly-index publisher already exists) and Phase 3's
-> `umbra serve` STAC façade are the next critical path.
+> document exactly as planned.
+>
+> **Update:** the **`umbra serve` STAC API façade (B2) has now shipped** — the
+> browser-facing sibling of the MCP server and the shared foundation the demo
+> application (`DEMO_APP_GAPS.md` Path B) was waiting on. `umbra serve` (`[serve]`
+> extra) runs a read-only STAC API over the same `CatalogIndex`
+> (landing/conformance/collections/items + `GET`/`POST /search`, with a free
+> OpenAPI doc at `/docs`), so the standard STAC tooling — `pystac-client`, the
+> QGIS STAC plugin, `stac-browser`, leafmap — and OpenAPI-driven agents can now
+> query Umbra's open archive. The remaining Phase 2 item (A2 `llms.txt` docs
+> bundle) and Phase 3's Tier C AI-infused capabilities are the next critical
+> path.
 
 ---
 
@@ -169,7 +178,21 @@ is nearly the whole job; the server needs the `viz` extra. Registering in the
 MCP registries (and Anthropic's directory) is part of the deliverable, not an
 afterthought.
 
-### B2. `umbra serve`: a local STAC API façade (API extensibility)
+### B2. `umbra serve`: a local STAC API façade (API extensibility) — **shipped**
+
+> **Status:** ✅ Shipped as `umbra_py.serve`, behind the `[serve]` extra and
+> runnable as `umbra serve`. It serves the STAC API landing page,
+> `/conformance`, `/collections`, `/collections/{id}`,
+> `/collections/{id}/items`, `/collections/{id}/items/{item_id}`, and STAC item
+> search over both `GET /search` and `POST /search` (bbox, datetime interval,
+> ids, limit, opaque-token pagination), with FastAPI's generated OpenAPI doc at
+> `/docs`. Following the package's determinism boundary, the STAC documents are
+> built by plain offline functions (`landing_page`/`collection`/`item_to_stac`/
+> `search_result`) with no web-framework dependency — offline-testable in the
+> core install — and `build_app()` only wires them onto routes. It reads the
+> prebuilt `catalog.db` index first (instant), with an opt-in `--live` S3-walk
+> fallback. Not-yet-done follow-ups: a hosted community instance, and richer
+> query extensions (free-text `area`, geometry `intersects`).
 
 `CatalogIndex` already mirrors search semantics in SQL. Putting a small
 read-only **STAC API** (FastAPI, `[serve]` extra) in front of it —
@@ -289,7 +312,7 @@ and contributors.
 |---|---|---|---|
 | 1 (next release) | ✅ **shipped** — A3 context cards · A2 `llm_context()` · A4 determinism policy · B3 `__geo_interface__` · A1 `info --json` | days | Zero-dependency groundwork every later phase consumes |
 | 2 | ✅ **B1 MCP server (shipped)** · nightly prebuilt index (shipped) · ⬜ A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
-| 3 | B2 `umbra serve` STAC API · C1 NL search (fuzzy/date parts first) · B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
+| 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ⬜ C1 NL search (fuzzy/date parts first) · ⬜ B3 notebooks | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | C2 describe/narrate · C3 watch loops · C4 chips | ongoing | AI-infused capabilities; each is independently shippable |
 | 5 | C5 embeddings | exploratory | Flagship differentiator once the base is solid |
 
@@ -300,8 +323,8 @@ amplify silently-truncated search results), and the prebuilt-index *consume*
 side has shipped — `umbra index fetch` / `CatalogIndex.from_release()` pulls the
 weekly `catalog.db` snapshot, so an MCP or STAC-API layer can bootstrap a
 whole-catalog index in seconds instead of crawling on first run. Both
-interfaces were thereby unblocked; the MCP server (B1) is now shipped, and the
-STAC façade (B2) remains open.
+interfaces were thereby unblocked, and both have now shipped: the MCP server
+(B1) and the `umbra serve` STAC façade (B2).
 
 ---
 

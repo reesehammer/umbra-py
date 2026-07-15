@@ -63,7 +63,7 @@ jobs:
           cache-dependency-glob: pyproject.toml
 
       - name: Install package with all extras
-        run: uv pip install --system -e ".[dev,all,mcp]"
+        run: uv pip install --system -e ".[dev,all,mcp,serve]"
 
       - name: Test (offline, all extras)
         run: pytest -q

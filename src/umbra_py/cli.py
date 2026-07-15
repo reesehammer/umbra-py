@@ -259,6 +259,42 @@ def mcp() -> None:
 
 
 @cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Interface to bind.")
+@click.option("--port", default=8000, show_default=True, type=int, help="Port to listen on.")
+@click.option(
+    "--db",
+    "index_path",
+    default=None,
+    help="Catalog index to serve (default: the shared index path). "
+    "Fetch one first with 'umbra index fetch'.",
+)
+@click.option(
+    "--live",
+    is_flag=True,
+    help="Serve from a live S3 walk per request instead of a local index "
+    "(correct but slow; for a quick try without building an index).",
+)
+def serve(host, port, index_path, live) -> None:
+    """Run a read-only STAC API over the catalog index (HTTP server).
+
+    Umbra publishes a static STAC catalog and no search API, so the standard
+    STAC tooling (pystac-client, the QGIS STAC plugin, stac-browser, leafmap)
+    has nothing to query. This serves ``/search``, ``/collections`` and
+    ``/collections/{id}/items`` -- plus an OpenAPI doc at ``/docs`` -- over the
+    local index, turning umbra-py into the STAC API bridge for the open archive.
+    Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``).
+    """
+    from .exceptions import MissingDependencyError
+    from .serve import serve as run_stac_server
+
+    click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
+    try:
+        run_stac_server(host=host, port=port, index_path=index_path, live=live)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
 @click.argument("item_url")
 @click.option(
     "--asset",

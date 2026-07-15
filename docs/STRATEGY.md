@@ -48,6 +48,18 @@ same 500 lines of glue first, and many give up."*
 > return radar pictures, not just JSON. Getting it *listed* in the MCP
 > registries and Anthropic's directory is now part of workstream 5.3 ("make
 > adoption visible where Umbra looks").
+>
+> **Update:** the **`umbra serve` STAC API façade has shipped** (`AI_INTEGRATION_IDEAS.md`
+> B2 / `DEMO_APP_GAPS.md` Path B). Umbra publishes a static STAC catalog and no
+> search API — the structural reason the standard geo tooling falls flat (§2) —
+> and this restores it: a read-only STAC API over the local index (`umbra serve`,
+> `[serve]` extra) that `pystac-client`, the QGIS STAC plugin, `stac-browser`,
+> leafmap, and OpenAPI-driven agents all speak. It is the browser-facing sibling
+> of the MCP server and the shared backend a self-serve demo app (`DEMO_APP_GAPS.md`)
+> needs. Materially, this widens the "discovery is the moat" surface (§3): the
+> search-over-a-catalog-with-no-search-API primitive is now reachable from every
+> STAC client, not just this library's own API — and it is exactly the kind of
+> component that would be graceful to *offer upstream* to Umbra (5.2).
 
 ## 2. The landscape: life without umbra-py
 
