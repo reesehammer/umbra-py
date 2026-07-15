@@ -1,10 +1,12 @@
+import threading
+import time
 from datetime import date
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import responses
 
-from umbra_py.catalog import UmbraCatalog, _acq_date, _task_name
+from umbra_py.catalog import _SIDECAR_WORKERS, UmbraCatalog, _acq_date, _task_name
 
 
 @pytest.mark.parametrize(
@@ -445,3 +447,102 @@ def test_list_prefix_follows_continuation_token():
     assert all("list-type=2" in url for url in seen_urls)
     # The delimiter must survive alongside list-type=2 on the first request.
     assert "delimiter=" in seen_urls[0]
+
+
+# -- concurrent sidecar fetching (docs/CODEBASE_ANALYSIS.md §4.2 / #9) --------
+
+
+def _single_task_catalog(monkeypatch, stems, fake_get):
+    """A catalog with one task holding an acquisition per stem in ``stems``.
+
+    ``fake_get`` is installed as ``UmbraCatalog._get`` so a test controls the
+    per-sidecar behaviour (timing, concurrency accounting, ...).
+    """
+    task = "sar-data/tasks/Big Site/"
+    keys: list[str] = []
+    for s in stems:
+        keys += [f"{task}{s}/{s}.stac.v2.json", f"{task}{s}/{s}_GEC.tif"]
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", lambda self, prefix: ([task], []))
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_stream_keys",
+        lambda self, prefix: iter(keys if prefix == task else []),
+    )
+    monkeypatch.setattr(UmbraCatalog, "_get", fake_get)
+    return UmbraCatalog()
+
+
+def _stem_sidecar(url):
+    stem = url.rsplit("/", 1)[-1].removesuffix(".stac.v2.json")
+    return _sidecar(stem, f"{stem[:10]}T10:00:00Z", (0, 0, 1, 1))
+
+
+def test_search_yields_sidecars_in_date_order_despite_concurrency(monkeypatch):
+    """Sidecars are fetched concurrently but yielded in acquisition-date order.
+
+    Earlier acquisitions are made to take *longer*, so if the walk yielded in
+    completion order the output would be reversed; only an order-preserving
+    merge yields them ascending. Guards the determinism §4.2 calls out.
+    """
+    stems = [f"2024-{m:02d}-01-10-00-00_UMBRA-04" for m in range(1, 7)]
+
+    def fake_get(self, url):
+        month = int(url.rsplit("/", 1)[-1][5:7])
+        time.sleep((7 - month) * 0.02)  # earlier month -> longer fetch
+        return _stem_sidecar(url)
+
+    cat = _single_task_catalog(monkeypatch, stems, fake_get)
+    items = list(cat.search(start="2024-01-01", end="2024-12-31"))
+    assert [i.id for i in items] == stems
+
+
+def test_search_fetches_sidecars_concurrently(monkeypatch):
+    """More than one sidecar GET is in flight at once -- not a serial N+1."""
+    stems = [f"2024-{m:02d}-01-10-00-00_UMBRA-04" for m in range(1, 9)]
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0}
+
+    def fake_get(self, url):
+        with lock:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+        try:
+            time.sleep(0.05)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+        return _stem_sidecar(url)
+
+    cat = _single_task_catalog(monkeypatch, stems, fake_get)
+    items = list(cat.search(start="2024-01-01", end="2024-12-31"))
+    assert len(items) == len(stems)
+    assert state["peak"] > 1  # genuinely parallel, not one-at-a-time
+
+
+def test_search_limit_bounds_sidecar_overfetch(monkeypatch):
+    """A tiny ``limit`` must not drag in every sidecar of a large task.
+
+    Fetching in windows caps wasted work at one worker window even though the
+    task holds far more in-range acquisitions than the limit asks for.
+    """
+    stems = [f"2024-01-{d:02d}-10-00-00_UMBRA-04" for d in range(1, 21)]
+    fetched: list[str] = []
+    lock = threading.Lock()
+
+    def fake_get(self, url):
+        with lock:
+            fetched.append(url)
+        return _stem_sidecar(url)
+
+    cat = _single_task_catalog(monkeypatch, stems, fake_get)
+    items = list(cat.search(start="2024-01-01", end="2024-12-31", limit=1))
+    assert [i.id for i in items] == [stems[0]]
+    assert len(fetched) <= _SIDECAR_WORKERS
+
+
+def test_search_single_acquisition_task_still_yields(monkeypatch):
+    """The one-sidecar fast path (no thread pool) still returns the item."""
+    stems = ["2024-05-01-10-00-00_UMBRA-04"]
+    cat = _single_task_catalog(monkeypatch, stems, lambda self, url: _stem_sidecar(url))
+    items = list(cat.search(start="2024-01-01", end="2024-12-31"))
+    assert [i.id for i in items] == stems

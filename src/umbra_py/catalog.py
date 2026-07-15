@@ -40,6 +40,15 @@ _TASKS_PREFIX = "sar-data/tasks/"
 # to prune by date.
 _ACQ_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-")
 
+# How many acquisition sidecars to fetch concurrently within one task. The
+# per-acquisition ``*.stac.v2.json`` GET is the one round trip in an otherwise
+# single-LIST task walk, and each is an independent, latency-bound HTTPS request,
+# so a small thread pool collapses a task's wall time from N serial fetches
+# toward N/workers. We fetch in windows of this size and yield each window in
+# date order, so output stays deterministic and an early ``limit`` /
+# ``max_per_task`` stop wastes at most one window of fetches.
+_SIDECAR_WORKERS = 8
+
 _GEOTIFF_MEDIA = "image/tiff; application=geotiff; profile=cloud-optimized"
 _NITF_MEDIA = "application/vnd.nitf"
 _JSON_MEDIA = "application/json"
@@ -480,16 +489,58 @@ class UmbraCatalog:
             acq_prefix = task_prefix + "/".join(parts[: acq_idx + 1]) + "/"
             by_acq.setdefault(acq_prefix, []).append(key)
 
-        # Sort so output order is deterministic (older acquisitions first).
+        # Collect the acquisitions that have a sidecar, sorted so output order is
+        # deterministic (older acquisitions first). Each still needs one sidecar
+        # GET -- the N+1 round trips in an otherwise single-LIST walk -- which
+        # _items_from_sidecars resolves concurrently while preserving this order.
+        pending: list[tuple[str, list[str], str]] = []
         for acq_prefix in sorted(by_acq):
             keys = by_acq[acq_prefix]
             sidecar = next((k for k in keys if k.endswith(".stac.v2.json")), None)
             if sidecar is None:
                 continue
-            sidecar_url = self._url_for(sidecar)
+            pending.append((acq_prefix, keys, self._url_for(sidecar)))
+        yield from self._items_from_sidecars(pending)
+
+    def _items_from_sidecars(
+        self, pending: list[tuple[str, list[str], str]]
+    ) -> Iterator[UmbraItem]:
+        """Fetch each acquisition's sidecar and build its item, order-preserving.
+
+        ``pending`` is ``(acq_prefix, keys, sidecar_url)`` tuples already in the
+        date order the walk yields. The sidecar GET is the one per-acquisition
+        round trip in an otherwise single-LIST task walk, so we resolve the
+        fetches through a small thread pool (:data:`_SIDECAR_WORKERS`) rather than
+        one at a time -- but yield strictly in the input order, so ``search``
+        output stays deterministic. Fetching in windows keeps the pool bounded
+        and, because ``search`` is a generator that may stop early on ``limit`` /
+        ``max_per_task``, caps wasted fetches at one window rather than an entire
+        large task. A sidecar fetch that fails raises exactly as the serial path
+        did (the pool re-raises when its result is consumed).
+        """
+        if not pending:
+            return
+        if len(pending) == 1:
+            acq_prefix, keys, sidecar_url = pending[0]
             item = self._item_from_sidecar(self._get(sidecar_url), acq_prefix, keys, sidecar_url)
             if item is not None:
                 yield item
+            return
+
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        def fetch(entry: tuple[str, list[str], str]) -> dict:
+            return self._get(entry[2])
+
+        workers = min(_SIDECAR_WORKERS, len(pending))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for base in range(0, len(pending), workers):
+                window = pending[base : base + workers]
+                for entry, doc in zip(window, pool.map(fetch, window), strict=True):
+                    acq_prefix, keys, sidecar_url = entry
+                    item = self._item_from_sidecar(doc, acq_prefix, keys, sidecar_url)
+                    if item is not None:
+                        yield item
 
     def _url_for(self, key: str) -> str:
         """Build a public HTTPS URL for an S3 key, encoding spaces / unicode.

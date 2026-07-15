@@ -328,6 +328,20 @@ same 500 lines of glue first, and many give up."*
 > a changed remote object restarts cleanly instead of splicing). Not a new
 > capability — the reliability floor under every capability already shipped. The
 > strategic gaps above are unchanged.
+>
+> **Update:** **live search is now concurrent** (`CODEBASE_ANALYSIS.md` §4.2 /
+> P1 #9 — supporting infrastructure, §7). Discovery is the moat (§3): the one
+> thing with no substitute is search over a catalog that has no search API, so
+> how *fast* that search feels is strategy, not polish. The catalog walk's last
+> serial bottleneck was the per-acquisition `*.stac.v2.json` sidecar GET — a
+> 50-item search paid ~50 latencies back to back. `UmbraCatalog._walk_task` now
+> fetches those sidecars through a bounded thread pool (mirroring the gallery's
+> proven pattern) while yielding in the same deterministic acquisition-date
+> order, so a task's wall time collapses from N serial fetches toward N/workers
+> with no change to *what* is returned. Not a new capability — the responsiveness
+> floor under the core operation every user and agent reaches for first. The
+> strategic gaps above are unchanged: SICD → geocoded COG (5.5) and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 

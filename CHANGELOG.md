@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Live search now fetches acquisition sidecars concurrently
+  (`docs/CODEBASE_ANALYSIS.md` §4.2 / P1 #9).** Discovery is the library's core
+  value — searching a catalog that has no search API — and the walk's one
+  remaining per-acquisition round trip was the `*.stac.v2.json` sidecar GET,
+  issued serially, so a 50-item search paid ~50 latencies back to back.
+  `UmbraCatalog._walk_task` now resolves those sidecars through a small thread
+  pool (`_SIDECAR_WORKERS = 8`, mirroring the gallery's proven pattern) and
+  yields them strictly in acquisition-date order, so a task's wall time collapses
+  from N serial fetches toward N/workers with the output order unchanged.
+  Fetching in windows keeps the pool bounded and caps wasted work at one window
+  when an early `limit` / `max_per_task` stops the search. The shared
+  `_http.default_session()` connection pool was sized up (`pool_maxsize=16`) so
+  the fan-out reuses connections instead of churning them. No behavior change
+  beyond speed — same items, same order, still fully offline-testable.
 - **The shared HTTP session now retries transient failures, and downloads verify
   their integrity (`docs/CODEBASE_ANALYSIS.md` P1 #5/#6, §3.2/§4.3).** The
   library's core job is fetching data from a public bucket; these harden that

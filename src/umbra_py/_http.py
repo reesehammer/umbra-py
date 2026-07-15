@@ -32,12 +32,29 @@ _RETRY = Retry(
 )
 
 
+# The session is shared across a small thread pool (the catalog walk fetches an
+# acquisition's sidecars concurrently -- see ``UmbraCatalog._items_from_sidecars``),
+# so the connection pool has to hold more than urllib3's default of 10 to avoid
+# discarding and re-opening connections under that fan-out. This bound comfortably
+# covers the sidecar worker count with headroom.
+_POOL_SIZE = 16
+
+
 def default_session() -> requests.Session:
     """Return a :class:`requests.Session` with a descriptive user agent and
-    retry/backoff on transient HTTP failures."""
+    retry/backoff on transient HTTP failures.
+
+    The session is safe to share across a small thread pool: its connection pool
+    is sized (:data:`_POOL_SIZE`) to hold the concurrent sidecar fetches the
+    catalog walk issues without churning connections.
+    """
     session = requests.Session()
     session.headers.update({"User-Agent": f"umbra-py/{__version__}"})
-    adapter = HTTPAdapter(max_retries=_RETRY)
+    adapter = HTTPAdapter(
+        max_retries=_RETRY,
+        pool_connections=_POOL_SIZE,
+        pool_maxsize=_POOL_SIZE,
+    )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
