@@ -70,6 +70,26 @@ paths = download_item(first, dest_dir="downloads", assets=["GEC"])
 print(paths)
 ```
 
+### Search a site by name (exact or fuzzy)
+
+Umbra files every pass of a site under one named task directory, so `area=`
+searches by that label — and prunes every other task *before* listing it, so
+it is also the fast way to gather the co-located passes `change` / `timescan`
+need. `area=` is a case-insensitive substring by default; pass `fuzzy=True`
+(CLI `--fuzzy`) to match it loosely — word-order- and punctuation-independent
+and tolerant of a small typo. It resolves with plain string arithmetic, **no
+model call**, and never drops a result the substring match would have found:
+
+```python
+catalog.search(area="Centerfield")                 # substring: "Centerfield, Utah"
+catalog.search(area="utah centerfield", fuzzy=True)  # reordered  -> same task
+catalog.search(area="centrfield", fuzzy=True)        # small typo -> same task
+```
+
+```bash
+umbra search --area "utah centerfield" --fuzzy
+```
+
 ### Browse results in a notebook
 
 In Jupyter, an `UmbraItem` renders as a card — a metadata table beside an

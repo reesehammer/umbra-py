@@ -72,23 +72,30 @@ follow-ons:
 
 ---
 
-## Finish C1 natural-language search (fuzzy task matching + `umbra ask`)
+## Finish C1 natural-language search (`umbra ask` + semantic task aliasing)
 
-- **Surfaced in:** the relative-date-bounds PR (`AI_INTEGRATION_IDEAS.md` C1 —
-  deterministic first step now shipped in `src/umbra_py/dates.py`).
-- **Code:** `src/umbra_py/catalog.py` / `index.py` (`area` matching),
-  `pyproject.toml` (a future `[ai]` extra).
+- **Surfaced in:** the relative-date-bounds PR and the fuzzy-task-matching PR
+  (`AI_INTEGRATION_IDEAS.md` C1 — the two deterministic first steps have shipped
+  in `src/umbra_py/dates.py` and `src/umbra_py/fuzzy.py`).
+- **Code:** `src/umbra_py/fuzzy.py` (deterministic matcher), `catalog.py` /
+  `index.py` (`fuzzy=` on `search`), `pyproject.toml` (a future `[ai]` extra).
 
-The relative-date resolver is done; the other two C1 pieces named in the doc are
-still open:
+The relative-date resolver and the deterministic first step of fuzzy task
+matching are both done. What remains of C1:
 
-- **Fuzzy / alias task matching.** `area=` is a literal case-insensitive
-  substring today (live and index paths agree). Add fuzzy/alias matching so
-  `area="grain storage north dakota"` can reach the "Beet Piler - ND" task —
-  first with plain string similarity, then optionally an embedding index over
-  task names/descriptions (sqlite-vec inside `catalog.db`, `[ai]` extra). Keep
-  the deterministic substring path as the default so nothing regresses.
-- **`umbra ask "…"` (`[ai]` extra).** Hand the user's sentence plus the A2
+- ✅ **Fuzzy task matching (string-similarity step, done).** `area=` stays a
+  literal case-insensitive substring by default; `fuzzy=True` (CLI `--fuzzy`)
+  widens it to the deterministic token-wise match in `umbra_py.fuzzy` —
+  word-order- and punctuation-independent and typo-tolerant, a strict superset
+  of the substring path (so nothing regresses), shared by the live and index
+  backends and the MCP `search_catalog` tool. Offline tests cover both paths and
+  assert they agree.
+- ⬜ **Semantic / alias task matching.** The string-similarity step deliberately
+  does *not* reach `area="grain storage north dakota"` → "Beet Piler - ND" —
+  that needs an embedding index over task names/descriptions (sqlite-vec inside
+  `catalog.db`, `[ai]` extra). Build it on top of `fuzzy.matching_tasks` as the
+  optional, model-backed layer, keeping the deterministic matcher as the default.
+- ⬜ **`umbra ask "…"` (`[ai]` extra).** Hand the user's sentence plus the A2
   `llm_context()` document to a configured model and return the *deterministic
   command it maps to*, shown before running. The LLM plans; the library
   executes; the user audits. This is the home for range keywords with

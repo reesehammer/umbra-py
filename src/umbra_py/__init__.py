@@ -26,6 +26,7 @@ from .exceptions import (
     UmbraError,
 )
 from .export import export_geoparquet
+from .fuzzy import matching_tasks, task_matches
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
@@ -74,6 +75,8 @@ __all__ = [
     "ATTRIBUTION",
     "llm_context",
     "parse_date_bound",
+    "task_matches",
+    "matching_tasks",
     "llms_txt",
     "llms_full_txt",
     "UmbraError",

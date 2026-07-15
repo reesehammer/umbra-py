@@ -116,6 +116,63 @@ def test_search_area_escapes_like_wildcards(tmp_path):
         assert {i.id for i in idx.search(area="river_nov")} == {"w"}
 
 
+_CF = _make_item(
+    "Centerfield, Utah", "2024-01-15-10-00-00_UMBRA-04", "cf", "2024-01-15T10:00:00Z", (0, 0, 1, 1)
+)
+_PR = _make_item(
+    "Provo, Utah", "2024-02-01-10-00-00_UMBRA-05", "pr", "2024-02-01T10:00:00Z", (2, 2, 3, 3)
+)
+
+
+def test_search_area_fuzzy_matches_word_order_and_typos(tmp_path):
+    """fuzzy=True on the index path mirrors the live path's token-wise match."""
+    with _index(tmp_path, items=(_CF, _PR)) as idx:
+        for query in ("utah centerfield", "centerfield utah", "centrfield"):
+            assert {i.id for i in idx.search(area=query, fuzzy=True)} == {"cf"}, query
+        # A one-token query that names the shared state matches both tasks.
+        assert {i.id for i in idx.search(area="utah", fuzzy=True)} == {"cf", "pr"}
+
+
+def test_search_area_fuzzy_off_keeps_substring_only(tmp_path):
+    """Without fuzzy, a reordered query matches nothing (legacy LIKE behaviour)."""
+    with _index(tmp_path, items=(_CF, _PR)) as idx:
+        assert {i.id for i in idx.search(area="utah centerfield")} == set()
+        # The substring path still works unchanged.
+        assert {i.id for i in idx.search(area="centerfield")} == {"cf"}
+
+
+def test_search_area_fuzzy_no_match_yields_nothing(tmp_path):
+    with _index(tmp_path, items=(_CF, _PR)) as idx:
+        assert list(idx.search(area="nowhere at all", fuzzy=True)) == []
+
+
+def test_fuzzy_agrees_across_live_and_index_paths(tmp_path):
+    """The two backends must return the same ids for the same fuzzy query."""
+    from umbra_py.catalog import UmbraCatalog
+
+    items = (_CF, _PR)
+
+    # Live path: stub the catalog to yield these items grouped by task.
+    by_task: dict[str, list] = {}
+    for it in items:
+        by_task.setdefault(it.task, []).append(it)
+    prefixes = [f"sar-data/tasks/{t}/" for t in by_task]
+
+    cat = UmbraCatalog()
+    cat._list_prefix = lambda prefix: (prefixes, [])  # type: ignore[assignment]
+    cat._walk_task = (
+        lambda prefix, start, end: iter(  # type: ignore[assignment]
+            by_task[prefix[len("sar-data/tasks/") :].rstrip("/")]
+        )
+    )
+
+    with _index(tmp_path, items=items) as idx:
+        for query in ("utah centerfield", "centrfield", "utah", "provo"):
+            live = {i.id for i in cat.search(area=query, fuzzy=True)}
+            indexed = {i.id for i in idx.search(area=query, fuzzy=True)}
+            assert live == indexed, query
+
+
 def test_search_limit(tmp_path):
     with _index(tmp_path) as idx:
         assert len(list(idx.search(limit=1))) == 1

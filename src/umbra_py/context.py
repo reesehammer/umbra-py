@@ -42,7 +42,16 @@ _SEARCH_PARAMETERS: dict[str, str] = {
     ),
     "area": (
         "Substring match against the Umbra task (AOI campaign) name, e.g. "
-        "'Centerfield, Utah'. Tasks group every pass of one site over time."
+        "'Centerfield, Utah'. Tasks group every pass of one site over time. "
+        "Set fuzzy=True to match it loosely instead (see 'fuzzy')."
+    ),
+    "fuzzy": (
+        "When true, widen 'area' from a literal substring to a deterministic "
+        "token-wise match: word-order- and punctuation-independent and "
+        "tolerant of a small typo, so 'utah centerfield' or 'centrfield' still "
+        "reach 'Centerfield, Utah'. No model call, and a strict superset of the "
+        "substring match (it never drops a result). Semantic aliasing ('grain "
+        "storage north dakota' -> 'Beet Piler - ND') is out of scope."
     ),
     "start": (
         "Earliest acquisition date, inclusive. An ISO YYYY-MM-DD date, a bare "

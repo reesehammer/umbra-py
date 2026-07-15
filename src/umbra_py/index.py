@@ -33,6 +33,7 @@ from pathlib import Path
 
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
+from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem
 
 _SCHEMA = """
@@ -262,6 +263,7 @@ class CatalogIndex:
         end: DateLike = None,
         product_types: list[str] | None = None,
         area: str | None = None,
+        fuzzy: bool = False,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -269,7 +271,10 @@ class CatalogIndex:
 
         Same semantics as :meth:`UmbraCatalog.search`, answered from local SQL.
         Only returns acquisitions already present in the index; build or refresh
-        it with :meth:`build` first.
+        it with :meth:`build` first. ``fuzzy=True`` widens ``area`` to the same
+        deterministic token-wise match the live path uses
+        (:func:`umbra_py.fuzzy.matching_tasks`): the distinct task names are
+        read from the index and matched in Python, so both backends agree.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -282,7 +287,23 @@ class CatalogIndex:
         if end_d is not None:
             conditions.append("(acq_date IS NULL OR acq_date <= ?)")
             params.append(end_d.isoformat())
-        if area:
+        if area and fuzzy:
+            # SQL LIKE can't express the token-wise fuzzy match, so resolve the
+            # matching task names in Python (same matcher as the live path) and
+            # constrain to them. An empty match set means nothing can match.
+            names = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT task FROM items WHERE task IS NOT NULL"
+                )
+            ]
+            matched = matching_tasks(area, names)
+            if not matched:
+                return
+            placeholders = ", ".join("?" * len(matched))
+            conditions.append(f"task IN ({placeholders})")
+            params += matched
+        elif area:
             conditions.append("task IS NOT NULL AND LOWER(task) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(area.lower())}%")
         if bbox is not None:
