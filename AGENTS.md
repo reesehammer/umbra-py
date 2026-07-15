@@ -43,6 +43,7 @@ src/umbra_py/
   convert.py         # optional SICD -> amplitude GeoTIFF (behind [convert] extra)
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
+  serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/

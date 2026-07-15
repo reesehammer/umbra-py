@@ -101,17 +101,25 @@ critical path to a demo application.
 The repo's output surface is Folium-rendered, self-contained HTML. For an
 application you need one of:
 
-- **a queryable API.** For *AI* clients this now exists: the `umbra-mcp` MCP
-  server (`AI_INTEGRATION_IDEAS.md` §B1, shipped) is a queryable, schema'd tool
-  surface over the catalog. For a *browser* front end the relevant façade is
-  still the `umbra serve` read-only STAC API proposed in §B2 — **not built
-  yet**; it would share `CatalogIndex` with the MCP server, or
+- **a queryable API.** This now exists for both client classes. For *AI*
+  clients: the `umbra-mcp` MCP server (`AI_INTEGRATION_IDEAS.md` §B1, shipped)
+  is a queryable, schema'd tool surface over the catalog. For a *browser* front
+  end: the `umbra serve` read-only STAC API (§B2, ✅ **now shipped**) serves
+  `/search`, `/collections` and `/collections/{id}/items` over the same
+  `CatalogIndex`, plus an OpenAPI doc at `/docs`. A MapLibre/leafmap front end
+  (or any `pystac-client` / stac-browser client) can now query the catalog
+  live — R2's interactive filters and R4's per-site actions have a backend to
+  call. What remains for a full app is the front end itself, and (for R4 over
+  *any* site) the on-demand artifact endpoints in Path B. Alternatively, still
+  server-free:
 - **a static data export + JS front end** (GeoJSON/PMTiles + MapLibre — the
   export half exists as `write_geojson`; the front end does not).
 
-Without one of these there is no way to implement R2's interactive filters or
-R4's on-demand product actions. This is the central gap: **everything else on
-this list is incremental; this one is a new component.**
+This was the central gap. With `umbra serve` shipped, the queryable-API half is
+built: **R2's interactive filters now have a backend to call, and R4's per-site
+metadata/search actions do too.** What is still missing for a *self-serve* app
+is the front end (a MapLibre/leafmap client) and — for R4's render actions over
+*any* site — the on-demand artifact endpoints in Path B.
 
 ### G4 — Scale ceiling of the current map rendering
 
@@ -204,9 +212,10 @@ nightly prebuilt-index publisher recommended in the analysis doc (#17).
 
 Adds on-demand capability over Path A rather than replacing it:
 
-1. `umbra serve` (FastAPI, `[serve]` extra): read-only **STAC API** over
+1. ✅ `umbra serve` (FastAPI, `[serve]` extra): read-only **STAC API** over
    `CatalogIndex` (search/collections/items) — the same component proposed
-   for AI integration (B2), so this work is shared, not duplicated.
+   for AI integration (B2), so this work is shared, not duplicated. **Shipped**;
+   the STAC search backend the rest of this path builds on now exists.
 2. Artifact endpoints wrapping the existing library functions:
    `GET /quicklook/{id}.png`, `POST /change`, `POST /swipe`, `POST /timescan`
    with async job semantics (renders take seconds–minutes) and a disk cache

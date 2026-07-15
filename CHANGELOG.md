@@ -7,6 +7,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra serve`: a read-only STAC API façade over the catalog index
+  (`docs/AI_INTEGRATION_IDEAS.md` B2 / `docs/DEMO_APP_GAPS.md` Path B step 1).**
+  Umbra publishes a *static* STAC catalog and **no** search API, which is
+  exactly what breaks the standard geospatial tooling — `pystac-client`, the
+  QGIS STAC plugin, `stac-browser` and leafmap all speak the STAC API *search*
+  protocol and have nothing to query. This serves that protocol over
+  `CatalogIndex`, so pointing any STAC client at `http://localhost:8000` makes
+  Umbra's open archive searchable like Sentinel-1 or Landsat. It is the
+  browser-facing sibling of `umbra-mcp`: same index underneath, a different
+  front door, and the shared foundation the demo application (`DEMO_APP_GAPS.md`
+  Path B) wants. Run it with `umbra serve`; needs the new `[serve]` extra
+  (`pip install "umbra-py[serve]"`).
+
+  - **Endpoints:** the STAC API landing page (`/`), `/conformance`,
+    `/collections`, `/collections/{id}`, `/collections/{id}/items`,
+    `/collections/{id}/items/{item_id}`, and STAC item search over both
+    `GET /search` and `POST /search` (bbox, datetime interval, ids, limit, and
+    opaque-token pagination). FastAPI generates the OpenAPI document at
+    `/openapi.json` and interactive docs at `/docs` for free — the schema'd REST
+    surface OpenAPI-driven agents consume without custom glue.
+  - **Index-first:** every query is a local SQL read against the prebuilt
+    `catalog.db` (`umbra index fetch`), so the server answers in milliseconds
+    rather than re-walking S3. `--live` opts into a per-request S3 walk (slow)
+    for a quick try without an index; a missing index returns `503` with a hint.
+  - **Deterministic, thin edge** (mirrors `umbra-mcp`): the STAC documents are
+    built by plain, offline functions with no web-framework dependency (so they
+    are unit-testable in the core install), and the CC-BY attribution travels in
+    the landing page and collection metadata. A fresh backend is opened and
+    closed per request, so the app is safe under FastAPI's thread pool.
 - **`umbra-mcp`: a Model Context Protocol server over the library (the flagship
   AI-integration deliverable, `docs/AI_INTEGRATION_IDEAS.md` B1 / Phase 2).**
   Umbra publishes no STAC API, so this library *is* the query layer — and this

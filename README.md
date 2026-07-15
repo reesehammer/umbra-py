@@ -37,6 +37,7 @@ pip install "umbra-py[load]"    # + analysis-ready xarray loading (xarray, raste
 pip install "umbra-py[convert]" # + SICD amplitude extraction (sarpy, rasterio)
 pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
+pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
 ```
 
@@ -405,6 +406,36 @@ keeping with the library's design, the server stays deterministic — it
 searches, geocodes and renders; the client's model plans and narrates. It even
 refuses to composite mixed polarizations (HH and VV aren't comparable), and the
 CC-BY attribution line travels with every result.
+
+### Serve it as a STAC API (`umbra serve`)
+
+Umbra publishes a *static* STAC catalog and no search API — which is exactly
+what breaks the standard geospatial tooling: `pystac-client`, the QGIS STAC
+plugin, `stac-browser` and leafmap all expect a STAC API *search* endpoint.
+`umbra serve` restores one: a read-only STAC API over your local catalog index,
+so any STAC client can query Umbra's open archive like Sentinel-1 or Landsat.
+It's the browser-facing sibling of the MCP server — same index underneath.
+
+```bash
+pip install "umbra-py[serve]"
+umbra index fetch                 # grab the prebuilt catalog.db (one-time)
+umbra serve                       # http://127.0.0.1:8000  (OpenAPI docs at /docs)
+```
+
+```python
+# Point any STAC API client at it:
+from pystac_client import Client
+
+client = Client.open("http://127.0.0.1:8000")
+items = client.search(bbox=[-112.1, 39.0, -111.9, 39.2], datetime="2024-01-01/..").items()
+```
+
+It serves the STAC API landing page, `/conformance`, `/collections`,
+`/collections/{id}/items` and STAC item search over `GET`/`POST /search` (bbox,
+datetime, ids, pagination), with a generated OpenAPI document at `/openapi.json`
+and interactive docs at `/docs`. Queries hit the local index, so they answer in
+milliseconds; `umbra serve --live` walks S3 per request instead if you'd rather
+not build an index first.
 
 ## What the data looks like
 
