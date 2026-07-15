@@ -42,6 +42,7 @@ convert = ["sarpy>=1.3", "rasterio>=1.3", "numpy>=1.23"]
 load = ["xarray>=2023.1", "rasterio>=1.3", "numpy>=1.23"]
 viz = ["folium>=0.14", "matplotlib>=3.6", "rasterio>=1.3", "numpy>=1.23"]
 export = ["stac-geoparquet>=0.6"]
+mcp = ["mcp>=1.2", "umbra-py[viz]"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -59,6 +60,7 @@ Issues = "https://github.com/theminiverse/umbra-py/issues"
 [project.scripts]
 umbra = "umbra_py.cli:main"
 umbra-py = "umbra_py.cli:main"
+umbra-mcp = "umbra_py.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/umbra_py"]

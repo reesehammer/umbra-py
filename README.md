@@ -37,6 +37,7 @@ pip install "umbra-py[load]"    # + analysis-ready xarray loading (xarray, raste
 pip install "umbra-py[convert]" # + SICD amplitude extraction (sarpy, rasterio)
 pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
+pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
 ```
 
 Requires Python 3.10+.
@@ -370,6 +371,40 @@ umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe
 # gray/yellow; anything that came and went over the series glows blue/cyan.
 umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out timescan.png --db
 ```
+
+### Drive it from an AI agent (MCP)
+
+Umbra publishes no STAC API, so this library *is* the query layer — and
+`umbra-mcp` exposes that layer over the [Model Context
+Protocol](https://modelcontextprotocol.io/), turning any MCP client (Claude
+Desktop / Code and others) into a natural-language front door to the archive.
+*"Show me what changed at Centerfield, Utah this spring"* becomes a first-run
+experience instead of a tutorial chapter.
+
+```bash
+pip install "umbra-py[mcp]"
+umbra mcp            # run the stdio server (also: umbra-mcp, or uvx umbra-mcp)
+```
+
+Register it with an MCP client (Claude Desktop shown):
+
+```json
+{
+  "mcpServers": {
+    "umbra": { "command": "umbra-mcp" }
+  }
+}
+```
+
+The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
+`quicklook`, `change_composite`, `timescan` and `download_asset` tools; a
+`umbra://context` resource with the product-type table and search semantics;
+and packaged `monitor-site` / `survey-region` prompts. The imagery tools return
+the rendered PNG as an MCP image block, so the model *sees* the radar scene. In
+keeping with the library's design, the server stays deterministic — it
+searches, geocodes and renders; the client's model plans and narrates. It even
+refuses to composite mixed polarizations (HH and VV aren't comparable), and the
+CC-BY attribution line travels with every result.
 
 ## What the data looks like
 
