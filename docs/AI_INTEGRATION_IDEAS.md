@@ -281,6 +281,34 @@ builds capabilities that assume an AI in the loop.
 > `nbclient` and the render extras are present. With B3 done, the only remaining
 > AI item is the exploratory **C5 archive-embedding** (research-grade, trails the
 > rest by design).
+>
+> **Update:** the **C5 archive-embedding capability has now shipped — the last
+> open AI item, so every idea in this document (Tier A–C) is now built.**
+> `umbra_py.embed` (`umbra embed`, `[ai]` + `[viz]` extras) is the flagship
+> differentiator §C5 named: it precomputes a vector for *one quicklook per
+> acquisition* (`umbra embed build`, keyed by item id and idempotent — a rebuild
+> only embeds what is new) and exposes both `search_similar(item)`
+> (`umbra embed similar <url>` — image-to-image "find scenes that look like this
+> flooded field") and text-to-scene search (`umbra embed search "ships at a
+> berth"`, given a joint CLIP-family model). It builds directly on the two pieces
+> §C5 required: the `umbra chips` raster-iteration substrate and the already-shipped
+> quicklook render — `umbra embed` reuses `umbra describe`'s injectable quicklook
+> renderer so a scene is embedded from exactly the picture a human sees. It holds
+> the determinism boundary the whole document rests on (§A4, §6.1): the *only*
+> model calls are turning an image or a text query into a vector (both injectable —
+> an `ImageEmbedder` and a text `Embedder`, default an OpenAI-compatible multimodal
+> `/embeddings` endpoint via the already-core `requests`, user-supplied key, never
+> implicit), while rendering, storage, cosine ranking and thresholding are
+> stdlib-only (no `numpy`, no `sqlite-vec` — a brute-force scan at catalog scale is
+> instant). The vectors live in a schema-versioned sidecar `catalog.embed.db` beside
+> the catalog index — the same reasoning `umbra semantic` uses for its task-name
+> sidecar, so the deterministic index and its published snapshot never carry
+> model-derived data a core install can't use — and a `SceneMatch` is always a
+> pointer back to a real acquisition (id, task, datetime, STAC href), never a
+> model-authored fact. It is fully offline-testable with a deterministic stand-in
+> embedder and renderer. The remaining C5 follow-ons are optional and non-blocking:
+> publishing the embedding table alongside the nightly index so no user recomputes
+> it, and surfacing `search_similar` as an MCP tool.
 
 ---
 
@@ -582,16 +610,33 @@ umbra-py as the data-loading layer for SAR foundation-model and change-detection
 research — the audience most likely to contribute back — and it is the
 prerequisite the exploratory C5 archive-embedding work builds on.
 
-### C5. Embedding the archive itself (exploratory)
+### C5. Embedding the archive itself — **shipped**
 
-Once chips exist: precompute image embeddings (e.g. a SAR-tuned or CLIP-family
-encoder) for one quicklook per acquisition, store vectors in the index, and
-expose `search_similar(item)` / text-to-scene search. "Find scenes that look
-like this flooded field" is a genuinely new capability over this archive —
-nothing in the Umbra ecosystem offers it. Publish the embedding table with
-the nightly index so no user recomputes it. This is research-grade and should
-trail C1–C4, but it is the kind of flagship feature that earns talks, papers,
-and contributors.
+✅ **shipped** (`umbra_py.embed`, `umbra embed`, `[ai]` + `[viz]` extras).
+`umbra embed build` precomputes an image embedding for one quicklook per
+acquisition and stores the vectors in a schema-versioned sidecar SQLite DB
+(`catalog.embed.db`) beside the catalog index; `umbra embed similar <item-url>`
+exposes `search_similar(item)` (image-to-image — "find scenes that look like this
+flooded field") and `umbra embed search "…"` exposes text-to-scene search (given
+a joint CLIP-family model whose text and image encoders share a space). This is
+the genuinely new capability over the archive §C5 called for — nothing in the
+Umbra ecosystem offers visual similarity search over Umbra data.
+
+It holds the same determinism boundary as `umbra semantic` (§A4, §6.1): the only
+model calls are turning an image or a text query into a vector — an injectable
+`ImageEmbedder` and text `Embedder` (default an OpenAI-compatible multimodal
+`/embeddings` endpoint via the already-core `requests`, user-supplied key, never
+implicit) — while rendering (it reuses `umbra describe`'s injectable quicklook
+renderer, so a scene is embedded from exactly the picture a human sees), storage,
+cosine ranking and thresholding are stdlib-only (no `numpy`, no `sqlite-vec`, no
+binary dependency — a brute-force scan at catalog scale is instant). `build` is
+idempotent (keyed by item id) and skips a scene whose asset won't render rather
+than aborting the batch; a `SceneMatch` is always a pointer back to a real
+acquisition (id, task, datetime, STAC href), never a model-authored fact. It is
+fully offline-testable with a deterministic stand-in embedder and renderer.
+Remaining (optional, non-blocking): publish the embedding table with the nightly
+index so no user recomputes it, and surface `search_similar` as an MCP tool. It
+is the kind of flagship feature that earns talks, papers, and contributors.
 
 ---
 
@@ -603,7 +648,7 @@ and contributors.
 | 2 | ✅ **shipped** — B1 MCP server · nightly prebuilt index · A2 `llms.txt` + docs bundle | 1–2 weeks | The adoption unlock; MCP server is the highest leverage single artifact |
 | 3 | ✅ **B2 `umbra serve` STAC API (shipped)** · ✅ **C1 relative date bounds (shipped)** · ✅ **C1 fuzzy task matching (shipped)** · ✅ **C1 `umbra ask` (shipped)** · ✅ **C1 semantic aliasing / embedding index (shipped)** · ✅ **B3 notebooks (shipped)** | 2–4 weeks | Ecosystem bridges, both geo and AI |
 | 4 | ✅ **C2 `umbra describe` (shipped)** · ✅ **C2 `change --narrate` (shipped)** · ✅ **C3 `umbra watch` (shipped)** · ✅ **C4 `umbra chips` (shipped)** | ongoing | AI-infused capabilities; each is independently shippable |
-| 5 | C5 embeddings (builds on C4 chips) | exploratory | Flagship differentiator once the base is solid |
+| 5 | ✅ **C5 embeddings — visual similarity search (shipped)** | exploratory | Flagship differentiator; every idea in this document is now built |
 
 Dependencies to respect: the MCP server (B1) and STAC façade (B2) both lean on
 correct S3 pagination and the prebuilt index from the analysis document. Both

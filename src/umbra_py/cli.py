@@ -2589,6 +2589,316 @@ def semantic_info(sem_db, db_path) -> None:
     click.echo(f"  size  : {size_mb:.1f} MB")
 
 
+@cli.group()
+def embed() -> None:
+    """Visual similarity search over the archive (embedding-based, C5).
+
+    Every other search matches metadata -- a date, a bbox, a task name. This
+    matches *appearance*: it embeds each acquisition's rendered quicklook into a
+    vector once ('umbra embed build'), then ranks scenes by cosine similarity, so
+    'umbra embed similar <url>' finds acquisitions that *look like* a given one and
+    'umbra embed search "a flooded field"' finds them from a text description (with
+    a joint CLIP-family model).
+
+    Requires the ``ai`` extra for the model call and ``viz`` to render the
+    quicklooks (``pip install 'umbra-py[ai,viz]'``) plus a multimodal embedding API
+    key: set OPENAI_API_KEY (optionally OPENAI_BASE_URL for a CLIP-family
+    /embeddings endpoint, UMBRA_SCENE_EMBED_MODEL to pick the model). The ranking
+    is deterministic; only turning an image or query into a vector calls a model.
+    """
+
+
+def _embed_path(embed_db: str | None, db_path: str | None):
+    """Resolve the scene-embedding DB path: an explicit ``--embed-db``, else the
+    sibling of the (explicit or default) catalog index."""
+    from .embed import default_scene_embed_path
+
+    if embed_db:
+        return Path(embed_db)
+    return default_scene_embed_path(db_path)
+
+
+@embed.command("build")
+@click.argument("item_urls", nargs=-1)
+@click.option("--area", default=None, help="Search mode: name of an Umbra site to embed.")
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Search mode: geocode a place name to a bounding box (mutually exclusive with --bbox).",
+)
+@click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD or relative).")
+@click.option("--end", help="Search mode: latest acquisition date (same formats as --start).")
+@click.option(
+    "--limit",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Search mode: cap how many acquisitions to embed.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product's quicklook to embed. GEC (the geocoded GeoTIFF) is the "
+    "sensible default; the complex SICD/CPHD products aren't amplitude rasters.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Embedding model label (default: $UMBRA_SCENE_EMBED_MODEL, else clip). "
+    "The provider is an OpenAI-compatible multimodal /embeddings endpoint chosen "
+    "by OPENAI_API_KEY / OPENAI_BASE_URL.",
+)
+@click.option(
+    "--embed-db",
+    default=None,
+    help="Where to write the scene index (default: the catalog index's sibling, "
+    "e.g. catalog.embed.db).",
+)
+@_local_index_options
+@_fuzzy_option
+def embed_build(
+    item_urls,
+    area,
+    bbox,
+    place,
+    start,
+    end,
+    limit,
+    asset,
+    model,
+    embed_db,
+    local,
+    db_path,
+    fuzzy,
+) -> None:
+    """Render and embed acquisition quicklooks into a scene-similarity index.
+
+    Two ways to choose what to embed:
+
+    \b
+    - Pass STAC JSON URLs directly.
+    - Or search: give --area (or --bbox / --place) with --start/--end and the
+      command gathers the acquisitions automatically.
+
+    Each item's quicklook is rendered once (only downsampled overviews stream over
+    HTTP -- no full download) and embedded; an item already in the index is skipped
+    so a rebuild only embeds what is new. Requires the ``ai`` + ``viz`` extras and
+    an embedding API key.
+    """
+    from . import embed as emb
+    from .exceptions import MissingDependencyError
+
+    search_mode = any(v for v in (area, bbox, place, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+        )
+
+    if item_urls:
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox or place):
+            raise click.UsageError(
+                "Give --area, --bbox or --place (optionally with --start/--end) to "
+                "search, or pass item URLs directly."
+            )
+        search_bbox = _resolve_search_bbox(bbox, place)
+        items = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=search_bbox,
+            start=start,
+            end=end,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=[asset],
+            limit=limit,
+        )
+    if not items:
+        raise click.ClickException("No acquisitions to embed; widen the search or pass URLs.")
+
+    path = _embed_path(embed_db, db_path)
+    try:
+        model_name = emb.resolve_scene_model(model)
+        embedder = emb.default_image_embedder(model=model_name)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    render = lambda it: emb._render_quicklook_asset(it, asset=asset)  # noqa: E731
+    skipped: list[str] = []
+
+    def note_error(item: UmbraItem, exc: Exception) -> None:
+        skipped.append(f"{item.id}: {exc}")
+
+    try:
+        with OrbitSpinner(f"Embedding {len(items)} quicklook(s)") as spinner:
+
+            def tally(done: int, total: int) -> None:
+                spinner.label = f"Embedding quicklooks ({done}/{total})"
+
+            with emb.SceneEmbeddingIndex(path) as index:
+                written = index.build(
+                    items,
+                    embedder=embedder,
+                    render=render,
+                    model=model_name,
+                    progress=tally,
+                    on_error=note_error,
+                )
+                total = len(index)
+    except (emb.EmbedError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for note in skipped:
+        click.echo(f"warning: skipped {note}", err=True)
+    click.echo(
+        f"Embedded {written} new scene(s); scene index now holds {total} ({model_name}). ({path})"
+    )
+
+
+def _print_scene_matches(matches, as_json: bool, query_label: str) -> None:
+    if as_json:
+        click.echo(
+            json.dumps({"query": query_label, "matches": [m.to_dict() for m in matches]}, indent=2)
+        )
+        return
+    if not matches:
+        click.echo("No scenes cleared the score threshold.")
+        return
+    for m in matches:
+        when = m.datetime or "?"
+        where = m.task or "?"
+        click.echo(f"  {m.score:.3f}  {m.item_id}  [{where} @ {when}]")
+        if m.href:
+            click.echo(f"           {m.href}")
+
+
+@embed.command("similar")
+@click.argument("item_url")
+@click.option("--embed-db", default=None, help="Scene index to query (default: the sibling).")
+@click.option("--top-k", type=int, default=10, show_default=True, help="How many matches to show.")
+@click.option(
+    "--min-score",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Drop matches below this cosine score (0=unrelated, 1=identical).",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product's quicklook of the query item to embed (match how the index was built).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Embedding model for the query -- must match the model the index was "
+    "built with (default: $UMBRA_SCENE_EMBED_MODEL, else clip).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+def embed_similar(item_url, embed_db, top_k, min_score, asset, model, as_json) -> None:
+    """Find archived scenes that look like the acquisition at ITEM_URL.
+
+    Renders and embeds the query item's quicklook, then ranks the stored scene
+    vectors by cosine similarity (the query item is excluded from its own results).
+    "Find scenes that look like this flooded field" -- a search over pixels, not
+    metadata. Build the index first with 'umbra embed build'.
+    """
+    from . import embed as emb
+    from .exceptions import MissingDependencyError
+
+    path = _embed_path(embed_db, None)
+    if not path.exists():
+        raise click.ClickException(
+            f"No scene index at {path}. Build one first with 'umbra embed build'."
+        )
+    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    try:
+        embedder = emb.default_image_embedder(model=model)
+        render = lambda it: emb._render_quicklook_asset(it, asset=asset)  # noqa: E731
+        with OrbitSpinner(f"Embedding {item.id}"):
+            with emb.SceneEmbeddingIndex(path) as index:
+                matches = index.similar_to_item(
+                    item, embedder=embedder, render=render, top_k=top_k, min_score=min_score
+                )
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (emb.EmbedError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _print_scene_matches(matches, as_json, item.id)
+
+
+@embed.command("search")
+@click.argument("query")
+@click.option("--embed-db", default=None, help="Scene index to query (default: the sibling).")
+@click.option("--top-k", type=int, default=10, show_default=True, help="How many matches to show.")
+@click.option(
+    "--min-score",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Drop matches below this cosine score (0=unrelated, 1=identical).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Joint (CLIP-family) model to embed the text query -- must share a vector "
+    "space with the model the index was built with (default: $UMBRA_SCENE_EMBED_MODEL, "
+    "else clip).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+def embed_search(query, embed_db, top_k, min_score, model, as_json) -> None:
+    """Find archived scenes matching a plain-language QUERY ("ships at a berth").
+
+    Embeds the text query and ranks the stored *image* vectors by cosine
+    similarity. This needs a joint CLIP-family model whose text and image encoders
+    share a space -- build the index and run this query with the same model.
+    """
+    from . import embed as emb
+    from .exceptions import MissingDependencyError
+
+    path = _embed_path(embed_db, None)
+    if not path.exists():
+        raise click.ClickException(
+            f"No scene index at {path}. Build one first with 'umbra embed build'."
+        )
+    try:
+        text_embedder = emb.default_text_embedder(model=model)
+        with emb.SceneEmbeddingIndex(path) as index:
+            matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (emb.EmbedError, UmbraError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _print_scene_matches(matches, as_json, query)
+
+
+@embed.command("info")
+@click.option("--embed-db", default=None, help="Scene index to inspect (default: the sibling).")
+def embed_info(embed_db) -> None:
+    """Show what a scene index holds: scene-vector count, model and dimension."""
+    from . import embed as emb
+
+    path = _embed_path(embed_db, None)
+    if not path.exists():
+        raise click.ClickException(f"No scene index at {path}. Build one with 'umbra embed build'.")
+    with emb.SceneEmbeddingIndex(path) as index:
+        s = index.stats()
+    size_mb = path.stat().st_size / 1e6
+    click.echo(f"Scene index: {path}")
+    click.echo(f"  scenes : {s['scenes']}")
+    click.echo(f"  model  : {s['model'] or '?'}")
+    click.echo(f"  dim    : {s['dim'] or '?'}")
+    click.echo(f"  size   : {size_mb:.1f} MB")
+
+
 def main() -> None:
     """Console entry point with friendly error reporting."""
     try:

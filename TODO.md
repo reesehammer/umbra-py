@@ -182,10 +182,6 @@ called. The remaining C3 pieces build on it:
 manifest, `[load]` extra, no model call) is shipped. Follow-ons that build on it,
 not blockers:
 
-- **C5 archive embeddings (exploratory).** Chips are the prerequisite for
-  precomputing per-acquisition image embeddings and a `search_similar(item)` /
-  text-to-scene capability (`AI_INTEGRATION_IDEAS.md` C5). Publish the embedding
-  table with the nightly index so no user recomputes it.
 - **Publish the chip manifest as stac-geoparquet.** The manifest is JSONL /
   GeoJSON today; a `.parquet` option (reusing the `[export]` extra's
   stac-geoparquet plumbing) would let DuckDB / geopandas query a large chip set
@@ -196,8 +192,61 @@ not blockers:
 
 ---
 
+## C5 archive-embedding follow-ons (`umbra embed` shipped)
+
+- **Surfaced in:** the `umbra embed` PR (`AI_INTEGRATION_IDEAS.md` C5 /
+  `STRATEGY.md` 5.2).
+- **Code:** `src/umbra_py/embed.py`, `umbra embed` in `cli.py`.
+
+`umbra embed` (visual similarity search — one image vector per acquisition in a
+sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
+`[viz]` extras) is shipped. Follow-ons that build on it, not blockers:
+
+- **Publish the embedding table with the nightly index.** The scene vectors are
+  local-only today; publishing `catalog.embed.db` (or a stac-geoparquet embedding
+  table) beside the weekly `catalog.db` snapshot would let a fresh install run
+  `umbra embed similar` with no rebuild — and is exactly the kind of artifact worth
+  offering upstream (`STRATEGY.md` 5.2). Note the published table would be model-
+  and dimension-specific, so record the model label prominently.
+- **MCP `search_similar` tool.** `SceneEmbeddingIndex.similar_to_item` /
+  `similar_to_text` are plain callables; wrapping them as an MCP tool (returning the
+  same `SceneMatch` records as context cards) would let an agent do visual
+  similarity search conversationally, gated like the CLI on the `[ai]` key.
+- **A native vector index at scale.** Ranking is a brute-force cosine scan today
+  (instant at catalog scale, no binary dependency). If the archive grows to
+  hundreds of thousands of scenes, the schema leaves room to swap in `sqlite-vec`
+  or an ANN index behind the same `similar()` API.
+- **A SAR-tuned encoder.** The default targets a generic CLIP-family multimodal
+  `/embeddings` endpoint; a SAR-specific encoder (once one is broadly available)
+  would sharpen recall for radar-specific scene types. The `model` label already
+  guards against silently mixing encoders in one index.
+
+---
+
 ## Done
 
+- **`umbra embed`: archive scene embeddings / visual similarity search (C5).**
+  Added `src/umbra_py/embed.py` (`[ai]` + `[viz]` extras). `umbra embed build`
+  renders each acquisition's quicklook once (reusing `umbra describe`'s injectable
+  renderer — only downsampled overviews stream over HTTP) and embeds it into a
+  vector stored in a schema-versioned sidecar `catalog.embed.db` beside the catalog
+  index, keyed by item id and idempotent (a rebuild only embeds what is new; a
+  scene whose asset won't render is skipped, not fatal). `umbra embed similar
+  <url>` renders + embeds the query item and returns the archived scenes that look
+  most like it (image-to-image, the query excluded from its own results); `umbra
+  embed search "…"` ranks the stored image vectors against a text query
+  (text-to-scene, with a joint CLIP-family model); `umbra embed info` reports the
+  count, model and dimension. The only model calls are turning an image or a text
+  query into a vector — both injectable (`ImageEmbedder` / text `Embedder`, default
+  an OpenAI-compatible multimodal `/embeddings` endpoint via `requests`,
+  user-supplied key) — while rendering, storage, `cosine_similarity` (reused from
+  `umbra_py.semantic`) ranking and thresholding are stdlib-only (no `numpy`, no
+  `sqlite-vec`), so the whole feature is offline-testable with a deterministic
+  stand-in embedder and renderer. Chose a sidecar `catalog.embed.db` over embedding
+  vectors *inside* `catalog.db` so the deterministic index and its published
+  snapshot never carry model-derived data a core install can't use — the same
+  boundary `umbra semantic` uses. A `SceneMatch` is a pointer back to a real
+  acquisition (id, task, datetime, STAC href), never a model-authored fact.
 - **`umbra chips`: ML dataset preparation (C4).** Added `src/umbra_py/chips.py`
   (`[load]` extra). `chip_item` walks an acquisition's geocoded GeoTIFF one window
   at a time via GDAL's `/vsicurl/` driver (only each tile's bytes stream over HTTP

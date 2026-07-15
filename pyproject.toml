@@ -46,14 +46,16 @@ serve = ["fastapi>=0.110", "uvicorn>=0.27"]
 mcp = ["mcp>=1.2", "umbra-py[viz]"]
 # The AI features call a model at the edge while the library stays
 # deterministic: `umbra ask` has a model *plan* a search (re-validated before it
-# runs) and `umbra describe` has a vision model *read* a rendered quicklook
-# (returned as a provenance-stamped description, never a filter). Both talk to
-# Anthropic or any OpenAI-compatible endpoint over plain HTTPS with the
+# runs), `umbra describe` has a vision model *read* a rendered quicklook
+# (returned as a provenance-stamped description, never a filter), and `umbra
+# embed` turns a quicklook (or a text query) into a vector for visual similarity
+# search (only the embedding step calls a model; ranking is deterministic). All
+# talk to Anthropic or any OpenAI-compatible endpoint over plain HTTPS with the
 # already-core `requests`, plus a user-supplied API key at runtime — no heavy
 # SDK. The extra exists as the documented install target and the marker of the
 # determinism boundary (AI is opt-in, never implicit); it pulls in nothing
-# beyond the core dependency it relies on. `umbra describe` additionally needs
-# the `viz` extra to render the quicklook it sends to the model.
+# beyond the core dependency it relies on. `umbra describe` and `umbra embed`
+# additionally need the `viz` extra to render the quicklook they embed/send.
 ai = ["requests>=2.28"]
 dev = [
     "pytest>=7.4",
