@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`watch_site` MCP tool + `watch-site` prompt: the standing-analyst delta,
+  now conversational (`docs/AI_INTEGRATION_IDEAS.md` C3 — the last open C3
+  piece).** The `umbra watch` idempotent delta is now surfaced over the flagship
+  `umbra-mcp` server, reusing `umbra_py.watch.watch()` unchanged. `watch_site`
+  takes the same filters as `search_catalog` (`place`/`area`/`bbox`,
+  `products`, `start`/`end`, `fuzzy`) and returns only the acquisitions **new**
+  since the last check of that site — all of them on the first run, and just the
+  delta on every re-check. State persists in the local catalog index's `meta`
+  table (`MetaWatchStore`, created on first use), so a watch survives across MCP
+  sessions with no extra setup; a stable `name` is derived from the query (pass
+  an explicit `name` for several independent watches over one site), and
+  `reset=True` re-establishes the baseline. The returned `new_items` are context
+  cards ready to hand straight to `change_composite` / `timescan`, closing the
+  standing-analyst loop (new pass → composite → describe) inside one
+  conversation. The companion `watch-site` prompt packages that workflow.
+  **No model is called** — this is pure set arithmetic over the deterministic
+  search — so the whole surface stays offline-testable (the search source is an
+  injectable live/index backend and the store an injectable index).
 - **`umbra chips`: turn SAR scenes into georeferenced ML training tiles
   (`docs/AI_INTEGRATION_IDEAS.md` C4 / `docs/STRATEGY.md` 5.5 — the ML
   dataset-preparation layer).** For the model-*training* audience, the missing

@@ -215,6 +215,23 @@ same 500 lines of glue first, and many give up."*
 > archive-embedding work (C5) builds on. The remaining AI item is the B3 example
 > notebooks; the single highest-value strategic move overall remains the unstarted
 > Canopy backend (5.1).
+>
+> **Update:** the **standing-analyst loop is now conversational** — the `umbra
+> watch` delta ships as a `watch_site` tool and a `watch-site` prompt on the
+> flagship MCP server (`AI_INTEGRATION_IDEAS.md` C3's optional follow-up, which
+> **completes C3**), reusing the `watch()` function unchanged. This is a direct
+> funnel-widening move (§1) on the highest-leverage surface the project has: an
+> MCP client can now ask "what's new at this site since I last checked?" and get
+> back only the delta — all of it on the first check, just the new passes after —
+> as context cards that feed straight into the existing `change_composite` /
+> `timescan` tools, so SAR-based monitoring (new pass → composite → describe) is a
+> zero-install conversation instead of a scripting project. It preserves the
+> boundary and novelty the scientific audience needs (§3): **no model is called**
+> — pure set arithmetic over the deterministic search — watch state persists in
+> the local index's `meta` table so it survives across sessions with no schema
+> change, and the source and store stay injectable, so it is fully offline-testable
+> without the SDK. The remaining AI item is the B3 example notebooks; the single
+> highest-value strategic move overall remains the unstarted Canopy backend (5.1).
 
 ## 2. The landscape: life without umbra-py
 

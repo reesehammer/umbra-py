@@ -57,11 +57,12 @@ def test_build_server_registers_expected_surface():
         "change_composite",
         "timescan",
         "download_asset",
+        "watch_site",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
     prompts = {p.name for p in asyncio.run(server.list_prompts())}
-    assert prompts == {"monitor-site", "survey-region"}
+    assert prompts == {"monitor-site", "watch-site", "survey-region"}
 
 
 def test_context_resource_matches_llm_context():
@@ -185,3 +186,93 @@ def test_download_asset_confirm_gate(sample_item_dict):
     assert out["confirm_required"] is True
     assert out["bytes"] == 2500000
     assert "confirm=true" in out["hint"]
+
+
+# --------------------------------------------------------------------------
+# watch_site — the standing-analyst delta, over MCP
+# --------------------------------------------------------------------------
+
+
+def _fake_catalog(items):
+    """A minimal live-catalog stand-in returning ``items`` from ``search``."""
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(list(items))
+
+    return _FakeCatalog()
+
+
+def test_watch_site_reports_only_new_items(sample_item_dict, monkeypatch, tmp_path):
+    # State persists in the local index at the default path; point it at a temp
+    # dir so the test never touches a real user index.
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "catalog.db")
+
+    first = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    second_dict = copy.deepcopy(sample_item_dict)
+    second_dict["id"] = sample_item_dict["id"] + "-2"
+    second_url = ITEM_URL.replace("item", "item2")
+    second = UmbraItem.from_dict(second_dict, href=second_url)
+
+    # First check: live source has one pass; it is new (first run reports all).
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _fake_catalog([first]))
+    out1 = ms.watch_site(area="anywhere", local=False)
+    assert out1["source"] == "live-catalog"
+    assert out1["first_run"] is True
+    assert out1["new_count"] == 1
+    assert out1["new_items"][0]["id"] == first.id
+    assert out1["attribution"]
+
+    # Second check, same query: the source now has both passes, but only the
+    # second is new — the first was already reported and state persisted.
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _fake_catalog([first, second]))
+    out2 = ms.watch_site(area="anywhere", local=False)
+    assert out2["first_run"] is False
+    assert out2["new_count"] == 1
+    assert out2["new_items"][0]["id"] == second.id
+    assert out2["total_seen"] == 2
+
+    # Idempotent: an immediate re-run with no newly published data reports zero.
+    out3 = ms.watch_site(area="anywhere", local=False)
+    assert out3["new_count"] == 0
+    assert out3["total_seen"] == 2
+
+
+def test_watch_site_reset_reestablishes_baseline(sample_item_dict, monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "catalog.db")
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _fake_catalog([item]))
+
+    ms.watch_site(area="anywhere", local=False)
+    # Without reset the same pass is not new again...
+    assert ms.watch_site(area="anywhere", local=False)["new_count"] == 0
+    # ...but reset re-reports it as a fresh baseline.
+    out = ms.watch_site(area="anywhere", local=False, reset=True)
+    assert out["first_run"] is True
+    assert out["new_count"] == 1
+
+
+@responses.activate
+def test_watch_site_geocodes_place(sample_item_dict, monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "catalog.db")
+    responses.add(
+        responses.GET,
+        _NOMINATIM,
+        json=[{"boundingbox": ["10.0", "11.0", "-68.0", "-67.0"], "display_name": "Somewhere"}],
+        status=200,
+    )
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    captured = {}
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.watch_site(place="Somewhere", local=False)
+    assert out["resolved_place"] == "Somewhere"
+    assert out["resolved_bbox"] == [-68.0, 10.0, -67.0, 11.0]
+    # The geocoded bbox reaches the deterministic search layer.
+    assert captured["bbox"] == (-68.0, 10.0, -67.0, 11.0)

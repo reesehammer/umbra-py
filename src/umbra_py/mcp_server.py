@@ -39,6 +39,7 @@ from .exceptions import MissingDependencyError
 from .geocode import geocode_place as _geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
+from .watch import MetaWatchStore, watch, watch_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.fastmcp import FastMCP
@@ -332,6 +333,89 @@ def download_asset(
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
 
+def watch_site(
+    place: str | None = None,
+    area: str | None = None,
+    bbox: list[float] | None = None,
+    fuzzy: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+    products: list[str] | None = None,
+    name: str | None = None,
+    reset: bool = False,
+    local: bool | None = None,
+) -> dict[str, Any]:
+    """Report only the acquisitions **new** since the last check of this site.
+
+    SAR's value for monitoring is its cadence, so the natural workflow is
+    *standing*: run the same search each time and act only on what changed. This
+    tool packages that idempotent delta — call it in one turn, come back a day
+    (or a session) later and call it again, and it returns just the passes
+    published in between, not the whole list again. The scheduler is you: ask the
+    agent to check the site, and it reports the delta.
+
+    Define the site with the same filters as ``search_catalog`` — ``place``
+    (geocoded to a bbox), ``area`` (task/site-name substring, loosened by
+    ``fuzzy``), ``bbox``, ``products``, and ``start``/``end`` date bounds. The
+    watch is identified by a stable ``name`` derived from those filters (pass an
+    explicit ``name`` to run several independent watches over the same site);
+    ``reset=True`` re-establishes the baseline, reporting everything as new.
+
+    State persists in the local catalog index's ``meta`` table (created on first
+    use), so a watch survives across sessions with no extra setup. ``local``
+    selects the search backend exactly as in ``search_catalog`` — leave it unset
+    to use the on-disk index when present and a live S3 walk otherwise; for true
+    monitoring a live walk (``local=false``) catches freshly published passes.
+    **No model is called** — this is pure set arithmetic over the deterministic
+    search — and the returned ``new_items`` are context cards ready to hand
+    straight to ``change_composite`` / ``timescan``, closing the standing-analyst
+    loop (new pass → composite → describe) without leaving the conversation.
+    """
+    resolved_bbox = tuple(bbox) if bbox else None
+    resolved_place = None
+    if place and resolved_bbox is None:
+        resolved_bbox, resolved_place = _geocode_place(place)
+
+    source, is_index = _search_source(local)
+    # Watch state always lives in the local index's meta table (MetaWatchStore),
+    # so a watch persists across MCP sessions. Reuse the index connection when
+    # the search already opened one; otherwise open the index just for the store
+    # (CatalogIndex creates the DB + meta table on first use).
+    store_index = source if is_index else CatalogIndex(default_index_path())
+
+    resolved_products = list(products) if products else None
+    watch_name = name or watch_key(
+        area=area,
+        place=place,
+        bbox=resolved_bbox,
+        product_types=resolved_products,
+        start=start,
+        end=end,
+        fuzzy=fuzzy,
+    )
+    try:
+        result = watch(
+            source,
+            name=watch_name,
+            store=MetaWatchStore(store_index),
+            reset=reset,
+            bbox=resolved_bbox,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=resolved_products,
+            start=start,
+            end=end,
+        )
+        payload = result.to_dict()
+    finally:
+        store_index.close()
+
+    payload["source"] = "local-index" if is_index else "live-catalog"
+    payload["resolved_place"] = resolved_place
+    payload["resolved_bbox"] = list(resolved_bbox) if resolved_bbox else None
+    return payload
+
+
 def main() -> None:
     """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
     build_server().run()
@@ -367,6 +451,7 @@ def build_server() -> FastMCP:
         change_composite,
         timescan,
         download_asset,
+        watch_site,
     ):
         server.add_tool(fn)
 
@@ -404,6 +489,30 @@ def build_server() -> FastMCP:
             "3. change_composite(urls=[...]) on their stac_href URLs.\n"
             "4. Describe what the green/magenta regions imply about activity, "
             "citing the acquisition dates and keeping the attribution line."
+        )
+
+    @server.prompt(
+        name="watch-site",
+        description="Standing workflow: report only passes new since last check, then composite.",
+    )
+    def watch_site_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
+        window = f" between {start} and {end}" if start or end else ""
+        args = f"place='{place}', local=False"
+        if start:
+            args += f", start={start!r}"
+        if end:
+            args += f", end={end!r}"
+        return (
+            f"Check '{place}' for newly published passes{window} using the umbra tools:\n"
+            f"1. watch_site({args}) — it returns only the acquisitions new since the "
+            "last check (all of them on the first run), persisting state so a later "
+            "re-check reports just the delta.\n"
+            "2. If new_count is 0, report that nothing new has arrived and stop.\n"
+            "3. Otherwise pick two or three recent passes of the same polarization "
+            "(see each new item's polarization_caveat) and change_composite(urls=[...]) "
+            "on their stac_href URLs.\n"
+            "4. Describe what the green/magenta regions imply about activity since the "
+            "last check, citing the acquisition dates and keeping the attribution line."
         )
 
     @server.prompt(
