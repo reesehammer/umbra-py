@@ -86,14 +86,14 @@ escaping, retry/backoff, repo metadata hygiene, and open-source scaffolding
   with `spinner.__enter__()` and paired `finally: spinner.stop()` instead of a
   `with` block (cli.py:170-185). It works, but it's the kind of code that
   breaks silently under refactoring.
-- **Version is duplicated** in `pyproject.toml` (`version = "0.1.0"`) and
-  `src/umbra_py/__init__.py` (`__version__ = "0.1.0"`). Use hatchling's
-  dynamic version (`[tool.hatch.version] path = "src/umbra_py/__init__.py"`)
-  so they cannot drift.
-- **No `py.typed` marker.** The codebase is consistently and modernly typed
-  (`from __future__ import annotations`, `X | None`, `list[str]`), but without
-  `src/umbra_py/py.typed` no downstream type checker can consume any of it.
-  One empty file + one line in the wheel config fixes this.
+- ~~**Version is duplicated** in `pyproject.toml` and
+  `src/umbra_py/__init__.py`.~~ ✅ **Fixed:** `pyproject.toml` now uses
+  hatchling's dynamic version (`[tool.hatch.version] path =
+  "src/umbra_py/__init__.py"`), so `__version__` is the single source and the
+  two cannot drift.
+- ~~**No `py.typed` marker.**~~ ✅ **Fixed:** `src/umbra_py/py.typed` now ships
+  in the wheel and sdist, so downstream type checkers consume the library's
+  inline types.
 - **No type-checking in CI.** ruff catches lint, but nothing runs mypy or
   pyright. The `# type: ignore[arg-type]` in `index.build` (index.py:198) and
   the loosely-typed `**kwargs` pass-throughs in `download.py`/`viz.py` save
@@ -321,14 +321,16 @@ warns a full index build "takes a while." Two structural improvements:
 1. **Not on PyPI (verified 404).** The README's install command fails for
    every prospective user — the single biggest adoption blocker, and the name
    is claimable by anyone. Even a `0.1.0a1` pre-release claims the name,
-   enables `pip install`, and unlocks conda-forge later. Pair with a
-   `release.yml` using PyPI **Trusted Publishing** (OIDC — no long-lived
-   token secret) triggered on GitHub Releases.
-2. **Repository metadata points to the wrong org.** `pyproject.toml` URLs
-   reference `github.com/theminiverse/umbra-py`, but this repository is
-   `reesehammer/umbra-py`. Whichever is canonical, PyPI metadata, README
-   badges, and CONTRIBUTING clone instructions must agree, or issues/PRs land
-   in the wrong place.
+   enables `pip install`, and unlocks conda-forge later. ⏳ **The
+   `release.yml` using PyPI Trusted Publishing (OIDC — no long-lived token
+   secret) triggered on GitHub Releases now exists**; the remaining step is a
+   maintainer action — register the PyPI Trusted Publisher for
+   `reesehammer/umbra-py` and cut the `v0.1.0` GitHub Release, which fires the
+   workflow and claims the name.
+2. ~~**Repository metadata points to the wrong org.**~~ ✅ **Fixed:** the
+   `pyproject.toml` project URLs, `CHANGELOG` compare/tag links, and
+   `CONTRIBUTING` clone command now all point at the canonical
+   `reesehammer/umbra-py`.
 3. **No releases, no tags.** The changelog is all "Unreleased" and there are
    no git tags, so there is no way to pin, bisect, or communicate stability.
    Cutting `v0.1.0` (matching the existing version string) costs minutes.
@@ -359,8 +361,8 @@ warns a full index build "takes a while." Two structural improvements:
 | # | Recommendation | Where | Effort |
 |---|---|---|---|
 | 1 | ✅ **Done (PR #29).** Added `list-type=2` to both S3 listing URLs; added truncated-pagination regression tests (offline two-page fakes + `network` test) | `catalog.py:121,155` | ~2 lines + tests |
-| 2 | Publish to PyPI (even as alpha) and add a Trusted-Publishing release workflow; tag `v0.1.0` | `pyproject.toml`, `.github/workflows/release.yml` | half a day |
-| 3 | Fix `pyproject.toml`/README/CONTRIBUTING repo URLs to the canonical org | `pyproject.toml:52-56` | minutes |
+| 2 | ⏳ **Release plumbing done (this PR); the publish itself is a maintainer action.** Added `.github/workflows/release.yml` — Trusted-Publishing (OIDC) release workflow that builds sdist+wheel, `twine check`s them, and refuses to publish if the `vX.Y.Z` tag disagrees with the version. Remaining: a maintainer cuts the `v0.1.0` GitHub Release (which fires the workflow) after registering the PyPI Trusted Publisher | `pyproject.toml`, `.github/workflows/release.yml` | half a day |
+| 3 | ✅ **Done (this PR).** Fixed `pyproject.toml` project URLs, `CHANGELOG` compare/tag links, and `CONTRIBUTING` clone command to the canonical `reesehammer` org | `pyproject.toml`, `CHANGELOG.md`, `CONTRIBUTING.md` | minutes |
 | 4 | Add a CI job with `.[all,dev]` so the 72 skipped viz/load tests run; add Python 3.13 | `.github/workflows/ci.yml` | ~10 lines |
 
 **P1 — user-facing robustness**
@@ -378,11 +380,11 @@ warns a full index build "takes a while." Two structural improvements:
 
 | # | Recommendation | Where | Effort |
 |---|---|---|---|
-| 11 | Ship `py.typed`; add mypy (or pyright) to CI | package + CI | small |
+| 11 | ⏳ **`py.typed` shipped (this PR)** — the marker is now in the wheel + sdist, so downstream type checkers consume the inline types; adding mypy/pyright to CI is still open | package + CI | small |
 | 12 | Add SRI hashes to the injected geotiff.js `<script>` tag | `_lazy_imagery.py` | small |
 | 13 | Parse listing XML with `defusedxml` (or document the trust boundary) | `catalog.py` | small |
 | 14 | Add `SECURITY.md`, `CODE_OF_CONDUCT.md`, Dependabot config, `pip-audit` CI step | `.github/` | small |
-| 15 | Single-source the version via hatchling dynamic version | `pyproject.toml`, `__init__.py` | small |
+| 15 | ✅ **Done (this PR).** Version single-sourced from `umbra_py.__version__` via hatchling's dynamic version, so `pyproject.toml` and `__init__.py` can no longer drift | `pyproject.toml`, `__init__.py` | small |
 | 16 | Wire `pytest --cov` + Codecov badge into CI | CI | small |
 | 17 | Publish a nightly prebuilt `catalog.db` as a rolling release artifact (scheduled Action) | new workflow | medium |
 

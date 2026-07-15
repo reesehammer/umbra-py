@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **PyPI release readiness — the single highest-leverage adoption gap
+  (`docs/CODEBASE_ANALYSIS.md` P0 #2/#3, P2 #11/#15).** The whole funnel is
+  built (free-bucket search → paid Canopy archive, all in one library), but the
+  README's first instruction, `pip install umbra-py`, still fails because the
+  package isn't on PyPI. This lands the release plumbing so a maintainer can
+  claim the name and ship:
+  - **`release.yml` workflow** publishing to PyPI via **Trusted Publishing**
+    (OIDC) on a published GitHub Release — no long-lived token stored in the
+    repo. It builds the sdist + wheel, runs `twine check`, and refuses to
+    publish if the `vX.Y.Z` release tag disagrees with the package version.
+    `workflow_dispatch` runs a build-and-verify dry run without publishing.
+  - **Single-sourced version.** `pyproject.toml` now derives the version from
+    `umbra_py.__version__` via hatchling's dynamic version, so the two can no
+    longer drift (`docs/CODEBASE_ANALYSIS.md` §2.2).
+  - **PEP 561 `py.typed` marker** shipped in the wheel and sdist, so downstream
+    type checkers finally consume the library's inline types.
+  - **Repository-identity fix.** The `pyproject.toml` project URLs, the
+    `CHANGELOG` compare/tag links, and the `CONTRIBUTING` clone command now all
+    point at the canonical `reesehammer/umbra-py` instead of the stale
+    `theminiverse` org (`docs/CODEBASE_ANALYSIS.md` P0 #3).
 - **Canopy commercial-archive backend behind the same `search()` interface
   (`docs/STRATEGY.md` 5.1 — the single highest-value strategic move).** Umbra's
   open data is a static STAC catalog with no search API (which is why this
@@ -842,5 +862,5 @@ Initial release. Discovery + download core for Umbra's open SAR data.
   amplitude extraction from SICD.
 - Project scaffolding: Apache 2.0 license, packaging, CI, tests, and docs.
 
-[Unreleased]: https://github.com/theminiverse/umbra-py/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/theminiverse/umbra-py/releases/tag/v0.1.0
+[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.0
