@@ -489,7 +489,8 @@ def default_planner(*, model: str | None = None) -> Planner:
         "OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
         "endpoint) and, optionally, UMBRA_ASK_MODEL to pick the model. "
         "The model only plans the search; the library still runs it "
-        "deterministically."
+        "deterministically.",
+        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
     )
 
 

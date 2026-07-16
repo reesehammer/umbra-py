@@ -135,7 +135,8 @@ def _require_serve():
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via CLI
         raise MissingDependencyError(
             "The STAC API server needs the 'serve' extra. Install it with:\n"
-            "    pip install 'umbra-py[serve]'"
+            "    pip install 'umbra-py[serve]'",
+            hint="pip install 'umbra-py[serve]'",
         ) from exc
     import fastapi
 
@@ -1507,7 +1508,8 @@ def serve(
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via CLI
         raise MissingDependencyError(
             "The STAC API server needs the 'serve' extra. Install it with:\n"
-            "    pip install 'umbra-py[serve]'"
+            "    pip install 'umbra-py[serve]'",
+            hint="pip install 'umbra-py[serve]'",
         ) from exc
 
     app = build_app(index_path, live=live, artifacts=artifacts, cache_dir=cache_dir)

@@ -711,7 +711,8 @@ def default_narrator(*, model: str | None = None) -> Narrator:
         "(or OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
         "endpoint) and, optionally, UMBRA_NARRATE_MODEL to pick the model. The "
         "model only interprets the change composite; every narration is stamped as "
-        "an AI interpretation and carries the CC-BY attribution."
+        "an AI interpretation and carries the CC-BY attribution.",
+        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
     )
 
 

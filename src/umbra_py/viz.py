@@ -60,7 +60,8 @@ def _require(module: str):
     except ImportError as exc:  # pragma: no cover - only without extra
         raise MissingDependencyError(
             f"'{module}' is required for interactive maps. "
-            'Install the extra with: pip install "umbra-py[viz]"'
+            'Install the extra with: pip install "umbra-py[viz]"',
+            hint='pip install "umbra-py[viz]"',
         ) from exc
 
 

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/error.schema.json",
+  "title": "umbra-py error object",
+  "description": "The single JSON object umbra-py prints to stderr when a command fails and machine-readable errors are active (the invocation used --json, or UMBRA_JSON is set). Produced by umbra_py.UmbraError.to_dict(). Stable within a minor version.",
+  "type": "object",
+  "required": ["error", "message", "hint"],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "type": "string",
+      "description": "The exception class name (e.g. \"CatalogError\", \"MissingDependencyError\"). Stable identifier a caller can branch on without parsing the message.",
+      "examples": ["CatalogError", "MissingDependencyError", "GeocodeError"]
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable summary of what went wrong."
+    },
+    "hint": {
+      "type": ["string", "null"],
+      "description": "A single actionable recovery step (an install command, an alternative flag), or null when none applies.",
+      "examples": ["pip install \"umbra-py[viz]\"", "Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)", null]
+    }
+  }
+}

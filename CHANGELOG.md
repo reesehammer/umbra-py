@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Machine-readable errors (`docs/AI_INTEGRATION_IDEAS.md` §A1).** Every
+  `UmbraError` now carries an optional `hint` — a single actionable recovery
+  step — and serializes to a stable `{"error", "message", "hint"}` dict via
+  `UmbraError.to_dict()`. When a command fails and JSON output is active (the
+  invocation passed `--json`, or `UMBRA_JSON` is set to a truthy value) the CLI
+  prints that object to stderr instead of a prose line, so an agent can branch
+  on `error` and act on `hint` without parsing a traceback; otherwise it prints
+  the usual `error: …` line plus a `hint: …` line when one applies. The wire
+  shape is published as public API in `docs/schemas/error.schema.json`
+  (`docs/schemas/README.md`). Every optional-dependency and API-key error now
+  populates `hint` with the exact `pip install` command or the environment
+  variable to set (e.g. `pip install "umbra-py[viz]"`,
+  `Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)`), and geocoding's no-match error
+  points at `--bbox`.
+
 ### Security
 - **Generated HTML now escapes all remote metadata and validates link schemes
   (`docs/CODEBASE_ANALYSIS.md` §3.1).** The map/gallery/swipe/change artifacts
