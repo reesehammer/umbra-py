@@ -455,6 +455,13 @@ umbra demo --local --max-per-task 1 --out explorer.html
 # view" panel). Without --server-url the page stays a static single file.
 umbra demo --local --area "Centerfield" --server-url http://localhost:8000 --out explorer.html
 
+# Whole catalog on one map, fast: tile every acquisition into a single-file
+# PMTiles vector archive (no tile server, no tippecanoe -- pure standard
+# library). A map fetches only the tiles in view, so it scales past the point
+# where embedding every footprint in the page stops being fast. --viewer also
+# writes a MapLibre GL page that renders it; host the two side by side.
+umbra tiles --local --out catalog.pmtiles --viewer catalog.html
+
 # Interactive before/after swipe map: drag a divider to wipe the earliest
 # pass of a site over the latest and watch what changed. Self-contained HTML.
 umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe.html --db

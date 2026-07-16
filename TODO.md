@@ -9,6 +9,37 @@ the bottom if the history is useful).
 
 ---
 
+## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
+
+- **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).
+- **Code:** `src/umbra_py/pmtiles.py`, `umbra tiles` in `cli.py`.
+
+`umbra tiles` (a stdlib-only PMTiles v3 writer over acquisition centroids + a
+MapLibre GL viewer, no extra, no tippecanoe) is shipped, closing the demo's
+full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
+
+- **Publish `catalog.pmtiles` with the nightly index.** The weekly workflow
+  already publishes `catalog.db` (and could publish the geoparquet snapshot); a
+  `catalog.pmtiles` built from the same index would give a fresh install (and a
+  Pages showcase) a whole-catalog basemap with no local tiling step — and is
+  exactly the kind of artifact worth offering upstream (`STRATEGY.md` 5.2).
+- **Wire the PMTiles source into `umbra demo`.** The demo embeds its gathered
+  slice as inline JSON; an opt-in `--pmtiles <url>` that swaps the Leaflet
+  cluster layer for a MapLibre vector layer over a tiled archive would let the
+  interactive explorer scale to the whole catalog too (today `tiles` ships its
+  own separate MapLibre viewer to keep the proven demo page untouched).
+- **Leaf directories for very large catalogs.** The writer emits a single root
+  directory, which is spec-valid and ample for the current catalog (thousands of
+  tiles). If the tile count ever grows past a comfortable root-directory size,
+  add leaf-directory splitting (the PMTiles spec's mechanism) so readers still
+  fetch a small root first.
+- **Tile polygons, not just centroids.** Points are what a whole-catalog overview
+  needs; tiling the actual footprints (clipping polygons to tile boundaries)
+  would let the viewer show coverage shape at high zoom — more encoder work
+  (clipping, MoveTo/LineTo/ClosePath commands) for a niche gain.
+
+---
+
 ## Asset classifier: `"tif"` substring check can never match uppercased name
 
 - **Surfaced in:** [PR #2](https://github.com/theminiverse/umbra-py/pull/2) ("Notes for reviewers")
