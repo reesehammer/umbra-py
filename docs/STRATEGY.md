@@ -408,6 +408,29 @@ same 500 lines of glue first, and many give up."*
 > "run this analysis here" affordance over *any* site (`DEMO_APP_GAPS.md` Path B
 > step 3). What remains under the demo heading is only async job semantics for
 > the longest renders and the full-acquisition-set PMTiles tiling.
+>
+> **Update (2026-07-16):** the **async job semantics for the longest renders have
+> shipped** (`DEMO_APP_GAPS.md` Path B step 2 — the productized shape the
+> synchronous render endpoints deferred as an honest first slice). A composite
+> request can opt in to `"async": true` and get a `202 Accepted` + a job id back
+> immediately instead of holding the request for the whole render; it then polls
+> `GET /jobs/{id}` (`queued` → `running` → `succeeded` | `failed`) and fetches the
+> finished artifact from `GET /jobs/{id}/result`. The move that keeps it in the
+> project's grain (§3): there is **no separate result store** — the render still
+> writes the same content-addressed disk cache the synchronous path uses, so a
+> completed job's result *is* a cache entry, and an async request whose key is
+> already cached returns an already-`succeeded` job with no work. It preserves the
+> determinism and testability the scientific audience needs (§3): frame resolution
+> and validation stay synchronous (a bad request is still a fast `400`, never a
+> doomed job; a failed render is a `failed` job whose result endpoint mirrors the
+> sync status), and the queue's executor is **injectable**, so the whole path is
+> offline-testable with no wall-clock timing — the same discipline the injectable
+> renderers already hold. This productizes the demo's server backend for the
+> renders that actually take tens of seconds (a large `max_size`, a long
+> timescan). With it, the only remaining item under the demo heading is the
+> full-acquisition-set PMTiles tiling (Path A step 3); the higher-level strategic
+> gaps are unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption
+> moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 

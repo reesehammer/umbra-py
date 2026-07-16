@@ -197,8 +197,17 @@ whose Change / Timescan / Swipe buttons POST the currently-filtered acquisitions
 to the matching endpoint and render the returned artifact in place (swipe opens
 its map in a new tab). This is the R4 "run this analysis here" affordance over
 *any* site, closing the self-serve loop; without `--server-url` the page stays a
-fully static single file. What remains under this heading is only the async job
-semantics for the longest renders (`TODO.md`).
+fully static single file.
+
+✅ **Async job semantics for the longest renders now ship too.** A composite
+request that carries `"async": true` no longer holds the request for the whole
+render: the server queues it on a small background pool and returns
+`202 Accepted` + a job id, the client polls `GET /jobs/{id}`
+(`queued` → `running` → `succeeded` | `failed`), and fetches the finished
+artifact from `GET /jobs/{id}/result`. The disk cache *is* the result store, so a
+completed job's result is a cache entry (and an already-cached key returns an
+already-`succeeded` job with no work). Nothing under this heading now remains
+open.
 
 ### G6 — No thumbnail/artifact caching layer — **partly addressed**
 
@@ -272,12 +281,14 @@ Adds on-demand capability over Path A rather than replacing it:
    for AI integration (B2), so this work is shared, not duplicated. **Shipped**;
    the STAC search backend the rest of this path builds on now exists.
 2. ✅ **Artifact endpoints wrapping the existing library functions —
-   shipped.** `GET /artifacts/quicklook/{id}.png`, `POST /artifacts/change` and
-   `POST /artifacts/timescan` render on demand over *any* site and cache each
-   result to disk keyed by its inputs (fixes G5, and G6 for these endpoints).
-   Still open: a `POST /artifacts/swipe` endpoint, and async job/progress
-   semantics for the longest renders (today they are synchronous — fine for a
-   downsampled overview, which returns in seconds).
+   shipped, now with async job semantics.** `GET /artifacts/quicklook/{id}.png`,
+   `POST /artifacts/change`, `POST /artifacts/timescan` and `POST /artifacts/swipe`
+   render on demand over *any* site and cache each result to disk keyed by its
+   inputs (fixes G5, and G6 for these endpoints). A composite request can opt in
+   to `"async": true` to get a `202 Accepted` + a job id, poll `GET /jobs/{id}`,
+   and fetch the result from `GET /jobs/{id}/result` (the disk cache is the result
+   store) — so a large `max_size` or a long timescan no longer holds a request for
+   its whole duration. Nothing here remains open.
 3. Front end grows "run this analysis here" affordances against those
    endpoints; everything else from Path A is reused.
 4. Dockerfile + compose for one-command self-hosting; a public instance is a
@@ -310,13 +321,16 @@ Adds on-demand capability over Path A rather than replacing it:
   quicklook/change/timescan/swipe over *any* site on demand and caches the
   results (Path B step 2), and `umbra demo --server-url` wires the front-end
   "run this analysis here" affordance that calls those endpoints (Path B step 3)
-  — the last self-serve-demo gap. (Former blockers gone: the pagination bug is
+  — the last self-serve-demo gap. Long renders are no longer blocking: a
+  composite request can opt in to `"async": true` for a `202 Accepted` + a
+  `GET /jobs/{id}` poll loop, with `GET /jobs/{id}/result` serving the finished
+  artifact from the disk cache. (Former blockers gone: the pagination bug is
   fixed in PR #29, the visual commands render from the prebuilt index via
   `--local`, the self-serve front end ships as `umbra demo`, the on-demand
   artifact endpoints ship on `umbra serve`, and the demo now calls them.)
 - **Not yet**: the *truly whole-catalog* view (PMTiles tiling of the full
-  acquisition set, Path A step 3), and async job semantics for the longest
-  renders (`TODO.md`).
+  acquisition set, Path A step 3). Async job semantics for the longest renders,
+  formerly listed here, are now shipped.
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the

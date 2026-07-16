@@ -772,6 +772,23 @@ browser page on another origin can call it. Use `umbra serve --no-artifacts` to
 expose only the read-only STAC surface (e.g. for a public instance that wants to
 bound COG-streaming egress).
 
+A long render (a large `max_size`, a many-frame timescan) needn't hold the
+request: add `"async": true` to a composite request body to get a `202 Accepted`
+and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished
+artifact from `GET /jobs/{id}/result` (the disk cache is the result store, so an
+already-cached render comes straight back `succeeded`):
+
+```bash
+# Queue a change composite; the response is a job document, not the PNG.
+curl -X POST http://127.0.0.1:8000/artifacts/change \
+  -H 'content-type: application/json' \
+  -d '{"bbox": [-112.1, 39.0, -111.9, 39.2], "datetime": "2024-01-01/2024-03-01", "async": true}'
+# -> {"id": "…", "status": "queued", "links": [...]}
+
+curl http://127.0.0.1:8000/jobs/<job-id>            # {"status": "succeeded", ...}
+curl -o change.png http://127.0.0.1:8000/jobs/<job-id>/result
+```
+
 These endpoints are what `umbra demo --server-url <serve URL>` calls: the
 generated explorer gains an "Analyze this view" panel whose Change / Timescan /
 Swipe buttons render each product over the currently-filtered acquisitions on

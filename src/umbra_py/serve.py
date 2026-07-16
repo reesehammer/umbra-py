@@ -34,10 +34,18 @@ the "no artifact caching" gap for these endpoints). Two properties keep them in
 the package's grain: the renderers are **injectable** (``build_app(...,
 renderers=...)``), so the routes are unit-testable in the core install with no
 network and no ``viz`` extra; and they are opt-out (``--no-artifacts``) for a
-public instance that wants to bound COG-streaming egress. Rendering is
-synchronous for now -- a single composite streams a downsampled overview per
-pass and returns in seconds; an async job queue for long renders is the ledgered
-follow-on (``TODO.md``).
+public instance that wants to bound COG-streaming egress.
+
+Renders are synchronous by default -- a single composite streams a downsampled
+overview per pass and returns in seconds -- but a composite request can opt in
+to ``"async": true`` for a small job queue: it gets a ``202 Accepted`` + a job
+id back immediately, polls ``GET /jobs/{id}`` for status, and fetches the
+finished artifact from ``GET /jobs/{id}/result``. There is no separate result
+store -- the render still writes the same content-addressed disk cache, so a
+completed job's result *is* a cache entry (and an async request whose key is
+already cached returns an already-``succeeded`` job with no work). The queue's
+executor is injectable too, so it stays offline-testable without wall-clock
+timing.
 
 Two design commitments carry over from the rest of the package:
 
@@ -62,9 +70,12 @@ import io
 import itertools
 import json
 import os
+import threading
+import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -658,6 +669,173 @@ def swipe_frames(items: list[UmbraItem]) -> list[UmbraItem]:
 
 
 # --------------------------------------------------------------------------
+# Async render jobs (202 Accepted + poll; the disk cache is the result store)
+# --------------------------------------------------------------------------
+#
+# The composite endpoints render synchronously by default -- a downsampled
+# overview returns in seconds, which is the honest first slice. But a large
+# ``max_size`` or a long timescan can take tens of seconds, and a synchronous
+# request holds a worker for the whole render. The productized shape
+# (``DEMO_APP_GAPS.md`` Path B step 2 / ``TODO.md``) is a small job queue: a
+# request can opt in to ``"async": true``, get a ``202 Accepted`` + a job id
+# back immediately, poll ``GET /jobs/{id}`` for status, and fetch the finished
+# artifact from ``GET /jobs/{id}/result``. There is no separate result store --
+# the render still writes the same content-addressed disk cache the synchronous
+# path uses, so a completed job's result *is* a cache entry (and an async
+# request whose key is already cached returns an already-``succeeded`` job with
+# no work). The core stays deterministic and offline-testable: the executor is
+# injectable, so a test drives the queue with an inline or hand-stepped runner
+# and never depends on wall-clock timing.
+
+#: Job lifecycle states. ``queued`` -> ``running`` -> ``succeeded`` | ``failed``.
+JOB_QUEUED = "queued"
+JOB_RUNNING = "running"
+JOB_SUCCEEDED = "succeeded"
+JOB_FAILED = "failed"
+
+#: Background workers for the default job pool. Small: renders are CPU/IO heavy
+#: and this only exists to keep long renders off the request path, not to scale.
+ARTIFACT_JOB_WORKERS = 2
+
+
+def _utcnow_iso() -> str:
+    """Current UTC time as an RFC3339 string (job timestamps)."""
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+@dataclass
+class RenderJob:
+    """One queued/running/finished artifact render.
+
+    The job holds only what is needed to report status and locate the result:
+    the render ``kind``, the content-addressed ``cache_key`` + ``suffix`` that
+    name its disk-cache entry, the ``media_type`` to serve it as, and (on
+    failure) the error and the HTTP status the synchronous path would have used
+    for it (``501`` for a missing render extra, ``500`` otherwise).
+    """
+
+    id: str
+    kind: str
+    cache_key: str
+    suffix: str
+    media_type: str
+    status: str = JOB_QUEUED
+    #: True when the result was already on disk at submit time (no work run).
+    cached: bool = False
+    error: str | None = None
+    error_status: int = 500
+    created: str = field(default_factory=_utcnow_iso)
+    started: str | None = None
+    finished: str | None = None
+
+
+class JobStore:
+    """A thread-safe in-memory registry of :class:`RenderJob`\\ s.
+
+    In-memory is deliberate: the *artifacts* survive process restarts (they are
+    the disk cache), so a lost job record only costs a re-submit, and a durable
+    queue would be scope the first slice does not need. All state transitions
+    go through this class so they are serialised under one lock.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, RenderJob] = {}
+        self._lock = threading.Lock()
+
+    def create(
+        self,
+        kind: str,
+        cache_key: str,
+        media_type: str,
+        suffix: str,
+        *,
+        status: str = JOB_QUEUED,
+        cached: bool = False,
+    ) -> RenderJob:
+        job = RenderJob(
+            id=uuid.uuid4().hex,
+            kind=kind,
+            cache_key=cache_key,
+            suffix=suffix,
+            media_type=media_type,
+            status=status,
+            cached=cached,
+        )
+        if status == JOB_SUCCEEDED:
+            job.finished = _utcnow_iso()
+        with self._lock:
+            self._jobs[job.id] = job
+        return job
+
+    def get(self, job_id: str) -> RenderJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def mark_running(self, job: RenderJob) -> None:
+        with self._lock:
+            job.status = JOB_RUNNING
+            job.started = _utcnow_iso()
+
+    def mark_succeeded(self, job: RenderJob) -> None:
+        with self._lock:
+            job.status = JOB_SUCCEEDED
+            job.finished = _utcnow_iso()
+
+    def mark_failed(self, job: RenderJob, error: str, status: int) -> None:
+        with self._lock:
+            job.status = JOB_FAILED
+            job.error = error
+            job.error_status = status
+            job.finished = _utcnow_iso()
+
+
+def job_to_dict(job: RenderJob, base_url: str) -> dict[str, Any]:
+    """Serialise a job for ``GET /jobs/{id}`` (deterministic; no server needed).
+
+    A ``self`` link is always present; a ``result`` link (to
+    ``/jobs/{id}/result``) is added only once the job has ``succeeded``, and the
+    error message is surfaced when it has ``failed``.
+    """
+    base = base_url.rstrip("/")
+    links = [_link("self", f"{base}/jobs/{job.id}")]
+    payload: dict[str, Any] = {
+        "id": job.id,
+        "kind": job.kind,
+        "status": job.status,
+        "created": job.created,
+        "started": job.started,
+        "finished": job.finished,
+        "links": links,
+    }
+    if job.status == JOB_SUCCEEDED:
+        links.append(
+            _link("result", f"{base}/jobs/{job.id}/result", type=job.media_type, title="Result")
+        )
+        payload["cache"] = "hit" if job.cached else "miss"
+    if job.status == JOB_FAILED:
+        payload["error"] = job.error
+    return payload
+
+
+class _InlineJobExecutor:
+    """A :class:`~concurrent.futures.ThreadPoolExecutor`-shaped runner that runs
+    work synchronously on ``submit``.
+
+    Not used by the server (which wants a real pool), but the honest default for
+    tests: a submitted job finishes before ``submit`` returns, so ``POST
+    ...`` with ``"async": true`` yields an already-``succeeded`` job with no
+    timing races. It mirrors the tiny slice of the executor protocol the server
+    uses (``submit`` / ``shutdown``).
+    """
+
+    def submit(self, fn: Callable[[], Any]) -> None:
+        fn()
+
+    def shutdown(self, wait: bool = True) -> None:  # noqa: FBT001, FBT002 - stdlib signature
+        pass
+
+
+# --------------------------------------------------------------------------
 # FastAPI application factory
 # --------------------------------------------------------------------------
 
@@ -669,6 +847,7 @@ def build_app(
     artifacts: bool = True,
     renderers: Renderers | None = None,
     cache_dir: str | os.PathLike | None = None,
+    job_executor: Any | None = None,
 ) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
@@ -679,12 +858,17 @@ def build_app(
 
     When ``artifacts`` is true (the default) the on-demand render endpoints
     (``/artifacts/quicklook/{id}.png``, ``POST /artifacts/change``,
-    ``POST /artifacts/timescan``, ``POST /artifacts/swipe``) are mounted.
-    ``renderers`` overrides the
-    render functions (defaults to :func:`default_renderers`, which needs the
-    ``viz`` extra at request time); ``cache_dir`` overrides where rendered PNGs
-    are cached (defaults to :func:`default_artifact_cache_dir`). Requires the
-    ``serve`` extra.
+    ``POST /artifacts/timescan``, ``POST /artifacts/swipe``) are mounted, along
+    with the async job endpoints (``GET /jobs/{id}``, ``GET /jobs/{id}/result``)
+    the composite renders use when a request opts in to ``"async": true``.
+    ``renderers`` overrides the render functions (defaults to
+    :func:`default_renderers`, which needs the ``viz`` extra at request time);
+    ``cache_dir`` overrides where rendered PNGs are cached (defaults to
+    :func:`default_artifact_cache_dir`). ``job_executor`` overrides the
+    background runner for async jobs (anything with ``submit(fn)`` / ``shutdown``,
+    e.g. a :class:`~concurrent.futures.ThreadPoolExecutor`); it defaults to a
+    small thread pool, and a test can inject :class:`_InlineJobExecutor` to run
+    jobs synchronously. Requires the ``serve`` extra.
     """
     fastapi = _require_serve()
     from fastapi import Body, HTTPException, Query, Request, Response
@@ -702,6 +886,25 @@ def build_app(
         renderers = default_renderers()
     cache_path = Path(cache_dir) if cache_dir is not None else default_artifact_cache_dir()
 
+    # Async render jobs: an in-memory registry + a background runner. Both are
+    # created only when artifacts are enabled; the executor is injectable so a
+    # test can drive the queue deterministically (see ``_InlineJobExecutor``).
+    job_store = JobStore()
+    if job_executor is None and artifacts:
+        from concurrent.futures import ThreadPoolExecutor
+
+        job_executor = ThreadPoolExecutor(
+            max_workers=ARTIFACT_JOB_WORKERS, thread_name_prefix="umbra-render"
+        )
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        yield
+        # Drain the background render pool on shutdown so a stopping server does
+        # not hang on (or leak) in-flight renders.
+        if job_executor is not None:
+            job_executor.shutdown(wait=False)
+
     app = fastapi.FastAPI(
         title="Umbra Open Data STAC API",
         description=(
@@ -709,6 +912,7 @@ def build_app(
             "umbra-py from a local catalog index."
         ),
         version=STAC_VERSION,
+        lifespan=_lifespan,
     )
 
     # The server is read-only, so a permissive CORS policy is safe and is what
@@ -920,6 +1124,15 @@ def build_app(
     # On-demand render artifacts
     # ----------------------------------------------------------------------
 
+    def _cache_file(key: str, suffix: str) -> Path:
+        return cache_path / f"{key}.{suffix}"
+
+    def _write_cache(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".part")
+        tmp.write_bytes(payload)
+        tmp.replace(path)
+
     def _serve_artifact(
         kind: str,
         items: list[UmbraItem],
@@ -937,7 +1150,7 @@ def build_app(
         distinct files).
         """
         key = artifact_cache_key(kind, [it.id for it in items], options)
-        path = cache_path / f"{key}.{suffix}"
+        path = _cache_file(key, suffix)
         if path.exists():
             return Response(
                 content=path.read_bytes(),
@@ -948,14 +1161,66 @@ def build_app(
             payload = render()
         except MissingDependencyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".part")
-        tmp.write_bytes(payload)
-        tmp.replace(path)
+        _write_cache(path, payload)
         return Response(
             content=payload,
             media_type=media_type,
             headers={"X-Umbra-Cache": "miss"},
+        )
+
+    def _run_job(job: RenderJob, render: Callable[[], bytes]) -> None:
+        """Execute one queued render on the background runner.
+
+        Renders, writes the shared disk cache, and records the terminal state on
+        the job. A missing render extra becomes a ``failed`` job the result
+        endpoint reports as ``501`` (mirroring the synchronous path); any other
+        error becomes a ``500``. Exceptions never escape -- they are the job's
+        recorded outcome, not a crash of the worker thread.
+        """
+        job_store.mark_running(job)
+        try:
+            payload = render()
+        except MissingDependencyError as exc:
+            job_store.mark_failed(job, str(exc), 501)
+            return
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client via job status
+            job_store.mark_failed(job, str(exc), 500)
+            return
+        _write_cache(_cache_file(job.cache_key, job.suffix), payload)
+        job_store.mark_succeeded(job)
+
+    def _submit_artifact(
+        request: Request,
+        kind: str,
+        items: list[UmbraItem],
+        options: Mapping[str, Any],
+        render: Callable[[], bytes],
+        *,
+        media_type: str,
+        suffix: str,
+    ) -> JSONResponse:
+        """Queue an async render (or short-circuit an already-cached one).
+
+        Returns a job document. When the content-addressed result is already on
+        disk the job is born ``succeeded`` (HTTP ``200``, no work run); otherwise
+        it is ``queued`` on the executor and the response is ``202 Accepted``
+        with a ``Location`` header pointing at the poll URL.
+        """
+        key = artifact_cache_key(kind, [it.id for it in items], options)
+        base = str(request.base_url).rstrip("/")
+        if _cache_file(key, suffix).exists():
+            job = job_store.create(kind, key, media_type, suffix, status=JOB_SUCCEEDED, cached=True)
+        else:
+            job = job_store.create(kind, key, media_type, suffix)
+            job_executor.submit(lambda: _run_job(job, render))
+        # Report the job's actual state: 200 once it has succeeded (an already
+        # cached result, or a synchronous executor that finished during submit),
+        # 202 while it is still queued/running in the background.
+        status_code = 200 if job.status == JOB_SUCCEEDED else 202
+        return JSONResponse(
+            status_code=status_code,
+            content=job_to_dict(job, str(request.base_url)),
+            headers={"Location": f"{base}/jobs/{job.id}"},
         )
 
     def _resolve_for_composite(body: Mapping[str, Any]) -> list[UmbraItem]:
@@ -994,45 +1259,92 @@ def build_app(
                 "quicklook", [item], options, lambda: renderers.quicklook(item, options)
             )
 
-        @app.post("/artifacts/change", tags=["Artifacts"])
-        def post_change(body: dict[str, Any] = Body(default={})) -> Response:
+        def _composite(
+            request: Request,
+            body: Mapping[str, Any],
+            kind: str,
+            pick_frames: Callable[[list[UmbraItem]], list[UmbraItem]],
+            render_one: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes],
+            *,
+            media_type: str = "image/png",
+            suffix: str = "png",
+        ) -> Response:
+            """Resolve frames for a composite and render it sync or async.
+
+            Frame resolution and validation are always synchronous, so a bad
+            request (too few acquisitions, malformed bbox) is a fast ``400`` and
+            never becomes a doomed background job. Only the render itself is
+            deferred, and only when the request opts in to ``"async": true`` --
+            in which case the caller gets a job document instead of the artifact.
+            """
             items = _resolve_for_composite(body)
             try:
-                frames = change_frames(items)
+                frames = pick_frames(items)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             options = artifact_options(body)
+
+            def render() -> bytes:
+                return render_one(frames, options)
+
+            if body.get("async"):
+                return _submit_artifact(
+                    request, kind, frames, options, render, media_type=media_type, suffix=suffix
+                )
             return _serve_artifact(
-                "change", frames, options, lambda: renderers.change(frames, options)
+                kind, frames, options, render, media_type=media_type, suffix=suffix
             )
+
+        @app.post("/artifacts/change", tags=["Artifacts"])
+        def post_change(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
+            return _composite(request, body, "change", change_frames, renderers.change)
 
         @app.post("/artifacts/timescan", tags=["Artifacts"])
-        def post_timescan(body: dict[str, Any] = Body(default={})) -> Response:
-            items = _resolve_for_composite(body)
-            try:
-                frames = timescan_frames(items)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            options = artifact_options(body)
-            return _serve_artifact(
-                "timescan", frames, options, lambda: renderers.timescan(frames, options)
-            )
+        def post_timescan(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
+            return _composite(request, body, "timescan", timescan_frames, renderers.timescan)
 
         @app.post("/artifacts/swipe", tags=["Artifacts"])
-        def post_swipe(body: dict[str, Any] = Body(default={})) -> Response:
-            items = _resolve_for_composite(body)
-            try:
-                frames = swipe_frames(items)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            options = artifact_options(body)
-            return _serve_artifact(
+        def post_swipe(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
+            return _composite(
+                request,
+                body,
                 "swipe",
-                frames,
-                options,
-                lambda: renderers.swipe(frames, options),
+                swipe_frames,
+                renderers.swipe,
                 media_type="text/html; charset=utf-8",
                 suffix="html",
+            )
+
+        @app.get("/jobs/{job_id}", tags=["Artifacts"])
+        def get_job(job_id: str, request: Request) -> JSONResponse:
+            job = job_store.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"No job {job_id!r}")
+            return JSONResponse(content=job_to_dict(job, str(request.base_url)))
+
+        @app.get("/jobs/{job_id}/result", tags=["Artifacts"])
+        def get_job_result(job_id: str) -> Response:
+            job = job_store.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"No job {job_id!r}")
+            if job.status in (JOB_QUEUED, JOB_RUNNING):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Job {job_id!r} is {job.status}; poll /jobs/{job_id} until succeeded.",
+                )
+            if job.status == JOB_FAILED:
+                raise HTTPException(
+                    status_code=job.error_status, detail=job.error or "render failed"
+                )
+            path = _cache_file(job.cache_key, job.suffix)
+            if not path.exists():  # succeeded but the cached bytes were evicted
+                raise HTTPException(
+                    status_code=404, detail=f"Result for job {job_id!r} is no longer cached."
+                )
+            return Response(
+                content=path.read_bytes(),
+                media_type=job.media_type,
+                headers={"X-Umbra-Cache": "hit"},
             )
 
     return app
