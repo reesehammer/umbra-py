@@ -735,6 +735,36 @@ same 500 lines of glue first, and many give up."*
 > remains under 5.5 is the vertical-datum/geoid niceties and MultiRTC/RTC interop;
 > the other higher-level gaps are unchanged and non-code: the maintainer-side
 > adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **vertical-datum / geoid handling has shipped** —
+> `umbra convert --geoid` / `sicd_to_geocoded_cog(geoid=…)` (`STRATEGY.md` 5.5,
+> the geocoding nicety named at the foot of the DEM-orthorectification updates
+> above). Terrain orthorectification walks each control point onto the DEM
+> surface, but it fed the sampled height straight into SICD's projection — and
+> global DEMs (Copernicus GLO-30, SRTM) quote height above the **EGM geoid**,
+> while SICD projects against the **ellipsoid**. That mismatch is the geoid
+> undulation `N` (up to ~±100 m worldwide), and treating an orthometric height as
+> if it were ellipsoidal mislocates relief by roughly `N·tan(look_angle)` on the
+> ground — the same systematic error terrain orthorectification exists to remove,
+> reintroduced through the vertical datum. `--geoid PATH` closes it: given any
+> rasterio-readable undulation grid (an EGM96/EGM2008 GeoTIFF), it adds `N` at each
+> point (`hae = orthometric + N`) before projecting, for survey-grade geolocation.
+> It directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
+> not just loadable and terrain-corrected but *vertically referenced correctly*),
+> and it holds the project's grain and testability (§3): the correction is a **pure
+> composition** of two injectable `(lons, lats) → heights` samplers
+> (`_geoid_corrected_sampler`) — the geoid grid is read with the very same
+> `_dem_height_sampler` the DEM uses — so the whole path is offline-tested with a
+> hand-written grid, with **no new dependency and no packaged EGM data**. It is an
+> honest optional layer: it requires `--dem` (it corrects DEM heights, so it is a
+> hard error without one), degrades gracefully to the uncorrected height where the
+> grid has no coverage, and without it the output is unchanged (correct to the
+> local geoid–ellipsoid separation, ample for map placement). What remains under
+> 5.5 is an optional `--geoid auto` (fetch a matching EGM grid for the scene, the
+> vertical sibling of `--dem auto`) and MultiRTC/RTC interop (radiometric terrain
+> correction, a different job); the other higher-level gaps are unchanged and
+> non-code: the maintainer-side adoption moves (5.3 registries, 5.6 talking to
+> Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -934,8 +964,17 @@ data trivially trainable increases demand for Umbra pixels.
   longer starts with hand-finding a DEM. The tile math (id naming, bbox coverage)
   is stdlib-only and offline-tested; the fetch reuses the resume-safe
   `download_url` and is injectable, so the whole path is covered without network.
-- ⬜ Remaining geocoding niceties: vertical-datum/geoid handling and MultiRTC
-  interop; RTC recipes (radiometric terrain correction) are still open.
+- ✅ **Vertical-datum / geoid handling shipped** (`umbra convert --geoid` /
+  `sicd_to_geocoded_cog(geoid=…)`): global DEMs quote height above the EGM geoid,
+  but SICD projects against the ellipsoid, so an optional undulation grid adds the
+  geoid–ellipsoid separation `N` to each sampled DEM height (`hae = orthometric +
+  N`) before projecting — survey-grade placement over relief. It requires `--dem`,
+  degrades gracefully off the grid, and is a pure composition of two injectable
+  height samplers, so it is offline-tested with a hand-written grid and needs no
+  packaged EGM data.
+- ⬜ Remaining geocoding niceties: an optional `--geoid auto` (fetch a matching
+  EGM grid like `--dem auto`) and MultiRTC interop; RTC recipes (radiometric
+  terrain correction) are still open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
 

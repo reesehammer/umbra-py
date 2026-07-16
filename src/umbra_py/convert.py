@@ -27,6 +27,14 @@ both injectable, so the whole path is exercised offline with plain callables and
 a hand-written DEM raster — no sarpy DEM plumbing, and any Copernicus/SRTM COG
 works as the elevation source.
 
+Global DEMs quote height above the *geoid* (EGM96/EGM2008), but SICD projects
+against the *ellipsoid*; the difference (the geoid undulation, up to ~±100 m) is
+a systematic geolocation error over relief. Pass ``geoid=`` — a path to an
+undulation grid — to add that separation to the sampled DEM height before
+projecting, for survey-grade placement. Without it the DEM height is used as-is,
+correct to within the local geoid–ellipsoid separation and ample for map
+placement.
+
 Install with: ``pip install "umbra-py[convert]"``
 """
 
@@ -287,6 +295,41 @@ def _dem_height_sampler(dem_ds: Any):
     return sample_height
 
 
+def _geoid_corrected_sampler(dem_sample: Any, geoid_sample: Any):
+    """Compose an orthometric DEM sampler with a geoid grid into an *ellipsoidal*-height sampler.
+
+    Global DEMs (Copernicus GLO-30, SRTM) quote height above the **geoid**
+    (EGM96/EGM2008), but SICD's image-projection model wants height above the
+    **ellipsoid** (HAE). The two differ by the geoid undulation ``N`` — up to
+    ~±100 m worldwide — and feeding an orthometric height in as if it were
+    ellipsoidal mislocates a point by roughly ``N * tan(look_angle)`` on the
+    ground, the same failure mode terrain orthorectification exists to fix. This
+    adapter adds ``N`` at each query point so the refinement loop projects a true
+    HAE::
+
+        hae = dem_orthometric_height + geoid_undulation
+
+    Both dependencies are injected, so the correction is exercised offline with
+    plain callables — ``dem_sample`` and ``geoid_sample`` share the
+    ``(lons, lats) -> heights`` shape of :func:`_dem_height_sampler`, so a geoid
+    undulation grid is read with the very same sampler. Where the geoid grid has
+    no coverage (``geoid_sample`` returns NaN) the undulation is taken as ``0`` —
+    i.e. the DEM height is used uncorrected — so a scene straddling the grid edge
+    degrades gracefully rather than tearing. A DEM NaN (no terrain coverage) is
+    preserved as NaN, so :func:`_refine_gcps_with_dem` still falls back to the
+    scene height there.
+    """
+    np = _require("numpy")
+
+    def sample_height(lons, lats):
+        heights = np.asarray(dem_sample(lons, lats), dtype="float64")
+        undulation = np.asarray(geoid_sample(lons, lats), dtype="float64")
+        undulation = np.where(np.isfinite(undulation), undulation, 0.0)
+        return heights + undulation
+
+    return sample_height
+
+
 def _scene_reference_hae(sicd: Any) -> float:
     """Scene reference height (SCP HAE, metres) to seed the DEM iteration.
 
@@ -453,6 +496,7 @@ def sicd_to_geocoded_cog(
     resampling: str = "bilinear",
     projection_type: str = "HAE",
     dem: str | os.PathLike | None = None,
+    geoid: str | os.PathLike | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -501,6 +545,17 @@ def sicd_to_geocoded_cog(
         terrain-orthorectified against it and ``projection_type`` is ignored;
         heights are read in the DEM's own vertical datum. ``None`` keeps the
         flat-earth projection.
+    geoid:
+        Optional path to a geoid-undulation grid (any raster rasterio can open,
+        giving the ellipsoid-minus-geoid separation ``N`` in metres, e.g. an
+        EGM96/EGM2008 undulation GeoTIFF). Global DEMs quote *orthometric* height
+        above the geoid, but SICD projects against the *ellipsoid*, so with a DEM
+        this adds ``N`` at each point to convert the sampled height to HAE before
+        projecting — survey-grade geolocation over relief. Requires ``dem`` (it
+        corrects DEM heights); passing it without ``dem`` is an error. Where the
+        grid has no coverage the undulation is taken as ``0`` (the DEM height is
+        used uncorrected). ``None`` reads DEM heights as-is (correct to within the
+        local geoid–ellipsoid separation, ample for map placement).
     """
     np = _require("numpy")
     _require("rasterio")
@@ -516,14 +571,28 @@ def sicd_to_geocoded_cog(
 
         dem = dem_mod.fetch_dem_for_bbox(_scene_geo_bbox(sicd, amplitude.shape))
     if dem is not None:
-        with rasterio.open(str(dem)) as dem_ds:
+        import contextlib  # noqa: PLC0415
+
+        with contextlib.ExitStack() as stack:
+            dem_ds = stack.enter_context(rasterio.open(str(dem)))
+            sample_height = _dem_height_sampler(dem_ds)
+            if geoid is not None:
+                geoid_ds = stack.enter_context(rasterio.open(str(geoid)))
+                sample_height = _geoid_corrected_sampler(
+                    sample_height, _dem_height_sampler(geoid_ds)
+                )
             gcps = _build_gcps_dem(
                 sicd,
                 amplitude.shape,
                 grid=gcp_grid,
-                sample_height=_dem_height_sampler(dem_ds),
+                sample_height=sample_height,
                 h0=_scene_reference_hae(sicd),
             )
+    elif geoid is not None:
+        raise ValueError(
+            "geoid= requires dem=: the geoid correction adjusts DEM heights to "
+            "ellipsoidal (HAE), so pass a DEM to terrain-orthorectify against."
+        )
     else:
         gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
     return _warp_gcps_to_cog(
