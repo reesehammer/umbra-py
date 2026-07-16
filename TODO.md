@@ -58,9 +58,14 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   geometric orthorectification shipped here; interop with
   [MultiRTC](https://github.com/MultiSAR/MultiRTC) and RTC recipes remain open
   under 5.5.
-- **Auto-fetch a DEM for the scene footprint.** Today the DEM is user-supplied;
-  a helper that pulls the Copernicus DEM tiles covering the scene bbox (a public
-  COG collection) would make `--dem auto` a one-liner.
+- ~~**Auto-fetch a DEM for the scene footprint.**~~ ✅ **Done** (`umbra_py.dem` /
+  `umbra convert --dem auto`). `dem="auto"` / `--dem auto` resolves the 1°×1°
+  Copernicus GLO-30 tiles covering the scene's projected footprint, pulls them
+  from the public AWS Open Data bucket (skipping the ocean gaps that 404, merging
+  several into a mosaic), and terrain-orthorectifies against the result — no more
+  hand-finding a DEM. The tile math is stdlib-only and offline-tested; the fetch
+  reuses the resume-safe `download_url` and is injectable, so the whole path is
+  covered without network (only the multi-tile mosaic touches `rasterio`).
 
 ---
 

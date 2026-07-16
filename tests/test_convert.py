@@ -523,3 +523,90 @@ def test_cli_convert_with_dem(tmp_path, monkeypatch):
     assert "terrain-orthorectified" in result.output
     with rasterio.open(out) as ds:
         assert ds.crs.to_epsg() == 4326
+
+
+# --------------------------------------------------------------------------- #
+# --dem auto: fetch the covering Copernicus DEM for the scene.
+# --------------------------------------------------------------------------- #
+
+
+def test_scene_geo_bbox_bounds_the_corner_projection():
+    pytest.importorskip("numpy")
+    sicd = _FakeSicd()  # lon0=-100, lat0=40, dlon=dlat=0.01, skew=0.002
+    west, south, east, north = convert._scene_geo_bbox(sicd, (30, 40))
+    # Longitude grows with column (east) and rows (skew); latitude drops with row.
+    assert west == pytest.approx(sicd.lon0, abs=1e-9)  # top-left corner
+    assert east > west and north > south
+    assert -101.0 < west < east < -98.0
+    assert 39.0 < south < north < 41.0
+
+
+def test_sicd_to_geocoded_cog_dem_auto_fetches_covering_dem(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "auto_dem.tif")
+    sicd = _FakeSicd(hae_shift=1e-4)
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+
+    seen = {}
+
+    def fake_fetch(bbox, *args, **kwargs):
+        seen["bbox"] = bbox
+        return dem
+
+    import umbra_py.dem as dem_mod
+
+    monkeypatch.setattr(dem_mod, "fetch_dem_for_bbox", fake_fetch)
+
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "auto.tif", gcp_grid=6, resampling="nearest", dem="auto"
+    )
+
+    # The scene bbox (west, south, east, north) was handed to the fetcher.
+    assert "bbox" in seen and len(seen["bbox"]) == 4
+    assert seen["bbox"][0] < seen["bbox"][2] and seen["bbox"][1] < seen["bbox"][3]
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_dem_auto(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd(hae_shift=1e-4)))
+    dem = _write_dem(tmp_path / "auto_dem.tif")
+
+    import umbra_py.dem as dem_mod
+
+    monkeypatch.setattr(dem_mod, "fetch_dem_for_bbox", lambda bbox, *a, **k: dem)
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(cli_mod.cli, ["convert", str(src), str(out), "--dem", "auto"])
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-orthorectified" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_dem_missing_path_errors(tmp_path):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    missing = tmp_path / "nope.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "o.tif"), "--dem", str(missing)]
+    )
+    assert result.exit_code != 0
+    assert "does not exist" in result.output

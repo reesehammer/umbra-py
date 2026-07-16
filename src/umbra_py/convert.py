@@ -300,6 +300,28 @@ def _scene_reference_hae(sicd: Any) -> float:
         return 0.0
 
 
+def _scene_geo_bbox(sicd: Any, shape: tuple[int, int]) -> tuple[float, float, float, float]:
+    """Geographic bbox ``(west, south, east, north)`` of the scene's image corners.
+
+    Projects the four image corners onto the scene height plane with SICD's own
+    model, so :func:`umbra_py.dem.fetch_dem_for_bbox` knows which Copernicus DEM
+    tiles to pull for ``dem="auto"``. A coarse footprint is all the tile resolver
+    needs (tiles are 1° cells), so four corners suffice.
+    """
+    np = _require("numpy")
+
+    rows, cols = shape
+    corners = np.array(
+        [[0, 0], [0, cols - 1], [rows - 1, 0], [rows - 1, cols - 1]], dtype="float64"
+    )
+    ground = np.asarray(
+        sicd.project_image_to_ground_geo(corners, ordering="latlong", projection_type="HAE"),
+        dtype="float64",
+    )
+    lats, lons = ground[:, 0], ground[:, 1]
+    return float(lons.min()), float(lats.min()), float(lons.max()), float(lats.max())
+
+
 def _build_gcps_dem(
     sicd: Any,
     shape: tuple[int, int],
@@ -447,7 +469,8 @@ def sicd_to_geocoded_cog(
     orthorectify** instead: each control point is walked onto the DEM surface
     (project → sample the DEM → reproject, until it converges), so hilltops and
     valley floors land in their true ground position. ``dem`` supersedes
-    ``projection_type``.
+    ``projection_type``. Pass ``dem="auto"`` to fetch the covering Copernicus
+    GLO-30 DEM tiles for the scene automatically (see :mod:`umbra_py.dem`).
 
     Parameters
     ----------
@@ -472,10 +495,12 @@ def sicd_to_geocoded_cog(
         (flat-earth, the default), ``"PLANE"``, or ``"DEM"``.
     dem:
         Optional path to a digital elevation model (any raster rasterio can
-        open, e.g. a Copernicus/SRTM COG). When given, the scene is terrain-
-        orthorectified against it and ``projection_type`` is ignored; heights
-        are read in the DEM's own vertical datum. ``None`` keeps the flat-earth
-        projection.
+        open, e.g. a Copernicus/SRTM COG), or the literal ``"auto"`` to
+        auto-fetch the covering Copernicus GLO-30 tiles for the scene
+        (:func:`umbra_py.dem.fetch_dem_for_bbox`). When given, the scene is
+        terrain-orthorectified against it and ``projection_type`` is ignored;
+        heights are read in the DEM's own vertical datum. ``None`` keeps the
+        flat-earth projection.
     """
     np = _require("numpy")
     _require("rasterio")
@@ -486,6 +511,10 @@ def sicd_to_geocoded_cog(
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
     amplitude = _amplitude(reader[:, :], decibels=decibels)
+    if isinstance(dem, str) and dem.lower() == "auto":
+        from . import dem as dem_mod  # noqa: PLC0415
+
+        dem = dem_mod.fetch_dem_for_bbox(_scene_geo_bbox(sicd, amplitude.shape))
     if dem is not None:
         with rasterio.open(str(dem)) as dem_ds:
             gcps = _build_gcps_dem(
