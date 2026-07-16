@@ -532,6 +532,28 @@ same 500 lines of glue first, and many give up."*
 > 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-16):** **visual similarity search is now conversational** —
+> `umbra-mcp` gained `find_similar` / `find_similar_text` tools (plus a
+> `find-similar-scenes` prompt) surfacing the shipped `umbra embed` C5 capability
+> (`AI_INTEGRATION_IDEAS.md` §C5). This puts the project's *sharpest* novelty (§3 —
+> "a genuinely new capability over the archive that nothing in the Umbra ecosystem
+> offers, and that no amount of metadata search can fake") on the highest-leverage
+> surface it has: an MCP client can now say "find scenes that look like this flooded
+> field" and get back the closest archived acquisitions as cards whose STAC `href`
+> feeds straight into the existing `quicklook` / `change_composite` tools — the
+> search that lives in the pixels, closing the discover-then-view loop in one
+> conversation. It is a direct funnel-widener on the highest-leverage surface (§1),
+> reusing `SceneEmbeddingIndex` unchanged and holding the determinism boundary and
+> testability the scientific audience needs (§3): the tools gate on a prebuilt
+> sidecar `catalog.embed.db` and the `[ai]` key, the only model call is the
+> injectable embedder, and the whole path is offline-tested with a stand-in embedder
+> and renderer. It stays graceful under the "moat is leased" risk (§3): the
+> embedding table it queries is exactly the artifact worth *offering upstream* (5.2)
+> — publish it beside the nightly index and the ecosystem gets scene-similarity
+> search over MCP for free. The remaining strategic gaps are unchanged and largely
+> non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

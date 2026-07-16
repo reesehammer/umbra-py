@@ -323,6 +323,27 @@ builds capabilities that assume an AI in the loop.
 > embedder and renderer. The remaining C5 follow-ons are optional and non-blocking:
 > publishing the embedding table alongside the nightly index so no user recomputes
 > it, and surfacing `search_similar` as an MCP tool.
+>
+> **Update:** the **`search_similar` MCP surface has now shipped**, so the flagship
+> C5 differentiator is conversational on the highest-leverage surface the project
+> has. `umbra-mcp` grew two tools — `find_similar(url)` (image-to-image: render +
+> embed the query item's quicklook, rank the pre-embedded archive by cosine
+> similarity, query excluded from its own results) and `find_similar_text(query)`
+> (text-to-scene, given a joint CLIP-family model) — plus a `find-similar-scenes`
+> prompt, all wrapping the shipped `SceneEmbeddingIndex` (§C5) unchanged. This makes
+> the search that lives in the *pixels* ("find scenes that look like this flooded
+> field") a first-run MCP conversation, and the returned `SceneMatch` cards carry
+> each acquisition's STAC `href` so a match hands straight to the server's existing
+> `get_item` / `quicklook` / `change_composite` tools — closing the
+> discover-then-view loop without leaving the chat. It holds the same determinism
+> boundary as the rest of the server (§A4, §6.1): the tools gate on a prebuilt
+> sidecar `catalog.embed.db` (a self-describing error points at `umbra embed build`
+> when it is absent) and the `[ai]` key, and the *only* model call is the injectable
+> image/text embedder — rendering, storage and ranking stay deterministic, so the
+> whole path is offline-tested with a stand-in embedder and renderer, no `[viz]` or
+> network. With this done, the sole remaining C5 follow-on is the optional,
+> non-blocking work of publishing the embedding table alongside the nightly index so
+> no user recomputes it.
 
 ---
 
@@ -417,6 +438,7 @@ exposing:
 | `change_composite` | `change_composite` + `select_change_frames` | image block + the polarization-mixing warning as text |
 | `timescan` | `timescan_composite` | image block; the "where did activity happen" primitive |
 | `download_asset` | `download_asset` | gated by a size confirmation parameter; returns path + bytes |
+| `find_similar` / `find_similar_text` | `SceneEmbeddingIndex.similar_to_item` / `similar_to_text` | **visual similarity search (C5)** — image-to-image and text-to-scene over the pre-embedded archive; returns `SceneMatch` cards (each with a STAC `href` for `quicklook`/`change_composite`); `[ai]` extra + a prebuilt `catalog.embed.db` |
 | `build_index` / `index_stats` | `CatalogIndex` | lets a long-running agent make its own searches fast |
 
 **Resources:** the local index DB stats; recently fetched STAC items;
@@ -648,9 +670,12 @@ idempotent (keyed by item id) and skips a scene whose asset won't render rather
 than aborting the batch; a `SceneMatch` is always a pointer back to a real
 acquisition (id, task, datetime, STAC href), never a model-authored fact. It is
 fully offline-testable with a deterministic stand-in embedder and renderer.
-Remaining (optional, non-blocking): publish the embedding table with the nightly
-index so no user recomputes it, and surface `search_similar` as an MCP tool. It
-is the kind of flagship feature that earns talks, papers, and contributors.
+✅ **`search_similar` is now surfaced as an MCP tool** — `umbra-mcp`'s
+`find_similar` (image-to-image) and `find_similar_text` (text-to-scene) wrap
+`SceneEmbeddingIndex` unchanged and return `SceneMatch` cards that hand straight to
+`quicklook` / `change_composite`. Remaining (optional, non-blocking): publish the
+embedding table with the nightly index so no user recomputes it. It is the kind of
+flagship feature that earns talks, papers, and contributors.
 
 ---
 

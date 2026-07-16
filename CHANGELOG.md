@@ -24,6 +24,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escaped its inputs and was unchanged.
 
 ### Added
+- **Visual similarity search over MCP — `find_similar` / `find_similar_text`
+  tools on `umbra-mcp` (`docs/AI_INTEGRATION_IDEAS.md` §C5).** The flagship
+  scene-embedding capability (`umbra embed`) is now conversational: the
+  `umbra-mcp` server exposes two tools (plus a `find-similar-scenes` prompt) that
+  wrap the shipped `SceneEmbeddingIndex` unchanged. `find_similar(url)` renders and
+  embeds one acquisition's quicklook and ranks the pre-embedded archive by cosine
+  similarity — "find scenes that *look like* this flooded field", the search that
+  lives in the pixels rather than the metadata, with the query item excluded from
+  its own results; `find_similar_text(query)` ranks the stored image vectors against
+  a plain-language query ("ships at a berth") given a joint CLIP-family model. Both
+  require a scene index built ahead of time with `umbra embed build` (a sidecar
+  `catalog.embed.db`; a missing one raises a self-describing error pointing at that
+  command) and the `[ai]` embedding key, and return `SceneMatch` records as compact
+  cards — each carrying the acquisition's STAC `href`, so a match hands straight to
+  `get_item` / `quicklook` / `change_composite`, closing the discover-then-view loop
+  in one conversation. Like the rest of the server they hold the determinism
+  boundary: the only model call is turning the query image/text into a vector (the
+  injectable `default_image_embedder` / `default_text_embedder`), while rendering,
+  storage and cosine ranking stay deterministic — so the whole path is
+  offline-tested with a stand-in embedder and renderer.
 - **Incremental index refresh — `umbra index update` / `CatalogIndex.update`
   (`docs/CODEBASE_ANALYSIS.md` §4.4, `docs/STRATEGY.md` §6).** A full `umbra
   index build` fetches a `*.stac.v2.json` sidecar for *every* acquisition in

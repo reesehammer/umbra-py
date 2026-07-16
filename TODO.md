@@ -247,10 +247,6 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
   `umbra embed similar` with no rebuild — and is exactly the kind of artifact worth
   offering upstream (`STRATEGY.md` 5.2). Note the published table would be model-
   and dimension-specific, so record the model label prominently.
-- **MCP `search_similar` tool.** `SceneEmbeddingIndex.similar_to_item` /
-  `similar_to_text` are plain callables; wrapping them as an MCP tool (returning the
-  same `SceneMatch` records as context cards) would let an agent do visual
-  similarity search conversationally, gated like the CLI on the `[ai]` key.
 - **A native vector index at scale.** Ranking is a brute-force cosine scan today
   (instant at catalog scale, no binary dependency). If the archive grows to
   hundreds of thousands of scenes, the schema leaves room to swap in `sqlite-vec`
@@ -280,6 +276,25 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **MCP `find_similar` / `find_similar_text` tools — visual similarity search over
+  the flagship server (C5 follow-on).** Surfaced the shipped `umbra embed`
+  capability (`SceneEmbeddingIndex.similar_to_item` / `similar_to_text`) as two
+  tools on `umbra-mcp` (`src/umbra_py/mcp_server.py`), plus a `find-similar-scenes`
+  prompt. `find_similar(url)` renders + embeds the query item's quicklook and ranks
+  the pre-embedded archive by cosine similarity (image-to-image, query excluded from
+  its own results); `find_similar_text(query)` ranks the stored image vectors against
+  a text query (text-to-scene, joint CLIP-family model). Both reuse the existing
+  `SceneEmbeddingIndex` unchanged, gate on a prebuilt sidecar `catalog.embed.db`
+  (a self-describing `FileNotFoundError` pointing at `umbra embed build` when
+  absent) and the `[ai]` embedding key, and return `SceneMatch` records as compact
+  cards carrying each acquisition's STAC `href` so a match hands straight to
+  `get_item` / `quicklook` / `change_composite`. It holds the server's determinism
+  boundary (`AI_INTEGRATION_IDEAS.md` §A4/§6.1): the only model call is turning the
+  query image/text into a vector (the injectable `default_image_embedder` /
+  `default_text_embedder`), while rendering, storage and ranking are deterministic
+  — so the whole path is offline-tested with a stand-in embedder and renderer, no
+  `[viz]`/network. Named in `AI_INTEGRATION_IDEAS.md` §C5 and this file's C5
+  follow-ons.
 - **Async job semantics for long `umbra serve` renders (`202 Accepted` + poll).**
   Added a small in-memory job queue to `src/umbra_py/serve.py` so a composite
   render need not hold a request for its whole duration. A `POST /artifacts/change`

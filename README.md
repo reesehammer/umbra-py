@@ -738,9 +738,12 @@ Register it with an MCP client (Claude Desktop shown):
 ```
 
 The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
-`quicklook`, `change_composite`, `timescan` and `download_asset` tools; a
-`umbra://context` resource with the product-type table and search semantics;
-and packaged `monitor-site` / `survey-region` prompts. The imagery tools return
+`quicklook`, `change_composite`, `timescan`, `download_asset`, `watch_site`
+(report only passes new since the last check) and `find_similar` /
+`find_similar_text` (visual similarity search over a prebuilt scene-embedding
+index) tools; a `umbra://context` resource with the product-type table and search
+semantics; and packaged `monitor-site` / `watch-site` / `find-similar-scenes` /
+`survey-region` prompts. The imagery tools return
 the rendered PNG as an MCP image block, so the model *sees* the radar scene. In
 keeping with the library's design, the server stays deterministic — it
 searches, geocodes and renders; the client's model plans and narrates. It even

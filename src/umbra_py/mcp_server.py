@@ -416,6 +416,110 @@ def watch_site(
     return payload
 
 
+def _scene_matches_payload(
+    matches: list[Any], stored_model: str | None, query: dict[str, Any]
+) -> dict[str, Any]:
+    """Shape a list of :class:`~umbra_py.embed.SceneMatch` into a tool result.
+
+    Each match is a pointer back to a real acquisition (id, task, datetime, STAC
+    ``href``), never a model-authored fact — so the agent can hand a match's
+    ``href`` straight to ``get_item`` / ``quicklook`` / ``change_composite`` to
+    keep working. ``model`` records which embedding model the index was built
+    with, and the attribution line rides along as with every other tool.
+    """
+    return {
+        "query": query,
+        "count": len(matches),
+        "model": stored_model,
+        "matches": [m.to_dict() for m in matches],
+        "attribution": ATTRIBUTION,
+    }
+
+
+def find_similar(
+    url: str,
+    asset: str = "GEC",
+    top_k: int = 10,
+    min_score: float = 0.0,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Find archived scenes that **look like** the acquisition at ``url``.
+
+    This is the one search that lives in the pixels, not the metadata: where
+    ``search_catalog`` filters by date/bbox/task-name, this renders the query
+    item's quicklook, embeds it, and ranks the pre-embedded scene index by visual
+    (cosine) similarity — "find scenes that look like this flooded field / crowded
+    berth / runway". The query item is excluded from its own results.
+
+    Requires a scene-embedding index built ahead of time with ``umbra embed
+    build`` (a sidecar ``catalog.embed.db`` beside the catalog index) and a
+    user-supplied multimodal embedding key (``OPENAI_API_KEY``, optionally
+    ``OPENAI_BASE_URL`` / ``UMBRA_SCENE_EMBED_MODEL``) — the only model call is
+    turning the query image into a vector; ranking is deterministic. ``asset``
+    picks which product's quicklook to embed (default ``GEC``; match how the index
+    was built); ``model`` must match the index's embedding model. Returns the
+    ranked matches as compact records (each with the acquisition's ``href``, so
+    hand it to ``get_item`` / ``quicklook`` / ``change_composite`` next) plus the
+    attribution line.
+    """
+    from . import embed as emb
+
+    path = emb.default_scene_embed_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No scene-embedding index at {path}. Build one first with "
+            "'umbra embed build' (image-to-image similarity search needs it)."
+        )
+    item = _fetch_item(url)
+    embedder = emb.default_image_embedder(model=model)
+
+    def render(it: UmbraItem) -> bytes:
+        return emb._render_quicklook_asset(it, asset=asset)
+
+    with emb.SceneEmbeddingIndex(path) as index:
+        matches = index.similar_to_item(
+            item, embedder=embedder, render=render, top_k=top_k, min_score=min_score
+        )
+        stored_model = index.stored_model()
+    return _scene_matches_payload(
+        matches, stored_model, {"kind": "image", "item_id": item.id, "asset": asset}
+    )
+
+
+def find_similar_text(
+    query: str,
+    top_k: int = 10,
+    min_score: float = 0.0,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Find archived scenes matching a plain-language ``query`` over their imagery.
+
+    Text-to-scene search: embeds ``query`` ("ships at a berth", "a flooded field")
+    and ranks the stored *image* vectors by cosine similarity. It only works when
+    the index was built and this query is embedded with the **same** joint
+    CLIP-family model whose text and image encoders share a vector space (a
+    dimension mismatch is reported as an error; ``model`` selects it).
+
+    Requires the same prebuilt ``catalog.embed.db`` (``umbra embed build``) and
+    embedding key as ``find_similar``; the only model call is turning the text
+    query into a vector. Returns the ranked matches as compact records (each with
+    the acquisition's ``href`` for ``get_item`` / ``quicklook``) plus attribution.
+    """
+    from . import embed as emb
+
+    path = emb.default_scene_embed_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No scene-embedding index at {path}. Build one first with "
+            "'umbra embed build' (text-to-scene search needs it)."
+        )
+    text_embedder = emb.default_text_embedder(model=model)
+    with emb.SceneEmbeddingIndex(path) as index:
+        matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
+        stored_model = index.stored_model()
+    return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
+
+
 def main() -> None:
     """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
     build_server().run()
@@ -452,6 +556,8 @@ def build_server() -> FastMCP:
         timescan,
         download_asset,
         watch_site,
+        find_similar,
+        find_similar_text,
     ):
         server.add_tool(fn)
 
@@ -513,6 +619,23 @@ def build_server() -> FastMCP:
             "on their stac_href URLs.\n"
             "4. Describe what the green/magenta regions imply about activity since the "
             "last check, citing the acquisition dates and keeping the attribution line."
+        )
+
+    @server.prompt(
+        name="find-similar-scenes",
+        description="Workflow: find archived scenes that look like an acquisition, then view them.",
+    )
+    def find_similar_scenes(url: str) -> str:
+        return (
+            f"Find archived scenes that look like the acquisition at {url} using the "
+            "umbra tools (needs a scene index built with 'umbra embed build'):\n"
+            f"1. find_similar(url='{url}') — ranks the pre-embedded archive by visual "
+            "similarity to this scene's quicklook and returns the closest matches.\n"
+            "2. If the result's count is 0, report that nothing cleared the similarity "
+            "threshold (or that the index has not been built) and stop.\n"
+            "3. Otherwise quicklook(url=<match.href>) on the top one or two matches so "
+            "you can see them, and summarize what the matched scenes have in common, "
+            "citing their acquisition dates and keeping the attribution line."
         )
 
     @server.prompt(
