@@ -216,3 +216,202 @@ def test_run_search_offset_paging_is_stable(index_path):
         second, has_next = serve.run_search(source, limit=2, offset=2)
         assert has_next is False
         assert [i.id for i in second] == ["item-2"]
+
+
+# --------------------------------------------------------------------------
+# On-demand render artifacts
+# --------------------------------------------------------------------------
+
+# A short, valid-enough PNG signature the fake renderers hand back. The routes
+# treat render output as opaque bytes, so this never needs to be a real image.
+FAKE_PNG = b"\x89PNG\r\n\x1a\nFAKE"
+
+
+class RecordingRenderers:
+    """Fake :class:`serve.Renderers` that records calls and returns FAKE_PNG.
+
+    Lets the artifact routes be exercised with zero network and no ``viz``
+    extra -- the whole point of the renderers being injectable.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str], dict]] = []
+
+    def _make(self, kind):
+        def render(items, opts):
+            ids = [items.id] if hasattr(items, "id") else [it.id for it in items]
+            self.calls.append((kind, ids, dict(opts)))
+            return FAKE_PNG
+
+        return render
+
+    def as_renderers(self) -> serve.Renderers:
+        return serve.Renderers(
+            quicklook=self._make("quicklook"),
+            change=self._make("change"),
+            timescan=self._make("timescan"),
+        )
+
+
+@pytest.fixture
+def recorder() -> RecordingRenderers:
+    return RecordingRenderers()
+
+
+@pytest.fixture
+def art_client(index_path, recorder, tmp_path) -> TestClient:
+    app = serve.build_app(
+        index_path,
+        renderers=recorder.as_renderers(),
+        cache_dir=tmp_path / "artifacts",
+    )
+    return TestClient(app)
+
+
+# ---- pure helpers (no server) --------------------------------------------
+
+
+def test_artifact_cache_key_is_order_sensitive_on_items():
+    opts = {"asset": "GEC", "max_size": 1024, "db": False}
+    a = serve.artifact_cache_key("change", ["item-0", "item-1"], opts)
+    b = serve.artifact_cache_key("change", ["item-1", "item-0"], opts)
+    assert a != b, "frame order defines a distinct change composite"
+    assert serve.artifact_cache_key("change", ["item-0", "item-1"], opts) == a
+
+
+def test_artifact_cache_key_is_option_order_independent():
+    a = serve.artifact_cache_key("quicklook", ["x"], {"asset": "GEC", "db": True, "max_size": 512})
+    b = serve.artifact_cache_key("quicklook", ["x"], {"max_size": 512, "asset": "GEC", "db": True})
+    assert a == b
+    # A changed option changes the key.
+    c = serve.artifact_cache_key("quicklook", ["x"], {"asset": "GEC", "db": False, "max_size": 512})
+    assert c != a
+
+
+def test_artifact_options_normalises_and_clamps():
+    opts = serve.artifact_options({"max_size": 100_000, "db": 1})
+    assert opts == {"asset": "GEC", "max_size": 8192, "db": True}
+    assert serve.artifact_options(None) == {
+        "asset": "GEC",
+        "max_size": serve.ARTIFACT_MAX_SIZE,
+        "db": False,
+    }
+
+
+def test_change_frames_selects_two_or_three():
+    items = [f"i{n}" for n in range(5)]  # stand-ins; helper only counts/indexes
+    assert serve.change_frames(items[:2]) == items[:2]
+    assert serve.change_frames(items[:3]) == items[:3]
+    three = serve.change_frames(items)  # 5 -> first/middle/last
+    assert three == ["i0", "i2", "i4"]
+    with pytest.raises(ValueError):
+        serve.change_frames(items[:1])
+
+
+def test_timescan_frames_requires_three_and_caps():
+    with pytest.raises(ValueError):
+        serve.timescan_frames(["a", "b"])
+    many = [f"i{n}" for n in range(serve.ARTIFACT_MAX_FRAMES + 20)]
+    picked = serve.timescan_frames(many)
+    assert len(picked) == serve.ARTIFACT_MAX_FRAMES
+    assert picked[0] == "i0" and picked[-1] == many[-1]
+
+
+def test_resolve_items_preserves_requested_id_order(index_path):
+    with CatalogIndex(index_path) as source:
+        got = serve.resolve_items(source, ids=["item-2", "item-0"])
+    assert [it.id for it in got] == ["item-2", "item-0"]
+
+
+# ---- endpoints -----------------------------------------------------------
+
+
+def test_quicklook_endpoint_renders_and_caches(art_client, recorder):
+    resp = art_client.get("/artifacts/quicklook/item-1.png")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.headers["x-umbra-cache"] == "miss"
+    assert resp.content == FAKE_PNG
+    assert recorder.calls == [
+        ("quicklook", ["item-1"], {"asset": "GEC", "max_size": 1024, "db": False})
+    ]
+
+    # Second identical request is served from disk -- renderer not called again.
+    again = art_client.get("/artifacts/quicklook/item-1.png")
+    assert again.status_code == 200
+    assert again.headers["x-umbra-cache"] == "hit"
+    assert again.content == FAKE_PNG
+    assert len(recorder.calls) == 1
+
+
+def test_quicklook_passes_options_through(art_client, recorder):
+    art_client.get("/artifacts/quicklook/item-0.png?db=true&max_size=512&asset=CSI")
+    assert recorder.calls[0][2] == {"asset": "CSI", "max_size": 512, "db": True}
+
+
+def test_quicklook_unknown_item_is_404(art_client):
+    assert art_client.get("/artifacts/quicklook/nope.png").status_code == 404
+
+
+def test_change_endpoint_two_dates(art_client, recorder):
+    resp = art_client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    kind, ids, _ = recorder.calls[0]
+    assert kind == "change"
+    assert ids == ["item-0", "item-1"]
+
+
+def test_change_endpoint_collapses_many_to_three(art_client, recorder):
+    # A bbox query resolves all three items -> first/middle/last three-date RGB.
+    resp = art_client.post("/artifacts/change", json={"bbox": [-69, 10, -67, 11]})
+    assert resp.status_code == 200
+    assert recorder.calls[0][1] == ["item-0", "item-1", "item-2"]
+
+
+def test_change_endpoint_needs_two_acquisitions(art_client):
+    resp = art_client.post("/artifacts/change", json={"ids": ["item-0"]})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+
+
+def test_timescan_endpoint_renders(art_client, recorder):
+    resp = art_client.post("/artifacts/timescan", json={"bbox": [-69, 10, -67, 11]})
+    assert resp.status_code == 200
+    kind, ids, _ = recorder.calls[0]
+    assert kind == "timescan"
+    assert ids == ["item-0", "item-1", "item-2"]
+
+
+def test_timescan_endpoint_needs_three_acquisitions(art_client):
+    resp = art_client.post("/artifacts/timescan", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 400
+    assert "at least 3" in resp.json()["detail"]
+
+
+def test_landing_advertises_artifacts_when_enabled(art_client):
+    rels = {link["rel"] for link in art_client.get("/").json()["links"]}
+    assert {"quicklook", "change", "timescan"} <= rels
+
+
+def test_artifacts_can_be_disabled(index_path, tmp_path):
+    app = serve.build_app(index_path, artifacts=False, cache_dir=tmp_path / "art")
+    client = TestClient(app)
+    assert client.get("/artifacts/quicklook/item-0.png").status_code == 404
+    assert client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]}).status_code == 404
+    rels = {link["rel"] for link in client.get("/").json()["links"]}
+    assert not ({"quicklook", "change", "timescan"} & rels)
+
+
+def test_missing_render_extra_maps_to_501(index_path, tmp_path):
+    from umbra_py.exceptions import MissingDependencyError
+
+    def boom(item, opts):
+        raise MissingDependencyError("needs the 'viz' extra")
+
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom)
+    app = serve.build_app(index_path, renderers=renderers, cache_dir=tmp_path / "art")
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/artifacts/quicklook/item-0.png")
+    assert resp.status_code == 501
+    assert "viz" in resp.json()["detail"]

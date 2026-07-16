@@ -742,6 +742,24 @@ and interactive docs at `/docs`. Queries hit the local index, so they answer in
 milliseconds; `umbra serve --live` walks S3 per request instead if you'd rather
 not build an index first.
 
+Beyond discovery, `umbra serve` also **renders the visual products on demand**,
+so a front end (or an agent) can trigger them over any site straight from HTTP:
+
+```bash
+# One acquisition's SAR quicklook:
+curl -o scene.png "http://127.0.0.1:8000/artifacts/quicklook/<item-id>.png?db=true"
+
+# A change composite / timescan over a query (by ids, or bbox + datetime):
+curl -o change.png -X POST http://127.0.0.1:8000/artifacts/change \
+  -H 'content-type: application/json' \
+  -d '{"bbox": [-112.1, 39.0, -111.9, 39.2], "datetime": "2024-01-01/2024-03-01"}'
+```
+
+Each artifact wraps the same `umbra_py.viz` function the CLI uses and is cached
+to disk by its inputs, so a repeat request is a file read. Use
+`umbra serve --no-artifacts` to expose only the read-only STAC surface (e.g. for
+a public instance that wants to bound COG-streaming egress).
+
 ## What the data looks like
 
 Each Umbra acquisition is a STAC item exposing these assets, from easiest to

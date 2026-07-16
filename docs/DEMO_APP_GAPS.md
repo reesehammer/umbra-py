@@ -112,10 +112,12 @@ critical path to a demo application.
 > geotiff.js driver via a `window.umbraLazyMap` fallback). It routes through the
 > same `_gather_items` helper, so `--local` builds it from the prebuilt index in
 > milliseconds (R5). This meets **R1–R3, R6–R7** for the gathered slice with zero
-> runtime infrastructure. What is still open below is R4's *render actions over
-> any site* (change/swipe/timescan from the UI), which needs either the curated
-> precompute of Path A step 3 or the on-demand endpoints of Path B, and the
-> full-acquisition-set PMTiles tiling for the truly whole-catalog view.
+> runtime infrastructure. R4's *render actions over any site* now have a backend
+> — the on-demand `/artifacts/...` endpoints on `umbra serve` (Path B step 2,
+> shipped) render quicklook/change/timescan for any site; what remains is wiring
+> this front end to call them (and a `swipe` endpoint). The
+> full-acquisition-set PMTiles tiling for the truly whole-catalog view is also
+> still open (Path A step 3).
 
 For the *server-backed* end state (Path B), the remaining options for the
 application layer are one of:
@@ -134,11 +136,12 @@ application layer are one of:
 - **a static data export + JS front end** (GeoJSON/PMTiles + MapLibre — the
   export half exists as `write_geojson`; the front end does not).
 
-This was the central gap. With `umbra serve` shipped, the queryable-API half is
-built: **R2's interactive filters now have a backend to call, and R4's per-site
-metadata/search actions do too.** What is still missing for a *self-serve* app
-is the front end (a MapLibre/leafmap client) and — for R4's render actions over
-*any* site — the on-demand artifact endpoints in Path B.
+This was the central gap. With `umbra serve` shipped — and now its on-demand
+`/artifacts/...` render endpoints — the queryable-API *and* the render-over-any-site
+halves are built: **R2's interactive filters have a backend to call, and R4's
+per-site render actions (quicklook/change/timescan) do too.** What is still
+missing for a *self-serve* app is the front end (a MapLibre/leafmap client) that
+calls them, plus a `swipe` endpoint.
 
 ### G4 — Scale ceiling of the current map rendering
 
@@ -159,9 +162,9 @@ is the front end (a MapLibre/leafmap client) and — for R4's render actions ove
   (< 1,000 tasks), so a `max_per_task=1` "one pin per site" world view is
   cheap; the full acquisition set is what needs clustering/tiling.
 
-### G5 — Product capabilities aren't orchestratable from a UI
+### G5 — Product capabilities aren't orchestratable from a UI — **on-demand execution now shipped**
 
-`change`, `swipe`, `timescan`, `gallery` are separate CLI invocations that
+`change`, `swipe`, `timescan`, `gallery` began as separate CLI invocations that
 write files. R4 ("demo every capability from the UI") requires either:
 
 - **precomputation**: a pipeline that renders these artifacts for a curated
@@ -169,22 +172,35 @@ write files. R4 ("demo every capability from the UI") requires either:
   fully static, zero runtime cost, but only for curated sites), or
 - **on-demand execution**: server endpoints that wrap
   `change_composite` / `swipe_map` / `timescan_composite` and return the
-  artifact (any site, needs a backend + job semantics — these renders take
-  seconds to tens of seconds, so the API needs async/progress affordances
-  the library's spinner obviously doesn't provide).
+  artifact (any site).
 
-Neither exists today. Note the library functions themselves are cleanly
-callable for this (good separation); the gap is purely the orchestration and
-delivery layer.
+✅ **The on-demand path now exists on `umbra serve`.** The STAC API façade
+mounts three render endpoints alongside search: `GET
+/artifacts/quicklook/{item_id}.png`, `POST /artifacts/change` and `POST
+/artifacts/timescan`. They resolve the requested acquisitions from the same
+`CatalogIndex` (by `ids`, or a `bbox` + `datetime` query — subsampling
+deterministically when a query resolves to more frames than a composite takes),
+call the existing `umbra_py.viz` functions unchanged, and return a PNG. This
+meets **R4 over any site**, not just a curated set. The library functions were
+already cleanly callable (good separation); the endpoints are purely the
+orchestration/delivery layer this section named as the gap. Rendering is
+synchronous for a first, honest slice — a composite streams a downsampled
+overview per pass and returns in seconds; the async job/progress semantics for
+long renders are the ledgered follow-on (`TODO.md`). A front end still has to
+*call* these endpoints and a `swipe` endpoint is not yet wired, but the
+capability now exists server-side.
 
-### G6 — No thumbnail/artifact caching layer
+### G6 — No thumbnail/artifact caching layer — **partly addressed**
 
 Every gallery render re-streams thumbnails from S3; every lazy-imagery click
-re-fetches COG overviews; nothing is cached across artifacts or sessions. A
-demo app wants a one-time thumbnail bake (e.g. 256-px PNG per acquisition,
-~a few KB each, stored alongside or inside the index) so the map and gallery
-feel instant. The `_thumbnail_data_uri` machinery is reusable as-is for the
-bake step.
+re-fetches COG overviews; nothing was cached across artifacts or sessions. ✅
+**The `umbra serve` render endpoints now cache to disk** keyed by a content hash
+of the render's kind, ordered frame ids and options, so a repeat request for the
+same quicklook/change/timescan is a file read (`X-Umbra-Cache: hit`) rather than
+a re-render. Still open for the map/gallery paths: a one-time thumbnail bake
+(e.g. 256-px PNG per acquisition, ~a few KB each, stored alongside or inside the
+index) so the *first* view feels instant. The `_thumbnail_data_uri` machinery is
+reusable as-is for that bake step.
 
 ### G7 — No packaging or hosting story
 
@@ -245,10 +261,13 @@ Adds on-demand capability over Path A rather than replacing it:
    `CatalogIndex` (search/collections/items) — the same component proposed
    for AI integration (B2), so this work is shared, not duplicated. **Shipped**;
    the STAC search backend the rest of this path builds on now exists.
-2. Artifact endpoints wrapping the existing library functions:
-   `GET /quicklook/{id}.png`, `POST /change`, `POST /swipe`, `POST /timescan`
-   with async job semantics (renders take seconds–minutes) and a disk cache
-   (fixes G5/G6 for *any* site, not just curated ones).
+2. ✅ **Artifact endpoints wrapping the existing library functions —
+   shipped.** `GET /artifacts/quicklook/{id}.png`, `POST /artifacts/change` and
+   `POST /artifacts/timescan` render on demand over *any* site and cache each
+   result to disk keyed by its inputs (fixes G5, and G6 for these endpoints).
+   Still open: a `POST /artifacts/swipe` endpoint, and async job/progress
+   semantics for the longest renders (today they are synchronous — fine for a
+   downsampled overview, which returns in seconds).
 3. Front end grows "run this analysis here" affordances against those
    endpoints; everything else from Path A is reused.
 4. Dockerfile + compose for one-command self-hosting; a public instance is a
@@ -262,7 +281,7 @@ Adds on-demand capability over Path A rather than replacing it:
 | R1 full catalog on map | ✓ gathered slice, clustered (PMTiles tiling pending for the full acquisition set) | ✓ | ✓ |
 | R2 interactive filters | ✓ (client-side: search, date range, product chips) | ✓ (client-side) | ✓ (server queries) |
 | R3 click → quicklook | ✓ (lazy COG overlay + metadata card) | ✓ (baked + lazy) | ✓ |
-| R4 product demos from UI | ✗ | curated sites only | ✓ any site |
+| R4 product demos from UI | endpoints exist (`umbra serve` renders quicklook/change/timescan over any site); front-end wiring pending | curated sites only | ✓ any site |
 | R5 fast | ✓ (`--local` prebuilt index) | ✓ (prebuilt data) | ✓ |
 | R6 hostable URL | ✓ (one static HTML file) | ✓ (Pages) | ✓ (container) |
 | R7 polish | ✓ (filters, attribution, loading states) | ✓ | ✓ |
@@ -278,12 +297,15 @@ Adds on-demand capability over Path A rather than replacing it:
   file. This closes R1–R3 and R5–R7 for the gathered slice with zero runtime
   infrastructure (G3 met, G4 partly met).
 - **Not yet**: the *truly whole-catalog* view (PMTiles tiling of the full
-  acquisition set, Path A step 3) and R4's on-demand product renders
-  (change/swipe/timescan) from the UI over *any* site — that needs curated
-  precompute (Path A) or the server-backed artifact endpoints (Path B). (Former
-  blockers gone: the pagination bug is fixed in PR #29, the visual commands
-  render from the prebuilt index via `--local`, and the self-serve front end now
-  ships as `umbra demo`.)
+  acquisition set, Path A step 3), and *wiring* the front end to R4's render
+  actions. The server side of R4 now exists — `umbra serve` renders
+  quicklook/change/timescan over *any* site on demand and caches the results
+  (Path B step 2) — so what remains for a self-serve app is the front-end
+  "run this analysis here" affordance that calls those endpoints, a `swipe`
+  endpoint, and async semantics for the longest renders. (Former blockers gone:
+  the pagination bug is fixed in PR #29, the visual commands render from the
+  prebuilt index via `--local`, the self-serve front end ships as `umbra demo`,
+  and the on-demand artifact endpoints ship on `umbra serve`.)
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the

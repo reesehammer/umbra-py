@@ -53,9 +53,28 @@ and returning the polarization-mixing warning as structured text alongside the
 - **Code:** `src/umbra_py/serve.py`, `pyproject.toml` (`[serve]` extra).
 
 The read-only STAC API is shipped (landing / conformance / collections / items /
-`GET`+`POST /search` with bbox, datetime, ids and token pagination). Open
+`GET`+`POST /search` with bbox, datetime, ids and token pagination), and now
+renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`, `POST
+/artifacts/change`, `POST /artifacts/timescan`), each disk-cached by its inputs
+and wrapping the existing `viz` functions behind injectable renderers. Open
 follow-ons:
 
+- **A `POST /artifacts/swipe` endpoint.** The three composites are wired;
+  `viz.swipe_map` (a self-contained before/after HTML) is the remaining product
+  a demo UI would want to trigger over any site. It returns HTML, not a PNG, so
+  it needs its own response type and cache entry (the `_serve_artifact` helper
+  assumes `image/png`).
+- **Async job semantics for long renders.** The render endpoints are synchronous
+  today — fine for a downsampled overview (seconds), but a large `max_size` or a
+  long timescan can take tens of seconds, and a synchronous request blocks a
+  worker for the duration. A small job queue (`202 Accepted` + a poll/`GET
+  /jobs/{id}` + the existing disk cache as the result store) is the productized
+  shape `DEMO_APP_GAPS.md` Path B step 2 names; deferred as an honest first slice.
+- **Front-end wiring (the demo app calls these endpoints).** `umbra demo` renders
+  a static page today; the R4 "run this analysis here" affordance is the front
+  end POSTing to `/artifacts/change` etc. against a configured server URL. This
+  is the last self-serve-demo gap once the endpoints above exist
+  (`DEMO_APP_GAPS.md` G5 / Path B step 3).
 - **Query extensions.** `/search` currently supports the STAC core filters; the
   index also filters by free-text `area` (task/site substring) and
   `product_types`, which aren't yet exposed over the API. Wiring the STAC

@@ -67,6 +67,20 @@ builds capabilities that assume an AI in the loop.
 > QGIS STAC plugin, `stac-browser`, leafmap — and OpenAPI-driven agents can now
 > query Umbra's open archive.
 >
+> **Update:** **`umbra serve` now renders artifacts on demand, not just
+> search** (`DEMO_APP_GAPS.md` R4 / Path B step 2). The façade grew three render
+> endpoints alongside discovery — `GET /artifacts/quicklook/{id}.png`, `POST
+> /artifacts/change`, `POST /artifacts/timescan` — that resolve acquisitions from
+> the same index and return the library's visual products (§2's "the outputs are
+> inherently multimodal" made reachable over plain HTTP for *any* site, not a
+> curated set). They wrap the existing `viz` compositors unchanged, cache each PNG
+> to disk keyed by its inputs, and — like the STAC document builders — keep the
+> render functions **injectable** so the routes are offline-testable in the core
+> install. This is the OpenAPI-visible counterpart to the MCP server's
+> `quicklook`/`change_composite`/`timescan` image tools (B1): a browser or an
+> OpenAPI-driven agent now gets the pictures, not just the metadata, from the
+> generated schema alone.
+>
 > **Update:** the **A2 `llms.txt` docs bundle has now shipped** — the last open
 > Phase 2 item, and the *user* agent guide that completes the AI-legible
 > surface. `umbra_py.llms_txt()` / `llms_full_txt()` (CLI: `umbra llms-txt

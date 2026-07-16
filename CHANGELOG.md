@@ -44,6 +44,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     objects into a corrupt file.
 
 ### Added
+- **On-demand render artifacts on `umbra serve` — quicklook / change / timescan
+  over any site (`docs/DEMO_APP_GAPS.md` R4 / Path B step 2).** The STAC API
+  façade shipped *discovery* (search/collections/items); the demo-gap analysis's
+  last self-serve requirement (R4) was *triggering the visual products from the
+  UI over any site*, not just a curated set baked at build time. The server now
+  renders them on demand, wrapping the existing `umbra_py.viz` functions
+  unchanged:
+  - **Three endpoints.** `GET /artifacts/quicklook/{item_id}.png` renders one
+    acquisition's SAR quicklook; `POST /artifacts/change` renders a 2–3 date
+    change composite over a query (`ids`, or `bbox` + `datetime`); `POST
+    /artifacts/timescan` renders a temporal-statistics composite over a series.
+    A query resolving to more frames than a composite takes is subsampled
+    deterministically (change → first/middle/last three dates; timescan → an
+    evenly-spaced cap of 60), and too few is a `400`.
+  - **Disk-cached by inputs.** Every artifact is cached to disk keyed by a
+    content hash of its kind, ordered frame ids and render options, so a repeat
+    request is a file read (`X-Umbra-Cache: hit`) — closing the "no artifact
+    caching" gap for these endpoints. Frame order is part of the key (a change
+    composite is not the same picture with its passes reversed).
+  - **Injectable renderers, offline-testable.** `build_app(..., renderers=...)`
+    overrides the render functions, so the routes are unit-tested in the core
+    install with no network and no `viz` extra; the default renderers lazily
+    import `viz` at request time and a missing extra surfaces as HTTP `501`.
+  - **Opt-out for public instances.** `umbra serve --no-artifacts` mounts only
+    the read-only STAC surface (bounding COG-streaming egress); `--cache-dir`
+    overrides where PNGs are cached. Rendering is synchronous for now — an async
+    job queue for long renders is the ledgered follow-on (`TODO.md`).
 - **`umbra demo` — a self-serve interactive catalog explorer in one HTML page
   (`docs/DEMO_APP_GAPS.md` G3/G4, Path A front end).** Every other visual command
   emits a *one-shot* artifact — change a filter and you re-run the CLI and open a
