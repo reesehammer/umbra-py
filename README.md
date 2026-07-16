@@ -524,6 +524,11 @@ umbra chips --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out chips
 # instead writes the raw, ungeoreferenced amplitude for quick inspection.
 umbra convert scene_SICD.nitf scene_geocoded.tif
 
+# Terrain-orthorectify against a DEM (any rasterio-readable raster, e.g. a
+# Copernicus/SRTM COG) so relief lands in its true ground position, not on a
+# single flat height plane. --dem supersedes the flat-earth projection.
+umbra convert scene_SICD.nitf scene_ortho.tif --dem copernicus_dem.tif
+
 # Visual similarity: embed a site's quicklooks, then find scenes that look alike.
 umbra embed build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 umbra embed similar <item-json-url>

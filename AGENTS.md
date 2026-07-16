@@ -40,7 +40,7 @@ src/umbra_py/
   download.py        # download_url / download_asset / download_item (resume support)
   cli.py             # `umbra search | info | download`
   constants.py       # bucket, STAC root URL, canonical product types
-  convert.py         # optional SICD -> slant-plane amplitude + geocoded COG (behind [convert] extra)
+  convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG (behind [convert] extra)
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call)
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
   demo.py            # umbra demo: one self-contained interactive catalog explorer (Leaflet + markercluster, client-side facets, lazy SAR overlays); stdlib-only generator

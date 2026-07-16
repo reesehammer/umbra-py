@@ -678,6 +678,36 @@ same 500 lines of glue first, and many give up."*
 > The remaining strategic gaps are unchanged and largely non-code: 5.5's full
 > terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
 > adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** **DEM terrain orthorectification has shipped** —
+> `umbra convert --dem` / `sicd_to_geocoded_cog(dem=…)` (`STRATEGY.md` 5.5, the
+> higher-level code gap named at the foot of nearly every update above). The SICD
+> geocoder shipped as an honest *flat-earth* first slice: it places every pixel on
+> the scene's single height-above-ellipsoid plane, exact over flat terrain but
+> mislocating relief — a hilltop is placed where the radar ray meets the plane,
+> not where it meets the ground. `--dem PATH` closes that: given any
+> rasterio-readable elevation model (a Copernicus/SRTM COG works), each
+> ground-control point is *walked onto the terrain surface* by the standard ortho
+> fixed-point iteration — project at a height, look up the DEM there, reproject,
+> repeat until the height it lands on stops moving — so the scene is genuinely
+> terrain-orthorectified rather than flat-projected. It directly serves the
+> ML/analytics audience 5.5 targets (Umbra data becomes trivially loadable *with
+> correct geolocation over relief*) and removes the largest remaining "same 500
+> lines of glue" the thesis (§1) says drives people away: hand-rolled DEM
+> geocoding. It stays in the project's grain and testability (§3): the refinement
+> loop and the DEM lookup are both **injectable** (`project` / `sample_height`
+> callables), so the whole path is offline-tested with plain callables and a
+> hand-written DEM raster — no sarpy DEM plumbing — against convergence to a
+> closed-form terrain fixed point, the flat-DEM and off-DEM (no-coverage) fallbacks,
+> the DEM sampler (ramp read, out-of-bounds/nodata masking, CRS reprojection), and
+> the end-to-end + CLI paths; the sarpy-facing HAE projector batches points sharing
+> a binned height into one call so the common early iterations stay a single
+> projection. The `--dem` mode supersedes `--projection`, and where the DEM has no
+> coverage a point falls back to the scene reference height rather than tearing.
+> What remains under 5.5 is the vertical-datum/geoid niceties and MultiRTC/RTC
+> interop (radiometric terrain correction, a different job from geometric
+> orthorectification); the other higher-level gaps are unchanged and non-code: the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -861,8 +891,16 @@ data trivially trainable increases demand for Umbra pixels.
   keeps the prior ungeoreferenced amplitude for quick inspection. The geocoding
   is a flat-earth first slice (pixels on the scene's HAE plane): exact over flat
   terrain, adequate for map placement elsewhere.
-- ⬜ Full terrain orthorectification (a DEM / `projection_type="DEM"`, MultiRTC
-  interop) is the remaining geocoding gap; RTC recipes are still open.
+- ✅ **DEM terrain orthorectification shipped** (`umbra convert --dem` /
+  `sicd_to_geocoded_cog(dem=…)`): given any rasterio-readable elevation model, each
+  ground-control point is walked onto the terrain surface by the standard ortho
+  fixed-point iteration (project → sample the DEM → reproject, until it converges),
+  so relief lands in its true ground position instead of on a single flat height
+  plane. `--dem` supersedes `--projection`; off-DEM points fall back to the scene
+  height. The refinement loop and DEM lookup are injectable, so the whole path is
+  offline-tested with plain callables and a hand-written DEM raster.
+- ⬜ Remaining geocoding niceties: vertical-datum/geoid handling and MultiRTC
+  interop; RTC recipes (radiometric terrain correction) are still open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
 

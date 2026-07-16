@@ -1204,7 +1204,17 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     help="SICD image-projection type. HAE is the flat-earth default (exact "
     "over flat terrain, adequate for map placement elsewhere).",
 )
-def convert(src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection) -> None:
+@click.option(
+    "--dem",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to a digital elevation model (any raster rasterio can open, e.g. "
+    "a Copernicus/SRTM COG) to terrain-orthorectify against, instead of the "
+    "flat-earth projection. Supersedes --projection.",
+)
+def convert(
+    src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection, dem
+) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
     By default this geocodes the scene: it detects amplitude and warps it onto
@@ -1213,8 +1223,10 @@ def convert(src, dst, slant_plane, linear, gcp_grid, resolution, resampling, pro
     georeferenced array via ``umbra_py.to_xarray`` -- no hand-rolled geocoding.
 
     The geocoding is flat-earth (pixels on the scene's height plane): exact over
-    flat terrain, adequate for map placement elsewhere. Pass --slant-plane for a
-    quick, ungeoreferenced amplitude image instead.
+    flat terrain, adequate for map placement elsewhere. Pass --dem PATH to
+    terrain-orthorectify against a digital elevation model instead, so relief is
+    placed in its true ground position. Pass --slant-plane for a quick,
+    ungeoreferenced amplitude image instead.
 
     SICD/CPHD are the complex products; the ``GEC`` asset is already a geocoded
     COG and needs no conversion. Requires the convert extra
@@ -1229,7 +1241,8 @@ def convert(src, dst, slant_plane, linear, gcp_grid, resolution, resampling, pro
         click.echo(f"Wrote slant-plane amplitude GeoTIFF to {path}")
         return
 
-    with OrbitSpinner(f"Geocoding {Path(src).name}"):
+    label = "Terrain-geocoding" if dem else "Geocoding"
+    with OrbitSpinner(f"{label} {Path(src).name}"):
         path = sicd_to_geocoded_cog(
             src,
             dst,
@@ -1238,8 +1251,10 @@ def convert(src, dst, slant_plane, linear, gcp_grid, resolution, resampling, pro
             resolution=resolution,
             resampling=resampling.lower(),
             projection_type=projection.upper(),
+            dem=dem,
         )
-    click.echo(f"Wrote geocoded COG to {path}")
+    kind = "terrain-orthorectified COG" if dem else "geocoded COG"
+    click.echo(f"Wrote {kind} to {path}")
 
 
 @cli.command()

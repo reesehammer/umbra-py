@@ -35,6 +35,35 @@ full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
 
 ---
 
+## SICD DEM orthorectification follow-ons (`umbra convert --dem` shipped)
+
+- **Surfaced in:** the DEM terrain-orthorectification PR (`docs/STRATEGY.md` 5.5).
+- **Code:** `src/umbra_py/convert.py` (`_refine_gcps_with_dem`,
+  `_dem_height_sampler`, `_build_gcps_dem`), `umbra convert --dem` in `cli.py`.
+
+`umbra convert --dem PATH` / `sicd_to_geocoded_cog(dem=…)` terrain-orthorectifies
+a SICD against any rasterio-readable elevation model (walk each GCP onto the DEM
+surface via the standard ortho fixed-point iteration). Shipped, closing the
+geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
+
+- **Vertical datum / geoid handling.** DEM heights are read in the DEM's own
+  vertical datum and fed straight to SICD's HAE (ellipsoidal) projection. Most
+  global DEMs (Copernicus GLO-30, SRTM) are referenced to the EGM geoid, not the
+  ellipsoid, so a rigorous result adds the geoid undulation (e.g. via a packaged
+  EGM grid or sarpy's `GeoidHeight`) before projecting. The current output is
+  correct to within the local geoid–ellipsoid separation, ample for map
+  placement; document or add an optional geoid grid for survey-grade use.
+- **MultiRTC / RTC recipes.** Radiometric terrain correction (flattening
+  backscatter for local incidence angle over slopes) is a different job from the
+  geometric orthorectification shipped here; interop with
+  [MultiRTC](https://github.com/MultiSAR/MultiRTC) and RTC recipes remain open
+  under 5.5.
+- **Auto-fetch a DEM for the scene footprint.** Today the DEM is user-supplied;
+  a helper that pulls the Copernicus DEM tiles covering the scene bbox (a public
+  COG collection) would make `--dem auto` a one-liner.
+
+---
+
 ## Asset classifier: `"tif"` substring check can never match uppercased name
 
 - **Surfaced in:** [PR #2](https://github.com/theminiverse/umbra-py/pull/2) ("Notes for reviewers")
