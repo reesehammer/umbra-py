@@ -508,6 +508,30 @@ same 500 lines of glue first, and many give up."*
 > the whole funnel depends on (§3's "trust the scientific audience needs"). The
 > strategic gaps above are unchanged.
 
+> **Update (2026-07-16):** the **catalog index now refreshes incrementally** —
+> `umbra index update` / `CatalogIndex.update` (`CODEBASE_ANALYSIS.md` §4.4, the
+> "keep the crawl incremental" guardrail in §6). Discovery is the moat (§3), and
+> the prebuilt, published index is how that moat reaches a fresh install without a
+> multi-minute crawl (`umbra index fetch`, shipped). The missing half was
+> *staying* fresh cheaply: a full `umbra index build` fetches a sidecar for every
+> acquisition in the catalog — the N+1 round trips that dominate a crawl — so
+> refreshing a week-old snapshot re-read almost everything unchanged. `update`
+> closes that: it reads the newest acquisition date already indexed and re-walks
+> only from there (minus a small `--overlap-days` window for near-real-time
+> publish lag), so a weekly refresh reads just the new passes and upserts them
+> exactly as `build` does. It is pure funnel-widening infrastructure (§1): the
+> user who bootstrapped from the weekly snapshot now catches up in seconds rather
+> than re-downloading it, and the guardrail that the crawl stay polite and
+> incremental (§6) is now something a scheduled job can actually honor. It holds
+> the project's grain and testability (§3): no model, no new dependency, the
+> injectable catalog keeps the whole path offline-tested, and the bound's honest
+> limitation (acquisition date, not publish date — so back-dated late arrivals
+> want a widened window or a full build) is spelled out rather than hidden. The
+> published weekly snapshot is deliberately left as a full rebuild so it stays
+> authoritative. The remaining strategic gaps are unchanged and largely non-code:
+> 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

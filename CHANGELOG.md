@@ -24,6 +24,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escaped its inputs and was unchanged.
 
 ### Added
+- **Incremental index refresh — `umbra index update` / `CatalogIndex.update`
+  (`docs/CODEBASE_ANALYSIS.md` §4.4, `docs/STRATEGY.md` §6).** A full `umbra
+  index build` fetches a `*.stac.v2.json` sidecar for *every* acquisition in
+  scope — the N+1 round trips that dominate a crawl — so on an index only days
+  old almost all of that work re-reads unchanged data. `update` instead reads
+  the newest acquisition date already indexed and passes it (minus
+  `--overlap-days`, default 1) as the `start` bound to the live walk, which
+  prunes older acquisitions' sidecar fetches, so a weekly refresh reads only the
+  new passes and upserts them exactly as `build` does. It is the incremental
+  companion to the shipped `umbra index fetch` / `CatalogIndex.from_release`:
+  bootstrap from the weekly snapshot once, then `update` to catch acquisitions
+  published since — the "walk only prefixes newer than the index" improvement the
+  analysis doc named and the "keep the crawl incremental" guardrail in the
+  strategy doc. The bound is on *acquisition* date, not publish date, so
+  `--overlap-days` re-scans a little past the newest indexed date to catch
+  near-real-time lag, and the docstring is explicit that completeness over
+  back-dated late arrivals still wants a widened window or a full `build`. An
+  empty index falls back to a full build; `--since` forces a specific lower
+  bound; `--bbox`/`--place`/`--area`/`--limit` scope the refresh exactly as
+  `build` does. `CatalogIndex.update()` returns an `UpdateResult`
+  (`scanned`/`added`/`refreshed`/`start`, exported from the package root), and
+  the whole path is offline-tested with a recording fake catalog (derived-bound,
+  overlap widening, new-vs-refreshed tally, empty-index fallback, `since`
+  override, scope pass-through, and the `start=`-rejection guard), plus a CLI
+  test. The published weekly snapshot is deliberately left as a full rebuild so
+  it stays authoritative.
 - **Whole-catalog PMTiles tiling — `umbra tiles` / `build_pmtiles`
   (`docs/DEMO_APP_GAPS.md` Path A step 3).** Every other map surface embeds its
   features in the page (Folium polygons in `umbra map`, an inline JSON blob in

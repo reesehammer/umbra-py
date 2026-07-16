@@ -2646,6 +2646,88 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
     click.echo(f"Indexed {written} acquisition(s); index now holds {total}. ({path})")
 
 
+@index.command("update")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to refresh (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/"
+    "catalog.db). Must already exist -- create one with 'index fetch'/'build'.",
+)
+@click.option(
+    "--overlap-days",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Re-scan this many days before the newest indexed acquisition to catch "
+    "near-real-time publish lag. Widen it (or run 'index build') if back-dated "
+    "late arrivals matter.",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Force the acquisition-date lower bound (YYYY-MM-DD, a year/month, or "
+    "relative like '2 weeks ago') instead of deriving it from the index.",
+)
+@click.option(
+    "--bbox",
+    help="Scope the refresh to a footprint 'min_lon,min_lat,max_lon,max_lat' "
+    "(match the scope the index was built with).",
+)
+@click.option(
+    "--place",
+    default=None,
+    help="Scope the refresh to a geocoded place name (mutually exclusive with --bbox).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Scope the refresh to one Umbra task/site by name (e.g. 'Centerfield').",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap how many acquisitions to add this run (default: no cap).",
+)
+def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None:
+    """Cheaply refresh an existing index by re-walking only recent acquisitions.
+
+    'umbra index build' fetches a sidecar for every acquisition in scope; on a
+    snapshot only days old that re-reads mostly-unchanged data. 'update' instead
+    derives a start date from the newest acquisition already indexed (minus
+    --overlap-days) and walks only from there, so a weekly refresh reads just
+    the new passes. Bootstrap the index first with 'umbra index fetch' or
+    'umbra index build'.
+    """
+    search_bbox = _resolve_search_bbox(bbox, place)
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
+        )
+    with OrbitSpinner("Refreshing index") as spinner:
+
+        def tally(n: int) -> None:
+            spinner.label = f"Refreshing index ({n} scanned)"
+
+        with CatalogIndex(path) as idx:
+            result = idx.update(
+                overlap_days=overlap_days,
+                since=since,
+                progress=tally,
+                bbox=search_bbox,
+                area=area,
+                limit=limit,
+            )
+            total = len(idx)
+    frm = result.start.isoformat() if result.start else "the whole catalog"
+    click.echo(
+        f"Refreshed from {frm}: {result.added} new, {result.refreshed} refreshed; "
+        f"index now holds {total}. ({path})"
+    )
+
+
 @index.command("fetch")
 @click.option(
     "--db",

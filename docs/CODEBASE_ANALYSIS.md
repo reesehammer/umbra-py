@@ -320,9 +320,21 @@ warns a full index build "takes a while." Two structural improvements:
   to a rolling release turns every user's first search from minutes to
   milliseconds — and is the substrate for the STAC-API/MCP ideas in the
   companion document.
-- **Read-through caching.** When an index exists, `UmbraCatalog.search` could
-  consult it first and only walk prefixes newer than the index's max
-  `acq_date`. Today the user must choose live-vs-local manually per call.
+- **Incremental refresh — ✅ shipped** (`umbra index update` /
+  `CatalogIndex.update`). Keeping a snapshot fresh no longer means re-crawling
+  the whole bucket: `update` reads the newest indexed `acq_date` and re-walks
+  only from there (minus a small `--overlap-days` window for publish lag), so the
+  walk prunes older acquisitions' sidecar fetches — a weekly refresh reads just
+  the new passes and upserts them. This is the "only walk prefixes newer than the
+  index's max `acq_date`" half of the idea below, delivered as an explicit
+  command; the bound is on acquisition date (not publish date), so completeness
+  over back-dated late arrivals still wants a widened window or a full `build`.
+- **Read-through caching (still open).** The remaining half: when an index
+  exists, `UmbraCatalog.search` could consult it first and only walk prefixes
+  newer than the index's max `acq_date` automatically. Today the user still
+  chooses live-vs-local manually per call (and freshens the index with `umbra
+  index update`); folding the update into `search` transparently is the larger,
+  design-first step (P3 #21).
 
 ### 4.5 SQLite index details
 
@@ -441,7 +453,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 18 | Extract shared search-vs-URLs gathering + common option groups from the five CLI commands that duplicate them | `cli.py` | medium |
 | 19 | Split `viz.py` into a `viz/` package (geojson / maps / raster / composites / gallery) with re-exports preserved | `viz.py` | medium |
 | 20 | Stand up mkdocs-material + mkdocstrings docs site on GitHub Pages | new `docs/` config | medium |
-| 21 | Read-through index caching in `UmbraCatalog.search` (consult local index before walking) | `catalog.py`/`index.py` | larger; design first |
+| 21 | ⏳ **Incremental refresh shipped** (`umbra index update` / `CatalogIndex.update` — re-walks only acquisitions newer than the index's max `acq_date`, §4.4). Still open: folding that read-through consult into `UmbraCatalog.search` transparently | `catalog.py`/`index.py` | larger; design first |
 | 22 | Add `CITATION.cff`; register with STAC ecosystem list, AWS Open Data registry examples, pyOpenSci | repo root | small each |
 
 ---

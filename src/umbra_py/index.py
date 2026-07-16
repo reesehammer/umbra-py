@@ -28,7 +28,8 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable, Iterator
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
@@ -62,6 +63,23 @@ CREATE INDEX IF NOT EXISTS idx_items_acq_date ON items(acq_date);
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
 CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
 """
+
+
+@dataclass(frozen=True)
+class UpdateResult:
+    """Outcome of an incremental :meth:`CatalogIndex.update`.
+
+    ``added`` counts acquisitions whose href was not already in the index;
+    ``refreshed`` counts those whose existing row was replaced; ``scanned`` is
+    their sum (every item the scoped walk yielded). ``start`` is the
+    acquisition-date lower bound the walk used -- ``None`` when the index was
+    empty and ``update`` fell back to a full build.
+    """
+
+    scanned: int
+    added: int
+    refreshed: int
+    start: date | None
 
 
 def default_index_path() -> Path:
@@ -183,6 +201,11 @@ class CatalogIndex:
 
     # -- writing ---------------------------------------------------------------
 
+    def _has(self, href: str) -> bool:
+        """Whether an item with this sidecar href is already indexed."""
+        row = self._conn.execute("SELECT 1 FROM items WHERE href = ? LIMIT 1", (href,)).fetchone()
+        return row is not None
+
     def add(self, item: UmbraItem) -> bool:
         """Upsert one item (does not commit). Returns ``False`` (and skips) an
         item with no sidecar href, since the href is the row's identity."""
@@ -252,6 +275,76 @@ class CatalogIndex:
         self.set_meta("built_at", date.today().isoformat())
         self._conn.commit()
         return written
+
+    def update(
+        self,
+        catalog: UmbraCatalog | None = None,
+        *,
+        overlap_days: int = 1,
+        since: DateLike = None,
+        progress: Callable[[int], None] | None = None,
+        **search_kwargs: object,
+    ) -> UpdateResult:
+        """Cheaply refresh the index by re-walking only recent acquisitions.
+
+        A full :meth:`build` fetches a sidecar for *every* acquisition in
+        scope; on an index only days old, almost all of that work re-reads
+        unchanged data. ``update`` instead derives an acquisition-date lower
+        bound from what the index already holds -- the maximum indexed
+        ``acq_date`` minus ``overlap_days`` -- and passes it as ``start`` to the
+        live walk. The walk prunes older acquisitions' sidecar fetches (see
+        :meth:`UmbraCatalog.search`), so a weekly refresh reads only the new
+        passes rather than the whole catalog, and every returned row is upserted
+        exactly as :meth:`build` does. It is the incremental companion to
+        :meth:`from_release`: fetch the weekly snapshot once, then ``update`` to
+        catch acquisitions published since.
+
+        The bound is on *acquisition* date, not publish date, so a scene
+        acquired before the bound but published after the last build is not
+        picked up. ``overlap_days`` (default 1) re-scans a little past the newest
+        indexed date to catch the common near-real-time lag; widen it (or run a
+        full :meth:`build`) when completeness over back-dated late arrivals
+        matters. An empty index has no bound to derive, so ``update`` falls back
+        to a full build (``start=None``). Pass ``since`` to force a specific
+        lower bound instead of deriving one.
+
+        Extra keyword filters (``bbox``, ``area``, ``product_types``, ``limit``,
+        ``max_per_task``) scope the walk exactly as :meth:`build` does -- pass
+        the same scope the index was built with. ``start`` may not be passed
+        (the bound is what ``update`` computes); use ``since`` to override it.
+        Returns an :class:`UpdateResult` tallying new vs. refreshed rows.
+        """
+        if "start" in search_kwargs:
+            raise TypeError(
+                "update() derives the acquisition-date bound from the index; "
+                "pass 'since=' to override it, not 'start='."
+            )
+        if since is not None:
+            start = _coerce_date(since)
+        else:
+            max_acq = self._conn.execute("SELECT MAX(acq_date) FROM items").fetchone()[0]
+            if max_acq is None:
+                start = None  # empty index -> nothing to derive; do a full build
+            else:
+                start = date.fromisoformat(max_acq) - timedelta(days=max(0, overlap_days))
+
+        catalog = catalog or UmbraCatalog()
+        scanned = added = refreshed = 0
+        for item in catalog.search(start=start, **search_kwargs):  # type: ignore[arg-type]
+            existed = bool(item.href) and self._has(item.href)
+            if self.add(item):
+                scanned += 1
+                if existed:
+                    refreshed += 1
+                else:
+                    added += 1
+                if scanned % 200 == 0:
+                    self._conn.commit()
+            if progress is not None:
+                progress(scanned)
+        self.set_meta("built_at", date.today().isoformat())
+        self._conn.commit()
+        return UpdateResult(scanned=scanned, added=added, refreshed=refreshed, start=start)
 
     # -- querying --------------------------------------------------------------
 

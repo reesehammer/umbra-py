@@ -310,6 +310,20 @@ with CatalogIndex.from_release() as index:   # download the weekly snapshot, the
 `umbra index info` reports the snapshot's build date and age, so you know how
 fresh it is; re-run the fetch any time to refresh.
 
+Once you have an index, `umbra index update` freshens it *cheaply* instead of
+re-fetching or re-crawling the whole bucket: it reads the newest acquisition date
+already indexed and re-walks only from there (minus `--overlap-days`, default 1,
+to catch near-real-time publish lag), so a weekly refresh reads just the new
+passes. `CatalogIndex.update()` returns the tally (`added` / `refreshed`). The
+bound is on *acquisition* date, so for guaranteed completeness over back-dated
+late arrivals, widen `--overlap-days` or run a full `umbra index build`.
+
+```bash
+umbra index fetch                 # bootstrap once
+umbra index update                # later: pull only acquisitions published since
+umbra index update --since "2 weeks ago" --overlap-days 3   # or force the window
+```
+
 ### Render from the index too, not just `search`
 
 The visual commands — `map`, `gallery`, `swipe`, `change`, `timescan` — take the
@@ -327,8 +341,8 @@ umbra change --local --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --
 ```
 
 Only acquisitions already in the index are used, so keep it fresh with `umbra
-index fetch` (or an incremental `umbra index build`). Without `--local` the
-commands walk S3 live exactly as before.
+index fetch`, a cheap incremental `umbra index update`, or a full `umbra index
+build`. Without `--local` the commands walk S3 live exactly as before.
 
 ### Search the commercial archive too (Canopy)
 
@@ -381,6 +395,10 @@ umbra index info
 umbra index build
 umbra search --local --area "Centerfield" --product GEC
 umbra index info
+
+# Later, refresh an existing index cheaply -- re-walks only acquisitions newer
+# than what's already indexed instead of re-crawling the whole bucket.
+umbra index update
 
 # Export the index as one stac-geoparquet file: the whole catalog searchable
 # in seconds by DuckDB / geopandas / pyarrow, no server (needs [export]).

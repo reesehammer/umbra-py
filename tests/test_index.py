@@ -510,3 +510,133 @@ def test_cli_gallery_local_reads_index(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Wrote gallery of 2 acquisition(s)" in result.output
     assert "data:image/png;base64,Z" in out.read_text()
+
+
+# -- incremental update ---------------------------------------------------------
+
+
+class _RecordingCatalog:
+    """FakeCatalog that records the kwargs of its last search() and returns a
+    fixed set of items -- lets a test assert the derived date bound and scope."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.calls: list[dict] = []
+
+    def search(self, **kwargs):
+        self.calls.append(kwargs)
+        return iter(self._items)
+
+
+# A newer acquisition than any in (_A, _B, _C), for the "one new pass" case.
+_D = _make_item(
+    "SiteB", "2024-03-01-08-00-00_UMBRA-09", "d", "2024-03-01T08:00:00Z", (10, 10, 11, 11)
+)
+
+
+def test_update_derives_bound_from_newest_indexed(tmp_path):
+    """update() walks from (max indexed acq_date - overlap_days)."""
+    from datetime import date
+
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:  # max acq_date is 2024-02-10 (_B)
+        idx.update(cat, overlap_days=0)
+    assert cat.calls[0]["start"] == date(2024, 2, 10)
+
+
+def test_update_overlap_days_widens_the_bound(tmp_path):
+    from datetime import date
+
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        idx.update(cat, overlap_days=5)
+    assert cat.calls[0]["start"] == date(2024, 2, 5)
+
+
+def test_update_counts_new_vs_refreshed(tmp_path):
+    """A returned item already present is 'refreshed'; an unseen one is 'new'."""
+    cat = _RecordingCatalog([_B, _D])  # _B already indexed, _D is new
+    with _index(tmp_path) as idx:  # holds a, b, c
+        result = idx.update(cat, overlap_days=0)
+        assert (result.scanned, result.added, result.refreshed) == (2, 1, 1)
+        assert {i.id for i in idx.search()} == {"a", "b", "c", "d"}
+
+
+def test_update_empty_index_falls_back_to_full_build(tmp_path):
+    """With nothing indexed there is no bound to derive, so start is None."""
+    cat = _RecordingCatalog([_A, _B, _C])
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        result = idx.update(cat)
+    assert cat.calls[0]["start"] is None
+    assert result.start is None
+    assert (result.added, result.refreshed) == (3, 0)
+
+
+def test_update_since_overrides_derived_bound(tmp_path):
+    from datetime import date
+
+    cat = _RecordingCatalog([_A])
+    with _index(tmp_path) as idx:
+        result = idx.update(cat, since="2020-01-01")
+    assert cat.calls[0]["start"] == date(2020, 1, 1)
+    assert result.start == date(2020, 1, 1)
+
+
+def test_update_passes_scope_through(tmp_path):
+    """Extra filters (area/bbox/limit) reach the walk unchanged."""
+    cat = _RecordingCatalog([])
+    with _index(tmp_path) as idx:
+        idx.update(cat, overlap_days=0, area="SiteB", limit=5)
+    call = cat.calls[0]
+    assert call["area"] == "SiteB"
+    assert call["limit"] == 5
+
+
+def test_update_rejects_start_kwarg(tmp_path):
+    import pytest
+
+    cat = _RecordingCatalog([])
+    with _index(tmp_path) as idx, pytest.raises(TypeError, match="since="):
+        idx.update(cat, start="2024-01-01")
+
+
+def test_update_stamps_built_at(tmp_path):
+    from datetime import date
+
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        idx.update(cat, overlap_days=0)
+        assert idx.get_meta("built_at") == date.today().isoformat()
+
+
+def test_cli_index_update_requires_existing_index(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["index", "update", "--db", str(tmp_path / "missing.db")]
+    )
+    assert result.exit_code != 0
+    assert "No index" in result.output
+
+
+def test_cli_index_update_refreshes_and_reports(tmp_path, monkeypatch):
+    """`umbra index update` walks from the derived bound and prints the tally."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    with _index(tmp_path):  # holds a, b, c; newest acq_date 2024-02-10
+        pass
+    db = str(tmp_path / "catalog.db")
+
+    def fake_search(self, **kwargs):
+        # Only the new pass is returned, as a real walk from the bound would.
+        return iter([_D])
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    result = CliRunner().invoke(cli_mod.cli, ["index", "update", "--db", db, "--overlap-days", "0"])
+    assert result.exit_code == 0, result.output
+    assert "1 new" in result.output
+    assert "index now holds 4" in result.output

@@ -49,7 +49,7 @@ from .exceptions import (
 from .export import export_geoparquet
 from .fuzzy import matching_tasks, task_matches
 from .geocode import geocode_place
-from .index import CatalogIndex, default_index_path
+from .index import CatalogIndex, UpdateResult, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
 from .models import ItemCollection, UmbraItem
@@ -107,6 +107,7 @@ __all__ = [
     "__version__",
     "UmbraCatalog",
     "CatalogIndex",
+    "UpdateResult",
     "default_index_path",
     "export_geoparquet",
     "UmbraItem",
