@@ -58,11 +58,18 @@ def test_build_server_registers_expected_surface():
         "timescan",
         "download_asset",
         "watch_site",
+        "find_similar",
+        "find_similar_text",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
     prompts = {p.name for p in asyncio.run(server.list_prompts())}
-    assert prompts == {"monitor-site", "watch-site", "survey-region"}
+    assert prompts == {
+        "monitor-site",
+        "watch-site",
+        "find-similar-scenes",
+        "survey-region",
+    }
 
 
 def test_context_resource_matches_llm_context():
@@ -276,3 +283,99 @@ def test_watch_site_geocodes_place(sample_item_dict, monkeypatch, tmp_path):
     assert out["resolved_bbox"] == [-68.0, 10.0, -67.0, 11.0]
     # The geocoded bbox reaches the deterministic search layer.
     assert captured["bbox"] == (-68.0, 10.0, -67.0, 11.0)
+
+
+# --------------------------------------------------------------------------
+# find_similar / find_similar_text — visual similarity search over MCP (C5)
+#
+# Fully offline: the embedder and renderer are deterministic stand-ins (never a
+# model call), so the whole scene-embedding path is exercised without the
+# [ai]/[viz] extras or the network — the same boundary the CLI embed tests hold.
+# --------------------------------------------------------------------------
+
+
+def _stub_image_embedder(images):
+    """Deterministic image embedder: a 3-vector derived from the PNG bytes, so
+    identical inputs map to identical vectors and distinct ones stay distinct."""
+    return [[float(len(b)), float(sum(b) % 100), 1.0] for b in images]
+
+
+def _build_scene_index(path, items):
+    """Build a scene-embedding index at ``path`` from ``items`` with the stub
+    embedder and a render that stands in for the quicklook (item id as bytes)."""
+    from umbra_py import embed as emb
+
+    with emb.SceneEmbeddingIndex(path) as index:
+        index.build(
+            items,
+            embedder=_stub_image_embedder,
+            render=lambda it: it.id.encode(),
+            model="stub",
+        )
+
+
+def _patch_scene_index(monkeypatch, path):
+    """Point the embed layer at ``path`` and stub out the model/render calls."""
+    from umbra_py import embed as emb
+
+    monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: path)
+    monkeypatch.setattr(emb, "default_image_embedder", lambda **k: _stub_image_embedder)
+    monkeypatch.setattr(emb, "default_text_embedder", lambda **k: lambda q: [[7.0, 3.0, 1.0]])
+    monkeypatch.setattr(emb, "_render_quicklook_asset", lambda it, **k: it.id.encode())
+
+
+@responses.activate
+def test_find_similar_returns_matches_and_excludes_self(sample_item_dict, monkeypatch, tmp_path):
+    path = tmp_path / "catalog.embed.db"
+    first = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    second_dict = copy.deepcopy(sample_item_dict)
+    second_dict["id"] = sample_item_dict["id"] + "-2"
+    second_url = ITEM_URL.replace("item", "item2")
+    second = UmbraItem.from_dict(second_dict, href=second_url)
+    _build_scene_index(path, [first, second])
+
+    _patch_scene_index(monkeypatch, path)
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+
+    out = ms.find_similar(ITEM_URL)
+    assert out["query"] == {"kind": "image", "item_id": first.id, "asset": "GEC"}
+    assert out["model"] == "stub"
+    assert out["attribution"]
+    # The query item is excluded from its own results; only the other scene ranks.
+    ids = [m["item_id"] for m in out["matches"]]
+    assert ids == [second.id]
+    assert out["matches"][0]["href"] == second_url  # hand-off pointer for get_item/quicklook
+
+
+def test_find_similar_without_index_errors(monkeypatch, tmp_path):
+    from umbra_py import embed as emb
+
+    missing = tmp_path / "missing.embed.db"
+    monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
+    with pytest.raises(FileNotFoundError, match="umbra embed build"):
+        ms.find_similar(ITEM_URL)
+
+
+def test_find_similar_text_ranks_stored_scenes(sample_item_dict, monkeypatch, tmp_path):
+    path = tmp_path / "catalog.embed.db"
+    first = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    second_dict = copy.deepcopy(sample_item_dict)
+    second_dict["id"] = sample_item_dict["id"] + "-2"
+    second = UmbraItem.from_dict(second_dict, href=ITEM_URL.replace("item", "item2"))
+    _build_scene_index(path, [first, second])
+
+    _patch_scene_index(monkeypatch, path)
+    out = ms.find_similar_text("ships at a berth")
+    assert out["query"] == {"kind": "text", "text": "ships at a berth"}
+    assert out["count"] == 2  # text query has no self to exclude; ranks every stored scene
+    assert out["model"] == "stub"
+    assert {m["item_id"] for m in out["matches"]} == {first.id, second.id}
+
+
+def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
+    from umbra_py import embed as emb
+
+    missing = tmp_path / "missing.embed.db"
+    monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
+    with pytest.raises(FileNotFoundError, match="umbra embed build"):
+        ms.find_similar_text("a flooded field")
