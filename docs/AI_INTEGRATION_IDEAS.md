@@ -351,17 +351,27 @@ builds capabilities that assume an AI in the loop.
 
 ### A1. Structured output everywhere in the CLI
 
+> **Update:** **machine-readable errors have now shipped** — the load-bearing
+> half of A1, and the last still-open item in Tier A (every B/C surface that
+> reports failure rests on it). Every `UmbraError` carries an optional `hint`
+> and a stable `to_dict()` (`{"error", "message", "hint"}`); on failure the CLI
+> prints that JSON object to stderr when `--json` / `UMBRA_JSON` is active and
+> an `error:`/`hint:` prose pair otherwise. The contract is published as public
+> API in ✅ `docs/schemas/error.schema.json`. Still open (tracked in `TODO.md`):
+> extending success-side `--json` to `download` (`{asset, path, bytes, sha256}`)
+> and the render commands (`{output, items_used, parameters}` manifests).
+
 `umbra search --json` exists; extend the guarantee to the whole CLI:
 
 - `--json` on `info` (✅ shipped — emits the A3 context card), `index info`,
   `download` (emit `{asset, path, bytes, sha256}` records), and the render
   commands (emit `{output, items_used: [ids], parameters}` manifests).
-- Machine-readable errors: on failure, print a single JSON object to stderr
-  (`{"error": "CatalogError", "message": ..., "hint": ...}`) when `--json` is
-  active. Agents recover from `hint` fields dramatically better than from
-  prose tracebacks.
-- Document the JSON schemas in one place (`docs/schemas/`) and treat them as
-  public API under the same compatibility rules as `__all__`.
+- ✅ **shipped:** Machine-readable errors: on failure, print a single JSON
+  object to stderr (`{"error": "CatalogError", "message": ..., "hint": ...}`)
+  when `--json` (or `UMBRA_JSON`) is active. Agents recover from `hint` fields
+  dramatically better than from prose tracebacks.
+- ✅ **shipped:** Document the JSON schemas in one place (`docs/schemas/`) and
+  treat them as public API under the same compatibility rules as `__all__`.
 
 The spinner already no-ops on non-TTY output — good agent hygiene by accident;
 keep that guarantee explicit in a test.

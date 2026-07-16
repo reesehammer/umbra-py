@@ -418,7 +418,8 @@ def default_embedder(*, model: str | None = None) -> Embedder:
             "umbra semantic needs an embedding API key. Set OPENAI_API_KEY (and "
             "optionally OPENAI_BASE_URL for an OpenAI-compatible endpoint, or "
             "UMBRA_EMBED_MODEL to pick the model). Embeddings only rank task "
-            "names; the library still runs the resolved search deterministically."
+            "names; the library still runs the resolved search deterministically.",
+            hint="Set OPENAI_API_KEY",
         )
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     return _openai_embedder(api_key=api_key, model=model, base_url=base_url)

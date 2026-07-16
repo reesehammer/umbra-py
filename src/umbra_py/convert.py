@@ -44,7 +44,8 @@ def _require(module: str):
     except ImportError as exc:  # pragma: no cover - exercised only without extra
         raise MissingDependencyError(
             f"'{module}' is required for conversion. "
-            'Install the extra with: pip install "umbra-py[convert]"'
+            'Install the extra with: pip install "umbra-py[convert]"',
+            hint='pip install "umbra-py[convert]"',
         ) from exc
 
 

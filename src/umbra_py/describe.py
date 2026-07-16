@@ -472,7 +472,8 @@ def default_describer(*, model: str | None = None) -> Describer:
         "OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
         "endpoint) and, optionally, UMBRA_DESCRIBE_MODEL to pick the model. "
         "The model only interprets the imagery; every description is stamped as "
-        "an AI interpretation and carries the CC-BY attribution."
+        "an AI interpretation and carries the CC-BY attribution.",
+        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
     )
 
 

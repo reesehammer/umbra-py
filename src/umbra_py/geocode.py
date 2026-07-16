@@ -74,7 +74,10 @@ def geocode_place(
         raise GeocodeError("Geocoding service returned a malformed response.") from exc
 
     if not payload:
-        raise GeocodeError(f"No place matched {query!r}. Try a more specific name, or pass --bbox.")
+        raise GeocodeError(
+            f"No place matched {query!r}. Try a more specific name, or pass --bbox.",
+            hint="Pass an explicit --bbox 'W,S,E,N' instead of --place",
+        )
 
     match = payload[0]
     bbox = _parse_boundingbox(match.get("boundingbox"))

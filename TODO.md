@@ -9,6 +9,27 @@ the bottom if the history is useful).
 
 ---
 
+## Structured `--json` success output on the remaining commands (A1 follow-on)
+
+- **Surfaced in:** the machine-readable-errors PR (`docs/AI_INTEGRATION_IDEAS.md`
+  §A1).
+- **Code:** `download`, `index info`, and the render commands (`change`,
+  `timescan`, `swipe`, `map`, `gallery`) in `src/umbra_py/cli.py`.
+
+The A1 error contract shipped (structured stderr errors with `hint`, published
+as `docs/schemas/error.schema.json`), but the success-side `--json` guarantee is
+still partial. Remaining, each a small, offline-testable change plus a schema
+under `docs/schemas/`:
+
+- **`umbra download --json`** — emit one `{asset, path, bytes, sha256}` record
+  per downloaded asset. `download_item` returns the written paths; hash and stat
+  them. Add `docs/schemas/download.schema.json`.
+- **`umbra index info --json`** — `CatalogIndex.stats()` already returns a dict;
+  print it as JSON under the flag.
+- **Render-command manifests** — `{output, items_used: [ids], parameters}` from
+  each render command so an agent knows exactly what was produced from which
+  items. Add `docs/schemas/render-manifest.schema.json`.
+
 ## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
 
 - **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).

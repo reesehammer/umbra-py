@@ -52,7 +52,8 @@ def _require_mcp():
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via CLI
         raise MissingDependencyError(
             "The MCP server needs the 'mcp' extra. Install it with:\n"
-            "    pip install 'umbra-py[mcp]'"
+            "    pip install 'umbra-py[mcp]'",
+            hint="pip install 'umbra-py[mcp]'",
         ) from exc
     return FastMCP, Image
 

@@ -533,7 +533,8 @@ def _require_embed_key(model: str) -> tuple[str, str]:
             f"/embeddings endpoint, or UMBRA_SCENE_EMBED_MODEL to pick the model; "
             f"default {model!r}). Text-to-scene search additionally needs the model's "
             "text and image encoders to share a space. The library still runs every "
-            "search deterministically; embeddings only rank scenes by appearance."
+            "search deterministically; embeddings only rank scenes by appearance.",
+            hint="Set OPENAI_API_KEY",
         )
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     return api_key, base_url

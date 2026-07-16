@@ -40,7 +40,8 @@ def _require(module: str):
     except ImportError as exc:  # pragma: no cover - exercised only without extra
         raise MissingDependencyError(
             f"'{module}' is required for analysis-ready loading. "
-            'Install the extra with: pip install "umbra-py[load]"'
+            'Install the extra with: pip install "umbra-py[load]"',
+            hint='pip install "umbra-py[load]"',
         ) from exc
 
 
