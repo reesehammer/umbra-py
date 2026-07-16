@@ -745,3 +745,93 @@ def test_cli_convert_geoid_missing_path_errors(tmp_path):
     )
     assert result.exit_code != 0
     assert "does not exist" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# --geoid auto: fetch a global EGM geoid grid for the scene.
+# --------------------------------------------------------------------------- #
+
+
+def test_sicd_to_geocoded_cog_geoid_auto_fetches_grid(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "dem.tif")
+    geoid = _write_dem(tmp_path / "auto_geoid.tif", kind="const", const=60.0)
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd(hae_shift=1e-4)))
+
+    seen = {}
+
+    def fake_fetch(*args, **kwargs):
+        seen["called"] = True
+        return geoid
+
+    import umbra_py.geoid as geoid_mod
+
+    monkeypatch.setattr(geoid_mod, "fetch_geoid_grid", fake_fetch)
+
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "auto.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        geoid="auto",
+    )
+
+    assert seen.get("called") is True
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_geoid_auto_without_dem_raises(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 8), _FakeSicd()))
+    with pytest.raises(ValueError, match="geoid= requires dem="):
+        convert.sicd_to_geocoded_cog(tmp_path / "in.ntf", tmp_path / "out.tif", geoid="auto")
+
+
+def test_cli_convert_geoid_auto(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd(hae_shift=1e-4)))
+    dem = _write_dem(tmp_path / "dem.tif")
+    geoid = _write_dem(tmp_path / "auto_geoid.tif", kind="const", const=45.0)
+
+    import umbra_py.geoid as geoid_mod
+
+    monkeypatch.setattr(geoid_mod, "fetch_geoid_grid", lambda *a, **k: geoid)
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(out), "--dem", str(dem), "--geoid", "auto"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-orthorectified" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_geoid_auto_without_dem_errors(tmp_path):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "o.tif"), "--geoid", "auto"]
+    )
+    assert result.exit_code != 0
+    assert "--geoid requires --dem" in result.output

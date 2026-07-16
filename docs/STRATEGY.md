@@ -765,6 +765,34 @@ same 500 lines of glue first, and many give up."*
 > correction, a different job); the other higher-level gaps are unchanged and
 > non-code: the maintainer-side adoption moves (5.3 registries, 5.6 talking to
 > Umbra).
+>
+> **Update (2026-07-16):** the **`--geoid auto` grid fetch has shipped** — `umbra
+> convert --geoid auto` / `sicd_to_geocoded_cog(geoid="auto")` (`STRATEGY.md` 5.5,
+> the last convert-side glue nicety named at the foot of the geoid update above,
+> and the vertical sibling of the shipped `--dem auto`). Vertical-datum correction
+> landed as `--geoid PATH`, but that still made the user go find, download, and
+> point at the right EGM undulation grid — the same "same 500 lines of glue" the
+> thesis (§1) says drives people away, just moved from geocoding to grid-hunting,
+> exactly as `--dem PATH` had left DEM-hunting before `--dem auto` removed it. The
+> new `umbra_py.geoid` module removes it: `--geoid auto` fetches a global
+> geoid-undulation grid (the compact ~4 MB EGM96 15′ model PROJ distributes on
+> `cdn.proj.org` for datum transforms) once, caches it under the same XDG dir the
+> index and DEM tiles use, and hands it straight into the shipped `--geoid PATH`
+> correction unchanged — so `--dem auto --geoid auto` now gives a correctly
+> geolocated *and* vertically-referenced scene over relief with zero data hunting.
+> It holds the project's grain and testability (§3): the EGM grid is a **single
+> global file** (unlike a DEM there is nothing to tile — one file covers every
+> scene), the fetch reuses the resume-safe `download_url` and is **injectable**, so
+> the whole download-and-cache path is offline-tested with a stub downloader — no
+> network, no new dependency, no packaged EGM data. It stays graceful under the
+> "moat is leased" risk (§3): the EGM96/EGM2008 grids on the PROJ CDN are a public,
+> host-anywhere collection, so this depends on nothing Umbra-specific. This
+> directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
+> loadable, terrain-corrected, *and* vertically referenced in one command line).
+> What remains under 5.5 is only MultiRTC/RTC interop (radiometric terrain
+> correction, a different job from geometric orthorectification); the other
+> higher-level gaps are unchanged and non-code: the maintainer-side adoption moves
+> (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -972,8 +1000,17 @@ data trivially trainable increases demand for Umbra pixels.
   degrades gracefully off the grid, and is a pure composition of two injectable
   height samplers, so it is offline-tested with a hand-written grid and needs no
   packaged EGM data.
-- ⬜ Remaining geocoding niceties: an optional `--geoid auto` (fetch a matching
-  EGM grid like `--dem auto`) and MultiRTC interop; RTC recipes (radiometric
+- ✅ **`--geoid auto` shipped** (`umbra convert --geoid auto` /
+  `umbra_py.geoid`): the vertical sibling of `--dem auto`. `--geoid PATH` still
+  made the user find and download an EGM undulation grid; `--geoid auto` /
+  `sicd_to_geocoded_cog(geoid="auto")` fetches a global geoid grid (the compact
+  EGM96 15′ model PROJ distributes on `cdn.proj.org`) once, caches it beside the
+  DEM tiles, and feeds it into the shipped `--geoid PATH` correction unchanged —
+  so survey-grade vertical referencing over relief is one flag. The grid is a
+  single global file (nothing to tile), the fetch reuses the resume-safe
+  `download_url` and is injectable, so the whole path is offline-tested without
+  the CDN, with no new dependency and no packaged EGM data.
+- ⬜ Remaining geocoding niceties: MultiRTC interop; RTC recipes (radiometric
   terrain correction) are still open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
