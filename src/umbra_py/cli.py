@@ -2393,6 +2393,31 @@ def demo(
     click.echo(f"Wrote interactive explorer over {len(items)} acquisition(s) to {path}")
 
 
+def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_prebuilt_pmtiles):
+    """Download the published whole-catalog PMTiles basemap (``umbra tiles --fetch``)."""
+    if out_path is not None and not out_path.lower().endswith(".pmtiles"):
+        raise click.ClickException("Tiles output must be a .pmtiles file.")
+    dest = Path(out_path) if out_path else default_pmtiles_path()
+
+    with OrbitSpinner("Fetching prebuilt catalog basemap") as spinner:
+
+        def tally(done: int, total: int | None) -> None:
+            if total:
+                spinner.label = f"Fetching prebuilt catalog basemap ({done / total:.0%})"
+            else:
+                spinner.label = f"Fetching prebuilt catalog basemap ({done / 1e6:.0f} MB)"
+
+        path = fetch_prebuilt_pmtiles(dest, url=fetch_url, progress=tally)
+    size_mb = path.stat().st_size / 1e6
+    click.echo(f"Fetched prebuilt PMTiles basemap to {path} ({size_mb:.2f} MB)")
+
+    if viewer_path is not None:
+        from .pmtiles import save_viewer  # noqa: PLC0415
+
+        vpath = save_viewer(path.name, viewer_path)
+        click.echo(f"Wrote MapLibre viewer to {vpath}")
+
+
 @cli.command()
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
 @click.option(
@@ -2441,8 +2466,23 @@ def demo(
 @click.option(
     "--out",
     "out_path",
-    required=True,
-    help="Output PMTiles archive (e.g. catalog.pmtiles).",
+    default=None,
+    help="Output PMTiles archive (e.g. catalog.pmtiles). Required unless "
+    "--fetch is given, where it is the download destination "
+    "(default: the cached basemap path beside the index).",
+)
+@click.option(
+    "--fetch",
+    is_flag=True,
+    help="Skip tiling: download the prebuilt whole-catalog basemap published "
+    "weekly on the catalog-index release (no crawl, no index needed). Writes to "
+    "--out if given, else the default cache path.",
+)
+@click.option(
+    "--url",
+    "fetch_url",
+    default=None,
+    help="With --fetch, override the release asset URL (advanced -- e.g. to pull from a fork).",
 )
 @click.option(
     "--min-zoom",
@@ -2480,6 +2520,8 @@ def tiles(
     limit,
     max_per_task,
     out_path,
+    fetch,
+    fetch_url,
     min_zoom,
     max_zoom,
     viewer_path,
@@ -2495,16 +2537,35 @@ def tiles(
     file: drop it on GitHub Pages or in a bucket, no tile server. With --viewer
     it also writes a MapLibre GL page that renders it.
 
+    Skip the tiling entirely with --fetch: the weekly index workflow publishes a
+    ready-made whole-catalog 'catalog.pmtiles' on the catalog-index release, so a
+    fresh install gets the same basemap with no crawl and no index -- the visual
+    sibling of 'umbra index fetch'.
+
     Needs no extra: the encoder is pure standard library, and the viewer's map
     runs browser-side from pinned CDNs. Use --local for a near-instant build
     from a prebuilt index.
     """
-    if not out_path.lower().endswith(".pmtiles"):
-        raise click.ClickException("Tiles output must be a .pmtiles file.")
     if viewer_path is not None and not viewer_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Viewer output must be an .html file.")
 
-    from .pmtiles import save_viewer, write_pmtiles  # noqa: PLC0415
+    from .pmtiles import (  # noqa: PLC0415
+        default_pmtiles_path,
+        fetch_prebuilt_pmtiles,
+        save_viewer,
+        write_pmtiles,
+    )
+
+    if fetch:
+        _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_prebuilt_pmtiles)
+        return
+
+    if fetch_url is not None:
+        raise click.ClickException("--url only applies with --fetch.")
+    if not out_path:
+        raise click.ClickException("--out is required unless --fetch is given.")
+    if not out_path.lower().endswith(".pmtiles"):
+        raise click.ClickException("Tiles output must be a .pmtiles file.")
 
     search_bbox = _resolve_search_bbox(bbox, place)
     items = _gather_items(

@@ -18,11 +18,6 @@ the bottom if the history is useful).
 MapLibre GL viewer, no extra, no tippecanoe) is shipped, closing the demo's
 full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
 
-- **Publish `catalog.pmtiles` with the nightly index.** The weekly workflow
-  already publishes `catalog.db` (and could publish the geoparquet snapshot); a
-  `catalog.pmtiles` built from the same index would give a fresh install (and a
-  Pages showcase) a whole-catalog basemap with no local tiling step — and is
-  exactly the kind of artifact worth offering upstream (`STRATEGY.md` 5.2).
 - **Wire the PMTiles source into `umbra demo`.** The demo embeds its gathered
   slice as inline JSON; an opt-in `--pmtiles <url>` that swaps the Leaflet
   cluster layer for a MapLibre vector layer over a tiled archive would let the
@@ -274,6 +269,23 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **Publish + fetch the whole-catalog `catalog.pmtiles` basemap (`umbra tiles
+  --fetch`).** The weekly `publish-index.yml` workflow now tiles the freshly
+  built index (`umbra tiles --local`, no second crawl) into a single-file
+  `catalog.pmtiles` and writes a `catalog.html` MapLibre viewer pointed at the
+  published archive's stable release URL, uploading both to the rolling
+  `catalog-index` release beside `catalog.db` / `umbra-open-data.parquet`. The
+  consume side mirrors `CatalogIndex.from_release`: `pmtiles.fetch_prebuilt_pmtiles`
+  (resume-safe `download_url` of the release asset, default
+  `pmtiles.default_pmtiles_path` = `catalog.pmtiles` beside the cached
+  `catalog.db`, honouring `$UMBRA_PMTILES`) and a new `umbra tiles --fetch`
+  mode (`--out` optional, `--url` override, `--viewer` writes a local viewer)
+  give a fresh install a fast, zoom-anywhere whole-archive map with no crawl and
+  no index — the visual sibling of `umbra index fetch`, and the published
+  artifact worth offering upstream (`STRATEGY.md` 5.2, `DEMO_APP_GAPS.md` Path A
+  step 3). Stdlib-only and fully offline-tested (mocked release download +
+  round-tripped archive). This closed the "Publish `catalog.pmtiles` with the
+  nightly index" PMTiles follow-on above.
 - **Read-through catalog search — `CatalogIndex.search_live` / `umbra search
   --local --live` (`docs/CODEBASE_ANALYSIS.md` §4.4 / P3 #21).** The transparent
   middle between the instant-but-stale local index and the always-current live

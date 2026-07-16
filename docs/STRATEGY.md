@@ -655,6 +655,29 @@ same 500 lines of glue first, and many give up."*
 > remaining strategic gaps are unchanged and largely non-code: 5.5's full terrain
 > orthorectification (a DEM, MultiRTC interop) and the maintainer-side adoption
 > moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **whole-catalog PMTiles basemap is now published
+> and fetchable** (`STRATEGY.md` 5.2, `DEMO_APP_GAPS.md` Path A step 3). `umbra
+> tiles` shipped the *encoder*; what a fresh install still lacked was the built
+> artifact — it had to crawl the bucket, build an index, and tile it before
+> seeing a whole-catalog map. The weekly `publish-index.yml` workflow now tiles
+> the freshly built index (`umbra tiles --local`, no second crawl) into a
+> single-file `catalog.pmtiles` and a `catalog.html` MapLibre viewer over it, and
+> uploads both to the rolling `catalog-index` release beside `catalog.db` /
+> `umbra-open-data.parquet`. The consume side is the exact visual sibling of
+> `umbra index fetch`: `pmtiles.fetch_prebuilt_pmtiles()` and a new `umbra tiles
+> --fetch` mode pull the published archive (resume-safe `download_url`, default
+> path beside the cached index, `--viewer` for a ready-to-open page), so a fresh
+> install — or a Pages showcase — gets a fast, zoom-anywhere map of the *entire*
+> archive with zero tiling. It stays in the project's grain and testability (§3):
+> stdlib-only, no new dependency, fully offline-tested against a mocked release
+> download and a round-tripped archive, and delivered as an explicit `--fetch`
+> mode rather than a change to the build path. This is precisely the static,
+> host-anywhere artifact 5.2 wants to *offer upstream* — publish the `.pmtiles`
+> next to `catalog.json` and the ecosystem gets a whole-catalog basemap for free.
+> The remaining strategic gaps are unchanged and largely non-code: 5.5's full
+> terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
+> adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -775,10 +798,18 @@ One crawl shouldn't be everyone's crawl.
   install runs whole-catalog `--local` search out of the box — no crawl.
   `umbra index build` now stamps a `built_at` date and `umbra index info`
   reports snapshot staleness.
-- ⬜ **Then offer it upstream:** "here's the pipeline; host the parquet next
-  to `catalog.json` in your bucket and the whole ecosystem gets a search API
-  for free." If Umbra adopts it, this project is part of their data
-  program's infrastructure.
+- ✅ **Whole-catalog basemap now published too:** the same weekly workflow
+  tiles the freshly built index into a single-file `catalog.pmtiles` (plus a
+  `catalog.html` MapLibre viewer over it) and uploads both to the
+  `catalog-index` release. `umbra tiles --fetch` / `fetch_prebuilt_pmtiles()`
+  pull it — the visual sibling of `umbra index fetch`, and exactly the kind of
+  static, host-anywhere artifact worth offering upstream. A fresh install (or a
+  Pages showcase) now gets a fast, zoom-anywhere map of the *entire* archive
+  with no local tiling step.
+- ⬜ **Then offer it upstream:** "here's the pipeline; host the parquet (and the
+  `.pmtiles` basemap) next to `catalog.json` in your bucket and the whole
+  ecosystem gets a search API — and a whole-catalog map — for free." If Umbra
+  adopts it, this project is part of their data program's infrastructure.
 
 ### 5.3 Make adoption visible where Umbra looks — **not started**
 

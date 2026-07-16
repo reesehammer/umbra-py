@@ -263,9 +263,15 @@ already in the repo:
    `--viewer` writes a MapLibre GL page over it. The doc originally sketched this
    as `export catalog.geojson → tile with tippecanoe`; because the geometry is
    points, the whole encoder is pure standard library (no external binary), so it
-   runs in a core install and is offline-tested by decoding its own output. Still
-   open under this step as optional polish: baking per-item thumbnails + place
-   labels into a static `assets/` tree, and rendering showcase
+   runs in a core install and is offline-tested by decoding its own output.
+   **The basemap is now also *published*:** the weekly `publish-index.yml`
+   workflow tiles the freshly built index and uploads `catalog.pmtiles` (plus a
+   `catalog.html` viewer pointed at it) to the rolling `catalog-index` release
+   beside `catalog.db`, and `umbra tiles --fetch` / `fetch_prebuilt_pmtiles()`
+   pull it — so a fresh install (and a Pages showcase) gets the whole-archive map
+   with no local tiling step, the artifact `STRATEGY.md` 5.2 wants to offer
+   upstream. Still open under this step as optional polish: baking per-item
+   thumbnails + place labels into a static `assets/` tree, and rendering showcase
    swipe/change/timescan/gallery artifacts for ~6–10 curated sites.
 4. ✅ **Front end (done, delivered as an artifact): `umbra demo`.** Rather than a
    separate `demo/` MapLibre build toolchain, the front end ships as a

@@ -10,6 +10,12 @@ name: Publish catalog index
 #                              rustac, no umbra-py install required
 #   - catalog.db               the SQLite index, ready for
 #                              `umbra search --local --db catalog.db`
+#   - catalog.pmtiles          a single-file whole-catalog vector-tile basemap
+#                              (`umbra tiles --fetch`): drop straight onto a
+#                              static host, or read by range request from a
+#                              MapLibre page — a whole-archive map, no crawl
+#   - catalog.html             a ready-to-open MapLibre GL viewer that reads the
+#                              published catalog.pmtiles by range request
 #
 # Weekly is deliberate: frequent enough to pick up new acquisitions, polite
 # to Umbra's open-data bucket.
@@ -44,6 +50,16 @@ jobs:
       - name: Export stac-geoparquet
         run: umbra index export --db catalog.db --out umbra-open-data.parquet
 
+      # Tile the whole catalog into a single-file vector basemap from the index
+      # just built (--local, no second crawl), plus a MapLibre viewer pointed at
+      # the *published* pmtiles URL so catalog.html works standalone once both
+      # land on the release.
+      - name: Tile whole-catalog PMTiles basemap
+        run: |
+          umbra tiles --local --db catalog.db --out catalog.pmtiles
+          python -c "import umbra_py.pmtiles as p, umbra_py.constants as c; \
+          p.save_viewer(c.CATALOG_INDEX_PMTILES_URL, 'catalog.html')"
+
       - name: Publish to the rolling catalog-index release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,6 +70,8 @@ jobs:
 
           - \`umbra-open-data.parquet\` — [stac-geoparquet](https://stac-geoparquet.org/): query it directly with DuckDB, geopandas, pyarrow or rustac.
           - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`.
+          - \`catalog.pmtiles\` — single-file whole-catalog vector basemap for \`umbra tiles --fetch\`; drop onto any static host or read by range request from a MapLibre page.
+          - \`catalog.html\` — a ready-to-open MapLibre GL viewer over the published \`catalog.pmtiles\`.
 
           \`\`\`
           $summary
@@ -66,4 +84,5 @@ jobs:
             gh release create catalog-index \
               --title "Umbra open-data catalog index" --notes "$notes"
           fi
-          gh release upload catalog-index catalog.db umbra-open-data.parquet --clobber
+          gh release upload catalog-index \
+            catalog.db umbra-open-data.parquet catalog.pmtiles catalog.html --clobber
