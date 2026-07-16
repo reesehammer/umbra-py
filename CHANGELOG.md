@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`POST /artifacts/swipe` on `umbra serve`, and `umbra demo --server-url` that
+  calls the render endpoints — closing the self-serve demo loop
+  (`docs/DEMO_APP_GAPS.md` R4 / Path B step 3).** `umbra serve` gained a fourth
+  artifact endpoint that renders `viz.swipe_map` (an interactive before/after
+  HTML page) alongside the three PNG composites; because it returns HTML rather
+  than a PNG it is served from its own disk-cache entry, and the render
+  functions stay injectable (offline-testable) via a new `swipe` field on
+  `Renderers`. The server now also sets a permissive **read-only CORS** policy
+  so a browser page on another origin can call `/search` and the artifact
+  endpoints. On the front end, `build_demo(..., server_url=...)` /
+  `umbra demo --server-url <serve URL>` add an "Analyze this view" sidebar panel
+  whose Change / Timescan / Swipe buttons POST the currently-filtered
+  acquisitions (chronological, sampled to a bounded cap) to the matching
+  endpoint and render the returned artifact in place (swipe opens its map in a
+  new tab) — the R4 "run this analysis here" affordance over *any* site. With no
+  `server_url` the page stays a fully static single file, unchanged.
+
 ### Changed
 - **Live search now fetches acquisition sidecars concurrently
   (`docs/CODEBASE_ANALYSIS.md` §4.2 / P1 #9).** Discovery is the library's core
