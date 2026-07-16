@@ -324,6 +324,18 @@ umbra index update                # later: pull only acquisitions published sinc
 umbra index update --since "2 weeks ago" --overlap-days 3   # or force the window
 ```
 
+Or skip the explicit refresh step: `umbra search --local --live` reads
+*through* the index to the bucket in one call. It answers from the local index
+**and** walks only acquisitions newer than the index's freshest pass, merges the
+two, and caches anything new it finds — so a repeat search stays near-instant
+but is never staler than the moment you run it. `CatalogIndex.search_live()` is
+the API; pass `refresh=False` to leave a shared read-only snapshot untouched.
+
+```bash
+umbra index fetch                 # bootstrap once
+umbra search --local --live --area "Centerfield"   # fast (index) + fresh (live delta)
+```
+
 ### Render from the index too, not just `search`
 
 The visual commands — `map`, `gallery`, `swipe`, `change`, `timescan` — take the

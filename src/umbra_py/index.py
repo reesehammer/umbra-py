@@ -24,6 +24,7 @@ an idempotent upsert and an index can be grown incrementally.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import sqlite3
@@ -481,6 +482,134 @@ class CatalogIndex:
             count += 1
             if limit is not None and count >= limit:
                 return
+
+    def search_live(
+        self,
+        catalog: UmbraCatalog | None = None,
+        *,
+        overlap_days: int = 1,
+        refresh: bool = True,
+        bbox: BBox | None = None,
+        start: DateLike = None,
+        end: DateLike = None,
+        product_types: list[str] | None = None,
+        area: str | None = None,
+        fuzzy: bool = False,
+        limit: int | None = None,
+        max_per_task: int | None = None,
+    ) -> Iterator[UmbraItem]:
+        """Read-through search: the index for the bulk, a live delta for what's new.
+
+        :meth:`search` is instant but only returns what the index already holds;
+        :meth:`UmbraCatalog.search` is always current but re-walks the whole
+        bucket every call. This is the transparent middle the analysis doc names
+        as "make the index the default path" (``docs/CODEBASE_ANALYSIS.md``
+        §4.4): the index answers the whole query from local SQL, and a *bounded*
+        live walk covers only acquisitions at or after the index's freshness
+        horizon -- its maximum indexed ``acq_date`` minus ``overlap_days`` -- so
+        the walk fetches sidecars only for recent passes rather than the whole
+        catalog (the same pruning :meth:`update` relies on). The two streams are
+        merged in the usual ``(task, acq_date)`` order and de-duplicated by
+        sidecar href, so an acquisition the index already knows is never yielded
+        twice; the result is what a single fresh search would return, without
+        paying for a full crawl.
+
+        With ``refresh=True`` (the default) each genuinely new acquisition the
+        live delta discovers is upserted into the index as it is yielded -- the
+        "read-through cache warms" behavior -- so the next call needs an even
+        smaller (often empty) walk. Set ``refresh=False`` to leave the index
+        untouched (e.g. when it is a shared read-only snapshot); a read-only
+        database also disables warming automatically rather than failing the
+        search. The write-back is committed only when at least one new row was
+        added, and ``built_at`` is re-stamped then, exactly as :meth:`update`.
+
+        The keyword filters (``bbox``, ``start``, ``end``, ``product_types``,
+        ``area``, ``fuzzy``, ``limit``, ``max_per_task``) mean exactly what they
+        do on :meth:`search` / :meth:`UmbraCatalog.search`; ``start`` bounds both
+        streams (the live delta never walks older than the caller asked for, even
+        when the freshness horizon is older). ``overlap_days`` (default 1)
+        re-scans a little past the newest indexed date to catch near-real-time
+        publish lag; the bound is on *acquisition* date, so a back-dated late
+        arrival still wants a widened overlap or a full :meth:`build`. An empty
+        index has no horizon, so the live walk covers the caller's full window
+        (and, with ``refresh``, this doubles as a first :meth:`build`).
+        """
+        start_d = _coerce_date(start)
+        end_d = _coerce_date(end, is_end=True)
+
+        # Freshness horizon: the newest acquisition the index already knows. The
+        # live walk only needs to cover from there forward (minus the overlap),
+        # but never older than the caller's own start bound.
+        max_acq = self._conn.execute("SELECT MAX(acq_date) FROM items").fetchone()[0]
+        if max_acq is not None:
+            delta_start: date | None = date.fromisoformat(max_acq) - timedelta(
+                days=max(0, overlap_days)
+            )
+            if start_d is not None and start_d > delta_start:
+                delta_start = start_d
+        else:
+            # Empty index: nothing to prune against, so walk the caller's window.
+            delta_start = start_d
+
+        filters: dict[str, object] = {
+            "bbox": bbox,
+            "end": end_d,
+            "product_types": product_types,
+            "area": area,
+            "fuzzy": fuzzy,
+        }
+        index_stream = self.search(start=start_d, **filters)  # type: ignore[arg-type]
+        catalog = catalog or UmbraCatalog()
+        live_stream = catalog.search(start=delta_start, **filters)  # type: ignore[arg-type]
+
+        def keyed(items: Iterator[UmbraItem], origin: str):
+            for it in items:
+                acq = _index_acq_date(it)
+                key = (
+                    0 if it.task is None else 1,
+                    it.task or "",
+                    acq.isoformat() if acq else "",
+                    it.href or "",
+                )
+                yield key, origin, it
+
+        merged = heapq.merge(
+            keyed(index_stream, "index"),
+            keyed(live_stream, "live"),
+            key=lambda t: t[0],
+        )
+
+        seen: set[str] = set()
+        warm = refresh
+        added_any = False
+        count = 0
+        per_task: dict[str | None, int] = {}
+        try:
+            for _key, origin, item in merged:
+                href = item.href
+                if href and href in seen:
+                    continue  # already emitted from the other stream
+                if origin == "live" and warm and not (href and self._has(href)):
+                    try:
+                        if self.add(item):
+                            added_any = True
+                    except sqlite3.OperationalError:
+                        warm = False  # read-only index: leave it, results still correct
+                if href:
+                    seen.add(href)
+                if max_per_task is not None:
+                    n = per_task.get(item.task, 0)
+                    if n >= max_per_task:
+                        continue
+                    per_task[item.task] = n + 1
+                yield item
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+        finally:
+            if added_any:
+                self.set_meta("built_at", date.today().isoformat())
+                self.commit()
 
     def get(self, item_id: str) -> UmbraItem | None:
         """Return the indexed item with this STAC id, or ``None`` if absent.

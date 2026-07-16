@@ -309,6 +309,15 @@ def cli() -> None:
     "~/.cache/umbra-py/catalog.db). Implies --local.",
 )
 @click.option(
+    "--live",
+    "read_through",
+    is_flag=True,
+    help="With --local, read through to the live bucket: answer from the index "
+    "AND walk only acquisitions newer than the index's freshest pass, merging "
+    "the two -- so a repeat search stays near-instant but also catches anything "
+    "published since the index was built (which it caches for next time).",
+)
+@click.option(
     "--token",
     default=None,
     envvar=CANOPY_TOKEN_ENV,
@@ -330,6 +339,7 @@ def search(
     as_json,
     local,
     db_path,
+    read_through,
     token,
 ):
     """Search the catalog by area, date and product type.
@@ -343,21 +353,32 @@ def search(
             "--token searches the live Canopy archive and cannot be combined "
             "with --local / --db (which read a local open-data index)."
         )
+    if read_through and not (local or db_path is not None):
+        raise click.ClickException(
+            "--live reads through a local index to the bucket; it only applies "
+            "with --local / --db. (A plain search already walks S3 live.)"
+        )
     search_bbox = _resolve_search_bbox(bbox, place)
     source, index = _search_source(local, db_path, token)
+    search_kwargs = dict(
+        bbox=search_bbox,
+        start=start,
+        end=end,
+        product_types=list(products) or None,
+        area=area,
+        fuzzy=fuzzy,
+        limit=limit,
+        max_per_task=max_per_task,
+    )
     try:
-        results = source.search(
-            bbox=search_bbox,
-            start=start,
-            end=end,
-            product_types=list(products) or None,
-            area=area,
-            fuzzy=fuzzy,
-            limit=limit,
-            max_per_task=max_per_task,
-        )
+        if index and read_through:
+            results = source.search_live(**search_kwargs)
+        else:
+            results = source.search(**search_kwargs)
         found = 0
-        if index:
+        if index and read_through:
+            spinner_label = "Searching local index + live delta"
+        elif index:
             spinner_label = "Searching local index"
         elif token:
             spinner_label = "Searching Canopy archive"
