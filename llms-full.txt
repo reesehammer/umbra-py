@@ -59,6 +59,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra index export` — Export a local index to stac-geoparquet for serverless catalog search.
 - `umbra index fetch` — Download the published prebuilt catalog index for instant local search.
 - `umbra index info` — Show what a local index holds: item count, date span and task count.
+- `umbra index update` — Cheaply refresh an existing index by re-walking only recent acquisitions.
 - `umbra info` — Show a summary of a STAC item given its JSON URL.
 - `umbra llms-txt` — Print the project's llms.txt context bundle to stdout.
 - `umbra load` — Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
