@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **DEM terrain orthorectification for SICD geocoding — `umbra convert --dem`
+  / `sicd_to_geocoded_cog(dem=...)` (`docs/STRATEGY.md` 5.5).** The single named
+  remaining strategic code gap: every path to the open data assumed a flat
+  height plane, which mislocates relief (a pixel is placed where the radar ray
+  meets the plane, not where it meets the ground). `--dem PATH` — any
+  rasterio-readable elevation model, e.g. a Copernicus/SRTM COG — now walks each
+  ground-control point onto the terrain surface via the standard ortho
+  fixed-point iteration (`_refine_gcps_with_dem`: project at a height → sample
+  the DEM there → reproject, until the height it lands on stops moving), so
+  hilltops and valley floors land in their true ground position. `--dem`
+  supersedes `--projection`; where the DEM has no coverage a point falls back to
+  the scene reference height rather than snapping to zero. Both the iteration and
+  the DEM lookup are injectable (`project`/`sample_height` callables), so the
+  whole path is exercised offline with plain callables and a hand-written DEM
+  raster — no sarpy DEM plumbing, and the sarpy-facing HAE projector batches
+  points that share a (binned) height into one call. Stdlib/rasterio-only tests
+  cover convergence to a closed-form terrain fixed point, the flat-DEM and
+  off-DEM fallbacks, the DEM sampler (ramp read, out-of-bounds/nodata masking,
+  CRS reprojection), and the end-to-end + CLI paths.
 - **Published + fetchable whole-catalog PMTiles basemap — `umbra tiles --fetch`
   (`docs/STRATEGY.md` 5.2, `docs/DEMO_APP_GAPS.md` Path A step 3).** `umbra
   tiles` shipped the stdlib-only PMTiles *encoder*; this ships the built

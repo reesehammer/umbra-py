@@ -13,10 +13,19 @@ support burden (`STRATEGY.md` 5.5). This module provides two well-defined steps:
   amplitude onto a regular geographic grid — so the scene drops straight onto a
   map or into ``rioxarray`` / QGIS with no hand-rolled geocoding.
 
-The geocoding is a *flat-earth* first slice: the projection places pixels on the
+By default the geocoding is *flat-earth*: the projection places pixels on the
 scene's height-above-ellipsoid plane (the SICD ``HAE`` projection), which is
-exact over flat terrain and good enough for map placement everywhere. Full
-terrain orthorectification (a DEM, MultiRTC interop) is the follow-on.
+exact over flat terrain and good enough for map placement everywhere. Over
+relief a single height plane mislocates hilltops and valley floors (the pixel is
+placed where the radar ray meets the plane, not where it meets the ground), so
+:func:`sicd_to_geocoded_cog` also accepts ``dem=`` — any rasterio-readable
+digital elevation model. When given, each ground-control point is walked onto
+the terrain surface (project at a height → look up the DEM there → reproject,
+until the height it lands on stops moving), so the scene is *terrain-
+orthorectified* rather than flat-projected. The iteration and the DEM lookup are
+both injectable, so the whole path is exercised offline with plain callables and
+a hand-written DEM raster — no sarpy DEM plumbing, and any Copernicus/SRTM COG
+works as the elevation source.
 
 Install with: ``pip install "umbra-py[convert]"``
 """
@@ -160,6 +169,172 @@ def _build_gcps(
     return gcps
 
 
+def _sicd_projector(sicd: Any, *, height_bin: float = 1.0):
+    """A ``project(im_points, haes) -> (lats, lons)`` over the SICD ``HAE`` model.
+
+    SICD's ``project_image_to_ground_geo(..., projection_type="HAE", hae0=h)``
+    projects every point onto a single height plane ``h``; terrain
+    orthorectification needs a *different* height per point. This adapter accepts
+    a per-point height array and batches points that share a (binned) height into
+    one projection call, so the common early iterations — where all points sit on
+    the same plane — stay a single call, and the whole thing is still just the
+    stock HAE projection. ``height_bin`` (metres) is the grouping granularity;
+    its residual is well below the placement accuracy the flat-earth path already
+    accepts, and the loop re-refines regardless.
+    """
+    np = _require("numpy")
+
+    def project(im_points, haes):
+        im_points = np.asarray(im_points, dtype="float64")
+        n = im_points.shape[0]
+        haes = np.broadcast_to(np.asarray(haes, dtype="float64"), (n,))
+        lats = np.empty(n, dtype="float64")
+        lons = np.empty(n, dtype="float64")
+        keys = np.round(haes / height_bin).astype("int64")
+        for key in np.unique(keys):
+            mask = keys == key
+            h = float(np.mean(haes[mask]))
+            ground = sicd.project_image_to_ground_geo(
+                im_points[mask], ordering="latlong", projection_type="HAE", hae0=h
+            )
+            ground = np.asarray(ground, dtype="float64")
+            lats[mask] = ground[:, 0]
+            lons[mask] = ground[:, 1]
+        return lats, lons
+
+    return project
+
+
+def _refine_gcps_with_dem(
+    im_points: np.ndarray,
+    project: Any,
+    sample_height: Any,
+    *,
+    h0: float,
+    max_iter: int = 8,
+    tol: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Walk image points onto the terrain surface sampled from a DEM.
+
+    Flat-earth GCPs put every pixel on one height plane; over relief that
+    mislocates a point by roughly ``(terrain_height - h0) * tan(look_angle)`` on
+    the ground. Starting from the scene reference height ``h0``, this projects
+    each point to ground, looks up the DEM height there, reprojects at that
+    height, and repeats until the height a point lands on stops moving (within
+    ``tol`` metres) or ``max_iter`` is reached — the standard ortho fixed-point
+    iteration.
+
+    Both dependencies are injected so the loop is exercised offline with plain
+    callables and no sarpy/rasterio::
+
+        project(im_points, haes)  -> (lats, lons)   # SICD image->ground per height
+        sample_height(lons, lats) -> heights        # DEM lookup (NaN where no data)
+
+    Where the DEM has no coverage (``sample_height`` returns NaN) the point keeps
+    its last good height rather than snapping to zero, so a scene straddling the
+    DEM edge degrades to flat-earth there instead of tearing.
+    """
+    np = _require("numpy")
+
+    pts = np.asarray(im_points, dtype="float64")
+    n = pts.shape[0]
+    haes = np.full(n, float(h0), dtype="float64")
+    lats, lons = project(pts, haes)
+    for _ in range(max_iter):
+        sampled = np.asarray(sample_height(lons, lats), dtype="float64")
+        new_h = np.where(np.isfinite(sampled), sampled, haes)
+        lats, lons = project(pts, new_h)
+        moved = float(np.max(np.abs(new_h - haes))) if n else 0.0
+        haes = new_h
+        if moved <= tol:
+            break
+    return lats, lons, haes
+
+
+def _dem_height_sampler(dem_ds: Any):
+    """A ``sample_height(lons, lats) -> heights`` reading from an open DEM dataset.
+
+    Reprojects the query lon/lat (EPSG:4326) into the DEM's CRS when they differ,
+    samples the first band, and returns NaN outside coverage or at the DEM's
+    nodata value — so :func:`_refine_gcps_with_dem` can fall back to the scene
+    height there. Sarpy-free and rasterio-only, so it is tested against a
+    hand-written DEM GeoTIFF.
+    """
+    np = _require("numpy")
+    from rasterio.warp import transform as warp_transform  # noqa: PLC0415
+
+    nodata = dem_ds.nodata
+    left, bottom, right, top = dem_ds.bounds
+    to_epsg = dem_ds.crs.to_epsg() if dem_ds.crs else None
+
+    def sample_height(lons, lats):
+        lons = np.atleast_1d(np.asarray(lons, dtype="float64"))
+        lats = np.atleast_1d(np.asarray(lats, dtype="float64"))
+        xs, ys = lons, lats
+        if dem_ds.crs is not None and to_epsg != 4326:
+            xs, ys = warp_transform("EPSG:4326", dem_ds.crs, lons.tolist(), lats.tolist())
+            xs = np.asarray(xs, dtype="float64")
+            ys = np.asarray(ys, dtype="float64")
+        inside = (xs >= left) & (xs <= right) & (ys >= bottom) & (ys <= top)
+        out = np.full(lons.shape, np.nan, dtype="float64")
+        coords = list(zip(xs.tolist(), ys.tolist(), strict=True))
+        vals = np.array([v[0] for v in dem_ds.sample(coords, indexes=1)], dtype="float64")
+        if nodata is not None:
+            vals = np.where(vals == nodata, np.nan, vals)
+        out[inside] = vals[inside]
+        return out
+
+    return sample_height
+
+
+def _scene_reference_hae(sicd: Any) -> float:
+    """Scene reference height (SCP HAE, metres) to seed the DEM iteration.
+
+    Falls back to ``0.0`` when the SICD lacks a populated ``GeoData.SCP`` (e.g. a
+    test fake), which the fixed-point iteration recovers from in a few extra
+    steps.
+    """
+    try:
+        return float(sicd.GeoData.SCP.LLH.HAE)
+    except Exception:  # pragma: no cover - defensive; exercised via the 0.0 path
+        return 0.0
+
+
+def _build_gcps_dem(
+    sicd: Any,
+    shape: tuple[int, int],
+    *,
+    grid: int,
+    sample_height: Any,
+    h0: float,
+) -> list[GroundControlPoint]:
+    """Terrain-orthorectified ground control points for :func:`_warp_gcps_to_cog`.
+
+    Like :func:`_build_gcps`, but each lattice point is walked onto the DEM
+    surface by :func:`_refine_gcps_with_dem` (via the injectable
+    ``sample_height``) instead of projected onto a single flat height plane, so
+    the warp reproduces the true ground position over relief. The refined terrain
+    height is carried as the GCP ``z``.
+    """
+    np = _require("numpy")
+    from rasterio.control import GroundControlPoint  # noqa: PLC0415
+
+    rows, cols = shape
+    row_idx = _grid_indices(rows, grid)
+    col_idx = _grid_indices(cols, grid)
+    im_points = np.array([[r, c] for r in row_idx for c in col_idx], dtype="float64")
+    project = _sicd_projector(sicd)
+    lats, lons, haes = _refine_gcps_with_dem(im_points, project, sample_height, h0=h0)
+    gcps = []
+    for (row, col), lat, lon, hae in zip(im_points, lats, lons, haes, strict=True):
+        gcps.append(
+            GroundControlPoint(
+                row=float(row), col=float(col), x=float(lon), y=float(lat), z=float(hae)
+            )
+        )
+    return gcps
+
+
 def _warp_gcps_to_cog(
     amplitude: np.ndarray,
     gcps: list[GroundControlPoint],
@@ -255,6 +430,7 @@ def sicd_to_geocoded_cog(
     resolution: float | None = None,
     resampling: str = "bilinear",
     projection_type: str = "HAE",
+    dem: str | os.PathLike | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -264,10 +440,14 @@ def sicd_to_geocoded_cog(
     map, in QGIS, or as a georeferenced :class:`xarray.DataArray` (via
     :func:`umbra_py.to_xarray`) with no further work.
 
-    The geocoding is *flat-earth*: pixels are placed on the scene's
+    By default the geocoding is *flat-earth*: pixels are placed on the scene's
     height-above-ellipsoid plane (``projection_type="HAE"``), which is exact
-    over flat terrain and adequate for map placement elsewhere. Full terrain
-    orthorectification is out of scope for this first slice.
+    over flat terrain and adequate for map placement elsewhere. Pass ``dem`` — a
+    path to any rasterio-readable digital elevation model — to **terrain-
+    orthorectify** instead: each control point is walked onto the DEM surface
+    (project → sample the DEM → reproject, until it converges), so hilltops and
+    valley floors land in their true ground position. ``dem`` supersedes
+    ``projection_type``.
 
     Parameters
     ----------
@@ -288,18 +468,35 @@ def sicd_to_geocoded_cog(
     resampling:
         Warp kernel, one of :data:`RESAMPLING_METHODS`.
     projection_type:
-        SICD image-projection type: ``"HAE"`` (flat-earth, the default),
-        ``"PLANE"``, or ``"DEM"``.
+        SICD image-projection type when ``dem`` is not given: ``"HAE"``
+        (flat-earth, the default), ``"PLANE"``, or ``"DEM"``.
+    dem:
+        Optional path to a digital elevation model (any raster rasterio can
+        open, e.g. a Copernicus/SRTM COG). When given, the scene is terrain-
+        orthorectified against it and ``projection_type`` is ignored; heights
+        are read in the DEM's own vertical datum. ``None`` keeps the flat-earth
+        projection.
     """
     np = _require("numpy")
     _require("rasterio")
     _require("sarpy")
+    import rasterio  # noqa: PLC0415
     from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
     amplitude = _amplitude(reader[:, :], decibels=decibels)
-    gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
+    if dem is not None:
+        with rasterio.open(str(dem)) as dem_ds:
+            gcps = _build_gcps_dem(
+                sicd,
+                amplitude.shape,
+                grid=gcp_grid,
+                sample_height=_dem_height_sampler(dem_ds),
+                h0=_scene_reference_hae(sicd),
+            )
+    else:
+        gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
     return _warp_gcps_to_cog(
         amplitude,
         gcps,
