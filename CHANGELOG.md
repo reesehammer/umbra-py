@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Keyed single-item lookup on the catalog index — `CatalogIndex.get(item_id)`
+  (`docs/CODEBASE_ANALYSIS.md` §4.5).** The retrieval complement to
+  `search()`'s listing: `get()` returns the indexed `UmbraItem` with a given
+  STAC id (or `None`), backed by a new `idx_items_id` index so it stays fast as
+  the published `catalog.db` snapshot grows, rather than scanning an
+  id-filtered `search`. `umbra serve`'s `GET /collections/{id}/items/{item_id}`
+  now resolves through this keyed lookup when it is backed by an index (via a
+  new `serve.get_one` helper), falling back to the id-filtered search for the
+  live-catalog source that only lists. The index is additive — existing
+  databases gain it on the next open with no schema-version bump — so a
+  deployed or fetched snapshot needs no rebuild.
 - **Structured `--json` success output on the remaining commands
   (`docs/AI_INTEGRATION_IDEAS.md` §A1).** The machine-readable *error* contract
   already shipped; this completes the *success* side, so every command that

@@ -357,6 +357,14 @@ warns a full index build "takes a while." Two structural improvements:
   catalog scale (thousands of items) this is irrelevant; if the index grows to
   hundreds of thousands, SQLite's built-in R*Tree module is the natural
   upgrade and the schema-version marker makes that migration possible.
+- ✅ **Keyed single-item lookup shipped.** `CatalogIndex.get(item_id)` returns
+  one item by STAC id via a new `idx_items_id` index (the retrieval complement
+  to `search`'s listing), and `umbra serve`'s `/collections/{id}/items/{item_id}`
+  resolves through it (`serve.get_one`) instead of scanning an id-filtered
+  search. The index was added additively (`CREATE INDEX IF NOT EXISTS` in
+  `_SCHEMA`, no `user_version` bump), so existing/fetched snapshots gain it on
+  the next open — the first exercise of the additive-schema path the version
+  marker above was landed to enable.
 
 ### 4.6 Miscellaneous robustness
 

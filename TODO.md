@@ -102,10 +102,6 @@ Open follow-ons:
 - **Geometry `intersects`.** The Query extension now covers `product_types` and
   `area`; geometry `intersects` still needs more than the stored footprint bbox
   (a real polygon-in-polygon test), so it remains unexposed.
-- **Single-item lookup cost.** `/collections/{id}/items/{item_id}` filters by id
-  in the serve layer (a scan of the ordered result set). At catalog scale that's
-  fine; if the index grows, add a `CatalogIndex.get(item_id)` keyed lookup and
-  call it from `get_item`.
 - **A hosted community instance.** The local-first server has no operational
   cost; a public instance is a policy decision (COG-streaming egress) that would
   make the archive queryable with zero install — pair it with the demo front end
@@ -278,6 +274,22 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **Keyed single-item lookup on the catalog index (`umbra serve` follow-on).**
+  `/collections/{id}/items/{item_id}` previously resolved a single item by
+  filtering an id-scoped `run_search` in the serve layer — a scan of the ordered
+  result set. Added `CatalogIndex.get(item_id) -> UmbraItem | None`, an
+  `idx_items_id`-backed point lookup (the retrieval complement to `search`'s
+  listing), and a `serve.get_one(source, item_id)` helper that uses it when the
+  backend is a `CatalogIndex` and falls back to the id-filtered search for the
+  live `UmbraCatalog`, which only lists. The new index is additive — added to
+  `_SCHEMA` with `CREATE INDEX IF NOT EXISTS`, so existing databases (including a
+  fetched snapshot) gain it on the next open with no `PRAGMA user_version` bump,
+  exactly the additive path the schema-version marker was landed to enable.
+  Fully offline-tested (`tests/test_index.py`, `tests/test_serve.py`): found /
+  missing / index-present, plus the keyed-vs-listing dispatch in `get_one`.
+  Was `docs/CODEBASE_ANALYSIS.md` §4.5 and this file's `umbra serve` open item.
+  The Canopy-archive `get_item(id)` (a keyed fetch against the commercial STAC
+  API) remains the separate open follow-on under the Canopy section.
 - **Structured `--json` success output on the remaining commands (A1 follow-on).**
   The A1 error contract already shipped (structured stderr errors with `hint`,
   `docs/schemas/error.schema.json`); this completes the success side so every

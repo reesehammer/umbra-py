@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 CREATE INDEX IF NOT EXISTS idx_items_acq_date ON items(acq_date);
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
+CREATE INDEX IF NOT EXISTS idx_items_id ON items(id);
 CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
 """
 
@@ -480,6 +481,25 @@ class CatalogIndex:
             count += 1
             if limit is not None and count >= limit:
                 return
+
+    def get(self, item_id: str) -> UmbraItem | None:
+        """Return the indexed item with this STAC id, or ``None`` if absent.
+
+        The keyed point-lookup complement to :meth:`search`'s listing: where
+        filtering a full ``search`` by id would scan the ordered result set,
+        this is an ``idx_items_id``-backed lookup, so it stays fast as the
+        published ``catalog.db`` snapshot grows. STAC ids are unique per
+        acquisition in Umbra's catalog; in the unlikely event two sidecars
+        share an id, the first by ``href`` order is returned deterministically.
+        """
+        row = self._conn.execute(
+            "SELECT href, doc FROM items WHERE id = ? ORDER BY href LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        href, doc = row
+        return UmbraItem.from_dict(json.loads(doc), href=href)
 
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
