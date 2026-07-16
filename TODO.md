@@ -58,14 +58,12 @@ renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`, `POST
 /artifacts/change`, `POST /artifacts/timescan`, `POST /artifacts/swipe`), each
 disk-cached by its inputs and wrapping the existing `viz` functions behind
 injectable renderers. The `umbra demo` front end now calls these endpoints (see
-the Done log), closing the self-serve R4 loop. Open follow-ons:
+the Done log), closing the self-serve R4 loop. **Async job semantics for long
+renders are now shipped** (see the Done log): a composite request can opt in to
+`"async": true`, get a `202 Accepted` + a job id, poll `GET /jobs/{id}`, and
+fetch the result from `GET /jobs/{id}/result` (the disk cache is the result
+store). Open follow-ons:
 
-- **Async job semantics for long renders.** The render endpoints are synchronous
-  today — fine for a downsampled overview (seconds), but a large `max_size` or a
-  long timescan can take tens of seconds, and a synchronous request blocks a
-  worker for the duration. A small job queue (`202 Accepted` + a poll/`GET
-  /jobs/{id}` + the existing disk cache as the result store) is the productized
-  shape `DEMO_APP_GAPS.md` Path B step 2 names; deferred as an honest first slice.
 - **Query extensions.** `/search` currently supports the STAC core filters; the
   index also filters by free-text `area` (task/site substring) and
   `product_types`, which aren't yet exposed over the API. Wiring the STAC
@@ -251,6 +249,24 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **Async job semantics for long `umbra serve` renders (`202 Accepted` + poll).**
+  Added a small in-memory job queue to `src/umbra_py/serve.py` so a composite
+  render need not hold a request for its whole duration. A `POST /artifacts/change`
+  / `timescan` / `swipe` request that carries `"async": true` gets a `202 Accepted`
+  and a job document back immediately; the render runs on a background pool
+  (`ARTIFACT_JOB_WORKERS`, injectable via `build_app(..., job_executor=...)`).
+  `GET /jobs/{id}` polls status (`queued` → `running` → `succeeded` | `failed`)
+  and `GET /jobs/{id}/result` serves the finished artifact — from the *same*
+  content-addressed disk cache the synchronous path writes, so there is no
+  separate result store and an async request whose key is already cached returns
+  an already-`succeeded` job with no work. Frame resolution/validation stays
+  synchronous, so a bad request (too few acquisitions, malformed bbox) is still a
+  fast `400`, never a doomed job; a failed render becomes a `failed` job whose
+  result endpoint mirrors the sync path's status (`501` for a missing `viz`
+  extra, `500` otherwise). The default synchronous behavior is unchanged when
+  `"async"` is absent. New pure builder `job_to_dict` and the injectable executor
+  keep it offline-testable without wall-clock timing. This was
+  `DEMO_APP_GAPS.md` Path B step 2's remaining item.
 - **`POST /artifacts/swipe` + the demo front end that calls the render
   endpoints (closes the self-serve R4 loop).** Added the fourth artifact
   endpoint to `src/umbra_py/serve.py`: `POST /artifacts/swipe` wraps

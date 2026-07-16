@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Async job semantics for long `umbra serve` renders — `202 Accepted` + poll
+  (`docs/DEMO_APP_GAPS.md` Path B step 2).** The composite render endpoints
+  (`POST /artifacts/change` / `timescan` / `swipe`) accept an opt-in
+  `"async": true` in the request body. Instead of holding the request for the
+  whole render, the server queues the work on a small background pool and returns
+  `202 Accepted` with a job document (and a `Location` header). Two new endpoints
+  drive the poll loop: `GET /jobs/{id}` reports status
+  (`queued` → `running` → `succeeded` | `failed`, with a `result` link once done)
+  and `GET /jobs/{id}/result` serves the finished artifact. There is **no
+  separate result store** — the render writes the same content-addressed disk
+  cache the synchronous path uses, so a completed job's result *is* a cache entry,
+  and an async request whose key is already cached returns an already-`succeeded`
+  job with no work. Frame resolution and validation stay synchronous, so a bad
+  request (too few acquisitions, malformed bbox) is still a fast `400` and never a
+  doomed background job; a failed render becomes a `failed` job whose result
+  endpoint mirrors the synchronous status (`501` for a missing `viz` extra, `500`
+  otherwise). Default behavior is unchanged when `"async"` is absent. The queue's
+  executor is injectable (`build_app(..., job_executor=...)`) and a new pure
+  `job_to_dict` builder keeps the whole path offline-testable with no wall-clock
+  timing.
 - **`POST /artifacts/swipe` on `umbra serve`, and `umbra demo --server-url` that
   calls the render endpoints — closing the self-serve demo loop
   (`docs/DEMO_APP_GAPS.md` R4 / Path B step 3).** `umbra serve` gained a fourth

@@ -453,3 +453,218 @@ def test_missing_render_extra_maps_to_501(index_path, tmp_path):
     resp = client.get("/artifacts/quicklook/item-0.png")
     assert resp.status_code == 501
     assert "viz" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Async render jobs (202 + poll; the disk cache is the result store)
+# --------------------------------------------------------------------------
+
+
+class _ManualExecutor:
+    """An executor-shaped runner that defers submitted work until asked.
+
+    Lets a test observe the ``queued``/``running`` states a real thread pool
+    would produce, with none of the timing nondeterminism: ``submit`` just
+    records the callable, and ``run_all`` runs the pending ones.
+    """
+
+    def __init__(self) -> None:
+        self.pending: list = []
+
+    def submit(self, fn):
+        self.pending.append(fn)
+
+    def run_all(self) -> None:
+        pending, self.pending = self.pending, []
+        for fn in pending:
+            fn()
+
+    def shutdown(self, wait: bool = True) -> None:
+        pass
+
+
+@pytest.fixture
+def inline_client(index_path, recorder, tmp_path) -> TestClient:
+    """A client whose jobs run synchronously on submit (deterministic)."""
+    app = serve.build_app(
+        index_path,
+        renderers=recorder.as_renderers(),
+        cache_dir=tmp_path / "artifacts",
+        job_executor=serve._InlineJobExecutor(),
+    )
+    return TestClient(app)
+
+
+# ---- pure job document builder (no server) -------------------------------
+
+
+def test_job_to_dict_queued_has_only_a_self_link():
+    job = serve.RenderJob(
+        id="abc", kind="change", cache_key="k", suffix="png", media_type="image/png"
+    )
+    doc = serve.job_to_dict(job, "http://localhost:8000/")
+    assert doc["status"] == "queued"
+    assert {link["rel"] for link in doc["links"]} == {"self"}
+    assert "cache" not in doc and "error" not in doc
+
+
+def test_job_to_dict_succeeded_adds_a_result_link():
+    job = serve.RenderJob(
+        id="abc",
+        kind="swipe",
+        cache_key="k",
+        suffix="html",
+        media_type="text/html; charset=utf-8",
+        status=serve.JOB_SUCCEEDED,
+        cached=True,
+    )
+    doc = serve.job_to_dict(job, "http://localhost:8000")
+    result = next(link for link in doc["links"] if link["rel"] == "result")
+    assert result["href"].endswith("/jobs/abc/result")
+    assert result["type"] == "text/html; charset=utf-8"
+    assert doc["cache"] == "hit"
+
+
+def test_job_to_dict_failed_surfaces_the_error():
+    job = serve.RenderJob(
+        id="abc",
+        kind="change",
+        cache_key="k",
+        suffix="png",
+        media_type="image/png",
+        status=serve.JOB_FAILED,
+        error="boom",
+    )
+    doc = serve.job_to_dict(job, "http://localhost:8000")
+    assert doc["error"] == "boom"
+    assert {link["rel"] for link in doc["links"]} == {"self"}
+
+
+# ---- endpoints -----------------------------------------------------------
+
+
+def test_async_change_runs_and_serves_result(inline_client, recorder):
+    resp = inline_client.post(
+        "/artifacts/change", json={"ids": ["item-0", "item-1"], "async": True}
+    )
+    # The inline executor finishes the render during submit, so the job is born
+    # succeeded and the artifact response is 200, not 202.
+    assert resp.status_code == 200
+    job = resp.json()
+    assert job["kind"] == "change" and job["status"] == "succeeded"
+    assert resp.headers["location"].endswith(f"/jobs/{job['id']}")
+    assert recorder.calls[0][:2] == ("change", ["item-0", "item-1"])
+
+    # Polling the job reports success with a result link.
+    poll = inline_client.get(f"/jobs/{job['id']}").json()
+    assert poll["status"] == "succeeded"
+    result_link = next(link for link in poll["links"] if link["rel"] == "result")
+
+    # Fetching the result serves the rendered bytes from the disk cache.
+    result = inline_client.get(result_link["href"])
+    assert result.status_code == 200
+    assert result.headers["content-type"] == "image/png"
+    assert result.content == FAKE_PNG
+    # The render ran exactly once for the whole submit -> poll -> fetch flow.
+    assert len(recorder.calls) == 1
+
+
+def test_async_pending_job_then_result(index_path, recorder, tmp_path):
+    executor = _ManualExecutor()
+    app = serve.build_app(
+        index_path,
+        renderers=recorder.as_renderers(),
+        cache_dir=tmp_path / "artifacts",
+        job_executor=executor,
+    )
+    client = TestClient(app)
+
+    # The work is deferred, so the request returns 202 with a queued job.
+    resp = client.post("/artifacts/timescan", json={"bbox": [-69, 10, -67, 11], "async": True})
+    assert resp.status_code == 202
+    job_id = resp.json()["id"]
+    assert resp.json()["status"] == "queued"
+    assert recorder.calls == []  # nothing rendered yet
+
+    # While queued, the result endpoint refuses with 409 (poll, don't fetch).
+    assert client.get(f"/jobs/{job_id}").json()["status"] == "queued"
+    assert client.get(f"/jobs/{job_id}/result").status_code == 409
+
+    # Run the deferred render; the job flips to succeeded and the result serves.
+    executor.run_all()
+    assert client.get(f"/jobs/{job_id}").json()["status"] == "succeeded"
+    result = client.get(f"/jobs/{job_id}/result")
+    assert result.status_code == 200
+    assert result.content == FAKE_PNG
+    assert recorder.calls[0][0] == "timescan"
+
+
+def test_async_already_cached_returns_succeeded_without_work(inline_client, recorder):
+    body = {"ids": ["item-0", "item-1"]}
+    # Populate the cache synchronously first.
+    assert inline_client.post("/artifacts/change", json=body).status_code == 200
+    assert len(recorder.calls) == 1
+
+    # An async request for the same render finds the cache and does no new work.
+    resp = inline_client.post("/artifacts/change", json={**body, "async": True})
+    assert resp.status_code == 200
+    doc = resp.json()
+    assert doc["status"] == "succeeded" and doc["cache"] == "hit"
+    assert len(recorder.calls) == 1  # renderer not called again
+
+
+def test_async_swipe_serves_html_result(inline_client):
+    resp = inline_client.post("/artifacts/swipe", json={"ids": ["item-0", "item-2"], "async": True})
+    assert resp.status_code == 200
+    result = inline_client.get(f"/jobs/{resp.json()['id']}/result")
+    assert result.status_code == 200
+    assert result.headers["content-type"].startswith("text/html")
+    assert result.content == FAKE_PNG
+
+
+def test_async_validation_error_is_a_synchronous_400(inline_client):
+    # Too few acquisitions is caught before any job is created.
+    resp = inline_client.post("/artifacts/change", json={"ids": ["item-0"], "async": True})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+
+
+def test_async_failed_render_reports_error_status(index_path, tmp_path):
+    from umbra_py.exceptions import MissingDependencyError
+
+    def boom(items, opts):
+        raise MissingDependencyError("needs the 'viz' extra")
+
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom)
+    app = serve.build_app(
+        index_path,
+        renderers=renderers,
+        cache_dir=tmp_path / "art",
+        job_executor=serve._InlineJobExecutor(),
+    )
+    client = TestClient(app)
+    resp = client.post("/artifacts/change", json={"ids": ["item-0", "item-1"], "async": True})
+    # A failed render is not an HTTP error on submit -- it is a failed job.
+    assert resp.status_code == 202
+    job_id = resp.json()["id"]
+    poll = client.get(f"/jobs/{job_id}").json()
+    assert poll["status"] == "failed"
+    assert "viz" in poll["error"]
+    # The result endpoint mirrors the synchronous path's 501 for a missing extra.
+    result = client.get(f"/jobs/{job_id}/result")
+    assert result.status_code == 501
+    assert "viz" in result.json()["detail"]
+
+
+def test_unknown_job_is_404(art_client):
+    assert art_client.get("/jobs/does-not-exist").status_code == 404
+    assert art_client.get("/jobs/does-not-exist/result").status_code == 404
+
+
+def test_sync_default_is_unchanged_by_async_support(art_client, recorder):
+    # Without the async flag, the endpoint still returns the artifact directly.
+    resp = art_client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content == FAKE_PNG
+    assert resp.headers["x-umbra-cache"] == "miss"
