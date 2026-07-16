@@ -18,6 +18,26 @@ This buys two ecosystems from one component:
   generated OpenAPI document alone. It is the browser-facing sibling of the
   ``umbra-mcp`` server: same index underneath, a different front door.
 
+On top of *discovery* the server also renders *artifacts on demand*, so a
+front end (or an agent) can trigger the library's visual products over **any**
+site straight from HTTP, not just a curated set baked at build time
+(``DEMO_APP_GAPS.md`` R4 / Path B):
+
+- ``GET  /artifacts/quicklook/{item_id}.png`` -- one acquisition's SAR quicklook;
+- ``POST /artifacts/change``   -- a 2--3 date change composite over a query;
+- ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series.
+
+These wrap the existing :mod:`umbra_py.viz` functions unchanged and cache every
+result to disk keyed by its inputs, so a repeat request is a file read (closing
+the "no artifact caching" gap for these endpoints). Two properties keep them in
+the package's grain: the renderers are **injectable** (``build_app(...,
+renderers=...)``), so the routes are unit-testable in the core install with no
+network and no ``viz`` extra; and they are opt-out (``--no-artifacts``) for a
+public instance that wants to bound COG-streaming egress. Rendering is
+synchronous for now -- a single composite streams a downsampled overview per
+pass and returns in seconds; an async job queue for long renders is the ledgered
+follow-on (``TODO.md``).
+
 Two design commitments carry over from the rest of the package:
 
 - **Deterministic core, thin edge.** The STAC documents are built by plain,
@@ -36,8 +56,13 @@ Run it with ``umbra serve`` (needs the ``serve`` extra:
 
 from __future__ import annotations
 
+import hashlib
+import io
 import itertools
+import json
 import os
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -164,10 +189,59 @@ def _link(rel: str, href: str, *, type: str = "application/json", **extra: Any) 
     return link
 
 
-def landing_page(base_url: str) -> dict[str, Any]:
-    """The STAC API landing page (a STAC ``Catalog`` with conformance + links)."""
+def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
+    """The STAC API landing page (a STAC ``Catalog`` with conformance + links).
+
+    When ``artifacts`` is true the returned links also advertise the on-demand
+    render endpoints (``/artifacts/...``) so a client can discover them without
+    reading the OpenAPI document.
+    """
     base = base_url.rstrip("/")
     geojson = "application/geo+json"
+    links = [
+        _link("self", f"{base}/"),
+        _link("root", f"{base}/"),
+        _link("conformance", f"{base}/conformance"),
+        _link("data", f"{base}/collections"),
+        _link("search", f"{base}/search", type=geojson, method="GET", title="STAC search"),
+        _link("search", f"{base}/search", type=geojson, method="POST", title="STAC search"),
+        _link(
+            "service-desc",
+            f"{base}/openapi.json",
+            type="application/vnd.oai.openapi+json;version=3.0",
+        ),
+        _link("service-doc", f"{base}/docs", type="text/html"),
+        _link(
+            "child",
+            f"{base}/collections/{COLLECTION_ID}",
+            title="Umbra open data",
+        ),
+    ]
+    if artifacts:
+        png = "image/png"
+        links += [
+            _link(
+                "quicklook",
+                f"{base}/artifacts/quicklook/{{item_id}}.png",
+                type=png,
+                title="On-demand SAR quicklook (templated by item id)",
+                templated=True,
+            ),
+            _link(
+                "change",
+                f"{base}/artifacts/change",
+                type=png,
+                method="POST",
+                title="On-demand 2-3 date change composite",
+            ),
+            _link(
+                "timescan",
+                f"{base}/artifacts/timescan",
+                type=png,
+                method="POST",
+                title="On-demand temporal-statistics composite",
+            ),
+        ]
     return {
         "type": "Catalog",
         "stac_version": STAC_VERSION,
@@ -180,25 +254,7 @@ def landing_page(base_url: str) -> dict[str, Any]:
             f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION}"
         ),
         "conformsTo": list(CONFORMANCE_CLASSES),
-        "links": [
-            _link("self", f"{base}/"),
-            _link("root", f"{base}/"),
-            _link("conformance", f"{base}/conformance"),
-            _link("data", f"{base}/collections"),
-            _link("search", f"{base}/search", type=geojson, method="GET", title="STAC search"),
-            _link("search", f"{base}/search", type=geojson, method="POST", title="STAC search"),
-            _link(
-                "service-desc",
-                f"{base}/openapi.json",
-                type="application/vnd.oai.openapi+json;version=3.0",
-            ),
-            _link("service-doc", f"{base}/docs", type="text/html"),
-            _link(
-                "child",
-                f"{base}/collections/{COLLECTION_ID}",
-                title="Umbra open data",
-            ),
-        ],
+        "links": links,
     }
 
 
@@ -394,28 +450,219 @@ def open_source(index_path: str | os.PathLike | None = None, *, live: bool = Fal
 
 
 # --------------------------------------------------------------------------
+# On-demand render artifacts (quicklook / change / timescan)
+# --------------------------------------------------------------------------
+
+#: Upper bound on acquisitions pulled into a single composite. A timescan's
+#: statistics converge well before this, and it bounds per-request memory and
+#: COG-streaming egress; a query resolving to more is evenly subsampled to it.
+ARTIFACT_MAX_FRAMES = 60
+
+#: Default downsample ceiling for artifact renders. Smaller than the library
+#: default (2048) because these are interactive, streamed-in-the-request views.
+ARTIFACT_MAX_SIZE = 1024
+
+
+def default_artifact_cache_dir() -> Path:
+    """Where rendered artifacts are cached (next to the index by default)."""
+    return default_index_path().parent / "artifacts"
+
+
+@dataclass(frozen=True)
+class Renderers:
+    """The three render functions the artifact endpoints call, as PNG bytes.
+
+    Injecting this (rather than importing :mod:`umbra_py.viz` directly in the
+    routes) is what keeps the endpoints unit-testable in the core install: a
+    test passes fakes that return a fixed PNG with no network and no ``viz``
+    extra, while :func:`default_renderers` wires the real, lazily-imported
+    compositors. Each callable takes the resolved items and a normalised
+    options mapping (``asset`` / ``max_size`` / ``db``) and returns PNG bytes.
+    """
+
+    quicklook: Callable[[UmbraItem, Mapping[str, Any]], bytes]
+    change: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
+    timescan: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
+
+
+def _png_bytes(image: Any) -> bytes:
+    """Encode a ``PIL.Image`` to PNG bytes."""
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def default_renderers() -> Renderers:
+    """The production renderers, backed by :mod:`umbra_py.viz` (``viz`` extra).
+
+    Imports are deferred to call time so building the app -- and importing this
+    module -- never needs the heavy raster stack; only an actual render request
+    pulls it in (and a missing extra surfaces as a clean error the route maps to
+    HTTP 501).
+    """
+
+    def quicklook(item: UmbraItem, opts: Mapping[str, Any]) -> bytes:
+        from . import viz
+
+        image = viz.quicklook(item, asset=opts["asset"], max_size=opts["max_size"], db=opts["db"])
+        return _png_bytes(image)
+
+    def change(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        from . import viz
+
+        image = viz.change_composite(
+            list(items), asset=opts["asset"], max_size=opts["max_size"], db=opts["db"]
+        )
+        return _png_bytes(image)
+
+    def timescan(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        from . import viz
+
+        image = viz.timescan_composite(
+            list(items), asset=opts["asset"], max_size=opts["max_size"], db=opts["db"]
+        )
+        return _png_bytes(image)
+
+    return Renderers(quicklook=quicklook, change=change, timescan=timescan)
+
+
+def artifact_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalise the render options a request carries into a stable mapping.
+
+    Deterministic and offline: it is part of the cache key, so a test can assert
+    two requests hash the same. ``asset`` defaults to the detected amplitude
+    GeoTIFF, ``max_size`` to :data:`ARTIFACT_MAX_SIZE`, ``db`` off.
+    """
+    body = body or {}
+    return {
+        "asset": str(body.get("asset") or "GEC"),
+        "max_size": max(64, min(int(body.get("max_size") or ARTIFACT_MAX_SIZE), 8192)),
+        "db": bool(body.get("db", False)),
+    }
+
+
+def artifact_cache_key(kind: str, item_ids: Sequence[str], options: Mapping[str, Any]) -> str:
+    """A stable content hash for a render request.
+
+    Pure and order-sensitive on ``item_ids`` (a change composite is *not* the
+    same artifact with its frames reversed), so the cache never confuses two
+    distinct renders. Options are hashed order-independently.
+    """
+    payload = {
+        "kind": kind,
+        "items": list(item_ids),
+        "options": {k: options[k] for k in sorted(options)},
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def resolve_items(
+    source: Any,
+    *,
+    bbox: BBox | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    ids: Sequence[str] | None = None,
+    cap: int = ARTIFACT_MAX_FRAMES,
+) -> list[UmbraItem]:
+    """Gather the acquisitions a composite request refers to.
+
+    Either an explicit ``ids`` list (the client controls chronology -- the
+    returned order matches the requested order) or a ``bbox``/date query (the
+    source's stable acquisition-date order, i.e. chronological). ``ids`` cannot
+    be capped at the source since an id may appear anywhere, so it scans; a
+    bbox/date query is capped at ``cap``.
+    """
+    if ids:
+        by_id: dict[str, UmbraItem] = {}
+        wanted = set(ids)
+        for it in source.search(bbox=bbox, start=start, end=end, limit=None):
+            if it.id in wanted:
+                by_id[it.id] = it
+                if len(by_id) == len(wanted):
+                    break
+        return [by_id[i] for i in ids if i in by_id]
+    return list(source.search(bbox=bbox, start=start, end=end, limit=cap))
+
+
+def _evenly_spaced(items: list[UmbraItem], n: int) -> list[UmbraItem]:
+    """``n`` items spread across ``items``, always keeping the first and last."""
+    if len(items) <= n:
+        return items
+    idx = sorted({round(i * (len(items) - 1) / (n - 1)) for i in range(n)})
+    return [items[i] for i in idx]
+
+
+def change_frames(items: list[UmbraItem]) -> list[UmbraItem]:
+    """Pick the 2--3 frames :func:`viz.change_composite` needs from a query.
+
+    Two resolved acquisitions render the two-date (green/magenta) composite;
+    three or more collapse to a first/middle/last three-date temporal-RGB.
+    """
+    if len(items) < 2:
+        raise ValueError(
+            f"A change composite needs at least 2 acquisitions, resolved {len(items)}. "
+            "Widen the date range or pass explicit ids."
+        )
+    if len(items) <= 3:
+        return items
+    return _evenly_spaced(items, 3)
+
+
+def timescan_frames(items: list[UmbraItem]) -> list[UmbraItem]:
+    """Pick the frames :func:`viz.timescan_composite` needs (>=3, capped)."""
+    if len(items) < 3:
+        raise ValueError(
+            f"A timescan needs at least 3 acquisitions, resolved {len(items)}. "
+            "Widen the date range, or use /artifacts/change for two dates."
+        )
+    return _evenly_spaced(items, ARTIFACT_MAX_FRAMES)
+
+
+# --------------------------------------------------------------------------
 # FastAPI application factory
 # --------------------------------------------------------------------------
 
 
-def build_app(index_path: str | os.PathLike | None = None, *, live: bool = False) -> FastAPI:
+def build_app(
+    index_path: str | os.PathLike | None = None,
+    *,
+    live: bool = False,
+    artifacts: bool = True,
+    renderers: Renderers | None = None,
+    cache_dir: str | os.PathLike | None = None,
+) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
     ``index_path`` selects the catalog index (default: the shared
     :func:`~umbra_py.default_index_path`); ``live=True`` serves from a live S3
     walk instead. A fresh backend is opened and closed per request so the app
-    is safe under FastAPI's thread pool. Requires the ``serve`` extra.
+    is safe under FastAPI's thread pool.
+
+    When ``artifacts`` is true (the default) the on-demand render endpoints
+    (``/artifacts/quicklook/{id}.png``, ``POST /artifacts/change``,
+    ``POST /artifacts/timescan``) are mounted. ``renderers`` overrides the
+    render functions (defaults to :func:`default_renderers`, which needs the
+    ``viz`` extra at request time); ``cache_dir`` overrides where rendered PNGs
+    are cached (defaults to :func:`default_artifact_cache_dir`). Requires the
+    ``serve`` extra.
     """
     fastapi = _require_serve()
-    from fastapi import Body, HTTPException, Query, Request
+    from fastapi import Body, HTTPException, Query, Request, Response
     from fastapi.responses import JSONResponse
 
     # This module uses ``from __future__ import annotations``, so the route
     # handlers' annotations are strings that FastAPI resolves against the
-    # module globals. ``Request``/``JSONResponse`` are imported lazily inside
-    # this factory (to keep the fastapi import behind the ``serve`` extra), so
-    # publish them into the module namespace for that resolution to succeed.
-    globals().update(Request=Request, JSONResponse=JSONResponse)
+    # module globals. ``Request``/``JSONResponse``/``Response`` are imported
+    # lazily inside this factory (to keep the fastapi import behind the
+    # ``serve`` extra), so publish them into the module namespace for that
+    # resolution to succeed.
+    globals().update(Request=Request, JSONResponse=JSONResponse, Response=Response)
+
+    if renderers is None:
+        renderers = default_renderers()
+    cache_path = Path(cache_dir) if cache_dir is not None else default_artifact_cache_dir()
 
     app = fastapi.FastAPI(
         title="Umbra Open Data STAC API",
@@ -452,7 +699,7 @@ def build_app(index_path: str | os.PathLike | None = None, *, live: bool = False
 
     @app.get("/", tags=["STAC"])
     def get_landing(request: Request) -> dict[str, Any]:
-        return landing_page(str(request.base_url))
+        return landing_page(str(request.base_url), artifacts=artifacts)
 
     @app.get("/conformance", tags=["STAC"])
     def get_conformance() -> dict[str, Any]:
@@ -618,6 +865,99 @@ def build_app(index_path: str | os.PathLike | None = None, *, live: bool = False
                 detail=f"Only the {COLLECTION_ID!r} collection is served.",
             )
 
+    # ----------------------------------------------------------------------
+    # On-demand render artifacts
+    # ----------------------------------------------------------------------
+
+    def _serve_artifact(
+        kind: str,
+        items: list[UmbraItem],
+        options: Mapping[str, Any],
+        render: Callable[[], bytes],
+    ) -> Response:
+        """Cache-or-render a PNG artifact and return it with cache metadata."""
+        key = artifact_cache_key(kind, [it.id for it in items], options)
+        path = cache_path / f"{key}.png"
+        if path.exists():
+            return Response(
+                content=path.read_bytes(),
+                media_type="image/png",
+                headers={"X-Umbra-Cache": "hit"},
+            )
+        try:
+            png = render()
+        except MissingDependencyError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".part")
+        tmp.write_bytes(png)
+        tmp.replace(path)
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={"X-Umbra-Cache": "miss"},
+        )
+
+    def _resolve_for_composite(body: Mapping[str, Any]) -> list[UmbraItem]:
+        try:
+            bbox = parse_bbox(body.get("bbox"))
+            start, end = parse_datetime(body.get("datetime"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raw_ids = body.get("ids")
+        ids = [str(i) for i in raw_ids] if raw_ids else None
+        source = _open()
+        try:
+            return resolve_items(source, bbox=bbox, start=start, end=end, ids=ids)
+        finally:
+            _close(source)
+
+    if artifacts:
+
+        @app.get("/artifacts/quicklook/{item_id}.png", tags=["Artifacts"])
+        def get_quicklook(
+            item_id: str,
+            asset: str = Query(default="GEC"),
+            max_size: int = Query(default=ARTIFACT_MAX_SIZE, ge=64, le=8192),
+            db: bool = Query(default=False),
+        ) -> Response:
+            source = _open()
+            try:
+                page, _ = run_search(source, ids=[item_id], limit=1)
+            finally:
+                _close(source)
+            if not page:
+                raise HTTPException(status_code=404, detail=f"No item {item_id!r}")
+            item = page[0]
+            options = artifact_options({"asset": asset, "max_size": max_size, "db": db})
+            return _serve_artifact(
+                "quicklook", [item], options, lambda: renderers.quicklook(item, options)
+            )
+
+        @app.post("/artifacts/change", tags=["Artifacts"])
+        def post_change(body: dict[str, Any] = Body(default={})) -> Response:
+            items = _resolve_for_composite(body)
+            try:
+                frames = change_frames(items)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            options = artifact_options(body)
+            return _serve_artifact(
+                "change", frames, options, lambda: renderers.change(frames, options)
+            )
+
+        @app.post("/artifacts/timescan", tags=["Artifacts"])
+        def post_timescan(body: dict[str, Any] = Body(default={})) -> Response:
+            items = _resolve_for_composite(body)
+            try:
+                frames = timescan_frames(items)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            options = artifact_options(body)
+            return _serve_artifact(
+                "timescan", frames, options, lambda: renderers.timescan(frames, options)
+            )
+
     return app
 
 
@@ -627,6 +967,8 @@ def serve(
     port: int = 8000,
     index_path: str | os.PathLike | None = None,
     live: bool = False,
+    artifacts: bool = True,
+    cache_dir: str | os.PathLike | None = None,
     log_level: str = "info",
 ) -> None:
     """Build the app and run it with uvicorn (blocking). Requires ``serve``."""
@@ -639,5 +981,5 @@ def serve(
             "    pip install 'umbra-py[serve]'"
         ) from exc
 
-    app = build_app(index_path, live=live)
+    app = build_app(index_path, live=live, artifacts=artifacts, cache_dir=cache_dir)
     uvicorn.run(app, host=host, port=port, log_level=log_level)

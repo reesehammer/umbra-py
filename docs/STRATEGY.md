@@ -8,7 +8,7 @@ Companion docs: [`CODEBASE_ANALYSIS.md`](CODEBASE_ANALYSIS.md) (code-level
 priorities), [`AI_INTEGRATION_IDEAS.md`](AI_INTEGRATION_IDEAS.md) (AI/MCP
 direction), [`DEMO_APP_GAPS.md`](DEMO_APP_GAPS.md) (demo-app readiness).*
 
-*Last updated: 2026-07-15.*
+*Last updated: 2026-07-16.*
 
 ---
 
@@ -370,6 +370,34 @@ same 500 lines of glue first, and many give up."*
 > Path B). The higher-level strategic gaps are also unchanged: SICD → geocoded COG
 > (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
 > Umbra).
+>
+> **Update:** the **on-demand render endpoints have shipped on `umbra serve`**
+> (`DEMO_APP_GAPS.md` R4 / Path B step 2 — the server side of the last self-serve
+> demo requirement). `umbra serve` had restored *discovery* (a STAC search API
+> over a catalog with none); the demo-gap analysis's remaining self-serve
+> requirement was *triggering the visual products over any site*, not just a
+> curated set baked at build time. The server now does that: `GET
+> /artifacts/quicklook/{id}.png`, `POST /artifacts/change` and `POST
+> /artifacts/timescan` resolve the acquisitions from the same `CatalogIndex` and
+> render them by wrapping the existing `viz` functions unchanged, caching each
+> PNG to disk keyed by its inputs. It is the sharpest demo-critical-path move
+> since the demo page itself (§1): the "make Umbra's SAR feel as approachable as
+> Sentinel-1" thesis is best sold by a page a curious analyst can *act* on —
+> click a site, see it change over time — and this is the backend that closes the
+> loop over the whole archive rather than a handful of pre-baked showcases. It
+> preserves the project's grain and testability (§3): the renderers are
+> **injectable**, so the routes are unit-tested in the core install with no
+> network and no `viz` extra (the same discipline the STAC document builders
+> already hold), and the endpoints are opt-out (`--no-artifacts`) for a public
+> instance that wants to bound COG-streaming egress — the guardrail (§6) against
+> being the reason their S3 bill spikes. It layers on the same discovery substrate
+> the whole project rests on, so it stays graceful under upstream obsolescence.
+> Remaining demo gaps are unchanged and additive: the front-end "run this analysis
+> here" wiring that *calls* these endpoints, a `swipe` endpoint, async job
+> semantics for the longest renders, and the full-acquisition-set PMTiles tiling
+> (`DEMO_APP_GAPS.md` Path A step 3). The higher-level strategic gaps are also
+> unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption moves
+> (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
