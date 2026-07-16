@@ -641,6 +641,128 @@ def test_update_stamps_built_at(tmp_path):
         assert idx.get_meta("built_at") == date.today().isoformat()
 
 
+# -- read-through search (index + live delta) -----------------------------------
+
+
+def test_search_live_walks_only_from_the_freshness_horizon(tmp_path):
+    """The live delta walk starts at (max indexed acq_date - overlap_days)."""
+    from datetime import date
+
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:  # newest indexed acq_date is 2024-02-10 (_B)
+        list(idx.search_live(cat, overlap_days=0))
+    assert cat.calls[0]["start"] == date(2024, 2, 10)
+
+
+def test_search_live_merges_index_and_new_live_items(tmp_path):
+    """Results are the union of what's indexed and the new live delta."""
+    cat = _RecordingCatalog([_B, _D])  # _B already indexed, _D is new
+    with _index(tmp_path) as idx:  # holds a, b, c
+        found = list(idx.search_live(cat, overlap_days=0))
+    assert {i.id for i in found} == {"a", "b", "c", "d"}
+
+
+def test_search_live_deduplicates_overlap_by_href(tmp_path):
+    """An acquisition present in both the index and the live delta yields once."""
+    cat = _RecordingCatalog([_B])  # _B is already indexed -> a pure overlap
+    with _index(tmp_path) as idx:
+        ids = [i.id for i in idx.search_live(cat, overlap_days=0)]
+    assert ids.count("b") == 1
+    assert set(ids) == {"a", "b", "c"}
+
+
+def test_search_live_caches_new_items_by_default(tmp_path):
+    """refresh=True upserts the new delta so a later plain search finds it."""
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        list(idx.search_live(cat, overlap_days=0))
+        assert {i.id for i in idx.search()} == {"a", "b", "c", "d"}
+
+
+def test_search_live_refresh_false_leaves_index_untouched(tmp_path):
+    """refresh=False returns the merged view but does not write the delta back."""
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        found = {i.id for i in idx.search_live(cat, overlap_days=0, refresh=False)}
+        assert found == {"a", "b", "c", "d"}  # _D is in the returned view
+        assert {i.id for i in idx.search()} == {"a", "b", "c"}  # but not persisted
+
+
+def test_search_live_delta_starts_at_horizon_when_caller_start_is_older(tmp_path):
+    """The live walk starts at the later of (horizon-overlap, caller start).
+
+    The caller's ``start`` (2024-02-01) is older than the horizon (2024-02-10),
+    so the index already covers that span and the live delta only walks from the
+    horizon forward -- while the index side still honors the caller's start.
+    """
+    from datetime import date
+
+    cat = _RecordingCatalog([])
+    with _index(tmp_path) as idx:  # horizon 2024-02-10
+        found = list(idx.search_live(cat, start="2024-02-01", overlap_days=0))
+    assert cat.calls[0]["start"] == date(2024, 2, 10)
+    # _A (2024-01-15) and _C (2023) are before the caller's start, so the index
+    # side drops them; only _B (2024-02-10) is in the caller's window.
+    assert {i.id for i in found} == {"b"}
+
+
+def test_search_live_delta_uses_caller_start_when_it_is_newer(tmp_path):
+    """A caller start newer than the horizon bounds the live walk (never older)."""
+    from datetime import date
+
+    cat = _RecordingCatalog([])
+    with _index(tmp_path) as idx:  # horizon 2024-02-10
+        list(idx.search_live(cat, start="2024-06-01", overlap_days=0))
+    assert cat.calls[0]["start"] == date(2024, 6, 1)
+
+
+def test_search_live_applies_filters_and_limit(tmp_path):
+    """Standard filters and limit apply to the merged, de-duplicated stream."""
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        found = list(idx.search_live(cat, overlap_days=0, area="SiteB"))
+    assert {i.id for i in found} == {"b", "d"}  # both SiteB passes, none from SiteA
+
+
+def test_search_live_empty_index_walks_full_window_and_seeds(tmp_path):
+    """With nothing indexed the live walk covers the whole request (a first build)."""
+    cat = _RecordingCatalog([_A, _B, _C])
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        found = {i.id for i in idx.search_live(cat)}
+        assert cat.calls[0]["start"] is None  # no horizon to prune against
+        assert found == {"a", "b", "c"}
+        assert {i.id for i in idx.search()} == {"a", "b", "c"}  # seeded
+
+
+def test_cli_search_live_reads_index_and_delta(tmp_path, monkeypatch):
+    """`umbra search --local --live` merges the index with a fresh live pass."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    with _index(tmp_path):  # holds a, b, c
+        pass
+    db = str(tmp_path / "catalog.db")
+
+    def fake_search(self, **kwargs):
+        return iter([_D])  # one new pass from the live delta
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    result = CliRunner().invoke(cli_mod.cli, ["search", "--local", "--live", "--db", db])
+    assert result.exit_code == 0, result.output
+    assert "4 item(s)." in result.output
+
+
+def test_cli_search_live_requires_local(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(cli_mod.cli, ["search", "--live"])
+    assert result.exit_code != 0
+    assert "only applies" in result.output
+
+
 def test_cli_index_update_requires_existing_index(tmp_path):
     from click.testing import CliRunner
 

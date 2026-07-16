@@ -329,12 +329,21 @@ warns a full index build "takes a while." Two structural improvements:
   index's max `acq_date`" half of the idea below, delivered as an explicit
   command; the bound is on acquisition date (not publish date), so completeness
   over back-dated late arrivals still wants a widened window or a full `build`.
-- **Read-through caching (still open).** The remaining half: when an index
-  exists, `UmbraCatalog.search` could consult it first and only walk prefixes
-  newer than the index's max `acq_date` automatically. Today the user still
-  chooses live-vs-local manually per call (and freshens the index with `umbra
-  index update`); folding the update into `search` transparently is the larger,
-  design-first step (P3 #21).
+- **Read-through caching — ✅ shipped** (`CatalogIndex.search_live` / `umbra
+  search --local --live`). The remaining half is now delivered: `search_live`
+  answers the whole query from the index *and* walks only acquisitions at or
+  after the index's freshness horizon (its newest `acq_date` minus
+  `overlap_days`), merging the two streams in the usual `(task, acq_date)` order
+  and de-duplicating by sidecar href — so a repeat search stays near-instant but
+  also catches anything published since the index was built. With `refresh=True`
+  (the default) each new acquisition the delta discovers is upserted as it is
+  yielded, so the cache warms and the next call walks even less; a read-only
+  index disables the write-back rather than failing. It reuses the same
+  recent-only sidecar pruning `umbra index update` already relies on, and is
+  offline-tested with an injected catalog. This is the "fold the update into
+  search transparently" step (P3 #21), delivered as an explicit read-through
+  method + `--live` flag rather than an implicit mode change to `search`, so the
+  fast path can also be fresh without changing what a plain `search` means.
 
 ### 4.5 SQLite index details
 
@@ -469,7 +478,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 18 | Extract shared search-vs-URLs gathering + common option groups from the five CLI commands that duplicate them | `cli.py` | medium |
 | 19 | Split `viz.py` into a `viz/` package (geojson / maps / raster / composites / gallery) with re-exports preserved | `viz.py` | medium |
 | 20 | Stand up mkdocs-material + mkdocstrings docs site on GitHub Pages | new `docs/` config | medium |
-| 21 | ⏳ **Incremental refresh shipped** (`umbra index update` / `CatalogIndex.update` — re-walks only acquisitions newer than the index's max `acq_date`, §4.4). Still open: folding that read-through consult into `UmbraCatalog.search` transparently | `catalog.py`/`index.py` | larger; design first |
+| 21 | ✅ **Done.** Incremental refresh (`umbra index update` / `CatalogIndex.update`) *and* the read-through consult now both ship: `CatalogIndex.search_live` / `umbra search --local --live` answer from the index and walk only acquisitions newer than its max `acq_date`, merging + de-duplicating the two streams and warming the cache with the delta (§4.4) | `index.py`/`cli.py` | larger; design first |
 | 22 | Add `CITATION.cff`; register with STAC ecosystem list, AWS Open Data registry examples, pyOpenSci | repo root | small each |
 
 ---

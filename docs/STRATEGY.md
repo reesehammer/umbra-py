@@ -629,6 +629,33 @@ same 500 lines of glue first, and many give up."*
 > non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and
 > the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-16):** **catalog search is now read-through** —
+> `CatalogIndex.search_live` / `umbra search --local --live`
+> (`CODEBASE_ANALYSIS.md` §4.4 / P3 #21 — the "make the index the default path"
+> gap, and the last open item under §4.4). Discovery is the moat (§3), and the
+> way that moat now reaches every consumer is the *published* `catalog.db`
+> snapshot users `umbra index fetch`; the tension left was that a local search
+> was instant but only as fresh as the snapshot, while a live search was current
+> but re-walked the whole bucket every call. `search_live` closes it: it answers
+> the whole query from the index *and* walks only acquisitions at or after the
+> index's freshness horizon (its newest indexed `acq_date` minus an overlap),
+> merges the two streams in the usual `(task, acq_date)` order, de-duplicates by
+> sidecar href, and — with the default `refresh=True` — upserts each new
+> acquisition the delta discovers as it is yielded, so the cache warms and the
+> next call walks even less. It is pure funnel-widening infrastructure (§1): the
+> user who bootstrapped from the weekly snapshot now gets *fast and fresh* from
+> one command instead of choosing between them, and the guardrail that the crawl
+> stay polite and incremental (§6) is honored — the delta reuses the same
+> recent-only sidecar pruning `umbra index update` already relies on. It holds
+> the project's grain and testability (§3): no model, no new dependency, the
+> injectable catalog keeps the whole path offline-tested, and it is delivered as
+> an explicit read-through method + `--live` flag rather than an implicit mode
+> change to `search`, so a plain `search` still means exactly what it did and a
+> read-only shared snapshot disables the write-back instead of failing. The
+> remaining strategic gaps are unchanged and largely non-code: 5.5's full terrain
+> orthorectification (a DEM, MultiRTC interop) and the maintainer-side adoption
+> moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

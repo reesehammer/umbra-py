@@ -274,6 +274,28 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **Read-through catalog search — `CatalogIndex.search_live` / `umbra search
+  --local --live` (`docs/CODEBASE_ANALYSIS.md` §4.4 / P3 #21).** The transparent
+  middle between the instant-but-stale local index and the always-current live
+  walk, the "make the index the default path" gap. `search_live` answers the
+  whole query from the local index *and* walks only acquisitions at or after the
+  index's freshness horizon (its newest `acq_date` minus `overlap_days`), merges
+  the two streams (`heapq.merge` on the `(task, acq_date, href)` key) and
+  de-duplicates by sidecar href, so an acquisition the index already holds is
+  never yielded twice and the result is what a single fresh search would return.
+  With `refresh=True` (the default) each genuinely new acquisition the delta
+  discovers is upserted as it is yielded — the read-through cache warms, so the
+  next call walks even less — committing (and re-stamping `built_at`) only when a
+  row was actually added; a read-only index catches the `OperationalError` and
+  disables the write-back rather than failing the search. `umbra search --local
+  --live` exposes it (and `--live` without `--local` is a clean error). It reuses
+  the same recent-only sidecar pruning `CatalogIndex.update` relies on and is
+  delivered as an explicit method + flag rather than an implicit mode change to
+  `search`, so a plain `search` is unchanged. Fully offline-tested in
+  `tests/test_index.py` (horizon derivation, merge/dedup, cache warming,
+  `refresh=False`, start-bound interaction, empty-index seed, and the two CLI
+  paths) with an injected catalog. Was `docs/CODEBASE_ANALYSIS.md` §4.4's last
+  open item and P3 #21.
 - **Keyed single-item lookup on the catalog index (`umbra serve` follow-on).**
   `/collections/{id}/items/{item_id}` previously resolved a single item by
   filtering an id-scoped `run_search` in the serve layer — a scan of the ordered

@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Read-through catalog search — `CatalogIndex.search_live()` and
+  `umbra search --local --live` (`docs/CODEBASE_ANALYSIS.md` §4.4 / P3 #21).**
+  The transparent middle between the instant-but-stale local index and the
+  always-current-but-slow live walk, the "make the index the default path" gap
+  the analysis doc names. `search_live()` answers the whole query from the local
+  index *and* walks only acquisitions at or after the index's freshness horizon
+  (its newest indexed `acq_date` minus `overlap_days`), merging the two streams
+  in the usual `(task, acq_date)` order and de-duplicating by sidecar href — so a
+  repeat search stays near-instant but still catches anything published since the
+  index was built. With `refresh=True` (the default) each genuinely new
+  acquisition the delta discovers is upserted into the index as it is yielded
+  (the read-through cache warms, so the next call walks even less; a read-only
+  index disables warming automatically rather than failing). `umbra search
+  --local --live` exposes it on the CLI; `--live` without `--local` is rejected.
+  The bound reuses the same recent-only sidecar pruning `umbra index update`
+  relies on, and the whole path is offline-tested with an injected catalog.
 - **Keyed single-item lookup on the catalog index — `CatalogIndex.get(item_id)`
   (`docs/CODEBASE_ANALYSIS.md` §4.5).** The retrieval complement to
   `search()`'s listing: `get()` returns the indexed `UmbraItem` with a given
