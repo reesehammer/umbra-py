@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **Generated HTML now escapes all remote metadata and validates link schemes
+  (`docs/CODEBASE_ANALYSIS.md` §3.1).** The map/gallery/swipe/change artifacts
+  and the `umbra view` / `umbra demo` pages interpolate strings that come from
+  remote STAC JSON, and the CLI accepts arbitrary item URLs — so a hostile STAC
+  document could previously inject markup (a `<script>` in an `id`/`platform`
+  field) or a `javascript:` link into an HTML file a user then opens locally.
+  `viz._popup_html` now `html.escape()`s every remote-derived value (`id`,
+  `datetime`, `platform`, `instrument_mode`, `product_type`, `polarizations`,
+  `available_assets`) and routes the STAC link through a new shared
+  `_html.safe_href()` gate — a scheme allowlist (`http(s)` only) plus
+  attribute-escaping — which drops the link rather than emitting an unsafe
+  scheme. The same `safe_href` gate now covers `_html.py`'s card/gallery links,
+  `viewer._viewer_html`'s panel/title/link, and `demo.py`'s client-side STAC
+  link (scheme-guarded at build time). `_lazy_imagery.popup_button_html` already
+  escaped its inputs and was unchanged.
+
 ### Added
 - **Whole-catalog PMTiles tiling — `umbra tiles` / `build_pmtiles`
   (`docs/DEMO_APP_GAPS.md` Path A step 3).** Every other map surface embeds its

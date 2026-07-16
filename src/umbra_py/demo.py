@@ -82,6 +82,15 @@ MARKERCLUSTER_CSS_DEFAULT = (
 MARKERCLUSTER_JS = "https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
 
 
+def _is_http_url(url: Any) -> bool:
+    """True only for an ``http(s)`` URL — the schemes safe to make clickable.
+
+    STAC hrefs come from remote JSON; anything else (a ``javascript:`` scheme in
+    particular) must not reach an anchor's ``href``.
+    """
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
 def _lazy_bounds_for(bbox: tuple[float, float, float, float]) -> list[float]:
     """Return an item bbox as ``[south, west, north, east]``.
 
@@ -115,6 +124,13 @@ def _demo_feature(
         return None
     dt = item.datetime
     lazy_entry = lazy.get(item.id)
+    # The STAC href is assigned to an anchor's ``href`` DOM property client-side,
+    # so a ``javascript:`` scheme from a hostile STAC document would be a
+    # clickable script link. Only pass through ``http(s)`` URLs; the client
+    # already omits the link when ``stac_href`` is absent. (No HTML-escaping
+    # here -- this value travels as JSON and is set via a DOM property, not
+    # parsed as HTML.)
+    stac_href = item.href if _is_http_url(item.href) else None
     props: dict[str, Any] = {
         "id": item.id,
         "place": item.task,
@@ -126,7 +142,7 @@ def _demo_feature(
         "platform": item.platform,
         "polarizations": list(item.polarizations),
         "assets": list(item.available_assets),
-        "stac_href": item.href,
+        "stac_href": stac_href,
         "centroid": list(centroid) if centroid else None,
         "lazy_url": lazy_entry[0] if lazy_entry else None,
         "lazy_bounds": _lazy_bounds_for(lazy_entry[1]) if lazy_entry else None,

@@ -204,3 +204,43 @@ def test_standalone_gallery_single_task_stays_flat():
     # Nothing to separate -> flat grid, no per-task section wrapper.
     assert 'class="umbra-group"' not in html
     assert '<main class="umbra-grid">' in html
+
+
+# --- href scheme validation (CODEBASE_ANALYSIS.md §3.1) --------------------
+
+
+def test_safe_href_allows_http_and_escapes():
+    from umbra_py._html import safe_href
+
+    assert safe_href("https://x/i.json?a=1&b=2") == "https://x/i.json?a=1&amp;b=2"
+    assert safe_href("http://x/i.json") == "http://x/i.json"
+
+
+def test_safe_href_rejects_non_http_schemes():
+    from umbra_py._html import safe_href
+
+    assert safe_href("javascript:alert(1)") is None
+    assert safe_href("data:text/html,<script>alert(1)</script>") is None
+    assert safe_href("/relative/path") is None
+    assert safe_href("") is None
+    assert safe_href(None) is None
+
+
+def test_item_card_drops_javascript_href():
+    from umbra_py._html import item_card_html
+
+    item = UmbraItem(id="x", href="javascript:alert(1)")
+    html = item_card_html(item)
+    assert "javascript:alert" not in html
+    assert "STAC JSON" not in html  # link omitted when the scheme is unsafe
+
+
+def test_standalone_gallery_drops_javascript_href():
+    from umbra_py._html import standalone_gallery_html
+
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href="javascript:alert(1)")
+    html = standalone_gallery_html([item])
+    # No clickable anchor may carry the unsafe scheme. (The copyable URL panel
+    # still shows the string as inert, escaped text -- it is never a link.)
+    assert 'href="javascript:' not in html
+    assert "STAC item ↗" not in html

@@ -490,6 +490,23 @@ same 500 lines of glue first, and many give up."*
 > non-demo and largely non-code: 5.5's full terrain orthorectification (a DEM,
 > MultiRTC interop) and RTC recipes, and the maintainer-side adoption moves (5.3
 > registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **generated HTML artifacts are now hardened
+> against injection from remote metadata** (`CODEBASE_ANALYSIS.md` §3.1 —
+> supporting infrastructure, §7). Strategy is only as credible as the project's
+> reliability, and the artifacts a curious analyst opens locally (the maps,
+> galleries, swipe/change pages, and the `umbra view` / `umbra demo` explorers)
+> are the funnel's front door — but they interpolate strings that come from
+> remote STAC JSON, and every discovery verb accepts *arbitrary* item URLs, so a
+> hostile document could inject a `<script>` or a `javascript:` link into a page
+> a user then opens from `file://`. A shared, dependency-free
+> `_html.safe_href()` (scheme allowlist + attribute-escaping) is now the single
+> gate for every clickable remote link, and every remote-derived string is
+> escaped before it reaches generated HTML — across `viz`, `_html`, `viewer`,
+> and `demo`, with regression tests for the escaping and the `javascript:`
+> rejection. Not a new capability — the trust floor under the shareable outputs
+> the whole funnel depends on (§3's "trust the scientific audience needs"). The
+> strategic gaps above are unchanged.
 
 ## 2. The landscape: life without umbra-py
 

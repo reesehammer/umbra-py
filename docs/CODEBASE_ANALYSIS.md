@@ -129,7 +129,25 @@ server, and no secret handling — the attack surface is (a) remote content it
 parses, (b) files it writes, and (c) HTML/JS it emits. Findings in rough order
 of severity:
 
-### 3.1 Unescaped remote metadata is interpolated into generated HTML (moderate)
+### 3.1 Unescaped remote metadata is interpolated into generated HTML (moderate) — **fixed**
+
+> **Status:** ✅ Fixed. A shared, dependency-free `_html.safe_href()` (scheme
+> allowlist + attribute-escaping) is now the single gate for every clickable
+> link built from a remote href, and every remote-derived string is
+> `html.escape()`d before it reaches generated HTML. `viz._popup_html` now
+> escapes `id`, `datetime`, `platform`, `instrument_mode`, `product_type`,
+> `polarizations` and `available_assets`, and routes `item.href` through
+> `safe_href` (so a `javascript:`/`data:` scheme or an attribute-breakout value
+> drops the link instead of emitting it). The same discipline was extended to
+> the other surfaces that interpolate remote metadata: `viewer._viewer_html`
+> (the `umbra view` single-scene page — escapes the panel/title metadata and
+> validates the STAC link), and `_html.py`'s card/gallery links and `demo.py`'s
+> client-side STAC link (scheme-guarded at build time, since it is assigned to
+> an anchor's `href` DOM property). `_lazy_imagery.popup_button_html` already
+> escaped its `item_id`/`asset_url`, so it was unchanged. Regression tests cover
+> the escaping and the `javascript:` scheme rejection across `viz`, `_html`,
+> `viewer`, and `demo`. Remaining follow-on (unrelated to this class): SRI hashes
+> on the third-party CDN `<script>` tags (§3.4). Original finding retained below.
 
 `viz._popup_html` escapes `location` and `description` but interpolates
 `item.id`, `platform`, `product_type`, `instrument_mode`, and `item.href` into
