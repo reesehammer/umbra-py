@@ -450,6 +450,11 @@ umbra map --start 2024-01-01 --end 2024-06-30 --product GEC --max-per-task 1 \
 # SAR overlays. Reads a prebuilt index with --local for a near-instant build.
 umbra demo --local --max-per-task 1 --out explorer.html
 
+# Point the explorer at a running `umbra serve` to render change/timescan/swipe
+# products over the currently-filtered acquisitions on demand (the "Analyze this
+# view" panel). Without --server-url the page stays a static single file.
+umbra demo --local --area "Centerfield" --server-url http://localhost:8000 --out explorer.html
+
 # Interactive before/after swipe map: drag a divider to wipe the earliest
 # pass of a site over the latest and watch what changed. Self-contained HTML.
 umbra swipe --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out swipe.html --db
@@ -753,12 +758,24 @@ curl -o scene.png "http://127.0.0.1:8000/artifacts/quicklook/<item-id>.png?db=tr
 curl -o change.png -X POST http://127.0.0.1:8000/artifacts/change \
   -H 'content-type: application/json' \
   -d '{"bbox": [-112.1, 39.0, -111.9, 39.2], "datetime": "2024-01-01/2024-03-01"}'
+
+# An interactive before/after swipe map (HTML) over the same kind of query:
+curl -o swipe.html -X POST http://127.0.0.1:8000/artifacts/swipe \
+  -H 'content-type: application/json' \
+  -d '{"ids": ["<before-id>", "<after-id>"]}'
 ```
 
 Each artifact wraps the same `umbra_py.viz` function the CLI uses and is cached
-to disk by its inputs, so a repeat request is a file read. Use
-`umbra serve --no-artifacts` to expose only the read-only STAC surface (e.g. for
-a public instance that wants to bound COG-streaming egress).
+to disk by its inputs, so a repeat request is a file read (`swipe` returns HTML,
+the others PNG). The server sends a permissive read-only CORS policy, so a
+browser page on another origin can call it. Use `umbra serve --no-artifacts` to
+expose only the read-only STAC surface (e.g. for a public instance that wants to
+bound COG-streaming egress).
+
+These endpoints are what `umbra demo --server-url <serve URL>` calls: the
+generated explorer gains an "Analyze this view" panel whose Change / Timescan /
+Swipe buttons render each product over the currently-filtered acquisitions on
+demand. Without `--server-url` the page stays a fully static single file.
 
 ## What the data looks like
 

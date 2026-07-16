@@ -250,6 +250,7 @@ class RecordingRenderers:
             quicklook=self._make("quicklook"),
             change=self._make("change"),
             timescan=self._make("timescan"),
+            swipe=self._make("swipe"),
         )
 
 
@@ -389,9 +390,45 @@ def test_timescan_endpoint_needs_three_acquisitions(art_client):
     assert "at least 3" in resp.json()["detail"]
 
 
+def test_swipe_frames_takes_temporal_endpoints():
+    items = [f"i{n}" for n in range(5)]  # stand-ins; helper only counts/indexes
+    assert serve.swipe_frames(items[:2]) == items[:2]
+    # A query resolving many collapses to first and last (widest span).
+    assert serve.swipe_frames(items) == ["i0", "i4"]
+    with pytest.raises(ValueError):
+        serve.swipe_frames(items[:1])
+
+
+def test_swipe_endpoint_serves_html_from_its_own_cache(art_client, recorder):
+    resp = art_client.post("/artifacts/swipe", json={"ids": ["item-0", "item-2"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert resp.headers["x-umbra-cache"] == "miss"
+    kind, ids, _ = recorder.calls[0]
+    assert kind == "swipe"
+    assert ids == ["item-0", "item-2"]
+
+    # A repeat request is served from the HTML cache entry, renderer not re-run.
+    again = art_client.post("/artifacts/swipe", json={"ids": ["item-0", "item-2"]})
+    assert again.status_code == 200
+    assert again.headers["x-umbra-cache"] == "hit"
+    assert len(recorder.calls) == 1
+
+
+def test_swipe_endpoint_needs_two_acquisitions(art_client):
+    resp = art_client.post("/artifacts/swipe", json={"ids": ["item-0"]})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+
+
 def test_landing_advertises_artifacts_when_enabled(art_client):
     rels = {link["rel"] for link in art_client.get("/").json()["links"]}
-    assert {"quicklook", "change", "timescan"} <= rels
+    assert {"quicklook", "change", "timescan", "swipe"} <= rels
+
+
+def test_cors_headers_allow_cross_origin_calls(art_client):
+    resp = art_client.get("/", headers={"Origin": "https://example.com"})
+    assert resp.headers.get("access-control-allow-origin") == "*"
 
 
 def test_artifacts_can_be_disabled(index_path, tmp_path):
@@ -399,8 +436,9 @@ def test_artifacts_can_be_disabled(index_path, tmp_path):
     client = TestClient(app)
     assert client.get("/artifacts/quicklook/item-0.png").status_code == 404
     assert client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]}).status_code == 404
+    assert client.post("/artifacts/swipe", json={"ids": ["item-0", "item-1"]}).status_code == 404
     rels = {link["rel"] for link in client.get("/").json()["links"]}
-    assert not ({"quicklook", "change", "timescan"} & rels)
+    assert not ({"quicklook", "change", "timescan", "swipe"} & rels)
 
 
 def test_missing_render_extra_maps_to_501(index_path, tmp_path):
@@ -409,7 +447,7 @@ def test_missing_render_extra_maps_to_501(index_path, tmp_path):
     def boom(item, opts):
         raise MissingDependencyError("needs the 'viz' extra")
 
-    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom)
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom)
     app = serve.build_app(index_path, renderers=renderers, cache_dir=tmp_path / "art")
     client = TestClient(app, raise_server_exceptions=False)
     resp = client.get("/artifacts/quicklook/item-0.png")

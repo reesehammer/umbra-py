@@ -2069,6 +2069,14 @@ def gallery(
     show_default=True,
     help="Low,high percentile cut for the on-click SAR overlay's contrast stretch.",
 )
+@click.option(
+    "--server-url",
+    default=None,
+    help="Base URL of a running 'umbra serve' instance (e.g. "
+    "http://localhost:8000). When set, the explorer gains an 'Analyze this "
+    "view' panel whose buttons render change/timescan/swipe products over the "
+    "currently-filtered acquisitions on demand. Omit for a fully static page.",
+)
 @_local_index_options
 @_fuzzy_option
 def demo(
@@ -2085,6 +2093,7 @@ def demo(
     asset,
     lazy_imagery,
     percentile,
+    server_url,
     local,
     db_path,
 ) -> None:
@@ -2098,6 +2107,11 @@ def demo(
     with --local for a near-instant, offline build. Needs no extra: the page is
     pure HTML, and Leaflet + the on-click COG decode run browser-side from
     pinned CDNs.
+
+    Pass --server-url pointing at a running 'umbra serve' to add an "Analyze
+    this view" panel that renders change/timescan/swipe products over the
+    currently-filtered acquisitions on demand (the server does the raster work
+    and caches results); without it the page stays fully static.
     """
     if not out_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Explorer output must be an .html file.")
@@ -2128,6 +2142,7 @@ def demo(
             lazy_imagery=lazy_imagery,
             percentile=_parse_percentile(percentile),
             subtitle=_search_subtitle(place or area, bbox, start, end),
+            server_url=server_url,
         )
     click.echo(f"Wrote interactive explorer over {len(items)} acquisition(s) to {path}")
 

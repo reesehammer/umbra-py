@@ -25,7 +25,8 @@ site straight from HTTP, not just a curated set baked at build time
 
 - ``GET  /artifacts/quicklook/{item_id}.png`` -- one acquisition's SAR quicklook;
 - ``POST /artifacts/change``   -- a 2--3 date change composite over a query;
-- ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series.
+- ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series;
+- ``POST /artifacts/swipe``    -- an interactive before/after swipe map (HTML).
 
 These wrap the existing :mod:`umbra_py.viz` functions unchanged and cache every
 result to disk keyed by its inputs, so a repeat request is a file read (closing
@@ -240,6 +241,13 @@ def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
                 type=png,
                 method="POST",
                 title="On-demand temporal-statistics composite",
+            ),
+            _link(
+                "swipe",
+                f"{base}/artifacts/swipe",
+                type="text/html",
+                method="POST",
+                title="On-demand before/after swipe map (interactive HTML)",
             ),
         ]
     return {
@@ -483,6 +491,9 @@ class Renderers:
     quicklook: Callable[[UmbraItem, Mapping[str, Any]], bytes]
     change: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
     timescan: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
+    #: Unlike the three PNG compositors, ``swipe`` returns a self-contained HTML
+    #: page (:func:`viz.swipe_map`), so its bytes are UTF-8 HTML, not a PNG.
+    swipe: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
 
 
 def _png_bytes(image: Any) -> bytes:
@@ -523,7 +534,16 @@ def default_renderers() -> Renderers:
         )
         return _png_bytes(image)
 
-    return Renderers(quicklook=quicklook, change=change, timescan=timescan)
+    def swipe(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        from . import viz
+
+        before, after = items[0], items[1]
+        m = viz.swipe_map(
+            before, after, asset=opts["asset"], max_size=opts["max_size"], db=opts["db"]
+        )
+        return m.get_root().render().encode("utf-8")
+
+    return Renderers(quicklook=quicklook, change=change, timescan=timescan, swipe=swipe)
 
 
 def artifact_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -620,6 +640,23 @@ def timescan_frames(items: list[UmbraItem]) -> list[UmbraItem]:
     return _evenly_spaced(items, ARTIFACT_MAX_FRAMES)
 
 
+def swipe_frames(items: list[UmbraItem]) -> list[UmbraItem]:
+    """Pick the two frames :func:`viz.swipe_map` compares (before / after).
+
+    A swipe is inherently a two-pass comparison. Exactly two resolved
+    acquisitions become the before/after pair directly; a query that resolves
+    more collapses to its temporal endpoints (first and last) so the seam sweeps
+    the widest change the selection spans. Order is the resolved order (the
+    client controls chronology via ``ids``; a bbox/date query is chronological).
+    """
+    if len(items) < 2:
+        raise ValueError(
+            f"A swipe needs at least 2 acquisitions, resolved {len(items)}. "
+            "Widen the date range or pass two explicit ids."
+        )
+    return [items[0], items[-1]]
+
+
 # --------------------------------------------------------------------------
 # FastAPI application factory
 # --------------------------------------------------------------------------
@@ -642,7 +679,8 @@ def build_app(
 
     When ``artifacts`` is true (the default) the on-demand render endpoints
     (``/artifacts/quicklook/{id}.png``, ``POST /artifacts/change``,
-    ``POST /artifacts/timescan``) are mounted. ``renderers`` overrides the
+    ``POST /artifacts/timescan``, ``POST /artifacts/swipe``) are mounted.
+    ``renderers`` overrides the
     render functions (defaults to :func:`default_renderers`, which needs the
     ``viz`` extra at request time); ``cache_dir`` overrides where rendered PNGs
     are cached (defaults to :func:`default_artifact_cache_dir`). Requires the
@@ -671,6 +709,19 @@ def build_app(
             "umbra-py from a local catalog index."
         ),
         version=STAC_VERSION,
+    )
+
+    # The server is read-only, so a permissive CORS policy is safe and is what
+    # browser STAC clients (leafmap, stac-browser) and the static ``umbra demo``
+    # page -- which loads from ``file://`` or a different static host -- need to
+    # call ``/search`` and the ``/artifacts/...`` render endpoints cross-origin.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
     )
 
     def _open():
@@ -874,27 +925,36 @@ def build_app(
         items: list[UmbraItem],
         options: Mapping[str, Any],
         render: Callable[[], bytes],
+        *,
+        media_type: str = "image/png",
+        suffix: str = "png",
     ) -> Response:
-        """Cache-or-render a PNG artifact and return it with cache metadata."""
+        """Cache-or-render an artifact and return it with cache metadata.
+
+        Defaults to a PNG; ``media_type``/``suffix`` let the swipe endpoint
+        serve a ``text/html`` product from its own cache entry without confusing
+        it with the PNG composites (a swipe and a change over the same items are
+        distinct files).
+        """
         key = artifact_cache_key(kind, [it.id for it in items], options)
-        path = cache_path / f"{key}.png"
+        path = cache_path / f"{key}.{suffix}"
         if path.exists():
             return Response(
                 content=path.read_bytes(),
-                media_type="image/png",
+                media_type=media_type,
                 headers={"X-Umbra-Cache": "hit"},
             )
         try:
-            png = render()
+            payload = render()
         except MissingDependencyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".part")
-        tmp.write_bytes(png)
+        tmp.write_bytes(payload)
         tmp.replace(path)
         return Response(
-            content=png,
-            media_type="image/png",
+            content=payload,
+            media_type=media_type,
             headers={"X-Umbra-Cache": "miss"},
         )
 
@@ -956,6 +1016,23 @@ def build_app(
             options = artifact_options(body)
             return _serve_artifact(
                 "timescan", frames, options, lambda: renderers.timescan(frames, options)
+            )
+
+        @app.post("/artifacts/swipe", tags=["Artifacts"])
+        def post_swipe(body: dict[str, Any] = Body(default={})) -> Response:
+            items = _resolve_for_composite(body)
+            try:
+                frames = swipe_frames(items)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            options = artifact_options(body)
+            return _serve_artifact(
+                "swipe",
+                frames,
+                options,
+                lambda: renderers.swipe(frames, options),
+                media_type="text/html; charset=utf-8",
+                suffix="html",
             )
 
     return app

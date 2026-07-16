@@ -20,6 +20,16 @@ Design, deliberately in the repo's grain:
   ``DEMO_APP_GAPS.md`` Path B; this is Path A's front end delivered as an
   artifact.
 
+* **Optionally server-backed for analysis (R4).** With ``server_url`` set to a
+  running ``umbra serve`` instance, the sidebar gains an "Analyze this view"
+  panel: its buttons POST the currently-filtered acquisitions to the server's
+  ``/artifacts/change|timescan|swipe`` endpoints and render the returned
+  artifact in place — the "run this analysis here" affordance the demo-gap
+  analysis calls the last self-serve gap (``DEMO_APP_GAPS.md`` R4 / Path B). The
+  server does the heavy raster work and caches every result; the page itself
+  stays a static file (the panel is simply hidden when no ``server_url`` is
+  configured, so the default build is unchanged).
+
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
   (``umbra index fetch`` / ``umbra index build``) in milliseconds instead of
@@ -132,6 +142,7 @@ def build_demo(
     asset: str = "GEC",
     lazy_imagery: bool = True,
     percentile: tuple[float, float] = (2.0, 98.0),
+    server_url: str | None = None,
 ) -> str:
     """Render items as a single self-contained interactive explorer page.
 
@@ -153,6 +164,14 @@ def build_demo(
     percentile:
         Contrast-stretch cuts handed to the shared COG driver, mirroring
         :func:`umbra_py.viz._stretch_to_rgba`'s ``(2, 98)`` default.
+    server_url:
+        Base URL of a running ``umbra serve`` instance
+        (e.g. ``"http://localhost:8000"``). When set, the sidebar gains an
+        "Analyze this view" panel whose buttons POST the currently-filtered
+        acquisitions to the server's ``/artifacts/change|timescan|swipe``
+        endpoints and show the returned artifact — the R4 "run this analysis
+        here" affordance (``DEMO_APP_GAPS.md``). When ``None`` (default) the
+        page stays fully static and self-contained, exactly as before.
 
     Returns the HTML as a string; use :func:`save_demo` to write it to disk.
     """
@@ -176,6 +195,10 @@ def build_demo(
         "dateMin": date_min,
         "dateMax": date_max,
         "lazyImagery": bool(lazy),
+        # None keeps the page fully static; a URL turns on the "Analyze this
+        # view" panel that POSTs to a running ``umbra serve`` instance. Trailing
+        # slash is trimmed client-side, so either form is accepted.
+        "serverUrl": server_url or None,
     }
     # json.dumps then neutralise any "</" so a place name containing the literal
     # "</script>" cannot break out of the embedded data block.
@@ -261,6 +284,16 @@ html, body { margin: 0; height: 100%; }
   font: 12px/1.2 -apple-system, sans-serif; margin-top: 8px; padding: 4px 10px;
   border: 1px solid #888; border-radius: 3px; background: #f7f7f7; cursor: pointer;
 }
+#umbra-analyze { border-top: 1px solid #ddd; padding-top: 12px; }
+.umbra-analyze-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.umbra-analyze-btns button {
+  font: 12px/1.2 -apple-system, sans-serif; padding: 4px 10px; cursor: pointer;
+  border: 1px solid #2b6cb0; border-radius: 3px; background: #2b6cb0; color: #fff;
+}
+.umbra-analyze-btns button:disabled { background: #9db8d4; border-color: #9db8d4; cursor: default; }
+.umbra-analyze-status { font-size: 12px; color: #444; margin: 8px 0 0; min-height: 16px; }
+#umbra-analyze-result img { max-width: 100%; margin-top: 8px; border: 1px solid #ddd; }
+#umbra-analyze-result a { font-size: 12px; }
 """
 
 # The application. A *static* string (no Python interpolation): every dynamic
@@ -286,6 +319,9 @@ _APP_JS = """
   var cluster = L.markerClusterGroup({ chunkedLoading: true });
   map.addLayer(cluster);
   var selectedFootprint = null;
+  // The features currently passing the filters -- the "view" the server-backed
+  // analysis buttons act on. Kept in sync by render().
+  var shownFeatures = [];
 
   // --- filter state ---
   var state = { text: '', start: CFG.dateMin || '', end: CFG.dateMax || '', products: {} };
@@ -317,16 +353,18 @@ _APP_JS = """
 
   function render() {
     cluster.clearLayers();
-    var shown = 0;
+    shownFeatures = [];
     var markers = [];
     for (var i = 0; i < features.length; i++) {
       var f = features[i];
       if (!passesFilter(f.properties)) continue;
+      shownFeatures.push(f);
       var m = markerFor(f);
-      if (m) { markers.push(m); shown++; }
+      if (m) { markers.push(m); }
     }
     cluster.addLayers(markers);
-    countEl.textContent = shown + ' of ' + features.length + ' acquisitions shown';
+    countEl.textContent = shownFeatures.length + ' of ' + features.length + ' acquisitions shown';
+    if (typeof onViewChanged === 'function') onViewChanged();
   }
 
   // --- detail panel ---
@@ -423,6 +461,101 @@ _APP_JS = """
     render();
   });
 
+  // --- server-backed analysis (R4): POST the filtered view to `umbra serve` ---
+  // Only wired when the page was built with a server_url; otherwise the panel
+  // stays hidden and the page is fully static.
+  var onViewChanged = null;
+  if (CFG.serverUrl) {
+    var base = String(CFG.serverUrl).replace(/\\/+$/, '');
+    var analyzeBox = document.getElementById('umbra-analyze');
+    var statusEl = document.getElementById('umbra-analyze-status');
+    var resultEl = document.getElementById('umbra-analyze-result');
+    var buttons = [
+      { el: document.getElementById('umbra-btn-change'), kind: 'change', min: 2, html: false },
+      { el: document.getElementById('umbra-btn-timescan'), kind: 'timescan', min: 3, html: false },
+      { el: document.getElementById('umbra-btn-swipe'), kind: 'swipe', min: 2, html: true }
+    ];
+    analyzeBox.style.display = '';
+    var CAP = 120;
+
+    function analysisIds() {
+      // Ids of the filtered acquisitions in chronological order (the server
+      // resolves them and picks each product's frames). Sampled down to CAP so
+      // the POST body -- and the server-side id scan -- stay bounded while
+      // keeping the temporal span (first and last always survive).
+      var fs = shownFeatures.filter(function (f) { return f.properties.id && f.properties.date; });
+      fs.sort(function (a, b) {
+        var da = a.properties.datetime || a.properties.date;
+        var db = b.properties.datetime || b.properties.date;
+        return da < db ? -1 : (da > db ? 1 : 0);
+      });
+      var ids = fs.map(function (f) { return f.properties.id; });
+      if (ids.length <= CAP) return ids;
+      var picked = [];
+      for (var i = 0; i < CAP; i++) {
+        picked.push(ids[Math.round(i * (ids.length - 1) / (CAP - 1))]);
+      }
+      // Adjacent samples can collapse to the same id; de-dup, order preserved.
+      return picked.filter(function (v, i, a) { return a.indexOf(v) === i; });
+    }
+
+    function setBusy(busy) {
+      buttons.forEach(function (b) { b.el.disabled = busy; });
+    }
+
+    onViewChanged = function () {
+      var n = analysisIds().length;
+      buttons.forEach(function (b) { b.el.disabled = n < b.min; });
+    };
+
+    function runAnalysis(spec) {
+      var ids = analysisIds();
+      if (ids.length < spec.min) {
+        statusEl.textContent = 'Need at least ' + spec.min +
+          ' filtered acquisitions for ' + spec.kind + ' (have ' + ids.length + ').';
+        return;
+      }
+      setBusy(true);
+      statusEl.textContent = 'Rendering ' + spec.kind + ' over ' +
+        ids.length + ' acquisitions\\u2026';
+      resultEl.innerHTML = '';
+      fetch(base + '/artifacts/' + spec.kind, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids })
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (e) {
+            throw new Error((e && e.detail) || ('HTTP ' + r.status));
+          }, function () { throw new Error('HTTP ' + r.status); });
+        }
+        return r.blob();
+      }).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        statusEl.textContent = spec.kind + ' ready.';
+        if (spec.html) {
+          // Swipe is a full interactive HTML page: open it in a new tab and
+          // leave a link behind (popup blockers may swallow the auto-open).
+          var a = document.createElement('a');
+          a.href = url; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = 'open ' + spec.kind + ' map \\u2197';
+          resultEl.appendChild(a);
+          window.open(url, '_blank', 'noopener');
+        } else {
+          var img = document.createElement('img');
+          img.src = url; img.alt = spec.kind + ' composite over the filtered view';
+          resultEl.appendChild(img);
+        }
+      }).catch(function (err) {
+        statusEl.textContent = 'Failed: ' + (err && err.message ? err.message : err);
+      }).then(function () { setBusy(false); onViewChanged(); });
+    }
+
+    buttons.forEach(function (b) {
+      b.el.addEventListener('click', function () { runAnalysis(b); });
+    });
+  }
+
   render();
   // Frame the full set on first load.
   var pts = features.map(function (f) { return f.properties.centroid; }).filter(Boolean);
@@ -461,6 +594,16 @@ _PAGE_TEMPLATE = (
     </div>
     <div id="umbra-count"></div>
     <button id="umbra-reset" type="button">Reset filters</button>
+    <div id="umbra-analyze" style="display:none">
+      <label>Analyze this view</label>
+      <div class="umbra-analyze-btns">
+        <button id="umbra-btn-change" type="button">Change</button>
+        <button id="umbra-btn-timescan" type="button">Timescan</button>
+        <button id="umbra-btn-swipe" type="button">Swipe</button>
+      </div>
+      <p id="umbra-analyze-status" class="umbra-analyze-status"></p>
+      <div id="umbra-analyze-result"></div>
+    </div>
     <div id="umbra-detail"><p class="empty">Click a marker to see its metadata.</p></div>
   </aside>
   <div id="umbra-map"></div>
