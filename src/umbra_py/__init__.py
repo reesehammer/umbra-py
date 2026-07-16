@@ -57,6 +57,11 @@ from .exceptions import (
 from .export import export_geoparquet
 from .fuzzy import matching_tasks, task_matches
 from .geocode import geocode_place
+from .geoid import (
+    default_geoid_cache_dir,
+    fetch_geoid_grid,
+    geoid_grid_url,
+)
 from .index import CatalogIndex, UpdateResult, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
 from .load import to_geotiff, to_xarray
@@ -136,6 +141,9 @@ __all__ = [
     "tile_ids_for_bbox",
     "default_dem_cache_dir",
     "DemUnavailableError",
+    "fetch_geoid_grid",
+    "geoid_grid_url",
+    "default_geoid_cache_dir",
     "chip_item",
     "write_chips",
     "write_manifest",

@@ -59,8 +59,20 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   is read with the very same injectable `_dem_height_sampler` — so it is fully
   offline-tested with a hand-written grid, no new dependency, no packaged EGM data.
   Without `--geoid` the output is unchanged (correct to the local geoid–ellipsoid
-  separation, ample for map placement). Remaining nicety: an optional `--geoid
-  auto` mirroring `--dem auto` (fetch a matching EGM2008 grid for the scene).
+  separation, ample for map placement).
+- ~~**Auto-fetch a geoid grid for the scene.**~~ ✅ **Done** (`umbra_py.geoid` /
+  `umbra convert --geoid auto`). `geoid="auto"` / `--geoid auto` is the vertical
+  sibling of `--dem auto`: it fetches a global geoid-undulation grid (the compact
+  ~4 MB EGM96 15′ model PROJ distributes on `cdn.proj.org`, `us_nga_egm96_15.tif`)
+  once, caches it beside the DEM tiles under the same XDG dir, and hands it into
+  the shipped `--geoid PATH` correction unchanged — so `--dem auto --geoid auto`
+  gives a terrain-corrected *and* vertically-referenced scene with no data hunt.
+  Unlike a DEM the EGM grid is a single global file, so there is nothing to tile;
+  the fetch reuses the resume-safe `download_url` and is injectable, so the whole
+  download-and-cache path is offline-tested with a stub downloader (no network, no
+  new dependency, no packaged EGM data). `us_nga_egm08_25.tif` (EGM2008 2.5′) is a
+  higher-resolution alternative on the same CDN, selectable via
+  `fetch_geoid_grid(name=…)`.
 - **MultiRTC / RTC recipes.** Radiometric terrain correction (flattening
   backscatter for local incidence angle over slopes) is a different job from the
   geometric orthorectification shipped here; interop with

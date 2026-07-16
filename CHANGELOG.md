@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Auto-fetch a global geoid grid for vertical-datum correction —
+  `umbra convert --geoid auto` / `umbra_py.geoid` (`docs/STRATEGY.md` 5.5).**
+  Vertical-datum correction shipped as `--geoid PATH`, but that still made the
+  user find, download, and point at the right EGM undulation grid — the same
+  "same 500 lines of glue" `--dem auto` removed for DEMs, still present for the
+  geoid. `--geoid auto` / `sicd_to_geocoded_cog(geoid="auto")` closes it, the
+  vertical sibling of `--dem auto`: the new `umbra_py.geoid` module fetches a
+  global geoid-undulation grid (the compact ~4 MB EGM96 15′ model PROJ
+  distributes on [`cdn.proj.org`](https://cdn.proj.org/), `us_nga_egm96_15.tif`)
+  once, caches it under the same XDG cache dir the index and DEM tiles use, and
+  hands it into the shipped `--geoid PATH` correction unchanged — so
+  `--dem auto --geoid auto` gives a terrain-corrected *and* vertically-referenced
+  scene over relief with zero data hunting. Unlike a DEM the EGM grid is a single
+  global file (nothing to tile — one file covers every scene); the fetch reuses
+  the resume-safe `download_url` and is injectable (`fetch_geoid_grid`,
+  `geoid_grid_url`, `default_geoid_cache_dir`), so the whole download-and-cache
+  path is offline-tested with a stub downloader, with no new dependency and no
+  packaged EGM data. `us_nga_egm08_25.tif` (EGM2008 2.5′) is a higher-resolution
+  alternative on the same CDN, selectable via `fetch_geoid_grid(name=…)`.
 - **Vertical-datum / geoid correction for terrain orthorectification —
   `umbra convert --geoid PATH` / `sicd_to_geocoded_cog(geoid=…)`
   (`docs/STRATEGY.md` 5.5).** Terrain orthorectification walks each control point

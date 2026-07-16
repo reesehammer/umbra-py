@@ -30,8 +30,9 @@ works as the elevation source.
 Global DEMs quote height above the *geoid* (EGM96/EGM2008), but SICD projects
 against the *ellipsoid*; the difference (the geoid undulation, up to ~±100 m) is
 a systematic geolocation error over relief. Pass ``geoid=`` — a path to an
-undulation grid — to add that separation to the sampled DEM height before
-projecting, for survey-grade placement. Without it the DEM height is used as-is,
+undulation grid, or ``"auto"`` to fetch a global EGM grid — to add that
+separation to the sampled DEM height before projecting, for survey-grade
+placement. Without it the DEM height is used as-is,
 correct to within the local geoid–ellipsoid separation and ample for map
 placement.
 
@@ -548,14 +549,16 @@ def sicd_to_geocoded_cog(
     geoid:
         Optional path to a geoid-undulation grid (any raster rasterio can open,
         giving the ellipsoid-minus-geoid separation ``N`` in metres, e.g. an
-        EGM96/EGM2008 undulation GeoTIFF). Global DEMs quote *orthometric* height
-        above the geoid, but SICD projects against the *ellipsoid*, so with a DEM
-        this adds ``N`` at each point to convert the sampled height to HAE before
-        projecting — survey-grade geolocation over relief. Requires ``dem`` (it
-        corrects DEM heights); passing it without ``dem`` is an error. Where the
-        grid has no coverage the undulation is taken as ``0`` (the DEM height is
-        used uncorrected). ``None`` reads DEM heights as-is (correct to within the
-        local geoid–ellipsoid separation, ample for map placement).
+        EGM96/EGM2008 undulation GeoTIFF), or the literal ``"auto"`` to fetch a
+        global EGM geoid grid for the scene automatically
+        (:func:`umbra_py.geoid.fetch_geoid_grid`). Global DEMs quote *orthometric*
+        height above the geoid, but SICD projects against the *ellipsoid*, so with
+        a DEM this adds ``N`` at each point to convert the sampled height to HAE
+        before projecting — survey-grade geolocation over relief. Requires ``dem``
+        (it corrects DEM heights); passing it without ``dem`` is an error. Where
+        the grid has no coverage the undulation is taken as ``0`` (the DEM height
+        is used uncorrected). ``None`` reads DEM heights as-is (correct to within
+        the local geoid–ellipsoid separation, ample for map placement).
     """
     np = _require("numpy")
     _require("rasterio")
@@ -573,6 +576,10 @@ def sicd_to_geocoded_cog(
     if dem is not None:
         import contextlib  # noqa: PLC0415
 
+        if isinstance(geoid, str) and geoid.lower() == "auto":
+            from . import geoid as geoid_mod  # noqa: PLC0415
+
+            geoid = geoid_mod.fetch_geoid_grid()
         with contextlib.ExitStack() as stack:
             dem_ds = stack.enter_context(rasterio.open(str(dem)))
             sample_height = _dem_height_sampler(dem_ds)

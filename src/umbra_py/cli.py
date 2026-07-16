@@ -1218,9 +1218,10 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "--geoid",
     type=str,
     default=None,
-    metavar="PATH",
-    help="Path to a geoid-undulation grid (any raster rasterio can open, e.g. an "
-    "EGM96/EGM2008 GeoTIFF) giving ellipsoid-minus-geoid separation in metres. "
+    metavar="PATH|auto",
+    help="Geoid-undulation grid giving ellipsoid-minus-geoid separation in metres. "
+    "Pass a path to any raster rasterio can open (e.g. an EGM96/EGM2008 GeoTIFF), "
+    "or 'auto' to fetch a global EGM geoid grid for the scene automatically. "
     "Global DEMs quote height above the geoid but SICD projects against the "
     "ellipsoid, so this converts sampled DEM heights to HAE for survey-grade "
     "placement over relief. Requires --dem.",
@@ -1263,7 +1264,8 @@ def convert(
             "ellipsoidal (HAE).",
             param_hint="--geoid",
         )
-    if geoid and not Path(geoid).exists():
+    auto_geoid = bool(geoid) and geoid.lower() == "auto"
+    if geoid and not auto_geoid and not Path(geoid).exists():
         raise click.BadParameter(f"Geoid path does not exist: {geoid}", param_hint="--geoid")
 
     label = "Terrain-geocoding" if dem else "Geocoding"
