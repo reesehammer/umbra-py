@@ -23,6 +23,7 @@ from .chips import (
 )
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
+from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog
 from .dates import parse_date_bound
 from .demo import build_demo, save_demo
 from .describe import DescribeError, SceneDescription, describe, parse_description
@@ -111,6 +112,8 @@ __all__ = [
     "ItemCollection",
     "to_xarray",
     "to_geotiff",
+    "sicd_to_amplitude_geotiff",
+    "sicd_to_geocoded_cog",
     "chip_item",
     "write_chips",
     "write_manifest",

@@ -16,6 +16,7 @@ from .catalog import UmbraCatalog
 from .chips import CHIPPABLE_ASSETS
 from .constants import CANOPY_TOKEN_ENV, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
+from .convert import RESAMPLING_METHODS
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
@@ -1055,6 +1056,88 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
             db=db,
         )
     click.echo(f"Wrote GeoTIFF to {path}")
+
+
+@cli.command()
+@click.argument("src", type=click.Path(exists=True, dir_okay=False))
+@click.argument("dst", type=click.Path(dir_okay=False))
+@click.option(
+    "--slant-plane",
+    is_flag=True,
+    help="Skip geocoding: write the raw slant-plane amplitude with no "
+    "geolocation (inspection only). Default is a north-up EPSG:4326 COG.",
+)
+@click.option(
+    "--linear",
+    is_flag=True,
+    help="Write linear magnitude instead of the decibel (log-amplitude) scale.",
+)
+@click.option(
+    "--gcp-grid",
+    type=int,
+    default=15,
+    show_default=True,
+    help="Edge of the square lattice of ground control points sampled across "
+    "the image to model the sensor geometry (geocoded output only).",
+)
+@click.option(
+    "--resolution",
+    type=float,
+    default=None,
+    help="Output pixel size in degrees (geocoded output only). Omit to pick "
+    "the finer of the two per-axis ground sample distances.",
+)
+@click.option(
+    "--resampling",
+    type=click.Choice(list(RESAMPLING_METHODS), case_sensitive=False),
+    default="bilinear",
+    show_default=True,
+    help="Warp kernel for geocoding.",
+)
+@click.option(
+    "--projection",
+    type=click.Choice(["HAE", "PLANE", "DEM"], case_sensitive=False),
+    default="HAE",
+    show_default=True,
+    help="SICD image-projection type. HAE is the flat-earth default (exact "
+    "over flat terrain, adequate for map placement elsewhere).",
+)
+def convert(src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection) -> None:
+    """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
+
+    By default this geocodes the scene: it detects amplitude and warps it onto
+    a north-up EPSG:4326 cloud-optimized GeoTIFF using SICD's own image-
+    projection model, so the result opens straight onto a map, in QGIS, or as a
+    georeferenced array via ``umbra_py.to_xarray`` -- no hand-rolled geocoding.
+
+    The geocoding is flat-earth (pixels on the scene's height plane): exact over
+    flat terrain, adequate for map placement elsewhere. Pass --slant-plane for a
+    quick, ungeoreferenced amplitude image instead.
+
+    SICD/CPHD are the complex products; the ``GEC`` asset is already a geocoded
+    COG and needs no conversion. Requires the convert extra
+    (``pip install "umbra-py[convert]"``).
+    """
+    from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog  # noqa: PLC0415
+
+    decibels = not linear
+    if slant_plane:
+        with OrbitSpinner(f"Reading amplitude from {Path(src).name}"):
+            path = sicd_to_amplitude_geotiff(src, dst, decibels=decibels)
+        click.echo(f"Wrote slant-plane amplitude GeoTIFF to {path}")
+        return
+
+    with OrbitSpinner(f"Geocoding {Path(src).name}"):
+        path = sicd_to_geocoded_cog(
+            src,
+            dst,
+            decibels=decibels,
+            gcp_grid=gcp_grid,
+            resolution=resolution,
+            resampling=resampling.lower(),
+            projection_type=projection.upper(),
+        )
+    click.echo(f"Wrote geocoded COG to {path}")
 
 
 @cli.command()

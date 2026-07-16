@@ -431,6 +431,34 @@ same 500 lines of glue first, and many give up."*
 > full-acquisition-set PMTiles tiling (Path A step 3); the higher-level strategic
 > gaps are unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption
 > moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **SICD → geocoded COG one-liner has shipped**
+> (`STRATEGY.md` 5.5 — the higher-level code gap named at the foot of nearly
+> every update above). Every path to the open data assumes the ``GEC`` asset is
+> already a geocoded COG; the complex ``SICD`` product is not — it lives in the
+> radar slant plane, so it does not open on a map, in QGIS, or in the
+> xarray/rioxarray stack without hand-rolled geocoding, which is exactly the
+> "same 500 lines of glue" the thesis (§1) says drives people away. `umbra
+> convert SRC DST` (and `umbra_py.convert.sicd_to_geocoded_cog`) closes that:
+> it detects amplitude and warps it onto a north-up EPSG:4326 cloud-optimized
+> GeoTIFF using SICD's *own* image-projection model — a lattice of ground control
+> points from `project_image_to_ground_geo` — so the sensor geometry, not a naive
+> corner-stretch, places the pixels. It stays in the project's grain and
+> testability (§3): the geocoding core (`_warp_gcps_to_cog`) is deliberately free
+> of any sarpy dependency, so it is offline-tested with a plain array and
+> hand-built GCPs against real `rasterio`, and the SICD read → amplitude → GCP →
+> warp path is exercised end to end with a faked reader (the same injectable
+> discipline the renderers and STAC builders already hold) — `convert.py` went
+> from zero tests to a full offline suite in the `[convert]` extra CI job. The
+> geocoding is an honest flat-earth first slice (pixels on the scene's HAE
+> plane): exact over flat terrain, adequate for map placement elsewhere, and
+> `--slant-plane` still emits the prior ungeoreferenced amplitude for quick
+> inspection. This directly serves the ML/analytics audience 5.5 targets (Umbra
+> data becomes trivially loadable) and unblocks the `04_sicd_amplitude` notebook
+> flagged in 5.4. What remains under 5.5 is full terrain orthorectification (a
+> DEM, MultiRTC interop) and RTC recipes; the other higher-level gaps are
+> unchanged: the demo's full-acquisition-set PMTiles tiling (Path A step 3) and
+> the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -597,9 +625,17 @@ data trivially trainable increases demand for Umbra pixels.
   extra): chips scenes into fixed-size, georeferenced training tiles with the
   look-angle / resolution / polarization / license metadata attached per chip in
   a `.jsonl` (or `.geojson`) manifest. See `AI_INTEGRATION_IDEAS.md` C4.
-- ⬜ SICD → geocoded COG one-liner and RTC recipes (interop with MultiRTC) are
-  still open. (`convert.py` has slant-plane amplitude extraction; full geocoding
-  of the complex products is the remaining gap.)
+- ✅ **SICD → geocoded COG shipped** (`umbra convert` / `umbra_py.convert`,
+  `[convert]` extra): `sicd_to_geocoded_cog()` detects amplitude from the
+  complex product and warps it onto a north-up EPSG:4326 cloud-optimized GeoTIFF
+  using SICD's own image-projection model (a lattice of ground control points),
+  so the scene opens straight onto a map, in QGIS, or as a georeferenced array
+  via `to_xarray`. `umbra convert SRC DST` geocodes by default; `--slant-plane`
+  keeps the prior ungeoreferenced amplitude for quick inspection. The geocoding
+  is a flat-earth first slice (pixels on the scene's HAE plane): exact over flat
+  terrain, adequate for map placement elsewhere.
+- ⬜ Full terrain orthorectification (a DEM / `projection_type="DEM"`, MultiRTC
+  interop) is the remaining geocoding gap; RTC recipes are still open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
 
