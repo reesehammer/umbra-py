@@ -292,7 +292,10 @@ Adds on-demand capability over Path A rather than replacing it:
 1. ✅ `umbra serve` (FastAPI, `[serve]` extra): read-only **STAC API** over
    `CatalogIndex` (search/collections/items) — the same component proposed
    for AI integration (B2), so this work is shared, not duplicated. **Shipped**;
-   the STAC search backend the rest of this path builds on now exists.
+   the STAC search backend the rest of this path builds on now exists. The STAC
+   **Query extension** now also exposes the index's `product_types` / free-text
+   `area` / `fuzzy` filters over `/search`, so a client can pre-filter the
+   catalog server-side, not just by bbox/datetime/ids.
 2. ✅ **Artifact endpoints wrapping the existing library functions —
    shipped, now with async job semantics.** `GET /artifacts/quicklook/{id}.png`,
    `POST /artifacts/change`, `POST /artifacts/timescan` and `POST /artifacts/swipe`

@@ -79,7 +79,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .constants import ATTRIBUTION, DATA_LICENSE, PRODUCT_TYPE_EXPLANATIONS
+from .constants import (
+    ATTRIBUTION,
+    DATA_LICENSE,
+    PRODUCT_ASSETS,
+    PRODUCT_TYPE_EXPLANATIONS,
+)
 from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
 from .models import BBox, UmbraItem
@@ -108,6 +113,9 @@ CONFORMANCE_CLASSES = (
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/oas30",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
+    # The Query extension, mapped to the index's two Umbra-specific filters
+    # (``product_types`` and free-text ``area``); see :func:`parse_query`.
+    "https://api.stacspec.org/v1.0.0/item-search#query",
 )
 
 #: Default page size, and the ceiling a client can request via ``limit``.
@@ -188,6 +196,82 @@ def parse_datetime(value: str | None) -> tuple[date | None, date | None]:
         return (_date_part(start_s), _date_part(end_s))
     d = _date_part(value)
     return (d, d)
+
+
+def parse_product_types(value: str | list[str] | None) -> list[str] | None:
+    """Parse a ``product_types`` filter into a canonical, validated list.
+
+    Accepts a comma-separated string (``"GEC,SICD"``) or a list; matching is
+    case-insensitive (uppercased to the canonical :data:`PRODUCT_ASSETS` keys).
+    An unknown product type is a :class:`ValueError` rather than a silent empty
+    result, so a typo surfaces as a ``400`` instead of "no items match".
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = [str(p) for p in value]
+    else:
+        raise ValueError("product_types must be a string or list")
+    wanted = [p.strip().upper() for p in parts if str(p).strip()]
+    if not wanted:
+        return None
+    unknown = sorted({p for p in wanted if p not in PRODUCT_ASSETS})
+    if unknown:
+        raise ValueError(f"unknown product_types {unknown}; valid types are {list(PRODUCT_ASSETS)}")
+    return wanted
+
+
+def parse_query(query: Any) -> tuple[list[str] | None, str | None]:
+    """Parse a STAC *Query* extension object into ``(product_types, area)``.
+
+    The Umbra index filters by two fields that aren't STAC core properties:
+    ``product_types`` (which asset a scene carries) and free-text ``area`` (a
+    task/site substring). This maps the Query extension onto them:
+
+    - ``{"product_types": {"in": ["GEC", "SICD"]}}`` (or a bare list/string)
+    - ``{"area": {"like": "Beet Piler"}}`` (``eq`` is treated the same; the
+      index match is already a case-insensitive substring), or a bare string.
+
+    Any other property, or an unsupported operator, is a :class:`ValueError` so
+    a client's filter is never silently dropped (which would return items the
+    client asked to exclude). Returns ``(None, None)`` for an empty query.
+    """
+    if query is None:
+        return (None, None)
+    if not isinstance(query, dict):
+        raise ValueError("query must be an object")
+
+    supported = {"product_types", "area"}
+    unknown = sorted(set(query) - supported)
+    if unknown:
+        raise ValueError(
+            f"unsupported query properties {unknown}; this API's query extension "
+            f"covers {sorted(supported)}"
+        )
+
+    def _scalar(prop: str, spec: Any, ops: tuple[str, ...]) -> Any:
+        # A bare value is shorthand for the natural operator; an object must use
+        # exactly one of the operators we implement for that property.
+        if isinstance(spec, dict):
+            keys = list(spec)
+            if len(keys) != 1 or keys[0] not in ops:
+                raise ValueError(f"query.{prop} supports operators {list(ops)}, got {keys}")
+            return spec[keys[0]]
+        return spec
+
+    product_types = None
+    if "product_types" in query:
+        spec = _scalar("product_types", query["product_types"], ("in", "eq"))
+        product_types = parse_product_types(spec)
+
+    area = None
+    if "area" in query:
+        raw = _scalar("area", query["area"], ("like", "eq"))
+        area = str(raw).strip() or None
+
+    return (product_types, area)
 
 
 # --------------------------------------------------------------------------
@@ -421,6 +505,9 @@ def run_search(
     start: date | None = None,
     end: date | None = None,
     ids: list[str] | None = None,
+    product_types: list[str] | None = None,
+    area: str | None = None,
+    fuzzy: bool = False,
     limit: int = DEFAULT_LIMIT,
     offset: int = 0,
 ) -> tuple[list[UmbraItem], bool]:
@@ -428,15 +515,26 @@ def run_search(
 
     Returns ``(page_items, has_next)``. ``ids``, when given, filters by STAC
     item id in this layer (the index search filters by bbox/date/area, not id).
-    Paging is deterministic offset paging over the source's stable ordering: we
-    request one extra item to decide whether a ``next`` link is warranted.
+    ``product_types``, ``area`` and ``fuzzy`` are the Query-extension filters,
+    pushed down to the backend's ``search`` (both :class:`CatalogIndex` and the
+    live :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
+    deterministic offset paging over the source's stable ordering: we request
+    one extra item to decide whether a ``next`` link is warranted.
     """
     limit = _clamp_limit(limit)
     offset = max(0, int(offset))
     # Bound the work when we can. With an id filter we can't cap at the source
     # (an id can appear anywhere in the ordering), so scan and filter here.
     cap = None if ids else offset + limit + 1
-    stream = source.search(bbox=bbox, start=start, end=end, limit=cap)
+    stream = source.search(
+        bbox=bbox,
+        start=start,
+        end=end,
+        product_types=product_types,
+        area=area,
+        fuzzy=fuzzy,
+        limit=cap,
+    )
     if ids:
         wanted = set(ids)
         stream = (it for it in stream if it.id in wanted)
@@ -984,6 +1082,9 @@ def build_app(
         start: date | None,
         end: date | None,
         ids: list[str] | None,
+        product_types: list[str] | None = None,
+        area: str | None = None,
+        fuzzy: bool = False,
         limit: int,
         offset: int,
         self_href: str,
@@ -991,7 +1092,16 @@ def build_app(
         source = _open()
         try:
             page, has_next = run_search(
-                source, bbox=bbox, start=start, end=end, ids=ids, limit=limit, offset=offset
+                source,
+                bbox=bbox,
+                start=start,
+                end=end,
+                ids=ids,
+                product_types=product_types,
+                area=area,
+                fuzzy=fuzzy,
+                limit=limit,
+                offset=offset,
             )
         finally:
             _close(source)
@@ -1014,6 +1124,11 @@ def build_app(
         request: Request,
         bbox: str | None = Query(default=None),
         datetime: str | None = Query(default=None),
+        product_types: str | None = Query(
+            default=None, description="Comma-separated product types, e.g. GEC,SICD"
+        ),
+        area: str | None = Query(default=None, description="Free-text task/site substring"),
+        fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
@@ -1022,6 +1137,7 @@ def build_app(
         try:
             parsed_bbox = parse_bbox(bbox)
             start, end = parse_datetime(datetime)
+            wanted_products = parse_product_types(product_types)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _do_search(
@@ -1030,6 +1146,9 @@ def build_app(
             start=start,
             end=end,
             ids=None,
+            product_types=wanted_products,
+            area=area,
+            fuzzy=fuzzy,
             limit=limit,
             offset=token,
             self_href=str(request.url),
@@ -1057,6 +1176,11 @@ def build_app(
         datetime: str | None = Query(default=None),
         ids: str | None = Query(default=None, description="Comma-separated item ids"),
         collections: str | None = Query(default=None),
+        product_types: str | None = Query(
+            default=None, description="Comma-separated product types, e.g. GEC,SICD"
+        ),
+        area: str | None = Query(default=None, description="Free-text task/site substring"),
+        fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
@@ -1064,6 +1188,7 @@ def build_app(
         try:
             parsed_bbox = parse_bbox(bbox)
             start, end = parse_datetime(datetime)
+            wanted_products = parse_product_types(product_types)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         id_list = [i for i in ids.split(",") if i] if ids else None
@@ -1073,6 +1198,9 @@ def build_app(
             start=start,
             end=end,
             ids=id_list,
+            product_types=wanted_products,
+            area=area,
+            fuzzy=fuzzy,
             limit=limit,
             offset=token,
             self_href=str(request.url),
@@ -1084,9 +1212,18 @@ def build_app(
         try:
             parsed_bbox = parse_bbox(body.get("bbox"))
             start, end = parse_datetime(body.get("datetime"))
+            # The Query-extension filters can arrive either as a STAC ``query``
+            # object or as plain top-level fields; a top-level field, when given,
+            # overrides the same field inside ``query``.
+            query_products, query_area = parse_query(body.get("query"))
+            top_products = parse_product_types(body.get("product_types"))
+            wanted_products = top_products if top_products is not None else query_products
+            top_area = body.get("area")
+            area = str(top_area).strip() if top_area not in (None, "") else query_area
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ids = body.get("ids")
+        fuzzy = bool(body.get("fuzzy", False))
         limit = _clamp_limit(body.get("limit"))
         offset = int(body.get("token") or 0)
         base = str(request.base_url).rstrip("/")
@@ -1098,6 +1235,9 @@ def build_app(
                 start=start,
                 end=end,
                 ids=list(ids) if ids else None,
+                product_types=wanted_products,
+                area=area,
+                fuzzy=fuzzy,
                 limit=limit,
                 offset=offset,
             )

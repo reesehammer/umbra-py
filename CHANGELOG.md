@@ -24,6 +24,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escaped its inputs and was unchanged.
 
 ### Added
+- **STAC Query extension on `umbra serve` — filter `/search` by product type and
+  place, not just bbox/date (`docs/AI_INTEGRATION_IDEAS.md` §B2 / `docs/DEMO_APP_GAPS.md`
+  Path B).** The read-only STAC API answered only the STAC *core* filters (bbox,
+  datetime, ids), even though the `CatalogIndex` it wraps already filters by
+  product type and free-text task/site `area`. `/search` and
+  `/collections/{id}/items` now accept `product_types` (comma-separated, e.g.
+  `GEC,SICD`), `area` (a task/site substring) and a `fuzzy` toggle — as GET
+  query params, plain top-level `POST` body fields, or a standards-compliant
+  STAC **Query extension** object (`{"query": {"product_types": {"in": ["GEC"]},
+  "area": {"like": "Beet Piler"}}}`, with bare-value shorthands). The filters
+  are pushed straight down to the backend `search` both `CatalogIndex` and the
+  live `UmbraCatalog` already implement, so the same query works against either,
+  and GET pagination carries them into the `next` link. Two new pure parsers
+  keep it honest: `parse_product_types` rejects an unknown product type with a
+  `400` (never a silent empty result), and `parse_query` rejects an unsupported
+  query property or operator with a `400` so a client's filter is never quietly
+  dropped. The `item-search#query` conformance class is now advertised. Wired
+  entirely behind the deterministic document/parse boundary, so it is
+  offline-tested through the in-process `TestClient` with no network and no
+  `viz` extra.
 - **Visual similarity search over MCP — `find_similar` / `find_similar_text`
   tools on `umbra-mcp` (`docs/AI_INTEGRATION_IDEAS.md` §C5).** The flagship
   scene-embedding capability (`umbra embed`) is now conversational: the

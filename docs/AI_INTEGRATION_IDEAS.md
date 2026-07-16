@@ -474,8 +474,12 @@ afterthought.
 > `search_result`) with no web-framework dependency — offline-testable in the
 > core install — and `build_app()` only wires them onto routes. It reads the
 > prebuilt `catalog.db` index first (instant), with an opt-in `--live` S3-walk
-> fallback. Not-yet-done follow-ups: a hosted community instance, and richer
-> query extensions (free-text `area`, geometry `intersects`).
+> fallback. The **STAC Query extension is now wired** (`item-search#query`
+> conformance): `product_types`, free-text `area` and a `fuzzy` toggle are
+> accepted as GET params, top-level POST fields, or a STAC `query` object, and
+> pushed down to the same backend `search` both the index and the live catalog
+> answer. Not-yet-done follow-ups: a hosted community instance, and geometry
+> `intersects` (which needs a real polygon test, not the stored footprint bbox).
 
 `CatalogIndex` already mirrors search semantics in SQL. Putting a small
 read-only **STAC API** (FastAPI, `[serve]` extra) in front of it —
