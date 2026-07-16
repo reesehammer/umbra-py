@@ -25,6 +25,13 @@ from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog
 from .dates import parse_date_bound
+from .dem import (
+    DemUnavailableError,
+    copernicus_tile_id,
+    default_dem_cache_dir,
+    fetch_dem_for_bbox,
+    tile_ids_for_bbox,
+)
 from .demo import build_demo, save_demo
 from .describe import DescribeError, SceneDescription, describe, parse_description
 from .download import download_asset, download_item, download_url
@@ -124,6 +131,11 @@ __all__ = [
     "to_geotiff",
     "sicd_to_amplitude_geotiff",
     "sicd_to_geocoded_cog",
+    "fetch_dem_for_bbox",
+    "copernicus_tile_id",
+    "tile_ids_for_bbox",
+    "default_dem_cache_dir",
+    "DemUnavailableError",
     "chip_item",
     "write_chips",
     "write_manifest",

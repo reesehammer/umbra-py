@@ -1206,11 +1206,13 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
 )
 @click.option(
     "--dem",
-    type=click.Path(exists=True, dir_okay=False),
+    type=str,
     default=None,
-    help="Path to a digital elevation model (any raster rasterio can open, e.g. "
-    "a Copernicus/SRTM COG) to terrain-orthorectify against, instead of the "
-    "flat-earth projection. Supersedes --projection.",
+    metavar="PATH|auto",
+    help="Terrain-orthorectify against a digital elevation model instead of the "
+    "flat-earth projection. Pass a path to any raster rasterio can open (e.g. a "
+    "Copernicus/SRTM COG), or 'auto' to fetch the covering Copernicus GLO-30 "
+    "tiles for the scene automatically. Supersedes --projection.",
 )
 def convert(
     src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection, dem
@@ -1240,6 +1242,10 @@ def convert(
             path = sicd_to_amplitude_geotiff(src, dst, decibels=decibels)
         click.echo(f"Wrote slant-plane amplitude GeoTIFF to {path}")
         return
+
+    auto_dem = bool(dem) and dem.lower() == "auto"
+    if dem and not auto_dem and not Path(dem).exists():
+        raise click.BadParameter(f"DEM path does not exist: {dem}", param_hint="--dem")
 
     label = "Terrain-geocoding" if dem else "Geocoding"
     with OrbitSpinner(f"{label} {Path(src).name}"):

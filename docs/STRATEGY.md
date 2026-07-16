@@ -708,6 +708,33 @@ same 500 lines of glue first, and many give up."*
 > interop (radiometric terrain correction, a different job from geometric
 > orthorectification); the other higher-level gaps are unchanged and non-code: the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **DEM auto-fetch has shipped** — `umbra convert
+> --dem auto` / `sicd_to_geocoded_cog(dem="auto")` (`STRATEGY.md` 5.5, closing the
+> last convert-side glue step named in `TODO.md`). Terrain orthorectification
+> landed as `--dem PATH`, but that still made the user go find, download, and
+> mosaic the right elevation tiles for the scene — "the same 500 lines of glue"
+> the thesis (§1) says drives people away, just relocated from geocoding to DEM
+> wrangling. `umbra_py.dem` removes it: `--dem auto` projects the scene's four
+> image corners to a geographic bbox, resolves the 1°×1° Copernicus GLO-30 tiles
+> covering it, pulls them from the public AWS Open Data bucket (skipping the
+> all-ocean gaps Copernicus omits with a 404, merging several into a mosaic), and
+> hands the result straight into the shipped terrain-ortho path — so a curious
+> analyst types one flag and gets a correctly geolocated scene over relief with no
+> DEM hunt. It holds the project's grain and testability (§3): the tile math (id
+> naming, bbox coverage, URL building) is **pure standard library** and
+> offline-tested with no network, the fetch reuses the resume-safe `download_url`
+> and is **injectable**, so the skip/merge/raise behaviour is covered with a
+> stub downloader (only the multi-tile `rasterio.merge` mosaic touches the
+> `[convert]` extra), and tiles are cached under the same XDG cache dir the index
+> uses so a second conversion over the same area re-downloads nothing. It stays
+> graceful under the "moat is leased" risk (§3): Copernicus GLO-30 is a public,
+> host-anywhere collection, so this depends on nothing Umbra-specific. This
+> directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
+> trivially loadable *and* correctly geolocated over terrain in one command). What
+> remains under 5.5 is the vertical-datum/geoid niceties and MultiRTC/RTC interop;
+> the other higher-level gaps are unchanged and non-code: the maintainer-side
+> adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -899,6 +926,14 @@ data trivially trainable increases demand for Umbra pixels.
   plane. `--dem` supersedes `--projection`; off-DEM points fall back to the scene
   height. The refinement loop and DEM lookup are injectable, so the whole path is
   offline-tested with plain callables and a hand-written DEM raster.
+- ✅ **DEM auto-fetch shipped** (`umbra convert --dem auto` / `umbra_py.dem`):
+  `dem="auto"` resolves the 1°×1° Copernicus GLO-30 tiles covering the scene's
+  projected footprint, pulls them from the public AWS Open Data bucket (skipping
+  the all-ocean gaps that 404, merging several into a mosaic), and
+  terrain-orthorectifies against the result — so terrain orthorectification no
+  longer starts with hand-finding a DEM. The tile math (id naming, bbox coverage)
+  is stdlib-only and offline-tested; the fetch reuses the resume-safe
+  `download_url` and is injectable, so the whole path is covered without network.
 - ⬜ Remaining geocoding niceties: vertical-datum/geoid handling and MultiRTC
   interop; RTC recipes (radiometric terrain correction) are still open.
 

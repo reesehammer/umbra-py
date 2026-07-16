@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Auto-fetch the covering Copernicus DEM for terrain orthorectification —
+  `umbra convert --dem auto` / `umbra_py.dem` (`docs/STRATEGY.md` 5.5).** DEM
+  terrain orthorectification shipped as `--dem PATH`, but that still made the
+  user find, download, and mosaic the right elevation tiles for the scene — the
+  last convert-side "same 500 lines of glue" named in `TODO.md`. `--dem auto` /
+  `sicd_to_geocoded_cog(dem="auto")` closes it: it projects the scene's image
+  corners to a geographic bbox, resolves the 1°×1°
+  [Copernicus GLO-30](https://registry.opendata.aws/copernicus-dem/) tiles
+  covering it, pulls them from the public AWS Open Data bucket (skipping the
+  all-ocean gaps Copernicus
+  omits with a 404, merging several into a mosaic), and terrain-orthorectifies
+  against the result — one flag, correctly geolocated over relief. The new
+  `umbra_py.dem` module keeps the tile math (`copernicus_tile_id`,
+  `tiles_covering_bbox`, `tile_url`, `tile_ids_for_bbox`) pure standard library
+  and offline-tested, and the fetch (`fetch_dem_for_bbox`) reuses the resume-safe
+  `download_url` behind an injectable `download` callable, so the skip/merge/raise
+  behaviour is covered with a stub downloader — only the multi-tile
+  `rasterio.merge` mosaic touches the `[convert]` extra. Tiles are cached under
+  the same XDG cache dir the index uses (`default_dem_cache_dir`,
+  `$UMBRA_DEM_DIR`), so a second conversion over the same area re-downloads
+  nothing. `fetch_dem_for_bbox`, `copernicus_tile_id`, `tile_ids_for_bbox`,
+  `default_dem_cache_dir` and `DemUnavailableError` are exported from the package
+  root; the `--dem` CLI option now accepts a path *or* `auto` and validates a
+  given path exists.
 - **DEM terrain orthorectification for SICD geocoding — `umbra convert --dem`
   / `sicd_to_geocoded_cog(dem=...)` (`docs/STRATEGY.md` 5.5).** The single named
   remaining strategic code gap: every path to the open data assumed a flat
