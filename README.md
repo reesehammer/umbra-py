@@ -467,6 +467,11 @@ umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out ti
 # Chip a site's passes into fixed-size georeferenced ML tiles + a manifest.
 umbra chips --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out chips/ --chip-size 512 --db
 
+# Geocode a downloaded SICD (complex) product to a north-up EPSG:4326 COG that
+# opens straight on a map / in QGIS / via umbra_py.to_xarray. --slant-plane
+# instead writes the raw, ungeoreferenced amplitude for quick inspection.
+umbra convert scene_SICD.nitf scene_geocoded.tif
+
 # Visual similarity: embed a site's quicklooks, then find scenes that look alike.
 umbra embed build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 umbra embed similar <item-json-url>

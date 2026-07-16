@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SICD → geocoded COG — `umbra convert` / `sicd_to_geocoded_cog`
+  (`docs/STRATEGY.md` 5.5).** Umbra's `GEC` asset is already a geocoded COG, but
+  the complex `SICD` product lives in the radar slant plane and does not open on
+  a map, in QGIS, or in the xarray/rioxarray stack without hand-rolled
+  geocoding. The new `convert` extra function detects amplitude from the complex
+  product and warps it onto a north-up EPSG:4326 cloud-optimized GeoTIFF using
+  SICD's own image-projection model — a lattice of ground control points from
+  `project_image_to_ground_geo`, so the sensor geometry (not a naive
+  corner-stretch) places the pixels. `umbra convert SRC DST` geocodes by default
+  (with `--gcp-grid`, `--resolution`, `--resampling`, `--projection`, and
+  `--linear` for magnitude instead of dB); `--slant-plane` keeps the prior
+  ungeoreferenced amplitude image for quick inspection. The geocoding is an
+  honest flat-earth first slice (pixels on the scene's height-above-ellipsoid
+  plane): exact over flat terrain, adequate for map placement elsewhere; full
+  terrain orthorectification (a DEM, MultiRTC interop) is the follow-on. The
+  geocoding core (`_warp_gcps_to_cog`) is free of any sarpy dependency, so it is
+  offline-tested with a plain array and hand-built GCPs against real `rasterio`,
+  and the read → amplitude → GCP → warp path is exercised end to end with a
+  faked reader — `convert.py` gains its first test suite (the `[convert]` extra
+  CI job). `sicd_to_amplitude_geotiff` / `sicd_to_geocoded_cog` are exported
+  from the package root.
 - **Async job semantics for long `umbra serve` renders — `202 Accepted` + poll
   (`docs/DEMO_APP_GAPS.md` Path B step 2).** The composite render endpoints
   (`POST /artifacts/change` / `timescan` / `swipe`) accept an opt-in
