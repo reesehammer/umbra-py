@@ -398,6 +398,16 @@ same 500 lines of glue first, and many give up."*
 > (`DEMO_APP_GAPS.md` Path A step 3). The higher-level strategic gaps are also
 > unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption moves
 > (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the self-serve demo loop is now closed. `umbra serve`
+> gained `POST /artifacts/swipe` (an interactive before/after HTML page,
+> served from its own cache entry alongside the three PNG composites) and a
+> permissive read-only CORS policy, and `umbra demo --server-url` wires an
+> "Analyze this view" panel that POSTs the currently-filtered acquisitions to
+> the change/timescan/swipe endpoints and renders the result in place — the R4
+> "run this analysis here" affordance over *any* site (`DEMO_APP_GAPS.md` Path B
+> step 3). What remains under the demo heading is only async job semantics for
+> the longest renders and the full-acquisition-set PMTiles tiling.
 
 ## 2. The landscape: life without umbra-py
 

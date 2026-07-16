@@ -91,6 +91,30 @@ def test_build_demo_metadata_only_omits_driver(sample_item_dict):
     assert "GeoTIFF.fromUrl" not in html
 
 
+def test_build_demo_static_by_default_no_server(sample_item_dict):
+    """With no ``server_url`` the page stays fully static: the config carries no
+    server URL and the analyze panel is hidden."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    cfg = _config(html)
+    assert cfg["serverUrl"] is None
+    assert 'id="umbra-analyze" style="display:none"' in html
+
+
+def test_build_demo_server_url_wires_analysis_panel(sample_item_dict):
+    """With ``server_url`` set the config carries it and the app JS POSTs the
+    filtered view to the server's artifact endpoints (R4 wiring)."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+    cfg = _config(html)
+    # Stored verbatim; the trailing slash is trimmed client-side.
+    assert cfg["serverUrl"] == "http://localhost:8000/"
+    assert "/artifacts/' + spec.kind" in html
+    # The three products are wired.
+    for btn in ("umbra-btn-change", "umbra-btn-timescan", "umbra-btn-swipe"):
+        assert btn in html
+
+
 def test_build_demo_drops_unmappable_items(sample_item_dict):
     """An item with neither footprint nor bbox can't be placed or clustered, so
     it must be dropped rather than emitted as a null marker."""

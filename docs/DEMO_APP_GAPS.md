@@ -162,7 +162,7 @@ calls them, plus a `swipe` endpoint.
   (< 1,000 tasks), so a `max_per_task=1` "one pin per site" world view is
   cheap; the full acquisition set is what needs clustering/tiling.
 
-### G5 — Product capabilities aren't orchestratable from a UI — **on-demand execution now shipped**
+### G5 — Product capabilities aren't orchestratable from a UI — **shipped end-to-end (server + front end)**
 
 `change`, `swipe`, `timescan`, `gallery` began as separate CLI invocations that
 write files. R4 ("demo every capability from the UI") requires either:
@@ -186,9 +186,19 @@ already cleanly callable (good separation); the endpoints are purely the
 orchestration/delivery layer this section named as the gap. Rendering is
 synchronous for a first, honest slice — a composite streams a downsampled
 overview per pass and returns in seconds; the async job/progress semantics for
-long renders are the ledgered follow-on (`TODO.md`). A front end still has to
-*call* these endpoints and a `swipe` endpoint is not yet wired, but the
-capability now exists server-side.
+long renders are the ledgered follow-on (`TODO.md`).
+
+✅ **The front end now calls them, and the fourth product (swipe) is wired.**
+`POST /artifacts/swipe` renders `viz.swipe_map` (an interactive before/after
+HTML page) alongside the three PNG composites, and `umbra serve` sets a
+permissive read-only CORS policy so a browser page on any origin can reach it.
+`umbra demo --server-url <serve URL>` adds an "Analyze this view" sidebar panel
+whose Change / Timescan / Swipe buttons POST the currently-filtered acquisitions
+to the matching endpoint and render the returned artifact in place (swipe opens
+its map in a new tab). This is the R4 "run this analysis here" affordance over
+*any* site, closing the self-serve loop; without `--server-url` the page stays a
+fully static single file. What remains under this heading is only the async job
+semantics for the longest renders (`TODO.md`).
 
 ### G6 — No thumbnail/artifact caching layer — **partly addressed**
 
@@ -281,7 +291,7 @@ Adds on-demand capability over Path A rather than replacing it:
 | R1 full catalog on map | ✓ gathered slice, clustered (PMTiles tiling pending for the full acquisition set) | ✓ | ✓ |
 | R2 interactive filters | ✓ (client-side: search, date range, product chips) | ✓ (client-side) | ✓ (server queries) |
 | R3 click → quicklook | ✓ (lazy COG overlay + metadata card) | ✓ (baked + lazy) | ✓ |
-| R4 product demos from UI | endpoints exist (`umbra serve` renders quicklook/change/timescan over any site); front-end wiring pending | curated sites only | ✓ any site |
+| R4 product demos from UI | ✓ any site (`umbra serve` renders quicklook/change/timescan/swipe; `umbra demo --server-url` wires the front end to call them) | curated sites only | ✓ any site |
 | R5 fast | ✓ (`--local` prebuilt index) | ✓ (prebuilt data) | ✓ |
 | R6 hostable URL | ✓ (one static HTML file) | ✓ (Pages) | ✓ (container) |
 | R7 polish | ✓ (filters, attribution, loading states) | ✓ | ✓ |
@@ -296,16 +306,17 @@ Adds on-demand capability over Path A rather than replacing it:
   filters, clustered markers, and click-to-quicklook SAR, hostable as one static
   file. This closes R1–R3 and R5–R7 for the gathered slice with zero runtime
   infrastructure (G3 met, G4 partly met).
+- **Now also self-serve for R4**: `umbra serve` renders
+  quicklook/change/timescan/swipe over *any* site on demand and caches the
+  results (Path B step 2), and `umbra demo --server-url` wires the front-end
+  "run this analysis here" affordance that calls those endpoints (Path B step 3)
+  — the last self-serve-demo gap. (Former blockers gone: the pagination bug is
+  fixed in PR #29, the visual commands render from the prebuilt index via
+  `--local`, the self-serve front end ships as `umbra demo`, the on-demand
+  artifact endpoints ship on `umbra serve`, and the demo now calls them.)
 - **Not yet**: the *truly whole-catalog* view (PMTiles tiling of the full
-  acquisition set, Path A step 3), and *wiring* the front end to R4's render
-  actions. The server side of R4 now exists — `umbra serve` renders
-  quicklook/change/timescan over *any* site on demand and caches the results
-  (Path B step 2) — so what remains for a self-serve app is the front-end
-  "run this analysis here" affordance that calls those endpoints, a `swipe`
-  endpoint, and async semantics for the longest renders. (Former blockers gone:
-  the pagination bug is fixed in PR #29, the visual commands render from the
-  prebuilt index via `--local`, the self-serve front end ships as `umbra demo`,
-  and the on-demand artifact endpoints ship on `umbra serve`.)
+  acquisition set, Path A step 3), and async job semantics for the longest
+  renders (`TODO.md`).
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the
