@@ -281,8 +281,9 @@ no crawl, and no umbra-py install needed on the consuming side. Each row is a
 full STAC item with a `self` link back to its sidecar JSON, so query results
 lead straight to the data files. A [scheduled GitHub
 Action](.github/workflows/publish-index.yml) rebuilds the full index weekly
-and publishes `umbra-open-data.parquet` (plus the SQLite `catalog.db`) on the
-rolling [`catalog-index`
+and publishes `umbra-open-data.parquet` (plus the SQLite `catalog.db`, a
+whole-catalog `catalog.pmtiles` vector basemap, and a `catalog.html` viewer for
+it) on the rolling [`catalog-index`
 release](https://github.com/reesehammer/umbra-py/releases/tag/catalog-index).
 
 ```python
@@ -309,6 +310,16 @@ with CatalogIndex.from_release() as index:   # download the weekly snapshot, the
 
 `umbra index info` reports the snapshot's build date and age, so you know how
 fresh it is; re-run the fetch any time to refresh.
+
+The same release also ships a **whole-catalog `catalog.pmtiles` basemap** built
+from that snapshot, so you get a fast, zoom-anywhere map of the *entire* archive
+without tiling it yourself. `umbra tiles --fetch` (or
+`fetch_prebuilt_pmtiles()`) downloads it; add `--viewer catalog.html` for a
+ready-to-open MapLibre GL page — the visual sibling of `umbra index fetch`.
+
+```bash
+umbra tiles --fetch --viewer catalog.html   # whole-archive map, no crawl, no index
+```
 
 Once you have an index, `umbra index update` freshens it *cheaply* instead of
 re-fetching or re-crawling the whole bucket: it reads the newest acquisition date
@@ -491,6 +502,10 @@ umbra demo --local --area "Centerfield" --server-url http://localhost:8000 --out
 # where embedding every footprint in the page stops being fast. --viewer also
 # writes a MapLibre GL page that renders it; host the two side by side.
 umbra tiles --local --out catalog.pmtiles --viewer catalog.html
+
+# ...or skip the tiling entirely: the weekly workflow already publishes a
+# ready-made whole-catalog basemap, so fetch it (no crawl, no index needed).
+umbra tiles --fetch --out catalog.pmtiles --viewer catalog.html
 
 # Interactive before/after swipe map: drag a divider to wipe the earliest
 # pass of a site over the latest and watch what changed. Self-contained HTML.

@@ -386,3 +386,92 @@ def test_cli_tiles_rejects_bad_extension(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["tiles", "--local", "--out", str(tmp_path / "x.mbtiles")])
     assert result.exit_code != 0
     assert "must be a .pmtiles file" in result.output
+
+
+def test_cli_tiles_requires_out_without_fetch(monkeypatch):
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)])
+    result = CliRunner().invoke(cli, ["tiles", "--local"])
+    assert result.exit_code != 0
+    assert "--out is required unless --fetch is given" in result.output
+
+
+# --- fetch (the consume side of the published basemap) --------------------
+def _published_pmtiles() -> bytes:
+    """Stand in for the catalog.pmtiles the publish workflow uploads."""
+    return pmtiles.build_pmtiles([_item("a", -122.4, 37.8), _item("b", 2.35, 48.85)], max_zoom=3)
+
+
+def test_default_pmtiles_path_env_override(tmp_path, monkeypatch):
+    target = tmp_path / "custom.pmtiles"
+    monkeypatch.setenv("UMBRA_PMTILES", str(target))
+    assert pmtiles.default_pmtiles_path() == target
+
+
+def test_default_pmtiles_path_sits_beside_the_index(tmp_path, monkeypatch):
+    monkeypatch.delenv("UMBRA_PMTILES", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert pmtiles.default_pmtiles_path() == tmp_path / "umbra-py" / "catalog.pmtiles"
+
+
+def test_fetch_prebuilt_pmtiles_downloads_the_archive(tmp_path):
+    import responses
+
+    payload = _published_pmtiles()
+    url = "https://example.com/catalog-index/catalog.pmtiles"
+    dest = tmp_path / "fetched" / "catalog.pmtiles"
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        return pmtiles.fetch_prebuilt_pmtiles(dest, url=url)
+
+    path = run()
+    assert path == dest
+    assert dest.read_bytes() == payload
+    assert dest.read_bytes()[:7] == b"PMTiles"
+
+
+def test_cli_tiles_fetch_writes_archive_and_viewer(tmp_path):
+    import responses
+
+    payload = _published_pmtiles()
+    url = "https://example.com/catalog.pmtiles"
+    out = tmp_path / "catalog.pmtiles"
+    viewer = tmp_path / "map.html"
+
+    @responses.activate
+    def run():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        return CliRunner().invoke(
+            cli,
+            ["tiles", "--fetch", "--url", url, "--out", str(out), "--viewer", str(viewer)],
+        )
+
+    result = run()
+    assert result.exit_code == 0, result.output
+    assert out.read_bytes() == payload
+    assert "Fetched prebuilt PMTiles basemap" in result.output
+    # The viewer points at the fetched file by name, not the remote URL.
+    assert viewer.exists()
+    assert "catalog.pmtiles" in viewer.read_text()
+
+
+def test_cli_tiles_url_without_fetch_is_rejected(monkeypatch):
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)])
+    result = CliRunner().invoke(
+        cli, ["tiles", "--local", "--out", "catalog.pmtiles", "--url", "https://x/y.pmtiles"]
+    )
+    assert result.exit_code != 0
+    assert "--url only applies with --fetch" in result.output

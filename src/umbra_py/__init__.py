@@ -63,7 +63,14 @@ from .narrate import (
     parse_narration,
 )
 from .planner import AskError, SearchPlan, ask, parse_plan
-from .pmtiles import build_pmtiles, build_viewer, save_viewer, write_pmtiles
+from .pmtiles import (
+    build_pmtiles,
+    build_viewer,
+    default_pmtiles_path,
+    fetch_prebuilt_pmtiles,
+    save_viewer,
+    write_pmtiles,
+)
 from .semantic import (
     SemanticError,
     SemanticMatch,
@@ -197,6 +204,8 @@ __all__ = [
     "write_pmtiles",
     "build_viewer",
     "save_viewer",
+    "default_pmtiles_path",
+    "fetch_prebuilt_pmtiles",
     "save_gallery",
     "view",
     "make_viewer_server",

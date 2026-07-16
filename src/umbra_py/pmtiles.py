@@ -53,11 +53,11 @@ import json
 import math
 import os
 import struct
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .constants import ATTRIBUTION
+from .constants import ATTRIBUTION, CATALOG_INDEX_PMTILES_URL
 from .models import UmbraItem
 
 # --- PMTiles v3 header constants -----------------------------------------
@@ -481,6 +481,48 @@ def write_pmtiles(items: Iterable[UmbraItem], dest: str | os.PathLike, **kwargs:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(build_pmtiles(items, **kwargs))
     return dest
+
+
+def default_pmtiles_path() -> Path:
+    """Default location for the prebuilt whole-catalog PMTiles basemap.
+
+    A sibling of :func:`umbra_py.index.default_index_path` (``catalog.pmtiles``
+    beside ``catalog.db`` in the same cache dir), honouring
+    ``$UMBRA_PMTILES`` and then ``$XDG_CACHE_HOME`` so the searchable index and
+    its visual basemap live together and move together.
+    """
+    override = os.environ.get("UMBRA_PMTILES")
+    if override:
+        return Path(override)
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(base) / "umbra-py" / "catalog.pmtiles"
+
+
+def fetch_prebuilt_pmtiles(
+    dest: str | os.PathLike | None = None,
+    *,
+    url: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> Path:
+    """Download the published whole-catalog PMTiles basemap.
+
+    The weekly index workflow ships a ``catalog.pmtiles`` on the rolling
+    ``catalog-index`` release alongside ``catalog.db``, so a fresh install gets a
+    fast, zoom-anywhere map of the *whole* archive with no local tiling step --
+    the visual sibling of :meth:`umbra_py.index.CatalogIndex.from_release`. This
+    fetches that archive straight to ``dest`` (default:
+    :func:`default_pmtiles_path`) and returns its path. Re-run any time to
+    refresh; the download is resume-safe and always overwrites the existing file.
+    ``url`` overrides the release asset location (e.g. to pull from a fork or a
+    mirror). Pair it with :func:`build_viewer` / :func:`save_viewer` for a
+    ready-to-open MapLibre GL page over the fetched file.
+    """
+    from .download import download_url  # local dependency; keep the import cheap
+
+    target = Path(dest) if dest is not None else default_pmtiles_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    download_url(url or CATALOG_INDEX_PMTILES_URL, target, overwrite=True, progress=progress)
+    return target
 
 
 # --- MapLibre GL viewer ---------------------------------------------------

@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Published + fetchable whole-catalog PMTiles basemap — `umbra tiles --fetch`
+  (`docs/STRATEGY.md` 5.2, `docs/DEMO_APP_GAPS.md` Path A step 3).** `umbra
+  tiles` shipped the stdlib-only PMTiles *encoder*; this ships the built
+  *artifact*. The weekly `publish-index.yml` workflow now tiles the freshly
+  built index (`umbra tiles --local`, no second crawl) into a single-file
+  `catalog.pmtiles` and writes a `catalog.html` MapLibre GL viewer pointed at
+  the published archive, uploading both to the rolling `catalog-index` release
+  beside `catalog.db` / `umbra-open-data.parquet`. The consume side mirrors
+  `CatalogIndex.from_release()`: `pmtiles.fetch_prebuilt_pmtiles()` downloads the
+  release asset via the resume-safe `download_url` to `default_pmtiles_path()`
+  (`catalog.pmtiles` beside the cached `catalog.db`, honouring `$UMBRA_PMTILES`),
+  and a new `umbra tiles --fetch` mode (`--out` optional, `--url` override,
+  `--viewer` writes a local viewer) gives a fresh install a fast, zoom-anywhere
+  map of the *entire* archive with no crawl and no index — the visual sibling of
+  `umbra index fetch`. Stdlib-only and fully offline-tested against a mocked
+  release download and a round-tripped archive; the existing build path is
+  unchanged.
 - **Read-through catalog search — `CatalogIndex.search_live()` and
   `umbra search --local --live` (`docs/CODEBASE_ANALYSIS.md` §4.4 / P3 #21).**
   The transparent middle between the instant-but-stale local index and the

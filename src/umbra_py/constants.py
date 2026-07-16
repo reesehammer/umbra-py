@@ -96,11 +96,23 @@ CATALOG_INDEX_RELEASE = "catalog-index"
 #: Name of the prebuilt SQLite index asset on the ``catalog-index`` release.
 CATALOG_DB_ASSET = "catalog.db"
 
+#: Name of the prebuilt whole-catalog PMTiles basemap asset on the same release
+#: (the vector tile pyramid ``umbra tiles`` builds -- published so a fresh
+#: install gets a whole-catalog map with no local tiling step).
+CATALOG_PMTILES_ASSET = "catalog.pmtiles"
+
 #: Stable download URL for the prebuilt SQLite index. GitHub redirects this
 #: ``/releases/download/<tag>/<asset>`` path to the current asset, so it always
 #: points at the latest weekly snapshot without an API call.
 CATALOG_INDEX_DB_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/{CATALOG_INDEX_RELEASE}/{CATALOG_DB_ASSET}"
+)
+
+#: Stable download URL for the prebuilt whole-catalog PMTiles basemap (same
+#: rolling-release redirect discipline as :data:`CATALOG_INDEX_DB_URL`).
+CATALOG_INDEX_PMTILES_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/"
+    f"{CATALOG_INDEX_RELEASE}/{CATALOG_PMTILES_ASSET}"
 )
 
 #: License Umbra applies to all open data.
