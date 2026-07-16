@@ -606,6 +606,29 @@ same 500 lines of glue first, and many give up."*
 > terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
 > adoption moves (5.3 registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-16):** the **catalog index gained a keyed single-item
+> lookup** — `CatalogIndex.get(item_id)` (`CODEBASE_ANALYSIS.md` §4.5 —
+> supporting infrastructure, §7). Discovery is the moat (§3), and the way that
+> moat now reaches every consumer is the *published* `catalog.db` snapshot that
+> `--local` search, `umbra serve`, `umbra demo` and the MCP server all read.
+> Listing that catalog was covered (`search`); the one primitive still answered
+> by a *scan* was fetching a single acquisition by id — `umbra serve`'s
+> `/collections/{id}/items/{item_id}` filtered an id-scoped search over the
+> ordered result set, fine at today's scale but a full walk of the page as the
+> snapshot grows. `get()` closes that with an `idx_items_id`-backed point lookup
+> (the retrieval complement to `search`'s listing), and the serve item endpoint
+> resolves through it (`serve.get_one`), falling back to the id-filtered search
+> only for the live source that can't do a keyed read. Not a new capability —
+> the point-lookup floor under the retrieval interface every `--local` consumer
+> shares (§7). It holds the project's grain and testability (§3): no model, no
+> new dependency, the whole path offline-tested against real SQLite, and the
+> index is *additive* — added with `CREATE INDEX IF NOT EXISTS`, so existing and
+> fetched snapshots gain it on the next open with no `PRAGMA user_version` bump,
+> the first exercise of the additive-schema path the schema-version marker was
+> landed to enable. The remaining strategic gaps are unchanged and largely
+> non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and
+> the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

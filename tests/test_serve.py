@@ -175,6 +175,35 @@ def test_single_item_by_id(client):
     assert client.get(f"/collections/{COLLECTION}/items/nope").status_code == 404
 
 
+def test_get_one_uses_keyed_lookup_for_an_index(index_path):
+    # A CatalogIndex source resolves the item through its keyed get(), not a scan.
+    with CatalogIndex(index_path) as idx:
+        item = serve.get_one(idx, "item-2")
+        assert item is not None and item.id == "item-2"
+        assert serve.get_one(idx, "missing") is None
+
+
+def test_get_one_falls_back_to_search_for_a_listing_source(sample_item_dict):
+    # A source that only lists (like the live UmbraCatalog) is filtered by id.
+    class _ListingSource:
+        def __init__(self, items):
+            self._items = items
+
+        def search(self, **kwargs):
+            limit = kwargs.get("limit")
+            out = list(self._items)
+            return out[:limit] if limit is not None else out
+
+    items = []
+    for i in range(3):
+        doc = copy.deepcopy(sample_item_dict)
+        doc["id"] = f"item-{i}"
+        items.append(UmbraItem.from_dict(doc, href=_href(i)))
+    source = _ListingSource(items)
+    assert serve.get_one(source, "item-2").id == "item-2"
+    assert serve.get_one(source, "missing") is None
+
+
 def test_search_filters_by_bbox(client):
     hit = client.get("/search?bbox=-69,10,-67,11").json()
     assert len(hit["features"]) == 3

@@ -186,6 +186,38 @@ def test_search_max_per_task(tmp_path):
     assert {i.task for i in items} == {"SiteA", "SiteB"}
 
 
+def test_get_returns_item_by_id(tmp_path):
+    with _index(tmp_path) as idx:
+        item = idx.get("a")
+    assert item is not None
+    assert item.id == "a"
+    assert item.task == "SiteA"
+    # A keyed lookup reconstructs the full item (assets + href), like search.
+    assert item.available_assets == ["GEC", "SICD"]
+    assert item.asset_href("GEC").endswith("2024-01-15-10-00-00_UMBRA-04_GEC.tif")
+
+
+def test_get_missing_id_returns_none(tmp_path):
+    with _index(tmp_path) as idx:
+        assert idx.get("nope") is None
+
+
+def test_get_uses_the_id_index(tmp_path):
+    # The keyed lookup rides an index; adding it is additive (no schema bump),
+    # so a legacy or reopened database gains it too.
+    import sqlite3
+
+    path = tmp_path / "catalog.db"
+    _index(tmp_path).close()
+    names = {
+        row[0]
+        for row in sqlite3.connect(str(path)).execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+    }
+    assert "idx_items_id" in names
+
+
 def test_add_is_idempotent_upsert(tmp_path):
     idx = CatalogIndex(tmp_path / "catalog.db")
     idx.add(_A)

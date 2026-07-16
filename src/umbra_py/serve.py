@@ -544,6 +544,20 @@ def run_search(
     return window[:limit], has_next
 
 
+def get_one(source: Any, item_id: str) -> UmbraItem | None:
+    """Fetch a single item by STAC id from a ``source``.
+
+    Prefers a :class:`CatalogIndex`'s keyed :meth:`~CatalogIndex.get` (an
+    ``idx_items_id``-backed point lookup) so ``GET .../items/{id}`` stays fast
+    as the snapshot grows; a live :class:`~umbra_py.catalog.UmbraCatalog`, which
+    only lists, falls back to an id-filtered :func:`run_search`.
+    """
+    if isinstance(source, CatalogIndex):
+        return source.get(item_id)
+    page, _ = run_search(source, ids=[item_id], limit=1)
+    return page[0] if page else None
+
+
 def open_source(index_path: str | os.PathLike | None = None, *, live: bool = False) -> Any:
     """Open the search backend for the server.
 
@@ -1161,14 +1175,12 @@ def build_app(
             raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
         source = _open()
         try:
-            page, _ = run_search(source, ids=[item_id], limit=1)
+            item = get_one(source, item_id)
         finally:
             _close(source)
-        if not page:
+        if item is None:
             raise HTTPException(status_code=404, detail=f"No item {item_id!r}")
-        return JSONResponse(
-            content=item_to_stac(page[0], str(request.base_url)), media_type=geojson
-        )
+        return JSONResponse(content=item_to_stac(item, str(request.base_url)), media_type=geojson)
 
     @app.get("/search", tags=["STAC"])
     def get_search(
