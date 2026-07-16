@@ -46,13 +46,21 @@ a SICD against any rasterio-readable elevation model (walk each GCP onto the DEM
 surface via the standard ortho fixed-point iteration). Shipped, closing the
 geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
 
-- **Vertical datum / geoid handling.** DEM heights are read in the DEM's own
-  vertical datum and fed straight to SICD's HAE (ellipsoidal) projection. Most
-  global DEMs (Copernicus GLO-30, SRTM) are referenced to the EGM geoid, not the
-  ellipsoid, so a rigorous result adds the geoid undulation (e.g. via a packaged
-  EGM grid or sarpy's `GeoidHeight`) before projecting. The current output is
-  correct to within the local geoid–ellipsoid separation, ample for map
-  placement; document or add an optional geoid grid for survey-grade use.
+- ~~**Vertical datum / geoid handling.**~~ ✅ **Done** (`umbra convert --geoid
+  PATH` / `sicd_to_geocoded_cog(geoid=…)`). Global DEMs (Copernicus GLO-30, SRTM)
+  quote height above the EGM geoid, but SICD's HAE projection wants height above
+  the ellipsoid; feeding the orthometric height in as-is mislocated relief by
+  roughly `N * tan(look_angle)` (the undulation `N` reaches ~±100 m worldwide).
+  `--geoid PATH` takes any rasterio-readable undulation grid (e.g. an EGM96/EGM2008
+  GeoTIFF) and adds `N` to each sampled DEM height (`hae = orthometric + N`) before
+  projecting. It requires `--dem` (it corrects DEM heights) and degrades gracefully
+  off the grid (`N=0`). The correction is a pure composition of two
+  `(lons, lats) -> heights` samplers (`_geoid_corrected_sampler`) — the geoid grid
+  is read with the very same injectable `_dem_height_sampler` — so it is fully
+  offline-tested with a hand-written grid, no new dependency, no packaged EGM data.
+  Without `--geoid` the output is unchanged (correct to the local geoid–ellipsoid
+  separation, ample for map placement). Remaining nicety: an optional `--geoid
+  auto` mirroring `--dem auto` (fetch a matching EGM2008 grid for the scene).
 - **MultiRTC / RTC recipes.** Radiometric terrain correction (flattening
   backscatter for local incidence angle over slopes) is a different job from the
   geometric orthorectification shipped here; interop with

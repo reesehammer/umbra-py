@@ -610,3 +610,138 @@ def test_cli_convert_dem_missing_path_errors(tmp_path):
     )
     assert result.exit_code != 0
     assert "does not exist" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# --geoid: correct DEM (orthometric) heights to ellipsoidal (HAE) before projecting.
+# --------------------------------------------------------------------------- #
+
+
+def test_geoid_corrected_sampler_adds_undulation():
+    np = pytest.importorskip("numpy")
+
+    def dem_sample(lons, lats):
+        return np.array([100.0, 200.0, np.nan])
+
+    def geoid_sample(lons, lats):
+        # Second point falls outside the undulation grid (NaN -> treated as 0).
+        return np.array([30.0, np.nan, 30.0])
+
+    sample = convert._geoid_corrected_sampler(dem_sample, geoid_sample)
+    out = sample(np.array([0.0, 1.0, 2.0]), np.array([0.0, 0.0, 0.0]))
+    # hae = orthometric + undulation; missing undulation contributes 0; a DEM NaN
+    # stays NaN so the refinement still falls back to the scene height there.
+    assert out[0] == pytest.approx(130.0)
+    assert out[1] == pytest.approx(200.0)
+    assert np.isnan(out[2])
+
+
+def test_sicd_to_geocoded_cog_with_geoid_shifts_geolocation(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "dem.tif")
+    # A constant +60 m undulation grid over the same footprint: every sampled DEM
+    # height becomes 60 m higher in HAE, so the terrain projection moves.
+    geoid = _write_dem(tmp_path / "geoid.tif", kind="const", const=60.0)
+
+    # DEM only (heights read as-is, assumed ellipsoidal).
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd(hae_shift=1e-4)))
+    dem_only = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "dem.out.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+    )
+
+    # DEM + geoid: undulation lifts every height, so the scene shifts.
+    sicd = _FakeSicd(hae_shift=1e-4)
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    corrected = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "geoid.out.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        geoid=str(geoid),
+    )
+
+    with rasterio.open(dem_only) as a, rasterio.open(corrected) as b:
+        assert a.crs.to_epsg() == 4326 and b.crs.to_epsg() == 4326
+        assert b.transform.e < 0  # still north-up
+        assert np.isfinite(b.read(1)).any()
+        # The undulation correction moved the geolocation measurably.
+        assert abs(a.bounds.right - b.bounds.right) > 1e-3
+
+
+def test_geoid_without_dem_raises(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    geoid = _write_dem(tmp_path / "geoid.tif", kind="const", const=30.0)
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 8), _FakeSicd()))
+    with pytest.raises(ValueError, match="geoid= requires dem="):
+        convert.sicd_to_geocoded_cog(tmp_path / "in.ntf", tmp_path / "out.tif", geoid=str(geoid))
+
+
+def test_cli_convert_with_geoid(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd(hae_shift=1e-4)))
+    dem = _write_dem(tmp_path / "dem.tif")
+    geoid = _write_dem(tmp_path / "geoid.tif", kind="const", const=45.0)
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(out), "--dem", str(dem), "--geoid", str(geoid)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-orthorectified" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_geoid_without_dem_errors(tmp_path):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    geoid = _write_dem(tmp_path / "geoid.tif", kind="const", const=30.0)
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "o.tif"), "--geoid", str(geoid)]
+    )
+    assert result.exit_code != 0
+    assert "--geoid requires --dem" in result.output
+
+
+def test_cli_convert_geoid_missing_path_errors(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    dem = _write_dem(tmp_path / "dem.tif")
+    missing = tmp_path / "nope.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(tmp_path / "o.tif"), "--dem", str(dem), "--geoid", str(missing)],
+    )
+    assert result.exit_code != 0
+    assert "does not exist" in result.output

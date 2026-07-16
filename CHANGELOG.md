@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Vertical-datum / geoid correction for terrain orthorectification —
+  `umbra convert --geoid PATH` / `sicd_to_geocoded_cog(geoid=…)`
+  (`docs/STRATEGY.md` 5.5).** Terrain orthorectification walks each control point
+  onto the DEM surface, but global DEMs (Copernicus GLO-30, SRTM) quote height
+  above the **EGM geoid** while SICD projects against the **ellipsoid**; feeding
+  the orthometric height in as-is mislocated relief by roughly `N·tan(look_angle)`
+  (the geoid undulation `N` reaches ~±100 m worldwide). `--geoid` takes any
+  rasterio-readable undulation grid (e.g. an EGM96/EGM2008 GeoTIFF) and adds `N`
+  to each sampled DEM height (`hae = orthometric + N`) before projecting, for
+  survey-grade geolocation over relief. The correction is a pure composition of
+  two injectable `(lons, lats) -> heights` samplers (`_geoid_corrected_sampler`) —
+  the geoid grid is read with the same `_dem_height_sampler` the DEM uses — so the
+  whole path is offline-tested with a hand-written grid, with no new dependency
+  and no packaged EGM data. It requires `--dem` (it corrects DEM heights, a hard
+  error without one), degrades gracefully to the uncorrected height off the grid,
+  and without it the output is unchanged (correct to the local geoid–ellipsoid
+  separation, ample for map placement).
 - **Auto-fetch the covering Copernicus DEM for terrain orthorectification —
   `umbra convert --dem auto` / `umbra_py.dem` (`docs/STRATEGY.md` 5.5).** DEM
   terrain orthorectification shipped as `--dem PATH`, but that still made the

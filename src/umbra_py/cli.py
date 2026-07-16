@@ -1214,8 +1214,19 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "Copernicus/SRTM COG), or 'auto' to fetch the covering Copernicus GLO-30 "
     "tiles for the scene automatically. Supersedes --projection.",
 )
+@click.option(
+    "--geoid",
+    type=str,
+    default=None,
+    metavar="PATH",
+    help="Path to a geoid-undulation grid (any raster rasterio can open, e.g. an "
+    "EGM96/EGM2008 GeoTIFF) giving ellipsoid-minus-geoid separation in metres. "
+    "Global DEMs quote height above the geoid but SICD projects against the "
+    "ellipsoid, so this converts sampled DEM heights to HAE for survey-grade "
+    "placement over relief. Requires --dem.",
+)
 def convert(
-    src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection, dem
+    src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection, dem, geoid
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
@@ -1246,6 +1257,14 @@ def convert(
     auto_dem = bool(dem) and dem.lower() == "auto"
     if dem and not auto_dem and not Path(dem).exists():
         raise click.BadParameter(f"DEM path does not exist: {dem}", param_hint="--dem")
+    if geoid and not dem:
+        raise click.BadParameter(
+            "--geoid requires --dem: the geoid correction adjusts DEM heights to "
+            "ellipsoidal (HAE).",
+            param_hint="--geoid",
+        )
+    if geoid and not Path(geoid).exists():
+        raise click.BadParameter(f"Geoid path does not exist: {geoid}", param_hint="--geoid")
 
     label = "Terrain-geocoding" if dem else "Geocoding"
     with OrbitSpinner(f"{label} {Path(src).name}"):
@@ -1258,6 +1277,7 @@ def convert(
             resampling=resampling.lower(),
             projection_type=projection.upper(),
             dem=dem,
+            geoid=geoid,
         )
     kind = "terrain-orthorectified COG" if dem else "geocoded COG"
     click.echo(f"Wrote {kind} to {path}")
