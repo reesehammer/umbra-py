@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Structured `--json` success output on the remaining commands
+  (`docs/AI_INTEGRATION_IDEAS.md` §A1).** The machine-readable *error* contract
+  already shipped; this completes the *success* side, so every command that
+  produces a result now has a stable, machine-readable stdout shape:
+  - `umbra download --json` emits a `[{asset, path, bytes, sha256}, …]` array,
+    hashing each written file with a streaming SHA-256 so a caller can verify
+    what it fetched without re-reading it
+    (`docs/schemas/download.schema.json`).
+  - `umbra index info --json` emits the index summary — `path`, `size_bytes`,
+    `items`, `start`, `end`, `tasks`, `built_at`
+    (`docs/schemas/index-info.schema.json`).
+  - The render commands `change`, `timescan`, `swipe`, `gallery` and `map`
+    accept `--json` and emit a `{output, items_used, parameters}` manifest
+    naming the artifact written, the acquisition ids it was built from, and the
+    settings used; a command that also writes an auxiliary file (e.g.
+    `umbra change --narrate`'s narration JSON) lists it under an optional
+    `sidecars` map (`docs/schemas/render-manifest.schema.json`).
+
+  Human progress lines, warnings, and the `--place` "Resolved …" status line go
+  to stderr under `--json`, so stdout carries the JSON alone. The three new
+  schemas are published as public API alongside the error contract
+  (`docs/schemas/README.md`), under the same backwards-compatibility rules as
+  `umbra_py.__all__`.
 - **Machine-readable errors (`docs/AI_INTEGRATION_IDEAS.md` §A1).** Every
   `UmbraError` now carries an optional `hint` — a single actionable recovery
   step — and serializes to a stable `{"error", "message", "hint"}` dict via

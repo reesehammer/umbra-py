@@ -9,6 +9,27 @@ with a `CHANGELOG.md` entry.
 | Schema | Describes | Produced by |
 | --- | --- | --- |
 | [`error.schema.json`](error.schema.json) | The JSON error object printed to stderr on failure. | `umbra_py.UmbraError.to_dict()`; the `cli.main` error path when `--json` / `UMBRA_JSON` is active. |
+| [`download.schema.json`](download.schema.json) | The `[{asset, path, bytes, sha256}, …]` array printed to stdout on success. | `umbra download --json`. |
+| [`index-info.schema.json`](index-info.schema.json) | The index-stats object (path, size, item/task counts, date span, build date) printed to stdout. | `umbra index info --json`. |
+| [`render-manifest.schema.json`](render-manifest.schema.json) | The `{output, items_used, parameters}` manifest printed to stdout on success. | `umbra change` / `timescan` / `swipe` / `gallery` / `map`, each with `--json`. |
+
+## Structured success output
+
+The error contract above is the failure side; each command that produces a
+result also has a `--json` success shape, so an agent can depend on stdout being
+a single machine-readable object (progress and warnings stay on stderr):
+
+- **`umbra download --json`** emits one `{asset, path, bytes, sha256}` record per
+  downloaded asset ([`download.schema.json`](download.schema.json)) — the caller
+  can verify each file without re-hashing it.
+- **`umbra index info --json`** emits the index summary
+  ([`index-info.schema.json`](index-info.schema.json)).
+- **The render commands** (`change`, `timescan`, `swipe`, `gallery`, `map`) emit
+  a `{output, items_used, parameters}` manifest
+  ([`render-manifest.schema.json`](render-manifest.schema.json)) naming the file
+  produced, the acquisitions it was built from, and the settings used. A command
+  that also writes an auxiliary file (e.g. `umbra change --narrate`'s narration
+  JSON) lists it under an optional `sidecars` object.
 
 ## Machine-readable errors
 

@@ -308,8 +308,10 @@ def llms_full_txt() -> str:
     lines.append("")
     lines.append(
         "The CLI subcommands map 1:1 to library functions. Run any command with "
-        "`--help` for its full options; `--json` is available where a structured "
-        "result makes sense (`search`, `info`)."
+        "`--help` for its full options; `--json` emits a machine-readable result "
+        "on the commands that produce one (`search`, `info`, `download`, `index "
+        "info`, and the render commands `change`/`timescan`/`swipe`/`gallery`/`map`) "
+        "-- see `docs/schemas/` for the shapes."
     )
     lines.append("")
     for command, short_help in _command_reference():
