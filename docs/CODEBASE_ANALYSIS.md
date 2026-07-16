@@ -342,9 +342,17 @@ warns a full index build "takes a while." Two structural improvements:
   no `check_same_thread=False` handling, no busy timeout. Fine single-process;
   document that, or set `PRAGMA journal_mode=WAL` for concurrent readers
   (which the prebuilt-index use case will invite).
-- **No schema version marker.** The first time the schema changes, existing
-  user DBs will break confusingly. Add `PRAGMA user_version = 1` now and check
-  it on open — trivially cheap before there are deployed DBs, expensive after.
+- ~~**No schema version marker.**~~ ✅ **Fixed.** `CatalogIndex` now stamps
+  `PRAGMA user_version = 1` on create and checks it on open (`index.py`,
+  `_SCHEMA_VERSION` + `_init_schema`). A fresh or pre-versioning database
+  (`user_version 0`, which every deployed `catalog.db` and fetched snapshot
+  currently reads) is adopted in place and stamped; a database written by a
+  *newer* umbra-py — or a lower versioned schema with no migration — raises
+  `IndexSchemaError` (surfaced by the CLI as a clean `error: …`) instead of
+  being silently misread. This is what makes the next schema change (the
+  demo-oriented denormalizations in `DEMO_APP_GAPS.md` G2, an R\*Tree upgrade)
+  a migration rather than a confusing break — landed while every deployed DB
+  still shares one layout, as this recommendation urged.
 - bbox queries do a full table scan with range predicates. At the current
   catalog scale (thousands of items) this is irrelevant; if the index grows to
   hundreds of thousands, SQLite's built-in R*Tree module is the natural
@@ -432,7 +440,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 7 | Escape all remote-derived strings in `viz._popup_html`; validate href scheme | `viz.py:159-208` | small |
 | 8 | Fix the ledgered `_classify_asset` `"tif"` dead-branch bug with a regression test; delete the TODO entry | `models.py:30`, `TODO.md` | ~5 lines |
 | 9 | ✅ **Done.** `_walk_task` collects in-range acquisitions in date order and fetches their sidecars through a bounded `ThreadPoolExecutor` (`_items_from_sidecars`, `_SIDECAR_WORKERS=8`), yielding in sorted order; windowed so `limit` caps over-fetch, session `pool_maxsize` raised to 16 | `catalog.py:_walk_task`, `_http.py` | medium |
-| 10 | Add `PRAGMA user_version` schema versioning to `CatalogIndex` before any DBs are in the wild | `index.py` | small |
+| 10 | ✅ **Done.** `CatalogIndex` stamps `PRAGMA user_version = 1` on create and checks it on open (`_SCHEMA_VERSION` + `_init_schema`): a fresh/pre-versioning DB is adopted and stamped, a newer or un-migratable version raises `IndexSchemaError`. Landed while every deployed DB still shares one layout, so the next schema change is a migration, not a break | `index.py`, `exceptions.py` | small |
 
 **P2 — hardening & hygiene**
 

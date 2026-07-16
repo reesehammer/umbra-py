@@ -34,8 +34,18 @@ from pathlib import Path
 
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
+from .exceptions import IndexSchemaError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem
+
+#: On-disk schema version, stored via ``PRAGMA user_version``. Bump it whenever
+#: the table layout changes (a new column, a new index the queries assume) so an
+#: index written by an incompatible umbra-py is detected on open rather than
+#: misread. The index is the expensive, *published* artifact every ``--local``
+#: path and the prebuilt ``catalog.db`` snapshot depend on, so stamping the
+#: version now -- while every deployed database still shares one layout -- is what
+#: makes a future migration possible instead of a confusing break.
+_SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -140,8 +150,47 @@ class CatalogIndex:
         self.path = Path(path) if path is not None else default_index_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Create or adopt the schema, guarding on the ``PRAGMA user_version``.
+
+        A fresh database reads ``user_version == 0``; so does a legacy database
+        written before versioning existed -- and because this is schema
+        version 1 (the first marker) a legacy database already has exactly this
+        layout, so both cases are handled by creating the (idempotent) schema and
+        stamping the version. A database written by a *newer* umbra-py is
+        unreadable and raises :class:`~umbra_py.exceptions.IndexSchemaError`
+        rather than being silently misread; a lower non-zero version would be an
+        older versioned schema needing a migration this build doesn't carry, so
+        it raises the same, pointing at a rebuild.
+        """
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            # Fresh or pre-versioning database: ensure the schema and stamp it.
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            self._conn.commit()
+        elif version == _SCHEMA_VERSION:
+            # Same layout; make sure any additive `CREATE ... IF NOT EXISTS`
+            # objects are present, then leave the stamp untouched.
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
+        elif version > _SCHEMA_VERSION:
+            self._conn.close()
+            raise IndexSchemaError(
+                f"Catalog index at {self.path} has schema version {version}, but "
+                f"this umbra-py supports version {_SCHEMA_VERSION}. Upgrade umbra-py, "
+                "or rebuild the index with 'umbra index build' / 'umbra index fetch'."
+            )
+        else:  # 0 < version < _SCHEMA_VERSION -- an older schema with no migration
+            self._conn.close()
+            raise IndexSchemaError(
+                f"Catalog index at {self.path} has an older schema version {version} "
+                f"(this umbra-py uses version {_SCHEMA_VERSION}) and cannot be "
+                "migrated in place. Rebuild it with 'umbra index build' or refetch "
+                "with 'umbra index fetch'."
+            )
 
     @classmethod
     def from_release(

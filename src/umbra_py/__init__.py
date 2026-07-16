@@ -43,6 +43,7 @@ from .exceptions import (
     CatalogError,
     DownloadError,
     GeocodeError,
+    IndexSchemaError,
     MissingDependencyError,
     UmbraError,
 )
@@ -164,6 +165,7 @@ __all__ = [
     "llms_full_txt",
     "UmbraError",
     "CatalogError",
+    "IndexSchemaError",
     "AssetNotFoundError",
     "DownloadError",
     "MissingDependencyError",

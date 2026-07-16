@@ -24,6 +24,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escaped its inputs and was unchanged.
 
 ### Added
+- **The local catalog index is now schema-versioned (`docs/CODEBASE_ANALYSIS.md`
+  §4.5 / P1 #10).** `CatalogIndex` records its on-disk layout with
+  `PRAGMA user_version` (`_SCHEMA_VERSION = 1`) and checks it on open. This
+  matters because the index is no longer a private cache — the weekly `catalog.db`
+  snapshot users pull with `umbra index fetch` is a *distributed* artifact that
+  `--local` search, the MCP server, `umbra serve`, `umbra demo` and `umbra tiles`
+  all consume — so the next schema change (the demo denormalizations in
+  `docs/DEMO_APP_GAPS.md` G2, an R\*Tree upgrade) needs to be a migration, not a
+  confusing break. A fresh or pre-versioning database (`user_version 0`, which
+  every current snapshot reads) is adopted in place and stamped; a database
+  written by a *newer* umbra-py — or a lower versioned schema with no migration
+  path — now raises the new `IndexSchemaError` (surfaced by the CLI as a clean
+  `error: …`) instead of being silently misread. No new dependency, no behaviour
+  change for a matching index; mirrors the `PRAGMA user_version` discipline the
+  `catalog.embed.db` sidecar already used. `IndexSchemaError` is exported from the
+  top-level package.
 - **STAC Query extension on `umbra serve` — filter `/search` by product type and
   place, not just bbox/date (`docs/AI_INTEGRATION_IDEAS.md` §B2 / `docs/DEMO_APP_GAPS.md`
   Path B).** The read-only STAC API answered only the STAC *core* filters (bbox,

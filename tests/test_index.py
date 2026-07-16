@@ -640,3 +640,120 @@ def test_cli_index_update_refreshes_and_reports(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "1 new" in result.output
     assert "index now holds 4" in result.output
+
+
+# -- schema versioning -------------------------------------------------------
+
+
+def test_fresh_index_stamps_schema_version(tmp_path):
+    """A newly created database records the current schema version."""
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path):
+        pass
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_reopen_current_version_preserves_rows(tmp_path):
+    """Re-opening a same-version index keeps its data and version stamp."""
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    path = tmp_path / "catalog.db"
+    with _index(path.parent):  # writes catalog.db with a, b, c
+        pass
+    with CatalogIndex(path) as idx:  # second open must not wipe or re-stamp
+        assert {i.id for i in idx.search()} == {"a", "b", "c"}
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_legacy_unversioned_index_is_adopted(tmp_path):
+    """A pre-versioning database (user_version 0) is stamped, not rejected.
+
+    Databases built before schema versioning -- including a fetched snapshot --
+    read ``user_version == 0`` but already have exactly the version-1 layout, so
+    opening them must adopt them in place without losing rows.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA, _SCHEMA_VERSION
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_SCHEMA)  # schema, but deliberately no PRAGMA user_version
+    conn.execute(
+        "INSERT INTO items (href, id, doc) VALUES (?, ?, ?)",
+        ("h", "old", '{"id": "old", "assets": {}}'),
+    )
+    conn.commit()
+    conn.close()
+    assert sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0] == 0
+
+    with CatalogIndex(path) as idx:
+        assert {i.id for i in idx.search()} == {"old"}
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_newer_schema_version_is_rejected(tmp_path):
+    """A database written by a newer umbra-py raises rather than misreading."""
+    import sqlite3
+
+    import pytest
+
+    from umbra_py.exceptions import IndexSchemaError
+    from umbra_py.index import _SCHEMA_VERSION
+
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path):
+        pass
+    conn = sqlite3.connect(str(path))
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(IndexSchemaError) as exc:
+        CatalogIndex(path)
+    assert str(_SCHEMA_VERSION + 1) in str(exc.value)
+
+
+def test_older_schema_version_is_rejected(tmp_path):
+    """A lower non-zero version is an un-migratable older schema; it raises.
+
+    Version 1 is the first stamp, so this branch is unreachable today; the test
+    forces a synthetic in-between stamp so the guard is exercised and stays
+    correct when the schema version is bumped.
+    """
+    import sqlite3
+
+    import pytest
+
+    from umbra_py.exceptions import IndexSchemaError
+    from umbra_py.index import _SCHEMA_VERSION
+
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path):
+        pass
+    conn = sqlite3.connect(str(path))
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")  # a real, current stamp...
+    conn.commit()
+    conn.close()
+
+    # ...then monkeypatch the module constant upward so the on-disk stamp reads
+    # as an older schema the running build no longer matches.
+    import umbra_py.index as index_mod
+
+    original = index_mod._SCHEMA_VERSION
+    index_mod._SCHEMA_VERSION = original + 1
+    try:
+        with pytest.raises(IndexSchemaError) as exc:
+            CatalogIndex(path)
+        assert "older schema" in str(exc.value)
+    finally:
+        index_mod._SCHEMA_VERSION = original
