@@ -554,6 +554,34 @@ same 500 lines of glue first, and many give up."*
 > non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-16):** the **catalog index is now schema-versioned**
+> (`CODEBASE_ANALYSIS.md` §4.5 / P1 #10 — supporting infrastructure, §7).
+> Discovery is the moat (§3), and the way that moat now reaches a fresh install
+> without a multi-minute crawl is the *published* `catalog.db` snapshot users
+> `umbra index fetch` — which means the index is no longer a private cache but a
+> distributed artifact every `--local` path, the MCP server, `umbra serve`,
+> `umbra demo` and `umbra tiles` all consume. The one thing that turns a future
+> improvement of that index (the demo-oriented denormalizations
+> `DEMO_APP_GAPS.md` G2 wants — a precomputed centroid, a cached place label — or
+> an R\*Tree spatial upgrade) from a clean migration into a confusing break was
+> the missing schema-version marker: with DBs already in the wild, the next
+> schema change would fail every deployed snapshot with no explanation.
+> `CatalogIndex` now stamps `PRAGMA user_version` on create and checks it on
+> open — a fresh or pre-versioning database (`user_version 0`, which every
+> current snapshot reads) is adopted in place and stamped, while a database
+> written by a *newer* umbra-py, or a lower version with no migration path,
+> raises a self-describing `IndexSchemaError` (a clean CLI `error: …`) instead of
+> being silently misread. Not a new capability — the guardrail (§6 "keep the
+> crawl incremental" / reliability floor, §7) that keeps the prebuilt-index
+> distribution the whole discovery story now rests on evolvable. It holds the
+> project's grain and testability (§3): no model, no new dependency, and the
+> whole fresh/legacy/newer/older path is offline-tested against real SQLite
+> databases — mirroring the same `PRAGMA user_version` discipline the
+> `catalog.embed.db` sidecar already held. The remaining strategic gaps are
+> unchanged and largely non-code: 5.5's full terrain orthorectification (a DEM,
+> MultiRTC interop) and the maintainer-side adoption moves (5.3 registries, 5.6
+> talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
