@@ -89,6 +89,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)`), and geocoding's no-match error
   points at `--bbox`.
 
+### Fixed
+- **Asset classification no longer drops GeoTIFF products identified only by a
+  `.tif` key (`docs/CODEBASE_ANALYSIS.md` P1 #8).** `models._classify_asset`
+  built an upper-cased `name` but probed it for a lowercase `"tif"`, so that
+  branch never matched. Any acquisition whose STAC assets use filename-style
+  keys (`..._MM.tif`, `..._CSI_MM.tif`) with no geotiff media type — the current
+  href-less catalog generation — silently classified to nothing, so its primary
+  GEC (and CSI) product disappeared from `available_assets` / `asset_map` and
+  became undownloadable via the canonical product name. The extension probe is
+  now `"TIF" in name`; a regression test covers classification from the
+  extension alone (empty media type), and the ledgered `TODO.md` entry is
+  removed. Assets that already carried an `image/tiff; …geotiff…` media type were
+  unaffected, so no correctly-tagged catalog item changes.
+
 ### Security
 - **Generated HTML now escapes all remote metadata and validates link schemes
   (`docs/CODEBASE_ANALYSIS.md` §3.1).** The map/gallery/swipe/change artifacts

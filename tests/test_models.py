@@ -108,6 +108,29 @@ def test_derive_data_url_returns_none_for_unrecognised_keys():
     assert _derive_data_url("plain.txt", task_id="t") is None
 
 
+def test_classify_asset_by_extension_without_geotiff_media_type():
+    """A GeoTIFF identified only by its `.tif` key must still classify.
+
+    The current href-less catalog generation publishes assets with
+    filename-style keys (`..._MM.tif`, `..._CSI_MM.tif`) and no geotiff media
+    type, so classification has to fall back to the file extension. A
+    case-mismatched extension probe silently dropped these, hiding the primary
+    GEC product. Regression for CODEBASE_ANALYSIS P1 #8.
+    """
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "task-abc"},
+            "assets": {
+                "2025-06-22-23-57-52_UMBRA-10_MM.tif": {"href": ""},
+                "2025-06-22-23-57-52_UMBRA-10_CSI_MM.tif": {"href": ""},
+            },
+        }
+    )
+    assert "GEC" in item.available_assets
+    assert "CSI" in item.available_assets
+
+
 def _new_style_item():
     return UmbraItem.from_dict(
         {

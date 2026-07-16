@@ -36,7 +36,11 @@ def _classify_asset(key: str, asset: dict[str, Any]) -> str | None:
     """
     name = f"{key} {asset.get('href', '')}".upper()
     media = (asset.get("type") or "").lower()
-    is_geotiff = "tif" in name or "geotiff" in media
+    # `name` is upper-cased, so the extension probe must be too; a lowercase
+    # "tif" here never matched, which silently dropped any GeoTIFF identified
+    # only by its `.tif`/`.tiff` key when the STAC asset carried no geotiff
+    # media type (the current href-less catalog generation). See CODEBASE_ANALYSIS P1 #8.
+    is_geotiff = "TIF" in name or "geotiff" in media
 
     if "CPHD" in name:
         return "CPHD"
