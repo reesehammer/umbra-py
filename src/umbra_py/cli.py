@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -63,7 +64,8 @@ def _resolve_search_bbox(
             resolved, label = geocode_place(place)
         except GeocodeError as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo(f"Resolved '{place}' to {label}.")
+        # Status line to stderr so it never corrupts a --json manifest on stdout.
+        click.echo(f"Resolved '{place}' to {label}.", err=True)
         return resolved
     return _parse_bbox(bbox)
 
@@ -169,6 +171,53 @@ def _fuzzy_option(func):
         "'Centerfield, Utah'). Deterministic, no model call; a strict superset "
         "of the substring match.",
     )(func)
+
+
+def _manifest_option(func):
+    """Attach the shared ``--json`` flag that turns a render command's human
+    "Wrote ... to ..." output into a machine-readable manifest on stdout.
+
+    The manifest is ``{output, items_used, parameters}`` (see
+    ``docs/schemas/render-manifest.schema.json``) so an agent knows exactly what
+    file was produced, from which acquisitions, and with which settings -- the
+    success-side counterpart to the machine-readable error contract. Progress and
+    warnings still go to stderr, so stdout carries the JSON object alone.
+    """
+    return click.option(
+        "--json",
+        "as_json",
+        is_flag=True,
+        help="Emit a machine-readable {output, items_used, parameters} manifest "
+        "on stdout instead of the human 'Wrote ...' line. Progress and warnings "
+        "stay on stderr, so stdout is the JSON object alone.",
+    )(func)
+
+
+def _emit_render_manifest(out_path, items, parameters, sidecars=None) -> None:
+    """Print a render command's success manifest as JSON to stdout.
+
+    ``items`` are the acquisitions the artifact was built from (their ids become
+    ``items_used``); ``parameters`` is the command-specific settings dict; and
+    ``sidecars`` maps a name to any auxiliary file the command also wrote (e.g. a
+    change narration JSON). Matches ``docs/schemas/render-manifest.schema.json``.
+    """
+    manifest: dict = {
+        "output": str(out_path),
+        "items_used": [it.id for it in items],
+        "parameters": parameters,
+    }
+    if sidecars:
+        manifest["sidecars"] = {name: str(path) for name, path in sidecars.items()}
+    click.echo(json.dumps(manifest, indent=2))
+
+
+def _sha256_file(path: Path) -> str:
+    """Stream a file through SHA-256, bounding memory to one chunk."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _progress_printer(label: str):
@@ -835,18 +884,49 @@ def describe(item_url, asset, model, max_size, db, as_json) -> None:
 )
 @click.option("--dest", default=".", show_default=True, help="Output directory.")
 @click.option("--overwrite", is_flag=True, help="Re-download if the file exists.")
-def download(item_url, assets, dest, overwrite) -> None:
-    """Download asset(s) of an item given its STAC JSON URL."""
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit one {asset, path, bytes, sha256} record per downloaded asset as a "
+    "JSON array on stdout (see docs/schemas/download.schema.json), instead of the "
+    "human progress lines. Progress stays on stderr.",
+)
+def download(item_url, assets, dest, overwrite, as_json) -> None:
+    """Download asset(s) of an item given its STAC JSON URL.
+
+    ``--json`` emits a machine-readable ``[{asset, path, bytes, sha256}, ...]``
+    array (``docs/schemas/download.schema.json``) so an agent can verify each
+    file it just fetched without re-hashing it.
+    """
     item = UmbraItem.from_dict(get_json(item_url), href=item_url)
     names = list(assets) or item.available_assets
     if not names:
         raise click.ClickException("No downloadable assets found on this item.")
+    records: list[dict] = []
     for name in names:
-        click.echo(f"Downloading {name} of {item.id} ...")
+        if not as_json:
+            click.echo(f"Downloading {name} of {item.id} ...")
         path = download_item(
-            item, dest, assets=[name], overwrite=overwrite, progress=_progress_printer(name)
+            item,
+            dest,
+            assets=[name],
+            overwrite=overwrite,
+            progress=None if as_json else _progress_printer(name),
         )[0]
-        click.echo(f"\n  -> {path}")
+        if as_json:
+            records.append(
+                {
+                    "asset": name,
+                    "path": str(path),
+                    "bytes": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                }
+            )
+        else:
+            click.echo(f"\n  -> {path}")
+    if as_json:
+        click.echo(json.dumps(records, indent=2))
 
 
 def _parse_percentile(value: str) -> tuple[float, float]:
@@ -1426,6 +1506,7 @@ def chips(
 )
 @_local_index_options
 @_fuzzy_option
+@_manifest_option
 def change(
     item_urls,
     out_path,
@@ -1446,6 +1527,7 @@ def change(
     model,
     local,
     db_path,
+    as_json,
 ) -> None:
     """Render multi-temporal SAR change: a color composite or a time-lapse.
 
@@ -1527,16 +1609,18 @@ def change(
                 "apparent change may be a polarization difference, not real change.",
                 err=True,
             )
-        if animate:
-            span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
-            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
-        else:
-            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s):")
-            for it in items:
-                when = it.datetime.isoformat() if it.datetime else "unknown time"
-                click.echo(f"  {when}  {it.id}")
+        if not as_json:
+            if animate:
+                span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
+                click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+            else:
+                click.echo(f"Selected {len(items)} of {len(found)} acquisition(s):")
+                for it in items:
+                    when = it.datetime.isoformat() if it.datetime else "unknown time"
+                    click.echo(f"  {when}  {it.id}")
 
     grid = max_size if max_size is not None else (1024 if animate else 2048)
+    sidecars: dict = {}
     if animate:
         with OrbitSpinner(f"Rendering {len(items)}-frame time-lapse"):
             path = save_change_animation(
@@ -1549,7 +1633,8 @@ def change(
                 percentile=_parse_percentile(percentile),
                 fps=fps,
             )
-        click.echo(f"Wrote time-lapse to {path}")
+        if not as_json:
+            click.echo(f"Wrote time-lapse to {path}")
     elif narrate:
         # Render the composite ONCE (the expensive co-registration) and reuse the
         # exact bytes for both the written file and the model, so the narration is
@@ -1576,12 +1661,14 @@ def change(
         except (NarrateError, UmbraError) as exc:
             raise click.ClickException(str(exc)) from exc
 
-        click.echo(f"Wrote change composite to {path}")
         sidecar = Path(out_path).with_suffix(".narration.json")
         sidecar.write_text(json.dumps(narration.to_dict(), indent=2))
-        click.echo(f"Wrote change narration to {sidecar}")
-        click.echo("")
-        click.echo(narration.to_text())
+        sidecars["narration"] = sidecar
+        if not as_json:
+            click.echo(f"Wrote change composite to {path}")
+            click.echo(f"Wrote change narration to {sidecar}")
+            click.echo("")
+            click.echo(narration.to_text())
     else:
         with OrbitSpinner(f"Rendering change composite of {len(items)} acquisitions"):
             path = save_change_composite(
@@ -1592,7 +1679,26 @@ def change(
                 db=db,
                 percentile=_parse_percentile(percentile),
             )
-        click.echo(f"Wrote change composite to {path}")
+        if not as_json:
+            click.echo(f"Wrote change composite to {path}")
+
+    if as_json:
+        parameters: dict = {
+            "asset": asset,
+            "max_size": grid,
+            "db": db,
+            "percentile": percentile,
+            "mode": "animation" if animate else "composite",
+        }
+        if animate:
+            parameters["fps"] = fps
+            if colormap:
+                parameters["colormap"] = colormap
+        else:
+            parameters["frames"] = frames
+            if narrate:
+                parameters["narrate"] = True
+        _emit_render_manifest(path, items, parameters, sidecars or None)
 
 
 @cli.command()
@@ -1666,6 +1772,7 @@ def change(
 )
 @_local_index_options
 @_fuzzy_option
+@_manifest_option
 def timescan(
     item_urls,
     out_path,
@@ -1682,6 +1789,7 @@ def timescan(
     percentile,
     local,
     db_path,
+    as_json,
 ) -> None:
     """Collapse a whole SAR time series into one temporal-statistics image.
 
@@ -1750,8 +1858,9 @@ def timescan(
                 "apparent variability may be a polarization difference, not real change.",
                 err=True,
             )
-        span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
-        click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+        if not as_json:
+            span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
 
     with OrbitSpinner(f"Rendering timescan of {len(items)} acquisitions"):
         path = save_timescan_composite(
@@ -1762,7 +1871,14 @@ def timescan(
             db=db,
             percentile=_parse_percentile(percentile),
         )
-    click.echo(f"Wrote timescan composite to {path}")
+    if as_json:
+        _emit_render_manifest(
+            path,
+            items,
+            {"asset": asset, "max_size": max_size, "db": db, "percentile": percentile},
+        )
+    else:
+        click.echo(f"Wrote timescan composite to {path}")
 
 
 @cli.command()
@@ -1829,6 +1945,7 @@ def timescan(
 )
 @_local_index_options
 @_fuzzy_option
+@_manifest_option
 def swipe(
     item_urls,
     out_path,
@@ -1844,6 +1961,7 @@ def swipe(
     percentile,
     local,
     db_path,
+    as_json,
 ) -> None:
     """Render an interactive before/after swipe map of two SAR passes.
 
@@ -1903,10 +2021,11 @@ def swipe(
                 "apparent change may be a polarization difference, not real change.",
                 err=True,
             )
-        click.echo(f"Comparing {len(found)} found acquisition(s):")
-        for it in (before, after):
-            when = it.datetime.isoformat() if it.datetime else "unknown time"
-            click.echo(f"  {when}  {it.id}")
+        if not as_json:
+            click.echo(f"Comparing {len(found)} found acquisition(s):")
+            for it in (before, after):
+                when = it.datetime.isoformat() if it.datetime else "unknown time"
+                click.echo(f"  {when}  {it.id}")
 
     with OrbitSpinner("Rendering swipe map"):
         path = save_swipe_map(
@@ -1918,7 +2037,14 @@ def swipe(
             db=db,
             percentile=_parse_percentile(percentile),
         )
-    click.echo(f"Wrote swipe map to {path}")
+    if as_json:
+        _emit_render_manifest(
+            path,
+            [before, after],
+            {"asset": asset, "max_size": max_size, "db": db, "percentile": percentile},
+        )
+    else:
+        click.echo(f"Wrote swipe map to {path}")
 
 
 def _search_subtitle(area, bbox, start, end) -> str | None:
@@ -2023,6 +2149,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
 )
 @_local_index_options
 @_fuzzy_option
+@_manifest_option
 def gallery(
     bbox,
     place,
@@ -2042,6 +2169,7 @@ def gallery(
     workers,
     local,
     db_path,
+    as_json,
 ) -> None:
     """Render search results as a browseable HTML SAR thumbnail gallery.
 
@@ -2083,7 +2211,20 @@ def gallery(
             max_workers=workers,
             subtitle=_search_subtitle(place or area, bbox, start, end),
         )
-    click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
+    if as_json:
+        _emit_render_manifest(
+            path,
+            items,
+            {
+                "asset": asset,
+                "products": list(products) or [asset],
+                "max_size": max_size,
+                "db": db,
+                "percentile": percentile,
+            },
+        )
+    else:
+        click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
 
 
 @cli.command()
@@ -2469,6 +2610,7 @@ def tiles(
     "HTML output only; mutually exclusive with --imagery.",
 )
 @_local_index_options
+@_manifest_option
 def map_cmd(
     bbox,
     place,
@@ -2486,6 +2628,7 @@ def map_cmd(
     lazy_imagery,
     local,
     db_path,
+    as_json,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     search_bbox = _resolve_search_bbox(bbox, place)
@@ -2568,7 +2711,21 @@ def map_cmd(
         raise click.ClickException(
             "Unrecognized output extension. Use .html for a map or .geojson for data."
         )
-    click.echo(f"Wrote {len(items)} footprint(s) to {path}")
+    if as_json:
+        _emit_render_manifest(
+            path,
+            items,
+            {
+                "format": "geojson" if lower.endswith((".geojson", ".json")) else "html",
+                "products": list(products) or None,
+                "imagery": imagery,
+                "lazy_imagery": lazy_imagery,
+                "timeline": timeline,
+                "geocode": geocode,
+            },
+        )
+    else:
+        click.echo(f"Wrote {len(items)} footprint(s) to {path}")
 
 
 @cli.group()
@@ -2812,14 +2969,30 @@ def index_export(db_path, out_path) -> None:
     default=None,
     help="Index database to inspect (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
 )
-def index_info(db_path) -> None:
-    """Show what a local index holds: item count, date span and task count."""
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the index stats as a JSON object on stdout "
+    "(see docs/schemas/index-info.schema.json) instead of the human summary.",
+)
+def index_info(db_path, as_json) -> None:
+    """Show what a local index holds: item count, date span and task count.
+
+    ``--json`` emits the stats as a machine-readable object
+    (``docs/schemas/index-info.schema.json``): ``path``, ``size_bytes``,
+    ``items``, ``start``, ``end``, ``tasks`` and ``built_at``.
+    """
     path = _index_path(db_path)
     if not path.exists():
         raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
     with CatalogIndex(path) as idx:
         s = idx.stats()
-    size_mb = path.stat().st_size / 1e6
+    size_bytes = path.stat().st_size
+    if as_json:
+        click.echo(json.dumps({"path": str(path), "size_bytes": size_bytes, **s}, indent=2))
+        return
+    size_mb = size_bytes / 1e6
     click.echo(f"Index: {path}")
     click.echo(f"  items : {s['items']}")
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/index-info.schema.json",
+  "title": "umbra-py index-info object",
+  "description": "The JSON object umbra-py prints to stdout when 'umbra index info --json' succeeds: a machine-readable summary of a local catalog index. Produced from CatalogIndex.stats() plus the database's path and size. Stable within a minor version.",
+  "type": "object",
+  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "built_at"],
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Filesystem path of the index database that was inspected."
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size of the index database file in bytes."
+    },
+    "items": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of acquisitions held in the index."
+    },
+    "start": {
+      "type": ["string", "null"],
+      "description": "Earliest indexed acquisition date (YYYY-MM-DD), or null when the index is empty."
+    },
+    "end": {
+      "type": ["string", "null"],
+      "description": "Latest indexed acquisition date (YYYY-MM-DD), or null when the index is empty."
+    },
+    "tasks": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of distinct Umbra tasks/sites represented in the index."
+    },
+    "built_at": {
+      "type": ["string", "null"],
+      "description": "The date the index was last built (YYYY-MM-DD), or null for an index written before build stamping or hand-assembled."
+    }
+  }
+}

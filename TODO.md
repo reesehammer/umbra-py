@@ -9,27 +9,6 @@ the bottom if the history is useful).
 
 ---
 
-## Structured `--json` success output on the remaining commands (A1 follow-on)
-
-- **Surfaced in:** the machine-readable-errors PR (`docs/AI_INTEGRATION_IDEAS.md`
-  §A1).
-- **Code:** `download`, `index info`, and the render commands (`change`,
-  `timescan`, `swipe`, `map`, `gallery`) in `src/umbra_py/cli.py`.
-
-The A1 error contract shipped (structured stderr errors with `hint`, published
-as `docs/schemas/error.schema.json`), but the success-side `--json` guarantee is
-still partial. Remaining, each a small, offline-testable change plus a schema
-under `docs/schemas/`:
-
-- **`umbra download --json`** — emit one `{asset, path, bytes, sha256}` record
-  per downloaded asset. `download_item` returns the written paths; hash and stat
-  them. Add `docs/schemas/download.schema.json`.
-- **`umbra index info --json`** — `CatalogIndex.stats()` already returns a dict;
-  print it as JSON under the flag.
-- **Render-command manifests** — `{output, items_used: [ids], parameters}` from
-  each render command so an agent knows exactly what was produced from which
-  items. Add `docs/schemas/render-manifest.schema.json`.
-
 ## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
 
 - **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).
@@ -299,6 +278,23 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **Structured `--json` success output on the remaining commands (A1 follow-on).**
+  The A1 error contract already shipped (structured stderr errors with `hint`,
+  `docs/schemas/error.schema.json`); this completes the success side so every
+  command that produces a result has a machine-readable stdout shape. `umbra
+  download --json` emits a `[{asset, path, bytes, sha256}, …]` array (hashing each
+  written file with a streaming SHA-256), `umbra index info --json` prints the
+  `CatalogIndex.stats()` summary plus `path`/`size_bytes`, and the five render
+  commands (`change`, `timescan`, `swipe`, `gallery`, `map`) print a `{output,
+  items_used, parameters}` manifest — with an optional `sidecars` map for the
+  auxiliary files a command writes (e.g. `umbra change --narrate`'s narration
+  JSON). Human progress/warnings and the `--place` "Resolved …" status line were
+  moved to (or kept on) stderr so stdout carries the JSON object alone. Three
+  schemas published under `docs/schemas/` (`download`, `index-info`,
+  `render-manifest`) and documented in `docs/schemas/README.md`, under the same
+  compatibility rules as `__all__`. Fully offline-tested in `tests/test_cli_json.py`
+  with injected renderers/downloads (no network, no `viz` extra). Was
+  `AI_INTEGRATION_IDEAS.md` §A1's last open item.
 - **STAC Query extension on `umbra serve` — expose the index's `product_types` /
   `area` / `fuzzy` filters over `/search`.** The read-only STAC API previously
   answered only the STAC *core* filters (bbox, datetime, ids), even though the

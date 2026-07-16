@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/download.schema.json",
+  "title": "umbra-py download manifest",
+  "description": "The JSON array umbra-py prints to stdout when 'umbra download --json' succeeds: one record per downloaded asset, so a caller can verify each file it just fetched without re-hashing it. Stable within a minor version.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["asset", "path", "bytes", "sha256"],
+    "additionalProperties": false,
+    "properties": {
+      "asset": {
+        "type": "string",
+        "description": "The product asset that was downloaded (e.g. \"GEC\", \"SICD\").",
+        "examples": ["GEC", "SICD", "CSI"]
+      },
+      "path": {
+        "type": "string",
+        "description": "Filesystem path of the written file."
+      },
+      "bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Size of the written file in bytes."
+      },
+      "sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "Lowercase hex SHA-256 of the written file's contents."
+      }
+    }
+  }
+}

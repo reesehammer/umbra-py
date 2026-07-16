@@ -582,6 +582,30 @@ same 500 lines of glue first, and many give up."*
 > MultiRTC interop) and the maintainer-side adoption moves (5.3 registries, 5.6
 > talking to Umbra).
 
+> **Update (2026-07-16):** the **structured `--json` success output is now
+> complete across the CLI, finishing Tier A of the AI plan**
+> (`AI_INTEGRATION_IDEAS.md` §A1 — supporting infrastructure, §7). "Agents are
+> the new first-time users" (§3's AI thesis) is only true to the degree the tools
+> report back in a shape an agent can consume: the failure side shipped as the
+> machine-readable error contract, but the *success* side was still partial —
+> most commands ended in a human "Wrote … to …" line an agent had to parse. This
+> closes that: `umbra download --json` emits a `[{asset, path, bytes, sha256}, …]`
+> array (each file hashed with a streaming SHA-256, so a caller verifies what it
+> fetched without re-reading it), `umbra index info --json` emits the index
+> summary, and the five render commands (`change`/`timescan`/`swipe`/`gallery`/`map`)
+> emit a `{output, items_used, parameters}` manifest naming the artifact, the
+> acquisitions it was built from, and the settings used. It holds the project's
+> grain and testability (§3): human progress, warnings and the `--place`
+> "Resolved …" status line all go to stderr so stdout carries the JSON object
+> alone; the three new shapes are published as public API under `docs/schemas/`
+> (the same compatibility rules as `__all__`); and the whole surface is
+> offline-tested with injected renderers/downloads — no model, no network, no
+> `viz` extra. Pure funnel-widening (§1): the query-and-render surface newcomers
+> and agents reach for now answers in a shape a script or an LLM can branch on.
+> The remaining strategic gaps are unchanged and largely non-code: 5.5's full
+> terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
+> adoption moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

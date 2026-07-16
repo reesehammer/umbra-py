@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/render-manifest.schema.json",
+  "title": "umbra-py render manifest",
+  "description": "The JSON object umbra-py prints to stdout when a render command (change, timescan, swipe, gallery, map) is run with --json. It records exactly what artifact was produced, from which acquisitions, and with which settings -- the success-side counterpart to the machine-readable error contract. Human progress and warnings go to stderr, so stdout carries this object alone. Stable within a minor version.",
+  "type": "object",
+  "required": ["output", "items_used", "parameters"],
+  "additionalProperties": false,
+  "properties": {
+    "output": {
+      "type": "string",
+      "description": "Filesystem path of the artifact that was written (the image, GIF, or HTML page)."
+    },
+    "items_used": {
+      "type": "array",
+      "description": "The ids of the acquisitions the artifact was built from, in render order.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "description": "The render settings the command used. The exact keys depend on the command (e.g. 'asset', 'max_size', 'db', 'percentile', 'frames', 'mode', 'format'); a caller should read the keys present rather than assume a fixed set.",
+      "additionalProperties": true
+    },
+    "sidecars": {
+      "type": "object",
+      "description": "Any auxiliary files the command also wrote, keyed by name. Present only when a command produces one (e.g. 'umbra change --narrate' writes a 'narration' JSON sidecar).",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "examples": [{ "narration": "change.narration.json" }]
+    }
+  }
+}

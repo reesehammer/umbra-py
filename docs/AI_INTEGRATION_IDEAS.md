@@ -357,15 +357,30 @@ builds capabilities that assume an AI in the loop.
 > and a stable `to_dict()` (`{"error", "message", "hint"}`); on failure the CLI
 > prints that JSON object to stderr when `--json` / `UMBRA_JSON` is active and
 > an `error:`/`hint:` prose pair otherwise. The contract is published as public
-> API in ✅ `docs/schemas/error.schema.json`. Still open (tracked in `TODO.md`):
-> extending success-side `--json` to `download` (`{asset, path, bytes, sha256}`)
-> and the render commands (`{output, items_used, parameters}` manifests).
+> API in ✅ `docs/schemas/error.schema.json`.
+>
+> **Update:** the **success-side `--json` guarantee is now complete, so A1 is
+> fully shipped.** Every command that produces a result has a machine-readable
+> stdout shape: `umbra download --json` emits a `[{asset, path, bytes, sha256}, …]`
+> array (each written file hashed with a streaming SHA-256), `umbra index info
+> --json` emits the index summary (`CatalogIndex.stats()` plus `path`/`size_bytes`),
+> and the five render commands (`change`, `timescan`, `swipe`, `gallery`, `map`)
+> emit a `{output, items_used, parameters}` manifest — with an optional `sidecars`
+> map for the auxiliary files a command writes (e.g. `umbra change --narrate`'s
+> narration JSON). Human progress/warnings and the `--place` "Resolved …" status
+> line go to stderr, so stdout carries the JSON object alone — the guarantee an
+> agent depends on. Three new schemas are published as public API alongside the
+> error contract: ✅ `docs/schemas/download.schema.json`,
+> `docs/schemas/index-info.schema.json`, and `docs/schemas/render-manifest.schema.json`.
+> The whole surface is offline-tested (`tests/test_cli_json.py`) with injected
+> renderers/downloads — no network, no `viz` extra. With this, **Tier A is
+> complete end to end.**
 
-`umbra search --json` exists; extend the guarantee to the whole CLI:
+`umbra search --json` exists; the guarantee now covers the whole CLI:
 
-- `--json` on `info` (✅ shipped — emits the A3 context card), `index info`,
-  `download` (emit `{asset, path, bytes, sha256}` records), and the render
-  commands (emit `{output, items_used: [ids], parameters}` manifests).
+- ✅ **shipped:** `--json` on `info` (emits the A3 context card), `index info`
+  (index summary), `download` (`{asset, path, bytes, sha256}` records), and the
+  render commands (`{output, items_used, parameters}` manifests).
 - ✅ **shipped:** Machine-readable errors: on failure, print a single JSON
   object to stderr (`{"error": "CatalogError", "message": ..., "hint": ...}`)
   when `--json` (or `UMBRA_JSON`) is active. Agents recover from `hint` fields
