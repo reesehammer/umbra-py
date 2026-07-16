@@ -93,13 +93,15 @@ the Done log), closing the self-serve R4 loop. **Async job semantics for long
 renders are now shipped** (see the Done log): a composite request can opt in to
 `"async": true`, get a `202 Accepted` + a job id, poll `GET /jobs/{id}`, and
 fetch the result from `GET /jobs/{id}/result` (the disk cache is the result
-store). Open follow-ons:
+store). **The STAC Query extension now exposes the index's two Umbra-specific
+filters** (see the Done log): `/search` and `/collections/{id}/items` take
+`product_types`, `area` and `fuzzy` (as GET params, top-level POST fields, or a
+STAC `query` object), advertised via the `item-search#query` conformance class.
+Open follow-ons:
 
-- **Query extensions.** `/search` currently supports the STAC core filters; the
-  index also filters by free-text `area` (task/site substring) and
-  `product_types`, which aren't yet exposed over the API. Wiring the STAC
-  *query*/*filter* extension (or simple extra query params) would let clients
-  use them. Geometry `intersects` needs more than the stored footprint bbox.
+- **Geometry `intersects`.** The Query extension now covers `product_types` and
+  `area`; geometry `intersects` still needs more than the stored footprint bbox
+  (a real polygon-in-polygon test), so it remains unexposed.
 - **Single-item lookup cost.** `/collections/{id}/items/{item_id}` filters by id
   in the serve layer (a scan of the ordered result set). At catalog scale that's
   fine; if the index grows, add a `CatalogIndex.get(item_id)` keyed lookup and
@@ -276,6 +278,29 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
 
 ## Done
 
+- **STAC Query extension on `umbra serve` — expose the index's `product_types` /
+  `area` / `fuzzy` filters over `/search`.** The read-only STAC API previously
+  answered only the STAC *core* filters (bbox, datetime, ids), even though the
+  `CatalogIndex` it wraps also filters by product type and free-text task/site
+  `area` (with an optional token-wise `fuzzy` widen). Wired those two
+  Umbra-specific filters through the API: `run_search` and `_do_search` now
+  thread `product_types` / `area` / `fuzzy` down to the backend's `search`
+  (which both `CatalogIndex` and the live `UmbraCatalog` already accept, so the
+  same query works against either), and the endpoints accept them three ways —
+  GET query params on `/search` and `/collections/{id}/items`
+  (`?product_types=GEC,SICD&area=Beet+Piler&fuzzy=true`), plain top-level POST
+  body fields, and a proper STAC **Query extension** object
+  (`{"query": {"product_types": {"in": ["GEC"]}, "area": {"like": "Beet"}}}`,
+  with bare-value shorthands). Two new pure parsers do the work offline —
+  `parse_product_types` (comma/list → canonical `PRODUCT_ASSETS`, an unknown
+  type is a `400`, not a silent empty result) and `parse_query` (maps the Query
+  object onto the two fields; an unsupported property or operator is a hard
+  `400` so a client's filter is never silently dropped). The
+  `item-search#query` conformance class is now advertised, and GET pagination
+  carries the filters into the `next` link. Fully offline-testable through the
+  existing in-process `TestClient` harness (no network, no `viz` extra). Was
+  `AI_INTEGRATION_IDEAS.md` B2 / `DEMO_APP_GAPS.md` Path B's "query extensions"
+  follow-on and this file's `umbra serve` open item.
 - **MCP `find_similar` / `find_similar_text` tools — visual similarity search over
   the flagship server (C5 follow-on).** Surfaced the shipped `umbra embed`
   capability (`SceneEmbeddingIndex.similar_to_item` / `similar_to_text`) as two

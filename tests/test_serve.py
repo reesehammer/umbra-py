@@ -113,6 +113,32 @@ def test_parse_datetime_handles_instants_and_intervals():
     assert serve.parse_datetime("2024-01-01T12:00:00Z")[0] == date(2024, 1, 1)
 
 
+def test_parse_product_types_normalises_and_validates():
+    assert serve.parse_product_types(None) is None
+    assert serve.parse_product_types("") is None
+    assert serve.parse_product_types("gec, sicd") == ["GEC", "SICD"]
+    assert serve.parse_product_types(["Cphd"]) == ["CPHD"]
+    with pytest.raises(ValueError):
+        serve.parse_product_types("GEC,NOPE")
+
+
+def test_parse_query_maps_extension_to_index_filters():
+    assert serve.parse_query(None) == (None, None)
+    assert serve.parse_query({}) == (None, None)
+    # Both the operator form and the bare-value shorthand are accepted.
+    assert serve.parse_query({"product_types": {"in": ["gec"]}}) == (["GEC"], None)
+    assert serve.parse_query({"product_types": "sicd"}) == (["SICD"], None)
+    assert serve.parse_query({"area": {"like": "Beet"}}) == (None, "Beet")
+    assert serve.parse_query({"area": "Beet"}) == (None, "Beet")
+    # An unknown property or operator is a hard error, never a silent drop.
+    with pytest.raises(ValueError):
+        serve.parse_query({"datetime": {"gte": "2024"}})
+    with pytest.raises(ValueError):
+        serve.parse_query({"area": {"gt": "Beet"}})
+    with pytest.raises(ValueError):
+        serve.parse_query("not-an-object")
+
+
 # --------------------------------------------------------------------------
 # API endpoints (in-process TestClient)
 # --------------------------------------------------------------------------
@@ -193,6 +219,81 @@ def test_search_rejects_unknown_collection(client):
 
 def test_bad_bbox_is_a_client_error(client):
     assert client.get("/search?bbox=1,2,3").status_code == 400
+
+
+def test_conformance_advertises_query_extension(client):
+    conforms = client.get("/conformance").json()["conformsTo"]
+    assert "https://api.stacspec.org/v1.0.0/item-search#query" in conforms
+
+
+def test_search_filters_by_product_types(client):
+    # The sample items carry GEC/SICD/SIDD/CPHD assets but no CSI.
+    assert client.get("/search?product_types=GEC").json()["context"]["returned"] == 3
+    assert client.get("/search?product_types=CSI").json()["context"]["returned"] == 0
+
+
+def test_search_rejects_unknown_product_type(client):
+    resp = client.get("/search?product_types=BOGUS")
+    assert resp.status_code == 400
+    assert "BOGUS" in resp.json()["detail"]
+
+
+def test_search_filters_by_area(client):
+    # The fixture files every item under the "Testville" task.
+    assert client.get("/search?area=Testville").json()["context"]["returned"] == 3
+    assert client.get("/search?area=Nowhere").json()["context"]["returned"] == 0
+    # Fuzzy widens a lowercased token to the same task.
+    assert client.get("/search?area=testville&fuzzy=true").json()["context"]["returned"] == 3
+
+
+def test_items_endpoint_filters_by_product_types(client):
+    path = f"/collections/{COLLECTION}/items?product_types=GEC"
+    assert client.get(path).json()["context"]["returned"] == 3
+    path = f"/collections/{COLLECTION}/items?product_types=CSI"
+    assert client.get(path).json()["context"]["returned"] == 0
+
+
+def test_search_query_params_survive_pagination(client):
+    page1 = client.get("/search?product_types=GEC&limit=2").json()
+    next_link = next(link for link in page1["links"] if link["rel"] == "next")
+    assert "product_types=GEC" in next_link["href"]
+    href = next_link["href"].replace("http://testserver", "")
+    page2 = client.get(href).json()
+    assert page2["context"]["returned"] == 1
+
+
+def test_post_search_query_extension(client):
+    # Operator form, bare-list form and top-level fields all reach the index.
+    assert (
+        client.post("/search", json={"query": {"product_types": {"in": ["GEC"]}}}).json()[
+            "context"
+        ]["returned"]
+        == 3
+    )
+    assert (
+        client.post("/search", json={"query": {"product_types": ["CSI"]}}).json()["context"][
+            "returned"
+        ]
+        == 0
+    )
+    assert (
+        client.post("/search", json={"query": {"area": {"like": "Testville"}}}).json()["context"][
+            "returned"
+        ]
+        == 3
+    )
+    assert (
+        client.post("/search", json={"product_types": ["GEC"], "area": "Testville"}).json()[
+            "context"
+        ]["returned"]
+        == 3
+    )
+
+
+def test_post_search_rejects_bad_query(client):
+    assert client.post("/search", json={"query": {"nope": "x"}}).status_code == 400
+    assert client.post("/search", json={"query": {"area": {"gt": "x"}}}).status_code == 400
+    assert client.post("/search", json={"product_types": ["BOGUS"]}).status_code == 400
 
 
 def test_openapi_document_is_served(client):
