@@ -1603,3 +1603,59 @@ def test_cli_timescan_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample
     )
     assert result.exit_code != 0
     assert "not both" in result.output
+
+
+# --- popup HTML escaping (CODEBASE_ANALYSIS.md §3.1) ------------------------
+#
+# ``_popup_html`` interpolates remote STAC strings into a Folium popup. Those
+# strings are untrusted (the CLI accepts arbitrary item URLs), so every one is
+# HTML-escaped and the STAC link's scheme is validated -- a hostile document
+# must not be able to inject script into a map a user opens locally.
+
+
+def test_popup_html_escapes_remote_metadata():
+    from umbra_py.viz import _popup_html
+
+    item = UmbraItem(
+        id="<script>alert('id')</script>",
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        properties={
+            "platform": "<img src=x onerror=alert('plat')>",
+            "sar:product_type": "GEC\"><script>alert('pt')</script>",
+            "sar:instrument_mode": "<b>SPOT</b>",
+            "sar:polarizations": ["VV<script>"],
+        },
+    )
+    html = _popup_html(item)
+    for injected in (
+        "<script>alert('id')",
+        "onerror=alert('plat')",
+        "<script>alert('pt')",
+        "<b>SPOT</b>",
+        "VV<script>",
+    ):
+        assert injected not in html
+    # The data still renders -- just inert (escaped).
+    assert "&lt;script&gt;" in html
+
+
+def test_popup_html_rejects_non_http_href():
+    from umbra_py.viz import _popup_html
+
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href="javascript:alert(1)//")
+    html = _popup_html(item)
+    assert "javascript:alert" not in html
+    assert "open STAC item" not in html  # link omitted entirely
+
+
+def test_popup_html_keeps_and_escapes_http_href():
+    from umbra_py.viz import _popup_html
+
+    item = UmbraItem(
+        id="x",
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        href="https://example.com/item.json?a=1&b=2",
+    )
+    html = _popup_html(item)
+    assert "open STAC item" in html
+    assert "https://example.com/item.json?a=1&amp;b=2" in html

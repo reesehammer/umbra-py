@@ -238,3 +238,19 @@ def test_cli_demo_no_lazy_imagery_flag(monkeypatch, tmp_path, sample_item_dict):
     assert result.exit_code == 0, result.output
     text = out.read_text()
     assert '"lazyImagery":false' in text.replace(" ", "")
+
+
+def test_build_demo_drops_javascript_stac_href():
+    """A ``javascript:`` STAC href must not reach the client as a clickable
+    link (the front end assigns ``stac_href`` to an anchor's ``href``)."""
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href="javascript:alert(1)")
+    html = demo.build_demo([item])
+    assert "javascript:alert" not in html
+    cfg = _config(html)
+    assert cfg["features"][0]["properties"]["stac_href"] is None
+
+
+def test_build_demo_keeps_http_stac_href():
+    item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href="https://example/item.json")
+    cfg = _config(demo.build_demo([item]))
+    assert cfg["features"][0]["properties"]["stac_href"] == "https://example/item.json"

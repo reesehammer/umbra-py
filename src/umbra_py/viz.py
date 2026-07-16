@@ -160,22 +160,25 @@ def _popup_html(
     rng, azi = info["resolution_range_m"], info["resolution_azimuth_m"]
 
     def fmt(v: Any, suffix: str = "") -> str:
+        # These values originate from remote STAC JSON, so a string value is
+        # HTML-escaped before it reaches the popup. The ``&mdash;``/``&deg;``/
+        # unit literals are code-controlled and intentionally left as markup.
         if v is None:
             return "&mdash;"
         if isinstance(v, float):
             return f"{v:.2f}{suffix}"
-        return f"{v}{suffix}"
+        return f"{html.escape(str(v))}{suffix}"
 
     rows = [
-        ("ID", info["id"]),
-        ("Acquired", info["datetime"] or "&mdash;"),
+        ("ID", html.escape(str(info["id"]))),
+        ("Acquired", html.escape(info["datetime"]) if info["datetime"] else "&mdash;"),
         ("Platform", fmt(info["platform"])),
         ("Mode", fmt(info["instrument_mode"])),
         ("Product", fmt(info["product_type"])),
-        ("Polarizations", ", ".join(info["polarizations"]) or "&mdash;"),
+        ("Polarizations", html.escape(", ".join(info["polarizations"])) or "&mdash;"),
         ("Incidence", fmt(info["incidence_angle_deg"], "&deg;")),
         ("Resolution (rng × azi)", f"{fmt(rng, ' m')} × {fmt(azi, ' m')}"),
-        ("Assets", ", ".join(info["available_assets"]) or "&mdash;"),
+        ("Assets", html.escape(", ".join(info["available_assets"])) or "&mdash;"),
     ]
     if location:
         # Slot "Location" right under the acquisition time so the popup
@@ -188,9 +191,13 @@ def _popup_html(
     )
     desc = item.description
     desc_html = f"<p style='margin:6px 0 0;max-width:380px'>{html.escape(desc)}</p>" if desc else ""
+    from ._html import safe_href  # noqa: PLC0415
+
+    href = safe_href(item.href)
     link = (
-        f"<p style='margin-top:6px'><a href='{item.href}' target='_blank'>open STAC item</a></p>"
-        if item.href
+        f"<p style='margin-top:6px'><a href='{href}' target='_blank' "
+        "rel='noopener'>open STAC item</a></p>"
+        if href
         else ""
     )
     button = ""

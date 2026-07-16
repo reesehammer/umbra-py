@@ -42,6 +42,27 @@ def _esc(value: Any) -> str:
     return escape("" if value is None else str(value))
 
 
+# Schemes we are willing to emit as a clickable link. Umbra STAC hrefs are
+# absolute ``https`` URLs; anything else (notably ``javascript:``/``data:``, or
+# a value that would break out of the quoted attribute) is refused so a hostile
+# STAC document can't turn a generated map/gallery into a script-injection or a
+# clickable exfiltration link.
+_SAFE_HREF_SCHEMES = ("http://", "https://")
+
+
+def safe_href(url: Any) -> str | None:
+    """Return ``url`` escaped for an HTML attribute, or ``None`` if unsafe.
+
+    Only ``http(s)`` URLs pass; the result is escaped with ``quote=True`` so it
+    is safe inside either single- or double-quoted ``href`` attributes. Callers
+    treat ``None`` as "omit the link" rather than emitting an untrusted scheme.
+    These hrefs come from remote STAC JSON, so they are not trusted.
+    """
+    if not isinstance(url, str) or not url.startswith(_SAFE_HREF_SCHEMES):
+        return None
+    return escape(url, quote=True)
+
+
 def _rings(coords: Any):
     """Yield each polygon ring as a list of ``(lon, lat)`` tuples.
 
@@ -123,10 +144,11 @@ def _metadata_rows(item: UmbraItem) -> str:
         ("assets", ", ".join(info["available_assets"]) or "none"),
     ]
     out = "".join(f'<tr><td class="k">{_esc(k)}</td><td>{_esc(v)}</td></tr>' for k, v in rows)
-    if item.href:
+    href = safe_href(item.href)
+    if href:
         out += (
             '<tr><td class="k">item</td>'
-            f'<td><a href="{_esc(item.href)}" target="_blank">STAC JSON</a></td></tr>'
+            f'<td><a href="{href}" target="_blank" rel="noopener">STAC JSON</a></td></tr>'
         )
     return out
 
@@ -268,7 +290,7 @@ def _gallery_tile_html(item: UmbraItem, *, thumbnail: str | None = None, asset: 
     plat = info["platform"] or "—"
     mode = info["instrument_mode"]
     plat_line = _esc(f"{plat} · {mode}" if mode else plat)
-    href = item.href
+    href = safe_href(item.href)
 
     if thumbnail:
         pic = f'<img src="{_esc(thumbnail)}" loading="lazy" alt="SAR quicklook" />'
@@ -278,8 +300,8 @@ def _gallery_tile_html(item: UmbraItem, *, thumbnail: str | None = None, asset: 
         badge = None  # the picture pane already shows the footprint
 
     if href:
-        thumb = f'<a class="thumb" href="{_esc(href)}" target="_blank" rel="noopener">{pic}</a>'
-        link = f'<a href="{_esc(href)}" target="_blank" rel="noopener">STAC item ↗</a>'
+        thumb = f'<a class="thumb" href="{href}" target="_blank" rel="noopener">{pic}</a>'
+        link = f'<a href="{href}" target="_blank" rel="noopener">STAC item ↗</a>'
     else:
         thumb = f'<span class="thumb">{pic}</span>'
         link = ""

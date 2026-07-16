@@ -35,10 +35,12 @@ from __future__ import annotations
 import math
 import re
 import threading
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
+from ._html import safe_href
 from .exceptions import AssetNotFoundError
 from .models import UmbraItem
 from .viz import _amplitude_cuts, _require, _stretch_to_rgba
@@ -322,19 +324,22 @@ def _viewer_html(tiler: SceneTiler) -> str:
     def _res(v: Any) -> str:
         return f"{v:.2f} m" if isinstance(v, (int, float)) else "?"
 
-    href = tiler.item.href or ""
+    # ``id``/``datetime``/``platform``/``href`` come from remote STAC JSON, so
+    # they are HTML-escaped before landing in the page; ``href`` is additionally
+    # scheme-checked so a hostile document can't inject a ``javascript:`` link.
+    href = safe_href(tiler.item.href)
     stac_link = f'<a href="{href}" target="_blank" rel="noopener">STAC item</a>' if href else ""
     meta_rows = "".join(
         f"<tr><td>{k}</td><td>{v}</td></tr>"
         for k, v in [
-            ("ID", info["id"]),
-            ("Acquired", info["datetime"] or "&mdash;"),
-            ("Platform", info["platform"] or "&mdash;"),
-            ("Product", f"{tiler.asset} &middot; {scale}"),
+            ("ID", escape(str(info["id"]))),
+            ("Acquired", escape(info["datetime"]) if info["datetime"] else "&mdash;"),
+            ("Platform", escape(info["platform"]) if info["platform"] else "&mdash;"),
+            ("Product", f"{escape(str(tiler.asset))} &middot; {scale}"),
             ("Resolution", f"{_res(rng)} &times; {_res(azi)}"),
         ]
     )
-    title = f"Umbra SAR &mdash; {info['id']}"
+    title = f"Umbra SAR &mdash; {escape(str(info['id']))}"
     return _HTML_TEMPLATE.format(
         title=title,
         bounds=bounds_js,

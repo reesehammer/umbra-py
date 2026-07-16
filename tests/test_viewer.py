@@ -202,3 +202,29 @@ def test_cli_view_boots_and_stops(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Serving SAR viewer" in result.output
     assert opened.get("url", "").startswith("http://127.0.0.1:")
+
+
+def test_viewer_html_escapes_remote_metadata_and_href():
+    """``_viewer_html`` interpolates remote STAC strings into the page, so a
+    hostile item must not be able to inject markup or a ``javascript:`` link.
+
+    Uses a stub tiler so the check stays offline (no rasterio scene)."""
+    from umbra_py.viewer import _viewer_html
+
+    class _StubTiler:
+        db = True
+        asset = "GEC"
+        bounds_4326 = (0.0, 0.0, 1.0, 1.0)
+        item = UmbraItem(
+            id="<script>alert('id')</script>",
+            href="javascript:alert(1)",
+            properties={"platform": "<img src=x onerror=alert('plat')>"},
+        )
+
+    html = _viewer_html(_StubTiler())
+    assert "<script>alert('id')" not in html
+    assert "onerror=alert('plat')" not in html
+    assert "javascript:alert" not in html
+    assert "STAC item</a>" not in html  # link omitted for the unsafe scheme
+    # The escaped id still appears (inert) in the panel and title.
+    assert "&lt;script&gt;" in html
