@@ -116,8 +116,8 @@ critical path to a demo application.
 > — the on-demand `/artifacts/...` endpoints on `umbra serve` (Path B step 2,
 > shipped) render quicklook/change/timescan for any site; what remains is wiring
 > this front end to call them (and a `swipe` endpoint). The
-> full-acquisition-set PMTiles tiling for the truly whole-catalog view is also
-> still open (Path A step 3).
+> full-acquisition-set PMTiles tiling for the truly whole-catalog view has since
+> shipped as `umbra tiles` (Path A step 3, see G4).
 
 For the *server-backed* end state (Path B), the remaining options for the
 application layer are one of:
@@ -143,16 +143,23 @@ per-site render actions (quicklook/change/timescan) do too.** What is still
 missing for a *self-serve* app is the front end (a MapLibre/leafmap client) that
 calls them, plus a `swipe` endpoint.
 
-### G4 — Scale ceiling of the current map rendering
+### G4 — Scale ceiling of the current map rendering — **closed** (`umbra tiles`)
 
 - A Folium HTML embeds every footprint + popup in the DOM; at full-catalog
   scale (thousands of polygons) load time and interaction degrade. ✅ **Partly
   addressed:** `umbra demo` clusters item centroids with
   `Leaflet.markercluster` and draws a footprint polygon only for the *selected*
   item (a level-of-detail strategy — thousands of clustered points instead of
-  thousands of DOM polygons), so it scales far past the Folium map. Vector
-  tiling (PMTiles) for the truly whole-acquisition-set view is still the
-  build-pipeline step in Path A.
+  thousands of DOM polygons), so it scales far past the Folium map. ✅ **Now
+  fully addressed for the whole acquisition set:** `umbra tiles`
+  (`umbra_py.pmtiles`, no extra) pre-cuts the catalog's acquisition centroids
+  into a **PMTiles** vector-tile pyramid, so a map fetches only the tiles in the
+  current view instead of holding the whole catalog in the DOM or an inline JSON
+  blob. It needs no tippecanoe — the geometry is points, so the Mapbox Vector
+  Tile + PMTiles v3 encoder is pure standard library and offline-testable by
+  decoding its own output; `--viewer` emits a self-contained MapLibre GL page
+  over the archive. This was the build-pipeline step Path A step 3 named as
+  open.
 - `--imagery` (eager overlays) base64-embeds a PNG per item — unusable beyond
   a few dozen items (the docstrings say so honestly). `--lazy-imagery` is the
   right pattern and already proven in-repo; a demo app should generalize it
@@ -250,11 +257,16 @@ already in the repo:
 1. ✅ Fix G1 (`list-type=2`) — prerequisite, **done in PR #29**.
 2. ✅ Wire `--local`/`--index-db` into the visual CLI commands (G2, small) —
    **done**: `map`/`gallery`/`swipe`/`change`/`timescan` render from the index.
-3. **Build pipeline** (new, scheduled GitHub Action):
-   `umbra index build` → export `catalog.geojson` (exists) → tile to
-   **PMTiles** with tippecanoe for the full acquisition set → bake per-item
-   thumbnails + place labels into a static `assets/` tree → render showcase
-   artifacts (swipe/change/timescan/gallery) for ~6–10 curated sites.
+3. ✅ **PMTiles tiling of the full acquisition set — done** (`umbra tiles`).
+   `umbra index build`/`fetch` → `umbra tiles --local --out catalog.pmtiles`
+   emits a single-file vector-tile pyramid of every acquisition centroid, and
+   `--viewer` writes a MapLibre GL page over it. The doc originally sketched this
+   as `export catalog.geojson → tile with tippecanoe`; because the geometry is
+   points, the whole encoder is pure standard library (no external binary), so it
+   runs in a core install and is offline-tested by decoding its own output. Still
+   open under this step as optional polish: baking per-item thumbnails + place
+   labels into a static `assets/` tree, and rendering showcase
+   swipe/change/timescan/gallery artifacts for ~6–10 curated sites.
 4. ✅ **Front end (done, delivered as an artifact): `umbra demo`.** Rather than a
    separate `demo/` MapLibre build toolchain, the front end ships as a
    self-contained HTML generator (`umbra_py.demo`) in the library's own grain: a
@@ -262,10 +274,11 @@ already in the repo:
    slider and product-type chips filtering client-side, a free-text site search,
    an item click → metadata card + "open STAC item" + the lazy COG overlay
    (reusing the proven `_lazy_imagery` geotiff.js driver). It reads the prebuilt
-   index (`--local`), so the whole build is offline and near-instant. Still open
-   for the *fully* whole-catalog view: a PMTiles source for the full acquisition
-   set (step 3's tiling), baked thumbnails/labels, and showcase "Swipe / Change /
-   Timescan" buttons linking precomputed artifacts (R4 for curated sites).
+   index (`--local`), so the whole build is offline and near-instant. The
+   *fully* whole-catalog view now also ships as a PMTiles source (`umbra tiles`,
+   step 3) with its own MapLibre GL viewer. Still open as polish: baked
+   thumbnails/labels, and showcase "Swipe / Change / Timescan" buttons linking
+   precomputed artifacts (R4 for curated sites).
 5. Publish via Pages from the same Action.
 
 Meets R1–R3, R5–R7 fully; meets R4 for curated sites only. Zero runtime
@@ -299,7 +312,7 @@ Adds on-demand capability over Path A rather than replacing it:
 
 | Req | Today (`umbra demo`) | Path A | Path B |
 |---|---|---|---|
-| R1 full catalog on map | ✓ gathered slice, clustered (PMTiles tiling pending for the full acquisition set) | ✓ | ✓ |
+| R1 full catalog on map | ✓ gathered slice, clustered; ✓ full acquisition set via `umbra tiles` PMTiles + MapLibre viewer | ✓ | ✓ |
 | R2 interactive filters | ✓ (client-side: search, date range, product chips) | ✓ (client-side) | ✓ (server queries) |
 | R3 click → quicklook | ✓ (lazy COG overlay + metadata card) | ✓ (baked + lazy) | ✓ |
 | R4 product demos from UI | ✓ any site (`umbra serve` renders quicklook/change/timescan/swipe; `umbra demo --server-url` wires the front end to call them) | curated sites only | ✓ any site |
@@ -328,9 +341,15 @@ Adds on-demand capability over Path A rather than replacing it:
   fixed in PR #29, the visual commands render from the prebuilt index via
   `--local`, the self-serve front end ships as `umbra demo`, the on-demand
   artifact endpoints ship on `umbra serve`, and the demo now calls them.)
-- **Not yet**: the *truly whole-catalog* view (PMTiles tiling of the full
-  acquisition set, Path A step 3). Async job semantics for the longest renders,
-  formerly listed here, are now shipped.
+- **Now also the *truly whole-catalog* view**: `umbra tiles` tiles the full
+  acquisition set into a single-file PMTiles vector pyramid (pure standard
+  library, no tippecanoe) and `--viewer` renders it with MapLibre GL — a map that
+  fetches only the tiles in view, so it stays fast at whole-archive scale
+  (Path A step 3). Async job semantics for the longest renders, formerly listed
+  here, are also shipped.
+- **Not yet**: optional demo polish under Path A step 3 — baking per-item
+  thumbnails / place labels into a static `assets/` tree, and precomputed
+  showcase swipe/change/timescan artifacts for a handful of curated sites.
 - **The good news**: nothing structural is in the way. The library's clean
   separation (search → items → render functions) means the demo app is
   additive — a build pipeline + a small MapLibre front end (Path A), with the

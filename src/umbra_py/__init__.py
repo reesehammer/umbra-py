@@ -62,6 +62,7 @@ from .narrate import (
     parse_narration,
 )
 from .planner import AskError, SearchPlan, ask, parse_plan
+from .pmtiles import build_pmtiles, build_viewer, save_viewer, write_pmtiles
 from .semantic import (
     SemanticError,
     SemanticMatch,
@@ -189,6 +190,10 @@ __all__ = [
     "gallery",
     "build_demo",
     "save_demo",
+    "build_pmtiles",
+    "write_pmtiles",
+    "build_viewer",
+    "save_viewer",
     "save_gallery",
     "view",
     "make_viewer_server",

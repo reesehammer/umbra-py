@@ -2230,6 +2230,145 @@ def demo(
     click.echo(f"Wrote interactive explorer over {len(items)} acquisition(s) to {path}")
 
 
+@cli.command()
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name to a bounding box and tile items within it, via "
+    "OpenStreetMap Nominatim. Mutually exclusive with --bbox.",
+)
+@click.option(
+    "--start",
+    help="Earliest acquisition date (YYYY-MM-DD, a year/month, or a relative "
+    "expression like '3 months ago').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year/month "
+    "snaps to that span's last day).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive name of an Umbra task/site to tile (e.g. "
+    "'Centerfield'). Faster than a broad scan.",
+)
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Keep items exposing this asset (repeatable).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Max acquisitions to tile (default: all). The whole catalog is the "
+    "point of tiling, so leave unset with --local for the full archive.",
+)
+@click.option(
+    "--max-per-task",
+    type=int,
+    default=None,
+    help="Cap items per Umbra task directory ('--max-per-task 1' tiles one point "
+    "per distinct site).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output PMTiles archive (e.g. catalog.pmtiles).",
+)
+@click.option(
+    "--min-zoom",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Lowest zoom level to generate (world view).",
+)
+@click.option(
+    "--max-zoom",
+    type=int,
+    default=9,
+    show_default=True,
+    help="Highest zoom level to generate. 9 reaches city scale, where SAR sites "
+    "read individually; raise it for denser sites at the cost of a larger file.",
+)
+@click.option(
+    "--viewer",
+    "viewer_path",
+    default=None,
+    help="Also write a self-contained MapLibre GL viewer HTML that renders the "
+    "archive (points the page at the .pmtiles by its filename, so host them "
+    "side by side).",
+)
+@_local_index_options
+@_fuzzy_option
+def tiles(
+    bbox,
+    place,
+    start,
+    end,
+    area,
+    fuzzy,
+    products,
+    limit,
+    max_per_task,
+    out_path,
+    min_zoom,
+    max_zoom,
+    viewer_path,
+    local,
+    db_path,
+) -> None:
+    """Tile the whole catalog into a single-file PMTiles vector archive.
+
+    Where 'umbra map' and 'umbra demo' embed every footprint in the page (great
+    up to a few thousand items), this pre-cuts the catalog's acquisition
+    centroids into a vector tile pyramid so a map fetches only the tiles in view
+    -- the fast, zoom-anywhere whole-archive answer. The output is one .pmtiles
+    file: drop it on GitHub Pages or in a bucket, no tile server. With --viewer
+    it also writes a MapLibre GL page that renders it.
+
+    Needs no extra: the encoder is pure standard library, and the viewer's map
+    runs browser-side from pinned CDNs. Use --local for a near-instant build
+    from a prebuilt index.
+    """
+    if not out_path.lower().endswith(".pmtiles"):
+        raise click.ClickException("Tiles output must be a .pmtiles file.")
+    if viewer_path is not None and not viewer_path.lower().endswith((".html", ".htm")):
+        raise click.ClickException("Viewer output must be an .html file.")
+
+    from .pmtiles import save_viewer, write_pmtiles  # noqa: PLC0415
+
+    search_bbox = _resolve_search_bbox(bbox, place)
+    items = _gather_items(
+        local=local,
+        db_path=db_path,
+        bbox=search_bbox,
+        start=start,
+        end=end,
+        area=area,
+        fuzzy=fuzzy,
+        product_types=list(products) or None,
+        limit=limit,
+        max_per_task=max_per_task,
+    )
+    if not items:
+        raise click.ClickException("No items matched the search.")
+
+    with OrbitSpinner(f"Tiling {len(items)} acquisition(s) (z{min_zoom}-z{max_zoom})"):
+        path = write_pmtiles(items, out_path, min_zoom=min_zoom, max_zoom=max_zoom)
+    size_mb = path.stat().st_size / 1e6
+    click.echo(f"Wrote PMTiles archive of {len(items)} acquisition(s) to {path} ({size_mb:.2f} MB)")
+
+    if viewer_path is not None:
+        vpath = save_viewer(Path(out_path).name, viewer_path)
+        click.echo(f"Wrote MapLibre viewer to {vpath}")
+
+
 @cli.command(name="map")
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
 @click.option(

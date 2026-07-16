@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Whole-catalog PMTiles tiling — `umbra tiles` / `build_pmtiles`
+  (`docs/DEMO_APP_GAPS.md` Path A step 3).** Every other map surface embeds its
+  features in the page (Folium polygons in `umbra map`, an inline JSON blob in
+  `umbra demo`) — great up to a few thousand acquisitions, but the *whole*
+  acquisition set was the last open demo-app gap. `umbra tiles` pre-cuts the
+  catalog's acquisition centroids into a vector-tile pyramid and packages it as a
+  single [PMTiles v3](https://github.com/protomaps/PMTiles) file, so a map fetches
+  only the tiles in view and stays fast at whole-archive scale. The output drops
+  straight onto GitHub Pages or into a bucket — no tile server, and **no
+  tippecanoe**: because the geometry is points, the entire encoder (the Mapbox
+  Vector Tile protobuf and the PMTiles container) is pure standard library, so it
+  runs in a core install and is fully offline-tested by decoding its own output
+  (verified against the reference `pmtiles` / `mapbox-vector-tile` readers).
+  `--viewer` also writes a self-contained MapLibre GL page that renders the
+  archive as a scalable circle layer with a click popup, the same OpenStreetMap
+  basemap the Leaflet demo uses, and the mandatory CC-BY attribution. Reads a
+  prebuilt index with `--local` for a near-instant build. `build_pmtiles` /
+  `write_pmtiles` / `build_viewer` / `save_viewer` are exported from the package
+  root.
 - **SICD → geocoded COG — `umbra convert` / `sicd_to_geocoded_cog`
   (`docs/STRATEGY.md` 5.5).** Umbra's `GEC` asset is already a geocoded COG, but
   the complex `SICD` product lives in the radar slant plane and does not open on

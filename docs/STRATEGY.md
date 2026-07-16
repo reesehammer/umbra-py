@@ -459,6 +459,37 @@ same 500 lines of glue first, and many give up."*
 > DEM, MultiRTC interop) and RTC recipes; the other higher-level gaps are
 > unchanged: the demo's full-acquisition-set PMTiles tiling (Path A step 3) and
 > the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-16):** the **whole-catalog PMTiles tiling has shipped** —
+> `umbra tiles` (`DEMO_APP_GAPS.md` Path A step 3, the last open code gap under
+> the demo heading). Discovery is the moat (§3), and the demo thesis (§1 — "make
+> Umbra's SAR feel as approachable as Sentinel-1") is best sold by a map a
+> curious analyst can *explore*; but every prior map surface embeds its features
+> in the page (Folium polygons in `umbra map`, an inline JSON blob in `umbra
+> demo`), which stops being fast at the *whole* acquisition set — the one view
+> that most says "this is a real archive." `umbra tiles` (`umbra_py.pmtiles`)
+> closes that: it pre-cuts the catalog's acquisition centroids into a vector-tile
+> pyramid and packages it as a single [PMTiles](https://github.com/protomaps/PMTiles)
+> file, so a map fetches only the tiles in view and stays fast at any scale, and
+> the file drops straight onto Pages or into a bucket — no tile server. The move
+> that keeps it in the project's grain and testability (§3): the demo-gap doc
+> sketched this as `export GeoJSON → tile with tippecanoe` (an external binary),
+> but because the geometry is *points*, the whole encoder — the Mapbox Vector
+> Tile protobuf and the PMTiles v3 container — is **pure standard library**, so it
+> runs in a core install and is fully offline-tested by decoding its own output
+> (and verified against the reference `pmtiles` / `mapbox-vector-tile` readers) —
+> the same discipline `export` and the STAC builders hold. `--viewer` emits a
+> self-contained MapLibre GL page over the archive (the same OpenStreetMap
+> basemap and mandatory CC-BY attribution the Leaflet demo uses), complementing
+> `umbra demo` rather than replacing it: `demo` for the interactive
+> filter-and-click slice, `tiles` for the fast zoom-anywhere whole-archive view.
+> It also stays graceful under the "moat is leased" risk (§3): the `.pmtiles`
+> file is exactly the kind of artifact worth *offering upstream* (5.2) — publish
+> it beside the nightly `catalog.db` and the ecosystem gets a whole-catalog
+> basemap for free. With Path A step 3 landed, the remaining strategic gaps are
+> non-demo and largely non-code: 5.5's full terrain orthorectification (a DEM,
+> MultiRTC interop) and RTC recipes, and the maintainer-side adoption moves (5.3
+> registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
