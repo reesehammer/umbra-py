@@ -793,6 +793,37 @@ same 500 lines of glue first, and many give up."*
 > correction, a different job from geometric orthorectification); the other
 > higher-level gaps are unchanged and non-code: the maintainer-side adoption moves
 > (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-17):** the **Canopy commercial-archive funnel is now complete
+> to full parity on the CLI** (workstream 5.1 — "the single highest-value
+> strategic move overall"). §5.1 shipped `UmbraCatalog(token=…)` and `umbra search
+> --token …` so the *same* `search()` interface queries Umbra's paid Canopy
+> archive; the honest gap left was that only *search* reached it. Every other verb
+> routes through `_gather_items`, which called `_search_source(local, db_path)` and
+> silently dropped the token — so on the command line a paying customer could
+> discover the paid archive but not `map`, `change`, `timescan`, `swipe`, `gallery`
+> or `chips` it. This closes that: those six render/analysis verbs now take the
+> same `--token` (a shared `_token_option` with the `$UMBRA_CANOPY_TOKEN` fallback
+> and a `_check_token_not_local` guard against combining it with a local index),
+> threaded through `_gather_items` → `_search_source(local, db_path, token)` to the
+> commercial backend. This is the funnel §1 describes made literal end to end: "a
+> user who learned the library on the free data is already holding the exact tool
+> they'd use as a paying Canopy customer" is now true for *every* verb, not just
+> `search` — the same flags, over the archive they pay for. It preserves the
+> boundary and testability the scientific audience needs (§3): **no model is
+> called** and no new dependency is added — this is pure backend-selection wiring —
+> the token is only ever sent to the Canopy endpoint (never the open bucket), and
+> the whole path is offline-tested against a `responses`-mocked STAC API (dispatch,
+> the token→archive flow, per-command wiring, the env-var fallback and the
+> mutual-exclusion guard) with no credentials and no network. The whole-catalog
+> explorers (`demo`, `tiles`) and the index/embedding builders stay on the open
+> bucket by design — they gather large catalog slices, where a live paid-archive
+> walk is out of place. The remaining 5.1 follow-ons are unchanged and need a real
+> token to verify (pushing `product_types`/`area` down as STAC query extensions, a
+> keyed `get_item(id)` archive lookup, live request/response-shape verification);
+> the higher-level gaps are also unchanged and largely non-code: 5.5's MultiRTC/RTC
+> interop and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
+> Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -892,9 +923,15 @@ Design notes that keep it honest and testable:
 - **The token never touches the open bucket.** Bearer auth is only ever sent
   to the configured Canopy endpoint.
 
-Open follow-ons (not blockers): pushing `product_types` down as a STAC
-query/filter extension once the exact Canopy field names are confirmed, and a
-`get_item(id)` archive lookup. See `TODO.md`.
+The commercial-archive backend is now reachable from the *whole* CLI, not just
+`umbra search`: the render/analysis verbs (`map`, `gallery`, `change`,
+`timescan`, `swipe`, `chips`) all take the same `--token` (threaded through
+`_gather_items`), so a paying customer discovers *and* renders the archive they
+pay for with the identical flags — the funnel made literal end to end.
+
+Open follow-ons (not blockers, and each needs a real token to verify): pushing
+`product_types` down as a STAC query/filter extension once the exact Canopy field
+names are confirmed, and a `get_item(id)` archive lookup. See `TODO.md`.
 
 ### 5.2 Continuously rebuilt, published catalog index — **shipped** (PR #26)
 

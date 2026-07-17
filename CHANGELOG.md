@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The Canopy commercial-archive `--token` now works on the render/analysis
+  verbs, completing the funnel to full parity (`docs/STRATEGY.md` 5.1).**
+  `umbra search --token …` (or `$UMBRA_CANOPY_TOKEN`) has long pointed the same
+  `search()` interface at Umbra's authenticated Canopy archive instead of the
+  open bucket, but every other verb routed through `_gather_items`, which dropped
+  the token — so a paying customer could *search* the paid archive on the CLI but
+  not *render or analyse* it. `map`, `gallery`, `change`, `timescan`, `swipe` and
+  `chips` now take the same `--token` (with the `$UMBRA_CANOPY_TOKEN` fallback and
+  a guard against combining it with a local index), threaded through
+  `_gather_items` → `_search_source(local, db_path, token)` to the commercial
+  backend. This is the funnel made literal: the tool learned on the free data
+  *is* the tool used on the paid archive, with the identical flags. No new
+  dependency and no model call — the token is only ever sent to the Canopy
+  endpoint, and the whole path is offline-tested against a `responses`-mocked STAC
+  API (no credentials, no network), covering the dispatch, the token→archive flow,
+  the per-command wiring, the `$UMBRA_CANOPY_TOKEN` fallback and the
+  mutual-exclusion guard.
 - **Auto-fetch a global geoid grid for vertical-datum correction —
   `umbra convert --geoid auto` / `umbra_py.geoid` (`docs/STRATEGY.md` 5.5).**
   Vertical-datum correction shipped as `--geoid PATH`, but that still made the

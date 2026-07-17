@@ -288,7 +288,9 @@ def test_cli_ask_run_executes_the_search(fixed_plan, monkeypatch, sample_item_di
 
     fake = FakeSource()
     # Route execution through a fake backend instead of a live S3 walk.
-    monkeypatch.setattr("umbra_py.cli._search_source", lambda local, db_path: (fake, False))
+    monkeypatch.setattr(
+        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+    )
 
     result = CliRunner().invoke(cli, ["ask", "q", "--run"])
     assert result.exit_code == 0, result.output
