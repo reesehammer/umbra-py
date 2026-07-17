@@ -464,6 +464,7 @@ exposing:
 | `timescan` | `timescan_composite` | image block; the "where did activity happen" primitive |
 | `download_asset` | `download_asset` | gated by a size confirmation parameter; returns path + bytes |
 | `find_similar` / `find_similar_text` | `SceneEmbeddingIndex.similar_to_item` / `similar_to_text` | **visual similarity search (C5)** — image-to-image and text-to-scene over the pre-embedded archive; returns `SceneMatch` cards (each with a STAC `href` for `quicklook`/`change_composite`); `[ai]` extra + a prebuilt `catalog.embed.db` |
+| `describe_scene` | `describe.describe` | **SAR-literate VLM reading of one scene (C2)** — renders the quicklook, sends it with the context card behind the packaged SAR primer, and returns a validated `{summary, observed_features, confidence, caveats}` stamped as an AI interpretation with CC-BY; the one tool that consults a model, gated on the `[ai]` key |
 | `build_index` / `index_stats` | `CatalogIndex` | lets a long-running agent make its own searches fast |
 
 **Resources:** the local index DB stats; recently fetched STAC items;
@@ -619,6 +620,17 @@ Build on the artifacts that already exist:
   `parse_narration` boundary); the narration is a structured `ChangeNarration`
   (`{summary, changes[], confidence, caveats[]}`), and the model call / render are
   injectable so the whole feature is offline-testable.
+- ✅ **`describe_scene` MCP tool + `describe-scene` prompt (shipped)**: the same
+  scene reading is now surfaced over the `umbra-mcp` server, reusing the
+  `describe()` function unchanged, so an MCP client can get a grounded SAR reading
+  of a scene in one call. It is the **one tool on the server that consults a
+  model** — a deliberate, opt-in exception to the otherwise-deterministic tool
+  surface, gated (like the CLI) on the `[ai]` key, so it never runs implicitly.
+  The boundary still holds: the picture and the metadata card are produced
+  deterministically, the model **only interprets** (its reply passes the
+  `parse_description` boundary), and every reading carries the CC-BY attribution
+  and the `AI_PROVENANCE` note. The describer and render are injectable, so the
+  whole tool is offline-testable without the SDK, a key, or the network.
 - Every AI-generated artifact **automatically carries the CC-BY attribution
   and an "AI-generated interpretation" provenance note** — the same license
   discipline the library already applies to GeoTIFF tags and xarray attrs,

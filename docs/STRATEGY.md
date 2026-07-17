@@ -972,6 +972,32 @@ same 500 lines of glue first, and many give up."*
 > maintainer-side moves above, the 5.6 "talk to Umbra" conversation, and 5.5's
 > radiometric-RTC remainder.
 >
+> **Update (2026-07-17):** the **scene-reading VLM capability is now
+> conversational** — `umbra-mcp` gained a `describe_scene` tool and a
+> `describe-scene` prompt surfacing the shipped `umbra describe` C2 capability
+> (`AI_INTEGRATION_IDEAS.md` §C2). The MCP server is the highest-leverage surface
+> the project has (every MCP client becomes a zero-install front door to the
+> archive), and it already returns *pictures* of the radar; this adds the reading
+> of them — a client can now ask "what am I looking at?" and get a grounded,
+> SAR-literate `{summary, observed_features, confidence, caveats}` back, with the
+> radar-reading rules a general model lacks (bright ≠ hot, dark ≠ empty, speckle ≠
+> structure, one frame ≠ change) supplied once by the packaged prompt. It is a
+> direct funnel-widener on the highest-leverage surface (§1): the newcomer who can
+> search but can't *read* SAR now gets the scene explained inside the same
+> conversation, closing the discover → view → understand loop. It is a deliberate,
+> honest first: the **one tool on the server that consults a model**, gated (like
+> the CLI) on the `[ai]` key so it never runs implicitly, and it preserves the
+> determinism boundary and trust the scientific audience needs (§3) — the picture
+> and metadata are deterministic, the model **only interprets** (its reply passes
+> the `parse_description` boundary and never becomes a coordinate, URL, or filter),
+> every reading carries the CC-BY attribution plus the `AI_PROVENANCE` note, and
+> the describer and render are injectable so the whole tool is offline-tested with
+> no SDK, no key, and no network. The module's "nothing here calls a model"
+> invariant was revised to name this single exception rather than quietly break it.
+> The remaining strategic gaps are unchanged and largely non-code: 5.5's
+> radiometric-RTC remainder and the maintainer-side adoption moves (5.3 registries,
+> 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
