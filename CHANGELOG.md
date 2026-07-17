@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Detection-chips example notebook — `examples/05_detection_chips.ipynb`
+  (`docs/STRATEGY.md` 5.4 / `docs/AI_INTEGRATION_IDEAS.md` B3).** The ML-dataset
+  half of the notebook gallery, and the workflow the model-training audience (SAR
+  foundation models, change detection — the audience most likely to contribute
+  back) reaches for first. It cuts one scene into fixed-size, georeferenced
+  training chips with `umbra chips` — walked a window at a time straight out of
+  the geocoded COG over `/vsicurl` range reads, so there is no full download and
+  memory stays bounded to one tile — and reads back the manifest that makes each
+  chip trainable: its geographic bbox, CRS and affine transform, and the
+  acquisition's look-angle, resolution, polarization and CC-BY license. Like the
+  other notebooks it is self-checking (a deterministic one-day search with
+  `assert`s in every code cell) and guarded offline by `tests/test_examples.py`
+  (well-formed, cells parse, only public `umbra_py` symbols, CC-BY present),
+  executable end-to-end under `pytest -m network`. No new code surface and no
+  model call.
 - **Amplitude time-series example notebook —
   `examples/04_amplitude_time_series.ipynb` (`docs/STRATEGY.md` 5.4 /
   `docs/AI_INTEGRATION_IDEAS.md` B3).** With every capability built, the binding
