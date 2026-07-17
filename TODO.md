@@ -183,8 +183,19 @@ against a mocked API). Open follow-ons, none a blocker:
   `ids` filter (only the exact id is accepted), and inherits `_archive_page`'s
   bearer auth + 401/403/500 handling. Surfaced on the CLI as `umbra info <id>
   --token` (with the `$UMBRA_CANOPY_TOKEN` fallback), the retrieval sibling of
-  `umbra search --token`. Still open: wiring the archive lookup into the MCP
-  `get_item` tool (the MCP server has no token concept yet — a separate surface).
+  `umbra search --token`. ~~Still open: wiring the archive lookup into the MCP
+  `get_item` tool (the MCP server has no token concept yet — a separate
+  surface).~~ ✅ **Done.** `umbra_py.mcp_server` now reads `$UMBRA_CANOPY_TOKEN`
+  (via `_canopy_token()` — a secret configured once in the server's env, never a
+  model-supplied tool argument): when set, `search_catalog` and `watch_site`
+  query the commercial archive (`source: "canopy-archive"`) and `get_item`
+  resolves a bare acquisition id through `UmbraCatalog(token=...).get_item(id)`
+  (a full `://` URL is still read directly as an open-data sidecar). The
+  `_search_source(local, token)` guard rejects `local=True` with a token (the
+  archive has no local index), and the server's `instructions` announce archive
+  mode when a token is configured. Offline-tested in `tests/test_mcp_server.py`
+  with a fake archive catalog (no credentials, no network); the token is only
+  ever handed to the catalog, never surfaced in a result.
 - **Verify request/response shapes against the live Canopy API.** The client is
   built to the STAC API *standard*; confirm the exact search body, collection
   ids, and pagination link shape Canopy emits, and adjust if it deviates. Add a

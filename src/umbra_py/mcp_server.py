@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 from .catalog import UmbraCatalog
-from .constants import ATTRIBUTION, DATA_LICENSE
+from .constants import ATTRIBUTION, CANOPY_TOKEN_ENV, DATA_LICENSE
 from .context import llm_context
 from .exceptions import MissingDependencyError
 from .geocode import geocode_place as _geocode_place
@@ -81,14 +82,50 @@ def _png_bytes(image: Any) -> bytes:
     return buf.getvalue()
 
 
-def _search_source(local: bool | None) -> tuple[object, bool]:
+def _canopy_token() -> str | None:
+    """The configured Canopy commercial-archive token, if any.
+
+    Read from ``$UMBRA_CANOPY_TOKEN`` — the same environment variable the CLI's
+    ``--token`` falls back to. A token is a *secret configured once by the
+    operator* in the MCP server's environment (an MCP client sets it in the
+    server's ``env`` block), never a tool argument the client's model passes
+    around. When it is set, the search and retrieval tools transparently query
+    Umbra's authenticated commercial archive (a real STAC API) instead of the
+    open bucket — the funnel made literal: the same tools a user learned on the
+    free data now drive the paid Canopy catalog, with no new tool to learn.
+    """
+    return os.environ.get(CANOPY_TOKEN_ENV) or None
+
+
+def _source_label(is_index: bool, is_archive: bool) -> str:
+    """Name the backend a result came from, for the tool's ``source`` field."""
+    if is_index:
+        return "local-index"
+    if is_archive:
+        return "canopy-archive"
+    return "live-catalog"
+
+
+def _search_source(local: bool | None, token: str | None = None) -> tuple[object, bool]:
     """Pick the search backend.
 
-    ``local=True`` forces the on-disk index (error if absent); ``local=False``
-    forces a live S3 walk; ``local=None`` (the default) uses the index when one
-    exists at the default path and falls back to a live walk otherwise — the
-    fast path for an agent that has run ``umbra index fetch``.
+    A configured Canopy ``token`` selects Umbra's authenticated commercial
+    archive and takes precedence over the local/live open-data choice (the
+    archive is a live STAC API, so it has no local index — combining it with
+    ``local=True`` is a deliberate error). Otherwise: ``local=True`` forces the
+    on-disk index (error if absent); ``local=False`` forces a live S3 walk;
+    ``local=None`` (the default) uses the index when one exists at the default
+    path and falls back to a live walk otherwise — the fast path for an agent
+    that has run ``umbra index fetch``.
     """
+    if token:
+        if local is True:
+            raise ValueError(
+                "A Canopy token searches the live commercial archive, which has "
+                "no local index, so it cannot be combined with local=True. Unset "
+                f"${CANOPY_TOKEN_ENV} to search the local open-data index."
+            )
+        return UmbraCatalog(token=token), False
     path = default_index_path()
     if local is True:
         if not path.exists():
@@ -152,16 +189,21 @@ def search_catalog(
     to cap items per site (use 1 for a one-pin-per-site overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
-    present (instant) and fall back to a live S3 walk otherwise. Returns the
-    per-item context cards, not full STAC JSON, to protect the context window;
-    call ``get_item`` for one item's full metadata.
+    present (instant) and fall back to a live S3 walk otherwise. When the server
+    is configured with a Canopy token (``$UMBRA_CANOPY_TOKEN``), the search runs
+    against Umbra's authenticated commercial archive instead and ``source`` is
+    reported as ``"canopy-archive"``. Returns the per-item context cards, not
+    full STAC JSON, to protect the context window; call ``get_item`` for one
+    item's full metadata.
     """
     resolved_bbox = tuple(bbox) if bbox else None
     resolved_place = None
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
 
-    source, is_index = _search_source(local)
+    token = _canopy_token()
+    source, is_index = _search_source(local, token=token)
+    label = _source_label(is_index, bool(token))
     try:
         results = source.search(
             bbox=resolved_bbox,
@@ -180,7 +222,7 @@ def search_catalog(
 
     return {
         "count": len(cards),
-        "source": "local-index" if is_index else "live-catalog",
+        "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
         "items": cards,
@@ -189,13 +231,27 @@ def search_catalog(
 
 
 def get_item(url: str) -> dict[str, Any]:
-    """Return the full context card for one STAC item, given its JSON URL.
+    """Return the full context card for one item.
+
+    Without a Canopy token configured, ``url`` is the JSON URL of an open-data
+    STAC sidecar, read directly. When the server is configured with a token
+    (``$UMBRA_CANOPY_TOKEN``) and ``url`` is a bare acquisition id (no ``://``),
+    it is instead looked up in Umbra's authenticated commercial archive by a
+    keyed STAC search — the retrieval complement to ``search_catalog`` over the
+    paid catalog, since archive cards carry an ``id`` (not a fetchable sidecar
+    URL) as their hand-off pointer.
 
     The card (:meth:`UmbraItem.to_llm_context`) carries the id, ISO datetime,
     place, bbox, resolution, polarization *with the change-detection caveat*,
     the per-product-type explanations and asset URLs, and the mandatory
     attribution line — everything a model needs to reason about the scene.
     """
+    token = _canopy_token()
+    if token and "://" not in url:
+        item = UmbraCatalog(token=token).get_item(url)
+        if item is None:
+            raise ValueError(f"No item {url!r} in the Canopy commercial archive.")
+        return item.to_llm_context()
     return _fetch_item(url).to_llm_context()
 
 
@@ -380,7 +436,8 @@ def watch_site(
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
 
-    source, is_index = _search_source(local)
+    token = _canopy_token()
+    source, is_index = _search_source(local, token=token)
     # Watch state always lives in the local index's meta table (MetaWatchStore),
     # so a watch persists across MCP sessions. Reuse the index connection when
     # the search already opened one; otherwise open the index just for the store
@@ -414,7 +471,7 @@ def watch_site(
     finally:
         store_index.close()
 
-    payload["source"] = "local-index" if is_index else "live-catalog"
+    payload["source"] = _source_label(is_index, bool(token))
     payload["resolved_place"] = resolved_place
     payload["resolved_bbox"] = list(resolved_bbox) if resolved_bbox else None
     return payload
@@ -586,6 +643,13 @@ def build_server() -> FastMCP:
     """
     FastMCP, _Image = _require_mcp()
 
+    archive_note = (
+        " This server is configured with a Canopy token, so search_catalog and "
+        "get_item query Umbra's authenticated COMMERCIAL archive (source: "
+        "'canopy-archive'); get_item takes an acquisition id, not a URL."
+        if _canopy_token()
+        else ""
+    )
     server = FastMCP(
         "umbra",
         instructions=(
@@ -596,7 +660,7 @@ def build_server() -> FastMCP:
             "change_composite / timescan to see the radar imagery. describe_scene "
             "returns a SAR-literate model reading of a scene (the one tool that "
             "consults a model, and only when an [ai] key is configured). All data "
-            f"is {DATA_LICENSE}; keep the attribution line with any derived product."
+            f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
 

@@ -157,6 +157,89 @@ def test_index_stats_absent(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Canopy commercial-archive backend (configured via $UMBRA_CANOPY_TOKEN)
+# --------------------------------------------------------------------------
+
+
+def test_search_catalog_uses_canopy_archive_when_token_set(sample_item_dict, monkeypatch):
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeArchive:
+        def __init__(self, *a, **k):
+            _FakeArchive.token = k.get("token")
+
+        def search(self, **kwargs):
+            return iter([item])
+
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr(ms, "UmbraCatalog", _FakeArchive)
+    # A configured token routes the search to the commercial archive regardless
+    # of any local index on the machine (local left unset).
+    out = ms.search_catalog(area="anywhere", limit=5)
+
+    assert out["source"] == "canopy-archive"
+    assert out["count"] == 1
+    assert out["items"][0]["id"] == sample_item_dict["id"]
+    # The token is only ever handed to the catalog, never surfaced in the result.
+    assert _FakeArchive.token == "secret-token"
+    assert "secret-token" not in json.dumps(out)
+
+
+def test_search_catalog_token_rejects_local_index(monkeypatch):
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    # The archive is a live STAC API with no local index, so forcing local=True
+    # while a token is configured is a deliberate, explained error.
+    with pytest.raises(ValueError, match="commercial archive"):
+        ms.search_catalog(area="anywhere", local=True)
+
+
+def test_get_item_looks_up_archive_by_id_with_token(sample_item_dict, monkeypatch):
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeArchive:
+        def __init__(self, *a, **k):
+            self.token = k.get("token")
+
+        def get_item(self, item_id):
+            return item if item_id == item.id else None
+
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr(ms, "UmbraCatalog", _FakeArchive)
+    card = ms.get_item(item.id)
+    assert card["id"] == sample_item_dict["id"]
+
+
+def test_get_item_archive_missing_id_raises(monkeypatch):
+    class _FakeArchive:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_item(self, item_id):
+            return None
+
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr(ms, "UmbraCatalog", _FakeArchive)
+    with pytest.raises(ValueError, match="Canopy commercial archive"):
+        ms.get_item("no-such-id")
+
+
+@responses.activate
+def test_get_item_reads_url_directly_even_with_token(sample_item_dict, monkeypatch):
+    # With a token set, a bare id hits the archive, but a full URL is still read
+    # directly as an open-data sidecar — the "://" escape hatch.
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    card = ms.get_item(ITEM_URL)
+    assert card["id"] == sample_item_dict["id"]
+
+
+def test_build_server_instructions_mention_archive_with_token(monkeypatch):
+    monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
+    server = ms.build_server()
+    assert "canopy-archive" in (server.instructions or "")
+
+
+# --------------------------------------------------------------------------
 # Image tools + deterministic guards
 # --------------------------------------------------------------------------
 
