@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Canopy commercial-archive backend on the `umbra-mcp` MCP server — a token
+  concept for the flagship AI surface (`docs/STRATEGY.md` 5.1 follow-on /
+  `docs/AI_INTEGRATION_IDEAS.md` §B1).** The paid-archive funnel already ran end
+  to end on the CLI, but the MCP server — the project's highest-leverage surface —
+  only reached the free open bucket. `umbra_py.mcp_server` now reads
+  `$UMBRA_CANOPY_TOKEN` once from the server's environment (`_canopy_token()` — a
+  secret the operator configures in the MCP client's `env` block, never a tool
+  argument the client's model handles or can leak): when set, `search_catalog` and
+  `watch_site` query Umbra's authenticated commercial archive (`source:
+  "canopy-archive"`) and `get_item` resolves a bare acquisition id through the
+  shipped `UmbraCatalog.get_item` STAC `ids` lookup (a full `://` URL is still read
+  directly as an open-data sidecar). So a paying Canopy customer discovers,
+  monitors and retrieves the archive they pay for through the same conversation a
+  newcomer learned on the free data — the funnel made literal on the surface that
+  matters most. `_search_source(local, token)` rejects `local=True` with a token
+  (the live archive has no local index), and the server's `instructions` announce
+  archive mode when a token is configured. No model is called and no new dependency
+  is added — pure backend-selection wiring; the token is only ever handed to the
+  Canopy catalog (never surfaced in a result), and the whole path is offline-tested
+  (`tests/test_mcp_server.py`) against a fake archive catalog with no credentials
+  and no network.
 - **`describe_scene` MCP tool + `describe-scene` prompt — a SAR-literate VLM
   reading of one scene over MCP (`docs/AI_INTEGRATION_IDEAS.md` §C2 follow-on).**
   The `umbra-mcp` server surfaces the shipped `umbra describe` C2 capability:

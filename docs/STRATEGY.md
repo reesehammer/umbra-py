@@ -998,6 +998,35 @@ same 500 lines of glue first, and many give up."*
 > radiometric-RTC remainder and the maintainer-side adoption moves (5.3 registries,
 > 5.6 talking to Umbra).
 >
+> **Update (2026-07-17):** the **Canopy commercial archive is now reachable from
+> the flagship MCP server** — `umbra-mcp` gained a token concept (workstream 5.1
+> follow-on / `AI_INTEGRATION_IDEAS.md` §B1). The paid-archive funnel already ran
+> end to end on the CLI (search → every render/analysis verb → keyed `get_item`),
+> but the project's *highest-leverage surface* (§3 — every MCP client becomes a
+> zero-install front door to the archive) still only reached the free open bucket:
+> the MCP server had no token concept, the last named gap in 5.1's follow-ons. This
+> closes it: `umbra_py.mcp_server` reads `$UMBRA_CANOPY_TOKEN` once from the
+> server's environment (`_canopy_token()` — a secret the operator configures in the
+> MCP client's `env` block, **never** a tool argument the client's model handles or
+> can leak), and when it is set `search_catalog` and `watch_site` transparently
+> query Umbra's authenticated commercial archive (`source: "canopy-archive"`) while
+> `get_item` resolves a bare acquisition id through the shipped
+> `UmbraCatalog.get_item` STAC `ids` lookup — so a paying Canopy customer discovers,
+> monitors and retrieves the archive they pay for through the exact same
+> conversation a newcomer learned on the free data, with no new tool to learn. This
+> is the funnel §1 describes made literal on the surface that matters most (§1): the
+> tool a user onboards on *is* the tool they use as a customer. It preserves the
+> boundary and testability the scientific audience needs (§3): **no model is called**
+> and no new dependency is added — pure backend-selection wiring — the token is only
+> ever handed to the Canopy catalog (never surfaced in a result), the archive (a
+> live STAC API with no local index) is guarded against `local=True`, the rendering
+> tools stay URL-based open-data by design, and the whole path is offline-tested
+> against a fake archive catalog with no credentials and no network. The remaining
+> 5.1 follow-ons need a real token to verify (pushing `product_types` down as a STAC
+> query extension, verifying the live request/response shapes); the higher-level
+> gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1109,11 +1138,18 @@ same `/archive/search` endpoint — the retrieval sibling of `umbra search --tok
 so the archive's retrieval interface now matches the local index's
 `CatalogIndex.get`.
 
+The commercial archive is now also reachable from the flagship **MCP server**:
+`umbra-mcp` reads `$UMBRA_CANOPY_TOKEN` from its environment (a secret the
+operator configures once, never a model-supplied argument), and when set
+`search_catalog` / `watch_site` query the archive (`source: "canopy-archive"`)
+and `get_item` resolves an acquisition id through `UmbraCatalog.get_item` — so a
+paying customer discovers, monitors and retrieves the paid archive through the
+same conversation a newcomer learned on the free data.
+
 Open follow-ons (not blockers, and each needs a real token to verify): pushing
 `product_types` down as a STAC query/filter extension once the exact Canopy field
-names are confirmed, wiring the archive lookup into the MCP `get_item` tool (the
-MCP server has no token concept yet), and verifying the exact request/response
-shapes against the live API. See `TODO.md`.
+names are confirmed, and verifying the exact request/response shapes against the
+live API. See `TODO.md`.
 
 ### 5.2 Continuously rebuilt, published catalog index — **shipped** (PR #26)
 
