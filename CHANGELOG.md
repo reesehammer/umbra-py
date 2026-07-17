@@ -291,6 +291,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)`), and geocoding's no-match error
   points at `--bbox`.
 
+### Fixed
+- **Asset classifier now recognises a plain `image/tiff` GeoTIFF
+  (`docs/CODEBASE_ANALYSIS.md` P1 #8).** `_classify_asset` tested `"tif" in
+  name`, but `name` is upper-cased (`f"{key} {href}".upper()`), so the lowercase
+  substring could never match — dead code. Umbra's own COGs were still caught by
+  the parallel `"geotiff" in media` check, but an asset that declares a plain
+  `image/tiff` media type (no `geotiff` profile substring) with a `.tif` key
+  slipped through and was dropped from `asset_map` / `available_assets` — i.e.
+  its GEC product became invisible to `info`, `download`, and every consumer of
+  the item. The check now matches `"TIF"` against the upper-cased `name`; added a
+  regression test (`tests/test_models.py`) covering the plain-`image/tiff` case.
+
 ### Security
 - **Generated HTML now escapes all remote metadata and validates link schemes
   (`docs/CODEBASE_ANALYSIS.md` §3.1).** The map/gallery/swipe/change artifacts

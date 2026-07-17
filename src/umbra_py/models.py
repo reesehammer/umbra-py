@@ -36,7 +36,10 @@ def _classify_asset(key: str, asset: dict[str, Any]) -> str | None:
     """
     name = f"{key} {asset.get('href', '')}".upper()
     media = (asset.get("type") or "").lower()
-    is_geotiff = "tif" in name or "geotiff" in media
+    # ``name`` is upper-cased, so the substring must be too: a lowercase "tif"
+    # can never match and would leave the branch dead, dropping a GeoTIFF whose
+    # media type is a plain ``image/tiff`` (no "geotiff" profile substring).
+    is_geotiff = "TIF" in name or "geotiff" in media
 
     if "CPHD" in name:
         return "CPHD"
