@@ -882,6 +882,35 @@ same 500 lines of glue first, and many give up."*
 > showcase (`05_sicd_amplitude.ipynb`, paired with 5.5); the higher-level gaps are
 > unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-17):** the **detection-chips notebook has shipped** —
+> `examples/05_detection_chips.ipynb` (workstream 5.4 / `AI_INTEGRATION_IDEAS.md`
+> B3, the ML-dataset half of the gallery). Every capability is built; the binding
+> constraint on §1's thesis is adoption, and the notebook gallery is its front
+> door — the greatest-hits SAR workflows, runnable, that DevRel links first and
+> that double as live evals. The five shipped notebooks now cover
+> search→quicklook, stream a GEC into `xarray`, a two-pass change composite, an
+> amplitude time series, and — with this one — cutting the archive into
+> **training chips**. That last is the workflow the *model-training* audience (SAR
+> foundation models, change detection — the audience most likely to contribute
+> back, `AI_INTEGRATION_IDEAS.md` §C4) reaches for first: `umbra chips` walks one
+> scene's geocoded COG a window at a time over `/vsicurl` range reads (no full
+> download, memory bounded to one tile) and the notebook reads back the manifest
+> that makes each chip trainable — its geographic bbox, CRS and transform, and the
+> acquisition's look-angle / resolution / polarization / license. It holds the
+> gallery's culture exactly (§3): a small deterministic search with `assert`s in
+> every code cell, so it is a live eval as much as a tutorial, kept honest offline
+> by `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
+> symbols, CC-BY present) and executable end-to-end under `pytest -m network`.
+> Pure funnel-widening (§1), no new code surface and no model call. The one
+> gallery notebook still deferred is the SICD-convert showcase
+> (`06_sicd_amplitude.ipynb`, paired with 5.5): a SICD is a multi-gigabyte complex
+> product (a representative scene is ~8 GB), so a download-and-convert notebook
+> can't stay in the self-checking gallery's "small and fast" grain the way the
+> streamed-overview notebooks do — it wants a curated small scene or a pre-staged
+> fixture first. The higher-level gaps are unchanged and largely non-code: 5.5's
+> radiometric-RTC remainder and the maintainer-side adoption moves (5.3
+> registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -1054,10 +1083,20 @@ start; notebooks with rendered output travel further.
   to `timescan` (which keeps the map) and `change` (which compares two passes).
   Like the others it is self-checking (a small deterministic search with
   `assert`s) and guarded offline by `tests/test_examples.py`.
-- ⬜ Remaining: a detection-chips notebook (`umbra chips`) and
-  `05_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG work in 5.5).
-  Rendering pre-baked output into the committed notebooks (they currently ship
-  with cleared cells) is a later polish step.
+- ✅ **The detection-chips notebook has shipped** —
+  `05_detection_chips.ipynb` cuts one scene into fixed-size, georeferenced
+  training chips with `umbra chips` (streamed via `/vsicurl`, no full download)
+  and reads back the manifest that makes each chip trainable — bbox, CRS,
+  look-angle, polarization, license. Like the others it is self-checking (a
+  deterministic one-day search with `assert`s) and guarded offline by
+  `tests/test_examples.py`.
+- ⬜ Remaining: `06_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG
+  work in 5.5). It is deferred from the self-checking gallery for now because a
+  SICD is a multi-gigabyte complex product (a representative scene is ~8 GB), so
+  a notebook that downloads and converts one can't run quickly the way the
+  streamed-overview notebooks do — it wants a curated small scene or a pre-staged
+  fixture first. Rendering pre-baked output into the committed notebooks (they
+  currently ship with cleared cells) is a later polish step.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 

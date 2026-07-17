@@ -530,9 +530,11 @@ no operational cost and no abuse surface.
   `UmbraItem`/`ItemCollection` now implement `__geo_interface__` (derived from
   the existing `to_geojson`) so geopandas/shapely/leafmap ingest results with
   zero code — and so agent-written analysis code "just works" on the first try.
-- ✅ **shipped:** three **agent-executable example notebooks**
+- ✅ **shipped:** five **agent-executable example notebooks**
   (`examples/01_hello_umbra.ipynb`, `02_download_and_open_gec.ipynb`,
-  `03_change_detection.ipynb`) with deterministic, small-area searches and
+  `03_change_detection.ipynb`, `04_amplitude_time_series.ipynb`, and
+  `05_detection_chips.ipynb` — the ML-dataset workflow over `umbra chips` for the
+  §C4 model-training audience) with deterministic, small-area searches and
   `assert`s in every code cell — so, exactly as this line hoped, they are
   effectively free eval + documentation: a coding agent learns the library from
   them, and running one is a live check that the flow still works.

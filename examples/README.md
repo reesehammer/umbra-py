@@ -24,6 +24,10 @@ They stream from Umbra's public bucket, so run them with network access.
   site's repeat passes to one number each (mean backscatter in dB) and plot the
   amplitude time series — the scalar, whole-scene complement to `timescan`
   (`load` extra; matplotlib optional for the plot).
+- [`05_detection_chips.ipynb`](05_detection_chips.ipynb) — cut one scene into
+  fixed-size, georeferenced training chips with `umbra chips` (streamed via
+  `/vsicurl`, no full download), then read the manifest that makes each chip
+  trainable — bbox, CRS, look-angle, polarization, license (`load` extra).
 
 The committed notebooks ship with **cleared outputs**. `tests/test_examples.py`
 validates them offline on every CI run (well-formed, code cells parse, every
@@ -33,11 +37,14 @@ extras are installed.
 
 Still planned (good first contributions):
 
-- `05_sicd_amplitude.ipynb` — convert a SICD to a geocoded COG (terrain
+- `06_sicd_amplitude.ipynb` — convert a SICD to a geocoded COG (terrain
   orthorectified with `--dem auto`) and open it as a georeferenced array (uses
   the `convert` extra); tracked with the SICD → geocoded COG work in
-  `docs/STRATEGY.md` 5.5.
-- A detection-chips notebook over `umbra chips` (the `load` extra).
+  `docs/STRATEGY.md` 5.5. Deferred from the self-checking gallery for now
+  because a SICD is a multi-gigabyte complex product (a representative scene is
+  ~8 GB), so a notebook that downloads and converts one cannot run quickly the
+  way the streamed-overview notebooks above do — it wants a curated small scene
+  or a pre-staged fixture first.
 
 ## Guides
 
