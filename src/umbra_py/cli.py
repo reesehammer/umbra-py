@@ -635,25 +635,46 @@ def watch_cmd(
 
 
 @cli.command()
-@click.argument("item_url")
+@click.argument("item")
 @click.option(
     "--json",
     "as_json",
     is_flag=True,
     help="Emit the item's LLM context card as JSON instead of a readable summary.",
 )
-def info(item_url, as_json) -> None:
-    """Show a summary of a STAC item given its JSON URL.
+@click.option(
+    "--token",
+    default=None,
+    envvar=CANOPY_TOKEN_ENV,
+    help="Canopy API token. When given, ITEM is treated as an acquisition id and "
+    "looked up in Umbra's authenticated COMMERCIAL archive by a keyed STAC search "
+    "(the retrieval complement to 'umbra search --token'), instead of being read "
+    f"as an open-data sidecar URL. Falls back to ${CANOPY_TOKEN_ENV}.",
+)
+def info(item, as_json, token) -> None:
+    """Show a summary of a STAC item.
+
+    Without ``--token`` (the default), ITEM is the JSON URL of an open-data
+    sidecar, read directly. With ``--token`` (or ``$UMBRA_CANOPY_TOKEN``), ITEM
+    is instead an acquisition id, looked up in Umbra's Canopy commercial archive
+    by a keyed STAC search — the retrieval complement to ``umbra search
+    --token``, over the paid catalog.
 
     ``--json`` emits the explanation-rich context card
     (:meth:`umbra_py.UmbraItem.to_llm_context`) — a compact object an agent
     can consume directly, with per-product explanations and the license line.
     """
-    item = UmbraItem.from_dict(get_json(item_url), href=item_url)
+    if token:
+        found = UmbraCatalog(token=token).get_item(item)
+        if found is None:
+            raise click.ClickException(f"No item {item!r} in the Canopy commercial archive.")
+        item_obj = found
+    else:
+        item_obj = UmbraItem.from_dict(get_json(item), href=item)
     if as_json:
-        click.echo(json.dumps(item.to_llm_context(), indent=2))
+        click.echo(json.dumps(item_obj.to_llm_context(), indent=2))
         return
-    click.echo(item.summary())
+    click.echo(item_obj.summary())
     click.echo(f"\nData license: {DATA_LICENSE} (attribution required).")
 
 

@@ -194,10 +194,19 @@ against a mocked API). Open follow-ons, none a blocker:
   them as a STAC *query*/*filter* body would let the server pre-filter and cut
   transferred pages. This needs a real token to verify, so it is deliberately
   deferred rather than guessed.
-- **`get_item(id)` against the archive.** `UmbraCatalog.search` covers listing;
-  a keyed single-item fetch (`GET /collections/{id}/items/{item_id}` or an `ids`
-  search) would round out the interface for the MCP `get_item` tool over the
-  commercial archive.
+- ~~**`get_item(id)` against the archive.**~~ ✅ **Done.**
+  `UmbraCatalog.get_item(item_id)` is the keyed-retrieval complement to
+  `search`'s listing: it POSTs the STAC API `ids` search extension
+  (`{"ids": [item_id], "limit": 1}`) to the same `/archive/search` endpoint the
+  search path uses — so no new endpoint is guessed and the whole path is
+  offline-tested against a mocked API (`tests/test_canopy.py`). It requires a
+  token (the open bucket has no id→item index — resolve an open-data item from a
+  sidecar URL or `CatalogIndex.get`), guards against a server that ignores the
+  `ids` filter (only the exact id is accepted), and inherits `_archive_page`'s
+  bearer auth + 401/403/500 handling. Surfaced on the CLI as `umbra info <id>
+  --token` (with the `$UMBRA_CANOPY_TOKEN` fallback), the retrieval sibling of
+  `umbra search --token`. Still open: wiring the archive lookup into the MCP
+  `get_item` tool (the MCP server has no token concept yet — a separate surface).
 - **Verify request/response shapes against the live Canopy API.** The client is
   built to the STAC API *standard*; confirm the exact search body, collection
   ids, and pagination link shape Canopy emits, and adjust if it deviates. Add a
@@ -405,7 +414,8 @@ it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
   missing / index-present, plus the keyed-vs-listing dispatch in `get_one`.
   Was `docs/CODEBASE_ANALYSIS.md` §4.5 and this file's `umbra serve` open item.
   The Canopy-archive `get_item(id)` (a keyed fetch against the commercial STAC
-  API) remains the separate open follow-on under the Canopy section.
+  API) has since shipped too — see the Canopy section — so the retrieval interface
+  now has a keyed lookup on both the local index and the commercial archive.
 - **Structured `--json` success output on the remaining commands (A1 follow-on).**
   The A1 error contract already shipped (structured stderr errors with `hint`,
   `docs/schemas/error.schema.json`); this completes the success side so every

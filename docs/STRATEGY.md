@@ -912,6 +912,36 @@ same 500 lines of glue first, and many give up."*
 > radiometric-RTC remainder and the maintainer-side adoption moves (5.3
 > registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-17):** the **Canopy commercial archive gained a keyed
+> single-item lookup** — `UmbraCatalog.get_item(item_id)` / `umbra info <id>
+> --token` (workstream 5.1 follow-on — the flagship "single highest-value strategic
+> move overall"). §5.1 made the paid archive *searchable* behind the same
+> `search()` interface, and every render/analysis verb reaches it; the retrieval
+> interface, though, was asymmetric — the *local* index had a keyed point lookup
+> (`CatalogIndex.get(item_id)`, shipped) but the commercial archive could only be
+> *listed*, not fetched by id. This closes that: `get_item(id)` is the retrieval
+> complement to `search`'s listing, implemented with the STAC API `ids` search
+> extension over the *same* `/archive/search` endpoint the search path already
+> POSTs to (`POST {"ids": [item_id], "limit": 1}`) — so it guesses no new endpoint
+> and, like the search backend, is fully offline-testable against a mocked API. It
+> is the funnel made a little more literal (§1): the paying customer who searched
+> the archive can now pull one acquisition straight back by id — the primitive an
+> MCP `get_item` tool, a permalink, or a re-fetch of a saved id all reach for. It
+> preserves the boundary and testability the scientific audience needs (§3): **no
+> model is called** and no new dependency is added — this is pure STAC-standard
+> wiring — the token is only ever sent to the Canopy endpoint, the lookup guards
+> against a server that ignores the `ids` filter (only the exact id is accepted),
+> and the whole path is offline-tested (`tests/test_canopy.py`,
+> `tests/test_cli_token.py`) with no credentials and no network. On the CLI it is
+> an additive, backward-compatible layer on `umbra info`: with `--token` (or
+> `$UMBRA_CANOPY_TOKEN`) the argument is an archive item id, without it the command
+> is the open-data sidecar-URL read it has always been. The remaining 5.1
+> follow-ons still need a real token to verify (pushing `product_types` down as a
+> STAC query extension, wiring the archive lookup into the MCP `get_item` tool, and
+> live request/response-shape verification); the higher-level gaps are unchanged
+> and largely non-code: 5.5's radiometric-RTC remainder and the maintainer-side
+> adoption moves (5.3 registries, 5.6 talking to Umbra).
+
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1016,9 +1046,18 @@ The commercial-archive backend is now reachable from the *whole* CLI, not just
 `_gather_items`), so a paying customer discovers *and* renders the archive they
 pay for with the identical flags — the funnel made literal end to end.
 
+The commercial archive now also has a **keyed single-item lookup** to match its
+listing: `UmbraCatalog.get_item(item_id)` (surfaced as `umbra info <id> --token`)
+fetches one acquisition by STAC id via the standard `ids` search extension over the
+same `/archive/search` endpoint — the retrieval sibling of `umbra search --token`,
+so the archive's retrieval interface now matches the local index's
+`CatalogIndex.get`.
+
 Open follow-ons (not blockers, and each needs a real token to verify): pushing
 `product_types` down as a STAC query/filter extension once the exact Canopy field
-names are confirmed, and a `get_item(id)` archive lookup. See `TODO.md`.
+names are confirmed, wiring the archive lookup into the MCP `get_item` tool (the
+MCP server has no token concept yet), and verifying the exact request/response
+shapes against the live API. See `TODO.md`.
 
 ### 5.2 Continuously rebuilt, published catalog index — **shipped** (PR #26)
 

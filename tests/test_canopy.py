@@ -268,6 +268,65 @@ def test_search_archive_max_per_task():
     assert [i.id for i in items] == ["a1", "b1"]
 
 
+# -- keyed single-item lookup (get_item) --------------------------------------
+
+
+@responses.activate
+def test_get_item_returns_the_keyed_item():
+    responses.add(
+        responses.POST,
+        CANOPY_ARCHIVE_URL,
+        json=_collection(_feature("abc", "2024-01-15T10:00:00Z", (0, 0, 1, 1))),
+        status=200,
+    )
+    cat = UmbraCatalog(token="secret", collections=["umbra-archive"])
+    item = cat.get_item("abc")
+    assert item is not None
+    assert item.id == "abc"
+    assert item.asset_href("GEC").endswith("abc_GEC.tif")
+
+    # It uses the STAC ``ids`` search extension over the same endpoint, with
+    # bearer auth and the collection scope carried through.
+    assert len(responses.calls) == 1
+    req = responses.calls[0].request
+    assert req.headers["Authorization"] == "Bearer secret"
+    body = json.loads(req.body)
+    assert body["ids"] == ["abc"]
+    assert body["limit"] == 1
+    assert body["collections"] == ["umbra-archive"]
+
+
+@responses.activate
+def test_get_item_missing_returns_none():
+    responses.add(responses.POST, CANOPY_ARCHIVE_URL, json=_collection(), status=200)
+    assert UmbraCatalog(token="secret").get_item("nope") is None
+
+
+@responses.activate
+def test_get_item_ignores_wrong_id_from_a_server_that_ignores_ids():
+    # A server that ignores the ``ids`` filter and returns an unrelated feature
+    # must not be mistaken for a match.
+    responses.add(
+        responses.POST,
+        CANOPY_ARCHIVE_URL,
+        json=_collection(_feature("other", "2024-01-15T10:00:00Z", (0, 0, 1, 1))),
+        status=200,
+    )
+    assert UmbraCatalog(token="secret").get_item("wanted") is None
+
+
+def test_get_item_without_token_is_a_helpful_error():
+    with pytest.raises(CatalogError, match="needs a token"):
+        UmbraCatalog().get_item("abc")
+
+
+@responses.activate
+def test_get_item_auth_error_is_helpful():
+    responses.add(responses.POST, CANOPY_ARCHIVE_URL, status=403)
+    with pytest.raises(CatalogError, match="rejected the token"):
+        UmbraCatalog(token="bad").get_item("abc")
+
+
 @responses.activate
 def test_search_archive_auth_error_is_helpful():
     responses.add(responses.POST, CANOPY_ARCHIVE_URL, status=401)
