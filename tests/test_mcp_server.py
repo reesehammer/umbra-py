@@ -60,6 +60,7 @@ def test_build_server_registers_expected_surface():
         "watch_site",
         "find_similar",
         "find_similar_text",
+        "describe_scene",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
@@ -68,6 +69,7 @@ def test_build_server_registers_expected_surface():
         "monitor-site",
         "watch-site",
         "find-similar-scenes",
+        "describe-scene",
         "survey-region",
     }
 
@@ -379,3 +381,66 @@ def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
     with pytest.raises(FileNotFoundError, match="umbra embed build"):
         ms.find_similar_text("a flooded field")
+
+
+# --------------------------------------------------------------------------
+# describe_scene — the VLM scene reading over MCP (C2)
+#
+# Fully offline: the model step (default_describer) and the render step
+# (render_quicklook_png) are injectable module globals on umbra_py.describe, so
+# these exercise the whole path — fetch → render → prompt → parse → provenance —
+# without an [ai] key, the [viz] extra, or the network, the same interpretation
+# boundary the CLI describe tests hold.
+# --------------------------------------------------------------------------
+
+# ``from umbra_py import describe`` (the function) shadows the module attribute on
+# the package, so fetch the real submodule from sys.modules to patch its globals.
+import sys  # noqa: E402
+
+_describe_mod = sys.modules["umbra_py.describe"]
+
+
+def _fake_describer(reply):
+    """A describer that ignores the multimodal prompt and returns a fixed reply."""
+    return lambda messages: reply
+
+
+@responses.activate
+def test_describe_scene_returns_structured_reading(sample_item_dict, monkeypatch):
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    reply = json.dumps(
+        {
+            "summary": "A dark smooth river curves through a bright built-up area.",
+            "observed_features": ["bright grid of buildings in the northeast"],
+            "confidence": "medium",
+            "caveats": ["the dark band could be calm water or radar shadow"],
+        }
+    )
+    # Stub both edges: the model reply and the quicklook render (no network/viz).
+    monkeypatch.setattr(_describe_mod, "default_describer", lambda **k: _fake_describer(reply))
+    monkeypatch.setattr(_describe_mod, "render_quicklook_png", lambda item, **k: b"PNG")
+
+    out = ms.describe_scene(ITEM_URL)
+    assert out["item_id"] == sample_item_dict["id"]
+    assert out["summary"].startswith("A dark smooth river")
+    assert out["observed_features"] == ["bright grid of buildings in the northeast"]
+    assert out["confidence"] == "medium"
+    assert out["caveats"] == ["the dark band could be calm water or radar shadow"]
+    assert out["asset"] == "GEC"
+    # Provenance and attribution are stamped deterministically, never by the model.
+    assert out["attribution"] == ms.ATTRIBUTION
+    assert out["provenance"]
+
+
+@responses.activate
+def test_describe_scene_without_key_errors(sample_item_dict, monkeypatch):
+    from umbra_py.exceptions import MissingDependencyError
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    # Render is stubbed so the failure is specifically the missing model key,
+    # not the [viz] extra; clear any provider key the environment might carry.
+    monkeypatch.setattr(_describe_mod, "render_quicklook_png", lambda item, **k: b"PNG")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(MissingDependencyError, match="API key"):
+        ms.describe_scene(ITEM_URL)

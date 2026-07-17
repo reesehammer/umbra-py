@@ -375,6 +375,27 @@ builds capabilities that assume an AI in the loop.
 > The whole surface is offline-tested (`tests/test_cli_json.py`) with injected
 > renderers/downloads — no network, no `viz` extra. With this, **Tier A is
 > complete end to end.**
+>
+> **Update:** the **C2 scene reading is now on the flagship MCP surface** — the
+> `umbra-mcp` server gained a `describe_scene` tool (plus a `describe-scene`
+> prompt), surfacing the shipped `umbra describe` capability (C2) on the
+> highest-leverage surface the project has (B1). Where the server's `quicklook`
+> returns the *picture* for the client's own model to interpret, `describe_scene`
+> returns the **structured, SAR-literate reading** produced through the packaged
+> SAR primer — the radar-reading expertise (bright is backscatter not heat; a
+> dark patch may be calm water *or* radar shadow; speckle is not structure) a
+> general model does not reliably have — as `{summary, observed_features[],
+> confidence, caveats[], …}`, so an agent can branch on the fields rather than
+> re-read the image. It holds the server's determinism boundary (§A4, §6.1)
+> exactly as `find_similar` does: the only model call is the injectable
+> `Describer` reading a deterministically-rendered scene, the reply is validated
+> by `parse_description`, and the mandatory CC-BY attribution + `AI_PROVENANCE`
+> note are stamped on — so a reading is never mistaken for a measurement. Gated on
+> the `[ai]` key and the `[viz]` render (a self-describing error names the missing
+> piece), and fully offline-tested in `tests/test_mcp_server.py` with a stand-in
+> describer and renderer (no `[ai]`/`[viz]`, no network). This is the direct
+> funnel-widener the MCP surface exists for: every C1–C5 capability plus C2 scene
+> reading is now reachable as a zero-install conversation.
 
 `umbra search --json` exists; the guarantee now covers the whole CLI:
 

@@ -11,10 +11,15 @@ The tools are thin wrappers over the existing public API — the CLI subcommands
 already map 1:1 to library functions, so the tool inventory was already
 designed. Two design commitments carry over from the rest of the package:
 
-- **Deterministic core, AI at the edges.** Nothing here calls a model. The
-  server searches, geocodes, downloads and renders; the *client's* model
-  plans and narrates. A model output never becomes a coordinate, a URL, or a
-  filter without passing through this deterministic layer.
+- **Deterministic core, AI at the edges.** The search / geocode / download /
+  render core calls no model; the *client's* model plans and narrates. The
+  three ``[ai]``-gated tools that do reach a model touch it only at the
+  injectable edge — ``find_similar`` / ``find_similar_text`` turn an image or a
+  query into a vector, and ``describe_scene`` reads a rendered scene into
+  structured text — and a model output never becomes a coordinate, a URL, or a
+  filter: it is validated back through this deterministic layer (a similarity
+  match is a pointer to a real acquisition; a description is provenance-stamped
+  text *about* the scene) before it leaves the server.
 - **Images are the API.** ``quicklook``/``change_composite``/``timescan``
   return the rendered PNG as an MCP image content block, so the model *sees*
   the radar scene — the differentiator over geo servers that return only JSON.
@@ -521,6 +526,42 @@ def find_similar_text(
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 
+def describe_scene(
+    url: str,
+    asset: str = "GEC",
+    db: bool = True,
+    max_size: int = 1024,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Return a structured, SAR-literate reading of one scene's imagery.
+
+    Where ``quicklook`` hands the picture to the *client's* model to look at,
+    this returns a validated reading produced by a vision model prompted with the
+    library's packaged SAR primer — the radar-reading expertise a general model
+    does not reliably have (bright is strong backscatter, not heat; a dark patch
+    may be calm water *or* radar shadow; speckle is not structure). It renders the
+    item at ``url`` (default the analysis-ready ``GEC``, ``db=True`` decibel
+    stretch), sends that quicklook plus the item's ``to_llm_context`` metadata
+    card to the model, and returns ``{summary, observed_features[], confidence,
+    caveats[], model, asset, attribution, provenance}``.
+
+    The model **only interprets** — it never becomes a coordinate, URL, or
+    filter. The picture and the metadata are produced deterministically, the
+    reply is validated into that fixed shape, and the mandatory CC-BY attribution
+    plus an explicit "AI-generated interpretation" provenance note are stamped on,
+    so a reading is never mistaken for a measurement. Requires a vision-model key
+    (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY`` — the ``[ai]`` extra; optionally
+    ``UMBRA_DESCRIBE_MODEL`` / ``model`` to pick the model) and the ``[viz]``
+    extra for the render; a self-describing error names the missing piece when
+    either is absent.
+    """
+    from .describe import describe as _describe_scene
+
+    item = _fetch_item(url)
+    description = _describe_scene(item, model=model, asset=asset, db=db, max_size=max_size)
+    return description.to_dict()
+
+
 def main() -> None:
     """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
     build_server().run()
@@ -541,8 +582,10 @@ def build_server() -> FastMCP:
             "Search and visualize Umbra's open SAR archive. Start by reading "
             "the 'umbra://context' resource for product-type and search "
             "semantics. Use search_catalog to find acquisitions (compact cards), "
-            "get_item for one item's full metadata, and quicklook / "
-            "change_composite / timescan to see the radar imagery. All data is "
+            "get_item for one item's full metadata, quicklook / "
+            "change_composite / timescan to see the radar imagery, and "
+            "describe_scene for a SAR-literate structured reading of a scene. "
+            "All data is "
             f"{DATA_LICENSE}; keep the attribution line with any derived product."
         ),
     )
@@ -559,6 +602,7 @@ def build_server() -> FastMCP:
         watch_site,
         find_similar,
         find_similar_text,
+        describe_scene,
     ):
         server.add_tool(fn)
 
@@ -637,6 +681,31 @@ def build_server() -> FastMCP:
             "3. Otherwise quicklook(url=<match.href>) on the top one or two matches so "
             "you can see them, and summarize what the matched scenes have in common, "
             "citing their acquisition dates and keeping the attribution line."
+        )
+
+    @server.prompt(
+        name="describe-scene",
+        description="Workflow: find a scene and get a SAR-literate reading of it.",
+    )
+    def describe_scene_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
+        window = f" between {start} and {end}" if start or end else ""
+        args = f"place='{place}'"
+        if start:
+            args += f", start={start!r}"
+        if end:
+            args += f", end={end!r}"
+        return (
+            f"Read a SAR scene over '{place}'{window} using the umbra tools "
+            "(needs a vision-model key — the [ai] extra):\n"
+            f"1. search_catalog({args}, max_per_task=1) to find a representative "
+            "acquisition of the site.\n"
+            "2. describe_scene(url=<item.stac_href>) — a vision model reads the "
+            "rendered quicklook through the packaged SAR primer and returns a "
+            "structured {summary, observed_features, confidence, caveats} reading.\n"
+            "3. Relay the summary and observed features to the user, keeping the "
+            "AI-interpretation provenance note and the attribution line, and note "
+            "any caveats the reading flags (a dark area that could be shadow or "
+            "water, speckle in a low-backscatter field)."
         )
 
     @server.prompt(

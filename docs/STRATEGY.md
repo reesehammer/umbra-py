@@ -911,6 +911,33 @@ same 500 lines of glue first, and many give up."*
 > fixture first. The higher-level gaps are unchanged and largely non-code: 5.5's
 > radiometric-RTC remainder and the maintainer-side adoption moves (5.3
 > registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-17):** the **C2 scene reading is now on the flagship MCP
+> surface** — `umbra-mcp` gained a `describe_scene` tool (plus a `describe-scene`
+> prompt), surfacing the shipped `umbra describe` capability
+> (`AI_INTEGRATION_IDEAS.md` C2) on the highest-leverage surface the project has
+> (the flagship MCP server, `AI_INTEGRATION_IDEAS.md` B1). The MCP server already
+> returned imagery, but the model had to interpret the `quicklook` itself; this
+> hands back the **structured, SAR-literate reading** produced through the
+> library's packaged SAR primer — the radar-reading expertise a general model
+> lacks (bright is backscatter not heat; a dark patch may be calm water *or* radar
+> shadow; speckle is not structure) — as `{summary, observed_features[],
+> confidence, caveats[], …}`, so an agent branches on the fields instead of
+> re-reading the picture. It is a direct funnel-widener on the highest-leverage
+> surface (§1): SAR literacy that a newcomer *and* an agent lack is now one tool
+> call away, encoded once in the packaged prompt. It preserves the boundary and
+> trust the scientific audience needs (§3): the only model call is the injectable
+> describer reading a deterministically-rendered scene, its reply is re-validated
+> (`parse_description`), and every reading carries the CC-BY attribution plus the
+> explicit `AI_PROVENANCE` note — so a model's reading of radar is never mistaken
+> for a measurement, exactly as the CLI holds. It stays graceful under the "moat
+> is leased" risk (§3): it layers on the same discovery substrate the whole
+> project rests on. The whole path is offline-tested with a stand-in describer and
+> renderer (no `[ai]`/`[viz]`, no network), the same discipline `find_similar` /
+> `find_similar_text` hold. With this, every C1–C5 capability plus C2 scene
+> reading is reachable as a zero-install MCP conversation. The remaining strategic
+> gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
