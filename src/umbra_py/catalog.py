@@ -24,6 +24,8 @@ from urllib.parse import quote
 
 import requests
 
+from ._geometry import Geometry
+from ._geometry import to_geojson as _geometry_to_geojson
 from ._http import default_session, get_json
 from .constants import CANOPY_ARCHIVE_URL, S3_BUCKET, S3_REGION
 from .dates import parse_date_bound
@@ -257,6 +259,7 @@ class UmbraCatalog:
         self,
         *,
         bbox: BBox | None = None,
+        intersects: Geometry | None = None,
         start: DateLike = None,
         end: DateLike = None,
         product_types: list[str] | None = None,
@@ -271,6 +274,12 @@ class UmbraCatalog:
         ----------
         bbox:
             ``(min_lon, min_lat, max_lon, max_lat)`` footprint filter.
+        intersects:
+            A polygon geometry (the exterior-ring form from
+            :func:`umbra_py._geometry.parse_geometry`); keep only items whose
+            footprint intersects it. A tighter spatial filter than the
+            rectangular ``bbox`` -- the standard STAC ``intersects``. Combines
+            with ``bbox`` (both must match) when both are given.
         start, end:
             Inclusive acquisition-date bounds. Accepts ``date`` /
             ``datetime`` objects or ISO ``YYYY-MM-DD`` strings. The walker
@@ -323,6 +332,7 @@ class UmbraCatalog:
         if self.token:
             yield from self._search_archive(
                 bbox=bbox,
+                intersects=intersects,
                 start=start_d,
                 end=end_d,
                 wanted=wanted,
@@ -345,6 +355,8 @@ class UmbraCatalog:
             for item in self._walk_task(task_prefix, start_d, end_d):
                 if bbox is not None and not item.intersects_bbox(bbox):
                     continue
+                if intersects is not None and not item.intersects_polygon(intersects):
+                    continue
                 if wanted is not None and not (wanted & set(item.available_assets)):
                     continue
                 yield item
@@ -361,6 +373,7 @@ class UmbraCatalog:
         self,
         *,
         bbox: BBox | None,
+        intersects: Geometry | None,
         start: date | None,
         end: date | None,
         wanted: set[str] | None,
@@ -382,7 +395,14 @@ class UmbraCatalog:
         body: dict[str, Any] = {}
         if self.collections:
             body["collections"] = list(self.collections)
-        if bbox is not None:
+        if intersects is not None:
+            # The STAC API can filter by geometry itself; send the polygon and
+            # still re-check each returned footprint client-side (below) so a
+            # server that ignores or loosens the filter can't leak non-matches.
+            geojson = _geometry_to_geojson(intersects)
+            if geojson is not None:
+                body["intersects"] = geojson
+        elif bbox is not None:
             body["bbox"] = list(bbox)
         interval = _datetime_interval(start, end)
         if interval:
@@ -400,6 +420,8 @@ class UmbraCatalog:
             page = self._archive_page(url, method, next_body)
             for feature in page.get("features", []):
                 item = UmbraItem.from_dict(feature)
+                if intersects is not None and not item.intersects_polygon(intersects):
+                    continue
                 if wanted is not None and not (wanted & set(item.available_assets)):
                     continue
                 if area and not task_matches(area, item.task or "", fuzzy=fuzzy):

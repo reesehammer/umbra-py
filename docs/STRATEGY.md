@@ -1027,6 +1027,38 @@ same 500 lines of glue first, and many give up."*
 > gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 >
+> **Update (2026-07-17):** **polygon `intersects` search has shipped** — a true
+> footprint filter across every search surface (`AI_INTEGRATION_IDEAS.md` §B2 STAC
+> follow-on). §3 names discovery as the project's *moat* — "the only thing with no
+> substitute is search over a static STAC catalog that has no search API" — yet the
+> only spatial filter was a bounding box, and a rectangle is a blunt instrument: a
+> coast, a national border, a river basin, or any area of interest a user draws on a
+> map sweeps in a lot of empty ocean and neighbouring land, so the results need
+> hand-filtering afterward — more of "the same 500 lines of glue" §1 says drives
+> people away. `search(intersects=…)` keeps only acquisitions whose footprint
+> intersects a caller-supplied GeoJSON polygon (the standard STAC `intersects` every
+> geo tool already speaks), threaded through *every* surface so the backends agree:
+> the live `UmbraCatalog` walk, the SQLite `CatalogIndex` (its bbox pushed into SQL
+> as a cheap prefilter, the exact polygon test then run in Python), the read-through
+> `search_live`, the Canopy commercial archive (the polygon POSTed as STAC
+> `intersects` and re-checked client-side so a loose server can't leak non-matches),
+> `umbra search --intersects` (a `.geojson` file or inline JSON), the `umbra serve`
+> STAC API (`GET`/`POST /search`, mutually exclusive with `bbox` per the spec), and
+> the `search_catalog` MCP tool (so agents — §1's co-equal users — filter by AOI
+> too). It holds the project's grain and testability (§3): the geometry is a new
+> **dependency-free** core (`umbra_py._geometry`) — a stdlib GeoJSON parser and
+> closed-form intersection primitives (bbox reject, segment-crossing, ray-cast
+> point-in-polygon) over plain `(lon, lat)` tuples, **no shapely**, no compiled
+> geometry stack in the base install — and `UmbraItem.intersects_polygon` tests the
+> *actual* footprint (tighter than the bbox filter), falling back to the bbox when a
+> footprint is absent. Holes and antimeridian spans are handled over-inclusively
+> (they can only keep an item, never wrongly drop one — the safe direction for a
+> discovery filter) and documented as such; **no model is called** and the whole
+> path is offline-tested (`tests/test_geometry.py`) across core, item, catalog,
+> index, CLI, STAC API and MCP. The higher-level gaps are unchanged and largely
+> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
+> (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
+from ._geometry import Geometry, geometry_bbox
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
 from .exceptions import IndexSchemaError
@@ -403,6 +404,7 @@ class CatalogIndex:
         self,
         *,
         bbox: BBox | None = None,
+        intersects: Geometry | None = None,
         start: DateLike = None,
         end: DateLike = None,
         product_types: list[str] | None = None,
@@ -419,6 +421,12 @@ class CatalogIndex:
         deterministic token-wise match the live path uses
         (:func:`umbra_py.fuzzy.matching_tasks`): the distinct task names are
         read from the index and matched in Python, so both backends agree.
+
+        ``intersects`` (the exterior-ring form from
+        :func:`umbra_py._geometry.parse_geometry`) keeps only items whose
+        footprint intersects the polygon. Its bounding box is pushed into SQL as
+        a cheap prefilter and the exact polygon test then runs in Python on each
+        candidate, so the result matches :meth:`UmbraCatalog.search` exactly.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -450,14 +458,18 @@ class CatalogIndex:
         elif area:
             conditions.append("task IS NOT NULL AND LOWER(task) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(area.lower())}%")
-        if bbox is not None:
+        # A polygon filter pushes its own bounding box into SQL as a cheap
+        # prefilter (the exact polygon test runs in Python on each candidate
+        # below); combined with an explicit ``bbox`` both boxes must overlap.
+        boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
+        for box in boxes:
             # Footprint bbox overlaps the query bbox (matches
             # UmbraItem.intersects_bbox); items with no bbox never match.
             conditions.append(
                 "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
                 "AND max_lat >= ? AND min_lat <= ?"
             )
-            params += [bbox[0], bbox[2], bbox[1], bbox[3]]
+            params += [box[0], box[2], box[1], box[3]]
         if product_types:
             wanted = [p.upper() for p in product_types]
             placeholders = ", ".join("?" * len(wanted))
@@ -473,6 +485,8 @@ class CatalogIndex:
         per_task: dict[str | None, int] = {}
         for href, doc in self._conn.execute(sql, params):
             item = UmbraItem.from_dict(json.loads(doc), href=href)
+            if intersects is not None and not item.intersects_polygon(intersects):
+                continue
             if max_per_task is not None:
                 seen = per_task.get(item.task, 0)
                 if seen >= max_per_task:
@@ -490,6 +504,7 @@ class CatalogIndex:
         overlap_days: int = 1,
         refresh: bool = True,
         bbox: BBox | None = None,
+        intersects: Geometry | None = None,
         start: DateLike = None,
         end: DateLike = None,
         product_types: list[str] | None = None,
@@ -553,6 +568,7 @@ class CatalogIndex:
 
         filters: dict[str, object] = {
             "bbox": bbox,
+            "intersects": intersects,
             "end": end_d,
             "product_types": product_types,
             "area": area,

@@ -361,6 +361,25 @@ class UmbraItem:
             return False
         return _bbox_overlaps(self.bbox, bbox)
 
+    def intersects_polygon(self, geometry: Any) -> bool:
+        """Whether this item's footprint intersects the given polygon geometry.
+
+        ``geometry`` is the exterior-ring form returned by
+        :func:`umbra_py._geometry.parse_geometry` (a list of rings). This uses
+        the item's *actual* footprint polygon when it has one -- a tighter test
+        than the bbox rectangle :meth:`intersects_bbox` uses -- and falls back
+        to the footprint bbox when the geometry is missing or not a polygon (and
+        matches nothing when neither is available).
+        """
+        from ._geometry import bbox_ring, geometries_intersect, rings_from_geojson
+
+        item_rings = rings_from_geojson(self.geometry)
+        if item_rings is None:
+            if self.bbox is None:
+                return False
+            item_rings = [bbox_ring(self.bbox)]
+        return geometries_intersect(item_rings, geometry)
+
     def metadata_summary(self) -> dict[str, Any]:
         """A compact, human-friendly subset of the item's metadata."""
         rng, azi = self.resolution

@@ -36,6 +36,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
 from .constants import ATTRIBUTION, CANOPY_TOKEN_ENV, DATA_LICENSE
 from .context import llm_context
@@ -162,6 +163,7 @@ def _require_same_polarization(items: list[UmbraItem]) -> None:
 
 def search_catalog(
     bbox: list[float] | None = None,
+    intersects: dict[str, Any] | None = None,
     place: str | None = None,
     area: str | None = None,
     fuzzy: bool = False,
@@ -175,7 +177,11 @@ def search_catalog(
     """Search Umbra's catalog and return compact context cards.
 
     Filters (all optional, combine freely): ``bbox`` as
-    ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``place`` as a
+    ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``intersects`` as
+    a GeoJSON polygon object (a ``Polygon`` / ``MultiPolygon`` geometry, or a
+    ``Feature`` / ``FeatureCollection`` wrapping one) to keep only footprints
+    intersecting it -- a tighter spatial filter than the rectangular ``bbox``,
+    and mutually exclusive with ``bbox`` / ``place``; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
     task (site) name (set ``fuzzy`` to match it loosely -- word-order- and
     punctuation-independent and typo-tolerant, resolved deterministically with
@@ -196,10 +202,13 @@ def search_catalog(
     full STAC JSON, to protect the context window; call ``get_item`` for one
     item's full metadata.
     """
+    if intersects is not None and (bbox or place):
+        raise ValueError("pass intersects or bbox/place, not both")
     resolved_bbox = tuple(bbox) if bbox else None
     resolved_place = None
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
+    geometry = _parse_geometry(intersects) if intersects is not None else None
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
@@ -207,6 +216,7 @@ def search_catalog(
     try:
         results = source.search(
             bbox=resolved_bbox,
+            intersects=geometry,
             start=start,
             end=end,
             product_types=list(products) if products else None,

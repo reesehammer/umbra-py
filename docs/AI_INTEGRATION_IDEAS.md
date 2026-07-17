@@ -504,8 +504,12 @@ afterthought.
 > conformance): `product_types`, free-text `area` and a `fuzzy` toggle are
 > accepted as GET params, top-level POST fields, or a STAC `query` object, and
 > pushed down to the same backend `search` both the index and the live catalog
-> answer. Not-yet-done follow-ups: a hosted community instance, and geometry
-> `intersects` (which needs a real polygon test, not the stored footprint bbox).
+> answer. Geometry **`intersects` is now wired too** (`search(intersects=…)` /
+> `GET`/`POST /search`, mutually exclusive with `bbox` per the spec): a
+> dependency-free polygon test (`umbra_py._geometry`) filters on each item's
+> *actual* footprint, pushing the polygon's bbox into SQL as a cheap prefilter
+> first — the real polygon test the earlier note said this needed. The one
+> not-yet-done follow-up is a hosted community instance.
 
 `CatalogIndex` already mirrors search semantics in SQL. Putting a small
 read-only **STAC API** (FastAPI, `[serve]` extra) in front of it —
