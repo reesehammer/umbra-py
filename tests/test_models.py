@@ -189,6 +189,30 @@ def test_asset_href_falls_back_to_empty_without_task_id():
     assert item.asset_href("GEC") == ""
 
 
+def test_plain_image_tiff_asset_is_classified_as_geotiff():
+    """A GeoTIFF that declares a plain ``image/tiff`` media type (no "geotiff"
+    profile substring) must still classify as GEC via its ``.tif`` key.
+
+    Regression for the dead ``"tif" in name`` branch: ``name`` is upper-cased,
+    so the lowercase substring never matched and such an asset was dropped.
+    """
+    item = UmbraItem.from_dict(
+        {
+            "id": "plain-tiff",
+            "properties": {"umbra:task_id": "task-abc"},
+            "assets": {
+                "2025-06-22-23-57-52_UMBRA-10_MM.tif": {
+                    "href": "",
+                    "type": "image/tiff",  # plain: no "geotiff" profile
+                    "title": "GEC",
+                },
+            },
+        }
+    )
+    assert item.asset_map.get("GEC") == "2025-06-22-23-57-52_UMBRA-10_MM.tif"
+    assert "GEC" in item.available_assets
+
+
 def test_task_reads_decoded_label_from_href():
     sidecar = (
         "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"

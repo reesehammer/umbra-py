@@ -98,12 +98,12 @@ escaping, retry/backoff, repo metadata hygiene, and open-source scaffolding
   pyright. The `# type: ignore[arg-type]` in `index.build` (index.py:198) and
   the loosely-typed `**kwargs` pass-throughs in `download.py`/`viz.py` save
   functions would benefit from a checker keeping them honest.
-- **Known dead-code bug, already ledgered**: `_classify_asset`'s
-  `"tif" in name` check can never match an uppercased string
-  (`models.py:30`; tracked in `TODO.md`). It is masked today by the media-type
-  check, but an item declaring plain `image/tiff` would silently lose its GEC
-  classification. The fix plus regression test is ~5 lines — it should stop
-  being a TODO.
+- ~~**Known dead-code bug, already ledgered**: `_classify_asset`'s
+  `"tif" in name` check can never match an uppercased string.~~ ✅ **Fixed**
+  (P1 #8): the check now matches `"TIF"` against the upper-cased `name`, so an
+  item declaring a plain `image/tiff` media type no longer silently loses its
+  GEC classification. Regression test in `tests/test_models.py`; the `TODO.md`
+  entry is deleted.
 - **`ItemCollection` subclasses `list` but its constructor options are lost on
   slicing/`+`** (a slice returns a plain `list`, dropping `thumbnails`
   state). Minor, but worth a docstring note or a `__getitem__` override before
@@ -459,7 +459,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 5 | ✅ **Done.** `download_url` verifies received bytes against `Content-Length` (raising `DownloadError` on a short read and on a mid-stream break, keeping the `.part` for resume), and sends `If-Range` + a stored ETag on resume so a changed object restarts cleanly instead of splicing | `download.py` | small |
 | 6 | ✅ **Done.** `default_session()` mounts an `HTTPAdapter` with `Retry(total=3, backoff_factor=0.5, status_forcelist=(429,500,502,503,504))` on `GET`/`HEAD`; every caller inherits it | `_http.py` | ~5 lines |
 | 7 | Escape all remote-derived strings in `viz._popup_html`; validate href scheme | `viz.py:159-208` | small |
-| 8 | Fix the ledgered `_classify_asset` `"tif"` dead-branch bug with a regression test; delete the TODO entry | `models.py:30`, `TODO.md` | ~5 lines |
+| 8 | ✅ **Done.** `_classify_asset` now matches `"TIF"` against the already-upper-cased `name` (the lowercase `"tif"` was dead code), so a GeoTIFF that declares a plain `image/tiff` media type is classified as GEC instead of being dropped; added a regression test and deleted the TODO entry | `models.py`, `tests/test_models.py`, `TODO.md` | ~5 lines |
 | 9 | ✅ **Done.** `_walk_task` collects in-range acquisitions in date order and fetches their sidecars through a bounded `ThreadPoolExecutor` (`_items_from_sidecars`, `_SIDECAR_WORKERS=8`), yielding in sorted order; windowed so `limit` caps over-fetch, session `pool_maxsize` raised to 16 | `catalog.py:_walk_task`, `_http.py` | medium |
 | 10 | ✅ **Done.** `CatalogIndex` stamps `PRAGMA user_version = 1` on create and checks it on open (`_SCHEMA_VERSION` + `_init_schema`): a fresh/pre-versioning DB is adopted and stamped, a newer or un-migratable version raises `IndexSchemaError`. Landed while every deployed DB still shares one layout, so the next schema change is a migration, not a break | `index.py`, `exceptions.py` | small |
 
