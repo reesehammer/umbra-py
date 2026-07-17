@@ -11,10 +11,13 @@ The tools are thin wrappers over the existing public API — the CLI subcommands
 already map 1:1 to library functions, so the tool inventory was already
 designed. Two design commitments carry over from the rest of the package:
 
-- **Deterministic core, AI at the edges.** Nothing here calls a model. The
-  server searches, geocodes, downloads and renders; the *client's* model
-  plans and narrates. A model output never becomes a coordinate, a URL, or a
-  filter without passing through this deterministic layer.
+- **Deterministic core, AI at the edges.** Almost nothing here calls a model:
+  the server searches, geocodes, downloads and renders; the *client's* model
+  plans and narrates. The one deliberate, opt-in exception is ``describe_scene``
+  (the C2 VLM reading), which consults a vision model only when an ``[ai]`` key
+  is configured — and even it holds the boundary: a model output never becomes a
+  coordinate, a URL, or a filter without passing through this deterministic
+  layer, and every reading is validated and stamped as an AI interpretation.
 - **Images are the API.** ``quicklook``/``change_composite``/``timescan``
   return the rendered PNG as an MCP image content block, so the model *sees*
   the radar scene — the differentiator over geo servers that return only JSON.
@@ -521,6 +524,54 @@ def find_similar_text(
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 
+def describe_scene(
+    url: str,
+    asset: str = "GEC",
+    db: bool = True,
+    max_size: int = 1024,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Return a grounded, plain-language reading of the SAR scene at ``url``.
+
+    This is the C2 "VLM-in-the-loop" capability (``umbra describe``) on the MCP
+    surface: it renders the acquisition's quicklook, sends that picture plus the
+    item's :meth:`~umbra_py.UmbraItem.to_llm_context` metadata card to a vision
+    model behind the packaged SAR-literacy prompt, and returns a validated
+    ``{summary, observed_features[], confidence, caveats[]}`` reading. The value
+    over the client simply looking at a ``quicklook`` image itself is the packaged
+    prompt: it encodes the SAR reading rules a general model lacks (brightness is
+    backscatter not sunlight, speckle is not structure, a dark patch may be radar
+    shadow not water, one frame is not change), so the radar is read correctly.
+
+    **This is the one tool on the server that consults a model** — every other
+    tool is deterministic. It is a deliberate, opt-in exception that preserves the
+    boundary the rest of the package holds (``docs/AI_INTEGRATION_IDEAS.md`` §A4):
+    the picture and the metadata are produced deterministically, the model **only
+    interprets** (its reply passes the deterministic ``parse_description``
+    boundary — it never becomes a coordinate, a URL, or a filter), and every
+    reading is stamped with the CC-BY attribution and an ``AI_PROVENANCE`` note so
+    a model's reading of radar is never mistaken for a measurement.
+
+    It requires the ``[ai]`` extra plus a user-supplied vision key
+    (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``, optionally ``OPENAI_BASE_URL`` /
+    ``UMBRA_DESCRIBE_MODEL``), and the ``[viz]`` extra for the render; it raises a
+    helpful setup error when no key is configured, so it never runs implicitly.
+    ``db=True`` (the default) reads the decibel stretch — the radiometrically
+    correct SAR look; ``asset`` picks which product's quicklook to read (default
+    ``GEC``); ``model`` overrides the configured model. To *see* the same scene the
+    reading is of, call :func:`quicklook` on the same ``url``.
+    """
+    # Import the function directly: ``umbra_py.describe`` the attribute is the
+    # re-exported function, not the submodule, so ``from . import describe`` would
+    # bind the function. Its body still resolves ``default_describer`` / the render
+    # from its own module globals, so the [ai]-key gating and offline stubbing work.
+    from .describe import describe as _describe_scene
+
+    item = _fetch_item(url)
+    description = _describe_scene(item, model=model, asset=asset, max_size=max_size, db=db)
+    return description.to_dict()
+
+
 def main() -> None:
     """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
     build_server().run()
@@ -542,8 +593,10 @@ def build_server() -> FastMCP:
             "the 'umbra://context' resource for product-type and search "
             "semantics. Use search_catalog to find acquisitions (compact cards), "
             "get_item for one item's full metadata, and quicklook / "
-            "change_composite / timescan to see the radar imagery. All data is "
-            f"{DATA_LICENSE}; keep the attribution line with any derived product."
+            "change_composite / timescan to see the radar imagery. describe_scene "
+            "returns a SAR-literate model reading of a scene (the one tool that "
+            "consults a model, and only when an [ai] key is configured). All data "
+            f"is {DATA_LICENSE}; keep the attribution line with any derived product."
         ),
     )
 
@@ -559,6 +612,7 @@ def build_server() -> FastMCP:
         watch_site,
         find_similar,
         find_similar_text,
+        describe_scene,
     ):
         server.add_tool(fn)
 
@@ -637,6 +691,25 @@ def build_server() -> FastMCP:
             "3. Otherwise quicklook(url=<match.href>) on the top one or two matches so "
             "you can see them, and summarize what the matched scenes have in common, "
             "citing their acquisition dates and keeping the attribution line."
+        )
+
+    @server.prompt(
+        name="describe-scene",
+        description="Workflow: view a scene's quicklook and read it with SAR literacy.",
+    )
+    def describe_scene_prompt(url: str) -> str:
+        return (
+            f"Read the SAR acquisition at {url} using the umbra tools (the reading "
+            "needs an [ai] vision key configured on the server):\n"
+            f"1. quicklook(url='{url}') so you can see the radar scene yourself.\n"
+            f"2. describe_scene(url='{url}') — a vision model reads it behind the "
+            "packaged SAR-literacy prompt and returns a grounded "
+            "{summary, observed_features, confidence, caveats} object stamped as an "
+            "AI interpretation with the CC-BY attribution.\n"
+            "3. Present the reading, noting it is an AI interpretation of radar (not "
+            "a measurement) and keeping the attribution line. Remember SAR rules: "
+            "bright is backscatter not sunlight, a dark patch may be shadow not "
+            "water, and one frame shows no change over time."
         )
 
     @server.prompt(

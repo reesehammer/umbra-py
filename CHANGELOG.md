@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`describe_scene` MCP tool + `describe-scene` prompt — a SAR-literate VLM
+  reading of one scene over MCP (`docs/AI_INTEGRATION_IDEAS.md` §C2 follow-on).**
+  The `umbra-mcp` server surfaces the shipped `umbra describe` C2 capability:
+  `describe_scene(url, asset, db, max_size, model)` renders the acquisition's
+  quicklook, sends it with the item's context card behind the packaged
+  SAR-literacy prompt, and returns a validated `{summary, observed_features,
+  confidence, caveats}` reading — so an MCP client can get "what am I looking at?"
+  answered inside the same conversation that searched and viewed the scene. It is
+  the **one tool on the server that consults a model**, a deliberate, opt-in
+  exception to the otherwise-deterministic tool surface: gated (like the CLI) on
+  the `[ai]` key so it never runs implicitly, with the boundary intact — the
+  picture and metadata are produced deterministically, the model only interprets
+  (its reply passes the `parse_description` boundary and never becomes a
+  coordinate, URL, or filter), and every reading carries the CC-BY attribution
+  plus the `AI_PROVENANCE` note. The describer and render are injectable, so the
+  whole tool is offline-tested (`tests/test_mcp_server.py`) with no `[ai]`/`[viz]`
+  extra, no key, and no network — including the missing-key setup error. The
+  server module's "nothing here calls a model" invariant was revised to name this
+  single, honest exception. No new dependency.
 - **Adoption / community scaffolding — `CITATION.cff`, `SECURITY.md`,
   `CODE_OF_CONDUCT.md` (`docs/STRATEGY.md` 5.3 / `docs/CODEBASE_ANALYSIS.md` P2
   #14, P3 #22).** The library is feature-complete; the binding constraint on the

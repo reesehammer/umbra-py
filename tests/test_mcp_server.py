@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ pytest.importorskip("mcp")
 from mcp.server.fastmcp import Image  # noqa: E402
 
 from umbra_py import mcp_server as ms  # noqa: E402
+from umbra_py.exceptions import MissingDependencyError  # noqa: E402
 from umbra_py.models import UmbraItem  # noqa: E402
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -60,6 +62,7 @@ def test_build_server_registers_expected_surface():
         "watch_site",
         "find_similar",
         "find_similar_text",
+        "describe_scene",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
@@ -68,6 +71,7 @@ def test_build_server_registers_expected_surface():
         "monitor-site",
         "watch-site",
         "find-similar-scenes",
+        "describe-scene",
         "survey-region",
     }
 
@@ -379,3 +383,75 @@ def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
     with pytest.raises(FileNotFoundError, match="umbra embed build"):
         ms.find_similar_text("a flooded field")
+
+
+# --------------------------------------------------------------------------
+# describe_scene — a SAR-literate VLM reading of one scene over MCP (C2)
+#
+# Fully offline: the describer (the model call) and the render are deterministic
+# stand-ins, so the whole read-a-scene path is exercised without the [ai]/[viz]
+# extras or the network — the same injectable boundary the CLI describe tests
+# hold. This is the one MCP tool that consults a model; the stubs prove the
+# deterministic edges (prompt build + parse boundary + provenance stamp) work
+# without one.
+# --------------------------------------------------------------------------
+
+
+@responses.activate
+def test_describe_scene_returns_validated_reading(sample_item_dict, monkeypatch):
+    import umbra_py.describe  # noqa: F401  (ensure the submodule is imported)
+
+    # ``from umbra_py import describe`` is the function; patch the real module's
+    # globals (the render + the model call) via sys.modules, as test_describe does.
+    dsc = sys.modules["umbra_py.describe"]
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    # Stand in for the render (no viz extra / no COG stream) and the model call
+    # (no network / no key): the describer echoes a well-formed JSON reading.
+    monkeypatch.setattr(dsc, "render_quicklook_png", lambda item, **kw: b"png-bytes")
+
+    captured = {}
+
+    def _fake_describer(*, model=None):
+        def describer(messages):
+            captured["messages"] = messages
+            return json.dumps(
+                {
+                    "summary": "A bright grid of buildings beside a dark smooth river.",
+                    "observed_features": ["bright building grid", "dark river"],
+                    "confidence": "medium",
+                    "caveats": ["the dark patch could be shadow, not water"],
+                }
+            )
+
+        return describer
+
+    monkeypatch.setattr(dsc, "default_describer", _fake_describer)
+
+    out = ms.describe_scene(ITEM_URL)
+    assert out["item_id"] == sample_item_dict["id"]
+    assert out["summary"].startswith("A bright grid")
+    assert out["observed_features"] == ["bright building grid", "dark river"]
+    assert out["confidence"] == "medium"
+    # Provenance and attribution are stamped deterministically, never by the model.
+    assert out["attribution"]
+    assert out["provenance"]
+    # The model was shown the rendered picture and the metadata card, not asked to
+    # invent them: the prompt carries the PNG bytes and the item's context.
+    assert captured["messages"]["image_png"] == b"png-bytes"
+    assert sample_item_dict["id"] in captured["messages"]["user"]
+
+
+@responses.activate
+def test_describe_scene_without_key_raises_setup_error(sample_item_dict, monkeypatch):
+    import umbra_py.describe  # noqa: F401  (ensure the submodule is imported)
+
+    dsc = sys.modules["umbra_py.describe"]
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    monkeypatch.setattr(dsc, "render_quicklook_png", lambda item, **kw: b"png-bytes")
+    # No key configured -> the default describer refuses rather than running implicitly.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(MissingDependencyError, match="vision model API key"):
+        ms.describe_scene(ITEM_URL)

@@ -778,16 +778,21 @@ Register it with an MCP client (Claude Desktop shown):
 
 The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `download_asset`, `watch_site`
-(report only passes new since the last check) and `find_similar` /
+(report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
-index) tools; a `umbra://context` resource with the product-type table and search
+index) and `describe_scene` (a SAR-literate model reading of one scene) tools; a
+`umbra://context` resource with the product-type table and search
 semantics; and packaged `monitor-site` / `watch-site` / `find-similar-scenes` /
-`survey-region` prompts. The imagery tools return
+`describe-scene` / `survey-region` prompts. The imagery tools return
 the rendered PNG as an MCP image block, so the model *sees* the radar scene. In
 keeping with the library's design, the server stays deterministic — it
-searches, geocodes and renders; the client's model plans and narrates. It even
-refuses to composite mixed polarizations (HH and VV aren't comparable), and the
-CC-BY attribution line travels with every result.
+searches, geocodes and renders; the client's model plans and narrates. The one
+opt-in exception is `describe_scene`, which consults a vision model to *read* a
+scene (only when an `[ai]` key is configured), and even it holds the boundary:
+the model only interprets, its reply is validated, and every reading is stamped
+as an AI interpretation. It even refuses to composite mixed polarizations (HH
+and VV aren't comparable), and the CC-BY attribution line travels with every
+result.
 
 ### Serve it as a STAC API (`umbra serve`)
 
