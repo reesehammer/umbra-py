@@ -224,10 +224,20 @@ log). Optional follow-ons that build on them, not blockers:
 
 - **LangChain/LlamaIndex tool wrapper** reusing `SearchPlan` / the semantic
   matcher (same shapes, different registration) — worth doing for reach.
-- **MCP `search_catalog` semantic mode.** The MCP tool exposes `fuzzy=`; a
-  `semantic=` mode (resolving a query to task names via `SemanticTaskIndex`
-  before searching) would give agents the same aliasing the CLI now has — gated,
-  like the CLI, on the `[ai]` embedding key being configured.
+- ~~**MCP `search_catalog` semantic mode.**~~ ✅ **Done.** `search_catalog` now
+  takes `semantic=True` (plus an optional `semantic_model`): it resolves the
+  free-text `area` *description* to the closest Umbra task name by meaning via
+  `SemanticTaskIndex.matching_tasks` (the shared `_resolve_semantic_area` helper)
+  before searching, giving agents the same embedding-backed aliasing the CLI's
+  `umbra semantic` has — so `area="grain storage north dakota"` reaches
+  `"Beet Piler - ND"`. The resolved task is reported as `resolved_area` and the
+  ranked alternatives as `semantic_candidates` (`{task, score}`); `semantic`
+  supersedes `fuzzy` (it resolves to an exact name). Gated, like the CLI, on the
+  prebuilt sidecar `catalog.semantic.db` (`umbra semantic build`) plus the `[ai]`
+  embedding key — the only model call is the injectable `default_embedder`, so the
+  whole path is offline-tested in `tests/test_mcp_server.py` with a stand-in
+  embedder (no `[ai]` extra, no network), and a missing index raises a
+  self-describing error pointing at `umbra semantic build`.
 - **Embed task *descriptions*, not just names.** The current index embeds the
   task label; if Umbra publishes per-task descriptions, embedding those too would
   widen recall further.

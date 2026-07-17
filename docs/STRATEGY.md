@@ -1027,6 +1027,33 @@ same 500 lines of glue first, and many give up."*
 > gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
 > maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 >
+> **Update (2026-07-17):** **semantic natural-language search is now
+> conversational** — `umbra-mcp`'s `search_catalog` gained a `semantic=True` mode
+> (`AI_INTEGRATION_IDEAS.md` §C1 follow-on). The C1 line's capstone — embedding-backed
+> task-name aliasing, the reach that finds `"Beet Piler - ND"` from `"grain storage
+> north dakota"` when the two share no word — was complete on the CLI (`umbra
+> semantic`), but the project's *highest-leverage surface* (§3 — every MCP client is
+> a zero-install front door to the archive, and "agents are the new first-time
+> users") could only reach the deterministic `fuzzy=` widen, which tolerates how a
+> *known* site name is typed but cannot cross a vocabulary gap. This closes that: an
+> agent can now hand `search_catalog` a plain-language *description* of a site
+> (`area="grain storage north dakota", semantic=True`) and it resolves to the
+> closest task name by meaning — via the prebuilt sidecar `catalog.semantic.db`
+> (`SemanticTaskIndex`) — before running the ordinary deterministic search, reporting
+> the chosen `resolved_area` and the ranked `semantic_candidates` so a wrong top
+> match is re-searchable with an exact `area`. It is a direct funnel-widener on the
+> surface that matters most (§1): the newcomer or agent who can *describe* a site but
+> can't *name* it now gets there inside the same conversation, closing the
+> describe → search → view loop the fuzzy match left half-open. It preserves the
+> boundary and testability the scientific audience needs (§3): the only model call is
+> turning the description into a vector (the injectable `default_embedder`, gated on
+> the `[ai]` key — never implicit), while the ranking and the search stay
+> deterministic, so the whole path is offline-tested against a stand-in embedder with
+> no `[ai]` extra and no network, and it layers on the same discovery substrate the
+> whole project rests on, so it stays graceful under upstream obsolescence. The
+> remaining gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder
+> and the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

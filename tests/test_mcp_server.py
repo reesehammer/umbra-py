@@ -469,6 +469,117 @@ def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------
+# search_catalog semantic mode — embedding-backed task-name aliasing (C1)
+#
+# Fully offline: the text embedder is a deterministic stand-in (never a model
+# call), so the whole semantic-resolution path is exercised without the [ai]
+# extra or the network — the same injectable boundary the CLI semantic tests
+# hold. Semantic resolves the free-text `area` to an exact task name, which is
+# then searched deterministically like any other `area`.
+# --------------------------------------------------------------------------
+
+
+def _stub_text_embedder(texts):
+    """Deterministic embedder: [is-north-dakota, is-utah, 1.0], so a description
+    of a Dakota site ranks the ``ND`` task above the Utah one by cosine."""
+
+    def vec(t):
+        low = t.lower()
+        return [
+            1.0 if ("nd" in low.split() or "dakota" in low) else 0.0,
+            1.0 if "utah" in low else 0.0,
+            1.0,
+        ]
+
+    return [vec(t) for t in texts]
+
+
+def _build_semantic_index(path, tasks):
+    from umbra_py import semantic as sem
+
+    with sem.SemanticTaskIndex(path) as index:
+        index.build(task_names=tasks, embedder=_stub_text_embedder, model="stub")
+
+
+class _FakeSearchCatalog:
+    """Records the kwargs a search was issued with and returns the given items."""
+
+    kwargs: dict = {}
+
+    def __init__(self, items):
+        self._items = items
+
+    def search(self, **kwargs):
+        _FakeSearchCatalog.kwargs = kwargs
+        return iter(self._items)
+
+
+def test_search_catalog_semantic_resolves_area_to_task(sample_item_dict, monkeypatch, tmp_path):
+    from umbra_py import semantic as sem
+
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, ["Beet Piler - ND", "Centerfield, Utah"])
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: path)
+    monkeypatch.setattr(sem, "default_embedder", lambda **k: _stub_text_embedder)
+
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeSearchCatalog([item]))
+
+    out = ms.search_catalog(area="grain storage north dakota", semantic=True, local=False)
+
+    # The description resolved to the closest task by meaning, not by substring.
+    assert out["resolved_area"] == "Beet Piler - ND"
+    assert [c["task"] for c in out["semantic_candidates"]][0] == "Beet Piler - ND"
+    assert out["semantic_candidates"][0]["score"] > out["semantic_candidates"][1]["score"]
+    # The resolved exact task name is what the deterministic search runs on, and
+    # semantic supersedes fuzzy (the name is exact, no widen needed).
+    assert _FakeSearchCatalog.kwargs["area"] == "Beet Piler - ND"
+    assert _FakeSearchCatalog.kwargs["fuzzy"] is False
+    assert out["count"] == 1
+
+
+def test_search_catalog_semantic_without_index_errors(monkeypatch, tmp_path):
+    from umbra_py import semantic as sem
+
+    missing = tmp_path / "missing.semantic.db"
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: missing)
+    with pytest.raises(FileNotFoundError, match="umbra semantic build"):
+        ms.search_catalog(area="grain storage north dakota", semantic=True, local=False)
+
+
+def test_search_catalog_semantic_requires_area():
+    with pytest.raises(ValueError, match="area"):
+        ms.search_catalog(semantic=True, local=False)
+
+
+def test_search_catalog_semantic_no_match_returns_empty(sample_item_dict, monkeypatch, tmp_path):
+    from umbra_py import semantic as sem
+
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, ["Beet Piler - ND", "Centerfield, Utah"])
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: path)
+    # A query embedding whose direction is negative to every stored vector clears
+    # nothing above the 0.0 cosine floor, so the resolution is reported empty
+    # rather than searching an unrelated task.
+    monkeypatch.setattr(sem, "default_embedder", lambda **k: lambda texts: [[-1.0, -1.0, -1.0]])
+
+    called = {"search": False}
+
+    class _NeverSearched:
+        def search(self, **kwargs):
+            called["search"] = True
+            return iter([])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _NeverSearched())
+
+    out = ms.search_catalog(area="nothing like this", semantic=True, local=False)
+    assert out["count"] == 0
+    assert out["resolved_area"] is None
+    assert out["semantic_candidates"] == []
+    assert called["search"] is False  # short-circuited before touching the backend
+
+
+# --------------------------------------------------------------------------
 # describe_scene — a SAR-literate VLM reading of one scene over MCP (C2)
 #
 # Fully offline: the describer (the model call) and the render are deterministic
