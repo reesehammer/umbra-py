@@ -942,6 +942,36 @@ same 500 lines of glue first, and many give up."*
 > and largely non-code: 5.5's radiometric-RTC remainder and the maintainer-side
 > adoption moves (5.3 registries, 5.6 talking to Umbra).
 
+> **Update (2026-07-17):** the **code-side of the adoption-visibility workstream
+> has shipped** — `CITATION.cff`, `SECURITY.md`, and a Contributor Covenant 2.1
+> `CODE_OF_CONDUCT.md` (workstream 5.3 / `CODEBASE_ANALYSIS.md` P2 #14, P3 #22).
+> With the whole funnel built — free-bucket search through the paid Canopy archive,
+> every AI/MCP capability, the demo/serve/tiles surfaces, and SICD→COG with
+> DEM/geoid/RTC — the binding constraint on §1's thesis ("widen the funnel — more
+> people successfully using the open data") is no longer a missing *capability*; it
+> is that the project is not yet *discoverable or citable* where its audience
+> looks, which is exactly what 5.3 names. This lands the pieces of 5.3 that are
+> code/config rather than a maintainer action on another org's repo: a
+> machine-readable `CITATION.cff` (Citation File Format 1.2.0) so GitHub shows a
+> "Cite this repository" button and Zenodo / citation managers can read the
+> metadata — academic citations are the currency an open-data program exists to
+> generate, and companies count them (§4) — plus a `SECURITY.md` private-disclosure
+> policy (honest about the posture: anonymous HTTPS, no auth surface, remote
+> content and generated HTML as the trust boundary) and a `CODE_OF_CONDUCT.md`,
+> which together complete GitHub's Community Standards profile — the concrete
+> "makes the project easy to say yes to" signal §4 calls for ahead of 5.6's "talk
+> to Umbra" conversation. It holds the project's grain and testability (§3): no new
+> dependency and no code-surface change, and `CITATION.cff`'s `version` is kept in
+> lockstep with `umbra_py.__version__` by an offline, stdlib-only guard
+> (`tests/test_citation.py`), mirroring the golden-file discipline the `llms.txt`
+> bundle already uses — so a version bump can't silently leave the citation stale.
+> The remaining 5.3 items are maintainer actions, not code: the PyPI publish
+> (register the Trusted Publisher, cut `v0.1.0`), the open-data-registry /
+> STAC-Index / pyOpenSci listings, and minting the Zenodo DOI (then adding `doi:`
+> + `date-released:` to the file). With these, the strategic gaps left are the
+> maintainer-side moves above, the 5.6 "talk to Umbra" conversation, and 5.5's
+> radiometric-RTC remainder.
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1089,14 +1119,23 @@ One crawl shouldn't be everyone's crawl.
   ecosystem gets a search API — and a whole-catalog map — for free." If Umbra
   adopts it, this project is part of their data program's infrastructure.
 
-### 5.3 Make adoption visible where Umbra looks — **not started**
+### 5.3 Make adoption visible where Umbra looks — **partial**
 
-- PR to [awslabs/open-data-registry](https://github.com/awslabs/open-data-registry/blob/main/datasets/umbra-open-data.yaml)
-  adding umbra-py under the Umbra entry's "Tools & Applications".
-- Get listed on the [STAC Index](https://stacindex.org/) ecosystem page.
-- `CITATION.cff` + Zenodo DOI so academic users cite the package —
-  publications using Umbra data are what an open data program exists to
-  generate, and companies count them.
+- ⬜ PR to [awslabs/open-data-registry](https://github.com/awslabs/open-data-registry/blob/main/datasets/umbra-open-data.yaml)
+  adding umbra-py under the Umbra entry's "Tools & Applications" (maintainer
+  action — a PR against another org's repo).
+- ⬜ Get listed on the [STAC Index](https://stacindex.org/) ecosystem page
+  (maintainer action).
+- ✅ **`CITATION.cff` shipped** — machine-readable citation metadata (Citation
+  File Format 1.2.0), version-synced to `umbra_py.__version__` by an offline
+  test, so GitHub renders a "Cite this repository" button and Zenodo / citation
+  managers can consume it. Publications using Umbra data are what an open data
+  program exists to generate, and companies count them. The Zenodo DOI itself is
+  a maintainer action (mint on the first release, then add `doi:` +
+  `date-released:` to the file). Shipped alongside it: `SECURITY.md` (private
+  disclosure policy) and a Contributor Covenant 2.1 `CODE_OF_CONDUCT.md`,
+  completing GitHub's Community Standards profile — the "easy to say yes to"
+  signal §4 names.
 
 ### 5.4 Demo notebooks that create SAR converts — **partial**
 

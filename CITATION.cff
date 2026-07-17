@@ -1,0 +1,27 @@
+# This file lets GitHub render a "Cite this repository" button and lets Zenodo,
+# citation managers, and academic tooling read machine-readable citation
+# metadata. Format: Citation File Format 1.2.0 (https://citation-file-format.github.io/).
+#
+# Keep `version` in sync with `umbra_py.__version__` (enforced by
+# tests/test_citation.py). When a release is cut, add a matching
+# `date-released:` and (once minted) a `doi:` for the Zenodo archive.
+cff-version: 1.2.0
+message: "If you use umbra-py in your research, please cite it as below."
+title: umbra-py
+abstract: "A Python-first toolkit to make Umbra SAR open data easy to discover, load, download, and analyze."
+type: software
+authors:
+  - name: "umbra-py contributors"
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/reesehammer/umbra-py"
+url: "https://github.com/reesehammer/umbra-py"
+keywords:
+  - sar
+  - synthetic-aperture-radar
+  - umbra
+  - remote-sensing
+  - earth-observation
+  - stac
+  - geospatial
+  - gis

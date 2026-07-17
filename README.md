@@ -904,6 +904,19 @@ the data or derived products you must attribute Umbra, e.g.:
 `umbra-py` itself is licensed under **Apache 2.0** (see [LICENSE](LICENSE)). The
 code license and the data license are independent and compatible.
 
+## Citing umbra-py
+
+If `umbra-py` helps your research, please cite it. Machine-readable metadata
+lives in [CITATION.cff](CITATION.cff), and GitHub renders it as a **"Cite this
+repository"** button in the sidebar (with ready-to-copy APA and BibTeX). Please
+also honor the CC BY 4.0 attribution for any Umbra data you use (see above).
+
+## Community
+
+- [Contributing guide](CONTRIBUTING.md) — setup, checks, and conventions.
+- [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1.
+- [Security policy](SECURITY.md) — how to report a vulnerability privately.
+
 ## Roadmap
 
 - **v0.1 (now):** STAC search with date/bbox/product pruning, anonymous downloads

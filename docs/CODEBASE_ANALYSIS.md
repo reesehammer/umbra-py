@@ -209,12 +209,15 @@ or package release could execute script in every map a user has generated.
 Pinning + `integrity=`/`crossorigin=` attributes on the injected `<script>`
 tag closes this for the code the project controls.
 
-### 3.5 No security policy or dependency monitoring (process gap)
+### 3.5 No security policy or dependency monitoring (process gap) — **partly addressed**
 
-- No `SECURITY.md` / disclosure channel.
-- No Dependabot/Renovate config; `requests`, `click`, and the heavy extras
-  drift silently.
-- No `pip-audit` (or similar) step in CI.
+- ~~No `SECURITY.md` / disclosure channel.~~ ✅ **Fixed:** `SECURITY.md` now
+  documents private vulnerability reporting via GitHub Security Advisories, the
+  supported-version policy, and the library's security posture (anonymous HTTPS,
+  no auth surface; remote content + generated HTML as the trust boundary).
+- ~~No Dependabot/Renovate config~~ ✅ **Fixed** (`.github/dependabot.yml`
+  already ships grouped Actions + pip updates).
+- No `pip-audit` (or similar) step in CI — still open.
 
 ### 3.6 Non-findings worth recording
 
@@ -421,10 +424,11 @@ warns a full index build "takes a while." Two structural improvements:
    `.[all,dev]` so the viz/load suite actually runs; add Python 3.13 to the
    matrix (3.13 has been stable for ~20 months); wire `pytest --cov` +
    Codecov and put the badge in the README.
-5. **Missing community/security scaffolding:** `SECURITY.md` (§3.5),
-   `CODE_OF_CONDUCT.md` (expected by GitHub's community profile and by many
-   orgs' adoption checklists), Dependabot config, and optionally
-   `CITATION.cff` — research users of SAR data cite their tools.
+5. ~~**Missing community/security scaffolding:**~~ ✅ **Largely done.**
+   `SECURITY.md` (§3.5), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and
+   `CITATION.cff` now ship, and Dependabot config was already present — so
+   GitHub's community profile is complete and research users can cite the tool.
+   A `pip-audit` CI step is the one remaining item under this heading.
 6. **No rendered documentation site.** The README is excellent but is now 328
    lines doing the job of a docs site. mkdocs-material + mkdocstrings can
    generate API docs from the existing (high-quality) docstrings nearly for
@@ -466,7 +470,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 11 | ⏳ **`py.typed` shipped (this PR)** — the marker is now in the wheel + sdist, so downstream type checkers consume the inline types; adding mypy/pyright to CI is still open | package + CI | small |
 | 12 | Add SRI hashes to the injected geotiff.js `<script>` tag | `_lazy_imagery.py` | small |
 | 13 | Parse listing XML with `defusedxml` (or document the trust boundary) | `catalog.py` | small |
-| 14 | Add `SECURITY.md`, `CODE_OF_CONDUCT.md`, Dependabot config, `pip-audit` CI step | `.github/` | small |
+| 14 | ⏳ **Mostly done.** `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) now ship; Dependabot config was already present. Remaining: a `pip-audit` CI step | `.github/`, repo root | small |
 | 15 | ✅ **Done (this PR).** Version single-sourced from `umbra_py.__version__` via hatchling's dynamic version, so `pyproject.toml` and `__init__.py` can no longer drift | `pyproject.toml`, `__init__.py` | small |
 | 16 | Wire `pytest --cov` + Codecov badge into CI | CI | small |
 | 17 | Publish a nightly prebuilt `catalog.db` as a rolling release artifact (scheduled Action) | new workflow | medium |
@@ -479,7 +483,7 @@ warns a full index build "takes a while." Two structural improvements:
 | 19 | Split `viz.py` into a `viz/` package (geojson / maps / raster / composites / gallery) with re-exports preserved | `viz.py` | medium |
 | 20 | Stand up mkdocs-material + mkdocstrings docs site on GitHub Pages | new `docs/` config | medium |
 | 21 | ✅ **Done.** Incremental refresh (`umbra index update` / `CatalogIndex.update`) *and* the read-through consult now both ship: `CatalogIndex.search_live` / `umbra search --local --live` answer from the index and walk only acquisitions newer than its max `acq_date`, merging + de-duplicating the two streams and warming the cache with the delta (§4.4) | `index.py`/`cli.py` | larger; design first |
-| 22 | Add `CITATION.cff`; register with STAC ecosystem list, AWS Open Data registry examples, pyOpenSci | repo root | small each |
+| 22 | ⏳ **`CITATION.cff` added (this PR)** — machine-readable citation metadata (CFF 1.2.0), version-synced to `__version__` by an offline test, so GitHub shows "Cite this repository". Remaining (maintainer actions): register with the STAC ecosystem list, AWS Open Data registry examples, pyOpenSci; mint a Zenodo DOI | repo root | small each |
 
 ---
 
