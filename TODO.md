@@ -252,9 +252,22 @@ open and builds on the same boundary:
   |Δ|-in-dB sidecar to a VLM and return a plain-language, number-grounded change
   report — so the narration cites the deterministic statistics, not vibes. Reuse
   `describe.py`'s `Describer`/`parse_*` boundary and the `AI_PROVENANCE` stamp.
-- **MCP `describe_scene` tool.** The MCP server already returns imagery; a
-  `describe_scene` tool wrapping `describe()` would let an agent get the
-  structured reading directly (gated, like the CLI, on the `[ai]` key).
+- ~~**MCP `describe_scene` tool.**~~ ✅ **Done.** The flagship `umbra-mcp`
+  server now exposes `describe_scene(url, asset, db, max_size, model)`, a thin
+  wrapper over `describe.describe()` that returns the validated, provenance-
+  stamped `{summary, observed_features[], confidence, caveats[], …}` reading —
+  so an agent gets the SAR-literate structured description directly instead of
+  re-interpreting the `quicklook` image itself (the packaged SAR primer supplies
+  the radar-reading expertise a general model lacks). It holds the same
+  interpretation boundary as the CLI (`AI_INTEGRATION_IDEAS.md` §A4/§6.1): the
+  picture and metadata are deterministic, the model **only interprets**, the
+  reply is validated by `parse_description`, and the mandatory CC-BY attribution
+  + `AI_PROVENANCE` note are stamped on — gated on the `[ai]` key (and `[viz]`
+  for the render), with a self-describing error when either is absent. A
+  `describe-scene` prompt (search → describe) ships alongside it. Fully
+  offline-tested in `tests/test_mcp_server.py` with a stand-in describer and
+  renderer (no `[ai]`/`[viz]`, no network) — the same discipline
+  `find_similar` / `find_similar_text` hold.
 - **A `describe` render is a fresh S3 read every call.** When the demo/thumbnail
   bake (`DEMO_APP_GAPS.md` G6) lands, feed the cached quicklook into `describe`
   via its injectable `render=` hook instead of re-streaming the COG.

@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`describe_scene` MCP tool — the C2 scene reading on the flagship
+  `umbra-mcp` server (`docs/AI_INTEGRATION_IDEAS.md` C2 / B1).** Surfaces the
+  shipped `umbra describe` capability on the highest-leverage surface the project
+  has: where the server's `quicklook` returns the *picture* for the client's own
+  model, `describe_scene(url, asset, db, max_size, model)` returns the
+  **structured, SAR-literate reading** produced through the library's packaged SAR
+  primer — the radar-reading expertise a general model lacks (bright is
+  backscatter not heat; a dark patch may be calm water *or* radar shadow; speckle
+  is not structure) — as `{summary, observed_features[], confidence, caveats[],
+  model, asset, attribution, provenance}`, so an agent branches on the fields
+  rather than re-reading the image. A `describe-scene` prompt (search → describe)
+  ships alongside it. It holds the server's determinism boundary exactly as
+  `find_similar` does: the only model call is the injectable `Describer` reading a
+  deterministically-rendered scene, the reply is validated by `parse_description`,
+  and the mandatory CC-BY attribution + `AI_PROVENANCE` note are stamped on — so a
+  reading is never mistaken for a measurement. Gated on the `[ai]` key and the
+  `[viz]` render (a self-describing error names the missing piece), and fully
+  offline-tested in `tests/test_mcp_server.py` with a stand-in describer and
+  renderer (no `[ai]`/`[viz]`, no network). No new dependency.
 - **Detection-chips example notebook — `examples/05_detection_chips.ipynb`
   (`docs/STRATEGY.md` 5.4 / `docs/AI_INTEGRATION_IDEAS.md` B3).** The ML-dataset
   half of the notebook gallery, and the workflow the model-training audience (SAR
