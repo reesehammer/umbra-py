@@ -36,7 +36,8 @@ src/umbra_py/
   __init__.py        # public API surface; update __all__ when adding exports
   catalog.py         # UmbraCatalog: walks sar-data/tasks/ via S3 listings, prunes by date
   index.py           # CatalogIndex: local SQLite index of items for fast offline/repeat search
-  models.py          # UmbraItem dataclass + asset classification
+  models.py          # UmbraItem dataclass + asset classification + intersects_bbox / intersects_polygon
+  _geometry.py       # stdlib-only GeoJSON polygon parsing + intersection primitives (the `intersects` search filter, no shapely)
   download.py        # download_url / download_asset / download_item (resume support)
   cli.py             # `umbra search | info | download`
   constants.py       # bucket, STAC root URL, canonical product types

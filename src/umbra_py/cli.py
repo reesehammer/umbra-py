@@ -70,6 +70,32 @@ def _resolve_search_bbox(
     return _parse_bbox(bbox)
 
 
+def _resolve_intersects(value: str | None):
+    """Parse ``--intersects`` into a polygon geometry (or None).
+
+    The value is a path to a ``.geojson``/``.json`` file or an inline GeoJSON
+    string -- a ``Polygon`` / ``MultiPolygon`` geometry, or a ``Feature`` /
+    ``FeatureCollection`` wrapping one. A path that exists is read; otherwise the
+    value is treated as inline JSON. Returns the exterior-ring form the search
+    functions expect, and raises ``BadParameter`` at the boundary on bad input.
+    """
+    from ._geometry import parse_geometry
+
+    if not value:
+        return None
+    text = value
+    candidate = Path(value)
+    try:
+        if len(value) < 4096 and candidate.is_file():
+            text = candidate.read_text()
+    except OSError:
+        text = value
+    try:
+        return parse_geometry(text)
+    except ValueError as exc:
+        raise click.BadParameter(f"--intersects: {exc}") from exc
+
+
 def _index_path(db_path: str | None) -> Path:
     """Resolve the index database path from an explicit ``--db`` or the default."""
     return Path(db_path) if db_path else default_index_path()
@@ -293,6 +319,14 @@ def cli() -> None:
     "outside the named place.",
 )
 @click.option(
+    "--intersects",
+    default=None,
+    help="Keep only items whose footprint intersects this GeoJSON polygon -- a "
+    "path to a .geojson file or an inline GeoJSON string (Polygon / "
+    "MultiPolygon, or a Feature / FeatureCollection wrapping one). A tighter "
+    "spatial filter than the rectangular --bbox; the two are mutually exclusive.",
+)
+@click.option(
     "--start",
     help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
     "(2024, 2024-03), or a relative expression ('today', 'yesterday', "
@@ -372,6 +406,7 @@ def cli() -> None:
 def search(
     bbox,
     place,
+    intersects,
     start,
     end,
     products,
@@ -401,10 +436,14 @@ def search(
             "--live reads through a local index to the bucket; it only applies "
             "with --local / --db. (A plain search already walks S3 live.)"
         )
+    if intersects is not None and (bbox or place):
+        raise click.UsageError("Pass --intersects or --bbox/--place, not both.")
     search_bbox = _resolve_search_bbox(bbox, place)
+    search_geometry = _resolve_intersects(intersects)
     source, index = _search_source(local, db_path, token)
     search_kwargs = dict(
         bbox=search_bbox,
+        intersects=search_geometry,
         start=start,
         end=end,
         product_types=list(products) or None,

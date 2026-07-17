@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Polygon `intersects` spatial search — a true footprint filter, not just a
+  bounding box (`docs/AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on).** Discovery
+  is the project's moat (`docs/STRATEGY.md` §3), and its only spatial filter was
+  a rectangle: a coast, a border, or any drawn area of interest dragged in a lot
+  of empty ocean and neighbouring land. `search(intersects=…)` now keeps only
+  acquisitions whose footprint intersects a caller-supplied GeoJSON polygon —
+  the standard STAC `intersects` every geo tool already speaks — threaded
+  through every search surface so the two backends agree: the live
+  `UmbraCatalog` walk, the SQLite `CatalogIndex` (its bounding box pushed into
+  SQL as a cheap prefilter, the exact polygon test then run in Python),
+  `CatalogIndex.search_live`, the Canopy commercial archive (the polygon POSTed
+  as the STAC `intersects` and re-checked client-side), `umbra search
+  --intersects <file.geojson | inline JSON>`, the `umbra serve` STAC API
+  (`GET`/`POST /search`, mutually exclusive with `bbox` per the spec), and the
+  `search_catalog` MCP tool. The geometry itself is a new dependency-free core
+  (`umbra_py._geometry`): a stdlib GeoJSON polygon parser (`Polygon` /
+  `MultiPolygon`, or a `Feature` / `FeatureCollection` wrapping one) and
+  closed-form intersection primitives (bbox reject, segment-crossing, ray-cast
+  point-in-polygon) over plain `(lon, lat)` tuples — no shapely, no compiled
+  geometry stack in the base install. `UmbraItem.intersects_polygon` tests the
+  item's *actual* footprint (a tighter filter than the bbox
+  `intersects_bbox`), falling back to the bbox when a footprint is absent. Holes
+  and antimeridian-spanning polygons are handled over-inclusively (they can only
+  keep an item, never wrongly drop one — the safe direction for a discovery
+  filter) and documented as such. No model is called; the whole path is
+  offline-tested (`tests/test_geometry.py`) across the core, item, catalog,
+  index, CLI, STAC API and MCP surfaces.
 - **Canopy commercial-archive backend on the `umbra-mcp` MCP server — a token
   concept for the flagship AI surface (`docs/STRATEGY.md` 5.1 follow-on /
   `docs/AI_INTEGRATION_IDEAS.md` §B1).** The paid-archive funnel already ran end

@@ -79,6 +79,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._geometry import Geometry, parse_geometry
 from .constants import (
     ATTRIBUTION,
     DATA_LICENSE,
@@ -169,6 +170,18 @@ def parse_bbox(value: str | list[float] | None) -> BBox | None:
         # 3D bbox: [minx, miny, minz, maxx, maxy, maxz] -> drop z.
         return (parts[0], parts[1], parts[3], parts[4])
     raise ValueError("bbox must have 4 or 6 comma-separated numbers")
+
+
+def parse_intersects(value: dict | str | None) -> Geometry | None:
+    """Parse a STAC ``intersects`` GeoJSON geometry into polygon rings.
+
+    Accepts a GeoJSON ``dict`` (as in a POST body) or a JSON string (as in a GET
+    query). Returns ``None`` for empty input. Raises :class:`ValueError` on a
+    non-polygon geometry so the handler can answer 400.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return parse_geometry(value)
 
 
 def _date_part(token: str) -> date | None:
@@ -503,6 +516,7 @@ def run_search(
     source: Any,
     *,
     bbox: BBox | None = None,
+    intersects: Geometry | None = None,
     start: date | None = None,
     end: date | None = None,
     ids: list[str] | None = None,
@@ -529,6 +543,7 @@ def run_search(
     cap = None if ids else offset + limit + 1
     stream = source.search(
         bbox=bbox,
+        intersects=intersects,
         start=start,
         end=end,
         product_types=product_types,
@@ -1094,6 +1109,7 @@ def build_app(
         request: Request,
         *,
         bbox: BBox | None,
+        intersects: Geometry | None = None,
         start: date | None,
         end: date | None,
         ids: list[str] | None,
@@ -1109,6 +1125,7 @@ def build_app(
             page, has_next = run_search(
                 source,
                 bbox=bbox,
+                intersects=intersects,
                 start=start,
                 end=end,
                 ids=ids,
@@ -1186,6 +1203,9 @@ def build_app(
     def get_search(
         request: Request,
         bbox: str | None = Query(default=None),
+        intersects: str | None = Query(
+            default=None, description="GeoJSON polygon geometry as a JSON string"
+        ),
         datetime: str | None = Query(default=None),
         ids: str | None = Query(default=None, description="Comma-separated item ids"),
         collections: str | None = Query(default=None),
@@ -1198,8 +1218,13 @@ def build_app(
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         _check_collections(collections.split(",") if collections else None)
+        if intersects and bbox:
+            raise HTTPException(
+                status_code=400, detail="bbox and intersects are mutually exclusive"
+            )
         try:
             parsed_bbox = parse_bbox(bbox)
+            parsed_geometry = parse_intersects(intersects)
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
         except ValueError as exc:
@@ -1208,6 +1233,7 @@ def build_app(
         return _do_search(
             request,
             bbox=parsed_bbox,
+            intersects=parsed_geometry,
             start=start,
             end=end,
             ids=id_list,
@@ -1222,8 +1248,13 @@ def build_app(
     @app.post("/search", tags=["STAC"])
     def post_search(request: Request, body: dict[str, Any] = Body(default={})) -> JSONResponse:
         _check_collections(body.get("collections"))
+        if body.get("intersects") is not None and body.get("bbox") is not None:
+            raise HTTPException(
+                status_code=400, detail="bbox and intersects are mutually exclusive"
+            )
         try:
             parsed_bbox = parse_bbox(body.get("bbox"))
+            parsed_geometry = parse_intersects(body.get("intersects"))
             start, end = parse_datetime(body.get("datetime"))
             # The Query-extension filters can arrive either as a STAC ``query``
             # object or as plain top-level fields; a top-level field, when given,
@@ -1245,6 +1276,7 @@ def build_app(
             page, has_next = run_search(
                 source,
                 bbox=parsed_bbox,
+                intersects=parsed_geometry,
                 start=start,
                 end=end,
                 ids=list(ids) if ids else None,
