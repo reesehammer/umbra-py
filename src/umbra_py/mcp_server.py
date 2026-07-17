@@ -155,6 +155,38 @@ def _require_same_polarization(items: list[UmbraItem]) -> None:
         )
 
 
+def _resolve_semantic_area(
+    description: str, *, model: str | None = None, top_k: int = 5
+) -> list[Any]:
+    """Rank Umbra task names by semantic closeness to ``description``.
+
+    The deterministic complement to the ``fuzzy=`` widen: where fuzzy tolerates
+    how a *known* site name is typed, this reaches a task whose label shares no
+    word with the query (``"grain storage north dakota"`` -> ``"Beet Piler -
+    ND"``) via the prebuilt embedding index (:class:`~umbra_py.semantic.SemanticTaskIndex`).
+    Returns the ranked :class:`~umbra_py.semantic.SemanticMatch` candidates,
+    highest score first (empty only when nothing is stored, which raises inside).
+
+    Requires a semantic index built ahead of time with ``umbra semantic build``
+    (a sidecar ``catalog.semantic.db`` beside the catalog index) and a
+    user-supplied embedding key -- the only model call is turning the query into
+    a vector; the ranking is deterministic. Raises a self-describing
+    :class:`FileNotFoundError` (pointing at ``umbra semantic build``) when the
+    index is absent, mirroring :func:`find_similar`.
+    """
+    from . import semantic as sem
+
+    path = sem.default_semantic_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No semantic task index at {path}. Build one first with "
+            "'umbra semantic build' (semantic area resolution needs it)."
+        )
+    embedder = sem.default_embedder(model=model)
+    with sem.SemanticTaskIndex(path) as index:
+        return index.matching_tasks(description, embedder, top_k=top_k)
+
+
 # --------------------------------------------------------------------------
 # Tool implementations (plain functions; registered on the server below).
 # --------------------------------------------------------------------------
@@ -165,6 +197,8 @@ def search_catalog(
     place: str | None = None,
     area: str | None = None,
     fuzzy: bool = False,
+    semantic: bool = False,
+    semantic_model: str | None = None,
     start: str | None = None,
     end: str | None = None,
     products: list[str] | None = None,
@@ -188,6 +222,21 @@ def search_catalog(
     (any of GEC, SICD, SIDD, CPHD); ``limit`` to cap results; ``max_per_task``
     to cap items per site (use 1 for a one-pin-per-site overview).
 
+    Set ``semantic=True`` to treat ``area`` as a natural-language *description*
+    of a site rather than a substring, resolving it to the closest Umbra task
+    name by meaning before searching -- the embedding-backed reach the
+    deterministic ``fuzzy`` match can't (and shouldn't) fake, so ``area="grain
+    storage north dakota"`` finds ``"Beet Piler - ND"`` even though they share
+    no word. It requires a semantic index built ahead of time with ``umbra
+    semantic build`` (a sidecar ``catalog.semantic.db``) plus a user-supplied
+    embedding key -- the only model call is turning the description into a
+    vector; the ranking and the search itself stay deterministic. The resolved
+    task name is reported as ``resolved_area`` and the ranked alternatives as
+    ``semantic_candidates`` (each ``{task, score}``), so if the top match is
+    wrong you can re-search with an exact ``area`` from the list. ``semantic``
+    resolves ``area`` to an exact task name, so it supersedes ``fuzzy``;
+    ``semantic_model`` must match the model the index was built with.
+
     ``local`` selects the backend: leave it unset to use the on-disk index when
     present (instant) and fall back to a live S3 walk otherwise. When the server
     is configured with a Canopy token (``$UMBRA_CANOPY_TOKEN``), the search runs
@@ -200,6 +249,36 @@ def search_catalog(
     resolved_place = None
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
+
+    resolved_area: str | None = None
+    semantic_candidates: list[dict[str, Any]] | None = None
+    if semantic:
+        if not area:
+            raise ValueError(
+                "semantic=True resolves the `area` description to a task name, so "
+                "`area` must be set (e.g. area='grain storage north dakota')."
+            )
+        candidates = _resolve_semantic_area(area, model=semantic_model)
+        semantic_candidates = [{"task": m.task, "score": m.score} for m in candidates]
+        if not candidates:
+            # Nothing cleared the similarity floor: report the empty resolution
+            # rather than searching an unrelated task, so the caller sees why.
+            return {
+                "count": 0,
+                "source": _source_label(False, bool(_canopy_token())),
+                "resolved_place": resolved_place,
+                "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+                "resolved_area": None,
+                "semantic_candidates": [],
+                "items": [],
+                "attribution": ATTRIBUTION,
+            }
+        # Search by the best match's exact task name; an exact name needs no
+        # fuzzy widen. The candidate list rides along so the caller can re-search
+        # with a different exact `area` if the top match is off.
+        resolved_area = candidates[0].task
+        area = resolved_area
+        fuzzy = False
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
@@ -225,6 +304,8 @@ def search_catalog(
         "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+        "resolved_area": resolved_area,
+        "semantic_candidates": semantic_candidates,
         "items": cards,
         "attribution": ATTRIBUTION,
     }

@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Semantic `area` resolution on the `umbra-mcp` `search_catalog` tool
+  (`docs/AI_INTEGRATION_IDEAS.md` §C1 follow-on / `TODO.md`).** The C1
+  natural-language-search capstone — embedding-backed task-name aliasing — was
+  complete on the CLI (`umbra semantic`) but agents, the project's
+  highest-leverage audience, could only reach the deterministic `fuzzy=` widen.
+  `search_catalog` now takes `semantic=True` (plus an optional `semantic_model`):
+  it treats `area` as a natural-language *description* of a site and resolves it
+  to the closest Umbra task name by meaning — via the prebuilt sidecar
+  `catalog.semantic.db` (`umbra semantic build`) — before searching, so
+  `area="grain storage north dakota"` finds `"Beet Piler - ND"` even though they
+  share no word (the reach the token-wise fuzzy matcher can't and shouldn't fake).
+  The resolved task is reported as `resolved_area` and the ranked alternatives as
+  `semantic_candidates` (`{task, score}`), so a wrong top match is re-searchable
+  with an exact `area` from the list; `semantic` resolves to an exact task name,
+  so it supersedes `fuzzy`. It holds the server's determinism boundary: the only
+  model call is turning the description into a vector (the injectable
+  `default_embedder`, gated on the `[ai]` embedding key), while the ranking and the
+  search stay deterministic — so the whole path is offline-tested
+  (`tests/test_mcp_server.py`) with a stand-in embedder, no `[ai]` extra and no
+  network, and a missing index raises a self-describing error pointing at
+  `umbra semantic build`.
 - **Canopy commercial-archive backend on the `umbra-mcp` MCP server — a token
   concept for the flagship AI surface (`docs/STRATEGY.md` 5.1 follow-on /
   `docs/AI_INTEGRATION_IDEAS.md` §B1).** The paid-archive funnel already ran end
