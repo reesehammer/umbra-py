@@ -858,6 +858,30 @@ same 500 lines of glue first, and many give up."*
 > heavier, calibration-oriented job than the geometric cosine correction shipped
 > here; the other higher-level gaps are unchanged and non-code: the maintainer-side
 > adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-17):** the **amplitude time-series notebook has shipped** —
+> `examples/04_amplitude_time_series.ipynb` (workstream 5.4 / `AI_INTEGRATION_IDEAS.md`
+> B3, one of the two remaining named notebooks). With every capability built, the
+> binding constraint on §1's thesis ("widen the funnel — more people successfully
+> using the open data") is adoption, and the notebook gallery is its front door:
+> the greatest-hits SAR workflows, runnable, that DevRel links first and that
+> double as live evals. The three shipped notebooks cover search→quicklook, stream
+> a GEC into `xarray`, and a two-pass change composite; this adds the *monitoring*
+> greatest-hit — SAR's killer app is cadence, so the natural analysis is a time
+> series. It reduces a site's repeat passes to one scalar each (mean backscatter in
+> dB, from `to_xarray(..., db=True)` over streamed decimated overviews — no full
+> download) and plots the trend, the whole-scene scalar complement to `umbra
+> timescan` (which keeps the map to show *where* activity happened) and `umbra
+> change` (which compares two passes in color). It holds the gallery's culture
+> exactly (§3): a small deterministic search with `assert`s in every code cell, so
+> it is a live eval as much as a tutorial, kept honest offline by
+> `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
+> symbols, CC-BY present) and executable end-to-end under `pytest -m network`. Pure
+> funnel-widening (§1), no new code surface and no model call. The remaining 5.4
+> notebooks are a detection-chips walkthrough (`umbra chips`) and the SICD-convert
+> showcase (`05_sicd_amplitude.ipynb`, paired with 5.5); the higher-level gaps are
+> unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -1023,10 +1047,17 @@ start; notebooks with rendered output travel further.
   keeps them from drifting: an offline, stdlib-only CI guard (well-formed, cells
   parse, only public `umbra_py` symbols, CC-BY present) plus an opt-in
   `pytest -m network` end-to-end execution.
-- ⬜ Remaining: an amplitude time-series notebook, a detection-chips notebook
-  (`umbra chips`), and `04_sicd_amplitude.ipynb` (paired with the SICD →
-  geocoded COG work in 5.5). Rendering pre-baked output into the committed
-  notebooks (they currently ship with cleared cells) is a later polish step.
+- ✅ **The amplitude time-series notebook has shipped** —
+  `04_amplitude_time_series.ipynb` reduces a site's repeat passes to one number
+  each (mean backscatter in dB via `to_xarray(..., db=True)` over streamed
+  decimated overviews) and plots the series — the scalar, whole-scene complement
+  to `timescan` (which keeps the map) and `change` (which compares two passes).
+  Like the others it is self-checking (a small deterministic search with
+  `assert`s) and guarded offline by `tests/test_examples.py`.
+- ⬜ Remaining: a detection-chips notebook (`umbra chips`) and
+  `05_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG work in 5.5).
+  Rendering pre-baked output into the committed notebooks (they currently ship
+  with cleared cells) is a later polish step.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 

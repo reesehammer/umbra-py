@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Amplitude time-series example notebook —
+  `examples/04_amplitude_time_series.ipynb` (`docs/STRATEGY.md` 5.4 /
+  `docs/AI_INTEGRATION_IDEAS.md` B3).** With every capability built, the binding
+  constraint on adoption is the notebook gallery — the greatest-hits SAR
+  workflows, runnable, that double as live evals. The three shipped notebooks
+  cover search→quicklook, streaming a GEC into `xarray`, and a two-pass change
+  composite; this adds the *monitoring* greatest-hit. It reduces a site's repeat
+  passes to one scalar each (mean backscatter in dB, from `to_xarray(..., db=True)`
+  over streamed decimated overviews — no full download) and plots the trend — the
+  whole-scene scalar complement to `umbra timescan` (which keeps the map) and
+  `umbra change` (which compares two passes in color). Like the others it is
+  self-checking (a small deterministic search with `assert`s in every code cell)
+  and guarded offline by `tests/test_examples.py`, executable end-to-end under
+  `pytest -m network`. No new code surface and no model call.
 - **Radiometric terrain flattening — `umbra convert --rtc` /
   `sicd_to_geocoded_cog(rtc=True)` (`docs/STRATEGY.md` 5.5).** Terrain
   orthorectification (`--dem`) fixes *where* each pixel lands but not *how bright*
