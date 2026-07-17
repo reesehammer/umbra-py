@@ -182,10 +182,18 @@ against a mocked API). Open follow-ons, none a blocker:
   built to the STAC API *standard*; confirm the exact search body, collection
   ids, and pagination link shape Canopy emits, and adjust if it deviates. Add a
   `network`-marked smoke test gated on a `UMBRA_CANOPY_TOKEN` secret.
-- **Wire `--token` into the visual commands.** `umbra search` takes `--token`;
-  the render commands (`map`/`gallery`/`change`/…) route through `_gather_items`
-  and could accept it too, so a paying user renders the commercial archive with
-  the same flags.
+- ~~**Wire `--token` into the visual commands.**~~ ✅ **Done.** `map`, `gallery`,
+  `change`, `timescan`, `swipe` and `chips` now take the same `--token` (shared
+  `_token_option`, `$UMBRA_CANOPY_TOKEN` fallback, and a `_check_token_not_local`
+  guard against combining it with `--local` / `--index-db`), threaded through
+  `_gather_items` → `_search_source(local, db_path, token)` to the commercial
+  backend — so a paying user renders and analyses the archive they pay for with
+  the identical flags. Offline-tested in `tests/test_cli_token.py` against a
+  `responses`-mocked STAC API (dispatch, token→archive flow, per-command wiring,
+  env-var fallback, mutual-exclusion guard). The whole-catalog explorers (`demo`,
+  `tiles`) and the embedding/index builders are deliberately left on the open
+  bucket — they gather large catalog slices, where a live paid-archive walk is out
+  of place.
 
 ---
 

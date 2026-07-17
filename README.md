@@ -389,18 +389,25 @@ for item in archive.search(bbox=(-118.3, 33.7, -118.1, 33.8), start="2024", limi
 ```
 
 On the command line, `--token` (or the `UMBRA_CANOPY_TOKEN` environment
-variable) switches `umbra search` to the commercial archive:
+variable) switches `umbra search` to the commercial archive — and the same flag
+works on the render and analysis verbs (`map`, `gallery`, `change`, `timescan`,
+`swipe`, `chips`), so a paying customer discovers *and* renders the archive they
+pay for with the identical commands:
 
 ```bash
 export UMBRA_CANOPY_TOKEN=your-canopy-token
 umbra search --start "3 months ago" --bbox="-118.3,33.7,-118.1,33.8" --limit 5
+# ...then analyse the same commercial archive with the same flags:
+umbra change --token "$UMBRA_CANOPY_TOKEN" --area "Port of Long Beach" \
+  --start 2024 --out change.png
 ```
 
 `bbox` and the date bounds are sent to the STAC API; `--product` and
 `--area`/`--fuzzy` are applied to the returned items exactly as on the open-data
-path. The token is only ever sent to the Canopy endpoint, never the open bucket.
-Learn what you built on the free data, then point the same three lines at the
-archive you pay for.
+path. `--token` is mutually exclusive with `--local` / `--index-db` (which read a
+local open-data index), and the token is only ever sent to the Canopy endpoint,
+never the open bucket. Learn what you built on the free data, then point the same
+commands at the archive you pay for.
 
 ### Command line
 

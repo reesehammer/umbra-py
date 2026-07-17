@@ -110,21 +110,30 @@ def _gather_items(
     *,
     local: bool = False,
     db_path: str | None = None,
+    token: str | None = None,
     live_label: str = "Searching Umbra archive",
     **search_kwargs: object,
 ) -> list[UmbraItem]:
     """Run a search and return the results as a list, choosing the backend the
     same way ``umbra search`` does: a prebuilt local index when ``--local`` /
-    ``--index-db`` is given, otherwise a live :class:`UmbraCatalog` S3 walk.
+    ``--index-db`` is given, Umbra's authenticated Canopy commercial archive when
+    a ``token`` is given, otherwise a live :class:`UmbraCatalog` open-data S3 walk.
 
     The visual commands (``map``, ``gallery``, ``swipe``, ``change``,
-    ``timescan``) used to re-walk S3 on every render; routing them through here
-    lets ``--local`` answer from an already-built index (``umbra index fetch`` /
-    ``umbra index build``) instead — near-instant, and the fast path a demo or
-    repeat-render flow needs.
+    ``timescan``, ``chips``) used to re-walk S3 on every render; routing them
+    through here lets ``--local`` answer from an already-built index
+    (``umbra index fetch`` / ``umbra index build``) instead — near-instant, and
+    the fast path a demo or repeat-render flow needs — while ``token`` points the
+    same verb at the paid Canopy archive, so a commercial customer renders the
+    archive they pay for with the identical flags.
     """
-    source, is_index = _search_source(local, db_path)
-    label = "Searching local index" if is_index else live_label
+    source, is_index = _search_source(local, db_path, token)
+    if is_index:
+        label = "Searching local index"
+    elif token:
+        label = "Searching Canopy archive"
+    else:
+        label = live_label
     try:
         with OrbitSpinner(label):
             return list(source.search(**search_kwargs))  # type: ignore[attr-defined]
@@ -171,6 +180,40 @@ def _fuzzy_option(func):
         "'Centerfield, Utah'). Deterministic, no model call; a strict superset "
         "of the substring match.",
     )(func)
+
+
+def _token_option(func):
+    """Attach the shared ``--token`` option that points a render/analysis command
+    at Umbra's authenticated Canopy commercial archive instead of the open bucket.
+
+    ``umbra search`` already takes a ``--token`` (:mod:`umbra_py.catalog`); this
+    threads the *same* commercial-archive backend through ``_gather_items`` so a
+    paying Canopy customer renders and analyses the archive they pay for with the
+    identical flags (the funnel made literal — the tool learned on the free data
+    *is* the tool used on the paid archive). Falls back to
+    ``$UMBRA_CANOPY_TOKEN``; mutually exclusive with ``--local`` / ``--index-db``.
+    """
+    return click.option(
+        "--token",
+        default=None,
+        envvar=CANOPY_TOKEN_ENV,
+        help="Canopy API token. When given, gather items from Umbra's "
+        "authenticated COMMERCIAL archive (a real STAC API) instead of the open "
+        "bucket — the same flags, over the paid catalog. Falls back to "
+        f"${CANOPY_TOKEN_ENV}. Mutually exclusive with --local / --index-db.",
+    )(func)
+
+
+def _check_token_not_local(token, local, db_path) -> None:
+    """Guard: the Canopy ``--token`` backend queries the live commercial archive,
+    so it cannot be combined with a local open-data index (``--local`` /
+    ``--index-db``). Mirrors the check ``umbra search`` makes for ``--token``."""
+    if token and (local or db_path is not None):
+        raise click.ClickException(
+            "--token renders from the live Canopy commercial archive and cannot "
+            "be combined with --local / --index-db (which read a local open-data "
+            "index)."
+        )
 
 
 def _manifest_option(func):
@@ -1368,6 +1411,7 @@ def convert(
 @click.option("--json", "as_json", is_flag=True, help="Emit the dataset summary as JSON.")
 @_fuzzy_option
 @_local_index_options
+@_token_option
 def chips(
     item_urls,
     out_dir,
@@ -1387,6 +1431,7 @@ def chips(
     fuzzy,
     local,
     db_path,
+    token,
 ) -> None:
     """Cut SAR scenes into fixed-size, georeferenced ML training tiles.
 
@@ -1409,6 +1454,7 @@ def chips(
     """
     from .chips import write_chips
 
+    _check_token_not_local(token, local, db_path)
     search_mode = any(v for v in (area, bbox, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -1426,6 +1472,7 @@ def chips(
         items = _gather_items(
             local=local,
             db_path=db_path,
+            token=token,
             bbox=_parse_bbox(bbox),
             start=start,
             end=end,
@@ -1569,6 +1616,7 @@ def chips(
     "else the provider default). The provider is chosen by which API key is set.",
 )
 @_local_index_options
+@_token_option
 @_fuzzy_option
 @_manifest_option
 def change(
@@ -1592,6 +1640,7 @@ def change(
     local,
     db_path,
     as_json,
+    token,
 ) -> None:
     """Render multi-temporal SAR change: a color composite or a time-lapse.
 
@@ -1630,6 +1679,7 @@ def change(
     if model and not narrate:
         raise click.UsageError("--model only applies together with --narrate.")
 
+    _check_token_not_local(token, local, db_path)
     search_mode = any(v for v in (area, bbox, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -1652,6 +1702,7 @@ def change(
         found = _gather_items(
             local=local,
             db_path=db_path,
+            token=token,
             bbox=_parse_bbox(bbox),
             start=start,
             end=end,
@@ -1835,6 +1886,7 @@ def change(
     help="Low,high percentile cut for each statistic's contrast stretch.",
 )
 @_local_index_options
+@_token_option
 @_fuzzy_option
 @_manifest_option
 def timescan(
@@ -1854,6 +1906,7 @@ def timescan(
     local,
     db_path,
     as_json,
+    token,
 ) -> None:
     """Collapse a whole SAR time series into one temporal-statistics image.
 
@@ -1881,6 +1934,7 @@ def timescan(
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
+    _check_token_not_local(token, local, db_path)
     search_mode = any(v for v in (area, bbox, place, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -1901,6 +1955,7 @@ def timescan(
         found = _gather_items(
             local=local,
             db_path=db_path,
+            token=token,
             bbox=search_bbox,
             start=start,
             end=end,
@@ -2008,6 +2063,7 @@ def timescan(
     help="Low,high percentile cut for each overlay's contrast stretch.",
 )
 @_local_index_options
+@_token_option
 @_fuzzy_option
 @_manifest_option
 def swipe(
@@ -2026,6 +2082,7 @@ def swipe(
     local,
     db_path,
     as_json,
+    token,
 ) -> None:
     """Render an interactive before/after swipe map of two SAR passes.
 
@@ -2046,6 +2103,7 @@ def swipe(
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
+    _check_token_not_local(token, local, db_path)
     search_mode = any(v for v in (area, bbox, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -2065,6 +2123,7 @@ def swipe(
         found = _gather_items(
             local=local,
             db_path=db_path,
+            token=token,
             bbox=_parse_bbox(bbox),
             start=start,
             end=end,
@@ -2212,6 +2271,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     help="How many thumbnails to stream in parallel.",
 )
 @_local_index_options
+@_token_option
 @_fuzzy_option
 @_manifest_option
 def gallery(
@@ -2234,6 +2294,7 @@ def gallery(
     local,
     db_path,
     as_json,
+    token,
 ) -> None:
     """Render search results as a browseable HTML SAR thumbnail gallery.
 
@@ -2247,10 +2308,12 @@ def gallery(
     if not out_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Gallery output must be an .html file.")
 
+    _check_token_not_local(token, local, db_path)
     search_bbox = _resolve_search_bbox(bbox, place)
     items = _gather_items(
         local=local,
         db_path=db_path,
+        token=token,
         bbox=search_bbox,
         start=start,
         end=end,
@@ -2735,6 +2798,7 @@ def tiles(
     "HTML output only; mutually exclusive with --imagery.",
 )
 @_local_index_options
+@_token_option
 @_manifest_option
 def map_cmd(
     bbox,
@@ -2754,8 +2818,10 @@ def map_cmd(
     local,
     db_path,
     as_json,
+    token,
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
+    _check_token_not_local(token, local, db_path)
     search_bbox = _resolve_search_bbox(bbox, place)
     imagery_kwargs: dict | None = None
     if imagery_max_size is not None:
@@ -2764,6 +2830,7 @@ def map_cmd(
     items = _gather_items(
         local=local,
         db_path=db_path,
+        token=token,
         bbox=search_bbox,
         start=start,
         end=end,
