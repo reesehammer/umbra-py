@@ -426,6 +426,45 @@ class UmbraCatalog:
             else:
                 next_body = None
 
+    def get_item(self, item_id: str) -> UmbraItem | None:
+        """Fetch a single acquisition from the Canopy commercial archive by id.
+
+        The keyed-retrieval complement to :meth:`search`'s listing: given a STAC
+        item id, return that one :class:`~umbra_py.UmbraItem`, or ``None`` when the
+        archive has no such item. It is implemented with the STAC API ``ids``
+        search extension over the *same* ``/archive/search`` endpoint
+        :meth:`search` already POSTs to -- ``POST {"ids": [item_id], "limit": 1}``
+        -- so it introduces no new endpoint to guess and stays offline-testable
+        against a mocked API, exactly like the search path. Bearer auth, the
+        helpful ``401/403`` "token rejected" message and the ``500`` wrap are all
+        inherited from :meth:`_archive_page`.
+
+        Requires a Canopy ``token``. The open bucket is a *static* catalog with no
+        id-to-item index, so a keyed lookup isn't meaningful there -- resolve an
+        open-data item from its sidecar URL instead
+        (:meth:`UmbraItem.from_dict` / ``umbra info <url>``) or from a built index
+        (:meth:`umbra_py.CatalogIndex.get`).
+        """
+        if not self.token:
+            raise CatalogError(
+                "get_item(id) queries the Canopy commercial archive and needs a "
+                "token (UmbraCatalog(token=...) or the UMBRA_CANOPY_TOKEN "
+                "environment variable). For the open data, read a sidecar URL with "
+                "UmbraItem.from_dict / 'umbra info <url>', or look an item up in a "
+                "built index with CatalogIndex.get(item_id)."
+            )
+        body: dict[str, Any] = {"ids": [item_id], "limit": 1}
+        if self.collections:
+            body["collections"] = list(self.collections)
+        page = self._archive_page(self.archive_url, "POST", body)
+        for feature in page.get("features", []):
+            item = UmbraItem.from_dict(feature)
+            # Guard against a server that ignores the ``ids`` filter and returns
+            # an unrelated page: only accept the exact id we asked for.
+            if item.id == item_id:
+                return item
+        return None
+
     def _archive_page(self, url: str, method: str, body: dict[str, Any] | None) -> dict[str, Any]:
         """Fetch one page from the Canopy STAC API with bearer auth."""
         headers = {"Authorization": f"Bearer {self.token}"}

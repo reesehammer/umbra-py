@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Keyed single-item lookup against the Canopy commercial archive —
+  `UmbraCatalog.get_item(item_id)` / `umbra info <id> --token` (`docs/STRATEGY.md`
+  5.1 follow-on).** `search` covers *listing* the paid archive; this adds the
+  *retrieval* complement — a keyed fetch of one acquisition by STAC id. It is
+  implemented with the STAC API `ids` search extension over the same
+  `/archive/search` endpoint the search path already POSTs to (`POST {"ids":
+  [item_id], "limit": 1}`), so it introduces no new endpoint and stays
+  offline-testable against a mocked API, and it inherits `_archive_page`'s bearer
+  auth plus the helpful 401/403 "token rejected" and 500 wrapping. It requires a
+  Canopy token (the open bucket is a static catalog with no id→item index — resolve
+  an open-data item from its sidecar URL or from a built index with
+  `CatalogIndex.get`), and guards against a server that ignores the `ids` filter by
+  accepting only the exact id requested. On the CLI, `umbra info` gains `--token`
+  (with the `$UMBRA_CANOPY_TOKEN` fallback): with a token the argument is an
+  archive item id resolved via the keyed lookup, without one it stays the
+  open-data sidecar-URL read it has always been — the retrieval sibling of `umbra
+  search --token`, so the commercial archive now has a keyed lookup matching the
+  local index's `CatalogIndex.get`. No model call and no new dependency; the whole
+  path is offline-tested (`tests/test_canopy.py`, `tests/test_cli_token.py`).
 - **Detection-chips example notebook — `examples/05_detection_chips.ipynb`
   (`docs/STRATEGY.md` 5.4 / `docs/AI_INTEGRATION_IDEAS.md` B3).** The ML-dataset
   half of the notebook gallery, and the workflow the model-training audience (SAR

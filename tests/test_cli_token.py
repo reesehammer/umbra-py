@@ -17,6 +17,8 @@ combining it with a local index, and the ``$UMBRA_CANOPY_TOKEN`` fallback.
 
 from __future__ import annotations
 
+import json
+
 import click
 import pytest
 import responses
@@ -152,3 +154,59 @@ def test_command_token_rejects_local_index(name, argv):
     result = _runner().invoke(cli_mod.cli, [*argv, "--token", "secret", "--local"])
     assert result.exit_code != 0
     assert "cannot be combined" in result.output
+
+
+# -- info --token: keyed archive lookup ---------------------------------------
+
+
+@responses.activate
+def test_info_token_looks_up_item_by_id_in_archive():
+    """``umbra info <id> --token`` resolves the id via the Canopy keyed lookup."""
+    responses.add(
+        responses.POST,
+        CANOPY_ARCHIVE_URL,
+        json={
+            "type": "FeatureCollection",
+            "features": [_feature("abc", "2024-01-15T10:00:00Z", (0, 0, 1, 1))],
+            "links": [],
+        },
+        status=200,
+    )
+    result = _runner().invoke(cli_mod.cli, ["info", "abc", "--token", "secret"])
+    assert result.exit_code == 0, result.output
+    assert "abc" in result.output
+    body = json.loads(responses.calls[0].request.body)
+    assert body["ids"] == ["abc"]
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer secret"
+
+
+@responses.activate
+def test_info_token_missing_item_errors():
+    responses.add(
+        responses.POST,
+        CANOPY_ARCHIVE_URL,
+        json={"type": "FeatureCollection", "features": [], "links": []},
+        status=200,
+    )
+    result = _runner().invoke(cli_mod.cli, ["info", "ghost", "--token", "secret"])
+    assert result.exit_code != 0
+    assert "No item" in result.output
+
+
+@responses.activate
+def test_info_token_env_var_fallback():
+    responses.add(
+        responses.POST,
+        CANOPY_ARCHIVE_URL,
+        json={
+            "type": "FeatureCollection",
+            "features": [_feature("abc", "2024-01-15T10:00:00Z", (0, 0, 1, 1))],
+            "links": [],
+        },
+        status=200,
+    )
+    result = _runner().invoke(
+        cli_mod.cli, ["info", "abc", "--json"], env={CANOPY_TOKEN_ENV: "envtok"}
+    )
+    assert result.exit_code == 0, result.output
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer envtok"
