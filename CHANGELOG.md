@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Radiometric terrain flattening — `umbra convert --rtc` /
+  `sicd_to_geocoded_cog(rtc=True)` (`docs/STRATEGY.md` 5.5).** Terrain
+  orthorectification (`--dem`) fixes *where* each pixel lands but not *how bright*
+  it is, and radar backscatter is strongly modulated by the local incidence angle
+  — so on relief a slope tilted toward the radar looks bright and one tilted away
+  looks dark from geometry alone. `--rtc` (which requires `--dem`) removes that
+  geometric modulation: after geocoding, each pixel is scaled in the power domain
+  by the cosine correction `cos(reference) / cos(local_incidence)`, where the
+  local incidence angle comes from the DEM's local slope (its surface normal) and
+  the scene look geometry (`SCPCOA.IncidenceAng` / `AzimAng`). The reference
+  defaults to the scene incidence angle, so flat terrain is left unchanged and
+  only slopes are flattened (`--rtc-ref-angle` overrides it). This is an honest
+  first slice: a geometric normalisation of *detected amplitude*, not a calibrated
+  gamma-nought RTC product (Umbra's open products are not radiometrically
+  calibrated), documented as exactly that. It holds the module's grain — the
+  physics is a pure-numpy core (terrain normals, look vector, correction factor)
+  with closed-form behaviour over a planar slope, so it is fully offline-tested
+  with hand-built arrays; only resampling the DEM onto the output grid touches
+  rasterio, and DEM gaps / radar-shadow slopes degrade gracefully (factor clamped,
+  gaps pass through unchanged). No new dependency and no model call. This closes
+  the geometric half of 5.5's remaining `MultiRTC`/RTC gap; full gamma-nought area
+  normalisation and MultiRTC interop remain open follow-ons.
 - **The Canopy commercial-archive `--token` now works on the render/analysis
   verbs, completing the funnel to full parity (`docs/STRATEGY.md` 5.1).**
   `umbra search --token …` (or `$UMBRA_CANOPY_TOKEN`) has long pointed the same

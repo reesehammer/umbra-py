@@ -1269,8 +1269,36 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "ellipsoid, so this converts sampled DEM heights to HAE for survey-grade "
     "placement over relief. Requires --dem.",
 )
+@click.option(
+    "--rtc",
+    is_flag=True,
+    help="Radiometrically terrain-flatten the geocoded output: scale each pixel "
+    "by the cosine correction cos(reference)/cos(local_incidence) from the DEM "
+    "slope and scene look geometry, so slopes facing toward or away from the "
+    "radar no longer look artificially bright or dark. Requires --dem. A "
+    "geometric normalisation of detected amplitude, not a calibrated product.",
+)
+@click.option(
+    "--rtc-ref-angle",
+    type=float,
+    default=None,
+    metavar="DEGREES",
+    help="Reference incidence angle (degrees) the --rtc flattening normalises to. "
+    "Omit to use the scene incidence angle, which leaves flat terrain unchanged.",
+)
 def convert(
-    src, dst, slant_plane, linear, gcp_grid, resolution, resampling, projection, dem, geoid
+    src,
+    dst,
+    slant_plane,
+    linear,
+    gcp_grid,
+    resolution,
+    resampling,
+    projection,
+    dem,
+    geoid,
+    rtc,
+    rtc_ref_angle,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
@@ -1282,8 +1310,10 @@ def convert(
     The geocoding is flat-earth (pixels on the scene's height plane): exact over
     flat terrain, adequate for map placement elsewhere. Pass --dem PATH to
     terrain-orthorectify against a digital elevation model instead, so relief is
-    placed in its true ground position. Pass --slant-plane for a quick,
-    ungeoreferenced amplitude image instead.
+    placed in its true ground position. Add --rtc (with --dem) to also
+    radiometrically terrain-flatten the output, removing the geometric brightness
+    swings that slopes cause. Pass --slant-plane for a quick, ungeoreferenced
+    amplitude image instead.
 
     SICD/CPHD are the complex products; the ``GEC`` asset is already a geocoded
     COG and needs no conversion. Requires the convert extra
@@ -1310,6 +1340,12 @@ def convert(
     auto_geoid = bool(geoid) and geoid.lower() == "auto"
     if geoid and not auto_geoid and not Path(geoid).exists():
         raise click.BadParameter(f"Geoid path does not exist: {geoid}", param_hint="--geoid")
+    if rtc and not dem:
+        raise click.BadParameter(
+            "--rtc requires --dem: radiometric terrain flattening derives the "
+            "local incidence angle from a DEM.",
+            param_hint="--rtc",
+        )
 
     label = "Terrain-geocoding" if dem else "Geocoding"
     with OrbitSpinner(f"{label} {Path(src).name}"):
@@ -1323,8 +1359,15 @@ def convert(
             projection_type=projection.upper(),
             dem=dem,
             geoid=geoid,
+            rtc=rtc,
+            rtc_reference_deg=rtc_ref_angle,
         )
-    kind = "terrain-orthorectified COG" if dem else "geocoded COG"
+    if rtc:
+        kind = "radiometrically terrain-flattened COG"
+    elif dem:
+        kind = "terrain-orthorectified COG"
+    else:
+        kind = "geocoded COG"
     click.echo(f"Wrote {kind} to {path}")
 
 

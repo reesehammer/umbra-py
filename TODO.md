@@ -73,11 +73,31 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   new dependency, no packaged EGM data). `us_nga_egm08_25.tif` (EGM2008 2.5′) is a
   higher-resolution alternative on the same CDN, selectable via
   `fetch_geoid_grid(name=…)`.
-- **MultiRTC / RTC recipes.** Radiometric terrain correction (flattening
-  backscatter for local incidence angle over slopes) is a different job from the
-  geometric orthorectification shipped here; interop with
-  [MultiRTC](https://github.com/MultiSAR/MultiRTC) and RTC recipes remain open
-  under 5.5.
+- ~~**Radiometric terrain flattening (geometric cosine correction).**~~ ✅
+  **Done** (`umbra convert --rtc` / `sicd_to_geocoded_cog(rtc=True)`). Terrain
+  orthorectification fixes *where* a pixel lands but not *how bright* it is; radar
+  backscatter is modulated by the local incidence angle, so slopes tilted toward
+  the radar look bright and slopes tilted away look dark from geometry alone.
+  `--rtc` (which requires `--dem`) removes that: after geocoding, each pixel is
+  scaled in the power domain by `cos(reference)/cos(local_incidence)`, with the
+  local incidence angle derived from the DEM's local slope (surface normal,
+  `_terrain_normals`) and the scene look geometry (`SCPCOA.IncidenceAng`/`AzimAng`,
+  `_scene_look_geometry`). The reference defaults to the scene incidence, so flat
+  terrain is unchanged and only slopes are flattened (`--rtc-ref-angle` overrides
+  it). The physics is a pure-numpy core (`_terrain_normals`, `_look_unit_vector`,
+  `_cos_local_incidence`, `_terrain_flatten_factor`, `_apply_terrain_flattening`)
+  with closed-form planar-slope behaviour, fully offline-tested with hand-built
+  arrays; only the DEM-on-grid resample (`_terrain_flatten_on_grid`) touches
+  rasterio, wired in through a `post_warp` hook on `_warp_gcps_to_cog`. DEM gaps
+  and radar-shadow slopes degrade gracefully (factor clamped to ±10 dB, gaps pass
+  through unchanged). No model call, no new dependency.
+- **MultiRTC interop / full gamma-nought RTC.** The `--rtc` above is the
+  *geometric* cosine correction. The *radiometric* remainder — full gamma-nought
+  illuminated-area normalisation (integrating the projected local illuminated area
+  per pixel rather than a per-pixel cosine) and interop with
+  [MultiRTC](https://github.com/MultiSAR/MultiRTC) — is a heavier,
+  calibration-oriented job (Umbra's open products are not radiometrically
+  calibrated), and remains open under 5.5.
 - ~~**Auto-fetch a DEM for the scene footprint.**~~ ✅ **Done** (`umbra_py.dem` /
   `umbra convert --dem auto`). `dem="auto"` / `--dem auto` resolves the 1°×1°
   Copernicus GLO-30 tiles covering the scene's projected footprint, pulls them
