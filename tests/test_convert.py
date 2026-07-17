@@ -54,10 +54,26 @@ class _FakeSicd:
     tests assert on.
     """
 
-    def __init__(self, lon0=-100.0, lat0=40.0, dlon=0.01, dlat=0.01, skew=0.002, hae_shift=0.0):
+    class _SCPCOA:
+        def __init__(self, incidence, azimuth):
+            self.IncidenceAng = incidence
+            self.AzimAng = azimuth
+
+    def __init__(
+        self,
+        lon0=-100.0,
+        lat0=40.0,
+        dlon=0.01,
+        dlat=0.01,
+        skew=0.002,
+        hae_shift=0.0,
+        incidence=30.0,
+        azimuth=100.0,
+    ):
         self.lon0, self.lat0, self.dlon, self.dlat, self.skew = lon0, lat0, dlon, dlat, skew
         self.hae_shift = hae_shift
         self.calls: list[tuple] = []
+        self.SCPCOA = self._SCPCOA(incidence, azimuth)
 
     def project_image_to_ground_geo(
         self, im_points, ordering="latlong", projection_type="HAE", hae0=None
@@ -835,3 +851,234 @@ def test_cli_convert_geoid_auto_without_dem_errors(tmp_path):
     )
     assert result.exit_code != 0
     assert "--geoid requires --dem" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Radiometric terrain flattening (RTC).
+#
+# The physics core (terrain normals, look vector, cosine correction) is pure
+# numpy with closed-form behaviour over a planar slope, so it is exercised here
+# with hand-built arrays; the end-to-end path uses the faked reader + a real DEM.
+# --------------------------------------------------------------------------- #
+
+_DEG = 1.0 / convert._M_PER_DEG_LAT  # a degree step giving 1 m of ground spacing
+
+
+def test_terrain_normals_flat_is_straight_up():
+    np = pytest.importorskip("numpy")
+    dem = np.full((8, 10), 123.0, dtype="float64")
+    nx, ny, nz = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    assert np.allclose(nx, 0.0)
+    assert np.allclose(ny, 0.0)
+    assert np.allclose(nz, 1.0)
+
+
+def test_terrain_normals_east_ramp_matches_closed_form():
+    np = pytest.importorskip("numpy")
+    # 1 m of ground spacing per column, DEM rising 0.5 m per metre eastward.
+    dem = np.broadcast_to(0.5 * np.arange(12, dtype="float64"), (6, 12)).copy()
+    nx, ny, nz = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    # Upward normal of z = 0.5*east is (-0.5, 0, 1) normalised: it leans downhill (west).
+    mag = math.sqrt(0.5**2 + 1.0)
+    assert np.allclose(nx, -0.5 / mag)
+    assert np.allclose(ny, 0.0)
+    assert np.allclose(nz, 1.0 / mag)
+
+
+def test_cos_local_incidence_reduces_to_incidence_on_flat_ground():
+    np = pytest.importorskip("numpy")
+    dem = np.zeros((5, 5), dtype="float64")
+    normals = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    look = convert._look_unit_vector(37.0, 100.0)
+    cos_lia = convert._cos_local_incidence(normals, look)
+    assert np.allclose(cos_lia, math.cos(math.radians(37.0)))
+
+
+def test_cos_local_incidence_east_ramp_is_incidence_plus_slope():
+    np = pytest.importorskip("numpy")
+    # East-rising ramp faces west (away from a radar looking from the east), so a
+    # radar at azimuth 90 sees a back-slope: LIA = incidence + slope angle.
+    dem = np.broadcast_to(0.5 * np.arange(12, dtype="float64"), (6, 12)).copy()
+    normals = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    look = convert._look_unit_vector(45.0, 90.0)  # look from due east
+    cos_lia = convert._cos_local_incidence(normals, look)
+    slope = math.degrees(math.atan(0.5))
+    expected = math.cos(math.radians(45.0 + slope))
+    assert np.allclose(cos_lia, expected)
+
+
+def test_terrain_flatten_factor_clamps_nan_and_shadow():
+    np = pytest.importorskip("numpy")
+    cos_ref = math.cos(math.radians(30.0))
+    cos_lia = np.array([cos_ref, np.nan, -0.5, 1e-9])
+    factor = convert._terrain_flatten_factor(cos_lia, cos_ref=cos_ref)
+    assert factor[0] == pytest.approx(1.0)  # equal to reference -> no change
+    assert factor[1] == pytest.approx(1.0)  # DEM gap (NaN) -> no change
+    # Shadow / near-zero cosine is floored, so the factor cannot run away.
+    assert factor[2] == pytest.approx(convert._RTC_FACTOR_MAX)
+    assert factor[3] == pytest.approx(convert._RTC_FACTOR_MAX)
+
+
+def test_apply_terrain_flattening_db_and_linear_preserve_nan():
+    np = pytest.importorskip("numpy")
+    factor = np.array([[4.0, 1.0]], dtype="float64")
+
+    db = np.array([[10.0, np.nan]], dtype="float32")
+    out_db = convert._apply_terrain_flattening(db, factor, decibels=True)
+    assert out_db[0, 0] == pytest.approx(10.0 + 10.0 * math.log10(4.0), rel=1e-5)
+    assert np.isnan(out_db[0, 1])
+
+    lin = np.array([[8.0, np.nan]], dtype="float32")
+    out_lin = convert._apply_terrain_flattening(lin, factor, decibels=False)
+    assert out_lin[0, 0] == pytest.approx(8.0 * math.sqrt(4.0), rel=1e-5)
+    assert np.isnan(out_lin[0, 1])
+
+
+def test_scene_look_geometry_reads_scpcoa_and_errors_when_absent():
+    sicd = _FakeSicd(incidence=42.0, azimuth=170.0)
+    assert convert._scene_look_geometry(sicd) == (42.0, 170.0)
+
+    class _Bare:
+        SCPCOA = None
+
+    with pytest.raises(ValueError, match="SCPCOA"):
+        convert._scene_look_geometry(_Bare())
+
+
+def test_sicd_to_geocoded_cog_rtc_flat_dem_leaves_values_unchanged(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "flat_dem.tif", kind="const", const=100.0)
+
+    # Terrain-geocode without RTC.
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest", dem=str(dem)
+    )
+    # Same, with RTC: on flat terrain the local incidence equals the scene
+    # incidence (the default reference), so every factor is 1 -> identical values.
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    flattened = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+    )
+    with rasterio.open(plain) as a, rasterio.open(flattened) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        assert both.any()
+        assert np.allclose(va[both], vb[both], atol=1e-3)
+
+
+def test_sicd_to_geocoded_cog_rtc_slope_changes_brightness(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "ramp_dem.tif")  # default east-west ramp 0..500 m
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest", dem=str(dem)
+    )
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    flattened = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+    )
+    with rasterio.open(plain) as a, rasterio.open(flattened) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        # The geocoding is identical (same DEM); only the flattening differs, and
+        # over a real slope it must move the values measurably.
+        assert both.any()
+        assert not np.allclose(va[both], vb[both], atol=1e-3)
+
+
+def test_sicd_to_geocoded_cog_rtc_reference_offsets_flat_scene(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "flat_dem.tif", kind="const", const=100.0)
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd(incidence=30.0)))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest", dem=str(dem)
+    )
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd(incidence=30.0)))
+    shifted = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_reference_deg=50.0,
+    )
+    # Flat DEM: cos_lia == cos(30) everywhere, so a reference of 50 deg applies a
+    # uniform dB offset of 10*log10(cos50/cos30).
+    offset = 10.0 * math.log10(math.cos(math.radians(50.0)) / math.cos(math.radians(30.0)))
+    with rasterio.open(plain) as a, rasterio.open(shifted) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        assert both.any()
+        assert np.allclose(vb[both] - va[both], offset, atol=1e-3)
+
+
+def test_sicd_to_geocoded_cog_rtc_without_dem_raises(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 8), _FakeSicd()))
+    with pytest.raises(ValueError, match="rtc= requires dem="):
+        convert.sicd_to_geocoded_cog(tmp_path / "in.ntf", tmp_path / "out.tif", rtc=True)
+
+
+def test_cli_convert_rtc(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    dem = _write_dem(tmp_path / "dem.tif")
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(out), "--dem", str(dem), "--rtc"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-flattened" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_rtc_without_dem_errors(tmp_path):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "o.tif"), "--rtc"]
+    )
+    assert result.exit_code != 0
+    assert "--rtc requires --dem" in result.output

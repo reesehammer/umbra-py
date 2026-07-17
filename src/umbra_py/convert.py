@@ -36,6 +36,17 @@ placement. Without it the DEM height is used as-is,
 correct to within the local geoid–ellipsoid separation and ample for map
 placement.
 
+Terrain orthorectification fixes where each pixel lands; it does nothing to how
+bright it is. Radar backscatter is strongly modulated by the local incidence
+angle, so on relief a slope tilted toward the radar looks bright and one tilted
+away looks dark from geometry alone. Pass ``rtc=True`` (with a ``dem=``) to
+**radiometrically terrain-flatten** the geocoded output: each pixel is scaled by
+the geometric cosine correction ``cos(reference) / cos(local_incidence)``,
+derived from the DEM slope and the scene look geometry, so those geometric
+brightness swings are removed. It is a normalisation of *detected amplitude*, not
+a calibrated gamma-nought RTC product; the pure-numpy core (terrain normals, look
+vector, correction factor) is exercised offline with hand-built arrays.
+
 Install with: ``pip install "umbra-py[convert]"``
 """
 
@@ -344,6 +355,216 @@ def _scene_reference_hae(sicd: Any) -> float:
         return 0.0
 
 
+# --------------------------------------------------------------------------- #
+# Radiometric terrain flattening (RTC).
+#
+# Terrain orthorectification above places every pixel in its true *ground*
+# position; it does nothing to the pixel's *brightness*. But radar backscatter
+# is strongly modulated by the local incidence angle (LIA) — the angle between
+# the radar line of sight and the terrain surface normal — so on relief a slope
+# tilted toward the sensor looks bright and one tilted away looks dark, purely
+# from geometry rather than from any real difference on the ground. Radiometric
+# terrain correction removes that geometric modulation so the imagery can be
+# compared and analysed across terrain.
+#
+# What ships here is the standard geometric *cosine correction* to a reference
+# incidence angle (the honest first slice, matching the flat-earth-then-DEM
+# cadence of the geocoding above): each pixel's value is scaled in the power
+# domain by ``cos(theta_ref) / cos(theta_lia)``, computed from the DEM's local
+# slope and the scene's look geometry. On flat ground the LIA equals the scene
+# incidence angle, so with the default reference (the scene incidence) flat
+# terrain is left unchanged and only slopes are flattened. This is a geometric
+# normalisation of *detected amplitude*, not a calibrated gamma-nought RTC
+# product (Umbra's open products are not radiometrically calibrated) — it is
+# documented as exactly that.
+#
+# The whole computation is a pure-numpy core (terrain normals from a DEM patch,
+# the look vector, their dot product, and the correction factor) with closed-form
+# behaviour over a planar slope, so it is exercised offline with hand-built
+# arrays; only resampling the DEM onto the output grid touches rasterio.
+# --------------------------------------------------------------------------- #
+
+#: Metres per degree of latitude / longitude at the equator, for turning a
+#: degree-spaced geographic grid into the ground distances a slope needs. The
+#: east-west figure is scaled by ``cos(latitude)`` per row.
+_M_PER_DEG_LAT = 111320.0
+_M_PER_DEG_LON = 111320.0
+
+#: Clamp on the power-domain correction factor (``+/- 10 dB``), so a near-shadow
+#: slope where ``cos(theta_lia)`` approaches zero cannot amplify noise without
+#: bound.
+_RTC_FACTOR_MIN = 0.1
+_RTC_FACTOR_MAX = 10.0
+
+
+def _terrain_normals(dem: np.ndarray, *, x_res_deg: float, y_res_deg: float, top_lat: float):
+    """Per-pixel unit surface normals ``(east, north, up)`` from a north-up DEM.
+
+    ``dem`` is a 2-D height array on a north-up EPSG:4326 grid (row 0 is the
+    northmost row). ``x_res_deg`` / ``y_res_deg`` are the pixel size in degrees
+    (positive), and ``top_lat`` is the latitude of the top row's centre, so the
+    east-west ground spacing can shrink with ``cos(latitude)`` away from the
+    equator. Flat ground yields ``(0, 0, 1)``.
+
+    NaNs (DEM gaps) are filled with the scene mean height before differencing so
+    a gap reads as locally flat (normal straight up) rather than tearing the
+    gradient; callers suppress the correction over gaps separately.
+    """
+    np = _require("numpy")
+
+    dem = np.asarray(dem, dtype="float64")
+    finite = np.isfinite(dem)
+    fill = float(np.mean(dem[finite])) if finite.any() else 0.0
+    dem = np.where(finite, dem, fill)
+
+    h, _w = dem.shape
+    rows = np.arange(h, dtype="float64")
+    lat = np.clip(top_lat - rows * y_res_deg, -89.9, 89.9)  # north-up: row -> south
+    dy = y_res_deg * _M_PER_DEG_LAT  # north spacing (metres), constant per row
+    dx = np.maximum(x_res_deg * _M_PER_DEG_LON * np.cos(np.radians(lat)), 1e-6)
+
+    dz_drow, dz_dcol = np.gradient(dem)
+    dz_deast = dz_dcol / dx[:, None]
+    dz_dnorth = -dz_drow / dy  # north is the -row direction on a north-up grid
+    # Upward normal of the surface z = f(east, north): (-dz/deast, -dz/dnorth, 1).
+    nx = -dz_deast
+    ny = -dz_dnorth
+    nz = np.ones_like(dem)
+    norm = np.sqrt(nx * nx + ny * ny + nz * nz)
+    return nx / norm, ny / norm, nz / norm
+
+
+def _look_unit_vector(incidence_deg: float, azimuth_deg: float):
+    """Unit vector from a ground point toward the sensor, in local ENU.
+
+    ``incidence_deg`` is the incidence angle (from vertical) and ``azimuth_deg``
+    is the azimuth (clockwise from north) of the horizontal ground-to-sensor
+    direction — SICD's ``SCPCOA.AzimAng``. Over flat ground (up-normal) the dot
+    product with this vector is ``cos(incidence)``, i.e. the local incidence
+    angle reduces to the scene incidence angle.
+    """
+    np = _require("numpy")
+
+    theta = np.radians(float(incidence_deg))
+    az = np.radians(float(azimuth_deg))
+    sin_t = np.sin(theta)
+    return (sin_t * np.sin(az), sin_t * np.cos(az), np.cos(theta))
+
+
+def _cos_local_incidence(normals, look):
+    """Cosine of the local incidence angle: the normal-look dot product."""
+    nx, ny, nz = normals
+    lx, ly, lz = look
+    return nx * lx + ny * ly + nz * lz
+
+
+def _terrain_flatten_factor(cos_lia, *, cos_ref: float):
+    """Power-domain correction factor ``cos_ref / cos_lia``, clamped and gap-safe.
+
+    A slope facing the radar has a smaller local incidence angle (larger
+    ``cos_lia``) and looks artificially bright, so its factor is below one
+    (darkened); a slope facing away is brightened. Non-finite ``cos_lia`` (a DEM
+    gap) takes ``cos_ref`` so the factor is exactly one (no change), and
+    ``cos_lia`` at or below zero (radar shadow / steep back-slope, where the
+    cosine correction is undefined) is floored before dividing. The result is
+    clamped to :data:`_RTC_FACTOR_MIN` .. :data:`_RTC_FACTOR_MAX`.
+    """
+    np = _require("numpy")
+
+    cos_lia = np.asarray(cos_lia, dtype="float64")
+    cos_lia = np.where(np.isfinite(cos_lia), cos_lia, cos_ref)
+    cos_lia = np.clip(cos_lia, 1e-3, 1.0)
+    factor = cos_ref / cos_lia
+    return np.clip(factor, _RTC_FACTOR_MIN, _RTC_FACTOR_MAX)
+
+
+def _apply_terrain_flattening(amplitude: np.ndarray, factor, *, decibels: bool):
+    """Apply a power-domain correction ``factor`` to a detected-amplitude raster.
+
+    ``amplitude`` is the geocoded output: ``20*log10(|z|)`` (which equals
+    ``10*log10(power)``) when ``decibels`` is true, else linear magnitude. So in
+    decibels the correction adds ``10*log10(factor)``; in linear magnitude it
+    multiplies by ``sqrt(factor)``. NaN nodata is preserved either way.
+    """
+    np = _require("numpy")
+
+    amplitude = np.asarray(amplitude, dtype="float32")
+    factor = np.asarray(factor, dtype="float64")
+    if decibels:
+        return (amplitude + 10.0 * np.log10(factor)).astype("float32")
+    return (amplitude * np.sqrt(factor)).astype("float32")
+
+
+def _scene_look_geometry(sicd: Any) -> tuple[float, float]:
+    """``(incidence_deg, azimuth_deg)`` at the scene centre from SICD ``SCPCOA``.
+
+    Reads ``SCPCOA.IncidenceAng`` (angle from vertical) and ``SCPCOA.AzimAng``
+    (azimuth clockwise from north of the ground-to-sensor line of sight), the
+    scene-centre geometry every SICD carries. A scene-constant look vector is the
+    standard approximation for a scene-scale flattening. Raises if the fields are
+    absent, since the correction has no meaning without them.
+    """
+    scpcoa = getattr(sicd, "SCPCOA", None)
+    inc = getattr(scpcoa, "IncidenceAng", None)
+    az = getattr(scpcoa, "AzimAng", None)
+    if inc is None or az is None:
+        raise ValueError(
+            "SICD is missing SCPCOA.IncidenceAng / SCPCOA.AzimAng, which "
+            "radiometric terrain flattening (--rtc) needs for the look geometry."
+        )
+    return float(inc), float(az)
+
+
+def _terrain_flatten_on_grid(
+    warped: np.ndarray,
+    dst_transform: Any,
+    width: int,
+    height: int,
+    *,
+    dem: str | os.PathLike,
+    incidence_deg: float,
+    azimuth_deg: float,
+    reference_deg: float,
+    decibels: bool,
+) -> np.ndarray:
+    """Radiometrically flatten a warped amplitude raster against a DEM.
+
+    Resamples ``dem`` onto the output grid (``dst_transform`` / ``width`` /
+    ``height``), derives the per-pixel local incidence angle from the DEM slope
+    and the scene look geometry, and scales the amplitude by the cosine
+    correction to ``reference_deg``. The DEM resample is the only rasterio touch;
+    the physics is the pure-numpy core above. Over DEM gaps the factor is one, so
+    those pixels pass through unchanged.
+    """
+    np = _require("numpy")
+    import rasterio  # noqa: PLC0415
+    from rasterio.warp import Resampling, reproject  # noqa: PLC0415
+
+    dem_on_grid = np.full((height, width), np.nan, dtype="float64")
+    with rasterio.open(str(dem)) as dem_ds:
+        reproject(
+            source=rasterio.band(dem_ds, 1),
+            destination=dem_on_grid,
+            dst_transform=dst_transform,
+            dst_crs="EPSG:4326",
+            src_nodata=dem_ds.nodata,
+            dst_nodata=float("nan"),
+            resampling=Resampling.bilinear,
+        )
+
+    x_res = abs(dst_transform.a)
+    y_res = abs(dst_transform.e)
+    top_lat = dst_transform.f + dst_transform.e / 2.0  # centre of the top row
+    normals = _terrain_normals(dem_on_grid, x_res_deg=x_res, y_res_deg=y_res, top_lat=top_lat)
+    look = _look_unit_vector(incidence_deg, azimuth_deg)
+    cos_ref = float(np.cos(np.radians(reference_deg)))
+    cos_lia = _cos_local_incidence(normals, look)
+    # Suppress the correction where the DEM had no coverage on the output grid.
+    cos_lia = np.where(np.isfinite(dem_on_grid), cos_lia, cos_ref)
+    factor = _terrain_flatten_factor(cos_lia, cos_ref=cos_ref)
+    return _apply_terrain_flattening(warped, factor, decibels=decibels)
+
+
 def _scene_geo_bbox(sicd: Any, shape: tuple[int, int]) -> tuple[float, float, float, float]:
     """Geographic bbox ``(west, south, east, north)`` of the scene's image corners.
 
@@ -409,6 +630,7 @@ def _warp_gcps_to_cog(
     resolution: float | None,
     resampling: str,
     nodata: float,
+    post_warp: Any = None,
 ) -> Path:
     """Warp a GCP-tagged amplitude array onto a north-up EPSG:4326 COG.
 
@@ -417,6 +639,11 @@ def _warp_gcps_to_cog(
     output bounds come from the GCP lon/lat extent; ``resolution`` (degrees)
     defaults to the finer of the two per-axis ground sample distances so the
     warp does not throw away resolution.
+
+    ``post_warp``, if given, is a callable
+    ``(warped, dst_transform, width, height) -> warped`` applied to the geocoded
+    array before it is written — the hook radiometric terrain flattening uses to
+    adjust pixel values in the output geometry, kept out of the sarpy-free core.
     """
     np = _require("numpy")
     from rasterio.crs import CRS  # noqa: PLC0415
@@ -460,6 +687,11 @@ def _warp_gcps_to_cog(
         resampling=Resampling[resampling],
     )
 
+    if post_warp is not None:
+        warped = np.ascontiguousarray(
+            post_warp(warped, dst_transform, width, height), dtype="float32"
+        )
+
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     profile = {
@@ -498,6 +730,8 @@ def sicd_to_geocoded_cog(
     projection_type: str = "HAE",
     dem: str | os.PathLike | None = None,
     geoid: str | os.PathLike | None = None,
+    rtc: bool = False,
+    rtc_reference_deg: float | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -559,12 +793,31 @@ def sicd_to_geocoded_cog(
         the grid has no coverage the undulation is taken as ``0`` (the DEM height
         is used uncorrected). ``None`` reads DEM heights as-is (correct to within
         the local geoid–ellipsoid separation, ample for map placement).
+    rtc:
+        If true, **radiometrically terrain-flatten** the output: after geocoding,
+        scale each pixel by the geometric cosine correction
+        ``cos(reference) / cos(local_incidence)``, computed from the DEM slope and
+        the scene look geometry, so slopes tilted toward or away from the radar no
+        longer look artificially bright or dark. Requires ``dem`` (the correction
+        needs terrain); passing it without ``dem`` is an error. This is a
+        geometric normalisation of detected amplitude, not a calibrated
+        gamma-nought product.
+    rtc_reference_deg:
+        Reference incidence angle (degrees) the flattening normalises to. ``None``
+        uses the scene incidence angle, so flat terrain is left unchanged and only
+        slopes are corrected.
     """
     np = _require("numpy")
     _require("rasterio")
     _require("sarpy")
     import rasterio  # noqa: PLC0415
     from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
+
+    if rtc and dem is None:
+        raise ValueError(
+            "rtc= requires dem=: radiometric terrain flattening derives the local "
+            "incidence angle from a DEM, so pass a DEM to flatten against."
+        )
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
@@ -602,6 +855,25 @@ def sicd_to_geocoded_cog(
         )
     else:
         gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
+
+    post_warp = None
+    if rtc:
+        incidence_deg, azimuth_deg = _scene_look_geometry(sicd)
+        reference_deg = incidence_deg if rtc_reference_deg is None else float(rtc_reference_deg)
+
+        def post_warp(warped, dst_transform, width, height):
+            return _terrain_flatten_on_grid(
+                warped,
+                dst_transform,
+                width,
+                height,
+                dem=dem,
+                incidence_deg=incidence_deg,
+                azimuth_deg=azimuth_deg,
+                reference_deg=reference_deg,
+                decibels=decibels,
+            )
+
     return _warp_gcps_to_cog(
         amplitude,
         gcps,
@@ -609,4 +881,5 @@ def sicd_to_geocoded_cog(
         resolution=resolution,
         resampling=resampling,
         nodata=float(np.nan),
+        post_warp=post_warp,
     )

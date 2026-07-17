@@ -8,7 +8,7 @@ Companion docs: [`CODEBASE_ANALYSIS.md`](CODEBASE_ANALYSIS.md) (code-level
 priorities), [`AI_INTEGRATION_IDEAS.md`](AI_INTEGRATION_IDEAS.md) (AI/MCP
 direction), [`DEMO_APP_GAPS.md`](DEMO_APP_GAPS.md) (demo-app readiness).*
 
-*Last updated: 2026-07-16.*
+*Last updated: 2026-07-17.*
 
 ---
 
@@ -824,6 +824,40 @@ same 500 lines of glue first, and many give up."*
 > the higher-level gaps are also unchanged and largely non-code: 5.5's MultiRTC/RTC
 > interop and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
 > Umbra).
+>
+> **Update (2026-07-17):** the **geometric half of radiometric terrain correction
+> has shipped** — `umbra convert --rtc` / `sicd_to_geocoded_cog(rtc=True)`
+> (`STRATEGY.md` 5.5, the last remaining *code* item on the strategic critical path,
+> named at the foot of nearly every recent update). Terrain orthorectification
+> (`--dem`, shipped) fixes *where* each pixel lands but does nothing to *how bright*
+> it is — yet radar backscatter is strongly modulated by the local incidence angle,
+> so on relief a slope facing the radar looks bright and one facing away looks dark
+> from geometry alone, and that geometric modulation is exactly what makes SAR over
+> terrain hard to compare, threshold, or feed to a model. `--rtc` (which builds
+> directly on the shipped DEM infrastructure and requires it) removes it: after
+> geocoding, each pixel is scaled in the power domain by the cosine correction
+> `cos(reference) / cos(local_incidence)`, where the local incidence angle comes
+> from the DEM's own local slope (its surface normal) and the scene look geometry
+> (`SCPCOA.IncidenceAng`/`AzimAng`); the reference defaults to the scene incidence,
+> so flat terrain is left unchanged and only slopes are flattened. It directly
+> serves the ML/analytics audience 5.5 targets (Umbra data over relief becomes
+> comparable and trainable, not just correctly *placed*) and removes another slice
+> of the "same 500 lines of glue" the thesis (§1) says drives people away —
+> hand-rolled terrain flattening. It is an honest first slice, in the exact
+> flat-earth→DEM→geoid cadence the rest of `convert.py` follows: a geometric
+> normalisation of *detected amplitude*, not a calibrated gamma-nought product
+> (Umbra's open products are not radiometrically calibrated), documented as exactly
+> that. It holds the project's grain and testability (§3): the physics is a
+> **pure-numpy core** (terrain normals, look vector, correction factor) with
+> closed-form behaviour over a planar slope, so it is fully offline-tested with
+> hand-built arrays — only resampling the DEM onto the output grid touches rasterio
+> — and DEM gaps and radar-shadow slopes degrade gracefully (the factor is clamped,
+> gaps pass through unchanged) rather than tearing; **no model is called and no
+> dependency is added**. What remains under 5.5 is the *radiometric* remainder —
+> full gamma-nought illuminated-area normalisation and MultiRTC interop — a
+> heavier, calibration-oriented job than the geometric cosine correction shipped
+> here; the other higher-level gaps are unchanged and non-code: the maintainer-side
+> adoption moves (5.3 registries, 5.6 talking to Umbra).
 
 ## 2. The landscape: life without umbra-py
 
@@ -1047,8 +1081,23 @@ data trivially trainable increases demand for Umbra pixels.
   single global file (nothing to tile), the fetch reuses the resume-safe
   `download_url` and is injectable, so the whole path is offline-tested without
   the CDN, with no new dependency and no packaged EGM data.
-- ⬜ Remaining geocoding niceties: MultiRTC interop; RTC recipes (radiometric
-  terrain correction) are still open.
+- ✅ **Radiometric terrain flattening shipped** (`umbra convert --rtc` /
+  `sicd_to_geocoded_cog(rtc=True)`): the geometric half of RTC. After geocoding
+  against a DEM, each pixel is scaled in the power domain by the cosine correction
+  `cos(reference)/cos(local_incidence)`, where the local incidence angle is derived
+  from the DEM's local slope (surface normal) and the scene look geometry
+  (`SCPCOA.IncidenceAng`/`AzimAng`), so slopes tilted toward or away from the radar
+  no longer look artificially bright or dark. The reference defaults to the scene
+  incidence (flat terrain unchanged); `--rtc-ref-angle` overrides it. It requires
+  `--dem`. This is an honest geometric normalisation of detected amplitude, not a
+  calibrated gamma-nought product; the physics is a pure-numpy core (normals, look
+  vector, correction factor) offline-tested against closed-form planar-slope
+  behaviour, with only the DEM-on-grid resample touching rasterio, and DEM
+  gaps/radar-shadow slopes degrading gracefully.
+- ⬜ Remaining geocoding niceties: the *radiometric* remainder of RTC — full
+  gamma-nought illuminated-area normalisation and MultiRTC interop (a heavier,
+  calibration-oriented job than the geometric cosine correction above) — is still
+  open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
 
