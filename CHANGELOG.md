@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Adoption / community scaffolding — `CITATION.cff`, `SECURITY.md`,
+  `CODE_OF_CONDUCT.md` (`docs/STRATEGY.md` 5.3 / `docs/CODEBASE_ANALYSIS.md` P2
+  #14, P3 #22).** The library is feature-complete; the binding constraint on the
+  strategy's "widen the funnel" thesis is now discoverability and citability, not
+  capability. This lands the code-side pieces of workstream 5.3 ("make adoption
+  visible where Umbra looks"): a machine-readable `CITATION.cff` (Citation File
+  Format 1.2.0) so GitHub renders a "Cite this repository" button and Zenodo /
+  citation managers can read the metadata — academic citations are the currency
+  an open-data program exists to generate; a `SECURITY.md` disclosure policy
+  (private GitHub advisory reporting, plus the honest security posture: anonymous
+  HTTPS, no auth surface, remote-content/generated-HTML as the trust boundary);
+  and a Contributor Covenant 2.1 `CODE_OF_CONDUCT.md`. Together they complete
+  GitHub's Community Standards profile. `CITATION.cff`'s `version` is kept in sync
+  with `umbra_py.__version__` by an offline, stdlib-only guard
+  (`tests/test_citation.py`), mirroring the golden-file discipline the
+  `llms.txt` bundle already uses. README gains "Citing umbra-py" and "Community"
+  sections linking all three. No code surface changes and no new dependency.
 - **Keyed single-item lookup against the Canopy commercial archive —
   `UmbraCatalog.get_item(item_id)` / `umbra info <id> --token` (`docs/STRATEGY.md`
   5.1 follow-on).** `search` covers *listing* the paid archive; this adds the
