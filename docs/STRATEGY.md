@@ -8,7 +8,7 @@ Companion docs: [`CODEBASE_ANALYSIS.md`](CODEBASE_ANALYSIS.md) (code-level
 priorities), [`AI_INTEGRATION_IDEAS.md`](AI_INTEGRATION_IDEAS.md) (AI/MCP
 direction), [`DEMO_APP_GAPS.md`](DEMO_APP_GAPS.md) (demo-app readiness).*
 
-*Last updated: 2026-07-17.*
+*Last updated: 2026-07-18.*
 
 ---
 
@@ -1058,6 +1058,39 @@ same 500 lines of glue first, and many give up."*
 > index, CLI, STAC API and MCP. The higher-level gaps are unchanged and largely
 > non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
 > (5.3 registries, 5.6 talking to Umbra).
+>
+> **Update (2026-07-18):** **semantic "describe the site" search is now
+> conversational** — `umbra-mcp`'s `search_catalog` gained a `semantic=True` mode
+> (`AI_INTEGRATION_IDEAS.md` §C1 follow-on). §3 frames the MCP server as the
+> project's *highest-leverage surface* ("agents are the new first-time users")
+> and the semantic embedding index as the project's *sharpest novelty* — reaching
+> a site by *meaning* ("grain storage north dakota" → "Beet Piler - ND") when the
+> query shares no word with the task label, the alias the deterministic `fuzzy`
+> matcher can't and shouldn't fake. That capability shipped complete on the CLI
+> (`umbra semantic search`), but the agent surface only reached the deterministic
+> `fuzzy=` token match; a newcomer *describing* a site to an MCP client fell back
+> to guessing its exact name. This closes that: `search_catalog(area=…,
+> semantic=True)` resolves the description to the closest task names through the
+> shipped `SemanticTaskIndex`, searches the best over the chosen backend, and
+> returns `resolved_area` plus the ranked `semantic_matches` so the resolution is
+> **auditable** — the same "show what will run" discipline `umbra ask` / `umbra
+> semantic search` hold — with a `min_score` threshold so a description that
+> matches nothing confidently returns an empty audit trail rather than an
+> arbitrary top pick, and a `search-by-description` prompt packaging the workflow.
+> It is a direct funnel-widener on the surface that matters most (§1): the tool a
+> user onboards on now takes a plain-language *description*, not just a name. It
+> preserves the boundary and testability the scientific audience needs (§3): the
+> only model call is turning the query into a vector (the injectable embedder,
+> gated — like the CLI — on a prebuilt semantic index and the `[ai]` key, so it
+> never runs implicitly), `semantic` and `fuzzy` are mutually exclusive, and the
+> whole path is offline-tested with a deterministic concept embedder (resolve,
+> empty-audit no-match, missing-index/missing-key errors) in
+> `tests/test_mcp_server.py` — **no key, no network, no new dependency**. It reuses
+> `SemanticTaskIndex` unchanged and layers on the same discovery substrate the
+> whole project rests on, so it stays graceful under upstream obsolescence. The
+> higher-level gaps are unchanged and largely non-code: 5.5's radiometric-RTC
+> remainder and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
+> Umbra).
 >
 ## 2. The landscape: life without umbra-py
 

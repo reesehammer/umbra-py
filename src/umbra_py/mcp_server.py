@@ -156,6 +156,41 @@ def _require_same_polarization(items: list[UmbraItem]) -> None:
         )
 
 
+def _resolve_semantic_area(
+    query: str, *, top_k: int = 5, min_score: float = 0.0, model: str | None = None
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Resolve a plain-language site *description* to catalog task names.
+
+    This is how the semantic C1 capability (``umbra semantic search``) reaches the
+    MCP surface: it ranks the prebuilt task-name embedding index against ``query``
+    and returns ``(best_task, ranked_matches)`` — the single best task name to
+    search plus the ranked candidates for the agent to audit — or ``(None, [])``
+    when nothing clears the threshold. Like :func:`find_similar_text`, the only
+    model call is turning the query into a vector (an injectable embedder gated on
+    an ``[ai]`` key); the storage, cosine ranking and thresholding are
+    deterministic and offline.
+
+    Raises :class:`FileNotFoundError` if the semantic index has not been built,
+    and (via :func:`~umbra_py.semantic.default_embedder`)
+    :class:`~umbra_py.MissingDependencyError` when no embedding key is configured,
+    so it never runs implicitly.
+    """
+    from . import semantic as sem
+
+    path = sem.default_semantic_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No semantic index at {path}. Build one first with 'umbra semantic "
+            "build' (natural-language 'describe the site' search needs it)."
+        )
+    embedder = sem.default_embedder(model=model)
+    with sem.SemanticTaskIndex(path) as index:
+        matches = index.matching_tasks(query, embedder, top_k=top_k, min_score=min_score)
+    best = matches[0].task if matches else None
+    ranked = [{"task": m.task, "score": round(m.score, 6)} for m in matches]
+    return best, ranked
+
+
 # --------------------------------------------------------------------------
 # Tool implementations (plain functions; registered on the server below).
 # --------------------------------------------------------------------------
@@ -167,6 +202,8 @@ def search_catalog(
     place: str | None = None,
     area: str | None = None,
     fuzzy: bool = False,
+    semantic: bool = False,
+    min_score: float = 0.0,
     start: str | None = None,
     end: str | None = None,
     products: list[str] | None = None,
@@ -186,7 +223,18 @@ def search_catalog(
     task (site) name (set ``fuzzy`` to match it loosely -- word-order- and
     punctuation-independent and typo-tolerant, resolved deterministically with
     no model call, so ``"utah centerfield"`` still reaches ``"Centerfield,
-    Utah"``); ``start``/``end`` as acquisition-date bounds -- an ISO
+    Utah"``; set ``semantic`` instead to treat ``area`` as a plain-language
+    *description* of a site whose name you don't know and resolve it to the
+    closest task names by *meaning* via the prebuilt embedding index, so
+    ``"grain storage north dakota"`` reaches ``"Beet Piler - ND"`` -- a query
+    that shares no word with the label, which ``fuzzy`` cannot and should not
+    fake; ``semantic`` and ``fuzzy`` are mutually exclusive, and the resolved
+    task name is returned as ``resolved_area`` with the ranked candidates in
+    ``semantic_matches`` so you can audit and retry with a different one, and
+    ``min_score`` -- a cosine threshold in ``[0, 1]`` -- drops weak aliases, so
+    a description that matches nothing confidently returns an empty result
+    rather than an arbitrary top pick); ``start``/``end`` as acquisition-date
+    bounds -- an ISO
     ``YYYY-MM-DD`` date, a bare year/month (``2024``, ``2024-03``), or a
     relative expression (``today``, ``yesterday``, ``3 months ago``,
     ``last month``), resolved deterministically with no model call;
@@ -201,9 +249,51 @@ def search_catalog(
     reported as ``"canopy-archive"``. Returns the per-item context cards, not
     full STAC JSON, to protect the context window; call ``get_item`` for one
     item's full metadata.
+
+    ``semantic=True`` requires a task-embedding index built ahead of time with
+    ``umbra semantic build`` and a user-supplied embedding key (``OPENAI_API_KEY``,
+    optionally ``OPENAI_BASE_URL`` / ``UMBRA_EMBED_MODEL``); it raises a helpful
+    setup error otherwise, so it never runs implicitly. The only model call is
+    turning ``area`` into a vector -- the resolved search over the chosen backend
+    stays fully deterministic.
     """
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
+    if semantic and fuzzy:
+        raise ValueError(
+            "pass semantic or fuzzy, not both: semantic resolves a plain-language "
+            "site description via embeddings, fuzzy is a deterministic token match"
+        )
+
+    resolved_area = None
+    semantic_matches = None
+    search_area = area
+    search_fuzzy = fuzzy
+    if semantic:
+        if not area:
+            raise ValueError(
+                "semantic=True needs `area` set to the plain-language site "
+                "description to resolve (e.g. 'grain storage north dakota')"
+            )
+        resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
+        if resolved_area is None:
+            # Nothing cleared the similarity threshold: report the (empty) audit
+            # trail rather than silently running an unfiltered catalog search.
+            return {
+                "count": 0,
+                "source": "semantic-index",
+                "resolved_place": None,
+                "resolved_bbox": None,
+                "resolved_area": None,
+                "semantic_matches": [],
+                "items": [],
+                "attribution": ATTRIBUTION,
+            }
+        # Search the resolved exact task name literally (it is a real label, so a
+        # substring match hits it; no fuzzy widening on an already-resolved name).
+        search_area = resolved_area
+        search_fuzzy = False
+
     resolved_bbox = tuple(bbox) if bbox else None
     resolved_place = None
     if place and resolved_bbox is None:
@@ -220,8 +310,8 @@ def search_catalog(
             start=start,
             end=end,
             product_types=list(products) if products else None,
-            area=area,
-            fuzzy=fuzzy,
+            area=search_area,
+            fuzzy=search_fuzzy,
             limit=limit,
             max_per_task=max_per_task,
         )
@@ -235,6 +325,8 @@ def search_catalog(
         "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+        "resolved_area": resolved_area,
+        "semantic_matches": semantic_matches,
         "items": cards,
         "attribution": ATTRIBUTION,
     }
@@ -799,6 +891,26 @@ def build_server() -> FastMCP:
             "full time series.\n"
             "3. quicklook(url=...) on a representative scene and summarize the "
             "products, dates and resolutions available, keeping attribution."
+        )
+
+    @server.prompt(
+        name="search-by-description",
+        description="Workflow: find a site by describing it when you don't know its name.",
+    )
+    def search_by_description(description: str) -> str:
+        return (
+            f"Find Umbra acquisitions of the site described as '{description}' when "
+            "you don't know its exact task name (needs a semantic index built with "
+            "'umbra semantic build'):\n"
+            f"1. search_catalog(area='{description}', semantic=True) — it resolves the "
+            "description to the closest task names by meaning, searches the best one, "
+            "and returns resolved_area plus the ranked semantic_matches.\n"
+            "2. If count is 0 and semantic_matches is empty, report that nothing "
+            "matched the description (or that the index has not been built) and stop.\n"
+            "3. If resolved_area looks wrong, re-run search_catalog with area set to a "
+            "better candidate from semantic_matches and fuzzy=False.\n"
+            "4. Summarize the acquisitions found (products, dates, resolutions), noting "
+            "which task name the description resolved to and keeping the attribution line."
         )
 
     return server
