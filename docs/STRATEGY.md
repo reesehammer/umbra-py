@@ -1308,6 +1308,29 @@ same 500 lines of glue first, and many give up."*
 > fully-calibrated radiometric-RTC remainder and the maintainer-side adoption
 > moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18, demo thumbnails):** the **flagship self-serve explorer
+> now leads with a picture** — `umbra demo --server-url` wires the baked SAR
+> quicklook thumbnail into a clicked scene's detail panel (`DEMO_APP_GAPS.md`
+> G6). The demo is "the sharpest funnel-widener since the notebooks" (§1 — "make
+> Umbra's SAR feel as approachable as Sentinel-1" is best sold by a page a
+> curious analyst can *explore*), and the thumbnail bake (PR #86) shipped the
+> primitive and the `GET /artifacts/thumbnail/{id}.png` server endpoint but left
+> the explorer itself unwired, so clicking a scene showed only metadata. Now the
+> panel opens with the radar image, served straight from the index as an offline
+> local-bytes read (quicklook-render fallback), with the heavier on-click COG
+> overlay left as the deeper look — the "images are the API" principle (the whole
+> project's superpower for AI *and* for humans) reaching the one surface a
+> newcomer actually clicks first. It stays in the project's grain and testability
+> (§3): the generator is stdlib-only and fully offline-tested, the preview is
+> gated on `--server-url` so the default build stays a fully static single file,
+> a scene with no baked thumbnail 404s and the element is dropped (never a broken
+> image), and the remote item id is url-encoded into a path under the trusted
+> server base. Not a new capability — the last-mile client wiring that finishes
+> the demo bake the whole G6 thread has been building. The remaining strategic
+> gaps are unchanged and largely non-code: 5.5's fully-calibrated
+> radiometric-RTC remainder and the maintainer-side adoption moves (5.3
+> registries, PyPI publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

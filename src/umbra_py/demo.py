@@ -30,6 +30,18 @@ Design, deliberately in the repo's grain:
   stays a static file (the panel is simply hidden when no ``server_url`` is
   configured, so the default build is unchanged).
 
+* **Instant thumbnail preview when server-backed (G6).** With ``server_url``
+  set, clicking a scene *leads* its detail panel with a small SAR picture pulled
+  from ``GET /artifacts/thumbnail/{id}.png`` — the baked quicklook thumbnail
+  ``umbra index bake-thumbnails`` stored in the index, served straight from local
+  bytes with no render (falling back to a live quicklook render for a scene not
+  yet baked). This is the client wiring the ``DEMO_APP_GAPS.md`` G6 bake left
+  open: the primitive and the server endpoint shipped, so the detail panel now
+  opens with a radar picture, not just metadata, and the heavier on-click
+  "Get SAR image" COG overlay stays the deeper look. A scene with no baked
+  thumbnail 404s and the element is dropped, so a metadata-only scene is never a
+  broken image; without ``server_url`` the panel is unchanged.
+
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
   (``umbra index fetch`` / ``umbra index build``) in milliseconds instead of
@@ -189,8 +201,11 @@ def build_demo(
         "Analyze this view" panel whose buttons POST the currently-filtered
         acquisitions to the server's ``/artifacts/change|timescan|swipe``
         endpoints and show the returned artifact — the R4 "run this analysis
-        here" affordance (``DEMO_APP_GAPS.md``). When ``None`` (default) the
-        page stays fully static and self-contained, exactly as before.
+        here" affordance (``DEMO_APP_GAPS.md``). It also turns on the instant
+        thumbnail preview in the detail panel (served from the endpoint's
+        ``/artifacts/thumbnail/{id}.png`` baked thumbnail, ``DEMO_APP_GAPS.md``
+        G6). When ``None`` (default) the page stays fully static and
+        self-contained, exactly as before.
 
     Returns the HTML as a string; use :func:`save_demo` to write it to disk.
     """
@@ -296,6 +311,10 @@ html, body { margin: 0; height: 100%; }
   margin-top: 16px; padding-top: 12px; border-top: 1px solid #ddd; font-size: 12px;
 }
 #umbra-detail .empty { color: #999; }
+.umbra-thumb {
+  display: block; width: 100%; margin-bottom: 8px; border: 1px solid #ddd;
+  border-radius: 3px; background: #f2f2f2;
+}
 #umbra-detail table { border-collapse: collapse; width: 100%; }
 #umbra-detail th { text-align: left; padding: 2px 8px 2px 0; color: #555; vertical-align: top; }
 #umbra-detail td { padding: 2px 0; word-break: break-word; }
@@ -338,6 +357,11 @@ _APP_JS = """
   var cluster = L.markerClusterGroup({ chunkedLoading: true });
   map.addLayer(cluster);
   var selectedFootprint = null;
+  // Base URL of a running `umbra serve` instance, if the page was built with
+  // one. It backs both the instant thumbnail preview in the detail panel
+  // (below) and the "Analyze this view" panel (further down). Null keeps the
+  // page fully static.
+  var serverBase = CFG.serverUrl ? String(CFG.serverUrl).replace(/\\/+$/, '') : null;
   // The features currently passing the filters -- the "view" the server-backed
   // analysis buttons act on. Kept in sync by render().
   var shownFeatures = [];
@@ -399,6 +423,28 @@ _APP_JS = """
     var p = feature.properties;
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
+
+    // Lead with an instant SAR picture of the selected scene. `umbra serve`
+    // serves the baked quicklook thumbnail (umbra index bake-thumbnails)
+    // straight from the index -- an offline file read -- and falls back to a
+    // quicklook render for a scene not yet baked. Only wired when the page was
+    // built with a server_url; without one the panel stays metadata-only and
+    // the page is fully static. `p.id` is remote metadata, so it is
+    // URL-encoded into the path (the scheme is our own trusted server base, so
+    // no javascript:-style breakout is possible); an unbaked/unrenderable scene
+    // 404s and the onerror handler drops the element rather than showing a
+    // broken image.
+    if (serverBase && p.id) {
+      var thumb = document.createElement('img');
+      thumb.className = 'umbra-thumb';
+      thumb.alt = 'SAR quicklook thumbnail';
+      thumb.onerror = function () {
+        if (thumb.parentNode) thumb.parentNode.removeChild(thumb);
+      };
+      thumb.src = serverBase + '/artifacts/thumbnail/' + encodeURIComponent(p.id) + '.png';
+      panel.appendChild(thumb);
+    }
+
     var table = document.createElement('table');
     table.appendChild(row('ID', p.id));
     table.appendChild(row('Place', p.place));
@@ -484,8 +530,8 @@ _APP_JS = """
   // Only wired when the page was built with a server_url; otherwise the panel
   // stays hidden and the page is fully static.
   var onViewChanged = null;
-  if (CFG.serverUrl) {
-    var base = String(CFG.serverUrl).replace(/\\/+$/, '');
+  if (serverBase) {
+    var base = serverBase;
     var analyzeBox = document.getElementById('umbra-analyze');
     var statusEl = document.getElementById('umbra-analyze-status');
     var resultEl = document.getElementById('umbra-analyze-result');

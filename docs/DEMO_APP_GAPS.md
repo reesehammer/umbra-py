@@ -246,10 +246,16 @@ rather than S3-bound. `umbra serve` serves it from `GET
 offline file read, `404` → fall back to `/artifacts/quicklook`. It mirrors
 `bake_places`: idempotent (only unbaked items are rendered), `--limit` for bounded
 batches, an unrenderable scene skipped and retried, and an **injectable** renderer
-(default `viz._thumbnail_png`) so the whole path is offline-tested. Optional polish
-that remains: wiring the baked thumbnail into the `umbra demo` / gallery *client*
-surfaces (the primitive and the server endpoint both exist now), and baking
-thumbnails into the published weekly snapshot.
+(default `viz._thumbnail_png`) so the whole path is offline-tested. ✅ **The
+`umbra demo` client now consumes it:** with `--server-url` set, clicking a scene
+leads its detail panel with the baked thumbnail pulled from
+`GET /artifacts/thumbnail/{id}.png` (an instant local-bytes read, falling back to
+a quicklook render), so the flagship explorer opens with a radar picture rather
+than metadata alone — the heavier on-click "Get SAR image" COG overlay stays the
+deeper look. A scene with no baked thumbnail 404s and the element is dropped (no
+broken image); without `--server-url` the panel is unchanged and the page stays
+fully static. Optional polish that remains: the same preview in the `umbra
+gallery` contact sheet, and baking thumbnails into the published weekly snapshot.
 
 ### G7 — No packaging or hosting story
 
