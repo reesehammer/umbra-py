@@ -4,7 +4,7 @@
   "title": "umbra-py index-info object",
   "description": "The JSON object umbra-py prints to stdout when 'umbra index info --json' succeeds: a machine-readable summary of a local catalog index. Produced from CatalogIndex.stats() plus the database's path and size. Stable within a minor version.",
   "type": "object",
-  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "built_at"],
+  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at"],
   "additionalProperties": false,
   "properties": {
     "path": {
@@ -38,6 +38,11 @@
       "type": "integer",
       "minimum": 0,
       "description": "Number of acquisitions carrying a baked reverse-geocoded place label (from 'umbra index bake'); 0 when none have been baked."
+    },
+    "thumbnailed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of acquisitions carrying a baked SAR quicklook thumbnail (from 'umbra index bake-thumbnails'); 0 when none have been baked."
     },
     "built_at": {
       "type": ["string", "null"],

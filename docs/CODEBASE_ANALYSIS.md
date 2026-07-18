@@ -364,7 +364,11 @@ warns a full index build "takes a while." Two structural improvements:
   being silently misread. This is what makes the next schema change (the
   demo-oriented denormalizations in `DEMO_APP_GAPS.md` G2, an R\*Tree upgrade)
   a migration rather than a confusing break — landed while every deployed DB
-  still shares one layout, as this recommendation urged.
+  still shares one layout, as this recommendation urged. Two additive migrations
+  have since exercised the path: `user_version` 1 → 2 added the baked `place`
+  column (`bake_places`, G2) and 2 → 3 added the baked `thumbnail` BLOB
+  (`bake_thumbnails`, G6), each applied in place by adding the nullable column so
+  an existing or fetched snapshot gains it on the next open.
 - bbox queries do a full table scan with range predicates. At the current
   catalog scale (thousands of items) this is irrelevant; if the index grows to
   hundreds of thousands, SQLite's built-in R*Tree module is the natural

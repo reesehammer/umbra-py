@@ -24,6 +24,8 @@ site straight from HTTP, not just a curated set baked at build time
 (``DEMO_APP_GAPS.md`` R4 / Path B):
 
 - ``GET  /artifacts/quicklook/{item_id}.png`` -- one acquisition's SAR quicklook;
+- ``GET  /artifacts/thumbnail/{item_id}.png`` -- its baked quicklook thumbnail,
+  served straight from the index with no render (``umbra index bake-thumbnails``);
 - ``POST /artifacts/change``   -- a 2--3 date change composite over a query;
 - ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series;
 - ``POST /artifacts/swipe``    -- an interactive before/after swipe map (HTML).
@@ -335,6 +337,13 @@ def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
                 f"{base}/artifacts/quicklook/{{item_id}}.png",
                 type=png,
                 title="On-demand SAR quicklook (templated by item id)",
+                templated=True,
+            ),
+            _link(
+                "thumbnail",
+                f"{base}/artifacts/thumbnail/{{item_id}}.png",
+                type=png,
+                title="Baked SAR quicklook thumbnail (templated by item id)",
                 templated=True,
             ),
             _link(
@@ -1449,6 +1458,32 @@ def build_app(
             return _serve_artifact(
                 "quicklook", [item], options, lambda: renderers.quicklook(item, options)
             )
+
+        @app.get("/artifacts/thumbnail/{item_id}.png", tags=["Artifacts"])
+        def get_thumbnail(item_id: str) -> Response:
+            """Serve a baked quicklook thumbnail straight from the index.
+
+            Unlike ``/artifacts/quicklook`` this renders nothing: it returns the
+            small PNG ``umbra index bake-thumbnails`` stored in the index, so a
+            demo grid or map preview is an instant, offline file read instead of
+            an S3 COG stream. A ``404`` means the acquisition is unknown *or* its
+            thumbnail has not been baked -- fall back to ``/artifacts/quicklook``.
+            """
+            source = _open()
+            try:
+                png = source.get_thumbnail(item_id) if isinstance(source, CatalogIndex) else None
+            finally:
+                _close(source)
+            if png is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"No baked thumbnail for {item_id!r}. Bake the index with "
+                        "'umbra index bake-thumbnails', or use "
+                        f"/artifacts/quicklook/{item_id}.png to render on demand."
+                    ),
+                )
+            return Response(content=png, media_type="image/png")
 
         def _composite(
             request: Request,
