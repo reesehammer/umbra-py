@@ -40,6 +40,7 @@ pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
 pip install "umbra-py[langchain]" # + the catalog as native LangChain / LangGraph tools
+pip install "umbra-py[llamaindex]" # + the catalog as native LlamaIndex tools
 pip install "umbra-py[ai]"      # + umbra ask / semantic / describe / embed: model-backed NL search, scene reading & visual similarity
 ```
 
@@ -845,6 +846,39 @@ text-only model, or an install without the `viz` extra). The determinism boundar
 is preserved: the tools search, geocode and render; the agent's model plans and
 narrates, with `describe_scene` the one opt-in exception (a vision reading, only
 when an `[ai]` key is configured).
+
+### Drive it from a LlamaIndex agent
+
+A third large population of agent builders assembles tools with LlamaIndex.
+`umbra_py.llamaindex` offers the **same** catalog tools as native LlamaIndex
+`FunctionTool`s — the identical deterministic callables the MCP and LangChain
+surfaces expose, so all three front doors can't drift.
+
+```bash
+pip install "umbra-py[llamaindex]"
+```
+
+```python
+from umbra_py.llamaindex import umbra_tools
+
+tools = umbra_tools()                       # ready for any LlamaIndex agent
+
+from llama_index.core.agent import ReActAgent
+agent = ReActAgent.from_tools(tools, llm=my_llm)
+```
+
+`umbra_tools()` returns the same inventory as the LangChain adapter
+(`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `download_asset`,
+`watch_site`, `find_similar` / `find_similar_text`, `describe_scene` and the
+`quicklook` / `change_composite` / `timescan` render tools) — each name and
+description inferred from the function's docstring and each argument schema from
+its signature. *Images are the API*: LlamaIndex has no `content_and_artifact`
+split, so the render tools return a `RenderResult` whose string form is the
+caption and whose `.png` (surfaced as the `ToolOutput.raw_output`) carries the raw
+PNG for a downstream multimodal model to *see* the radar scene. Pass
+`include_render=False` for a JSON-only surface. The determinism boundary is
+preserved exactly as on the other surfaces: `describe_scene` is the one opt-in
+model call.
 
 ### Serve it as a STAC API (`umbra serve`)
 
