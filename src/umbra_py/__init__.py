@@ -44,6 +44,7 @@ from .embed import (
     default_image_embedder,
     default_scene_embed_path,
     default_text_embedder,
+    fetch_prebuilt_embeddings,
     resolve_scene_model,
 )
 from .exceptions import (
@@ -186,6 +187,7 @@ __all__ = [
     "default_image_embedder",
     "default_text_embedder",
     "default_scene_embed_path",
+    "fetch_prebuilt_embeddings",
     "resolve_scene_model",
     "parse_date_bound",
     "task_matches",

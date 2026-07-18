@@ -1256,6 +1256,41 @@ same 500 lines of glue first, and many give up."*
 > `TODO.md`'s download-hardening ledger; the strategic gaps above are unchanged and
 > largely non-code.
 >
+> **Update (2026-07-18):** the **prebuilt scene-embedding table is now published
+> and fetchable** (`STRATEGY.md` 5.2 "offer it upstream" / `AI_INTEGRATION_IDEAS.md`
+> C5's last open follow-on). Discovery is the moat (§3), and the way that moat now
+> reaches a fresh install without work is the *published* artifacts on the rolling
+> `catalog-index` release — `catalog.db` (`umbra index fetch`), the whole-catalog
+> `catalog.pmtiles` basemap (`umbra tiles --fetch`). The one capability whose reach
+> still stopped at a local build was the project's *sharpest* novelty (§3) — visual
+> similarity search over the archive (`umbra embed`, C5): embedding every quicklook
+> is expensive and model-backed, so a newcomer got the metadata index and the map
+> for free but had to render and embed thousands of scenes themselves before
+> `umbra embed similar` returned anything. This closes that: `umbra embed fetch` /
+> `fetch_prebuilt_embeddings()` / `SceneEmbeddingIndex.from_release()` pull a
+> published `catalog.embed.db` straight to the sibling of the catalog index, so
+> visual similarity search works with **no rebuild** — only the *query* still needs
+> an embedding key (the archive vectors arrive pre-built) — the exact embedding
+> sibling of `umbra index fetch` / `umbra tiles --fetch`. It is precisely the
+> static, host-anywhere artifact 5.2 wants to offer upstream: publish
+> `catalog.embed.db` beside `catalog.json` and the ecosystem gets scene-similarity
+> search over Umbra data for free. It stays in the project's grain and testability
+> (§3): the fetch calls **no model** and adds **no dependency** (it reuses the
+> resume-safe `download_url`), and the whole path is offline-tested against a mocked
+> release download + a round-tripped DB, with the model label preserved so a query
+> uses the matching model. Because the vectors are model-derived and
+> model-*specific* — unlike the deterministic `catalog.db` / `catalog.pmtiles` — the
+> *publish* is honestly opt-in: the weekly `publish-index.yml` gained a gated,
+> `continue-on-error` step that builds and uploads the table (recording the
+> embedding model prominently in the release notes) only when a maintainer has set
+> an `OPENAI_API_KEY` secret, so it never touches the deterministic index publish
+> and costs nothing until configured — the same "plumbing shipped, publish is a
+> maintainer action" shape the PyPI release already follows. With this, the
+> published-artifact trio (searchable index, visual basemap, similarity vectors) is
+> complete on the consume side, and the remaining strategic gaps are unchanged and
+> largely non-code: 5.5's fully-calibrated radiometric-RTC remainder and the
+> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1405,9 +1440,22 @@ One crawl shouldn't be everyone's crawl.
   static, host-anywhere artifact worth offering upstream. A fresh install (or a
   Pages showcase) now gets a fast, zoom-anywhere map of the *entire* archive
   with no local tiling step.
+- ✅ **Scene-similarity vectors now publishable + fetchable too:** the same
+  rolling `catalog-index` release can carry a `catalog.embed.db` scene-embedding
+  sidecar (one image vector per acquisition, the `umbra embed` C5 index), and
+  `umbra embed fetch` / `fetch_prebuilt_embeddings()` /
+  `SceneEmbeddingIndex.from_release()` pull it — the embedding sibling of
+  `umbra index fetch` / `umbra tiles --fetch` — so a fresh install runs visual
+  similarity search over the *whole* archive with no rebuild (only the query needs
+  a key). Unlike the deterministic `catalog.db` / `catalog.pmtiles`, the vectors
+  are model-specific, so the publish is opt-in: the weekly workflow builds and
+  uploads the table (recording the embedding model in the release notes) only when
+  a maintainer sets an `OPENAI_API_KEY` secret, gated and non-blocking so it never
+  affects the deterministic publish.
 - ⬜ **Then offer it upstream:** "here's the pipeline; host the parquet (and the
-  `.pmtiles` basemap) next to `catalog.json` in your bucket and the whole
-  ecosystem gets a search API — and a whole-catalog map — for free." If Umbra
+  `.pmtiles` basemap, and the `catalog.embed.db` similarity vectors) next to
+  `catalog.json` in your bucket and the whole ecosystem gets a search API — a
+  whole-catalog map — and visual scene-similarity search — for free." If Umbra
   adopts it, this project is part of their data program's infrastructure.
 
 ### 5.3 Make adoption visible where Umbra looks — **partial**

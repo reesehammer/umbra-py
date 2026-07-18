@@ -50,6 +50,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra download` — Download asset(s) of an item given its STAC JSON URL.
 - `umbra embed` — Visual similarity search over the archive (embedding-based, C5).
 - `umbra embed build` — Render and embed acquisition quicklooks into a scene-similarity index.
+- `umbra embed fetch` — Download the published scene-embedding index for instant similarity search.
 - `umbra embed info` — Show what a scene index holds: scene-vector count, model and dimension.
 - `umbra embed search` — Find archived scenes matching a plain-language QUERY ("ships at a berth").
 - `umbra embed similar` — Find archived scenes that look like the acquisition at ITEM_URL.

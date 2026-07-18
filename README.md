@@ -738,7 +738,10 @@ this flooded field"* — a search over pixels, not metadata, and a capability
 nothing in the Umbra ecosystem offers.
 
 ```bash
-# Embed a site's quicklooks once into a scene-similarity index (sidecar DB).
+# Fetch the prebuilt scene-embedding table — no rebuild (when one is published).
+umbra embed fetch                    # pulls catalog.embed.db from the release
+
+# ...or embed a site's quicklooks yourself into a scene-similarity index.
 umbra embed build --area "Centerfield, Utah" --start 2024-01-01 --end 2024-12-31
 
 # Image-to-image: archived scenes that look most like a given acquisition.
@@ -751,7 +754,13 @@ umbra embed info                     # scene-vector count, model and dimension
 ```
 
 The vectors live in a sidecar `catalog.embed.db` beside the local index, keyed by
-item id (a rebuild only embeds what is new). Only turning an image or a text query
+item id (a rebuild only embeds what is new). Embedding every quicklook is the one
+expensive, model-backed step, so `umbra embed fetch` pulls a published
+`catalog.embed.db` from the rolling `catalog-index` release straight to that
+sibling path — visual similarity search with no rebuild, the embedding sibling of
+`umbra index fetch` / `umbra tiles --fetch` (only the *query* still needs a key).
+The fetched vectors are model-specific, so query with the model `umbra embed info`
+reports. Only turning an image or a text query
 into a vector calls a model — an OpenAI-compatible multimodal `/embeddings`
 endpoint (set `OPENAI_API_KEY`, optionally `OPENAI_BASE_URL` /
 `UMBRA_SCENE_EMBED_MODEL`); rendering, storage and cosine ranking are

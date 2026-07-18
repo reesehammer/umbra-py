@@ -363,6 +363,32 @@ builds capabilities that assume an AI in the loop.
 > network. With this done, the sole remaining C5 follow-on is the optional,
 > non-blocking work of publishing the embedding table alongside the nightly index so
 > no user recomputes it.
+>
+> **Update (2026-07-18):** the **prebuilt scene-embedding table is now fetchable —
+> the last open C5 follow-on**. `umbra embed fetch` /
+> `fetch_prebuilt_embeddings()` / `SceneEmbeddingIndex.from_release()` pull a
+> published `catalog.embed.db` from the rolling `catalog-index` release straight to
+> the sibling of the catalog index, so a fresh install runs `umbra embed similar` /
+> `umbra embed search` over the *whole* archive with **no rebuild** — the embedding
+> sibling of the shipped `umbra index fetch` / `umbra tiles --fetch`, and precisely
+> the "so no user recomputes it" artifact §C5 named. Embedding every quicklook is
+> the one expensive, model-backed step; skipping it is the funnel-widener (§1) —
+> only the *query* still needs a key (the archive vectors arrive pre-built). It
+> stays inside the determinism boundary (§A4, §6.1): the fetch calls no model and
+> adds no dependency (it reuses the resume-safe `download_url`), and the whole path
+> is offline-tested against a mocked release download + a round-tripped DB, with the
+> model label preserved so a query uses the matching model. Because the vectors are
+> model-derived and model-specific — unlike the deterministic `catalog.db` /
+> `catalog.pmtiles` — the *publish* is opt-in: the weekly `publish-index.yml` gained
+> a gated, `continue-on-error` step that builds and uploads `catalog.embed.db`
+> (recording the embedding model prominently in the release notes) only when a
+> maintainer has set an `OPENAI_API_KEY` secret, so it never touches the
+> deterministic publish and costs nothing until configured — the same "plumbing
+> shipped, publish is a maintainer action" shape as the PyPI release. New constants
+> `CATALOG_EMBED_ASSET` / `CATALOG_INDEX_EMBED_URL`. It is exactly the artifact
+> worth *offering upstream* (`STRATEGY.md` 5.2): publish `catalog.embed.db` beside
+> `catalog.db` and the ecosystem gets visual similarity search over Umbra data for
+> free. **With this, every idea in Tiers A–C is built and its consume side shipped.**
 
 ---
 
@@ -742,9 +768,15 @@ fully offline-testable with a deterministic stand-in embedder and renderer.
 ✅ **`search_similar` is now surfaced as an MCP tool** — `umbra-mcp`'s
 `find_similar` (image-to-image) and `find_similar_text` (text-to-scene) wrap
 `SceneEmbeddingIndex` unchanged and return `SceneMatch` cards that hand straight to
-`quicklook` / `change_composite`. Remaining (optional, non-blocking): publish the
-embedding table with the nightly index so no user recomputes it. It is the kind of
-flagship feature that earns talks, papers, and contributors.
+`quicklook` / `change_composite`. ✅ **The prebuilt embedding table is now
+fetchable** — `umbra embed fetch` / `fetch_prebuilt_embeddings()` /
+`SceneEmbeddingIndex.from_release()` pull a published `catalog.embed.db` from the
+rolling `catalog-index` release so a fresh install runs visual similarity search
+with no rebuild (only the query needs a key), the embedding sibling of `umbra index
+fetch` / `umbra tiles --fetch`; the weekly workflow publishes the table in an
+opt-in, non-blocking step gated on a maintainer `OPENAI_API_KEY` secret, recording
+the embedding model prominently. It is the kind of flagship feature that earns
+talks, papers, and contributors.
 
 ---
 
