@@ -932,6 +932,35 @@ def save_quicklook(
     return dest
 
 
+def _thumbnail_png(
+    item: UmbraItem,
+    *,
+    asset: str = "GEC",
+    max_size: int = 256,
+    db: bool = True,
+    percentile: tuple[float, float] = (2.0, 98.0),
+    colormap: str | None = None,
+) -> bytes:
+    """Render a small SAR quicklook and return the raw PNG bytes.
+
+    The byte-level primitive under :func:`_thumbnail_data_uri` (which base64s
+    these bytes into a data URI) and the default renderer for
+    :meth:`umbra_py.index.CatalogIndex.bake_thumbnails`, which stores the bytes
+    directly in the index. ``db=True`` gives the radiometrically-correct decibel
+    stretch, which reads better at thumbnail size than the linear default. Only
+    the bytes for ``max_size`` are streamed from the cloud-optimized GeoTIFF.
+    Requires the ``viz`` extra.
+    """
+    import io  # noqa: PLC0415
+
+    image = quicklook(
+        item, asset=asset, max_size=max_size, db=db, percentile=percentile, colormap=colormap
+    )
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _thumbnail_data_uri(
     item: UmbraItem,
     *,
@@ -950,14 +979,11 @@ def _thumbnail_data_uri(
     from the cloud-optimized GeoTIFF. Requires the ``viz`` extra.
     """
     import base64  # noqa: PLC0415
-    import io  # noqa: PLC0415
 
-    image = quicklook(
+    png = _thumbnail_png(
         item, asset=asset, max_size=max_size, db=db, percentile=percentile, colormap=colormap
     )
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
 def _render_gallery_thumbnails(

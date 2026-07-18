@@ -35,11 +35,17 @@ Follow-ons that build on it, none a blocker:
   `test_serve.py`, and `test_export.py`.
   (The gallery contact sheet groups by task, not a per-item place popup, so it
   has no label to wire.)
-- **Bake per-item thumbnails too (G6).** `bake_places` establishes the build-time
-  denormalization pattern (idempotent, injectable, additive column); a companion
-  `bake_thumbnails` (a small PNG per acquisition via the reusable
-  `viz._thumbnail_data_uri`, stored alongside or in the index) would make the
-  *first* gallery/lazy-imagery view instant, closing the rest of G6.
+- ~~**Bake per-item thumbnails too (G6).**~~ ✅ **Done** (`umbra index
+  bake-thumbnails` / `CatalogIndex.bake_thumbnails` / `get_thumbnail`). A small PNG
+  per acquisition is rendered once (via the reusable `viz._thumbnail_png`) and
+  cached in an additive `thumbnail BLOB` column (the second additive migration,
+  `user_version` 2 → 3), so `GET /artifacts/thumbnail/{id}.png` on `umbra serve`
+  serves it instantly from local bytes instead of re-streaming the COG. Idempotent
+  and injectable, mirroring `bake_places`, so it is fully offline-tested. Remaining
+  optional polish under G6: wiring the baked thumbnail into the `umbra demo` /
+  gallery *client* surfaces (the server endpoint and the primitive both exist), and
+  baking thumbnails into the published weekly snapshot (gated on egress, like the
+  place-label bake below).
 - **A precomputed centroid column.** The centroid is derived from the stored bbox
   today (cheap), so a `centroid` column is only worth adding if a consumer needs
   to query/sort on it in SQL rather than compute it per row.
@@ -176,7 +182,9 @@ The read-only STAC API is shipped (landing / conformance / collections / items /
 renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`, `POST
 /artifacts/change`, `POST /artifacts/timescan`, `POST /artifacts/swipe`), each
 disk-cached by its inputs and wrapping the existing `viz` functions behind
-injectable renderers. The `umbra demo` front end now calls these endpoints (see
+injectable renderers. `GET /artifacts/thumbnail/{id}.png` serves the baked
+quicklook thumbnail (`umbra index bake-thumbnails`) straight from the index with
+no render. The `umbra demo` front end now calls these endpoints (see
 the Done log), closing the self-serve R4 loop. **Async job semantics for long
 renders are now shipped** (see the Done log): a composite request can opt in to
 `"async": true`, get a `202 Accepted` + a job id, poll `GET /jobs/{id}`, and

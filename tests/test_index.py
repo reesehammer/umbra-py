@@ -1074,12 +1074,164 @@ def test_place_column_migration_from_v1(tmp_path):
         assert {i.id for i in idx.search()} == {"old"}  # rows preserved
         cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
         assert "place" in cols  # migration added the column
+        assert "thumbnail" in cols  # later additive columns are added too
         # The migrated index labels normally.
         assert idx.bake_places(geocoder=lambda lat, lon: "Migrated Place") == 1
         assert next(iter(idx.search())).place == "Migrated Place"
 
     version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
-    assert version == _SCHEMA_VERSION == 2
+    assert version == _SCHEMA_VERSION
+
+
+# -- baked thumbnails (bake_thumbnails / get_thumbnail) ----------------------
+
+
+def _counting_renderer(png=b"\x89PNG\r\n\x1a\nfake"):
+    """A deterministic thumbnail renderer that records which items it rendered.
+
+    Returns ``(fn, ids)`` where ``fn(item)`` yields fixed PNG bytes and appends
+    the item's id to ``ids`` -- so a test can assert both the stored bytes and
+    how many scenes were actually rendered (idempotence).
+    """
+    ids: list[str] = []
+
+    def fn(item):
+        ids.append(item.id)
+        return png
+
+    return fn, ids
+
+
+def test_bake_thumbnails_stores_and_returns_png(tmp_path):
+    with _index(tmp_path) as idx:
+        render, rendered = _counting_renderer()
+        assert idx.bake_thumbnails(render) == 3
+        assert sorted(rendered) == ["a", "b", "c"]  # every GEC item rendered
+        assert idx.get_thumbnail("a") == b"\x89PNG\r\n\x1a\nfake"
+        # Unknown id (or unbaked) is a clean None, not an error.
+        assert idx.get_thumbnail("nope") is None
+
+
+def test_bake_thumbnails_is_idempotent(tmp_path):
+    with _index(tmp_path) as idx:
+        render, rendered = _counting_renderer()
+        assert idx.bake_thumbnails(render) == 3
+        rendered.clear()
+        # A second run has nothing new to do -- no item is re-rendered.
+        assert idx.bake_thumbnails(render) == 0
+        assert rendered == []
+
+
+def test_bake_thumbnails_limit_batches(tmp_path):
+    with _index(tmp_path) as idx:
+        render, _ = _counting_renderer()
+        assert idx.bake_thumbnails(render, limit=2) == 2
+        assert idx.stats()["thumbnailed"] == 2
+        # The remaining item is baked on the next run.
+        assert idx.bake_thumbnails(render) == 1
+        assert idx.stats()["thumbnailed"] == 3
+
+
+def test_bake_thumbnails_skips_unrenderable(tmp_path):
+    """A renderer returning None leaves the item unbaked, to retry next run."""
+    with _index(tmp_path) as idx:
+        assert idx.bake_thumbnails(lambda item: None) == 0
+        assert idx.stats()["thumbnailed"] == 0
+        # A later successful run still finds it (it was never marked).
+        assert idx.bake_thumbnails(lambda item: b"png") == 3
+
+
+def test_bake_thumbnails_only_items_with_asset(tmp_path):
+    """Only acquisitions carrying the requested asset are considered."""
+    with _index(tmp_path) as idx:
+        # No item has a CSI asset, so nothing is baked for it.
+        assert idx.bake_thumbnails(lambda item: b"png", asset="CSI") == 0
+
+
+def test_stats_reports_thumbnailed_count(tmp_path):
+    with _index(tmp_path) as idx:
+        assert idx.stats()["thumbnailed"] == 0
+        idx.bake_thumbnails(lambda item: b"png", limit=2)
+        assert idx.stats()["thumbnailed"] == 2
+
+
+def test_thumbnail_column_migration_from_v2(tmp_path):
+    """A version-2 index (place but no thumbnail) is migrated in place.
+
+    The v2->v3 additive migration adds the ``thumbnail`` column, stamps the
+    current version, and preserves every row -- and a bake then works against it.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    # The version-2 schema: today's `items` table minus the `thumbnail` column.
+    v2_schema = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL, place TEXT
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v2.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v2_schema)
+    conn.execute(
+        "INSERT INTO items (href, id, doc) VALUES (?, ?, ?)",
+        ("h", "old", '{"id": "old", "assets": {}}'),
+    )
+    conn.execute("INSERT INTO item_assets (href, asset) VALUES (?, ?)", ("h", "GEC"))
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        assert {i.id for i in idx.search()} == {"old"}  # rows preserved
+        cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
+        assert "thumbnail" in cols  # migration added the column
+        assert idx.bake_thumbnails(lambda item: b"png") == 1
+        assert idx.get_thumbnail("old") == b"png"
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_cli_index_bake_thumbnails(tmp_path, monkeypatch):
+    """`umbra index bake-thumbnails` bakes via an injectable renderer path."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_A)
+        idx.add(_B)
+
+    # Stand in for the network/viz renderer so the CLI path stays offline.
+    monkeypatch.setattr("umbra_py.viz._thumbnail_png", lambda item, **kw: b"png")
+
+    result = CliRunner().invoke(cli_mod.cli, ["index", "bake-thumbnails", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert "Baked 2 new thumbnail(s)" in result.output
+    assert "2 of 2" in result.output
+
+    info = CliRunner().invoke(cli_mod.cli, ["index", "info", "--db", str(db)])
+    assert "thumbs: 2 of 2 baked" in info.output
+
+
+def test_cli_index_bake_thumbnails_missing_index_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["index", "bake-thumbnails", "--db", str(tmp_path / "missing.db")]
+    )
+    assert result.exit_code != 0
+    assert "No index at" in result.output
 
 
 def test_cli_index_bake(tmp_path, monkeypatch):

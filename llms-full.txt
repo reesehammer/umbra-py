@@ -56,6 +56,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra gallery` — Render search results as a browseable HTML SAR thumbnail gallery.
 - `umbra index` — Build and inspect a local SQLite catalog index for fast offline search.
 - `umbra index bake` — Reverse-geocode indexed acquisitions and cache their place labels.
+- `umbra index bake-thumbnails` — Render a small SAR quicklook per acquisition and cache it in the index.
 - `umbra index build` — Walk Umbra's archive and persist matching acquisitions into the index.
 - `umbra index export` — Export a local index to stac-geoparquet for serverless catalog search.
 - `umbra index fetch` — Download the published prebuilt catalog index for instant local search.

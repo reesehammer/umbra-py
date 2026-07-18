@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Baked SAR quicklook thumbnails in the catalog index — `umbra index
+  bake-thumbnails` / `CatalogIndex.bake_thumbnails()` /
+  `CatalogIndex.get_thumbnail()` (`docs/DEMO_APP_GAPS.md` G6).** Closes the last
+  open piece of the "No thumbnail/artifact caching layer" gap. Every gallery,
+  `umbra demo` preview and `umbra serve` quicklook otherwise re-streams a scene's
+  cloud-optimized GeoTIFF overview from S3 at *render* time, so the first view of
+  a whole catalog is network-bound and slow. `umbra index bake-thumbnails` renders
+  a small (`--size`, default 256 px) PNG preview per acquisition once at build
+  time and caches the bytes in a new additive `thumbnail` column, so a later
+  `GET /artifacts/thumbnail/{item_id}.png` on `umbra serve` — a new endpoint that
+  wraps `get_thumbnail()` — is an instant, offline file read instead of an S3 COG
+  stream (a `404` falls back to `/artifacts/quicklook`). The render-side sibling
+  of `umbra index bake`, it shares that command's discipline: **idempotent** (only
+  acquisitions without a baked thumbnail are rendered, so a re-run bakes just what
+  was added since), `--limit` for bounded batches, and a scene that can't be
+  rendered is skipped and retried next run rather than aborting the batch. The
+  schema migrates additively in place (`user_version` 2 → 3 — the second exercise
+  of the migration path versioning was landed to enable), so an existing or fetched
+  `catalog.db` gains the column on the next open. The renderer is **injectable**
+  (default `viz._thumbnail_png`, needing the `viz` extra), so the whole path — bake,
+  point-lookup, the server endpoint, coverage in `umbra index info` /
+  `docs/schemas/index-info.schema.json` — is offline-tested with a stand-in
+  renderer, no network and no `viz` extra. No model is called; the baked bytes never
+  ride on `search`/`get` (which would bloat every `UmbraItem` with a PNG).
 - **Baked place labels now flow through every read surface (`docs/DEMO_APP_GAPS.md`
   G2 follow-on).** `umbra index bake` writes a reverse-geocoded label onto
   `UmbraItem.place`, but until now only `umbra demo` consumed it — every other

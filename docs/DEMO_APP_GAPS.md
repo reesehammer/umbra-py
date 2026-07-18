@@ -230,17 +230,26 @@ completed job's result is a cache entry (and an already-cached key returns an
 already-`succeeded` job with no work). Nothing under this heading now remains
 open.
 
-### G6 — No thumbnail/artifact caching layer — **partly addressed**
+### G6 — No thumbnail/artifact caching layer — **closed**
 
 Every gallery render re-streams thumbnails from S3; every lazy-imagery click
 re-fetches COG overviews; nothing was cached across artifacts or sessions. ✅
-**The `umbra serve` render endpoints now cache to disk** keyed by a content hash
+**The `umbra serve` render endpoints cache to disk** keyed by a content hash
 of the render's kind, ordered frame ids and options, so a repeat request for the
 same quicklook/change/timescan is a file read (`X-Umbra-Cache: hit`) rather than
-a re-render. Still open for the map/gallery paths: a one-time thumbnail bake
-(e.g. 256-px PNG per acquisition, ~a few KB each, stored alongside or inside the
-index) so the *first* view feels instant. The `_thumbnail_data_uri` machinery is
-reusable as-is for that bake step.
+a re-render. ✅ **The one-time thumbnail bake now ships too** — `umbra index
+bake-thumbnails` (`CatalogIndex.bake_thumbnails`) renders a small (256-px default)
+PNG per acquisition once at build time and caches the bytes in the index's new
+additive `thumbnail` column (`user_version` 2 → 3), so the *first* view is instant
+rather than S3-bound. `umbra serve` serves it from `GET
+/artifacts/thumbnail/{id}.png` (`CatalogIndex.get_thumbnail`) — no render, an
+offline file read, `404` → fall back to `/artifacts/quicklook`. It mirrors
+`bake_places`: idempotent (only unbaked items are rendered), `--limit` for bounded
+batches, an unrenderable scene skipped and retried, and an **injectable** renderer
+(default `viz._thumbnail_png`) so the whole path is offline-tested. Optional polish
+that remains: wiring the baked thumbnail into the `umbra demo` / gallery *client*
+surfaces (the primitive and the server endpoint both exist now), and baking
+thumbnails into the published weekly snapshot.
 
 ### G7 — No packaging or hosting story
 

@@ -49,17 +49,19 @@ from .models import BBox, UmbraItem
 #: makes a future migration possible instead of a confusing break.
 #:
 #: Version 2 added the ``items.place`` column (a baked reverse-geocoded place
-#: label; see :meth:`CatalogIndex.bake_places`). It is purely additive, so a
-#: version-1 (or legacy version-0) database is migrated in place by adding the
-#: column -- the first real exercise of the migration path versioning was landed
+#: label; see :meth:`CatalogIndex.bake_places`). Version 3 added the
+#: ``items.thumbnail`` column (a baked SAR quicklook PNG; see
+#: :meth:`CatalogIndex.bake_thumbnails`). Both are purely additive, so a
+#: lower-version (or legacy version-0) database is migrated in place by adding
+#: the missing columns -- exercising the migration path versioning was landed
 #: to enable.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 #: The versions this build knows how to upgrade to :data:`_SCHEMA_VERSION` in
 #: place. Every step so far is additive (a new nullable column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1})
+_MIGRATABLE_FROM = frozenset({0, 1, 2})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -73,7 +75,8 @@ CREATE TABLE IF NOT EXISTS items (
     max_lon   REAL,
     max_lat   REAL,
     doc       TEXT NOT NULL,
-    place     TEXT
+    place     TEXT,
+    thumbnail BLOB
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -223,6 +226,8 @@ class CatalogIndex:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(items)")}
         if "place" not in columns:  # v1 -> v2: baked reverse-geocoded place label
             self._conn.execute("ALTER TABLE items ADD COLUMN place TEXT")
+        if "thumbnail" not in columns:  # v2 -> v3: baked SAR quicklook PNG
+            self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail BLOB")
 
     @classmethod
     def from_release(
@@ -500,6 +505,101 @@ class CatalogIndex:
         self._conn.commit()
         return labelled
 
+    def bake_thumbnails(
+        self,
+        renderer: Callable[[UmbraItem], bytes | None] | None = None,
+        *,
+        asset: str = "GEC",
+        max_size: int = 256,
+        limit: int | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Render a small SAR quicklook per acquisition once and cache it.
+
+        Every gallery, ``umbra demo`` preview and ``umbra serve`` quicklook
+        otherwise re-streams a scene's cloud-optimized GeoTIFF overview from S3
+        at *render* time, so the first view of a whole catalog is network-bound
+        and slow. This bakes the preview ahead of time: for every indexed
+        acquisition that carries the ``asset`` (default ``GEC``) but no thumbnail
+        yet, it renders a ``max_size``-pixel PNG and stores the bytes in the
+        additive ``thumbnail`` column, so a later
+        :meth:`get_thumbnail` -- and the ``GET /artifacts/thumbnail/{id}.png``
+        server endpoint that wraps it -- is an instant, offline file read.
+
+        It is the render-side sibling of :meth:`bake_places`, and shares its
+        discipline: **idempotent** (only items whose ``thumbnail`` is still
+        ``NULL`` are rendered, so a re-run bakes just what was added since), with
+        ``limit`` capping how many are rendered this call (to bake a large
+        catalog in bounded batches). An item whose asset can't be rendered (no
+        ``asset``, a decode error, a network blip) is skipped -- its thumbnail
+        stays ``NULL`` so a later run retries it -- and one bad scene never
+        aborts the batch, mirroring the gallery contact sheet.
+
+        ``renderer`` is an injectable ``(UmbraItem) -> bytes | None`` callable
+        returning PNG bytes (or ``None`` to skip); the default wraps
+        :func:`umbra_py.viz._thumbnail_png`, which streams only the overview for
+        ``max_size`` and needs the ``viz`` extra. Passing a stand-in keeps the
+        whole path offline-testable. ``progress``, if given, is called with the
+        running count of items processed. Returns the number newly thumbnailed.
+        """
+        if renderer is None:
+            from .viz import _thumbnail_png  # noqa: PLC0415
+
+            def renderer(item: UmbraItem) -> bytes | None:
+                try:
+                    return _thumbnail_png(item, asset=asset, max_size=max_size)
+                except Exception:
+                    # A single scene failing to render must not abort the bake;
+                    # it stays NULL and is retried on the next run.
+                    return None
+
+        rows = self._conn.execute(
+            "SELECT href, doc, place FROM items "
+            "WHERE thumbnail IS NULL AND href IN "
+            "(SELECT href FROM item_assets WHERE asset = ?) "
+            "ORDER BY href",
+            (asset.upper(),),
+        ).fetchall()
+        if limit is not None:
+            rows = rows[:limit]
+
+        baked = 0
+        for processed, (href, doc, place) in enumerate(rows, 1):
+            item = UmbraItem.from_dict(json.loads(doc), href=href)
+            item.place = place
+            png = renderer(item)
+            if png:
+                self._conn.execute(
+                    "UPDATE items SET thumbnail = ? WHERE href = ?", (sqlite3.Binary(png), href)
+                )
+                baked += 1
+                if baked % 25 == 0:
+                    self._conn.commit()
+            if progress is not None:
+                progress(processed)
+        self._conn.commit()
+        return baked
+
+    def get_thumbnail(self, item_id: str) -> bytes | None:
+        """Return the baked quicklook PNG for this STAC id, or ``None``.
+
+        The retrieval complement to :meth:`bake_thumbnails`: an
+        ``idx_items_id``-backed point lookup for the cached preview bytes (never
+        loaded by :meth:`search`/:meth:`get`, which would bloat every
+        :class:`~umbra_py.models.UmbraItem` with a PNG). ``None`` means the id is
+        absent *or* its thumbnail has not been baked -- both mean "render it
+        instead". If two sidecars share an id, the first by ``href`` order wins,
+        as in :meth:`get`.
+        """
+        row = self._conn.execute(
+            "SELECT thumbnail FROM items WHERE id = ? AND thumbnail IS NOT NULL "
+            "ORDER BY href LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return bytes(row[0])
+
     # -- querying --------------------------------------------------------------
 
     def search(
@@ -756,12 +856,13 @@ class CatalogIndex:
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
         span, number of distinct tasks, how many items carry a baked place label
-        (``labeled``; see :meth:`bake_places`), and the date the index was last
-        built (``built_at``, ``None`` for an index written before build
-        stamping)."""
-        items, start, end, tasks, labeled = self._conn.execute(
+        (``labeled``; see :meth:`bake_places`), how many carry a baked quicklook
+        thumbnail (``thumbnailed``; see :meth:`bake_thumbnails`), and the date the
+        index was last built (``built_at``, ``None`` for an index written before
+        build stamping)."""
+        items, start, end, tasks, labeled, thumbnailed = self._conn.execute(
             "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), COUNT(DISTINCT task), "
-            "COUNT(place) FROM items"
+            "COUNT(place), COUNT(thumbnail) FROM items"
         ).fetchone()
         return {
             "items": items,
@@ -769,5 +870,6 @@ class CatalogIndex:
             "end": end,
             "tasks": tasks,
             "labeled": labeled,
+            "thumbnailed": thumbnailed,
             "built_at": self.get_meta("built_at"),
         }

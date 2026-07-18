@@ -1116,6 +1116,34 @@ same 500 lines of glue first, and many give up."*
 > 5.5's radiometric-RTC remainder and the maintainer-side adoption moves (5.3
 > registries, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18):** the **baked thumbnail layer has shipped, closing the
+> last open demo-app gap** — `umbra index bake-thumbnails` (`docs/DEMO_APP_GAPS.md`
+> G6). Discovery is the moat (§3), and the way that moat reaches every consumer is
+> the *published* `catalog.db` snapshot users `umbra index fetch`; but every visual
+> surface — a gallery, an `umbra demo` preview, a `umbra serve` quicklook — still
+> re-streamed each scene's cloud-optimized GeoTIFF overview from S3 at *render*
+> time, so the *first* view of a whole catalog was network-bound and slow, the one
+> thing G6 (the last open gap in the demo-readiness doc) named as missing.
+> `bake_thumbnails` closes it in the exact grain of the shipped `bake_places`: it
+> renders a small PNG per acquisition once at build time and caches the bytes in an
+> additive `thumbnail` column (`user_version` 2 → 3, migrated in place — the second
+> exercise of the migration path the schema-version marker was landed to enable), so
+> `GET /artifacts/thumbnail/{id}.png` on `umbra serve` (a new endpoint wrapping
+> `CatalogIndex.get_thumbnail`) is an instant, offline file read instead of an S3
+> COG stream. It is pure funnel-widening infrastructure (§1): the analyst exploring
+> a fetched snapshot sees scenes immediately rather than waiting on a live re-walk,
+> and the baked thumbnail is exactly the kind of static artifact worth *offering
+> upstream* (5.2) — publish it beside the nightly `catalog.db` and the ecosystem
+> gets instant previews for free. It holds the project's grain and testability (§3):
+> **no model is called**, no dependency is added, the bake is idempotent and bounded
+> (`--limit`), the renderer is **injectable** (default `viz._thumbnail_png`) so the
+> whole path — bake, keyed lookup, the server endpoint, `umbra index info` coverage
+> — is offline-tested with a stand-in renderer, no network and no `viz` extra, and
+> the baked bytes never ride on `search`/`get` (which would bloat every `UmbraItem`
+> with a PNG). With G6 closed, the remaining gaps are unchanged and largely
+> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
+> (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

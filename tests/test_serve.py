@@ -495,6 +495,36 @@ def test_quicklook_unknown_item_is_404(art_client):
     assert art_client.get("/artifacts/quicklook/nope.png").status_code == 404
 
 
+def test_thumbnail_endpoint_serves_baked_png(client, index_path):
+    """A baked thumbnail is served straight from the index -- no render."""
+    with CatalogIndex(index_path) as idx:
+        assert idx.bake_thumbnails(lambda item: b"THUMB-" + item.id.encode()) == 3
+
+    resp = client.get("/artifacts/thumbnail/item-1.png")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content == b"THUMB-item-1"
+
+
+def test_thumbnail_endpoint_unbaked_is_404(client):
+    """A known item without a baked thumbnail is a 404 pointing at quicklook."""
+    resp = client.get("/artifacts/thumbnail/item-0.png")
+    assert resp.status_code == 404
+    assert "bake-thumbnails" in resp.json()["detail"]
+
+
+def test_thumbnail_endpoint_unknown_item_is_404(client):
+    assert client.get("/artifacts/thumbnail/nope.png").status_code == 404
+
+
+def test_thumbnail_endpoint_advertised_in_landing_when_artifacts_enabled():
+    page = serve.landing_page("http://localhost:8000/", artifacts=True)
+    rels = {link["rel"] for link in page["links"]}
+    assert "thumbnail" in rels
+    off = serve.landing_page("http://localhost:8000/", artifacts=False)
+    assert "thumbnail" not in {link["rel"] for link in off["links"]}
+
+
 def test_change_endpoint_two_dates(art_client, recorder):
     resp = art_client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]})
     assert resp.status_code == 200

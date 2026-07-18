@@ -3237,6 +3237,68 @@ def index_bake(db_path, limit, zoom) -> None:
     )
 
 
+@index.command("bake-thumbnails")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to bake into (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/"
+    "catalog.db). Must already exist -- create one with 'index fetch'/'build'.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap how many acquisitions to render this run (default: no cap). Each "
+    "thumbnail streams a scene's overview from S3, so use this to bake a large "
+    "catalog in bounded batches -- re-run to continue where it left off.",
+)
+@click.option(
+    "--size",
+    type=int,
+    default=256,
+    show_default=True,
+    help="Longest edge of the baked PNG, in pixels.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    help="Which asset to render the preview from (the geocoded GEC by default).",
+)
+def index_bake_thumbnails(db_path, limit, size, asset) -> None:
+    """Render a small SAR quicklook per acquisition and cache it in the index.
+
+    Bakes a downsampled PNG preview for every indexed acquisition once, so
+    'umbra serve's GET /artifacts/thumbnail/{id}.png -- and any demo/gallery
+    reading it -- shows a scene instantly from local bytes instead of
+    re-streaming its cloud-optimized GeoTIFF from S3 at render time.
+
+    Idempotent: only acquisitions without a baked thumbnail yet are rendered, so
+    re-running bakes just what was added since. A scene that can't be rendered is
+    skipped and retried next run. Needs the viz extra
+    (``pip install "umbra-py[viz]"``); bootstrap the index first with 'umbra
+    index fetch' or 'umbra index build'.
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
+        )
+    with OrbitSpinner("Baking thumbnails") as spinner:
+
+        def tally(n: int) -> None:
+            spinner.label = f"Baking thumbnails ({n} processed)"
+
+        with CatalogIndex(path) as idx:
+            baked = idx.bake_thumbnails(asset=asset, max_size=size, limit=limit, progress=tally)
+            s = idx.stats()
+    click.echo(
+        f"Baked {baked} new thumbnail(s); {s['thumbnailed']} of {s['items']} "
+        f"acquisition(s) now have one. ({path})"
+    )
+
+
 @index.command("fetch")
 @click.option(
     "--db",
@@ -3332,7 +3394,8 @@ def index_info(db_path, as_json) -> None:
 
     ``--json`` emits the stats as a machine-readable object
     (``docs/schemas/index-info.schema.json``): ``path``, ``size_bytes``,
-    ``items``, ``start``, ``end``, ``tasks`` and ``built_at``.
+    ``items``, ``start``, ``end``, ``tasks``, ``labeled``, ``thumbnailed`` and
+    ``built_at``.
     """
     path = _index_path(db_path)
     if not path.exists():
@@ -3349,6 +3412,7 @@ def index_info(db_path, as_json) -> None:
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
     click.echo(f"  tasks : {s['tasks']}")
     click.echo(f"  places: {s['labeled']} of {s['items']} labelled")
+    click.echo(f"  thumbs: {s['thumbnailed']} of {s['items']} baked")
     click.echo(f"  size  : {size_mb:.1f} MB")
     click.echo(f"  built : {_built_note(s['built_at'])}")
 
