@@ -47,7 +47,19 @@ from .models import BBox, UmbraItem
 #: path and the prebuilt ``catalog.db`` snapshot depend on, so stamping the
 #: version now -- while every deployed database still shares one layout -- is what
 #: makes a future migration possible instead of a confusing break.
-_SCHEMA_VERSION = 1
+#:
+#: Version 2 added the ``items.place`` column (a baked reverse-geocoded place
+#: label; see :meth:`CatalogIndex.bake_places`). It is purely additive, so a
+#: version-1 (or legacy version-0) database is migrated in place by adding the
+#: column -- the first real exercise of the migration path versioning was landed
+#: to enable.
+_SCHEMA_VERSION = 2
+
+#: The versions this build knows how to upgrade to :data:`_SCHEMA_VERSION` in
+#: place. Every step so far is additive (a new nullable column), handled
+#: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
+#: an older schema with no migration path and is rejected on open.
+_MIGRATABLE_FROM = frozenset({0, 1})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -60,7 +72,8 @@ CREATE TABLE IF NOT EXISTS items (
     min_lat   REAL,
     max_lon   REAL,
     max_lat   REAL,
-    doc       TEXT NOT NULL
+    doc       TEXT NOT NULL,
+    place     TEXT
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -159,34 +172,30 @@ class CatalogIndex:
         """Create or adopt the schema, guarding on the ``PRAGMA user_version``.
 
         A fresh database reads ``user_version == 0``; so does a legacy database
-        written before versioning existed -- and because this is schema
-        version 1 (the first marker) a legacy database already has exactly this
-        layout, so both cases are handled by creating the (idempotent) schema and
-        stamping the version. A database written by a *newer* umbra-py is
-        unreadable and raises :class:`~umbra_py.exceptions.IndexSchemaError`
-        rather than being silently misread; a lower non-zero version would be an
-        older versioned schema needing a migration this build doesn't carry, so
-        it raises the same, pointing at a rebuild.
+        written before versioning existed. Both, plus any version listed in
+        :data:`_MIGRATABLE_FROM`, are brought up to :data:`_SCHEMA_VERSION` in
+        place: the (idempotent) base schema is ensured, additive migrations are
+        applied, and the version is stamped. A database written by a *newer*
+        umbra-py is unreadable and raises
+        :class:`~umbra_py.exceptions.IndexSchemaError` rather than being silently
+        misread; a lower version with no migration path raises the same, pointing
+        at a rebuild.
         """
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            # Fresh or pre-versioning database: ensure the schema and stamp it.
-            self._conn.executescript(_SCHEMA)
-            self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-            self._conn.commit()
-        elif version == _SCHEMA_VERSION:
+        if version == _SCHEMA_VERSION:
             # Same layout; make sure any additive `CREATE ... IF NOT EXISTS`
             # objects are present, then leave the stamp untouched.
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
-        elif version > _SCHEMA_VERSION:
+            return
+        if version > _SCHEMA_VERSION:
             self._conn.close()
             raise IndexSchemaError(
                 f"Catalog index at {self.path} has schema version {version}, but "
                 f"this umbra-py supports version {_SCHEMA_VERSION}. Upgrade umbra-py, "
                 "or rebuild the index with 'umbra index build' / 'umbra index fetch'."
             )
-        else:  # 0 < version < _SCHEMA_VERSION -- an older schema with no migration
+        if version not in _MIGRATABLE_FROM:
             self._conn.close()
             raise IndexSchemaError(
                 f"Catalog index at {self.path} has an older schema version {version} "
@@ -194,6 +203,26 @@ class CatalogIndex:
                 "migrated in place. Rebuild it with 'umbra index build' or refetch "
                 "with 'umbra index fetch'."
             )
+        # A fresh, pre-versioning, or older-but-migratable database: ensure the
+        # base schema (which creates everything for a fresh file), apply the
+        # additive migrations an existing table might be missing, then stamp.
+        self._conn.executescript(_SCHEMA)
+        self._migrate()
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Apply additive, idempotent migrations to reach the current schema.
+
+        Each step is a nullable-column add that ``CREATE TABLE IF NOT EXISTS``
+        can't retrofit onto an existing table, so it is applied by checking the
+        live column set. Idempotent by construction (a column already present is
+        skipped), so running it against a fresh table -- which the base schema
+        created complete -- is a no-op.
+        """
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(items)")}
+        if "place" not in columns:  # v1 -> v2: baked reverse-geocoded place label
+            self._conn.execute("ALTER TABLE items ADD COLUMN place TEXT")
 
     @classmethod
     def from_release(
@@ -260,7 +289,14 @@ class CatalogIndex:
 
     def add(self, item: UmbraItem) -> bool:
         """Upsert one item (does not commit). Returns ``False`` (and skips) an
-        item with no sidecar href, since the href is the row's identity."""
+        item with no sidecar href, since the href is the row's identity.
+
+        On a re-index (same href) every STAC-derived column is refreshed, but the
+        baked ``place`` label is deliberately left untouched -- it is a derived
+        denormalization keyed on the footprint, not on the STAC document, so an
+        ``umbra index update`` that re-reads the sidecar must not clear a label an
+        ``umbra index bake`` already computed.
+        """
         href = item.href
         if not href:
             return False
@@ -269,9 +305,13 @@ class CatalogIndex:
         dt = item.datetime
         acq = _index_acq_date(item)
         self._conn.execute(
-            "INSERT OR REPLACE INTO items "
+            "INSERT INTO items "
             "(href, id, task, datetime, acq_date, min_lon, min_lat, max_lon, max_lat, doc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(href) DO UPDATE SET "
+            "id=excluded.id, task=excluded.task, datetime=excluded.datetime, "
+            "acq_date=excluded.acq_date, min_lon=excluded.min_lon, min_lat=excluded.min_lat, "
+            "max_lon=excluded.max_lon, max_lat=excluded.max_lat, doc=excluded.doc",
             (
                 href,
                 item.id,
@@ -398,6 +438,68 @@ class CatalogIndex:
         self._conn.commit()
         return UpdateResult(scanned=scanned, added=added, refreshed=refreshed, start=start)
 
+    def bake_places(
+        self,
+        geocoder: Callable[[float, float], str | None] | None = None,
+        *,
+        zoom: int = 10,
+        limit: int | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Reverse-geocode each item's footprint once and cache the place label.
+
+        Reverse geocoding is rate-limited (OpenStreetMap's Nominatim allows one
+        request per second) and, until now, ran at *render* time -- so labelling
+        a whole catalog in a map or the ``umbra demo`` explorer was impractical.
+        This bakes the label in ahead of time: for every indexed acquisition that
+        has a footprint but no label yet, it resolves the footprint centroid to a
+        human place name (e.g. ``"Reykjavík, Iceland"``) and stores it in the
+        ``place`` column, so every later ``search``/``get`` yields it on
+        :attr:`UmbraItem.place` for free -- turning the shared index into a
+        labelled demo backend.
+
+        It is **idempotent**: only items whose ``place`` is still ``NULL`` are
+        geocoded, so a re-run labels just what was added since (and an item whose
+        geocode returns nothing is retried on the next run rather than marked).
+        ``limit`` caps how many items are geocoded this call (to bake a large
+        catalog in bounded batches); ``zoom`` is the Nominatim address
+        granularity (3 = country ... 10 = city ... 18 = building). ``progress``,
+        if given, is called with the running count of items processed.
+
+        ``geocoder`` is an injectable ``(lat, lon) -> label | None`` callable; the
+        default wraps :func:`umbra_py.viz._reverse_geocode`, which self-throttles
+        to Nominatim's policy and caches in-process. Passing a stand-in keeps the
+        whole path offline-testable. Returns the number of items newly labelled.
+        """
+        if geocoder is None:
+            from .viz import _reverse_geocode  # noqa: PLC0415
+
+            def geocoder(lat: float, lon: float) -> str | None:
+                return _reverse_geocode(lat, lon, zoom=zoom)
+
+        rows = self._conn.execute(
+            "SELECT href, min_lon, min_lat, max_lon, max_lat FROM items "
+            "WHERE place IS NULL AND min_lon IS NOT NULL AND min_lat IS NOT NULL "
+            "ORDER BY href"
+        ).fetchall()
+        if limit is not None:
+            rows = rows[:limit]
+
+        labelled = 0
+        for processed, (href, min_lon, min_lat, max_lon, max_lat) in enumerate(rows, 1):
+            lat = (min_lat + max_lat) / 2.0
+            lon = (min_lon + max_lon) / 2.0
+            label = geocoder(lat, lon)
+            if label:
+                self._conn.execute("UPDATE items SET place = ? WHERE href = ?", (label, href))
+                labelled += 1
+                if labelled % 50 == 0:
+                    self._conn.commit()
+            if progress is not None:
+                progress(processed)
+        self._conn.commit()
+        return labelled
+
     # -- querying --------------------------------------------------------------
 
     def search(
@@ -479,12 +581,15 @@ class CatalogIndex:
             params += wanted
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-        sql = f"SELECT href, doc FROM items{where} ORDER BY task IS NULL, task, acq_date, href"
+        sql = (
+            f"SELECT href, doc, place FROM items{where} ORDER BY task IS NULL, task, acq_date, href"
+        )
 
         count = 0
         per_task: dict[str | None, int] = {}
-        for href, doc in self._conn.execute(sql, params):
+        for href, doc, place in self._conn.execute(sql, params):
             item = UmbraItem.from_dict(json.loads(doc), href=href)
+            item.place = place
             if intersects is not None and not item.intersects_polygon(intersects):
                 continue
             if max_per_task is not None:
@@ -638,25 +743,31 @@ class CatalogIndex:
         share an id, the first by ``href`` order is returned deterministically.
         """
         row = self._conn.execute(
-            "SELECT href, doc FROM items WHERE id = ? ORDER BY href LIMIT 1",
+            "SELECT href, doc, place FROM items WHERE id = ? ORDER BY href LIMIT 1",
             (item_id,),
         ).fetchone()
         if row is None:
             return None
-        href, doc = row
-        return UmbraItem.from_dict(json.loads(doc), href=href)
+        href, doc, place = row
+        item = UmbraItem.from_dict(json.loads(doc), href=href)
+        item.place = place
+        return item
 
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
-        span, number of distinct tasks, and the date the index was last built
-        (``built_at``, ``None`` for an index written before build stamping)."""
-        items, start, end, tasks = self._conn.execute(
-            "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), COUNT(DISTINCT task) FROM items"
+        span, number of distinct tasks, how many items carry a baked place label
+        (``labeled``; see :meth:`bake_places`), and the date the index was last
+        built (``built_at``, ``None`` for an index written before build
+        stamping)."""
+        items, start, end, tasks, labeled = self._conn.execute(
+            "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), COUNT(DISTINCT task), "
+            "COUNT(place) FROM items"
         ).fetchone()
         return {
             "items": items,
             "start": start,
             "end": end,
             "tasks": tasks,
+            "labeled": labeled,
             "built_at": self.get_meta("built_at"),
         }

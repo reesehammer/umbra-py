@@ -911,3 +911,207 @@ def test_older_schema_version_is_rejected(tmp_path):
         assert "older schema" in str(exc.value)
     finally:
         index_mod._SCHEMA_VERSION = original
+
+
+# -- baked place labels (bake_places / item.place) ---------------------------
+
+
+def _counting_geocoder():
+    """A deterministic reverse-geocoder that records its call arguments.
+
+    Returns ``(fn, calls)`` where ``fn(lat, lon)`` yields a stable label and
+    appends ``(lat, lon)`` to ``calls`` -- so a test can assert both what a bake
+    produced and how many items it actually geocoded.
+    """
+    calls: list[tuple[float, float]] = []
+
+    def fn(lat: float, lon: float) -> str | None:
+        calls.append((lat, lon))
+        return f"Place@{lat:.1f},{lon:.1f}"
+
+    return fn, calls
+
+
+def test_bake_places_labels_items_on_search(tmp_path):
+    """bake_places geocodes footprint centroids and search yields item.place."""
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path) as idx:
+        labelled = idx.bake_places(geocoder=geo)
+        assert labelled == 3
+        assert len(calls) == 3
+        places = {i.id: i.place for i in idx.search()}
+    # _A bbox (0,0,1,1) -> centroid (0.5, 0.5); label is (lat, lon).
+    assert places["a"] == "Place@0.5,0.5"
+    assert places["b"] == "Place@10.5,10.5"
+    assert places["c"] == "Place@5.5,5.5"
+
+
+def test_bake_places_is_idempotent(tmp_path):
+    """A second bake only geocodes items that were not labelled yet."""
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path) as idx:
+        idx.bake_places(geocoder=geo)
+        calls.clear()
+        # Nothing new to label -> no geocoder calls, no new labels.
+        assert idx.bake_places(geocoder=geo) == 0
+        assert calls == []
+        # A newly added item is the only one the next bake touches.
+        idx.add(
+            _make_item(
+                "SiteD",
+                "2024-03-01-00-00-00_UMBRA-04",
+                "d",
+                "2024-03-01T00:00:00Z",
+                (20, 20, 21, 21),
+            )
+        )
+        idx.commit()
+        assert idx.bake_places(geocoder=geo) == 1
+        assert calls == [(20.5, 20.5)]
+
+
+def test_bake_places_respects_limit(tmp_path):
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path) as idx:
+        assert idx.bake_places(geocoder=geo, limit=2) == 2
+        assert len(calls) == 2
+        # The rest are picked up on a later run (idempotent continuation).
+        assert idx.bake_places(geocoder=geo) == 1
+
+
+def test_bake_places_skips_items_without_bbox(tmp_path):
+    """An item with no footprint can't be geocoded and is left unlabelled."""
+    no_bbox = _make_item(
+        "SiteE", "2024-04-01-00-00-00_UMBRA-04", "e", "2024-04-01T00:00:00Z", (0, 0, 1, 1)
+    )
+    no_bbox.bbox = None  # drop the footprint the centroid needs
+    geo, calls = _counting_geocoder()
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        idx.add(no_bbox)
+        idx.commit()
+        assert idx.bake_places(geocoder=geo) == 0
+        assert calls == []
+        [e] = list(idx.search())
+        assert e.place is None
+
+
+def test_bake_places_retries_unresolved_items(tmp_path):
+    """An item whose geocode returns None stays NULL and is retried next run."""
+    with _index(tmp_path, items=(_A,)) as idx:
+        assert idx.bake_places(geocoder=lambda lat, lon: None) == 0
+        assert next(iter(idx.search())).place is None
+        # A later bake with a working geocoder still labels it.
+        assert idx.bake_places(geocoder=lambda lat, lon: "Somewhere") == 1
+        assert next(iter(idx.search())).place == "Somewhere"
+
+
+def test_add_preserves_baked_place_on_reindex(tmp_path):
+    """Re-indexing an acquisition refreshes its STAC data but keeps the label.
+
+    A weekly `umbra index update` re-reads sidecars; it must not clear a label a
+    prior `umbra index bake` computed, since the label is keyed on the footprint,
+    not the STAC document.
+    """
+    with _index(tmp_path, items=(_A,)) as idx:
+        idx.bake_places(geocoder=lambda lat, lon: "Baked City")
+        # Re-add the same href (the update path's upsert).
+        idx.add(_A)
+        idx.commit()
+        [a] = list(idx.search())
+    assert a.place == "Baked City"
+
+
+def test_stats_reports_labeled_count(tmp_path):
+    with _index(tmp_path) as idx:
+        assert idx.stats()["labeled"] == 0
+        idx.bake_places(geocoder=lambda lat, lon: "X", limit=2)
+        assert idx.stats()["labeled"] == 2
+
+
+def test_get_populates_place(tmp_path):
+    with _index(tmp_path) as idx:
+        idx.bake_places(geocoder=lambda lat, lon: "Keyed Place")
+        got = idx.get("a")
+    assert got is not None and got.place == "Keyed Place"
+
+
+def test_place_column_migration_from_v1(tmp_path):
+    """A version-1 index (no place column) is migrated in place, not rejected.
+
+    This is the first real additive migration the schema-versioning was landed
+    to enable: opening a v1 database adds the `place` column, stamps version 2,
+    and preserves every row -- and a bake then works against it.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    # The version-1 schema: exactly today's `items` table minus the `place`
+    # column added in version 2.
+    v1_schema = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v1.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v1_schema)
+    conn.execute(
+        "INSERT INTO items (href, id, doc, min_lon, min_lat, max_lon, max_lat) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("h", "old", '{"id": "old", "assets": {}}', 0.0, 0.0, 2.0, 2.0),
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        assert {i.id for i in idx.search()} == {"old"}  # rows preserved
+        cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
+        assert "place" in cols  # migration added the column
+        # The migrated index labels normally.
+        assert idx.bake_places(geocoder=lambda lat, lon: "Migrated Place") == 1
+        assert next(iter(idx.search())).place == "Migrated Place"
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION == 2
+
+
+def test_cli_index_bake(tmp_path, monkeypatch):
+    """`umbra index bake` labels the index and reports coverage."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_A)
+        idx.add(_B)
+
+    # Stand in for the network reverse-geocoder so the CLI path stays offline.
+    monkeypatch.setattr("umbra_py.viz._reverse_geocode", lambda lat, lon, **kw: "Testville")
+
+    result = CliRunner().invoke(cli_mod.cli, ["index", "bake", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert "Baked 2 new place label(s)" in result.output
+    assert "2 of 2" in result.output
+
+    info = CliRunner().invoke(cli_mod.cli, ["index", "info", "--db", str(db)])
+    assert "places: 2 of 2 labelled" in info.output
+
+
+def test_cli_index_bake_missing_index_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["index", "bake", "--db", str(tmp_path / "missing.db")]
+    )
+    assert result.exit_code != 0
+    assert "No index at" in result.output

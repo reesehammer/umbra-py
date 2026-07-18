@@ -159,6 +159,14 @@ class UmbraItem:
     bbox: BBox | None = None
     href: str | None = None  # URL of the item JSON, when known
     raw: dict[str, Any] = field(default_factory=dict)
+    #: Human-readable place label for the acquisition's location (e.g.
+    #: ``"Reykjavík, Iceland"``), reverse-geocoded from the footprint centroid.
+    #: It is *not* parsed from the STAC document -- ``CatalogIndex`` bakes it
+    #: once at build time and populates it on the items it yields (see
+    #: :meth:`umbra_py.CatalogIndex.bake_places`); it is ``None`` for an item
+    #: read live or from an index with no baked label. Distinct from
+    #: :attr:`task`, which is the Umbra campaign codename, not a geographic name.
+    place: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], href: str | None = None) -> UmbraItem:

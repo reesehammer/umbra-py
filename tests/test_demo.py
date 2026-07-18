@@ -254,3 +254,16 @@ def test_build_demo_keeps_http_stac_href():
     item = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href="https://example/item.json")
     cfg = _config(demo.build_demo([item]))
     assert cfg["features"][0]["properties"]["stac_href"] == "https://example/item.json"
+
+
+def test_demo_feature_prefers_baked_place_label():
+    """When the index has baked a place label, the explorer shows it over the
+    task codename; without one it falls back to the task."""
+    labelled = UmbraItem(id="x", bbox=(0.0, 0.0, 1.0, 1.0), href=_HREF)
+    labelled.place = "Reykjavik, Iceland"
+    feature = demo._demo_feature(labelled, {})
+    assert feature["properties"]["place"] == "Reykjavik, Iceland"
+
+    unlabelled = UmbraItem(id="y", bbox=(0.0, 0.0, 1.0, 1.0), href=_HREF)
+    fallback = demo._demo_feature(unlabelled, {})
+    assert fallback["properties"]["place"] == unlabelled.task

@@ -92,10 +92,20 @@ critical path to a demo application.
   `umbra search` could use the index. (The path flag is `--index-db` because the
   render commands already use `--db` for the decibel stretch.) This was the
   "required before any fast demo flow exists" wiring — it is now in place.
-- The index lacks demo-oriented denormalizations: no precomputed centroid,
-  no cached place label (Nominatim at 1 req/s cannot label thousands of items
-  at render time), no cached thumbnail. Baking these in at build time turns
-  the index into a real demo backend.
+- ✅ **Cached place labels now baked into the index** (`umbra index bake`).
+  Reverse geocoding used to run at *render* time, where Nominatim's 1 req/s cap
+  makes labelling thousands of items impractical, so the explorer fell back to
+  the task codename. `CatalogIndex.bake_places()` reverse-geocodes each
+  footprint centroid once at build time (idempotent, injectable geocoder) into a
+  new additive `place` column — the first real migration the schema-versioning
+  was landed to enable (`user_version` 1 → 2, in place, no rebuild). Every
+  `search`/`get` then yields the label on `UmbraItem.place`, so `umbra demo
+  --local` (and any `--local` visual command) shows real geographic names
+  instantly, with zero per-render geocoding, and `umbra index info` reports label
+  coverage. Still open: a precomputed **centroid** column (cheap — it is derived
+  from the stored bbox today) and a **cached thumbnail** bake (G6), plus wiring
+  the baked label through the map/gallery/serve popups too (a small follow-on —
+  see `TODO.md`).
 
 ### G3 — Application layer: a self-serve static explorer now ships (`umbra demo`)
 

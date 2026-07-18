@@ -3181,6 +3181,62 @@ def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None
     )
 
 
+@index.command("bake")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to label (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/"
+    "catalog.db). Must already exist -- create one with 'index fetch'/'build'.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap how many acquisitions to geocode this run (default: no cap). "
+    "Reverse geocoding is throttled to ~1/sec, so use this to bake a large "
+    "catalog in bounded batches -- re-run to continue where it left off.",
+)
+@click.option(
+    "--zoom",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Nominatim address granularity: 3 = country, 8 = county, 10 = city, "
+    "14 = suburb, 18 = building.",
+)
+def index_bake(db_path, limit, zoom) -> None:
+    """Reverse-geocode indexed acquisitions and cache their place labels.
+
+    Turns each acquisition's footprint into a human place name ("Reykjavik,
+    Iceland") once and stores it in the index, so 'umbra demo', maps and
+    galleries built with --local show real place labels instantly instead of
+    re-geocoding at render time (OpenStreetMap Nominatim caps traffic at ~1
+    request/sec, so labelling thousands of items live is impractical).
+
+    Idempotent: only items without a label yet are geocoded, so re-running
+    labels just what was added since. Bootstrap the index first with 'umbra
+    index fetch' or 'umbra index build'.
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
+        )
+    with OrbitSpinner("Baking place labels") as spinner:
+
+        def tally(n: int) -> None:
+            spinner.label = f"Baking place labels ({n} processed)"
+
+        with CatalogIndex(path) as idx:
+            labelled = idx.bake_places(limit=limit, zoom=zoom, progress=tally)
+            s = idx.stats()
+    click.echo(
+        f"Baked {labelled} new place label(s); {s['labeled']} of {s['items']} "
+        f"acquisition(s) now labelled. ({path})"
+    )
+
+
 @index.command("fetch")
 @click.option(
     "--db",
@@ -3292,6 +3348,7 @@ def index_info(db_path, as_json) -> None:
     click.echo(f"  items : {s['items']}")
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
     click.echo(f"  tasks : {s['tasks']}")
+    click.echo(f"  places: {s['labeled']} of {s['items']} labelled")
     click.echo(f"  size  : {size_mb:.1f} MB")
     click.echo(f"  built : {_built_note(s['built_at'])}")
 

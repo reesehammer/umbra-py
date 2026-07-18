@@ -9,6 +9,39 @@ the bottom if the history is useful).
 
 ---
 
+## Index demo-denormalization follow-ons (`umbra index bake` shipped)
+
+- **Surfaced in:** the baked place-label PR (`docs/DEMO_APP_GAPS.md` G2/G6).
+- **Code:** `src/umbra_py/index.py` (`bake_places`, the `place` column + the v1→v2
+  migration), `umbra index bake` in `cli.py`, `UmbraItem.place` in `models.py`.
+
+`umbra index bake` reverse-geocodes each acquisition's footprint centroid once at
+build time into an additive `place` column, so every `--local` search yields the
+label on `UmbraItem.place` and `umbra demo` shows real geographic names with no
+render-time geocoding. This closed G2's "no cached place label" denormalization.
+Follow-ons that build on it, none a blocker:
+
+- **Wire the baked label through the other consumers.** `umbra demo` reads
+  `UmbraItem.place`; the map/gallery popups (`viz._reverse_geocode` at render
+  time), `umbra serve`'s item documents, `to_llm_context()`, and the geoparquet
+  export could all prefer the baked label when present (falling back to live
+  geocoding only where it is absent), turning the one bake into instant labels
+  across every surface.
+- **Bake per-item thumbnails too (G6).** `bake_places` establishes the build-time
+  denormalization pattern (idempotent, injectable, additive column); a companion
+  `bake_thumbnails` (a small PNG per acquisition via the reusable
+  `viz._thumbnail_data_uri`, stored alongside or in the index) would make the
+  *first* gallery/lazy-imagery view instant, closing the rest of G6.
+- **A precomputed centroid column.** The centroid is derived from the stored bbox
+  today (cheap), so a `centroid` column is only worth adding if a consumer needs
+  to query/sort on it in SQL rather than compute it per row.
+- **Bake in the published snapshot.** The weekly `publish-index.yml` build could
+  run `umbra index bake` after the crawl so the fetched `catalog.db` arrives
+  pre-labelled — gated on the Nominatim rate limit (bake in bounded `--limit`
+  batches, or only the one-pin-per-site overview).
+
+---
+
 ## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
 
 - **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).

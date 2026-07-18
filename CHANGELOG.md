@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Baked place labels in the catalog index — `umbra index bake` /
+  `CatalogIndex.bake_places()` / `UmbraItem.place` (`docs/DEMO_APP_GAPS.md`
+  G2).** Turning the shared index into a *labelled* demo backend, the
+  denormalization G2 named as the change that does it. Reverse geocoding
+  (coordinates → a human place name) used to run only at *render* time, where
+  OpenStreetMap Nominatim's 1 req/s cap makes labelling thousands of
+  acquisitions impractical — so `umbra demo` and the maps fell back to the Umbra
+  task *codename*, not a geographic name. `umbra index bake` resolves each
+  acquisition's footprint centroid to a place label ("Reykjavík, Iceland") once
+  at build time and caches it in the index, so every `--local` `search`/`get`
+  yields it on the new `UmbraItem.place` attribute for free and `umbra demo
+  --local` shows real place names instantly, with zero per-render geocoding (the
+  free-text site search matches on them too). The bake is **idempotent** (only
+  unlabelled items are geocoded, so a re-run labels just what was added since,
+  and `--limit` bakes a large catalog in bounded batches) and the geocoder is
+  injectable, so the whole path is offline-tested with a stand-in — no network.
+  This ships as the **first real schema migration** the index versioning was
+  landed to enable: `place` is an additive nullable column, so a version-1 (or
+  legacy version-0) `catalog.db` — including a fetched snapshot — is migrated in
+  place on open (`user_version` 1 → 2, the column added, every row preserved)
+  rather than rebuilt or rejected. Re-indexing an acquisition (`umbra index
+  update`) now upserts via `ON CONFLICT` so it refreshes the STAC columns but
+  **preserves** a baked label (the label is keyed on the footprint, not the
+  document). `umbra index info` reports label coverage (`labeled` in the `--json`
+  object, `docs/schemas/index-info.schema.json`; a "places: N of M labelled" line
+  in the human summary). No new dependency and no model call.
 - **Semantic "describe the site" search on the `umbra-mcp` MCP server —
   `search_catalog(area=…, semantic=True)` (`docs/AI_INTEGRATION_IDEAS.md` §C1
   follow-on).** The embedding-backed task-name aliasing shipped complete on the
