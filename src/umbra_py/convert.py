@@ -42,16 +42,20 @@ angle, so on relief a slope tilted toward the radar looks bright and one tilted
 away looks dark from geometry alone. Pass ``rtc=True`` (with a ``dem=``) to
 **radiometrically terrain-flatten** the geocoded output, derived from the DEM
 slope and the scene look geometry so those geometric brightness swings are
-removed. Two models are available (``rtc_model=``): the default ``"cosine"``
+removed. Three models are available (``rtc_model=``): the default ``"cosine"``
 geometric correction ``cos(reference) / cos(local_incidence)`` using the full 3-D
-local incidence angle, and ``"area"``, the projected-area / foreshortening
-correction ``sin(local_range_incidence) / sin(reference)`` that works in the
-range–vertical plane so it targets the range-direction foreshortening and layover
-which dominate radiometric terrain distortion. Both are a normalisation of
-*detected amplitude*, not a calibrated gamma-nought RTC product (the full
-illuminated-area facet integration and MultiRTC interop remain deferred); the
-pure-numpy core (terrain normals, look vector, correction factors) is exercised
-offline with hand-built arrays.
+local incidence angle; ``"area"``, the projected-area / foreshortening correction
+``sin(local_range_incidence) / sin(reference)`` that works in the range–vertical
+plane so it targets the range-direction foreshortening and layover which dominate
+radiometric terrain distortion; and ``"gamma"``, the per-pixel facet-area
+(gamma-nought) normalisation ``cos(reference) * nz / cos(local_incidence)``, which
+adds the true tilted-facet-area term ``nz`` — the ground-referenced cosine and
+range-plane area models both omit it — using the full 3-D facet normal. All three
+are a normalisation of *detected amplitude*, not a calibrated gamma-nought RTC
+product (the full image-space illuminated-area facet integration with layover
+accumulation, and MultiRTC interop, remain deferred); the pure-numpy core (terrain
+normals, look vector, correction factors) is exercised offline with hand-built
+arrays.
 
 Install with: ``pip install "umbra-py[convert]"``
 """
@@ -74,8 +78,9 @@ RESAMPLING_METHODS = ("nearest", "bilinear", "cubic", "average", "lanczos")
 
 #: Radiometric terrain-flattening models accepted by
 #: :func:`sicd_to_geocoded_cog` (``rtc_model=``). ``"cosine"`` is the geometric
-#: cosine correction; ``"area"`` is the projected-area / foreshortening model.
-RTC_MODELS = ("cosine", "area")
+#: cosine correction; ``"area"`` is the projected-area / foreshortening model;
+#: ``"gamma"`` is the per-pixel facet-area (gamma-nought) normalisation.
+RTC_MODELS = ("cosine", "area", "gamma")
 
 
 def _require(module: str):
@@ -378,8 +383,8 @@ def _scene_reference_hae(sicd: Any) -> float:
 # terrain correction removes that geometric modulation so the imagery can be
 # compared and analysed across terrain.
 #
-# Two geometric models ship here, both an honest first slice matching the
-# flat-earth-then-DEM cadence of the geocoding above, and both a normalisation of
+# Three geometric models ship here, all an honest first slice matching the
+# flat-earth-then-DEM cadence of the geocoding above, and all a normalisation of
 # *detected amplitude*, not a calibrated gamma-nought product (Umbra's open
 # products are not radiometrically calibrated) — documented as exactly that:
 #
@@ -391,16 +396,30 @@ def _scene_reference_hae(sicd: Any) -> float:
 #    plane. Only the range-direction terrain tilt foreshortens the SAR image, so
 #    this targets the range foreshortening and layover that dominate radiometric
 #    terrain distortion, separating them from the azimuth-direction tilt the
-#    per-pixel cosine model folds in. It is a step toward area-based gamma-nought
-#    normalisation, not the full illuminated-area facet integration (Small 2011)
-#    or MultiRTC interop, which remain deferred.
+#    per-pixel cosine model folds in.
+#  * The "gamma" model scales by ``cos(theta_ref) * nz / cos(theta_lia)`` — the
+#    per-pixel facet-area (gamma-nought) normalisation. It normalises power by the
+#    local illuminated facet area projected into the plane perpendicular to the
+#    look direction: a terrain facet whose ground-projected area is one pixel has
+#    true (tilted) area ``1 / nz`` (``nz`` = cosine of the slope from horizontal),
+#    and its projection onto the look-perpendicular plane is ``(1 / nz) *
+#    cos(theta_lia)``, so the illuminated area per pixel scales as
+#    ``cos(theta_lia) / nz`` and normalising to the reference geometry gives the
+#    factor above. It uses the full 3-D facet normal (like "cosine", unlike the
+#    range-plane "area") and adds the true-facet-area term ``nz`` both other
+#    models omit — the gamma-nought convention on a per-pixel facet.
 #
-# On flat ground both reduce to the scene incidence angle, so with the default
-# reference (the scene incidence) flat terrain is left unchanged and only slopes
-# are flattened. Each is a pure-numpy core (terrain normals from a DEM patch, the
-# look/range geometry, and the correction factor) with closed-form behaviour over
-# a planar slope, so both are exercised offline with hand-built arrays; only
-# resampling the DEM onto the output grid touches rasterio.
+# All three are honest first slices, not the full image-space illuminated-area
+# facet integration (Small 2011 — integrating the projected local illuminated area
+# per pixel over the DEM in slant/azimuth image space, accumulating layover) or
+# MultiRTC interop, which remain deferred.
+#
+# On flat ground all three reduce to the scene incidence angle, so with the
+# default reference (the scene incidence) flat terrain is left unchanged and only
+# slopes are flattened. Each is a pure-numpy core (terrain normals from a DEM
+# patch, the look/range geometry, and the correction factor) with closed-form
+# behaviour over a planar slope, so all are exercised offline with hand-built
+# arrays; only resampling the DEM onto the output grid touches rasterio.
 # --------------------------------------------------------------------------- #
 
 #: Metres per degree of latitude / longitude at the equator, for turning a
@@ -566,6 +585,42 @@ def _foreshortening_factor(theta_local, *, sin_ref: float):
     return np.clip(factor, _RTC_FACTOR_MIN, _RTC_FACTOR_MAX)
 
 
+def _facet_area_factor(cos_lia, nz, *, cos_ref: float):
+    """Gamma-nought facet-area correction ``cos_ref * nz / cos_lia``, gap-safe.
+
+    Normalises detected power by the local *illuminated facet area* projected
+    into the plane perpendicular to the look direction — the gamma-nought
+    convention. A terrain facet whose ground-projected area is one pixel has true
+    (tilted) surface area ``1 / nz`` (``nz`` = cosine of the slope from horizontal,
+    the up-component of the unit normal), and its projection onto the
+    look-perpendicular plane is ``(1 / nz) * cos_lia``, so the illuminated area per
+    pixel scales as ``cos_lia / nz``. Normalising that to the flat reference
+    geometry (area ``cos_ref``, ``nz = 1``) gives ``cos_ref * nz / cos_lia``.
+
+    This is exactly the per-pixel cosine factor scaled by the true-facet-area term
+    ``nz`` — using the full 3-D facet normal, and adding the area term the
+    ground-referenced :func:`_terrain_flatten_factor` and the range-plane
+    :func:`_foreshortening_factor` both omit. It is still a per-pixel
+    normalisation, not the full image-space area integration over the DEM (layover
+    accumulation), which stays deferred.
+
+    Gap-safe and clamped exactly like the other models: a non-finite ``cos_lia``
+    (a DEM gap) takes ``cos_ref`` and a non-finite ``nz`` takes one, so the factor
+    is exactly one (no change); ``cos_lia`` at or below zero (radar shadow / steep
+    back-slope) is floored before dividing; and the result is clamped to
+    :data:`_RTC_FACTOR_MIN` .. :data:`_RTC_FACTOR_MAX`.
+    """
+    np = _require("numpy")
+
+    cos_lia = np.asarray(cos_lia, dtype="float64")
+    nz = np.asarray(nz, dtype="float64")
+    cos_lia = np.where(np.isfinite(cos_lia), cos_lia, cos_ref)
+    nz = np.where(np.isfinite(nz), nz, 1.0)
+    cos_lia = np.clip(cos_lia, 1e-3, 1.0)
+    factor = cos_ref * nz / cos_lia
+    return np.clip(factor, _RTC_FACTOR_MIN, _RTC_FACTOR_MAX)
+
+
 def _scene_look_geometry(sicd: Any) -> tuple[float, float]:
     """``(incidence_deg, azimuth_deg)`` at the scene centre from SICD ``SCPCOA``.
 
@@ -614,6 +669,9 @@ def _terrain_flatten_on_grid(
       ``sin(local_range_incidence) / sin(reference)``, using the range-plane
       incidence, so it targets the range-direction foreshortening/layover the
       per-pixel cosine model conflates with azimuth tilt.
+    * ``"gamma"`` — the per-pixel facet-area (gamma-nought) normalisation
+      ``cos(reference) * nz / cos(local_incidence)``, using the full 3-D facet
+      normal and the true-facet-area term ``nz`` the other two omit.
 
     The DEM resample is the only rasterio touch; the physics is the pure-numpy
     core above. Over DEM gaps the factor is one, so those pixels pass through
@@ -648,6 +706,15 @@ def _terrain_flatten_on_grid(
         factor = _foreshortening_factor(theta_local, sin_ref=sin_ref)
         # Suppress the correction where the DEM had no coverage on the output grid.
         factor = np.where(covered, factor, 1.0)
+    elif model == "gamma":
+        look = _look_unit_vector(incidence_deg, azimuth_deg)
+        cos_ref = float(np.cos(np.radians(reference_deg)))
+        cos_lia = _cos_local_incidence(normals, look)
+        nz = normals[2]  # up-component of the unit facet normal (cos of the slope)
+        # Off-DEM pixels get a unit factor: cos_lia -> cos_ref and nz -> 1.
+        cos_lia = np.where(covered, cos_lia, cos_ref)
+        nz = np.where(covered, nz, 1.0)
+        factor = _facet_area_factor(cos_lia, nz, cos_ref=cos_ref)
     else:
         look = _look_unit_vector(incidence_deg, azimuth_deg)
         cos_ref = float(np.cos(np.radians(reference_deg)))
@@ -911,9 +978,18 @@ def sicd_to_geocoded_cog(
           plane, so it targets the range-direction foreshortening and layover that
           dominate radiometric terrain distortion — separating them from the
           azimuth-direction tilt the per-pixel cosine model folds in. It is an
-          honest first-order step toward area-based gamma-nought normalisation,
-          not the full illuminated-area facet integration (Small 2011) or
-          MultiRTC interop, which remain deferred (`STRATEGY.md` 5.5).
+          honest first-order step toward area-based gamma-nought normalisation.
+        * ``"gamma"`` scales power by ``cos(reference) * nz / cos(local_incidence)``,
+          the per-pixel facet-area (gamma-nought) normalisation. It normalises by
+          the local illuminated facet area projected into the plane perpendicular
+          to the look direction, using the full 3-D facet normal and adding the
+          true tilted-facet-area term ``nz`` (cosine of the slope from horizontal)
+          that the ground-referenced ``"cosine"`` and range-plane ``"area"``
+          models both omit.
+
+        All three are honest first slices, not the full image-space
+        illuminated-area facet integration (Small 2011, with layover accumulation)
+        or MultiRTC interop, which remain deferred (`STRATEGY.md` 5.5).
     """
     np = _require("numpy")
     _require("rasterio")

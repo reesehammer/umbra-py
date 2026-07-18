@@ -1331,6 +1331,35 @@ same 500 lines of glue first, and many give up."*
 > radiometric-RTC remainder and the maintainer-side adoption moves (5.3
 > registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18, gamma-nought RTC):** the **third radiometric-terrain
+> model has shipped** — `umbra convert --rtc --rtc-model gamma` /
+> `sicd_to_geocoded_cog(rtc_model="gamma")` (`STRATEGY.md` 5.5), advancing the one
+> code gap named at the foot of nearly every update above: the fully-calibrated
+> RTC remainder. It directly serves the ML/analytics audience 5.5 targets — Umbra
+> data becomes not just loadable and terrain-corrected but *radiometrically
+> normalised the gamma-nought way* — removing more of the "same 500 lines of glue"
+> the thesis (§1) says drives people away. Where the shipped `cosine` model
+> normalises against the *ground*-projected area and `area` handles only the
+> range-plane foreshortening, `gamma` scales power by `cos(reference) * nz /
+> cos(local_incidence)`: it normalises by the local illuminated *facet* area
+> projected into the plane perpendicular to the look direction — the gamma-nought
+> convention — using the full 3-D facet normal *and* the true tilted-facet-area
+> term `nz = cos(slope)` both other models omit (a facet whose ground-projected
+> area is one pixel has true area `1/nz`, so its illuminated area per pixel scales
+> as `cos(local_incidence)/nz`). It holds the project's grain and testability (§3):
+> it is an honest first slice — a normalisation of *detected amplitude*, not a
+> calibrated product, and documented as **not** the full image-space facet
+> integration with layover accumulation (Small 2011) or MultiRTC interop, which
+> stay deferred — and the physics is a pure-numpy core (`_facet_area_factor`)
+> offline-tested against closed-form planar-slope behaviour (flat terrain
+> unchanged, the exact `nz`-scaling relative to the cosine factor, DEM-gap safety,
+> and the shadow/clamp floor), with only the DEM-on-grid resample touching
+> rasterio. Third value in the public `RTC_MODELS`; `rtc_model` still defaults to
+> `"cosine"`, so existing calls and CLI invocations are unchanged. The remaining
+> strategic gaps are unchanged and largely non-code: 5.5's fully-calibrated
+> image-space facet integration / MultiRTC interop and the maintainer-side
+> adoption moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1658,12 +1687,29 @@ data trivially trainable increases demand for Umbra pixels.
   behaviour (including the cosine-vs-area distinction on a pure azimuth slope),
   with only the DEM-on-grid resample touching rasterio. New public constant
   `RTC_MODELS`; `rtc_model` defaults to `"cosine"`, so existing calls are unchanged.
-- ⬜ Remaining geocoding niceties: the *fully calibrated* remainder of RTC — full
-  gamma-nought illuminated-area *facet integration* (integrating the projected
-  local illuminated area per pixel over the DEM in image space, rather than the
-  per-pixel range-plane approximation shipped above) and MultiRTC interop — is a
-  heavier, calibration-oriented job (Umbra's open products are not radiometrically
-  calibrated) and is still open.
+- ✅ **Per-pixel facet-area (gamma-nought) RTC model shipped** (`umbra convert --rtc
+  --rtc-model gamma` / `sicd_to_geocoded_cog(rtc_model="gamma")`): a third,
+  selectable flattening model. It scales power by `cos(reference) * nz /
+  cos(local_incidence)`, normalising by the local illuminated *facet* area projected
+  into the plane perpendicular to the look direction — the gamma-nought convention.
+  It uses the full 3-D facet normal (like `cosine`, unlike the range-plane `area`)
+  *and* adds the true tilted-facet-area term `nz = cos(slope)` both other models omit
+  (a facet whose ground-projected area is one pixel has true area `1/nz`, so the
+  illuminated area per pixel scales as `cos(local_incidence)/nz`). On flat terrain
+  `nz == 1` and it coincides with the other two, so only slopes change. Like them it
+  is an honest first slice — a normalisation of detected amplitude, not a calibrated
+  product; the physics is a pure-numpy core (`_facet_area_factor`) offline-tested
+  against closed-form planar-slope behaviour (flat unchanged, the exact `nz`-scaling
+  vs the cosine factor, DEM-gap safety, shadow/clamp floor), with only the
+  DEM-on-grid resample touching rasterio. Third value in `RTC_MODELS`; `rtc_model`
+  still defaults to `"cosine"`.
+- ⬜ Remaining geocoding niceties: the *fully calibrated* remainder of RTC — the
+  full gamma-nought illuminated-area *facet integration in image space* (integrating
+  the projected local illuminated area per pixel over the DEM in slant/azimuth image
+  space with layover accumulation, rather than the per-pixel facet-area
+  approximation the `gamma` model shipped above) and MultiRTC interop — is a heavier,
+  calibration-oriented job (Umbra's open products are not radiometrically calibrated)
+  and is still open.
 
 ### 5.6 Then actually talk to Umbra — **not started**
 
