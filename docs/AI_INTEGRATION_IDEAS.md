@@ -488,9 +488,15 @@ still allowing everything below.
 > the rendered PNG as an MCP image block. The tool *logic* lives in plain,
 > deterministic functions (offline-testable without the SDK) that
 > `build_server()` registers, so the server stays within the library's
-> determinism boundary. Not-yet-done follow-ups: registering in the public MCP
-> registries / Anthropic's directory (part of the deliverable, tracked in
-> `TODO.md`), and a LangChain/LlamaIndex wrapper reusing these tool shapes.
+> determinism boundary. ✅ **The LangChain wrapper reusing these tool shapes has
+> now shipped** as `umbra_py.langchain` behind the `[langchain]` extra:
+> `umbra_tools()` returns the *same* deterministic callables as native
+> `StructuredTool`s (the render tools re-implemented so the LangChain surface
+> never pulls in the MCP SDK, returning the PNG as a `content_and_artifact` tool
+> artifact), so the two agent front doors cannot drift. Not-yet-done follow-ups:
+> registering in the public MCP registries / Anthropic's directory (part of the
+> deliverable, tracked in `TODO.md`), and the parallel LlamaIndex `FunctionTool`
+> wrapper.
 
 The CLI subcommands already map 1:1 to library functions — which means the
 tool inventory for an MCP server is already designed. Shipped as a submodule
@@ -592,9 +598,13 @@ no operational cost and no abuse surface.
   `tests/test_examples.py` keeps them honest offline (stdlib `json`/`ast`: well
   formed, cells parse, only public `umbra_py` symbols, CC-BY present) and
   executes them end-to-end under `pytest -m network`.
-- A LangChain/LlamaIndex community tool wrapper is low-cost once the MCP tool
-  schemas exist (same shapes, different registration) — worth doing for reach,
-  after MCP.
+- ✅ **A LangChain community tool wrapper has shipped** (`umbra_py.langchain`,
+  `[langchain]` extra) — exactly as this line predicted, it is the *same* tool
+  shapes with different registration: `umbra_tools()` wraps the MCP server's
+  deterministic callables as native `StructuredTool`s (no duplicated business
+  logic; render tools return the PNG as a `content_and_artifact` artifact), so a
+  LangChain / LangGraph agent gets the archive with `model.bind_tools(...)`. The
+  parallel LlamaIndex `FunctionTool` wrapper is the remaining reach step.
 
 ---
 

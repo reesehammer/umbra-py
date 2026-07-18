@@ -39,6 +39,7 @@ pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
 pip install "umbra-py[serve]"   # + the umbra serve read-only STAC API
 pip install "umbra-py[mcp]"     # + the umbra-mcp Model Context Protocol server
+pip install "umbra-py[langchain]" # + the catalog as native LangChain / LangGraph tools
 pip install "umbra-py[ai]"      # + umbra ask / semantic / describe / embed: model-backed NL search, scene reading & visual similarity
 ```
 
@@ -809,6 +810,41 @@ the model only interprets, its reply is validated, and every reading is stamped
 as an AI interpretation. It even refuses to composite mixed polarizations (HH
 and VV aren't comparable), and the CC-BY attribution line travels with every
 result.
+
+### Drive it from a LangChain / LangGraph agent
+
+MCP reaches MCP-native clients; a large population of agent builders instead
+assemble tools with LangChain. `umbra_py.langchain` offers the **same** catalog
+tools as native LangChain `StructuredTool`s — the identical deterministic
+callables the MCP server exposes, so the two front doors can't drift.
+
+```bash
+pip install "umbra-py[langchain]"
+```
+
+```python
+from umbra_py.langchain import umbra_tools
+
+tools = umbra_tools()                       # ready to bind to any LangChain agent
+llm_with_tools = my_chat_model.bind_tools(tools)
+
+# …or hand them straight to LangGraph's prebuilt ReAct agent:
+from langgraph.prebuilt import create_react_agent
+agent = create_react_agent(my_chat_model, umbra_tools())
+```
+
+`umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
+`index_stats`, `download_asset`, `watch_site`, `find_similar` /
+`find_similar_text`, `describe_scene` and the `quicklook` / `change_composite` /
+`timescan` render tools — each schema inferred from the function signature and
+each description from its docstring. *Images are the API*: the render tools use
+LangChain's `content_and_artifact` response format, so the `ToolMessage` carries
+a text caption and the raw PNG on `.artifact` for a downstream multimodal model
+to *see* the radar scene. Pass `include_render=False` for a JSON-only surface (a
+text-only model, or an install without the `viz` extra). The determinism boundary
+is preserved: the tools search, geocode and render; the agent's model plans and
+narrates, with `describe_scene` the one opt-in exception (a vision reading, only
+when an `[ai]` key is configured).
 
 ### Serve it as a STAC API (`umbra serve`)
 
