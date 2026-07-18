@@ -1144,6 +1144,35 @@ same 500 lines of glue first, and many give up."*
 > non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
 > (5.3 registries, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18):** the **standing-analyst monitoring notebook has
+> shipped** — `examples/06_site_monitoring.ipynb` (workstream 5.4 /
+> `AI_INTEGRATION_IDEAS.md` C3's "packaged monitoring recipe"). Every capability
+> is built; the binding constraint on §1's thesis ("widen the funnel — more
+> people successfully using the open data") is adoption, and the notebook gallery
+> is its front door — the greatest-hits SAR workflows, runnable, that DevRel links
+> first and that double as live evals. SAR's *killer application* is monitoring
+> (its whole edge is cadence — the same spot re-imaged through cloud and dark),
+> so the recipe most worth packaging is the standing-analyst loop, and the
+> primitives for it (`umbra watch`, `umbra change`, `umbra change --narrate`, the
+> `watch_site` MCP tool) had all shipped without one runnable example that wires
+> them together. This closes that: the notebook stands up a watch over a
+> repeat-imaged site, asserts the first run reports every pass as new *and* an
+> immediate re-run reports **zero** (the idempotency guarantee a scheduler depends
+> on — the property that makes "run it every hour" safe), then hands the new
+> passes to `select_change_frames` → `save_change_composite` for the "new pass
+> lands → composite → notify" action, with `umbra change --narrate`, the
+> `watch_site` MCP tool, and `MetaWatchStore` cross-run persistence named as the
+> next steps in prose. It holds the gallery's culture exactly (§3): a small
+> deterministic search with `assert`s in every code cell and **no model call**, so
+> it is a live eval as much as a tutorial, guarded offline by
+> `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
+> symbols, CC-BY present) and executable end-to-end under `pytest -m network`.
+> Pure funnel-widening (§1), no new code surface. The one gallery notebook still
+> deferred is the SICD-convert showcase (`07_sicd_amplitude.ipynb`, paired with
+> 5.5, renumbered from `06`); the higher-level gaps are unchanged and largely
+> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
+> (5.3 registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1347,7 +1376,18 @@ start; notebooks with rendered output travel further.
   look-angle, polarization, license. Like the others it is self-checking (a
   deterministic one-day search with `assert`s) and guarded offline by
   `tests/test_examples.py`.
-- ⬜ Remaining: `06_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG
+- ✅ **The standing-analyst monitoring notebook has shipped** —
+  `06_site_monitoring.ipynb` wires `umbra watch` → `select_change_frames` →
+  `save_change_composite` into one runnable recipe: it stands up a watch over a
+  repeat-imaged site, asserts the first run reports every pass as new and an
+  immediate re-run reports **zero** (the idempotency a scheduler depends on),
+  then composites the new passes into a change image. SAR's killer application is
+  monitoring, so this is the copy-pasteable "new pass lands → composite → notify"
+  loop the C3 work was building toward — with `umbra change --narrate`, the
+  `watch_site` MCP tool, and `MetaWatchStore` persistence named as the next steps
+  in prose. Like the rest of the gallery it is self-checking (no model call) and
+  guarded offline by `tests/test_examples.py`.
+- ⬜ Remaining: `07_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG
   work in 5.5). It is deferred from the self-checking gallery for now because a
   SICD is a multi-gigabyte complex product (a representative scene is ~8 GB), so
   a notebook that downloads and converts one can't run quickly the way the
