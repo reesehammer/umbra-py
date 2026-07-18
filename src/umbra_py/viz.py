@@ -45,7 +45,7 @@ import html
 import json
 import os
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -961,6 +961,21 @@ def _thumbnail_png(
     return buf.getvalue()
 
 
+def _png_data_uri(png: bytes) -> str:
+    """Wrap raw PNG bytes as a base64 ``data:`` URI for inline HTML embedding.
+
+    The byte-level primitive shared by :func:`_thumbnail_data_uri` (which renders
+    the bytes from the cloud-optimized GeoTIFF) and the gallery's baked-thumbnail
+    path (which reads them straight from the index's ``thumbnail`` column via
+    :meth:`umbra_py.index.CatalogIndex.get_thumbnail`), so a pre-baked preview and
+    a freshly-streamed one reach the page in exactly the same shape. Pure standard
+    library -- no ``viz`` extra -- so a fully-baked gallery needs no ``rasterio``.
+    """
+    import base64  # noqa: PLC0415
+
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
 def _thumbnail_data_uri(
     item: UmbraItem,
     *,
@@ -978,12 +993,10 @@ def _thumbnail_data_uri(
     size than the linear default. Only the bytes for ``max_size`` are streamed
     from the cloud-optimized GeoTIFF. Requires the ``viz`` extra.
     """
-    import base64  # noqa: PLC0415
-
     png = _thumbnail_png(
         item, asset=asset, max_size=max_size, db=db, percentile=percentile, colormap=colormap
     )
-    return "data:image/png;base64," + base64.b64encode(png).decode()
+    return _png_data_uri(png)
 
 
 def _render_gallery_thumbnails(
@@ -995,21 +1008,36 @@ def _render_gallery_thumbnails(
     percentile: tuple[float, float],
     colormap: str | None,
     max_workers: int,
+    baked: Mapping[str, bytes] | None = None,
 ) -> dict[int, str | None]:
-    """Stream a SAR quicklook thumbnail per item, in parallel.
+    """Build a data-URI thumbnail per item, in parallel.
 
-    Returns ``{index: data_uri_or_None}``. Each read is independent and
-    network-bound (a cloud-optimized GeoTIFF overview fetched via HTTP range
-    requests, which releases the GIL inside GDAL), so a small thread pool
-    collapses the wall time of an N-tile sheet from N serial fetches toward
-    N/workers. Any item that can't be previewed -- no GEC asset, decode error,
-    network blip -- maps to ``None`` so its tile falls back to a footprint
-    sketch and one bad acquisition never sinks the whole sheet.
+    Returns ``{index: data_uri_or_None}``. An item whose id is present in
+    ``baked`` (a ``{id: PNG bytes}`` map of thumbnails already rendered into the
+    index by ``umbra index bake-thumbnails``) is served straight from those bytes
+    -- no S3 read, no ``rasterio``, no thread -- so a ``--local`` gallery over a
+    baked index is instant and offline. Every other item is streamed the usual
+    way: an independent, network-bound cloud-optimized GeoTIFF overview fetched
+    via HTTP range requests (which releases the GIL inside GDAL), so a small
+    thread pool collapses the wall time of the remaining tiles from N serial
+    fetches toward N/workers. Any item that can't be previewed -- no GEC asset,
+    decode error, network blip -- maps to ``None`` so its tile falls back to a
+    footprint sketch and one bad acquisition never sinks the whole sheet.
     """
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
     if not items:
         return {}
+
+    baked = baked or {}
+    result: dict[int, str | None] = {}
+    to_stream: list[tuple[int, UmbraItem]] = []
+    for index, item in enumerate(items):
+        png = baked.get(item.id)
+        if png is not None:
+            result[index] = _png_data_uri(png)
+        else:
+            to_stream.append((index, item))
 
     def render(index_item: tuple[int, UmbraItem]) -> tuple[int, str | None]:
         index, item = index_item
@@ -1028,9 +1056,11 @@ def _render_gallery_thumbnails(
             # repr, which likewise never lets one bad thumbnail raise.
             return index, None
 
-    workers = max(1, min(max_workers, len(items)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return dict(pool.map(render, enumerate(items)))
+    if to_stream:
+        workers = max(1, min(max_workers, len(to_stream)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            result.update(dict(pool.map(render, to_stream)))
+    return result
 
 
 def gallery(
@@ -1044,6 +1074,7 @@ def gallery(
     max_workers: int = 8,
     title: str = "Umbra SAR gallery",
     subtitle: str | None = None,
+    baked: Mapping[str, bytes] | None = None,
 ) -> str:
     """Render items as a self-contained HTML SAR thumbnail gallery (contact sheet).
 
@@ -1063,15 +1094,30 @@ def gallery(
     matplotlib colormap for pseudo-colored thumbnails. ``subtitle`` is shown in
     the page header (e.g. the search terms that produced the gallery).
 
-    Returns the HTML as a string; use :func:`save_gallery` to write it to disk.
-    Requires the ``viz`` extra (``pip install "umbra-py[viz]"``).
-    """
-    # Fail fast with a clear message if the viz extra is missing -- otherwise
-    # every thumbnail would silently fall back to a footprint and the page
-    # would quietly lose its whole point.
-    _require("rasterio")
+    ``baked`` is an optional ``{id: PNG bytes}`` map of thumbnails already
+    rendered into the local index by ``umbra index bake-thumbnails`` (fetched via
+    :meth:`umbra_py.index.CatalogIndex.get_thumbnail`). An item found there is
+    embedded straight from those bytes -- no S3 read and no ``rasterio`` -- so a
+    ``--local`` gallery over a fully-baked index is instant *and* runs in a core
+    install; only items missing from ``baked`` are streamed (and only those
+    require the ``viz`` extra).
 
+    Returns the HTML as a string; use :func:`save_gallery` to write it to disk.
+    Requires the ``viz`` extra (``pip install "umbra-py[viz]"``) unless every
+    item is served from ``baked``.
+    """
     items = list(items)
+    baked = baked or {}
+
+    # rasterio is only needed to *stream* an un-baked thumbnail from S3. When
+    # every item is served from the pre-baked index, the whole render is pure
+    # standard library, so a core install can produce the gallery. Fail fast
+    # only when a stream is actually required -- otherwise every un-baked
+    # thumbnail would silently fall back to a footprint and the page would
+    # quietly lose its whole point.
+    if any(item.id not in baked for item in items):
+        _require("rasterio")
+
     thumbnails = _render_gallery_thumbnails(
         items,
         asset=asset,
@@ -1080,6 +1126,7 @@ def gallery(
         percentile=percentile,
         colormap=colormap,
         max_workers=max_workers,
+        baked=baked,
     )
 
     from ._html import standalone_gallery_html  # noqa: PLC0415
