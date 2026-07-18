@@ -31,14 +31,19 @@ Deliberately in the repo's grain:
   own output, the same discipline :mod:`umbra_py.export` and the STAC document
   builders hold.
 
-* **The viewer is a static sibling, not a rewrite of the demo.** :func:`build_viewer`
+* **The viewer is an interactive whole-catalog explorer.** :func:`build_viewer`
   emits a self-contained MapLibre GL page that points at a ``.pmtiles`` URL via
   the pinned ``pmtiles`` protocol plugin; it renders the *whole* catalog as a
   scalable circle layer with the same OpenStreetMap basemap and mandatory CC-BY
-  attribution the Leaflet demo uses. Keeping it separate leaves the proven
-  ``umbra demo`` page untouched — the two are complementary: ``demo`` for the
-  interactive, filter-and-click slice; ``tiles`` for the fast, zoom-anywhere
-  whole-archive view.
+  attribution the Leaflet demo uses. It reads the archive's own ``umbra:*``
+  metadata (the distinct product types and the date range :func:`build_pmtiles`
+  records) and, when present, shows a filter panel — free-text site/id search,
+  product-type toggles, a date-range pair — that narrows the visible
+  acquisitions client-side via MapLibre ``setFilter``. That gives ``umbra demo``'s
+  filter-and-click experience at *whole-catalog* scale, which the demo's
+  inline-JSON page cannot hold at once. The two are complementary: ``demo`` for a
+  gathered slice with click-to-quicklook SAR and server-backed analysis;
+  ``tiles`` for the fast, zoom-anywhere, filterable whole-archive view.
 
 The catalog rows the tiles carry are points with a lean set of string
 properties (id, place, product, date, platform) — enough to style and label a
@@ -336,7 +341,13 @@ def _item_properties(item: UmbraItem) -> dict[str, Any]:
     dt = item.datetime
     props: dict[str, Any] = {
         "id": item.id,
-        "place": item.task,
+        # Prefer a baked reverse-geocoded label ("Reykjavík, Iceland") over the
+        # Umbra task codename when the index has one (see
+        # CatalogIndex.bake_places) -- the same preference every other read
+        # surface holds (map / serve / export / to_llm_context / demo), so the
+        # tiled whole-catalog view labels a point with a real place name too, not
+        # a campaign codename, and the viewer's free-text search matches on it.
+        "place": item.place or item.task,
         "product": item.product_type,
         "date": dt.date().isoformat() if dt else None,
         "platform": item.platform,
@@ -388,6 +399,18 @@ def build_pmtiles(
     bounds = (min(lons), min(lats), max(lons), max(lats))
     center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
 
+    # Filter facets for the viewer's interactive controls. The viewer reads these
+    # from the archive's metadata at runtime (build_viewer) so a static,
+    # zoom-anywhere map becomes a filterable *explorer* -- search a site, toggle a
+    # product type, bound the date range -- without the viewer having to hold the
+    # whole item list (the point of tiling). They are derived from the same points
+    # being tiled, so they can never drift from the data. Absent facets (an older
+    # archive) simply leave the panel hidden, so the viewer is unchanged there.
+    facet_products = sorted({p["product"] for (_pt, p) in points if p.get("product")})
+    facet_dates = [p["date"] for (_pt, p) in points if p.get("date")]
+    facet_date_min = min(facet_dates) if facet_dates else None
+    facet_date_max = max(facet_dates) if facet_dates else None
+
     # Bucket every point into the tile that holds it at each zoom.
     tiles: dict[tuple[int, int, int], list[tuple[int, int, dict[str, Any]]]] = {}
     for (lon, lat), props in points:
@@ -425,6 +448,12 @@ def build_pmtiles(
                 "description": description or f"{name} — acquisition footprint centroids.",
                 "attribution": ATTRIBUTION,
                 "type": "overlay",
+                # Namespaced facets the MapLibre viewer turns into filter controls
+                # (see build_viewer). Kept out of vector_layers.fields, which is a
+                # field *type* map, not a value list.
+                "umbra:products": facet_products,
+                "umbra:date_min": facet_date_min,
+                "umbra:date_max": facet_date_max,
                 "vector_layers": [
                     {
                         "id": layer_name,
@@ -540,6 +569,18 @@ def build_viewer(
     acquisition as a circle over an OpenStreetMap basemap, with a click popup and
     the mandatory CC-BY attribution. ``layer_name`` must match the archive's
     source-layer (:func:`build_pmtiles`' default is ``"acquisitions"``).
+
+    The page is an **interactive explorer**, not just a static map: it reads the
+    archive's own metadata (:func:`build_pmtiles` records the distinct product
+    types and the date range under ``umbra:*`` keys) and, when they are present,
+    shows a filter panel — a free-text site/id search, product-type toggles, and
+    a date-range pair — that narrows the visible acquisitions client-side via
+    MapLibre ``setFilter`` without touching the tiles. This scales the
+    ``umbra demo`` explorer's filter-and-click experience to the *whole*
+    catalog (which the demo's inline-JSON page cannot hold at once), on the
+    surface that is already tiled. An archive without those facets (one built
+    before they were recorded) simply leaves the panel hidden, so an older
+    ``.pmtiles`` renders exactly as before.
     """
     from html import escape
 
@@ -573,6 +614,11 @@ _VIEWER_JS = r"""
 const CFG = window.UMBRA_TILES;
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
+// A PMTiles instance registered with the protocol so the same archive backs
+// both the vector source (via the pmtiles:// URL) and the metadata read below
+// that builds the filter controls.
+const archive = new pmtiles.PMTiles(CFG.pmtiles);
+protocol.add(archive);
 
 const map = new maplibregl.Map({
   container: "map",
@@ -610,6 +656,113 @@ const map = new maplibregl.Map({
 
 map.addControl(new maplibregl.NavigationControl(), "top-left");
 map.addControl(new maplibregl.AttributionControl({ customAttribution: CFG.attribution }));
+
+// --- interactive filter panel -------------------------------------------
+// The archive records the distinct product types and the date range under
+// umbra:* metadata keys (build_pmtiles); when they are present, build a small
+// filter panel that narrows the visible circles client-side with setFilter, so
+// the whole-catalog view becomes an explorer. All filtering happens over the
+// tiles already fetched -- no re-query, no held item list. An archive without
+// the facets (built before they were recorded) leaves the panel hidden.
+const fstate = { text: "", products: null, start: "", end: "" };
+
+function buildFilterExpr() {
+  const clauses = ["all"];
+  if (fstate.text) {
+    // Case-insensitive substring match on place OR id. `in` tests substring
+    // when its second argument is a string; `coalesce`+`downcase` guard a
+    // missing/absent property.
+    clauses.push([
+      "any",
+      ["in", fstate.text, ["downcase", ["coalesce", ["get", "place"], ""]]],
+      ["in", fstate.text, ["downcase", ["coalesce", ["get", "id"], ""]]],
+    ]);
+  }
+  if (fstate.products && fstate.products.length) {
+    clauses.push(["in", ["coalesce", ["get", "product"], ""], ["literal", fstate.products]]);
+  }
+  // Date bounds are lexical on the YYYY-MM-DD string. Keep points with no date
+  // (mirroring the demo explorer) rather than dropping them under a bound.
+  if (fstate.start) {
+    clauses.push(["any", ["!", ["has", "date"]], [">=", ["get", "date"], fstate.start]]);
+  }
+  if (fstate.end) {
+    clauses.push(["any", ["!", ["has", "date"]], ["<=", ["get", "date"], fstate.end]]);
+  }
+  return clauses.length > 1 ? clauses : null;
+}
+
+function applyFilter() {
+  map.setFilter("acq", buildFilterExpr());
+}
+
+function buildFilterPanel(products, dateMin, dateMax) {
+  const panel = document.getElementById("filter");
+  if (!panel) return;
+
+  const search = document.createElement("input");
+  search.type = "text";
+  search.placeholder = "Search site / id";
+  search.className = "umbra-f-input";
+  search.addEventListener("input", function () {
+    fstate.text = search.value.trim().toLowerCase();
+    applyFilter();
+  });
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "umbra-f-row";
+  searchWrap.appendChild(search);
+  panel.appendChild(searchWrap);
+
+  if (products && products.length) {
+    fstate.products = products.slice();
+    const chips = document.createElement("div");
+    chips.className = "umbra-f-chips";
+    products.forEach(function (prod) {
+      const chip = document.createElement("span");
+      chip.className = "umbra-f-chip active";
+      chip.textContent = prod;
+      chip.addEventListener("click", function () {
+        const on = chip.classList.toggle("active");
+        if (on) {
+          if (fstate.products.indexOf(prod) === -1) fstate.products.push(prod);
+        } else {
+          fstate.products = fstate.products.filter(function (p) { return p !== prod; });
+        }
+        applyFilter();
+      });
+      chips.appendChild(chip);
+    });
+    panel.appendChild(chips);
+  }
+
+  if (dateMin && dateMax) {
+    const dates = document.createElement("div");
+    dates.className = "umbra-f-row umbra-f-dates";
+    const from = document.createElement("input");
+    from.type = "date";
+    from.min = dateMin; from.max = dateMax;
+    const to = document.createElement("input");
+    to.type = "date";
+    to.min = dateMin; to.max = dateMax;
+    from.addEventListener("change", function () { fstate.start = from.value; applyFilter(); });
+    to.addEventListener("change", function () { fstate.end = to.value; applyFilter(); });
+    dates.appendChild(from);
+    dates.appendChild(to);
+    panel.appendChild(dates);
+  }
+
+  panel.style.display = "";
+}
+
+archive.getMetadata().then(function (meta) {
+  meta = meta || {};
+  const products = meta["umbra:products"] || [];
+  const dateMin = meta["umbra:date_min"] || null;
+  const dateMax = meta["umbra:date_max"] || null;
+  if (products.length || (dateMin && dateMax)) {
+    buildFilterPanel(products, dateMin, dateMax);
+  }
+}).catch(function () { /* no metadata -> no filter panel, map still works */ });
 
 map.on("click", "acq", (e) => {
   const f = e.features && e.features[0];
@@ -656,10 +809,30 @@ _VIEWER_TEMPLATE = """<!DOCTYPE html>
     font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }}
   .umbra-popup a {{ display: inline-block; margin-top: 6px; }}
+  #filter {{
+    position: absolute; top: 10px; right: 10px; z-index: 1; display: none;
+    width: 220px; max-width: calc(100vw - 20px); padding: 12px;
+    background: rgba(255, 255, 255, 0.94); border: 1px solid #ccc; border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  #filter .umbra-f-row {{ margin-bottom: 8px; }}
+  #filter .umbra-f-input, #filter .umbra-f-dates input {{
+    width: 100%; padding: 5px 7px; border: 1px solid #bbb; border-radius: 4px; font: inherit;
+  }}
+  #filter .umbra-f-dates {{ display: flex; gap: 6px; }}
+  #filter .umbra-f-dates input {{ flex: 1; min-width: 0; }}
+  #filter .umbra-f-chips {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }}
+  #filter .umbra-f-chip {{
+    cursor: pointer; user-select: none; padding: 2px 9px; border-radius: 11px;
+    border: 1px solid #bbb; background: #fff; font-size: 12px;
+  }}
+  #filter .umbra-f-chip.active {{ background: #2b6cb0; border-color: #2b6cb0; color: #fff; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="filter"></div>
 <script src="{maplibre_js}"></script>
 <script src="{pmtiles_js}"></script>
 <script>window.UMBRA_TILES = {config_json};</script>

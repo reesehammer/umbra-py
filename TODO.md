@@ -82,11 +82,26 @@ Follow-ons that build on it, none a blocker:
 MapLibre GL viewer, no extra, no tippecanoe) is shipped, closing the demo's
 full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
 
-- **Wire the PMTiles source into `umbra demo`.** The demo embeds its gathered
-  slice as inline JSON; an opt-in `--pmtiles <url>` that swaps the Leaflet
-  cluster layer for a MapLibre vector layer over a tiled archive would let the
-  interactive explorer scale to the whole catalog too (today `tiles` ships its
-  own separate MapLibre viewer to keep the proven demo page untouched).
+- ~~**Make the whole-catalog view interactively filterable.**~~ ✅ **Done.** The
+  `umbra tiles --viewer` MapLibre page is now an interactive explorer: it reads
+  the archive's own metadata (`build_pmtiles` records the distinct product types
+  and the date span under `umbra:products` / `umbra:date_min` / `umbra:date_max`)
+  and shows a filter panel — free-text site/id search, product-type toggles, a
+  date-range pair — that narrows the visible acquisitions client-side via
+  MapLibre `setFilter`. This gives `umbra demo`'s filter-and-click experience at
+  *whole-catalog* scale on the surface that is already tiled, without a re-query
+  or the whole item list. Tiled points also now prefer the baked `item.place`
+  label over the task codename, matching every other read surface. Offline-tested
+  in `tests/test_pmtiles.py`.
+- **Wire the PMTiles source into `umbra demo` itself.** The interactive filtering
+  above lives on the `tiles` MapLibre viewer; the *demo* page still embeds its
+  gathered slice as inline JSON. An opt-in `--pmtiles <url>` that swaps `umbra
+  demo`'s Leaflet cluster layer for a MapLibre vector layer over a tiled archive
+  would additionally give the demo's click-to-quicklook SAR overlay and
+  server-backed "Analyze this view" panel at whole-catalog scale — a larger
+  change (the lazy-imagery driver and analyze panel are Leaflet-bound), so the
+  two remain complementary today: `demo` for the interactive slice with imagery +
+  analysis, `tiles` for the fast, filterable, zoom-anywhere whole-archive view.
 - **Leaf directories for very large catalogs.** The writer emits a single root
   directory, which is spec-valid and ample for the current catalog (thousands of
   tiles). If the tile count ever grows past a comfortable root-directory size,

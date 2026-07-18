@@ -1385,6 +1385,40 @@ same 500 lines of glue first, and many give up."*
 > integration / MultiRTC interop and the maintainer-side adoption moves (5.3
 > registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18, interactive tiles explorer):** the **whole-catalog
+> PMTiles viewer is now an interactive explorer** (`DEMO_APP_GAPS.md` Path A step
+> 3 / `TODO.md` PMTiles follow-on). Discovery is the moat (§3), and the demo
+> thesis (§1 — "make Umbra's SAR feel as approachable as Sentinel-1") is best sold
+> by a map a curious analyst can *explore*. `umbra demo` gives that at the scale of
+> a gathered slice (its inline JSON cannot hold the whole catalog), and `umbra
+> tiles` gives a fast, zoom-anywhere whole-archive map — but that whole-catalog map
+> was, until now, *static*: you could pan and zoom, not filter. This closes that
+> without the risky Leaflet→MapLibre swap wiring `umbra demo` to PMTiles would
+> need: `build_pmtiles` records the tiled catalog's distinct product types and
+> date span in the archive's own `umbra:*` metadata (derived from the same points,
+> so they cannot drift), and the MapLibre viewer reads them at runtime to show a
+> filter panel — free-text site/id search, product-type toggles, a date-range pair
+> — that narrows the visible acquisitions client-side via `setFilter`, over the
+> tiles already fetched (no re-query, no held item list). So the filter-and-click
+> experience now reaches *whole-catalog* scale on the surface that is already
+> tiled, and it works for a locally built *and* a published/fetched archive (the
+> facets travel in the file). It also fixes a real consistency gap the "baked
+> labels flow through every read surface" work (PR #85) left: the tiled points
+> labelled each acquisition with the Umbra task *codename*, while map / serve /
+> export / `to_llm_context` / demo all prefer the baked reverse-geocoded
+> `item.place`; the tiles surface now prefers it too, so a baked snapshot's
+> whole-catalog map and its site search read "Reykjavík, Iceland", not a codename.
+> It holds the project's grain and testability (§3): **no model is called**, no
+> dependency is added, the encoder stays pure standard library, an archive without
+> the facets simply leaves the panel hidden (so an older `.pmtiles` is unchanged),
+> and the whole path is offline-tested by decoding the archive's own metadata and
+> asserting the viewer ships the panel + `getMetadata` + `setFilter` wiring. Pure
+> funnel-widening (§1): the whole-archive map a newcomer opens is now something they
+> can *interrogate*, not just look at. The remaining strategic gaps are unchanged
+> and largely non-code: 5.5's fully-calibrated image-space facet integration /
+> MultiRTC interop and the maintainer-side adoption moves (5.3 registries, PyPI
+> publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
