@@ -76,6 +76,16 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.4",
 ]
+# The rendered documentation site (mkdocs-material + mkdocstrings), built from
+# the same docstrings the package already ships. `mkdocs-click` renders the CLI
+# reference straight from the Click group so the docs cannot drift from `umbra
+# --help`. Building the API reference imports the package, so this extra is
+# installed alongside `[all]` (and the agent extras) in the docs workflow.
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+    "mkdocs-click>=0.8",
+]
 all = ["umbra-py[convert,load,viz,export]"]
 
 [project.urls]

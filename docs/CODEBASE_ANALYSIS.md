@@ -441,11 +441,15 @@ warns a full index build "takes a while." Two structural improvements:
    `CITATION.cff` now ship, and Dependabot config was already present — so
    GitHub's community profile is complete and research users can cite the tool.
    A `pip-audit` CI step is the one remaining item under this heading.
-6. **No rendered documentation site.** The README is excellent but is now 328
-   lines doing the job of a docs site. mkdocs-material + mkdocstrings can
-   generate API docs from the existing (high-quality) docstrings nearly for
-   free, published via GitHub Pages. This also creates the anchor for the
-   `llms.txt` idea in the companion document.
+6. ✅ **Shipped.** A rendered documentation site now exists:
+   `mkdocs.yml` + `docs_src/` build a mkdocs-material site whose API reference
+   is generated from the existing docstrings by mkdocstrings, and whose CLI
+   reference is generated from the Click group by `mkdocs-click` (so it cannot
+   drift from `umbra --help`). `.github/workflows/docs.yml` builds it
+   `--strict` on every PR and deploys to GitHub Pages from `main` (the deploy
+   step waits on a maintainer enabling Pages). This also creates the anchor for
+   the `llms.txt` idea in the companion document. *(Originally: the README was
+   328 lines doing the job of a docs site.)*
 7. **Ecosystem listing:** once on PyPI, register in the STAC ecosystem tools
    list, the AWS Open Data registry's usage-examples section for the Umbra
    dataset, and pyOpenSci — each is a durable discovery channel for exactly
@@ -493,7 +497,7 @@ warns a full index build "takes a while." Two structural improvements:
 |---|---|---|---|
 | 18 | Extract shared search-vs-URLs gathering + common option groups from the five CLI commands that duplicate them | `cli.py` | medium |
 | 19 | Split `viz.py` into a `viz/` package (geojson / maps / raster / composites / gallery) with re-exports preserved | `viz.py` | medium |
-| 20 | Stand up mkdocs-material + mkdocstrings docs site on GitHub Pages | new `docs/` config | medium |
+| 20 | ✅ **Done.** `mkdocs.yml` + `docs_src/` stand up a mkdocs-material site: mkdocstrings renders the API reference from the shipped docstrings, `mkdocs-click` renders the CLI reference from the Click group, and `.github/workflows/docs.yml` builds it `--strict` on every PR and deploys to GitHub Pages from `main` (deploy gated on a maintainer enabling Pages). Added a `docs` extra | `mkdocs.yml`, `docs_src/`, `.github/workflows/docs.yml` | medium |
 | 21 | ✅ **Done.** Incremental refresh (`umbra index update` / `CatalogIndex.update`) *and* the read-through consult now both ship: `CatalogIndex.search_live` / `umbra search --local --live` answer from the index and walk only acquisitions newer than its max `acq_date`, merging + de-duplicating the two streams and warming the cache with the delta (§4.4) | `index.py`/`cli.py` | larger; design first |
 | 22 | ⏳ **`CITATION.cff` added (this PR)** — machine-readable citation metadata (CFF 1.2.0), version-synced to `__version__` by an offline test, so GitHub shows "Cite this repository". Remaining (maintainer actions): register with the STAC ecosystem list, AWS Open Data registry examples, pyOpenSci; mint a Zenodo DOI | repo root | small each |
 
