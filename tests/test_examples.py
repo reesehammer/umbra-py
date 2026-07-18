@@ -126,6 +126,7 @@ def test_examples_execute(tmp_path):
 
     pytest.importorskip("rasterio")
     pytest.importorskip("xarray")
+    pytest.importorskip("sarpy")  # 07_sicd_amplitude geocodes a SICD ([convert])
 
     for path in NOTEBOOKS:
         nb = nbformat.read(str(path), as_version=4)

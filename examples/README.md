@@ -33,23 +33,19 @@ They stream from Umbra's public bucket, so run them with network access.
   (idempotent, no model call), then composites the new passes into a change
   image — the copy-pasteable recipe for SAR-based site monitoring on a schedule
   (`viz` extra).
+- [`07_sicd_amplitude.ipynb`](07_sicd_amplitude.ipynb) — geocode the *complex*
+  product: detect a SICD's amplitude in the slant plane, then warp it onto a
+  map-ready EPSG:4326 cloud-optimized GeoTIFF with `sicd_to_geocoded_cog` (using
+  SICD's own image-projection model), and confirm it lands on the acquisition's
+  catalog footprint — the one-call answer to "my SICD won't open on a map"
+  (`convert` extra).
 
 The committed notebooks ship with **cleared outputs**. `tests/test_examples.py`
 validates them offline on every CI run (well-formed, code cells parse, every
 `umbra_py` symbol they reference is public, CC-BY attribution present) and can
 execute them end-to-end under `pytest -m network` when `nbclient` and the render
-extras are installed.
-
-Still planned (good first contributions):
-
-- `07_sicd_amplitude.ipynb` — convert a SICD to a geocoded COG (terrain
-  orthorectified with `--dem auto`) and open it as a georeferenced array (uses
-  the `convert` extra); tracked with the SICD → geocoded COG work in
-  `docs/STRATEGY.md` 5.5. Deferred from the self-checking gallery for now
-  because a SICD is a multi-gigabyte complex product (a representative scene is
-  ~8 GB), so a notebook that downloads and converts one cannot run quickly the
-  way the streamed-overview notebooks above do — it wants a curated small scene
-  or a pre-staged fixture first.
+extras are installed. `07_sicd_amplitude.ipynb` additionally needs the
+`convert` extra (`sarpy`) to run.
 
 ## Guides
 

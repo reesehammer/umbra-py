@@ -1173,6 +1173,39 @@ same 500 lines of glue first, and many give up."*
 > non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
 > (5.3 registries, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18):** the **SICD-convert showcase notebook has shipped,
+> completing the gallery** — `examples/07_sicd_amplitude.ipynb` (workstream 5.4 /
+> the runnable front door for 5.5's SICD → geocoded COG capability). Every path in
+> this project assumes the `GEC` asset — the already-geocoded COG Umbra ships; the
+> *complex* `SICD` is the other half of the archive, and it lives in the radar
+> slant plane, so it does not open on a map, in QGIS, or in the xarray stack
+> without the sensor-model geocoding `umbra convert` shipped. That flagship 5.5
+> capability (HAE geocode, DEM terrain-ortho, geoid, `--rtc`, auto-fetch) had
+> extensive code and tests but **no runnable tutorial** — the one thing that turns
+> a curious analyst into a user (§1). This closes that: the notebook takes one
+> SICD from the open bucket, detects its amplitude in the slant plane (asserting
+> the CRS is `None` — an image, not a map), geocodes it onto a north-up EPSG:4326
+> COG with `sicd_to_geocoded_cog`, and asserts the output is EPSG:4326, carries COG
+> overviews, and **lands on the acquisition's own catalog footprint** — proof the
+> projection model placed the pixels on Earth, not just somewhere plausible. It
+> holds the gallery's culture exactly (§3): a small deterministic search with
+> `assert`s in every code cell and **no model call**, guarded offline by
+> `tests/test_examples.py`. The long-standing deferral premise — "a representative
+> SICD is ~8 GB, so it can't run quickly the way the streamed-overview notebooks
+> do" — is answered precisely as that note said it would be, with the *curated
+> small scene* it asked for: the smallest open SICDs (`Centerfield, Utah`,
+> ~370 MB) download and geocode in well under a minute, so the notebook executes
+> end-to-end under `pytest -m network` like the rest of the gallery (its live
+> execution guard now also `importorskip`s `sarpy`). Terrain orthorectification
+> (`--dem auto`), the geoid correction, and `--rtc` are named in prose as the next
+> step rather than executed, keeping the self-checking path lean. This is pure
+> funnel-widening (§1) with no new code surface: the greatest-hits SAR workflows —
+> now including the hardest-to-use, most-differentiated one — are all runnable
+> marketing Umbra doesn't have to write. With 5.4 complete, the remaining
+> strategic gaps are unchanged and largely non-code: 5.5's radiometric-RTC
+> remainder and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
+> Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1345,7 +1378,7 @@ One crawl shouldn't be everyone's crawl.
   completing GitHub's Community Standards profile — the "easy to say yes to"
   signal §4 names.
 
-### 5.4 Demo notebooks that create SAR converts — **partial**
+### 5.4 Demo notebooks that create SAR converts — **shipped**
 
 An `examples/` gallery for the greatest hits: change detection over one of
 Umbra's time-series sites, an amplitude time series, detection chips
@@ -1387,13 +1420,22 @@ start; notebooks with rendered output travel further.
   `watch_site` MCP tool, and `MetaWatchStore` persistence named as the next steps
   in prose. Like the rest of the gallery it is self-checking (no model call) and
   guarded offline by `tests/test_examples.py`.
-- ⬜ Remaining: `07_sicd_amplitude.ipynb` (paired with the SICD → geocoded COG
-  work in 5.5). It is deferred from the self-checking gallery for now because a
-  SICD is a multi-gigabyte complex product (a representative scene is ~8 GB), so
-  a notebook that downloads and converts one can't run quickly the way the
-  streamed-overview notebooks do — it wants a curated small scene or a pre-staged
-  fixture first. Rendering pre-baked output into the committed notebooks (they
-  currently ship with cleared cells) is a later polish step.
+- ✅ **The SICD-convert showcase has shipped** — `07_sicd_amplitude.ipynb`
+  (paired with the SICD → geocoded COG work in 5.5) closes the gallery. It takes
+  one SICD from the open archive, detects its amplitude in the slant plane (CRS
+  `None` — an image, not a map), then geocodes it onto a north-up EPSG:4326 COG
+  with `sicd_to_geocoded_cog` and asserts the result is EPSG:4326, carries COG
+  overviews, and lands on the acquisition's catalog footprint. The deferral
+  premise (a "representative scene is ~8 GB") is answered exactly as that note
+  said it would be — with a *curated small scene*: the smallest open SICDs
+  (`Centerfield, Utah`, ~370 MB) download and convert in well under a minute, so
+  the notebook runs end-to-end under `pytest -m network` like the rest of the
+  gallery (its live execution guard now also `importorskip`s `sarpy`). Terrain
+  orthorectification (`--dem auto`), the geoid correction, and `--rtc` are named
+  in prose as the next step rather than executed, to keep the self-checking path
+  lean. With it, workstream 5.4 is **complete** — the whole notebook gallery, the
+  greatest-hits SAR workflows DevRel links first, now exists and doubles as a
+  live eval.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 
