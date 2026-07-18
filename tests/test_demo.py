@@ -115,6 +115,37 @@ def test_build_demo_server_url_wires_analysis_panel(sample_item_dict):
         assert btn in html
 
 
+def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
+    """With ``server_url`` set the detail panel leads with the baked-thumbnail
+    endpoint (DEMO_APP_GAPS G6): the app JS builds an ``.umbra-thumb`` image from
+    ``/artifacts/thumbnail/<id>.png`` off the server base, url-encoding the
+    remote item id, and drops it on error so an unbaked scene is never a broken
+    image."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+    # The preview reuses the one server base (also used by the analyze panel).
+    assert "serverBase" in html
+    # It targets the baked-thumbnail endpoint, url-encoding the remote id.
+    assert "/artifacts/thumbnail/' + encodeURIComponent(p.id) + '.png'" in html
+    # The image class exists in the stylesheet, and the element is dropped on a
+    # 404 (a scene with no baked thumbnail) rather than shown broken.
+    assert ".umbra-thumb" in html
+    assert "thumb.onerror" in html
+
+
+def test_build_demo_no_thumbnail_preview_without_server(sample_item_dict):
+    """Without ``server_url`` the detail panel stays metadata-only: there is no
+    server base to build a thumbnail URL from, so the preview never fires and the
+    page is fully static."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    cfg = _config(html)
+    assert cfg["serverUrl"] is None
+    # The wiring string ships in the static app JS, but it is guarded by
+    # ``serverBase`` (null here), so no request is ever made.
+    assert "serverBase = CFG.serverUrl" in html
+
+
 def test_build_demo_drops_unmappable_items(sample_item_dict):
     """An item with neither footprint nor bbox can't be placed or clustered, so
     it must be dropped rather than emitted as a null marker."""

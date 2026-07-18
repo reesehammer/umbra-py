@@ -41,10 +41,17 @@ Follow-ons that build on it, none a blocker:
   cached in an additive `thumbnail BLOB` column (the second additive migration,
   `user_version` 2 → 3), so `GET /artifacts/thumbnail/{id}.png` on `umbra serve`
   serves it instantly from local bytes instead of re-streaming the COG. Idempotent
-  and injectable, mirroring `bake_places`, so it is fully offline-tested. Remaining
-  optional polish under G6: wiring the baked thumbnail into the `umbra demo` /
-  gallery *client* surfaces (the server endpoint and the primitive both exist), and
-  baking thumbnails into the published weekly snapshot (gated on egress, like the
+  and injectable, mirroring `bake_places`, so it is fully offline-tested.
+  ~~Wire the baked thumbnail into the `umbra demo` client surface.~~ ✅ **Done.**
+  `umbra demo --server-url` now leads a clicked scene's detail panel with the
+  baked thumbnail from `GET /artifacts/thumbnail/{id}.png` (instant local-bytes
+  read, quicklook-render fallback); a scene with no baked thumbnail 404s and the
+  `<img>` is dropped via `onerror` (no broken image), and without `--server-url`
+  the panel is unchanged and the page stays static. Reuses the one `serverBase`
+  the analyze panel already computes; the remote item id is url-encoded into the
+  path. Offline-tested in `tests/test_demo.py`. Remaining optional polish under
+  G6: the same preview in the `umbra gallery` *contact sheet* client, and baking
+  thumbnails into the published weekly snapshot (gated on egress, like the
   place-label bake below).
 - **A precomputed centroid column.** The centroid is derived from the stored bbox
   today (cheap), so a `centroid` column is only worth adding if a consumer needs

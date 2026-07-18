@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Instant SAR thumbnail preview in `umbra demo` (`DEMO_APP_GAPS.md` G6).** The
+  baked-thumbnail bake shipped the primitive (`umbra index bake-thumbnails`) and
+  the server endpoint (`GET /artifacts/thumbnail/{id}.png`) but left the flagship
+  self-serve explorer unwired. Now, with `umbra demo --server-url` pointing at a
+  running `umbra serve`, clicking a scene *leads* its detail panel with a small
+  SAR picture pulled from that endpoint — the quicklook thumbnail served straight
+  from the index as an offline local-bytes read (falling back to a live quicklook
+  render for a scene not yet baked), so the funnel's front door opens with a
+  radar image, not metadata alone. The heavier on-click "Get SAR image" COG
+  overlay stays the deeper look. A scene with no baked thumbnail 404s and the
+  `<img>` is dropped via `onerror` (never a broken image); the remote item id is
+  url-encoded into the path (the base is the trusted server URL); and the preview
+  reuses the single `serverBase` the "Analyze this view" panel already computes.
+  Without `--server-url` the detail panel is unchanged and the page stays a fully
+  static single file. Offline-tested in `tests/test_demo.py` (the generator is
+  stdlib-only — no `viz` extra, no network).
 - **Rendered documentation site — mkdocs-material + mkdocstrings + mkdocs-click
   (`CODEBASE_ANALYSIS.md` §5.2 #6 / P3 #20).** The project graduates from a
   README doing a docs site's job to being the front door of a real one — the
