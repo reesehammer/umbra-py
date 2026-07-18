@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Download content-integrity verification against the S3 ETag MD5
+  (`docs/CODEBASE_ANALYSIS.md` §3.2 / P1 #5).** `download_url` already verified
+  the received byte count against `Content-Length` and used `If-Range` + a stored
+  ETag so a resume can't splice two different objects; this closes the remaining
+  §3.2 item — *content* verification. When the server exposes a single-part S3
+  `ETag` (the object's hex MD5) and `verify=True` (the new default), the finished
+  file is streamed through MD5 and compared, so on-the-wire corruption a correct
+  byte count can't catch fails loudly with a `Checksum mismatch` `DownloadError`.
+  A mismatch means the complete-length bytes are wrong — a resume can't repair
+  them — so the `.part` and its `.etag` validator are discarded and a retry
+  re-downloads cleanly rather than "resuming" a full-but-corrupt file. Multipart
+  ETags (`"<hash>-<n>"`) are not a plain MD5 of the bytes and are skipped rather
+  than raising a spurious mismatch; `verify=False` opts out for callers that don't
+  want the extra read of a multi-GB file (it threads through `download_asset` /
+  `download_item`). New `verify` keyword on `download_url`; stdlib `hashlib` only,
+  **no new dependency and no model call**, fully offline-tested in
+  `tests/test_download.py` (matching MD5 passes, corrupt-body mismatch discards
+  the `.part`, multipart-ETag skip, `verify=False` opt-out, and a resumed append
+  verifying the *whole* object's MD5). This is the reliability floor under the
+  library's core job — fetching multi-GB SAR products — and closes the last
+  open item under `TODO.md`'s download-hardening ledger.
 - **Projected-area (foreshortening) RTC model — `umbra convert --rtc
   --rtc-model area` (`STRATEGY.md` 5.5).** Radiometric terrain flattening (`--rtc`)
   shipped as the geometric cosine correction `cos(reference)/cos(local_incidence)`,

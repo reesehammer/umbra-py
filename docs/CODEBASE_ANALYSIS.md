@@ -169,9 +169,15 @@ validate `item.href` scheme (`http(s)`) before emitting it as a link.
 > `Content-Length` before renaming the `.part` (raising `DownloadError` on a
 > clean short read, and converting a mid-stream `RequestException` into one too,
 > leaving the `.part` for resume), and sends `If-Range` with a stored ETag on
-> resume so a changed remote object restarts cleanly instead of splicing.
-> Remaining follow-on (ledgered in `TODO.md`): full checksum verification
-> against the ETag's MD5 for single-part uploads. Original finding retained
+> resume so a changed remote object restarts cleanly instead of splicing. ✅
+> **Content verification now ships too** (the former follow-on): when the server
+> exposes a single-part S3 `ETag` (the object's hex MD5) and `verify=True` (the
+> default), the finished file is streamed through MD5 and compared, so
+> on-the-wire corruption a correct length can't catch fails loudly with a
+> `Checksum mismatch` — and the full-but-corrupt `.part` is discarded so a retry
+> re-downloads cleanly. Multipart ETags (`"<hash>-<n>"`) aren't a plain MD5 and
+> are skipped; `verify=False` opts out. Offline-tested in
+> `tests/test_download.py` with a known body + its MD5. Original finding retained
 > below.
 
 `download_url` (download.py:24-79):
@@ -186,8 +192,10 @@ validate `item.href` scheme (`http(s)`) before emitting it as a link.
   of two different objects. S3 provides ETags; send `If-Range` with the stored
   ETag (persist it next to the `.part`), and fall back to a restart on
   mismatch.
-- No checksum verification. S3 exposes ETag (MD5 for single-part uploads) via
-  HEAD; verifying when available is cheap insurance.
+- ~~No checksum verification. S3 exposes ETag (MD5 for single-part uploads) via
+  HEAD; verifying when available is cheap insurance.~~ ✅ **Fixed** — the
+  finished file is hashed and compared against a single-part ETag's MD5 when the
+  server exposes one (`verify=True` default; multipart ETags skipped).
 
 ### 3.3 XML parsing with stdlib `ElementTree` (low, defense-in-depth)
 
@@ -460,7 +468,7 @@ warns a full index build "takes a while." Two structural improvements:
 
 | # | Recommendation | Where | Effort |
 |---|---|---|---|
-| 5 | ✅ **Done.** `download_url` verifies received bytes against `Content-Length` (raising `DownloadError` on a short read and on a mid-stream break, keeping the `.part` for resume), and sends `If-Range` + a stored ETag on resume so a changed object restarts cleanly instead of splicing | `download.py` | small |
+| 5 | ✅ **Done.** `download_url` verifies received bytes against `Content-Length` (raising `DownloadError` on a short read and on a mid-stream break, keeping the `.part` for resume), sends `If-Range` + a stored ETag on resume so a changed object restarts cleanly instead of splicing, and (default `verify=True`) hashes the finished file against a single-part ETag's MD5 to catch on-the-wire corruption, discarding the corrupt `.part` on mismatch | `download.py` | small |
 | 6 | ✅ **Done.** `default_session()` mounts an `HTTPAdapter` with `Retry(total=3, backoff_factor=0.5, status_forcelist=(429,500,502,503,504))` on `GET`/`HEAD`; every caller inherits it | `_http.py` | ~5 lines |
 | 7 | Escape all remote-derived strings in `viz._popup_html`; validate href scheme | `viz.py:159-208` | small |
 | 8 | ✅ **Done.** `_classify_asset` now matches `"TIF"` against the already-upper-cased `name` (the lowercase `"tif"` was dead code), so a GeoTIFF that declares a plain `image/tiff` media type is classified as GEC instead of being dropped; added a regression test and deleted the TODO entry | `models.py`, `tests/test_models.py`, `TODO.md` | ~5 lines |

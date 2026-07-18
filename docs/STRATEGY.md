@@ -1237,6 +1237,25 @@ same 500 lines of glue first, and many give up."*
 > heavier calibration-oriented job — and the maintainer-side adoption moves (5.3
 > registries, 5.6 talking to Umbra) are unchanged and non-code.
 >
+> **Update (2026-07-18):** the **download path now verifies content integrity, not
+> just length** (`CODEBASE_ANALYSIS.md` §3.2 / P1 #5 — supporting infrastructure,
+> §7). Strategy is only as credible as the project's reliability, and the library's
+> core job is fetching data — often multi-GB SAR products — from a public bucket.
+> The HTTP hardening already retried transient failures and verified the byte count
+> and resume validator (`If-Range` + stored ETag); the one gap left was that a body
+> corrupted *in transit* still passed a correct `Content-Length`. `download_url`
+> now closes it: when the server exposes a single-part S3 `ETag` (the object's hex
+> MD5) it streams the finished file through MD5 and compares (`verify=True`
+> default), so silent on-the-wire corruption fails loudly with a `Checksum
+> mismatch` instead of landing a full-but-wrong file — and the corrupt `.part` is
+> discarded so a retry re-downloads cleanly rather than "resuming" it. Multipart
+> ETags (`"<hash>-<n>"`) aren't a plain MD5 and are skipped; `verify=False` opts
+> out. Not a new capability — the reliability floor under every download every
+> capability already shipped depends on, stdlib-only (`hashlib`), no new dependency,
+> offline-tested with a known body + its MD5. This closes the last open item in
+> `TODO.md`'s download-hardening ledger; the strategic gaps above are unchanged and
+> largely non-code.
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

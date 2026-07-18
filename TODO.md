@@ -430,24 +430,28 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ---
 
-## Download: verify the ETag checksum, not just the byte count
-
-- **Surfaced in:** the HTTP/download hardening PR (`docs/CODEBASE_ANALYSIS.md`
-  P1 #5 / §3.2).
-- **Code:** `src/umbra_py/download.py` (`download_url`).
-
-`download_url` now verifies the received byte count against `Content-Length` and
-uses `If-Range` + a stored ETag so a resume can't splice two different objects.
-The remaining §3.2 item is *content* verification: S3's ETag is the MD5 of the
-object for single-part uploads (no `-` suffix), so hashing the finished file and
-comparing to the stored ETag would catch on-the-wire corruption that a correct
-length can't. Skip the check when the ETag is multipart (`"<hash>-<n>"`), where
-it isn't a plain MD5. Small, and testable offline with a known body + its MD5.
-
----
-
 ## Done
 
+- **Download content-integrity verification against the S3 ETag MD5
+  (`docs/CODEBASE_ANALYSIS.md` P1 #5 / §3.2).** `download_url` already verified
+  the received byte count against `Content-Length` and used `If-Range` + a stored
+  ETag so a resume can't splice two objects; this closes the remaining §3.2 item —
+  *content* verification. When the server exposes a single-part S3 `ETag` (the
+  object's hex MD5) and `verify=True` (the default), the finished file is streamed
+  through MD5 and compared, so on-the-wire corruption a correct length can't catch
+  fails loudly with a `Checksum mismatch` `DownloadError`. A mismatch means the
+  complete-length bytes are wrong (a resume can't repair them), so the `.part` and
+  its `.etag` validator are discarded and a retry re-downloads cleanly rather than
+  "resuming" a full-but-corrupt file. Multipart ETags (`"<hash>-<n>"`) are not a
+  plain MD5 of the bytes, so `_single_part_md5` skips them rather than raising a
+  spurious mismatch; `verify=False` opts out for callers that don't want the extra
+  read of a multi-GB file (it threads through `download_asset` / `download_item`
+  via `**kwargs`). New helpers `_single_part_md5` (quote/weak-prefix/case
+  normalization, `-<n>` rejection) and `_file_md5` (streamed, memory-bounded);
+  fully offline-tested in `tests/test_download.py` (matching MD5 passes,
+  corrupt-body mismatch discards the `.part`, multipart-ETag skip, `verify=False`
+  opt-out, and a resumed append verifying the *whole* object's MD5). No new
+  dependency (stdlib `hashlib`), no model call.
 - **Publish + fetch the whole-catalog `catalog.pmtiles` basemap (`umbra tiles
   --fetch`).** The weekly `publish-index.yml` workflow now tiles the freshly
   built index (`umbra tiles --local`, no second crawl) into a single-file
