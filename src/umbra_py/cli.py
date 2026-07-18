@@ -18,7 +18,7 @@ from .catalog import UmbraCatalog
 from .chips import CHIPPABLE_ASSETS
 from .constants import CANOPY_TOKEN_ENV, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
-from .convert import RESAMPLING_METHODS
+from .convert import RESAMPLING_METHODS, RTC_MODELS
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
@@ -1346,6 +1346,18 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     help="Reference incidence angle (degrees) the --rtc flattening normalises to. "
     "Omit to use the scene incidence angle, which leaves flat terrain unchanged.",
 )
+@click.option(
+    "--rtc-model",
+    type=click.Choice(list(RTC_MODELS), case_sensitive=False),
+    default="cosine",
+    show_default=True,
+    help="Terrain-flattening model for --rtc. 'cosine' scales by "
+    "cos(reference)/cos(local_incidence) (the 3-D local incidence angle); 'area' "
+    "scales by sin(local_range_incidence)/sin(reference), the projected-area / "
+    "foreshortening correction in the range plane, which targets range "
+    "foreshortening and layover. A first-order step toward gamma-nought area "
+    "normalisation, not a calibrated product.",
+)
 def convert(
     src,
     dst,
@@ -1359,6 +1371,7 @@ def convert(
     geoid,
     rtc,
     rtc_ref_angle,
+    rtc_model,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
@@ -1421,6 +1434,7 @@ def convert(
             geoid=geoid,
             rtc=rtc,
             rtc_reference_deg=rtc_ref_angle,
+            rtc_model=rtc_model.lower(),
         )
     if rtc:
         kind = "radiometrically terrain-flattened COG"

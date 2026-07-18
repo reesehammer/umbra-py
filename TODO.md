@@ -138,10 +138,27 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   rasterio, wired in through a `post_warp` hook on `_warp_gcps_to_cog`. DEM gaps
   and radar-shadow slopes degrade gracefully (factor clamped to ±10 dB, gaps pass
   through unchanged). No model call, no new dependency.
-- **MultiRTC interop / full gamma-nought RTC.** The `--rtc` above is the
-  *geometric* cosine correction. The *radiometric* remainder — full gamma-nought
-  illuminated-area normalisation (integrating the projected local illuminated area
-  per pixel rather than a per-pixel cosine) and interop with
+- ~~**Projected-area (foreshortening) RTC model.**~~ ✅ **Done** (`umbra convert
+  --rtc --rtc-model area` / `sicd_to_geocoded_cog(rtc_model="area")`). The default
+  `--rtc` uses the 3-D local incidence angle in a *cosine* correction, which folds
+  the azimuth-direction tilt (which does not foreshorten) into the correction. The
+  `area` model scales power by `sin(local_range_incidence)/sin(reference)`,
+  measuring incidence in the *range–vertical* plane (`_range_local_incidence`,
+  `_foreshortening_factor`), so it corrects the range-direction foreshortening and
+  layover that dominate radiometric terrain distortion while leaving a pure azimuth
+  slope unchanged. On flat terrain both models reduce to the scene incidence, so
+  only slopes change; DEM gaps and layover degrade gracefully (factor one over
+  gaps, floored/clamped in layover). New public constant `RTC_MODELS`; `rtc_model`
+  defaults to `"cosine"`, so existing calls are unchanged. Pure-numpy core, no model
+  call, no new dependency, offline-tested in `tests/test_convert.py` (flat /
+  range-ramp / azimuth-slope geometry, the cosine-vs-area distinction, layover/gap
+  handling, end-to-end + CLI).
+- **MultiRTC interop / full calibrated gamma-nought RTC.** Both `--rtc` models above
+  are honest *geometric* first-order corrections (cosine of the 3-D local incidence;
+  the range-plane foreshortening area factor). The *fully calibrated* remainder —
+  full gamma-nought illuminated-area **facet integration** (integrating the projected
+  local illuminated area per pixel over the DEM in image space, rather than the
+  per-pixel range-plane approximation `area` ships) and interop with
   [MultiRTC](https://github.com/MultiSAR/MultiRTC) — is a heavier,
   calibration-oriented job (Umbra's open products are not radiometrically
   calibrated), and remains open under 5.5.
