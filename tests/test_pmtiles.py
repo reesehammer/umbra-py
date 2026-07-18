@@ -289,6 +289,45 @@ def test_metadata_advertises_the_vector_layer():
     assert set(doc["vector_layers"][0]["fields"]) >= {"id", "place", "product", "date"}
 
 
+def _metadata_doc(archive: bytes) -> dict:
+    import json
+
+    header = _parse_header(archive)
+    meta = gzip.decompress(archive[header["meta_off"] : header["meta_off"] + header["meta_len"]])
+    return json.loads(meta)
+
+
+def test_metadata_records_filter_facets():
+    # The viewer builds its filter controls from these, so they must reflect the
+    # tiled items exactly (distinct products, and the [min, max] date span).
+    items = [
+        _item("a", 0.0, 0.0, task="Site A"),
+        _item("b", 1.0, 1.0, task="Site B"),
+    ]
+    # Give one item a different product and a later date so the facets are real.
+    items[1].properties["sar:product_type"] = "SICD"
+    items[1].properties["datetime"] = "2025-01-15T00:00:00Z"
+
+    doc = _metadata_doc(pmtiles.build_pmtiles(items, max_zoom=2))
+    assert doc["umbra:products"] == ["GEC", "SICD"]  # sorted, distinct
+    assert doc["umbra:date_min"] == "2024-05-04"
+    assert doc["umbra:date_max"] == "2025-01-15"
+
+
+def test_tiled_point_prefers_the_baked_place_label():
+    # Every other read surface prefers the baked reverse-geocoded label over the
+    # task codename (CatalogIndex.bake_places); the tiled catalog must match, so
+    # the whole-catalog view labels a point "Reykjavík, Iceland", not "Site A".
+    item = _item("scene-1", -21.9, 64.1, task="Iceland_Nov-2025")
+    item.place = "Reykjavík, Iceland"
+    archive = pmtiles.build_pmtiles([item], min_zoom=0, max_zoom=2)
+    header = _parse_header(archive)
+    props = _decode_mvt_points(_tile_bytes(archive, header, pmtiles.zxy_to_tileid(0, 0, 0)))
+    assert props[0]["place"] == "Reykjavík, Iceland"
+    # And it flows into the facet-free metadata path without disturbing products.
+    assert _metadata_doc(archive)["umbra:products"] == ["GEC"]
+
+
 def test_features_and_properties_survive_the_round_trip():
     items = [
         _item("scene-1", -122.4, 37.8, task="San Francisco"),
@@ -361,6 +400,20 @@ def test_build_viewer_points_at_the_archive_and_layer():
     assert "CC BY 4.0" in html
     # The circle layer reads the same source-layer the archive writes.
     assert '"acquisitions"' in html or "acquisitions" in html
+
+
+def test_build_viewer_ships_the_interactive_filter_panel():
+    html = pmtiles.build_viewer("catalog.pmtiles")
+    # The filter panel container and its controls are in the page.
+    assert 'id="filter"' in html
+    assert "umbra-f-chip" in html
+    assert "Search site / id" in html
+    # It reads the archive's facets at runtime and narrows the layer via
+    # setFilter -- the wiring that makes it an explorer, not a static map.
+    assert "getMetadata" in html
+    assert 'setFilter("acq"' in html
+    assert "umbra:products" in html
+    assert "umbra:date_min" in html
 
 
 # --- CLI ------------------------------------------------------------------

@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The whole-catalog PMTiles viewer is now an interactive explorer
+  (`DEMO_APP_GAPS.md` Path A / `TODO.md` PMTiles follow-on).** `umbra tiles
+  --viewer` (and the published `catalog.html` / `umbra tiles --fetch --viewer`)
+  previously rendered the archive as a static, zoom-anywhere map. It now reads
+  the archive's own metadata and, when present, shows a filter panel — free-text
+  site/id search, product-type toggles, and a date-range pair — that narrows the
+  visible acquisitions client-side via MapLibre `setFilter`, without re-querying
+  or holding the whole item list. This brings `umbra demo`'s filter-and-click
+  experience to *whole-catalog* scale (which the demo's inline-JSON page cannot
+  hold at once), on the surface that is already tiled. `build_pmtiles` records the
+  distinct product types and the date span under `umbra:products` /
+  `umbra:date_min` / `umbra:date_max` metadata keys (derived from the tiled
+  items, so they cannot drift), and `build_viewer` builds the controls from them
+  at runtime — so it works for a locally built *and* a fetched/published archive.
+  An older `.pmtiles` without those facets simply leaves the panel hidden, so it
+  renders exactly as before. Stdlib-only, no new dependency, offline-tested in
+  `tests/test_pmtiles.py` (the facets round-trip through the archive metadata; the
+  viewer ships the panel + `getMetadata` + `setFilter` wiring).
+- **Tiled points now carry the baked place label.** `umbra tiles` labelled each
+  acquisition with the Umbra task *codename*; it now prefers the baked
+  reverse-geocoded label (`item.place`, from `CatalogIndex.bake_places`) when the
+  index has one — the same preference every other read surface holds (map / serve
+  / export / `to_llm_context` / demo), so a baked snapshot's whole-catalog map and
+  the viewer's site search show real geographic names ("Reykjavík, Iceland"), not
+  campaign codenames. Falls back to the task name when no label is baked.
 - **`umbra gallery --local` renders from baked thumbnails (`DEMO_APP_GAPS.md`
   G6).** The thumbnail bake shipped the primitive (`umbra index bake-thumbnails`)
   and the `umbra serve` / `umbra demo` consumers, but the *gallery* contact sheet

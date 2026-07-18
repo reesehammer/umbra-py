@@ -173,7 +173,15 @@ calls them, plus a `swipe` endpoint.
   Tile + PMTiles v3 encoder is pure standard library and offline-testable by
   decoding its own output; `--viewer` emits a self-contained MapLibre GL page
   over the archive. This was the build-pipeline step Path A step 3 named as
-  open.
+  open. ✅ **The whole-catalog viewer is now also interactive (R2 at whole-catalog
+  scale):** `build_pmtiles` records the tiled catalog's distinct product types and
+  date span in the archive's `umbra:*` metadata, and the MapLibre viewer reads
+  them to show a filter panel (free-text site/id search, product-type toggles, a
+  date-range pair) that narrows the visible acquisitions client-side via
+  `setFilter` — so the zoom-anywhere whole-archive map is filter-and-click, not
+  just static pan/zoom, without holding the whole item list. Tiled points also now
+  carry the baked `item.place` label (real geographic names), matching every other
+  read surface.
 - `--imagery` (eager overlays) base64-embeds a PNG per item — unusable beyond
   a few dozen items (the docstrings say so honestly). `--lazy-imagery` is the
   right pattern and already proven in-repo; a demo app should generalize it
