@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Standing-analyst monitoring notebook — `examples/06_site_monitoring.ipynb`
+  (`AI_INTEGRATION_IDEAS.md` C3 / `STRATEGY.md` 5.4).** SAR's killer application is
+  monitoring — the same site re-imaged pass after pass — and the primitives for it
+  (`umbra watch`, `umbra change`, the `watch_site` MCP tool) had all shipped
+  without one runnable example wiring them into the standing-analyst loop. This
+  adds it: the notebook stands up a `watch()` over a repeat-imaged site, asserts
+  the first run reports every pass as new *and* an immediate re-run reports **zero**
+  (the idempotency a scheduler depends on), then hands the new passes to
+  `select_change_frames` → `save_change_composite` for the "new pass lands →
+  composite → notify" action, naming `umbra change --narrate`, `MetaWatchStore`
+  persistence and the `watch_site` MCP tool as the next steps. Like the rest of the
+  gallery it is self-checking (a small deterministic search with `assert`s in every
+  code cell, **no model call**) and guarded offline by `tests/test_examples.py`,
+  and it executes end-to-end under `pytest -m network` (`viz` extra for the
+  composite). The still-planned SICD-convert showcase notebook is renumbered `06`
+  → `07`.
 - **Baked SAR quicklook thumbnails in the catalog index — `umbra index
   bake-thumbnails` / `CatalogIndex.bake_thumbnails()` /
   `CatalogIndex.get_thumbnail()` (`docs/DEMO_APP_GAPS.md` G6).** Closes the last

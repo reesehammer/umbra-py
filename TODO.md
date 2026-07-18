@@ -343,13 +343,19 @@ called. The remaining C3 pieces build on it:
   deterministic callable; wrapping it as an MCP tool (returning the same JSON
   delta) would let an MCP client run the standing check conversationally, reusing
   the state store unchanged.
-- **A packaged monitoring recipe/notebook.** The base example gallery has
-  shipped (`examples/01_hello_umbra.ipynb`, `02_download_and_open_gec.ipynb`,
-  `03_change_detection.ipynb`; `B3` / `STRATEGY.md` 5.4, guarded offline by
-  `tests/test_examples.py`). Still open: a *standing-analyst* notebook that wires
-  `umbra watch --json` → `select_change_frames` → `umbra change --narrate` into
-  one runnable example so the "new pass lands → composite → narration → notify"
-  loop ships as a copy-pasteable standing analyst, not just a set of primitives.
+- ~~**A packaged monitoring recipe/notebook.**~~ ✅ **Done**
+  (`examples/06_site_monitoring.ipynb`). The standing-analyst notebook wires
+  `umbra watch` → `select_change_frames` → `save_change_composite` into one
+  runnable, self-checking example: it stands up a watch over a repeat-imaged
+  site, asserts the first run reports every pass as new, asserts an immediate
+  re-run reports **zero** (the idempotency guarantee a scheduler depends on),
+  then composites the new passes into a change image. It holds the gallery's
+  grain (a small deterministic search with `assert`s in every code cell, no
+  model call — `umbra change --narrate` is described as the optional VLM
+  follow-on in prose), so it is guarded offline by `tests/test_examples.py` and
+  executes end-to-end under `pytest -m network`. The `viz` extra renders the
+  composite; the notebook also points at `MetaWatchStore` for cross-run
+  persistence and the `watch_site` MCP tool for the conversational path.
 
 ---
 
