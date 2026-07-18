@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Projected-area (foreshortening) RTC model — `umbra convert --rtc
+  --rtc-model area` (`STRATEGY.md` 5.5).** Radiometric terrain flattening (`--rtc`)
+  shipped as the geometric cosine correction `cos(reference)/cos(local_incidence)`,
+  which uses the full 3-D local incidence angle and so folds azimuth-direction tilt
+  into the correction. This adds a second, selectable model,
+  `sicd_to_geocoded_cog(rtc_model="area")` / `--rtc-model area`, that scales power
+  by `sin(local_range_incidence)/sin(reference)`: it measures incidence in the
+  *range–vertical* plane, so it targets the range-direction foreshortening and
+  layover that dominate radiometric terrain distortion — separating them from the
+  azimuth tilt that does not foreshorten. On flat terrain both reduce to the scene
+  incidence angle (default reference), so flat ground is left unchanged and only
+  slopes are corrected; DEM gaps and layover degrade gracefully (factor forced to
+  one over gaps, floored/clamped in layover). It is an honest first-order step
+  toward area-based gamma-nought normalisation, **not** the full illuminated-area
+  facet integration (Small 2011) or MultiRTC interop, which remain deferred. New
+  public constant `RTC_MODELS` and the `rtc_model=` keyword (default `"cosine"`,
+  so existing calls are unchanged); the physics is a pure-numpy core
+  (`_range_local_incidence`, `_foreshortening_factor`) with closed-form
+  planar-slope behaviour, **no model call and no new dependency**, offline-tested
+  in `tests/test_convert.py` (flat/range-ramp/azimuth-slope geometry, the
+  cosine-vs-area distinction, layover/gap handling, the end-to-end and CLI paths).
+  This advances the last remaining code item on `STRATEGY.md` 5.5's radiometric-RTC
+  line.
 - **stac-geoparquet chip manifest — `umbra chips --manifest chips.parquet`
   (`AI_INTEGRATION_IDEAS.md` C4 / `STRATEGY.md` 5.5).** `umbra chips` wrote its
   training-tile manifest as `.jsonl` (one record per line) or `.geojson` (a
