@@ -102,10 +102,14 @@ critical path to a demo application.
   `search`/`get` then yields the label on `UmbraItem.place`, so `umbra demo
   --local` (and any `--local` visual command) shows real geographic names
   instantly, with zero per-render geocoding, and `umbra index info` reports label
-  coverage. Still open: a precomputed **centroid** column (cheap — it is derived
-  from the stored bbox today) and a **cached thumbnail** bake (G6), plus wiring
-  the baked label through the map/gallery/serve popups too (a small follow-on —
-  see `TODO.md`).
+  coverage. ✅ **The baked label now flows through every read surface too:**
+  `UmbraItem.to_llm_context()` prefers it over the task codename, `umbra map` /
+  `--timeline` use it directly (so a fully-baked `--local` render never geocodes
+  at render time — the Nominatim session is built lazily only for still-unlabelled
+  items), `umbra serve` surfaces it as a namespaced `umbra:place` STAC property,
+  and the stac-geoparquet export carries `umbra:place` into the published
+  snapshot. Still open: a precomputed **centroid** column (cheap — it is derived
+  from the stored bbox today) and a **cached thumbnail** bake (G6).
 
 ### G3 — Application layer: a self-serve static explorer now ships (`umbra demo`)
 

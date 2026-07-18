@@ -68,6 +68,19 @@ def test_to_llm_context_has_explanations_and_license(sample_item_dict):
     assert products["GEC"]["url"].endswith("_GEC.tif")
 
 
+def test_to_llm_context_prefers_baked_place(sample_item_dict):
+    """A `CatalogIndex` search bakes a reverse-geocoded label onto `.place`;
+    the context card should surface it so an agent reasons about a real place
+    name, not the task codename."""
+    item = UmbraItem.from_dict(sample_item_dict, href="http://ex/item.json")
+    # Without a baked label the card falls back to the task codename.
+    assert item.place is None
+    assert item.to_llm_context()["place"] == item.task
+    # With one, the card prefers it.
+    item.place = "Reykjavík, Iceland"
+    assert item.to_llm_context()["place"] == "Reykjavík, Iceland"
+
+
 def test_geo_interface_item_is_a_feature(sample_item_dict):
     item = UmbraItem.from_dict(sample_item_dict)
     geo = item.__geo_interface__

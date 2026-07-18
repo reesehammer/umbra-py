@@ -1059,6 +1059,32 @@ def test_footprint_map_geocode_adds_location_row(monkeypatch, sample_item_dict):
     assert "Somewhere near" in html
 
 
+def test_footprint_map_prefers_baked_place(monkeypatch, sample_item_dict):
+    """When an item carries a baked `.place` (from `umbra index bake`), the map
+    uses it directly and never reaches for the network geocoder — a fully-baked
+    render stays offline even with geocode=True."""
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+
+    def _boom(*_a, **_k):
+        raise AssertionError("_reverse_geocode must not be called for a baked place")
+
+    monkeypatch.setattr(viz_mod, "_reverse_geocode", _boom)
+    monkeypatch.setattr(
+        viz_mod,
+        "_require_session_for_geocoding",
+        lambda: (_ for _ in ()).throw(AssertionError("no session for a baked place")),
+    )
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    item.place = "Reykjavík, Iceland"
+    html = viz_mod.footprint_map([item], geocode=True).get_root().render()
+    assert "Location" in html
+    assert "Reykjav" in html
+
+
 def test_footprint_map_default_does_not_geocode(monkeypatch, sample_item_dict):
     """The library default is opt-in; library callers don't pay for a
     surprise network call when they just want a footprint map."""
@@ -1175,6 +1201,32 @@ def test_timeline_map_geocode_threads_label_into_popup(monkeypatch, sample_item_
     html = timeline_map([item], geocode=True).get_root().render()
     assert "Location" in html
     assert "Somewhere near" in html
+
+
+def test_timeline_map_prefers_baked_place(monkeypatch, sample_item_dict):
+    """A baked `.place` is threaded into the timeline popup without a network
+    geocode, matching footprint_map."""
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+    from umbra_py import viz as viz_mod
+
+    _reset_geocode_state()
+
+    def _boom(*_a, **_k):
+        raise AssertionError("_reverse_geocode must not be called for a baked place")
+
+    monkeypatch.setattr(viz_mod, "_reverse_geocode", _boom)
+    monkeypatch.setattr(
+        viz_mod,
+        "_require_session_for_geocoding",
+        lambda: (_ for _ in ()).throw(AssertionError("no session for a baked place")),
+    )
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    item.place = "Reykjavík, Iceland"
+    html = timeline_map([item], geocode=True).get_root().render()
+    assert "Location" in html
+    assert "Reykjav" in html
 
 
 def test_timeline_map_default_does_not_geocode(monkeypatch, sample_item_dict):

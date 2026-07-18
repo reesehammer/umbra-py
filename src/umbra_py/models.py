@@ -421,7 +421,10 @@ class UmbraItem:
         return {
             "id": self.id,
             "datetime": self.datetime.isoformat() if self.datetime else None,
-            "place": self.task,
+            # Prefer the baked reverse-geocoded label (e.g. "Reykjavík,
+            # Iceland") a `CatalogIndex` search yields on `.place`; fall back to
+            # the task codename so an item from a live walk still carries a name.
+            "place": self.place or self.task,
             "bbox": list(self.bbox) if self.bbox else None,
             "platform": self.platform,
             "instrument_mode": self.instrument_mode,

@@ -457,6 +457,12 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     if item.bbox is not None:
         feature["bbox"] = list(item.bbox)
     feature.setdefault("properties", dict(item.properties))
+    # Surface the baked reverse-geocoded label (from `umbra index bake`) as a
+    # namespaced property so a STAC client shows a real place name, not just
+    # the task codename. Only when the index resolved one and the raw item
+    # didn't already carry it.
+    if item.place and "umbra:place" not in feature["properties"]:
+        feature["properties"]["umbra:place"] = item.place
     feature.setdefault("assets", dict(item.assets))
 
     item_path = f"{base}/collections/{COLLECTION_ID}/items/{item.id}"

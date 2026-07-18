@@ -93,6 +93,17 @@ def test_item_to_stac_stamps_collection_and_rewrites_links(sample_item_dict):
     assert {link["rel"] for link in feature["links"]} == {"self", "root", "parent", "collection"}
 
 
+def test_item_to_stac_surfaces_baked_place(sample_item_dict):
+    """A baked `.place` (from `umbra index bake`) is surfaced as the namespaced
+    `umbra:place` property, so a STAC client shows a real place name."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_href(0))
+    # Absent by default (a live-walk item carries no baked label).
+    assert "umbra:place" not in serve.item_to_stac(item, "http://x")["properties"]
+    item.place = "Reykjavík, Iceland"
+    feature = serve.item_to_stac(item, "http://x")
+    assert feature["properties"]["umbra:place"] == "Reykjavík, Iceland"
+
+
 def test_parse_bbox_accepts_2d_and_3d():
     assert serve.parse_bbox("1,2,3,4") == (1.0, 2.0, 3.0, 4.0)
     assert serve.parse_bbox("1,2,5,3,4,6") == (1.0, 2.0, 3.0, 4.0)  # z dropped

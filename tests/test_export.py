@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from umbra_py.exceptions import UmbraError
-from umbra_py.export import export_geoparquet
+from umbra_py.export import _export_doc, export_geoparquet
 from umbra_py.models import UmbraItem
 
 _BUCKET = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog"
@@ -121,6 +121,45 @@ def test_export_keeps_existing_self_link(tmp_path):
     assert self_links[0]["href"] == existing["href"]
     # The injection above must not have mutated the item's raw document.
     assert item.raw["links"] == [existing]
+
+
+def test_export_doc_injects_baked_place():
+    """A baked `.place` (from `umbra index bake`) is carried into the exported
+    STAC properties as `umbra:place`, without mutating the item's raw doc — so
+    the published snapshot has a real place name and no consumer re-geocodes."""
+    item = _make_item("a", (0, 0, 1, 1))
+    item.place = "Reykjavík, Iceland"
+    doc = _export_doc(item)
+    assert doc["properties"]["umbra:place"] == "Reykjavík, Iceland"
+    assert "umbra:place" not in (item.raw.get("properties") or {})
+
+
+def test_export_doc_without_place_leaves_properties_untouched():
+    item = _make_item("a", (0, 0, 1, 1))
+    assert item.place is None
+    assert "umbra:place" not in _export_doc(item).get("properties", {})
+
+
+def test_export_doc_keeps_existing_place_property():
+    """If the raw item already declares `umbra:place`, the baked label never
+    overrides it (the source document wins)."""
+    item = _make_item("a", (0, 0, 1, 1))
+    item.raw["properties"]["umbra:place"] = "From the source"
+    item.place = "Baked"
+    assert _export_doc(item)["properties"]["umbra:place"] == "From the source"
+
+
+def test_export_round_trip_carries_baked_place(tmp_path):
+    """End to end: a baked `.place` reaches the published parquet as
+    `umbra:place`, so a DuckDB / geopandas consumer reads a real place name."""
+    pytest.importorskip("stac_geoparquet")
+    item = _make_item("a", (0, 0, 1, 1))
+    item.place = "Reykjavík, Iceland"
+    out = tmp_path / "catalog.parquet"
+
+    assert export_geoparquet([item], out) == 1
+    [back] = _read_back(out)
+    assert back["properties"]["umbra:place"] == "Reykjavík, Iceland"
 
 
 def test_cli_index_export(tmp_path):

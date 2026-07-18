@@ -21,12 +21,20 @@ label on `UmbraItem.place` and `umbra demo` shows real geographic names with no
 render-time geocoding. This closed G2's "no cached place label" denormalization.
 Follow-ons that build on it, none a blocker:
 
-- **Wire the baked label through the other consumers.** `umbra demo` reads
-  `UmbraItem.place`; the map/gallery popups (`viz._reverse_geocode` at render
-  time), `umbra serve`'s item documents, `to_llm_context()`, and the geoparquet
-  export could all prefer the baked label when present (falling back to live
-  geocoding only where it is absent), turning the one bake into instant labels
-  across every surface.
+- ~~**Wire the baked label through the other consumers.**~~ ✅ **Done.**
+  `UmbraItem.to_llm_context()` now prefers `.place` over the task codename;
+  `viz.footprint_map` / `timeline_map` (`umbra map` / `--timeline`) use `.place`
+  directly and build the Nominatim session lazily, so a fully-baked `--local`
+  render never geocodes at render time (falling back to a live call only for
+  items still lacking a label); `umbra serve`'s `item_to_stac` surfaces the label
+  as a namespaced `umbra:place` STAC property; and the stac-geoparquet export
+  (`export._export_doc`) carries `umbra:place` into the published snapshot. In
+  each case the baked label is preferred only when present and never overrides a
+  value the source document already carries. Deterministic, no new dependency, no
+  model call; offline-tested in `tests/test_models.py`, `test_viz.py`,
+  `test_serve.py`, and `test_export.py`.
+  (The gallery contact sheet groups by task, not a per-item place popup, so it
+  has no label to wire.)
 - **Bake per-item thumbnails too (G6).** `bake_places` establishes the build-time
   denormalization pattern (idempotent, injectable, additive column); a companion
   `bake_thumbnails` (a small PNG per acquisition via the reusable
