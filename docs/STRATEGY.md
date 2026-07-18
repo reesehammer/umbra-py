@@ -1385,6 +1385,36 @@ same 500 lines of glue first, and many give up."*
 > integration / MultiRTC interop and the maintainer-side adoption moves (5.3
 > registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18, concurrent index):** the **catalog index is now safe for
+> concurrent, multi-process access** (`CODEBASE_ANALYSIS.md` §4.5 — supporting
+> infrastructure, §7). Discovery is the moat (§3), and the way that moat now
+> reaches every consumer is the *published* `catalog.db` snapshot users `umbra
+> index fetch` — which turned the index from a private single-process cache into
+> a *shared* artifact several processes read at once: a running `umbra serve`
+> (itself a web server answering concurrent requests), `umbra demo` and the MCP
+> server all read it while a CLI writer (`umbra index update` / `build` /
+> `bake-*`) may be refreshing it in another terminal. The connection was still
+> opened with SQLite's single-process defaults (rollback journal, no busy
+> timeout), so a reader that arrived while a writer held a transaction could fail
+> outright with `database is locked` — a real failure mode on exactly the shared
+> surfaces the discovery story now rests on. `CatalogIndex._configure_connection`
+> closes that: every connection sets a `busy_timeout` (a contended access waits
+> up to 5 s rather than erroring at once) and switches the file to WAL journal
+> mode (best-effort — swallowed on a read-only medium), under which a reader never
+> blocks on the writer and a single writer never blocks readers. Not a new
+> capability — the reliability floor under the prebuilt-index distribution the
+> whole discovery story now depends on (§7). It holds the project's grain and
+> testability (§3): **no model is called** and **no dependency is added** (two
+> stdlib `PRAGMA`s), WAL needs only the writable file-and-directory the index
+> already required (it ensures the schema on every open), `check_same_thread`
+> stays at its default because `umbra serve` already opens a fresh backend per
+> request, and the whole path is offline-tested (the PRAGMAs, WAL persistence
+> across reopen, and a second connection reading during an open write
+> transaction). The strategic gaps above are unchanged and largely non-code:
+> 5.5's fully-calibrated image-space facet integration / MultiRTC interop and the
+> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
+> Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

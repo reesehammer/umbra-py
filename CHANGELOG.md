@@ -664,6 +664,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   points at `--bbox`.
 
 ### Fixed
+- **Catalog index is now safe for concurrent, multi-process access
+  (`docs/CODEBASE_ANALYSIS.md` §4.5).** The published `catalog.db` snapshot
+  (`umbra index fetch`) is a *shared* artifact — read by `umbra serve`, `umbra
+  demo` and the MCP server while a CLI writer (`umbra index update` / `build` /
+  `bake-*`) may be refreshing it in another process — but `CatalogIndex` opened
+  its connection with SQLite's single-process defaults (rollback journal, no busy
+  timeout), so a reader that arrived while a writer held a transaction could fail
+  with `database is locked`. `CatalogIndex._configure_connection` now sets a
+  `busy_timeout` (5 s — a contended access waits rather than erroring at once) and
+  switches the file to WAL journal mode (best-effort, swallowed on a read-only
+  medium), under which a reader never blocks on the writer and a single writer
+  never blocks readers. WAL needs only the writable file and directory the index
+  already required (it ensures the schema on every open), so it tightens nothing;
+  `check_same_thread` is left at its default because `umbra serve` already opens a
+  fresh backend per request. No model call, no new dependency (two stdlib
+  `PRAGMA`s); offline-tested in `tests/test_index.py` (the PRAGMAs, WAL
+  persistence across reopen, and a second connection reading during an open write
+  transaction).
 - **Asset classifier now recognises a plain `image/tiff` GeoTIFF
   (`docs/CODEBASE_ANALYSIS.md` P1 #8).** `_classify_asset` tested `"tif" in
   name`, but `name` is upper-cased (`f"{key} {href}".upper()`), so the lowercase
