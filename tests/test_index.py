@@ -544,6 +544,40 @@ def test_cli_gallery_local_reads_index(tmp_path, monkeypatch):
     assert "data:image/png;base64,Z" in out.read_text()
 
 
+def test_cli_gallery_local_uses_baked_thumbnails(tmp_path, monkeypatch):
+    """`umbra gallery --local` embeds thumbnails already baked into the index
+    (umbra index bake-thumbnails) straight from local bytes -- no S3 stream at
+    all when every tile is baked."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import viz as viz_mod
+
+    # Build an index and bake fake PNG bytes with an injectable renderer (no
+    # rasterio, no network) -- the same primitive umbra index bake-thumbnails uses.
+    with _index(tmp_path, items=(_A, _B)) as idx:
+        idx.bake_thumbnails(renderer=lambda it: b"\x89PNG-" + it.id.encode())
+        idx.commit()
+    db = str(tmp_path / "catalog.db")
+
+    # Streaming any thumbnail is a bug here -- every tile is baked.
+    def boom(*_a, **_k):
+        raise AssertionError("streamed a baked thumbnail")
+
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", boom)
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+
+    out = tmp_path / "gallery.html"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["gallery", "--local", "--index-db", db, "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "from baked thumbnails" in result.output
+    text = out.read_text()
+    assert viz_mod._png_data_uri(b"\x89PNG-a") in text
+    assert viz_mod._png_data_uri(b"\x89PNG-b") in text
+
+
 # -- incremental update ---------------------------------------------------------
 
 

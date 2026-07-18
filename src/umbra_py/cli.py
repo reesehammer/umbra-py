@@ -101,6 +101,30 @@ def _index_path(db_path: str | None) -> Path:
     return Path(db_path) if db_path else default_index_path()
 
 
+def _baked_thumbnails(items: list[UmbraItem], db_path: str | None) -> dict[str, bytes]:
+    """Return a ``{id: PNG bytes}`` map of thumbnails already baked into the local
+    index (``umbra index bake-thumbnails``) for the given items.
+
+    Lets ``umbra gallery --local`` embed each preview straight from the index
+    instead of re-streaming a cloud-optimized overview from S3 -- instant,
+    offline, and (when every tile is baked) with no ``rasterio``. Items with no
+    baked thumbnail are simply absent from the map, so the gallery streams those
+    the usual way. An absent index yields an empty map (the render falls back to
+    streaming entirely), matching the "render it instead" contract of
+    :meth:`~umbra_py.index.CatalogIndex.get_thumbnail`.
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        return {}
+    baked: dict[str, bytes] = {}
+    with CatalogIndex(path) as idx:
+        for item in items:
+            png = idx.get_thumbnail(item.id)
+            if png is not None:
+                baked[item.id] = png
+    return baked
+
+
 def _built_note(built_at: object) -> str:
     """Human-readable build date with staleness for ``umbra index info``."""
     if not built_at:
@@ -2424,6 +2448,11 @@ def gallery(
     each tile linking to its STAC item with a footprint sketch. The missing
     "browse the catalog visually" primitive. Requires the viz extra
     (``pip install "umbra-py[viz]"``).
+
+    With --local (or --index-db), any thumbnail already baked into the index by
+    'umbra index bake-thumbnails' is embedded straight from local bytes -- no S3
+    stream, and no viz extra needed when every tile is baked -- so a baked index
+    renders the gallery instantly and offline.
     """
     if not out_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Gallery output must be an .html file.")
@@ -2446,7 +2475,20 @@ def gallery(
     if not items:
         raise click.ClickException("No items matched the search.")
 
-    with OrbitSpinner(f"Streaming {len(items)} SAR thumbnail(s)"):
+    # A --local gallery can serve any thumbnail already baked into the index
+    # (umbra index bake-thumbnails) straight from local bytes -- instant, offline,
+    # and skipping the S3 overview stream entirely. Only the rest are streamed.
+    baked = _baked_thumbnails(items, db_path) if (local or db_path is not None) else {}
+    n_baked = sum(1 for it in items if it.id in baked)
+    n_stream = len(items) - n_baked
+    if n_stream:
+        label = f"Streaming {n_stream} SAR thumbnail(s)"
+        if n_baked:
+            label += f" ({n_baked} from the baked index)"
+    else:
+        label = f"Loading {n_baked} baked SAR thumbnail(s)"
+
+    with OrbitSpinner(label):
         path = save_gallery(
             items,
             out_path,
@@ -2457,6 +2499,7 @@ def gallery(
             percentile=_parse_percentile(percentile),
             max_workers=workers,
             subtitle=_search_subtitle(place or area, bbox, start, end),
+            baked=baked,
         )
     if as_json:
         _emit_render_manifest(
@@ -2471,7 +2514,8 @@ def gallery(
             },
         )
     else:
-        click.echo(f"Wrote gallery of {len(items)} acquisition(s) to {path}")
+        note = f" ({n_baked} from baked thumbnails)" if n_baked else ""
+        click.echo(f"Wrote gallery of {len(items)} acquisition(s){note} to {path}")
 
 
 @cli.command()

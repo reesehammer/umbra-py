@@ -254,8 +254,15 @@ a quicklook render), so the flagship explorer opens with a radar picture rather
 than metadata alone — the heavier on-click "Get SAR image" COG overlay stays the
 deeper look. A scene with no baked thumbnail 404s and the element is dropped (no
 broken image); without `--server-url` the panel is unchanged and the page stays
-fully static. Optional polish that remains: the same preview in the `umbra
-gallery` contact sheet, and baking thumbnails into the published weekly snapshot.
+fully static. ✅ **The `umbra gallery` contact sheet now consumes the bake too:**
+a `--local` / `--index-db` gallery embeds any baked thumbnail straight from the
+index's `thumbnail` column (`viz.gallery(baked=…)` fed by
+`CatalogIndex.get_thumbnail`) instead of re-streaming the COG overview — instant,
+offline, and needing **no `viz` extra** when every tile is baked (the `rasterio`
+requirement is now raised only when a stream is actually needed); tiles missing
+from the bake still stream the usual way, and a plain live `umbra gallery` is
+unchanged. Optional polish that remains under G6: baking thumbnails into the
+published weekly snapshot (gated on egress, like the place-label bake).
 
 ### G7 — No packaging or hosting story
 

@@ -49,9 +49,19 @@ Follow-ons that build on it, none a blocker:
   `<img>` is dropped via `onerror` (no broken image), and without `--server-url`
   the panel is unchanged and the page stays static. Reuses the one `serverBase`
   the analyze panel already computes; the remote item id is url-encoded into the
-  path. Offline-tested in `tests/test_demo.py`. Remaining optional polish under
-  G6: the same preview in the `umbra gallery` *contact sheet* client, and baking
-  thumbnails into the published weekly snapshot (gated on egress, like the
+  path. Offline-tested in `tests/test_demo.py`.
+  ~~The same preview in the `umbra gallery` *contact sheet* client.~~ ✅ **Done.**
+  A `--local` / `--index-db` gallery now embeds any thumbnail already baked into
+  the index straight from local bytes (`viz.gallery(baked=…)` fed by
+  `CatalogIndex.get_thumbnail`, built in the CLI by `_baked_thumbnails`) instead
+  of re-streaming the COG overview — instant, offline, and needing **no `viz`
+  extra** when every tile is baked (the `_require("rasterio")` fail-fast is now
+  raised only when a stream is actually needed). Tiles missing from the bake still
+  stream the usual way, and a plain live `umbra gallery` is unchanged.
+  Offline-tested in `tests/test_viz.py` (baked-only needs no viz extra; baked +
+  streamed mix) and `tests/test_index.py` (`umbra gallery --local` over a
+  bake-thumbnailed index streams nothing). Remaining optional polish under G6:
+  baking thumbnails into the published weekly snapshot (gated on egress, like the
   place-label bake below).
 - **A precomputed centroid column.** The centroid is derived from the stored bbox
   today (cheap), so a `centroid` column is only worth adding if a consumer needs

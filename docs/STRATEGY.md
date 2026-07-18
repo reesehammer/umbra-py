@@ -1360,6 +1360,31 @@ same 500 lines of glue first, and many give up."*
 > image-space facet integration / MultiRTC interop and the maintainer-side
 > adoption moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-18, offline gallery):** the **`umbra gallery` contact sheet
+> now renders from the baked index** — a `--local` / `--index-db` gallery embeds
+> any thumbnail already baked into `catalog.db` (`umbra index bake-thumbnails`)
+> straight from local bytes (`viz.gallery(baked=…)` fed by
+> `CatalogIndex.get_thumbnail`) instead of re-streaming each scene's
+> cloud-optimized overview from S3 (`DEMO_APP_GAPS.md` G6). Discovery is the moat
+> (§3), and *visual* discovery — browse-before-you-download — is the gallery's job;
+> making it answer from the published snapshot moves it onto the same fast, offline
+> path `search` / `map` / `demo` already take, so the whole-catalog contact sheet
+> renders in milliseconds rather than N network-bound COG fetches. It is pure
+> funnel-widening infrastructure (§1): a fresh install that `umbra index fetch`ed a
+> baked snapshot browses the archive visually with **no `viz` extra at all** (the
+> `rasterio` fail-fast is now raised only when an un-baked tile actually needs a
+> stream), so the visual front door opens in a core install. Not a new capability —
+> the render-side reuse of the shipped `bake_thumbnails` primitive that `umbra
+> serve` and `umbra demo` already consume, so the three preview surfaces now share
+> one cache and cannot drift. It holds the project's grain and testability (§3): no
+> model, no new dependency, `baked=None` leaves a plain live `umbra gallery`
+> byte-for-byte unchanged, and the whole path (baked-only needs no viz extra, the
+> baked+streamed mix, and `umbra gallery --local` streaming nothing over a
+> bake-thumbnailed index) is offline-tested. The remaining strategic gaps are
+> unchanged and largely non-code: 5.5's fully-calibrated image-space facet
+> integration / MultiRTC interop and the maintainer-side adoption moves (5.3
+> registries, PyPI publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

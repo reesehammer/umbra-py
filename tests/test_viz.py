@@ -318,6 +318,63 @@ def test_gallery_requires_viz_extra(monkeypatch, sample_item_dict):
         viz_mod.gallery([UmbraItem.from_dict(sample_item_dict)])
 
 
+def test_gallery_baked_thumbnail_embedded_without_streaming(monkeypatch, sample_item_dict):
+    """An item whose id is in ``baked`` is embedded straight from those PNG bytes
+    -- the S3 streaming path (``_thumbnail_data_uri``) is never called."""
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+
+    def boom(*_a, **_k):  # streaming must not happen for a baked tile
+        raise AssertionError("streamed a baked thumbnail")
+
+    monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", boom)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    png = b"\x89PNG-baked-bytes"
+    html = viz_mod.gallery([item], baked={item.id: png})
+
+    assert viz_mod._png_data_uri(png) in html
+
+
+def test_gallery_all_baked_needs_no_rasterio(monkeypatch, sample_item_dict):
+    """A fully-baked gallery is pure standard library -- it must not require the
+    viz extra, so a core install can render it offline."""
+    from umbra_py import viz as viz_mod
+    from umbra_py.exceptions import MissingDependencyError
+
+    def no_rasterio(module):
+        if module == "rasterio":
+            raise MissingDependencyError("rasterio missing")
+
+    monkeypatch.setattr(viz_mod, "_require", no_rasterio)
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    png = b"\x89PNG-baked"
+    # Must not raise despite rasterio being unavailable: nothing is streamed.
+    html = viz_mod.gallery([item], baked={item.id: png})
+    assert viz_mod._png_data_uri(png) in html
+
+
+def test_gallery_mixes_baked_and_streamed(monkeypatch, sample_item_dict):
+    """With one item baked and one not, the baked tile comes from its bytes and
+    the other is streamed the usual way -- both land on the sheet."""
+    from umbra_py import viz as viz_mod
+
+    monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        viz_mod, "_thumbnail_data_uri", lambda item, **_k: f"data:image/png;base64,STREAM-{item.id}"
+    )
+
+    baked_item = UmbraItem.from_dict(sample_item_dict)
+    fresh_item = UmbraItem.from_dict({**sample_item_dict, "id": "fresh"})
+    png = b"\x89PNG-baked"
+    html = viz_mod.gallery([baked_item, fresh_item], baked={baked_item.id: png})
+
+    assert viz_mod._png_data_uri(png) in html  # baked, from bytes
+    assert "data:image/png;base64,STREAM-fresh" in html  # streamed
+
+
 def test_cli_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
     """End-to-end: `umbra gallery --area X` searches, streams (mocked)
     thumbnails, and writes a self-contained HTML page."""

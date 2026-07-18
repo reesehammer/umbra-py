@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra gallery --local` renders from baked thumbnails (`DEMO_APP_GAPS.md`
+  G6).** The thumbnail bake shipped the primitive (`umbra index bake-thumbnails`)
+  and the `umbra serve` / `umbra demo` consumers, but the *gallery* contact sheet
+  still re-streamed every tile's cloud-optimized overview from S3 at render time.
+  Now a `--local` / `--index-db` gallery embeds any thumbnail already baked into
+  the index straight from local bytes — instant, offline, and (when every tile is
+  baked) with **no `rasterio`**, so a core install over a fetched/baked
+  `catalog.db` renders the visual browse in milliseconds. Only tiles missing from
+  the bake are streamed the usual way, so a partially-baked index degrades
+  gracefully, and a plain live `umbra gallery` is unchanged. `viz.gallery` gained
+  an optional `baked` (`{id: PNG bytes}`) argument fed by
+  `CatalogIndex.get_thumbnail`; the `rasterio` requirement is now raised only when
+  a stream is actually needed. Deterministic, no model call, no new dependency;
+  offline-tested in `tests/test_viz.py` (baked-only needs no viz extra, baked +
+  streamed mix) and `tests/test_index.py` (`umbra gallery --local` over a
+  bake-thumbnailed index streams nothing).
 - **Per-pixel facet-area (gamma-nought) RTC model — `umbra convert --rtc
   --rtc-model gamma` / `sicd_to_geocoded_cog(rtc_model="gamma")` (`STRATEGY.md`
   5.5).** A third radiometric-terrain-flattening model alongside the default
