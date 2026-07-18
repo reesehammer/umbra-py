@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SICD-convert showcase notebook — `examples/07_sicd_amplitude.ipynb`
+  (`STRATEGY.md` 5.4 / 5.5).** Completes the example gallery with a runnable front
+  door for the flagship SICD → geocoded COG capability. Every other notebook uses
+  the already-geocoded `GEC` asset; the complex `SICD` lives in the radar slant
+  plane and won't open on a map without the sensor-model geocoding `umbra convert`
+  provides — extensive code that had no tutorial. The notebook takes one open-data
+  SICD, detects its amplitude in the slant plane (asserting the CRS is `None`),
+  geocodes it onto a north-up EPSG:4326 COG with `sicd_to_geocoded_cog`, and
+  asserts the result is EPSG:4326, carries COG overviews, and lands on the
+  acquisition's catalog footprint. Like the rest of the gallery it is
+  self-checking (a small deterministic search with `assert`s in every code cell,
+  **no model call**) and guarded offline by `tests/test_examples.py`; it executes
+  end-to-end under `pytest -m network` using a curated small scene (`Centerfield,
+  Utah`, ~370 MB, converts in under a minute), and the live-execution guard now
+  also `importorskip`s `sarpy` (the `convert` extra). Terrain orthorectification
+  (`--dem auto`), the geoid correction, and `--rtc` are named in prose as the next
+  step. This finishes workstream 5.4.
 - **Standing-analyst monitoring notebook — `examples/06_site_monitoring.ipynb`
   (`AI_INTEGRATION_IDEAS.md` C3 / `STRATEGY.md` 5.4).** SAR's killer application is
   monitoring — the same site re-imaged pass after pass — and the primitives for it
