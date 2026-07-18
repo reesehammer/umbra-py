@@ -1446,7 +1446,9 @@ data trivially trainable increases demand for Umbra pixels.
 - ✅ **ML dataset prep shipped** (`umbra chips` / `umbra_py.chips`, `[load]`
   extra): chips scenes into fixed-size, georeferenced training tiles with the
   look-angle / resolution / polarization / license metadata attached per chip in
-  a `.jsonl` (or `.geojson`) manifest. See `AI_INTEGRATION_IDEAS.md` C4.
+  a `.jsonl`, `.geojson`, or `.parquet` (stac-geoparquet, `[export]` extra —
+  queryable by DuckDB / geopandas at scale) manifest. See
+  `AI_INTEGRATION_IDEAS.md` C4.
 - ✅ **SICD → geocoded COG shipped** (`umbra convert` / `umbra_py.convert`,
   `[convert]` extra): `sicd_to_geocoded_cog()` detects amplitude from the
   complex product and warps it onto a north-up EPSG:4326 cloud-optimized GeoTIFF

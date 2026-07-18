@@ -20,6 +20,7 @@ from .chips import (
     chip_item,
     write_chips,
     write_manifest,
+    write_manifest_parquet,
 )
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
@@ -147,6 +148,7 @@ __all__ = [
     "chip_item",
     "write_chips",
     "write_manifest",
+    "write_manifest_parquet",
     "ChipRecord",
     "ChipDataset",
     "CHIPPABLE_ASSETS",

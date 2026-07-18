@@ -710,6 +710,11 @@ umbra chips --area "Centerfield, Utah" --start 2024-01-01 --end 2024-12-31 \
 umbra chips --area "Centerfield" --out chips/ --format npy \
     --chip-size 256 --stride 128 --min-valid 0.5 --manifest chips.geojson
 
+# For a large chip set, write a stac-geoparquet manifest instead — one
+# column-oriented file DuckDB / geopandas can query without loading every line
+# (needs the export extra: pip install "umbra-py[load,export]").
+umbra chips --area "Centerfield" --out chips/ --manifest chips.parquet
+
 # Or chip specific items directly, and print the dataset summary as JSON.
 umbra chips <item-json-url> --out chips/ --json
 ```
@@ -718,9 +723,11 @@ Only the bytes for each tile stream over HTTP range requests — no full downloa
 and memory stays bounded to one chip. Fixed-size is a promise (partial edge tiles
 are dropped), so every chip has the exact shape a loader expects; `--stride`
 overlaps tiles for dense inference / augmentation, and `--min-valid` drops the
-mostly-nodata corners of a rotated footprint. **No model is called** — chipping is
-pure raster iteration + manifest logic. Requires the load extra
-(`pip install "umbra-py[load]"`).
+mostly-nodata corners of a rotated footprint. The manifest format follows the
+`--manifest` extension — `.jsonl` (the ML default), `.geojson` (QGIS / geopandas),
+or `.parquet` (stac-geoparquet, queryable at scale via DuckDB / geopandas; needs
+the `export` extra). **No model is called** — chipping is pure raster iteration +
+manifest logic. Requires the load extra (`pip install "umbra-py[load]"`).
 
 ### Find scenes that *look alike* (`umbra embed`)
 
