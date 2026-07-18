@@ -163,6 +163,25 @@ builds capabilities that assume an AI in the loop.
 > the next critical path is **Tier C's VLM-in-the-loop capabilities** (C2 scene
 > description / change narration) and the **B3 example notebooks**.
 >
+> **Update (2026-07-18):** the **semantic aliasing is now on the MCP surface** —
+> `search_catalog(area=…, semantic=True)` (the C1 follow-on named in `TODO.md`).
+> The embedding index shipped complete on the CLI, but the agent surface — the
+> project's highest-leverage front door (B1) — only reached the deterministic
+> `fuzzy=` token match; an agent handed a plain-language *site description* had no
+> way to alias it to a task name. The new `semantic=True` flag closes that: it
+> resolves `area` to the closest task names by meaning through the shipped
+> `SemanticTaskIndex` (`_resolve_semantic_area`), searches the best over the
+> chosen backend, and returns `resolved_area` + the ranked `semantic_matches` so
+> the resolution is auditable, with a `min_score` threshold (a low-confidence
+> description returns an empty audit trail, not an arbitrary pick) and a
+> `search-by-description` prompt packaging the workflow. It reuses
+> `SemanticTaskIndex` unchanged and holds the same boundary as `umbra semantic`
+> (§A4, §6.1): the only model call is the injectable query embedder, gated on a
+> prebuilt index and the `[ai]` key (`semantic` and `fuzzy` are mutually
+> exclusive), so it never runs implicitly and the whole path is offline-tested in
+> `tests/test_mcp_server.py` with a deterministic concept embedder — no key, no
+> network, no new dependency.
+>
 > **Update:** the **first C2 VLM-in-the-loop capability has shipped** — `umbra
 > describe` (`src/umbra_py/describe.py`, `[ai]` + `[viz]` extras), the moment the
 > library's superpower for AI (its outputs are *images with precise metadata*)

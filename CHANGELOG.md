@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Semantic "describe the site" search on the `umbra-mcp` MCP server —
+  `search_catalog(area=…, semantic=True)` (`docs/AI_INTEGRATION_IDEAS.md` §C1
+  follow-on).** The embedding-backed task-name aliasing shipped complete on the
+  CLI (`umbra semantic search`), but the agent surface — the project's
+  highest-leverage front door — only reached the deterministic `fuzzy=` token
+  match, so a plain-language *site description* couldn't be aliased to a task
+  name. The new `semantic=True` flag resolves `area` to the closest task names
+  by meaning through the shipped `SemanticTaskIndex` (so `"grain storage north
+  dakota"` reaches `"Beet Piler - ND"`, an alias sharing no word with the label
+  that `fuzzy` cannot and should not fake), searches the best match over the
+  chosen backend, and returns `resolved_area` plus the ranked `semantic_matches`
+  so the resolution is auditable and retryable. A `min_score` cosine threshold
+  drops weak aliases (a low-confidence description returns an empty audit trail
+  rather than an arbitrary top pick), and a `search-by-description` prompt
+  packages the workflow. `semantic` and `fuzzy` are mutually exclusive; the mode
+  is gated (like the CLI) on a prebuilt semantic index and the `[ai]` embedding
+  key, so it never runs implicitly. The only model call is turning the query
+  into a vector (an injectable embedder); the whole path is offline-tested in
+  `tests/test_mcp_server.py` with a deterministic concept embedder — no key, no
+  network, no new dependency.
 - **Polygon `intersects` spatial search — a true footprint filter, not just a
   bounding box (`docs/AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on).** Discovery
   is the project's moat (`docs/STRATEGY.md` §3), and its only spatial filter was

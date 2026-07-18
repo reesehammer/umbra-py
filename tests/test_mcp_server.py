@@ -73,6 +73,7 @@ def test_build_server_registers_expected_surface():
         "find-similar-scenes",
         "describe-scene",
         "survey-region",
+        "search-by-description",
     }
 
 
@@ -466,6 +467,145 @@ def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
     with pytest.raises(FileNotFoundError, match="umbra embed build"):
         ms.find_similar_text("a flooded field")
+
+
+# --------------------------------------------------------------------------
+# search_catalog semantic mode — task-name aliasing by meaning over MCP (C1)
+#
+# Fully offline: the query embedder is a deterministic bag-of-concepts stand-in
+# (never a model call), so the whole describe-a-site path is exercised without an
+# [ai] key or the network — the same boundary the CLI semantic tests hold.
+# --------------------------------------------------------------------------
+
+# A tiny concept embedder so "grain storage north dakota" lands near the label
+# "Beet Piler - ND" (both touch the agriculture/storage/dakota concepts) while an
+# unrelated label ("Port of Long Beach") does not — the aliasing a real embedder
+# buys, made deterministic. Mirrors tests/test_semantic.py's concept embedder.
+_SEM_CONCEPTS = ["agriculture", "storage", "dakota", "coast", "port"]
+_SEM_WORDS = {
+    "grain": ["agriculture"],
+    "beet": ["agriculture"],
+    "storage": ["storage"],
+    "piler": ["storage", "agriculture"],
+    "north": ["dakota"],
+    "dakota": ["dakota"],
+    "nd": ["dakota"],
+    "port": ["port", "coast"],
+    "beach": ["coast"],
+}
+_SEM_TOKENS = __import__("re").compile(r"[a-z0-9]+")
+
+
+def _sem_vector(text: str) -> list[float]:
+    weights = dict.fromkeys(_SEM_CONCEPTS, 0.0)
+    for token in _SEM_TOKENS.findall(text.lower()):
+        for concept in _SEM_WORDS.get(token, []):
+            weights[concept] += 1.0
+    return [weights[c] for c in _SEM_CONCEPTS]
+
+
+def _concept_embedder(texts):
+    return [_sem_vector(t) for t in texts]
+
+
+def _build_semantic_index(path, tasks):
+    from umbra_py import semantic as sem
+
+    with sem.SemanticTaskIndex(path) as index:
+        index.build(embedder=_concept_embedder, task_names=tasks, model="stub")
+
+
+def _patch_semantic_index(monkeypatch, path):
+    """Point the semantic layer at ``path`` and stub the (injectable) embedder."""
+    from umbra_py import semantic as sem
+
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: path)
+    monkeypatch.setattr(sem, "default_embedder", lambda **k: _concept_embedder)
+
+
+_SEM_TASKS = ["Beet Piler - ND", "Port of Long Beach"]
+
+
+@responses.activate
+def test_search_catalog_semantic_resolves_description_and_searches(
+    sample_item_dict, monkeypatch, tmp_path
+):
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, _SEM_TASKS)
+    _patch_semantic_index(monkeypatch, path)
+
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+
+    out = ms.search_catalog(area="grain storage north dakota", semantic=True, local=False)
+
+    # The description resolved by meaning to the agricultural-storage task, not
+    # the coastal one it shares no concept with.
+    assert out["resolved_area"] == "Beet Piler - ND"
+    assert out["semantic_matches"][0]["task"] == "Beet Piler - ND"
+    assert {m["task"] for m in out["semantic_matches"]} <= set(_SEM_TASKS)
+    assert out["count"] == 1
+    assert out["source"] == "live-catalog"
+    # The resolved exact task name is searched literally (no fuzzy widening).
+    assert _FakeCatalog.kwargs["area"] == "Beet Piler - ND"
+    assert _FakeCatalog.kwargs["fuzzy"] is False
+
+
+def test_search_catalog_semantic_no_match_returns_empty_audit_trail(monkeypatch, tmp_path):
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, _SEM_TASKS)
+    _patch_semantic_index(monkeypatch, path)
+
+    # A query touching no shared concept has an all-zero vector (cosine 0.0 to
+    # every task); a positive min_score then drops them all, so no unfiltered
+    # catalog search runs and the (empty) audit trail is reported instead.
+    out = ms.search_catalog(area="unmatched vocabulary", semantic=True, min_score=0.1)
+
+    assert out["count"] == 0
+    assert out["source"] == "semantic-index"
+    assert out["resolved_area"] is None
+    assert out["semantic_matches"] == []
+
+
+def test_search_catalog_semantic_without_index_errors(monkeypatch, tmp_path):
+    from umbra_py import semantic as sem
+
+    missing = tmp_path / "missing.semantic.db"
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: missing)
+    with pytest.raises(FileNotFoundError, match="umbra semantic build"):
+        ms.search_catalog(area="grain storage north dakota", semantic=True)
+
+
+def test_search_catalog_semantic_requires_area(monkeypatch, tmp_path):
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, _SEM_TASKS)
+    _patch_semantic_index(monkeypatch, path)
+    with pytest.raises(ValueError, match="needs `area`"):
+        ms.search_catalog(semantic=True)
+
+
+def test_search_catalog_semantic_and_fuzzy_mutually_exclusive():
+    with pytest.raises(ValueError, match="not both"):
+        ms.search_catalog(area="grain storage", semantic=True, fuzzy=True)
+
+
+def test_search_catalog_semantic_missing_key_errors(monkeypatch, tmp_path):
+    # With no stubbed embedder, default_embedder raises the [ai]-setup error, so
+    # the tool never reaches a model implicitly.
+    path = tmp_path / "catalog.semantic.db"
+    _build_semantic_index(path, _SEM_TASKS)
+    from umbra_py import semantic as sem
+
+    monkeypatch.setattr(sem, "default_semantic_path", lambda *a, **k: path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(MissingDependencyError):
+        ms.search_catalog(area="grain storage north dakota", semantic=True)
 
 
 # --------------------------------------------------------------------------
