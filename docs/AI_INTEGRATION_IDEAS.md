@@ -493,10 +493,15 @@ still allowing everything below.
 > `umbra_tools()` returns the *same* deterministic callables as native
 > `StructuredTool`s (the render tools re-implemented so the LangChain surface
 > never pulls in the MCP SDK, returning the PNG as a `content_and_artifact` tool
-> artifact), so the two agent front doors cannot drift. Not-yet-done follow-ups:
-> registering in the public MCP registries / Anthropic's directory (part of the
-> deliverable, tracked in `TODO.md`), and the parallel LlamaIndex `FunctionTool`
-> wrapper.
+> artifact), so the two agent front doors cannot drift. ✅ **The parallel
+> LlamaIndex wrapper has now shipped too** as `umbra_py.llamaindex` behind the
+> `[llamaindex]` extra: `umbra_tools()` returns the *same* deterministic callables
+> as native `FunctionTool`s (the render tools re-implemented so this surface never
+> pulls in the MCP SDK either, returning the PNG on a `RenderResult` surfaced as
+> the `ToolOutput.raw_output`), completing the MCP → LangChain → LlamaIndex
+> agent-framework reach trilogy — three registrations, one deterministic core, no
+> drift. Not-yet-done follow-up: registering in the public MCP registries /
+> Anthropic's directory (part of the deliverable, tracked in `TODO.md`).
 
 The CLI subcommands already map 1:1 to library functions — which means the
 tool inventory for an MCP server is already designed. Shipped as a submodule
@@ -603,8 +608,14 @@ no operational cost and no abuse surface.
   shapes with different registration: `umbra_tools()` wraps the MCP server's
   deterministic callables as native `StructuredTool`s (no duplicated business
   logic; render tools return the PNG as a `content_and_artifact` artifact), so a
-  LangChain / LangGraph agent gets the archive with `model.bind_tools(...)`. The
-  parallel LlamaIndex `FunctionTool` wrapper is the remaining reach step.
+  LangChain / LangGraph agent gets the archive with `model.bind_tools(...)`.
+- ✅ **A LlamaIndex tool wrapper has shipped** (`umbra_py.llamaindex`,
+  `[llamaindex]` extra) — the third registration of the same tool shapes:
+  `umbra_tools()` wraps the identical MCP callables as native `FunctionTool`s (no
+  duplicated business logic; render tools return the PNG on a `RenderResult`
+  surfaced as `ToolOutput.raw_output`), so a LlamaIndex agent gets the archive
+  with `ReActAgent.from_tools(...)`. With this, the MCP → LangChain → LlamaIndex
+  agent-framework reach trilogy is complete.
 
 ---
 

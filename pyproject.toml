@@ -63,6 +63,12 @@ ai = ["requests>=2.28"]
 # a second front door for agent builders over the identical deterministic
 # callables, so the two surfaces cannot drift.
 langchain = ["langchain-core>=0.3", "umbra-py[viz]"]
+# The catalog tools as native LlamaIndex tools (`umbra_py.llamaindex`). Only
+# `llama-index-core` — the lightweight tool/abstraction package, not the full
+# framework — plus `viz` for the render tools' PNGs. It mirrors the `mcp` /
+# `langchain` extras: a third front door for agent builders over the identical
+# deterministic callables, so the three surfaces cannot drift.
+llamaindex = ["llama-index-core>=0.11", "umbra-py[viz]"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

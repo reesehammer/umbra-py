@@ -183,9 +183,17 @@ The server itself is shipped and runnable (`umbra mcp` / `uvx umbra-mcp`), but
 registering it in the public MCP registries and Anthropic's directory — the
 discovery half of the deliverable — is still open. Follow-ons named in the B1
 doc: ~~a LangChain community tool wrapper reusing the same tool shapes~~ ✅
-**done** (`umbra_py.langchain` / `[langchain]` extra, see below), the parallel
-LlamaIndex wrapper is still open, and returning the polarization-mixing warning
-as structured text alongside the `change_composite` image block.
+**done** (`umbra_py.langchain` / `[langchain]` extra, see below); ~~the parallel
+LlamaIndex wrapper~~ ✅ **done** (`umbra_py.llamaindex` / `[llamaindex]` extra —
+`umbra_tools()` returns the same nine JSON callables (reused verbatim from
+`mcp_server`, so all three front doors cannot drift) as native
+`FunctionTool`s, plus the three render tools re-implemented natively (returning
+a `RenderResult` whose string form is the caption and whose `.png` rides on the
+`ToolOutput.raw_output`) so the surface never pulls in the MCP SDK;
+offline-tested in `tests/test_llamaindex.py`); and returning the
+polarization-mixing warning as structured text alongside the `change_composite`
+image block is still open. With MCP → LangChain → LlamaIndex all shipped, the
+agent-framework reach trilogy is complete.
 
 ---
 
@@ -298,8 +306,15 @@ log). Optional follow-ons that build on them, not blockers:
   re-implemented natively (returning the PNG as a `content_and_artifact`
   artifact) so the LangChain surface never pulls in the MCP SDK. Offline-tested
   in `tests/test_langchain.py` (surface, schema inference, invocation, artifact,
-  guards). The parallel **LlamaIndex** `FunctionTool` wrapper — same callables,
-  a third registration — is the remaining reach step.
+  guards). ~~The parallel **LlamaIndex** `FunctionTool` wrapper — same callables,
+  a third registration — is the remaining reach step.~~ ✅ **Done**
+  (`umbra_py.llamaindex` / `[llamaindex]` extra). `umbra_tools()` wraps the same
+  nine MCP callables as native `FunctionTool`s (single source of truth, no drift)
+  plus the three render tools re-implemented natively (a `RenderResult` carrying
+  the caption as its string form and the PNG on `.png`, surfaced as
+  `ToolOutput.raw_output`, so the surface never pulls in the MCP SDK).
+  Offline-tested in `tests/test_llamaindex.py`. The MCP → LangChain → LlamaIndex
+  agent-framework reach trilogy is now complete.
 - ~~**MCP `search_catalog` semantic mode.**~~ ✅ **Done.** `search_catalog`
   gained a `semantic=True` flag (with a `min_score` cosine threshold and a
   `search-by-description` prompt): it treats `area` as a plain-language *site

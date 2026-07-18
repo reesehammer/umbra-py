@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native LlamaIndex tool adapter — `umbra_py.llamaindex`
+  (`AI_INTEGRATION_IDEAS.md` B1 / C1).** Completes the agent-framework reach
+  trilogy — MCP → LangChain → LlamaIndex — the "same shapes, a third
+  registration" step named in `TODO.md`. `umbra_tools()` returns the catalog as
+  native LlamaIndex `FunctionTool`s ready for `ReActAgent.from_tools(...)` or a
+  tool-calling agent. There is **no new business logic**: the nine JSON tools
+  (`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `download_asset`,
+  `watch_site`, `find_similar` / `find_similar_text`, `describe_scene`) reuse the
+  MCP server's deterministic callables verbatim, so all three front doors cannot
+  drift; each tool's name/description is inferred from the function docstring and
+  its argument schema from the signature. *Images are the API*: LlamaIndex has no
+  `content_and_artifact` split, so the `quicklook` / `change_composite` /
+  `timescan` render tools — re-implemented natively so the surface never pulls in
+  the MCP SDK — return a `RenderResult` whose string form is the caption and whose
+  `.png` (the `ToolOutput.raw_output`) carries the raw PNG for a downstream
+  multimodal model to *see* the radar scene; pass `include_render=False` for a
+  JSON-only surface. The determinism boundary is preserved — `describe_scene`
+  stays the one opt-in model call. New `[llamaindex]` extra (`llama-index-core` —
+  the lightweight tool package, not the full framework — plus `viz`), wired into
+  the all-extras CI job, and fully offline-tested in `tests/test_llamaindex.py`
+  (surface, schema inference, invocation, PNG `RenderResult`, guards) with no key
+  and no network.
 - **Native LangChain / LangGraph tool adapter — `umbra_py.langchain`
   (`AI_INTEGRATION_IDEAS.md` B1 / C1).** *Agents are the new first-time users*:
   the MCP server puts the 17+ TB SAR archive in front of MCP-native clients, and
@@ -29,8 +51,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extra (`langchain-core` — the lightweight tool package, not the full framework —
   plus `viz`), wired into the all-extras CI job, and fully offline-tested in
   `tests/test_langchain.py` (surface, schema inference, invocation, PNG artifact,
-  guards) with no key and no network. The parallel LlamaIndex `FunctionTool`
-  wrapper is the remaining reach step (tracked in `TODO.md`).
+  guards) with no key and no network. (The parallel LlamaIndex `FunctionTool`
+  wrapper has since shipped too — see the `umbra_py.llamaindex` entry above.)
 - **Fetchable prebuilt scene-embedding table — `umbra embed fetch`
   (`STRATEGY.md` 5.2 / `AI_INTEGRATION_IDEAS.md` C5).** Building the visual
   similarity index (`umbra embed`, C5) embeds every quicklook in the archive — the

@@ -48,6 +48,7 @@ src/umbra_py/
   _lazy_imagery.py   # browser-side geotiff.js COG-fetch driver shared by `umbra map --lazy-imagery` and `umbra demo`
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
   langchain.py       # umbra_tools(): the same catalog tools as native LangChain/LangGraph StructuredTools; reuses mcp_server's deterministic callables ([langchain])
+  llamaindex.py      # umbra_tools(): the same catalog tools as native LlamaIndex FunctionTools; reuses mcp_server's deterministic callables ([llamaindex])
   serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
   context.py         # llm_context(): domain knowledge as a machine-readable JSON dict (`umbra context`)
   llms_txt.py        # llms_txt()/llms_full_txt(): llms.txt-convention agent guide (`umbra llms-txt`); stdlib-only
