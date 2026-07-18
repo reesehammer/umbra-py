@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Baked place labels now flow through every read surface (`docs/DEMO_APP_GAPS.md`
+  G2 follow-on).** `umbra index bake` writes a reverse-geocoded label onto
+  `UmbraItem.place`, but until now only `umbra demo` consumed it — every other
+  surface still fell back to the task codename or re-geocoded at render time
+  (behind Nominatim's 1 req/s cap). This wires the baked label through the rest:
+  `UmbraItem.to_llm_context()` (the A3 agent context card) prefers `.place` over
+  the task codename; `footprint_map` / `timeline_map` (`umbra map`, `--timeline`)
+  use `.place` directly and skip the live geocode entirely — so a fully-baked
+  `--local` render with `--geocode` never touches the network, building the
+  Nominatim session lazily only for items still lacking a label; `umbra serve`
+  surfaces the label as a namespaced `umbra:place` STAC property so STAC clients
+  show a real place name; and the stac-geoparquet export (`umbra index export`)
+  carries `umbra:place` into the published snapshot, so a DuckDB / geopandas
+  consumer reads the label without re-geocoding every row. In each case the
+  baked label is preferred only when present and never overrides a value the
+  source document already carries. Deterministic, no new dependency, no model
+  call; offline-tested across models, viz, serve, and export.
 - **Baked place labels in the catalog index — `umbra index bake` /
   `CatalogIndex.bake_places()` / `UmbraItem.place` (`docs/DEMO_APP_GAPS.md`
   G2).** Turning the shared index into a *labelled* demo backend, the

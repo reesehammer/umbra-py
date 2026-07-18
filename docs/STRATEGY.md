@@ -1092,6 +1092,30 @@ same 500 lines of glue first, and many give up."*
 > remainder and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
 > Umbra).
 >
+> **Update (2026-07-18):** the **baked place labels now flow through every read
+> surface** (`docs/DEMO_APP_GAPS.md` G2 follow-on — supporting infrastructure,
+> §7). Discovery is the moat (§3), and the way that moat reaches every consumer is
+> the *published* `catalog.db` snapshot users `umbra index fetch`; PR #84 baked a
+> reverse-geocoded label onto `UmbraItem.place` so a demo shows a real place name
+> instead of the Umbra task *codename* — but only `umbra demo` consumed it, so
+> every other surface still fell back to the codename or paid a render-time
+> Nominatim call (its 1 req/s cap makes labelling thousands of items impractical).
+> This wires the one bake through the rest: `UmbraItem.to_llm_context()` (the agent
+> context card, §1's "agents are the new first-time users") prefers `.place`;
+> `umbra map` / `--timeline` use it directly and geocode lazily, so a fully-baked
+> `--local` render never touches the network; `umbra serve` surfaces it as a
+> namespaced `umbra:place` STAC property; and the stac-geoparquet export carries
+> `umbra:place` into the published snapshot, so a DuckDB / geopandas consumer — or
+> the ecosystem, if Umbra hosts the parquet upstream (5.2) — reads a real place
+> name with no re-geocoding. Pure funnel-widening (§1): every read surface newcomers
+> and agents reach for now shows *where* a scene is, not a codename. It holds the
+> project's grain and testability (§3): the baked label is preferred only when
+> present and never overrides the source document, **no model is called** and no
+> dependency is added, and the whole path is offline-tested across models, viz,
+> serve, and export. The higher-level gaps are unchanged and largely non-code:
+> 5.5's radiometric-RTC remainder and the maintainer-side adoption moves (5.3
+> registries, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

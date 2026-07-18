@@ -47,6 +47,14 @@ def _export_doc(item: UmbraItem) -> dict[str, Any]:
     if item.href and not any(link.get("rel") == "self" for link in links):
         links.append({"rel": "self", "href": item.href, "type": "application/json"})
     doc["links"] = links
+    # Carry the baked reverse-geocoded label (from `umbra index bake`) into the
+    # published snapshot as a namespaced property, so a parquet consumer gets a
+    # real place name without re-geocoding every row. Only when the index
+    # resolved one and the raw item didn't already carry it.
+    if item.place:
+        props = dict(doc.get("properties") or {})
+        props.setdefault("umbra:place", item.place)
+        doc["properties"] = props
     return doc
 
 

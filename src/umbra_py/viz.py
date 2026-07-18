@@ -499,11 +499,20 @@ def footprint_map(
     # for the Nominatim call twice.
     locations: dict[str, str] = {}
     if geocode:
-        geocode_session = _require_session_for_geocoding()
+        # Prefer a baked `item.place` (a `CatalogIndex` search yields it for
+        # free after `umbra index bake`); only fall back to a live Nominatim
+        # call for items without one, and build the session lazily so a
+        # fully-baked render never touches the network.
+        geocode_session = None
         for item, _ in features:
+            if item.place:
+                locations[item.id] = item.place
+                continue
             center_ll = _centroid(item)
             if center_ll is None:
                 continue
+            if geocode_session is None:
+                geocode_session = _require_session_for_geocoding()
             label = _reverse_geocode(
                 center_ll[0],
                 center_ll[1],
@@ -1686,11 +1695,19 @@ def timeline_map(
     # generation time.
     locations: dict[str, str] = {}
     if geocode:
-        geocode_session = _require_session_for_geocoding()
+        # Prefer a baked `item.place` (see `footprint_map`); geocode only the
+        # items without one, and create the session lazily so a fully-baked
+        # render never makes a network call.
+        geocode_session = None
         for item in plottable:
+            if item.place:
+                locations[item.id] = item.place
+                continue
             center_ll = _centroid(item)
             if center_ll is None:
                 continue
+            if geocode_session is None:
+                geocode_session = _require_session_for_geocoding()
             label = _reverse_geocode(
                 center_ll[0],
                 center_ll[1],
