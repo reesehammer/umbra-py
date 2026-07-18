@@ -1,0 +1,62 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Only one concurrent Pages deployment; a superseded build is dead feedback.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build on every PR (and on main) so a broken docstring cross-reference or
+  # nav entry fails review, not the deploy. `--strict` turns warnings into
+  # errors. The package itself is installed with every extra so mkdocstrings
+  # can import each module it documents.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install package + docs toolchain
+        run: uv pip install --system -e ".[docs,all,mcp,serve,ai,langchain,llamaindex]"
+
+      - name: Build (strict)
+        run: mkdocs build --strict
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Publish to GitHub Pages, but only from main — never from a PR. Requires
+  # Pages to be enabled for the repository (Settings → Pages → Source: GitHub
+  # Actions); until then this job is skipped/red without affecting PR CI.
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -2,8 +2,13 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Docs](https://img.shields.io/badge/docs-reesehammer.github.io%2Fumbra--py-informational.svg)](https://reesehammer.github.io/umbra-py/)
 
 **A Python-first toolkit to make [Umbra](https://umbra.space/open-data/) SAR open data easy to discover, load, download, and analyze.**
+
+📖 **Documentation:** the full guide and API reference live at
+**<https://reesehammer.github.io/umbra-py/>** (built from this repo with
+`mkdocs build`; sources under [`docs_src/`](docs_src/)).
 
 Umbra publishes very-high-resolution (down to ~16–25 cm) synthetic aperture
 radar (SAR) imagery as open data under a permissive **CC BY 4.0** license. The
