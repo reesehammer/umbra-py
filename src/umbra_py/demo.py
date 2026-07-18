@@ -133,7 +133,10 @@ def _demo_feature(
     stac_href = item.href if _is_http_url(item.href) else None
     props: dict[str, Any] = {
         "id": item.id,
-        "place": item.task,
+        # Prefer a baked reverse-geocoded label ("Reykjavík, Iceland") over the
+        # task codename when the index has one (see CatalogIndex.bake_places); it
+        # is what the detail panel shows and the free-text search matches on.
+        "place": item.place or item.task,
         "product": item.product_type,
         "datetime": dt.isoformat() if dt else None,
         # A plain YYYY-MM-DD keeps the client's date-range compare a lexical
