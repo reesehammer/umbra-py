@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-pixel facet-area (gamma-nought) RTC model — `umbra convert --rtc
+  --rtc-model gamma` / `sicd_to_geocoded_cog(rtc_model="gamma")` (`STRATEGY.md`
+  5.5).** A third radiometric-terrain-flattening model alongside the default
+  `cosine` and the range-plane `area`. It scales power by
+  `cos(reference) * nz / cos(local_incidence)` — normalising by the local
+  illuminated *facet* area projected into the plane perpendicular to the look
+  direction (the gamma-nought convention). It uses the full 3-D facet normal (like
+  `cosine`, unlike the range-plane `area`) *and* adds the true tilted-facet-area
+  term `nz = cos(slope)` that both other models omit: a facet whose ground-projected
+  area is one pixel has true area `1/nz`, so the illuminated area per pixel scales
+  as `cos(local_incidence)/nz`. On flat terrain `nz == 1` and the local incidence
+  equals the scene incidence, so with the default reference flat ground is left
+  unchanged and only slopes are flattened. Like the other two it is an honest
+  first slice — a normalisation of *detected amplitude*, not a calibrated product,
+  and *not* the full image-space illuminated-area facet integration (Small 2011,
+  with layover accumulation) or MultiRTC interop, which remain deferred. New value
+  in the public `RTC_MODELS` constant; `rtc_model` still defaults to `"cosine"`,
+  so existing calls are unchanged. The physics is a pure-numpy core
+  (`_facet_area_factor`) offline-tested against closed-form planar-slope behaviour
+  (flat → unchanged, the exact `nz`-scaling relative to the cosine factor, DEM-gap
+  safety, and the shadow/clamp floor), with only the DEM-on-grid resample touching
+  rasterio.
 - **Instant SAR thumbnail preview in `umbra demo` (`DEMO_APP_GAPS.md` G6).** The
   baked-thumbnail bake shipped the primitive (`umbra index bake-thumbnails`) and
   the server endpoint (`GET /artifacts/thumbnail/{id}.png`) but left the flagship

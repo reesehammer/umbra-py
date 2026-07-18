@@ -1355,8 +1355,10 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "cos(reference)/cos(local_incidence) (the 3-D local incidence angle); 'area' "
     "scales by sin(local_range_incidence)/sin(reference), the projected-area / "
     "foreshortening correction in the range plane, which targets range "
-    "foreshortening and layover. A first-order step toward gamma-nought area "
-    "normalisation, not a calibrated product.",
+    "foreshortening and layover; 'gamma' scales by cos(reference)*nz/"
+    "cos(local_incidence), the per-pixel facet-area (gamma-nought) normalisation "
+    "that adds the true tilted-facet-area term the other two omit. All are "
+    "first-order steps toward gamma-nought normalisation, not a calibrated product.",
 )
 def convert(
     src,

@@ -450,6 +450,32 @@ def _write_dem(
     return path
 
 
+def _write_steep_ramp_dem(path, *, bounds=(-100.6, 39.6, -99.4, 40.4), shape=(60, 60), top=20000.0):
+    """A steep west-to-east elevation ramp (0..``top`` m), same footprint as the
+    default ramp DEM. Used to make the second-order gamma facet-area term
+    (``nz = cos(slope)``) measurable, where the gentle default ramp would not."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_bounds
+
+    left, bottom, right, top_lat = bounds
+    h, w = shape
+    row = np.linspace(0.0, float(top), w, dtype="float32")
+    data = np.broadcast_to(row, (h, w)).copy()
+    profile = {
+        "driver": "GTiff",
+        "height": h,
+        "width": w,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:4326",
+        "transform": from_bounds(left, bottom, right, top_lat, w, h),
+    }
+    with rasterio.open(path, "w", **profile) as ds:
+        ds.write(data, 1)
+    return path
+
+
 def test_dem_height_sampler_reads_ramp_and_masks_out_of_bounds(tmp_path):
     rasterio = pytest.importorskip("rasterio")
     np = pytest.importorskip("numpy")
@@ -1226,6 +1252,136 @@ def test_sicd_to_geocoded_cog_rtc_invalid_model_raises(tmp_path, monkeypatch):
             rtc=True,
             rtc_model="bogus",
         )
+
+
+# --------------------------------------------------------------------------- #
+# The per-pixel facet-area / gamma-nought RTC model (rtc_model="gamma"). Its
+# factor is the cosine factor scaled by the true tilted-facet-area term nz, so it
+# is a pure-numpy core with closed-form behaviour over a planar slope, exercised
+# here with hand-built arrays; the end-to-end path uses the faked reader + a real
+# DEM, like the cosine and area models above.
+# --------------------------------------------------------------------------- #
+
+
+def test_facet_area_factor_flat_slope_gap_and_clamp():
+    np = pytest.importorskip("numpy")
+    cos_ref = math.cos(math.radians(35.0))
+    # A flat facet (cos_lia == cos_ref, nz == 1) is left unchanged.
+    flat = convert._facet_area_factor(np.array([cos_ref]), np.array([1.0]), cos_ref=cos_ref)
+    assert flat[0] == pytest.approx(1.0)
+    # A radar-facing, tilted facet (larger cos_lia, nz < 1): the gamma factor is
+    # exactly the cosine factor scaled by the true-facet-area term nz, so it lies
+    # below the ground-referenced cosine correction -- the extra darkening the
+    # cosine model omits by ignoring the tilted facet's larger true area.
+    cos_lia = np.array([0.95])
+    nz = np.array([0.8])
+    gamma = convert._facet_area_factor(cos_lia, nz, cos_ref=cos_ref)
+    cosine = convert._terrain_flatten_factor(cos_lia, cos_ref=cos_ref)
+    assert gamma[0] == pytest.approx(cosine[0] * 0.8, rel=1e-6)
+    assert gamma[0] < cosine[0]
+    # A DEM gap (non-finite cos_lia and/or nz) leaves the pixel unchanged.
+    gap = convert._facet_area_factor(np.array([np.nan]), np.array([np.nan]), cos_ref=cos_ref)
+    assert gap[0] == pytest.approx(1.0)
+    # Shadow / near-zero cosine is floored and the factor clamped, so it cannot run
+    # away.
+    steep = convert._facet_area_factor(np.array([1e-6]), np.array([1.0]), cos_ref=cos_ref)
+    assert steep[0] == pytest.approx(convert._RTC_FACTOR_MAX)
+
+
+def test_sicd_to_geocoded_cog_rtc_gamma_flat_dem_leaves_values_unchanged(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "flat_dem.tif", kind="const", const=100.0)
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest", dem=str(dem)
+    )
+    # On flat terrain nz == 1 and the local incidence equals the scene incidence
+    # (the default reference), so every facet-area factor is 1 -> identical values.
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    flattened = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_model="gamma",
+    )
+    with rasterio.open(plain) as a, rasterio.open(flattened) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        assert both.any()
+        assert np.allclose(va[both], vb[both], atol=1e-3)
+
+
+def test_sicd_to_geocoded_cog_rtc_gamma_differs_from_cosine_and_area(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    # A steep east-west ramp (0..20 km over the footprint). The gamma model differs
+    # from cosine only through the true-facet-area term nz = cos(slope), which is
+    # second-order small, so a gentle slope would leave them indistinguishable; a
+    # steep slope makes the nz term measurable while keeping the local incidence
+    # well clear of the shadow/clamp regime.
+    dem = _write_steep_ramp_dem(tmp_path / "steep_dem.tif")
+
+    outs = {}
+    for model in ("cosine", "area", "gamma"):
+        _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+        outs[model] = convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf",
+            tmp_path / f"{model}.tif",
+            gcp_grid=6,
+            resampling="nearest",
+            dem=str(dem),
+            rtc=True,
+            rtc_model=model,
+        )
+
+    with (
+        rasterio.open(outs["cosine"]) as c,
+        rasterio.open(outs["area"]) as a,
+        rasterio.open(outs["gamma"]) as g,
+    ):
+        vc, va, vg = c.read(1), a.read(1), g.read(1)
+        both = np.isfinite(vc) & np.isfinite(va) & np.isfinite(vg)
+        assert both.any()
+        # Same geocoding; the gamma facet-area model must move a real slope by
+        # measurably different amounts than either the cosine or the range-plane
+        # area model (it adds the nz true-facet-area term neither carries).
+        assert not np.allclose(vg[both], vc[both], atol=1e-3)
+        assert not np.allclose(vg[both], va[both], atol=1e-3)
+
+
+def test_cli_convert_rtc_gamma(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    dem = _write_dem(tmp_path / "dem.tif")
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(out), "--dem", str(dem), "--rtc", "--rtc-model", "gamma"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-flattened" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
 
 
 def test_cli_convert_rtc_area(tmp_path, monkeypatch):
