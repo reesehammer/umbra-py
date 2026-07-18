@@ -31,9 +31,15 @@ Design, following the package's determinism boundary (``docs/AGENTS.md``):
 
 The manifest is machine-readable first: ``.jsonl`` (one chip record per line --
 the standard ML manifest format) or ``.geojson`` (a ``FeatureCollection`` of
-chip footprints for QGIS / geopandas), both stdlib-only.
+chip footprints for QGIS / geopandas), both stdlib-only. A third format,
+``.parquet``, writes the same chip footprints as `stac-geoparquet
+<https://stac-geoparquet.org/>`__ -- one column-oriented file DuckDB, geopandas
+or pyarrow can query without loading every line, the format a *large* chip set
+wants (the same plumbing :mod:`umbra_py.export` uses for the catalog snapshot).
+It needs the ``[export]`` extra alongside ``[load]``.
 
-Install with: ``pip install "umbra-py[load]"``
+Install with: ``pip install "umbra-py[load]"`` (add ``[export]`` for
+``.parquet`` manifests).
 """
 
 from __future__ import annotations
@@ -374,15 +380,80 @@ def chip_item(
     return records
 
 
+def _chip_to_stac_item(record: ChipRecord) -> dict[str, Any]:
+    """Shape one chip record as a minimal STAC Item for stac-geoparquet.
+
+    The chip is naturally item-shaped: it has an id (its filename stem, unique
+    across a dataset), a footprint geometry and bbox, an acquisition datetime,
+    and the record fields as properties. The chip file itself is the item's one
+    ``data`` asset, so a parquet consumer gets from a row back to the raster.
+    Property names mirror :meth:`ChipRecord.to_dict` (minus ``bbox``, which is
+    the STAC bbox, and ``datetime``, promoted to the STAC ``properties.datetime``)
+    so the parquet columns match the ``.jsonl`` / ``.geojson`` fields.
+    """
+    min_lon, min_lat, max_lon, max_lat = record.bbox
+    ring = [
+        [min_lon, min_lat],
+        [max_lon, min_lat],
+        [max_lon, max_lat],
+        [min_lon, max_lat],
+        [min_lon, min_lat],
+    ]
+    props = {k: v for k, v in record.to_dict().items() if k not in ("bbox", "datetime")}
+    props["datetime"] = record.datetime  # STAC core (may be null)
+    asset_type = (
+        "image/tiff; application=geotiff"
+        if record.path.lower().endswith((".tif", ".tiff"))
+        else "application/octet-stream"
+    )
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": Path(record.path).stem,
+        "geometry": {"type": "Polygon", "coordinates": [ring]},
+        "bbox": [float(v) for v in record.bbox],
+        "properties": props,
+        "links": [],
+        "assets": {"data": {"href": record.path, "type": asset_type, "roles": ["data"]}},
+    }
+
+
+def write_manifest_parquet(records: list[ChipRecord], path: str | os.PathLike) -> Path:
+    """Write chip records as a stac-geoparquet manifest (needs the ``[export]`` extra).
+
+    Each chip becomes one STAC Item row (footprint geometry + record properties),
+    so a large chip set is queryable by DuckDB / geopandas / pyarrow without
+    reading every line -- what the ``.jsonl`` / ``.geojson`` manifests can't offer
+    at scale. Reuses the same ``stac_geoparquet.arrow`` writer as
+    :func:`umbra_py.export.export_geoparquet`.
+    """
+    from .export import _require as _require_export  # noqa: PLC0415
+
+    _require_export("stac_geoparquet")
+    import stac_geoparquet.arrow  # noqa: PLC0415
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    docs = [_chip_to_stac_item(r) for r in records]
+    reader = stac_geoparquet.arrow.parse_stac_items_to_arrow(docs)
+    stac_geoparquet.arrow.to_parquet(reader, path)
+    return path
+
+
 def write_manifest(records: list[ChipRecord], path: str | os.PathLike) -> Path:
     """Write chip records to a manifest, format chosen by ``path``'s extension.
 
     ``.jsonl`` (default) writes one JSON record per line -- the standard ML
     manifest format, streamable and append-friendly. ``.geojson`` writes a
     ``FeatureCollection`` of chip footprint polygons (each carrying the full
-    record as properties) for QGIS / geopandas. Both are stdlib-only.
+    record as properties) for QGIS / geopandas; both are stdlib-only.
+    ``.parquet`` writes a stac-geoparquet table (one column-oriented file DuckDB /
+    geopandas can query without loading every line) and needs the ``[export]``
+    extra.
     """
     path = Path(path)
+    if path.suffix.lower() == ".parquet":
+        return write_manifest_parquet(records, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".geojson":
         fc = {
@@ -418,10 +489,11 @@ def write_chips(
     manifest (``out_dir/manifest``) describing every chip. Returns a
     :class:`ChipDataset` summarising the run.
 
-    ``manifest`` is the manifest filename inside ``out_dir`` (``.jsonl`` or
-    ``.geojson``); pass ``None`` to skip writing it and just collect the
-    records. ``progress`` is called ``(index, total, item, chips_written)``
-    after each item, for a CLI progress line.
+    ``manifest`` is the manifest filename inside ``out_dir`` (``.jsonl``,
+    ``.geojson``, or ``.parquet`` -- the last needs the ``[export]`` extra);
+    pass ``None`` to skip writing it and just collect the records. ``progress``
+    is called ``(index, total, item, chips_written)`` after each item, for a CLI
+    progress line.
     """
     out_path = Path(out_dir)
     items = list(items)

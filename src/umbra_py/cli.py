@@ -1493,7 +1493,8 @@ def convert(
     show_default=True,
     help="Manifest filename inside --out. A .jsonl writes one chip record per "
     "line (the ML default); a .geojson writes a FeatureCollection of chip "
-    "footprints for QGIS / geopandas.",
+    "footprints for QGIS / geopandas; a .parquet writes a stac-geoparquet table "
+    "DuckDB / geopandas can query at scale (needs the [export] extra).",
 )
 @click.option(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."

@@ -220,6 +220,54 @@ def test_write_chips_geojson_manifest(tmp_path):
     assert dataset.manifest_path.endswith("chips.geojson")
 
 
+def test_write_chips_parquet_manifest(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("stac_geoparquet")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from umbra_py.chips import write_chips
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    dataset = write_chips([_item_for(tif)], tmp_path / "ds", chip_size=10, manifest="chips.parquet")
+
+    manifest = tmp_path / "ds" / "chips.parquet"
+    assert manifest.exists()
+    assert dataset.manifest_path.endswith("chips.parquet")
+
+    table = pq.read_table(manifest)
+    assert table.num_rows == 4
+    # stac-geoparquet writes a geometry column plus the flattened record fields,
+    # so a chip set is queryable by DuckDB / geopandas without loading every line.
+    assert "geometry" in table.column_names
+    rows = table.to_pylist()
+    assert {r["item_id"] for r in rows} == {"test-acq"}
+    # The chip id is unique per tile (its filename stem), so a dataset's rows
+    # don't collide across acquisitions.
+    assert len({r["id"] for r in rows}) == 4
+    assert rows[0]["asset"] == "GEC"
+    assert rows[0]["license"] == "CC-BY-4.0"
+    assert rows[0]["attribution"].startswith("Contains Umbra")
+
+
+def test_write_manifest_parquet_handles_null_datetime(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("stac_geoparquet")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from umbra_py.chips import chip_item, write_manifest_parquet
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    # An acquisition with no datetime must still produce a valid STAC row
+    # (properties.datetime null), not raise.
+    item = _item_for(tif)
+    item.properties = {k: v for k, v in item.properties.items() if k != "datetime"}
+    records = chip_item(item, tmp_path / "chips", chip_size=10)
+    assert records and records[0].datetime is None
+
+    out = write_manifest_parquet(records, tmp_path / "m.parquet")
+    rows = pq.read_table(out).to_pylist()
+    assert len(rows) == 4
+    assert rows[0]["datetime"] is None
+
+
 def test_write_chips_manifest_none_skips_file(tmp_path):
     pytest.importorskip("numpy")
     from umbra_py.chips import write_chips

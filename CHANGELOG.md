@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **stac-geoparquet chip manifest — `umbra chips --manifest chips.parquet`
+  (`AI_INTEGRATION_IDEAS.md` C4 / `STRATEGY.md` 5.5).** `umbra chips` wrote its
+  training-tile manifest as `.jsonl` (one record per line) or `.geojson` (a
+  `FeatureCollection`), both stdlib-only — fine for a small run, but a large chip
+  set forces a consumer to read every line. This adds a third format: a `.parquet`
+  manifest written as [stac-geoparquet](https://stac-geoparquet.org/), so a chip
+  dataset is one column-oriented file DuckDB, geopandas or pyarrow can query
+  without loading it whole — exactly what the SAR foundation-model / change-detection
+  audience (`STRATEGY.md` 5.5's "audience most likely to contribute back") reaches
+  for at scale. Each chip becomes one STAC Item row (its footprint geometry, the
+  acquisition datetime, and the same fields as the `.jsonl` record as properties,
+  with the chip file as the item's `data` asset), reusing the same
+  `stac_geoparquet.arrow` writer as `umbra_py.export`. Format is still chosen by
+  the manifest filename's extension, so the CLI is unchanged beyond accepting
+  `.parquet`. It stays in the project's determinism boundary (**no model call** —
+  pure manifest logic) and needs the `[export]` extra alongside `[load]`; new
+  public API `write_manifest_parquet`, fully offline-tested in
+  `tests/test_chips.py` (round-tripped through pyarrow, including the null-datetime
+  case). This closes the "publish the chip manifest as stac-geoparquet" follow-on
+  in `TODO.md`.
 - **SICD-convert showcase notebook — `examples/07_sicd_amplitude.ipynb`
   (`STRATEGY.md` 5.4 / 5.5).** Completes the example gallery with a runnable front
   door for the flagship SICD → geocoded COG capability. Every other notebook uses

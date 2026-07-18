@@ -369,10 +369,17 @@ called. The remaining C3 pieces build on it:
 manifest, `[load]` extra, no model call) is shipped. Follow-ons that build on it,
 not blockers:
 
-- **Publish the chip manifest as stac-geoparquet.** The manifest is JSONL /
-  GeoJSON today; a `.parquet` option (reusing the `[export]` extra's
-  stac-geoparquet plumbing) would let DuckDB / geopandas query a large chip set
-  without loading every line.
+- ~~**Publish the chip manifest as stac-geoparquet.**~~ ✅ **Done.** `umbra chips
+  --manifest chips.parquet` (and `write_manifest_parquet` / any `.parquet`
+  manifest path) writes the manifest as stac-geoparquet — each chip as one STAC
+  Item row (footprint geometry + the same fields as the `.jsonl` record as
+  properties, the chip file as its `data` asset) — reusing the `[export]` extra's
+  `stac_geoparquet.arrow` writer, so a large chip set is queryable by DuckDB /
+  geopandas / pyarrow without loading every line. Format is chosen by the manifest
+  extension, so the CLI is unchanged beyond accepting `.parquet`; it needs the
+  `[export]` extra alongside `[load]`, stays deterministic (no model call), and is
+  offline-tested in `tests/test_chips.py` (round-tripped through pyarrow, incl. the
+  null-datetime row).
 - **Chip the complex products.** The chipper reads amplitude rasters (GEC/CSI);
   chipping SICD/CPHD would need the slant-plane handling that `convert.py`
   begins — related to the still-open SICD → geocoded COG gap in `STRATEGY.md` 5.5.

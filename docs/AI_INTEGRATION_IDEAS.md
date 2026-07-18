@@ -699,7 +699,9 @@ the loop, not the agent:
 search results and emits fixed-size, georeferenced tiles (GeoTIFF or NumPy)
 with a manifest (JSONL — chip path, item id, datetime, place, bbox, CRS,
 transform, source pixel window, polarization, incidence angle, resolution,
-license — or a `.geojson` `FeatureCollection` of chip footprints). `chip_item`
+license — a `.geojson` `FeatureCollection` of chip footprints, or a `.parquet`
+stac-geoparquet table for querying a large chip set with DuckDB / geopandas
+without loading every line, reusing the `[export]` extra's writer). `chip_item`
 reads band 1 of the item's COG one window at a time via GDAL's `/vsicurl/`
 driver (mirroring `umbra_py.load`), so only each tile's bytes stream over HTTP
 range requests and memory stays bounded to one chip. Fixed size is a promise
