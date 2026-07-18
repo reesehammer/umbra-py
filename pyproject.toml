@@ -57,6 +57,12 @@ mcp = ["mcp>=1.2", "umbra-py[viz]"]
 # beyond the core dependency it relies on. `umbra describe` and `umbra embed`
 # additionally need the `viz` extra to render the quicklook they embed/send.
 ai = ["requests>=2.28"]
+# The catalog tools as native LangChain / LangGraph tools (`umbra_py.langchain`).
+# Only `langchain-core` — the lightweight tool/abstraction package, not the full
+# framework — plus `viz` for the render tools' PNGs. It mirrors the `mcp` extra:
+# a second front door for agent builders over the identical deterministic
+# callables, so the two surfaces cannot drift.
+langchain = ["langchain-core>=0.3", "umbra-py[viz]"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

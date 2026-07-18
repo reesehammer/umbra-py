@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native LangChain / LangGraph tool adapter — `umbra_py.langchain`
+  (`AI_INTEGRATION_IDEAS.md` B1 / C1).** *Agents are the new first-time users*:
+  the MCP server puts the 17+ TB SAR archive in front of MCP-native clients, and
+  this adds the **same** tool surface to the other large population of agent
+  builders — anyone assembling an agent with LangChain / LangGraph.
+  `umbra_tools()` returns the catalog as native LangChain `StructuredTool`s ready
+  for `model.bind_tools(...)` or LangGraph's `create_react_agent`. There is **no
+  new business logic**: the nine JSON tools (`search_catalog`, `get_item`,
+  `geocode_place`, `index_stats`, `download_asset`, `watch_site`, `find_similar` /
+  `find_similar_text`, `describe_scene`) reuse the MCP server's deterministic
+  callables verbatim, so the two front doors cannot drift; each tool's schema is
+  inferred from the function signature and its description from the docstring.
+  *Images are the API*: the `quicklook` / `change_composite` / `timescan` render
+  tools are re-implemented natively — so the LangChain surface never pulls in the
+  MCP SDK — and return the PNG via LangChain's `content_and_artifact` response
+  format (a text caption on the `ToolMessage` content, the raw PNG on
+  `.artifact`), so a downstream multimodal model still *sees* the radar scene;
+  pass `include_render=False` for a JSON-only surface. The determinism boundary is
+  preserved — `describe_scene` stays the one opt-in model call. New `[langchain]`
+  extra (`langchain-core` — the lightweight tool package, not the full framework —
+  plus `viz`), wired into the all-extras CI job, and fully offline-tested in
+  `tests/test_langchain.py` (surface, schema inference, invocation, PNG artifact,
+  guards) with no key and no network. The parallel LlamaIndex `FunctionTool`
+  wrapper is the remaining reach step (tracked in `TODO.md`).
 - **Fetchable prebuilt scene-embedding table — `umbra embed fetch`
   (`STRATEGY.md` 5.2 / `AI_INTEGRATION_IDEAS.md` C5).** Building the visual
   similarity index (`umbra embed`, C5) embeds every quicklook in the archive — the

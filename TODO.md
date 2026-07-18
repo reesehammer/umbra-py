@@ -182,9 +182,10 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
 The server itself is shipped and runnable (`umbra mcp` / `uvx umbra-mcp`), but
 registering it in the public MCP registries and Anthropic's directory — the
 discovery half of the deliverable — is still open. Follow-ons named in the B1
-doc: a LangChain/LlamaIndex community tool wrapper reusing the same tool shapes,
-and returning the polarization-mixing warning as structured text alongside the
-`change_composite` image block.
+doc: ~~a LangChain community tool wrapper reusing the same tool shapes~~ ✅
+**done** (`umbra_py.langchain` / `[langchain]` extra, see below), the parallel
+LlamaIndex wrapper is still open, and returning the polarization-mixing warning
+as structured text alongside the `change_composite` image block.
 
 ---
 
@@ -288,8 +289,17 @@ matcher (`fuzzy.py`), the model-planned `umbra ask` (`planner.py`), and the
 semantic embedding index (`semantic.py`) — are all shipped (see the **Done**
 log). Optional follow-ons that build on them, not blockers:
 
-- **LangChain/LlamaIndex tool wrapper** reusing `SearchPlan` / the semantic
-  matcher (same shapes, different registration) — worth doing for reach.
+- ~~**LangChain tool wrapper** reusing the semantic matcher (same shapes,
+  different registration) — worth doing for reach.~~ ✅ **Done**
+  (`umbra_py.langchain` / `[langchain]` extra). `umbra_tools()` wraps the MCP
+  server's deterministic tool callables (including `search_catalog`'s
+  `semantic=True` mode) as native `StructuredTool`s — no duplicated business
+  logic, so the LangChain and MCP surfaces cannot drift; the render tools are
+  re-implemented natively (returning the PNG as a `content_and_artifact`
+  artifact) so the LangChain surface never pulls in the MCP SDK. Offline-tested
+  in `tests/test_langchain.py` (surface, schema inference, invocation, artifact,
+  guards). The parallel **LlamaIndex** `FunctionTool` wrapper — same callables,
+  a third registration — is the remaining reach step.
 - ~~**MCP `search_catalog` semantic mode.**~~ ✅ **Done.** `search_catalog`
   gained a `semantic=True` flag (with a `min_score` cosine threshold and a
   `search-by-description` prompt): it treats `area` as a plain-language *site
