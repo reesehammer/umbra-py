@@ -101,6 +101,14 @@ CATALOG_DB_ASSET = "catalog.db"
 #: install gets a whole-catalog map with no local tiling step).
 CATALOG_PMTILES_ASSET = "catalog.pmtiles"
 
+#: Name of the prebuilt scene-embedding sidecar asset on the same release (the
+#: per-acquisition quicklook vectors ``umbra embed build`` produces -- published
+#: so a fresh install gets visual similarity search over the archive with no
+#: rebuild and no embedding key). Unlike ``catalog.db`` / ``catalog.pmtiles`` this
+#: artifact is model-derived and model-specific, so the embedding model is
+#: recorded prominently on the release (see ``.github/workflows/publish-index.yml``).
+CATALOG_EMBED_ASSET = "catalog.embed.db"
+
 #: Stable download URL for the prebuilt SQLite index. GitHub redirects this
 #: ``/releases/download/<tag>/<asset>`` path to the current asset, so it always
 #: points at the latest weekly snapshot without an API call.
@@ -113,6 +121,13 @@ CATALOG_INDEX_DB_URL = (
 CATALOG_INDEX_PMTILES_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/"
     f"{CATALOG_INDEX_RELEASE}/{CATALOG_PMTILES_ASSET}"
+)
+
+#: Stable download URL for the prebuilt scene-embedding sidecar (same
+#: rolling-release redirect discipline as :data:`CATALOG_INDEX_DB_URL`).
+CATALOG_INDEX_EMBED_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/"
+    f"{CATALOG_INDEX_RELEASE}/{CATALOG_EMBED_ASSET}"
 )
 
 #: License Umbra applies to all open data.

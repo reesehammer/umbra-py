@@ -457,3 +457,105 @@ def test_cli_build_rejects_urls_and_search(tmp_path):
     result = CliRunner().invoke(cli, ["embed", "build", "https://x/item.json", "--area", "Foo"])
     assert result.exit_code != 0
     assert "OR search criteria" in result.output
+
+
+# --- fetching a published scene index ---------------------------------------
+
+
+def test_fetch_prebuilt_embeddings_downloads_and_opens(tmp_path):
+    """from_release() / fetch_prebuilt_embeddings() pull the published sidecar and
+    open a working, queryable index -- no rebuild, no model call on the fetch."""
+    import responses
+
+    from umbra_py.embed import fetch_prebuilt_embeddings
+
+    # A real, populated embed DB serialized to bytes stands in for the asset the
+    # publish workflow would upload to the catalog-index release.
+    src = tmp_path / "published.embed.db"
+    _build(src, model="clip-v1")
+    payload = src.read_bytes()
+
+    url = "https://example.com/catalog-index/catalog.embed.db"
+    dest = tmp_path / "fetched" / "catalog.embed.db"
+
+    @responses.activate
+    def run_fetch():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        returned = fetch_prebuilt_embeddings(dest, url=url)
+        assert returned == dest
+        with SceneEmbeddingIndex.from_release(dest, url=url) as idx:
+            return idx.stats(), idx.similar(_concept_vector(["water", "field"], _WORD_CONCEPTS))
+
+    stats, matches = run_fetch()
+    assert dest.exists()
+    assert stats["scenes"] == 5
+    assert stats["model"] == "clip-v1"
+    # The fetched vectors are usable immediately: a flood-shaped query ranks the
+    # indexed floods first.
+    assert matches[0].item_id in {"flood-1", "flood-2"}
+
+
+def test_fetch_prebuilt_embeddings_overwrites_existing(tmp_path):
+    """A re-fetch replaces an older sidecar at the same path."""
+    import responses
+
+    from umbra_py.embed import fetch_prebuilt_embeddings
+
+    dest = tmp_path / "catalog.embed.db"
+    dest.write_bytes(b"stale-not-a-db")
+
+    fresh = tmp_path / "fresh.embed.db"
+    _build(fresh, items=[_item("flood", 1)], model="clip-v1")
+    payload = fresh.read_bytes()
+
+    url = "https://example.com/catalog.embed.db"
+
+    @responses.activate
+    def run_fetch():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        fetch_prebuilt_embeddings(dest, url=url)
+        with SceneEmbeddingIndex(dest) as idx:
+            return idx.stats()
+
+    assert run_fetch()["scenes"] == 1
+
+
+def test_cli_embed_fetch(tmp_path, monkeypatch):
+    """`umbra embed fetch` downloads the published sidecar and reports it."""
+    import responses
+
+    src = tmp_path / "published.embed.db"
+    _build(src, model="clip-v1")
+    payload = src.read_bytes()
+
+    url = "https://example.com/catalog.embed.db"
+    dest = tmp_path / "fetched.embed.db"
+
+    @responses.activate
+    def run_cli():
+        responses.add(
+            responses.GET,
+            url,
+            body=payload,
+            status=200,
+            headers={"Content-Length": str(len(payload))},
+        )
+        return CliRunner().invoke(cli, ["embed", "fetch", "--embed-db", str(dest), "--url", url])
+
+    result = run_cli()
+    assert result.exit_code == 0, result.output
+    assert "Fetched scene index: 5" in result.output
+    assert "clip-v1" in result.output
+    assert dest.exists()

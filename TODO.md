@@ -413,12 +413,23 @@ not blockers:
 sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 `[viz]` extras) is shipped. Follow-ons that build on it, not blockers:
 
-- **Publish the embedding table with the nightly index.** The scene vectors are
-  local-only today; publishing `catalog.embed.db` (or a stac-geoparquet embedding
-  table) beside the weekly `catalog.db` snapshot would let a fresh install run
-  `umbra embed similar` with no rebuild — and is exactly the kind of artifact worth
-  offering upstream (`STRATEGY.md` 5.2). Note the published table would be model-
-  and dimension-specific, so record the model label prominently.
+- ~~**Publish the embedding table with the nightly index.**~~ ✅ **Consume side +
+  publish plumbing done** (`umbra embed fetch` / `fetch_prebuilt_embeddings` /
+  `SceneEmbeddingIndex.from_release`, the embedding sibling of `umbra index fetch`
+  / `umbra tiles --fetch`). A fresh install now pulls a published
+  `catalog.embed.db` from the rolling `catalog-index` release straight to the
+  sibling of the catalog index and queries it with **no rebuild** — only the query
+  still needs an embedding key. The weekly `publish-index.yml` gained an **opt-in,
+  non-blocking** step that builds and uploads `catalog.embed.db` (recording the
+  embedding model prominently in the release notes) — gated on a maintainer-set
+  `OPENAI_API_KEY` secret and `continue-on-error`, so it never affects the
+  deterministic index publish and costs nothing until a key is configured (the
+  same "plumbing shipped, publish is a maintainer action" shape as the PyPI
+  release). Constants `CATALOG_EMBED_ASSET` / `CATALOG_INDEX_EMBED_URL`; the fetch
+  path is fully offline-tested (`tests/test_embed.py`, mocked release download +
+  round-tripped DB, model label preserved). Remaining maintainer action: set the
+  secret to actually publish the first table. (A stac-geoparquet embedding-table
+  form is still an option if a non-umbra-py consumer wants it.)
 - **A native vector index at scale.** Ranking is a brute-force cosine scan today
   (instant at catalog scale, no binary dependency). If the archive grows to
   hundreds of thousands of scenes, the schema leaves room to swap in `sqlite-vec`

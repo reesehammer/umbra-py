@@ -34,6 +34,12 @@ jobs:
     # Don't crawl Umbra's bucket from forks; schedules there stay off anyway.
     if: github.repository == 'reesehammer/umbra-py'
     timeout-minutes: 120
+    # Mapped here (not inline) so the optional embedding step can gate on the
+    # secret being present via the `env` context, which `if:` can read.
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
     steps:
       - uses: actions/checkout@v7
 
@@ -86,3 +92,26 @@ jobs:
           fi
           gh release upload catalog-index \
             catalog.db umbra-open-data.parquet catalog.pmtiles catalog.html --clobber
+
+      # Scene embeddings are model-derived and model-specific, so — unlike the
+      # deterministic artifacts above — publishing them is opt-in: it needs a
+      # multimodal (CLIP-family) embedding key and streams a quicklook per
+      # acquisition. It runs only when the maintainer has configured
+      # OPENAI_API_KEY as a repo secret, and never blocks the deterministic
+      # publish (continue-on-error), so `umbra embed fetch` can pull a
+      # `catalog.embed.db` beside `catalog.db` once a key is set. See
+      # STRATEGY.md 5.2 ("offer it upstream") / AI_INTEGRATION_IDEAS.md C5.
+      - name: Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pip install -e ".[ai,viz]"
+          umbra embed build --local --index-db catalog.db \
+            --bbox -180,-90,180,90 --limit 100000000 --embed-db catalog.embed.db
+          model="$(umbra embed info --embed-db catalog.embed.db | sed -n 's/^ *model *: //p')"
+          gh release upload catalog-index catalog.embed.db --clobber
+          gh release edit catalog-index --notes "$(gh release view catalog-index --json body -q .body)
+
+          - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."

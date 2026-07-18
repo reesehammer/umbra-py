@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Fetchable prebuilt scene-embedding table — `umbra embed fetch`
+  (`STRATEGY.md` 5.2 / `AI_INTEGRATION_IDEAS.md` C5).** Building the visual
+  similarity index (`umbra embed`, C5) embeds every quicklook in the archive — the
+  one expensive, model-backed step — so a fresh install got the searchable index
+  (`umbra index fetch`) and the whole-catalog basemap (`umbra tiles --fetch`) for
+  free but had to render and embed thousands of scenes itself before `umbra embed
+  similar` returned anything. This closes that: `umbra embed fetch` /
+  `fetch_prebuilt_embeddings()` / `SceneEmbeddingIndex.from_release()` pull a
+  published `catalog.embed.db` from the rolling `catalog-index` GitHub release
+  straight to the sibling of the catalog index, so visual similarity search works
+  with **no rebuild** — only the *query* still needs an embedding key (the archive
+  vectors arrive pre-built) — the embedding sibling of `umbra index fetch` /
+  `umbra tiles --fetch`. New constants `CATALOG_EMBED_ASSET` /
+  `CATALOG_INDEX_EMBED_URL`; the fetch path calls **no model** and adds **no
+  dependency** (it reuses the resume-safe `download_url`), and is fully
+  offline-tested in `tests/test_embed.py` (mocked release download + round-tripped
+  DB, model label preserved, overwrite, and the CLI). Because the vectors are
+  model-derived and model-*specific* — unlike the deterministic `catalog.db` /
+  `catalog.pmtiles` — the *publish* is opt-in: `.github/workflows/publish-index.yml`
+  gained a gated, `continue-on-error` step that builds and uploads
+  `catalog.embed.db` (recording the embedding model prominently in the release
+  notes) only when a maintainer has set an `OPENAI_API_KEY` secret, so it never
+  affects the deterministic index publish and costs nothing until configured. This
+  is exactly the static, host-anywhere artifact `STRATEGY.md` 5.2 wants to offer
+  upstream — publish it beside `catalog.json` and the ecosystem gets scene
+  similarity search over Umbra data for free.
 - **Download content-integrity verification against the S3 ETag MD5
   (`docs/CODEBASE_ANALYSIS.md` §3.2 / P1 #5).** `download_url` already verified
   the received byte count against `Content-Length` and used `If-Range` + a stored

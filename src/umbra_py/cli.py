@@ -3978,6 +3978,49 @@ def embed_info(embed_db) -> None:
     click.echo(f"  size   : {size_mb:.1f} MB")
 
 
+@embed.command("fetch")
+@click.option(
+    "--embed-db",
+    default=None,
+    help="Where to write the scene index (default: the catalog index's sibling, "
+    "e.g. catalog.embed.db). Overwritten if it already exists.",
+)
+@click.option(
+    "--url",
+    default=None,
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+)
+def embed_fetch(embed_db, url) -> None:
+    """Download the published scene-embedding index for instant similarity search.
+
+    Building the index embeds every quicklook in the archive -- the one expensive,
+    model-backed step. This instead fetches the prebuilt 'catalog.embed.db' from
+    the project's rolling catalog-index GitHub release, so 'umbra embed similar' /
+    'umbra embed search' work with no rebuild (only the query still needs an
+    embedding key). Re-run any time to refresh. Note the published vectors are
+    model-specific: query with the model the index reports ('umbra embed info').
+    """
+    from . import embed as emb
+
+    path = _embed_path(embed_db, None)
+
+    with OrbitSpinner("Fetching prebuilt scene index") as spinner:
+
+        def tally(done: int, total: int | None) -> None:
+            if total:
+                spinner.label = f"Fetching prebuilt scene index ({done / total:.0%})"
+            else:
+                spinner.label = f"Fetching prebuilt scene index ({done / 1e6:.0f} MB)"
+
+        with emb.SceneEmbeddingIndex.from_release(path, url=url, progress=tally) as index:
+            s = index.stats()
+    click.echo(
+        f"Fetched scene index: {s['scenes']} scene vector(s), model {s['model'] or '?'}. "
+        f"({path})\nQuery it now with 'umbra embed similar <url>' or "
+        "'umbra embed search \"…\"'."
+    )
+
+
 def _json_errors_requested() -> bool:
     """Whether a failure should print machine-readable JSON to stderr.
 

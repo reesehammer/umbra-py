@@ -74,6 +74,7 @@ __all__ = [
     "default_scene_embed_path",
     "default_image_embedder",
     "default_text_embedder",
+    "fetch_prebuilt_embeddings",
     "resolve_scene_model",
 ]
 
@@ -153,6 +154,36 @@ def default_scene_embed_path(index_path: str | os.PathLike | None = None) -> Pat
     return base.with_name(f"{base.stem}.embed.db")
 
 
+def fetch_prebuilt_embeddings(
+    dest: str | os.PathLike | None = None,
+    *,
+    url: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> Path:
+    """Download the published prebuilt scene-embedding sidecar.
+
+    The weekly index workflow can ship a ``catalog.embed.db`` on the rolling
+    ``catalog-index`` release beside ``catalog.db`` / ``catalog.pmtiles``, so a
+    fresh install gets visual similarity search over the whole archive with no
+    rebuild -- the embedding sibling of
+    :meth:`umbra_py.index.CatalogIndex.from_release` and
+    :func:`umbra_py.pmtiles.fetch_prebuilt_pmtiles`. This fetches that sidecar
+    straight to ``dest`` (default: :func:`default_scene_embed_path`) and returns
+    its path. Re-run any time to refresh; the download is resume-safe and always
+    overwrites the existing file. ``url`` overrides the release asset location
+    (e.g. to pull from a fork or a mirror). Open the result with
+    :class:`SceneEmbeddingIndex` (or use :meth:`SceneEmbeddingIndex.from_release`,
+    which wraps this), then query it with the matching embedding model.
+    """
+    from .constants import CATALOG_INDEX_EMBED_URL
+    from .download import download_url  # local dependency; keep the import cheap
+
+    target = Path(dest) if dest is not None else default_scene_embed_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    download_url(url or CATALOG_INDEX_EMBED_URL, target, overwrite=True, progress=progress)
+    return target
+
+
 def _vector_bytes(vec: Sequence[float]) -> bytes:
     """Pack a float vector as little-endian float32 bytes for BLOB storage."""
     return array("f", vec).tobytes()
@@ -206,6 +237,35 @@ class SceneEmbeddingIndex:
                 f"umbra-py expects {_SCHEMA_VERSION}. Delete it and rebuild with "
                 "'umbra embed build'."
             )
+
+    @classmethod
+    def from_release(
+        cls,
+        path: str | os.PathLike | None = None,
+        *,
+        url: str | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> SceneEmbeddingIndex:
+        """Download the published prebuilt scene-embedding sidecar and open it.
+
+        Embedding every quicklook in the archive is the one expensive step of
+        visual similarity search -- it renders each scene and calls a model. This
+        skips it: it fetches the published ``catalog.embed.db`` from the project's
+        rolling ``catalog-index`` GitHub release straight to ``path`` (default:
+        :func:`default_scene_embed_path`) and returns an open index over it, so
+        ``similar_to_item`` / ``similar_to_text`` work with **no rebuild** -- the
+        embedding sibling of :meth:`umbra_py.index.CatalogIndex.from_release` and
+        :func:`umbra_py.pmtiles.fetch_prebuilt_pmtiles`. Only the query itself
+        still needs an embedding key (the archive vectors arrive pre-built).
+
+        The download is resume-safe and always overwrites the existing file; re-run
+        any time to refresh. ``url`` overrides the release asset location (e.g. to
+        pull from a fork or a mirror). Because the vectors are model-specific, the
+        published table's :meth:`stored_model` records the embedding model it was
+        built with -- query it with the matching model (see :meth:`similar`).
+        """
+        target = fetch_prebuilt_embeddings(path, url=url, progress=progress)
+        return cls(target)
 
     # -- lifecycle -------------------------------------------------------------
 
