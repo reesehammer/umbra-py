@@ -358,10 +358,22 @@ warns a full index build "takes a while." Two structural improvements:
 
 ### 4.5 SQLite index details
 
-- `CatalogIndex` uses a single connection with default settings: no WAL mode,
-  no `check_same_thread=False` handling, no busy timeout. Fine single-process;
-  document that, or set `PRAGMA journal_mode=WAL` for concurrent readers
-  (which the prebuilt-index use case will invite).
+- ~~`CatalogIndex` uses a single connection with default settings: no WAL mode,
+  no busy timeout.~~ ✅ **Fixed.** `CatalogIndex._configure_connection`
+  (`index.py`) now sets `PRAGMA busy_timeout` (`_BUSY_TIMEOUT_MS`, 5 s) on every
+  connection and switches the file to `PRAGMA journal_mode=WAL` (best-effort,
+  swallowed on a read-only medium). This is what the prebuilt-index use case
+  invited: the published `catalog.db` snapshot is read by `umbra serve`, `umbra
+  demo` and the MCP server while a CLI writer (`umbra index update` / `build` /
+  `bake-*`) refreshes it — under WAL a reader never blocks on the writer, and the
+  busy timeout makes a contended access wait rather than raise `database is
+  locked` at once. WAL needs a writable file and directory, which the class
+  already required (it ensures the schema on every open), so it tightens nothing;
+  offline-tested (WAL/busy-timeout PRAGMAs, WAL persistence across reopen, and a
+  second connection reading during an open write transaction) in
+  `tests/test_index.py`. `check_same_thread` is left at its default because
+  `umbra serve` already opens a fresh backend per request (`serve.build_app`), so
+  no connection is shared across threads.
 - ~~**No schema version marker.**~~ ✅ **Fixed.** `CatalogIndex` now stamps
   `PRAGMA user_version = 1` on create and checks it on open (`index.py`,
   `_SCHEMA_VERSION` + `_init_schema`). A fresh or pre-versioning database

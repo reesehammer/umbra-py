@@ -1301,3 +1301,68 @@ def test_cli_index_bake_missing_index_errors(tmp_path):
     )
     assert result.exit_code != 0
     assert "No index at" in result.output
+
+
+# -- concurrent, multi-process access (WAL + busy timeout) --------------------
+
+
+def test_index_connection_uses_wal_and_busy_timeout(tmp_path):
+    """The index tunes its connection for shared, concurrent access.
+
+    WAL journal mode lets a reader (a running ``umbra serve``) proceed while a
+    writer (``umbra index update``) holds a transaction, and the busy timeout
+    makes a contended access wait rather than raise ``database is locked`` at
+    once. Both matter now that the published ``catalog.db`` snapshot is read by
+    several processes while a CLI writer refreshes it.
+    """
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        mode = idx._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+        timeout = idx._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == 5000
+
+
+def test_wal_journal_mode_persists_across_reopen(tmp_path):
+    """WAL is a persistent property of the file, so a reopened index keeps it."""
+    path = tmp_path / "catalog.db"
+    CatalogIndex(path).close()
+    with CatalogIndex(path) as idx:
+        assert idx._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+def test_second_connection_reads_during_open_write_transaction(tmp_path):
+    """A reader on a second connection is not blocked by an in-flight writer.
+
+    Under WAL the reader sees the last committed snapshot (three items) even
+    while another connection holds an uncommitted insert -- the read-heavy
+    shared-snapshot workload the published ``catalog.db`` invites, where a live
+    ``umbra serve`` must keep answering while an ``umbra index update`` writes.
+    """
+    path = tmp_path / "catalog.db"
+    writer = CatalogIndex(path)
+    for it in (_A, _B, _C):
+        writer.add(it)
+    writer.commit()
+
+    # A second connection opened while no write is held (its schema-ensure
+    # write commits immediately).
+    reader = CatalogIndex(path)
+
+    # The writer now holds an *uncommitted* insert -- an open write transaction.
+    writer.add(
+        _make_item(
+            "SiteC",
+            "2024-03-01-00-00-00_UMBRA-04",
+            "d",
+            "2024-03-01T00:00:00Z",
+            (20, 20, 21, 21),
+        )
+    )
+
+    # The reader still sees the committed snapshot with no "database is locked".
+    got = list(reader.search(limit=None))
+    assert len(got) == 3
+
+    writer.commit()
+    reader.close()
+    writer.close()

@@ -57,6 +57,18 @@ from .models import BBox, UmbraItem
 #: to enable.
 _SCHEMA_VERSION = 3
 
+#: How long (milliseconds) a connection waits for a lock held by another
+#: connection before raising ``sqlite3.OperationalError: database is locked``.
+#: The index is now a *shared* artifact -- a running ``umbra serve`` (or a demo,
+#: or the MCP server) reads it while a CLI writer (``umbra index update`` /
+#: ``build`` / ``bake-*``, or a ``search_live`` refresh) holds a write
+#: transaction -- so a reader that arrives mid-write should wait a moment rather
+#: than fail immediately. Paired with WAL journal mode (see
+#: :meth:`CatalogIndex._configure_connection`), which lets readers proceed
+#: without blocking on the writer at all, this makes concurrent multi-process
+#: access the norm rather than a race.
+_BUSY_TIMEOUT_MS = 5000
+
 #: The versions this build knows how to upgrade to :data:`_SCHEMA_VERSION` in
 #: place. Every step so far is additive (a new nullable column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
@@ -169,7 +181,39 @@ class CatalogIndex:
         self.path = Path(path) if path is not None else default_index_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
+        self._configure_connection()
         self._init_schema()
+
+    def _configure_connection(self) -> None:
+        """Tune the connection for concurrent, multi-process access.
+
+        The index is no longer a private single-process cache: the *published*
+        ``catalog.db`` snapshot (``umbra index fetch``) is read by ``umbra
+        serve``, ``umbra demo`` and the MCP server while a CLI writer (``umbra
+        index update`` / ``build`` / ``bake-*``) may be refreshing it in another
+        process. Two PRAGMAs make that safe:
+
+        - ``busy_timeout`` (always applied): a connection that finds the
+          database locked waits up to :data:`_BUSY_TIMEOUT_MS` for the lock to
+          clear instead of raising ``database is locked`` at once.
+        - ``journal_mode=WAL`` (best-effort): under write-ahead logging, readers
+          never block on a writer and a single writer never blocks readers, so
+          the read-heavy shared-snapshot workload no longer contends with the
+          occasional write. WAL is a persistent property of the file, so setting
+          it once carries into every later open. It needs a writable database
+          and directory -- which this class already requires, since it ensures
+          the schema (a write) on every open -- so it never tightens the access
+          the index already assumed. Should it be refused anyway (e.g. a
+          read-only mount), the attempt is swallowed and the connection stays in
+          its existing journal mode; ``busy_timeout`` still applies.
+        """
+        self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            # A read-only medium can refuse the WAL switch; degrade to the
+            # existing journal mode rather than failing to open the index.
+            pass
 
     def _init_schema(self) -> None:
         """Create or adopt the schema, guarding on the ``PRAGMA user_version``.
