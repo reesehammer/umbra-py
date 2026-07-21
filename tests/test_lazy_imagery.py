@@ -83,6 +83,33 @@ def test_cdn_url_uses_published_browser_bundle_path():
     assert li.GEOTIFF_JS.endswith("/dist-browser/geotiff.js"), li.GEOTIFF_JS
 
 
+def test_sri_digest_is_a_pinned_sha384():
+    """The integrity digest must be a real, pinned SHA-384 hash -- an
+    empty or malformed value would either disable verification or block
+    every load. We don't recompute the bytes here (the CDN host is
+    egress-restricted in CI), just assert the shape."""
+    from umbra_py import _lazy_imagery as li
+
+    assert re.fullmatch(r"sha384-[A-Za-z0-9+/]+=*", li.GEOTIFF_SRI), li.GEOTIFF_SRI
+
+
+def test_driver_script_verifies_geotiff_with_sri_and_cors():
+    """The dynamically-injected geotiff.js ``<script>`` must carry the
+    pinned Subresource Integrity digest and load with
+    ``crossorigin='anonymous'`` so the browser verifies the fetched
+    bytes before executing them (CODEBASE_ANALYSIS 3.4). Without both, a
+    compromised CDN could run arbitrary script in every generated map."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    # The digest is carried as a JSON-encoded literal, same as the URL.
+    assert '"' + li.GEOTIFF_SRI + '"' in js
+    # And applied to the injected <script> element with a CORS fetch
+    # (SRI is ignored by browsers on a no-cors request).
+    assert "s.integrity = GEOTIFF_SRI" in js
+    assert "s.crossOrigin = 'anonymous'" in js
+
+
 def test_driver_script_finds_map_via_dom_and_loads_geotiff():
     """The driver must:
 

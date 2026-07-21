@@ -147,7 +147,7 @@ of severity:
 > escaped its `item_id`/`asset_url`, so it was unchanged. Regression tests cover
 > the escaping and the `javascript:` scheme rejection across `viz`, `_html`,
 > `viewer`, and `demo`. Remaining follow-on (unrelated to this class): SRI hashes
-> on the third-party CDN `<script>` tags (§3.4). Original finding retained below.
+> on the third-party CDN `<script>` tags (§3.4) — ✅ now shipped for the project-controlled injection (the `geotiff.js` loader). Original finding retained below.
 
 `viz._popup_html` escapes `location` and `description` but interpolates
 `item.id`, `platform`, `product_type`, `instrument_mode`, and `item.href` into
@@ -208,7 +208,7 @@ is ever pointed at a hostile endpoint (the constructor accepts arbitrary
 with no dependency weight concerns (it's pure Python), or document the
 trust assumption explicitly.
 
-### 3.4 Third-party CDN scripts without Subresource Integrity (low-moderate)
+### 3.4 Third-party CDN scripts without Subresource Integrity (low-moderate) — **partly addressed**
 
 Generated lazy-imagery maps load `geotiff.js` from unpkg pinned to a version
 (`_lazy_imagery.py:50`) — good — but **without an SRI hash**, and Folium's own
@@ -216,6 +216,18 @@ CDN assets (leaflet, jquery, bootstrap) also ship hashless. A compromised CDN
 or package release could execute script in every map a user has generated.
 Pinning + `integrity=`/`crossorigin=` attributes on the injected `<script>`
 tag closes this for the code the project controls.
+
+- ~~The project-controlled injection (`geotiff.js`, loaded on demand by the
+  lazy-imagery driver) ships without an integrity digest.~~ ✅ **Fixed** — the
+  driver now sets `s.integrity` to a pinned SHA-384 digest (`GEOTIFF_SRI`) and
+  loads the `<script>` with `crossorigin="anonymous"`, so the browser verifies
+  the fetched bytes before executing them; a mismatch falls through the existing
+  `onerror` path to a clean "Fetch failed" instead of running unverified code.
+  The digest is reproducible from the npm registry tarball (documented inline)
+  so it survives version bumps and the egress-restricted CDN host.
+- Folium's own vendored CDN assets (leaflet/jquery/bootstrap) are emitted by
+  Folium, not this project, and remain hashless — out of scope for code the
+  project controls.
 
 ### 3.5 No security policy or dependency monitoring (process gap) — **partly addressed**
 
@@ -496,7 +508,7 @@ warns a full index build "takes a while." Two structural improvements:
 | # | Recommendation | Where | Effort |
 |---|---|---|---|
 | 11 | ⏳ **`py.typed` shipped (this PR)** — the marker is now in the wheel + sdist, so downstream type checkers consume the inline types; adding mypy/pyright to CI is still open | package + CI | small |
-| 12 | Add SRI hashes to the injected geotiff.js `<script>` tag | `_lazy_imagery.py` | small |
+| 12 | ✅ **Done.** The lazy-imagery driver now injects `geotiff.js` with a pinned SHA-384 `integrity` digest (`GEOTIFF_SRI`) + `crossorigin="anonymous"`, so the browser verifies the bytes before running them; the digest is reproducible from the npm registry tarball (documented inline) and a mismatch degrades to a clean "Fetch failed" | `_lazy_imagery.py`, `tests/test_lazy_imagery.py` | small |
 | 13 | Parse listing XML with `defusedxml` (or document the trust boundary) | `catalog.py` | small |
 | 14 | ⏳ **Mostly done.** `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) now ship; Dependabot config was already present. Remaining: a `pip-audit` CI step | `.github/`, repo root | small |
 | 15 | ✅ **Done (this PR).** Version single-sourced from `umbra_py.__version__` via hatchling's dynamic version, so `pyproject.toml` and `__init__.py` can no longer drift | `pyproject.toml`, `__init__.py` | small |
