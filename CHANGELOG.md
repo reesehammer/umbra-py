@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **Subresource Integrity on the browser-side `geotiff.js` loader
+  (`CODEBASE_ANALYSIS.md` §3.4 / P2 #12).** The lazy-imagery driver
+  (`umbra map --lazy-imagery`, `umbra demo`) fetches `geotiff.js` from a pinned
+  CDN URL on first click; it now injects that `<script>` with a pinned SHA-384
+  `integrity` digest (`_lazy_imagery.GEOTIFF_SRI`) and `crossorigin="anonymous"`,
+  so the browser verifies the fetched bytes before executing them. A compromised
+  CDN or hijacked package release can no longer run arbitrary script in every map
+  a user has generated — a digest mismatch falls through the existing `onerror`
+  path to a clean "Fetch failed" instead of running unverified code. The digest
+  is reproducible from the npm registry tarball (unpkg serves it verbatim), and
+  the recompute recipe is documented inline so it survives version bumps without
+  reaching the egress-restricted CDN host. Offline-tested in
+  `tests/test_lazy_imagery.py` (digest shape; the injected `<script>` carries the
+  digest and a CORS fetch). No new dependency, no behavior change on the happy
+  path. This closes the last open security-review item for code the project
+  controls; Folium's own vendored CDN assets remain out of scope.
+
 ### Added
 - **`umbra gallery --local` renders from baked thumbnails (`DEMO_APP_GAPS.md`
   G6).** The thumbnail bake shipped the primitive (`umbra index bake-thumbnails`)

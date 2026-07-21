@@ -49,6 +49,24 @@ import json
 # the package's own `unpkg` field points at.
 GEOTIFF_JS = "https://unpkg.com/geotiff@3.0.5/dist-browser/geotiff.js"
 
+# Subresource Integrity digest for the exact bytes at `GEOTIFF_JS`. The
+# browser refuses to run the fetched script unless its hash matches, so a
+# compromised CDN or a hijacked package release can't inject code into
+# every map a user has generated (CODEBASE_ANALYSIS 3.4). unpkg serves the
+# published npm tarball verbatim, so the digest is reproducible from the
+# registry without touching the (egress-restricted) CDN host:
+#
+#   v=3.0.5
+#   curl -sSL "https://registry.npmjs.org/geotiff/-/geotiff-$v.tgz" | \
+#     tar xzO package/dist-browser/geotiff.js | \
+#     openssl dgst -sha384 -binary | openssl base64 -A | \
+#     sed 's/^/sha384-/'
+#
+# Recompute and update this whenever `GEOTIFF_JS`'s version is bumped --
+# a stale digest blocks the load entirely (the driver's onerror path then
+# surfaces a clean "Fetch failed" rather than silently running nothing).
+GEOTIFF_SRI = "sha384-QchpYxK+DqZYCChtK4SebrECTZEIQ0ahLhme9vwraN6KNxOGwtS66BG72wo1HQDN"
+
 # Largest overview dimension we render at. geotiff.js picks the smallest
 # COG overview whose longest side is >= this, so the fetch stays a few
 # range requests rather than the full-res image.
@@ -70,7 +88,10 @@ def driver_script(
 
     The returned snippet embeds the CDN URL (pinned at module level) as
     a JSON-encoded JS string literal, so a future bump to a URL with
-    quotes or non-ASCII characters can't break the template. The driver
+    quotes or non-ASCII characters can't break the template. It also
+    carries the pinned Subresource Integrity digest (``GEOTIFF_SRI``) and
+    loads the ``<script>`` with ``crossorigin="anonymous"`` so the
+    browser verifies the fetched bytes before executing them. The driver
     resolves the running Folium map at click time by walking the
     button's DOM ancestry to the enclosing ``.folium-map`` element --
     robust against Jupyter cell reruns and multi-map pages, where a
@@ -81,6 +102,7 @@ def driver_script(
         phi=float(percentile_high),
         max_dim=_MAX_RENDER_DIM,
         geotiff_url=json.dumps(GEOTIFF_JS),
+        geotiff_sri=json.dumps(GEOTIFF_SRI),
     )
 
 
@@ -137,6 +159,7 @@ _DRIVER_TEMPLATE = """
   var layers = {{}};  // item_id -> L.imageOverlay
   var libPromise = null;
   var GEOTIFF_URL = {geotiff_url};
+  var GEOTIFF_SRI = {geotiff_sri};
   var MAX_DIM = {max_dim};
 
   // Resolve the Folium map by walking up from the clicked button to the
@@ -162,6 +185,13 @@ _DRIVER_TEMPLATE = """
     libPromise = new Promise(function(resolve, reject) {{
       var s = document.createElement('script');
       s.src = GEOTIFF_URL;
+      // Subresource Integrity: the browser hashes the fetched bytes and
+      // refuses to execute them unless they match GEOTIFF_SRI, so a
+      // compromised CDN can't run arbitrary script in the map. SRI
+      // requires a CORS fetch, hence crossorigin='anonymous' (unpkg/S3
+      // serve Access-Control-Allow-Origin: *, so this works from file://
+      // too). A digest mismatch fires onerror below -> clean 'Fetch failed'.
+      if (GEOTIFF_SRI) {{ s.integrity = GEOTIFF_SRI; s.crossOrigin = 'anonymous'; }}
       s.async = false;
       s.onload = resolve;
       s.onerror = function() {{ reject(new Error('Failed to load ' + GEOTIFF_URL)); }};
