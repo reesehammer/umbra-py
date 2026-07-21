@@ -35,6 +35,9 @@ classifiers = [
 dependencies = [
     "requests>=2.28",
     "click>=8.1",
+    # Pure-Python, zero transitive deps -- hardens the remote S3 bucket-listing
+    # XML parse against entity-expansion / XXE (see ``UmbraCatalog._parse_listing``).
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]

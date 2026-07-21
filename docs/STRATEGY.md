@@ -1415,6 +1415,34 @@ same 500 lines of glue first, and many give up."*
 > maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
 > Umbra).
 >
+> **Update (2026-07-21, XML hardening):** the **remote bucket-listing XML is now
+> parsed defensively, and a scheduled `pip-audit` closes the last security-hygiene
+> gap** (`CODEBASE_ANALYSIS.md` §6 P2 #13 / P2 #14 — supporting infrastructure,
+> §7). Discovery is the moat (§3), and the one operation with no substitute —
+> search over a catalog with no search API — reads *remote, untrusted* XML: the
+> S3 `ListObjectsV2` responses `UmbraCatalog` walks, over a listing base a caller
+> can point elsewhere. Those two parse sites used the stdlib `xml.etree`, exposed
+> to the entity-expansion ("billion laughs") and external-entity (XXE) attack
+> classes — the same "trust the scientific audience needs" (§3) the generated-HTML
+> escaping and the SRI loader already hardened, but on the *input* side of the
+> core discovery path. `UmbraCatalog._parse_listing` now routes both through
+> **`defusedxml`** (`forbid_dtd=True`), so a DTD, internal entity expansion, or
+> external reference is refused outright and surfaced as a clean `CatalogError`
+> instead of memory exhaustion or a filesystem read; `defusedxml` is pure-Python
+> with zero transitive deps, so the lean core (§ the `ai = requests` ethos) is
+> preserved, and the whole path is offline-tested with billion-laughs / XXE /
+> malformed payloads. Paired with it, a weekly `pip-audit --strict` workflow
+> (`.github/workflows/security-audit.yml`) audits the full dependency tree and
+> opens a tracking issue on a finding — a non-blocking canary, not a hard PR gate,
+> for the same reason the live-catalog canary is scheduled (advisories land
+> continuously on transitive deps the project doesn't control). Not a new
+> capability — the trust floor under the discovery operation the whole funnel
+> depends on (§7), closing the two security-hygiene items the analysis named as
+> still open. The remaining strategic gaps are unchanged and largely non-code:
+> 5.5's fully-calibrated image-space facet integration / MultiRTC interop and the
+> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
+> Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1808,5 +1836,14 @@ guard) plus a **single-sourced version** (hatchling dynamic version from
 `pyproject.toml`, `CHANGELOG.md`, and `CONTRIBUTING.md`. The one remaining
 step is a maintainer action, not code: register the PyPI Trusted Publisher for
 `reesehammer/umbra-py` and cut the `v0.1.0` GitHub Release (which fires the
-workflow and claims the name). Still open otherwise: a SessionStart hook /
-permission allowlist for remote agent sessions.
+workflow and claims the name).
+
+Also now shipped: a **weekly dependency security audit** —
+`.github/workflows/security-audit.yml` runs `pip-audit --strict` against the
+full resolved dependency tree (all extras) weekly and on demand, opening a
+tracking issue on a finding. It is a scheduled canary rather than a hard PR
+gate, for the same reason as the live-catalog canary: advisories land
+continuously on transitive dependencies the project doesn't control, so a
+per-PR gate would flap red on changes unrelated to the one under review. Still
+open otherwise: a SessionStart hook / permission allowlist for remote agent
+sessions.

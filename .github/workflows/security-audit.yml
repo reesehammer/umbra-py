@@ -1,0 +1,69 @@
+name: Dependency security audit
+
+# Audits the installed dependency tree against the Python advisory database
+# (PyPI / OSV) with pip-audit. Run on a schedule rather than as a PR gate:
+# advisories are published continuously against transitive dependencies the
+# project doesn't control (e.g. urllib3, idna, certifi under requests), so a
+# hard per-PR gate would flap red on things unrelated to the change under
+# review. Like the live-catalog canary, a failure here means "a dependency
+# grew a known CVE" and opens (or comments on) a tracking issue instead of
+# blocking PRs. Also runnable on demand via workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    if: github.repository == 'reesehammer/umbra-py'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      # Audit the package's own resolved dependency tree, including every
+      # optional extra, so a CVE in any shipped code path is surfaced.
+      - name: Install package with all extras
+        run: uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"
+
+      - name: Install pip-audit
+        run: uv pip install --system pip-audit
+
+      - name: Audit installed dependencies
+        run: pip-audit --strict --desc
+
+      - name: Open or update a tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body="The scheduled \`pip-audit\` run found a known vulnerability in an
+          installed dependency on $(date -u +%Y-%m-%d). This usually means a
+          transitive dependency needs a version bump (or a documented
+          \`--ignore-vuln\` if it doesn't affect this project). See the
+          [failed run]($run_url) for the advisory details."
+          existing=$(gh issue list --state open \
+            --search 'Dependency security audit failed in:title' \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Dependency security audit failed" --body "$body"
+          fi

@@ -237,7 +237,9 @@ tag closes this for the code the project controls.
   no auth surface; remote content + generated HTML as the trust boundary).
 - ~~No Dependabot/Renovate config~~ ✅ **Fixed** (`.github/dependabot.yml`
   already ships grouped Actions + pip updates).
-- No `pip-audit` (or similar) step in CI — still open.
+- ~~No `pip-audit` (or similar) step in CI~~ ✅ **Fixed**
+  (`.github/workflows/security-audit.yml` runs `pip-audit --strict` weekly and
+  on demand, opening a tracking issue on a finding).
 
 ### 3.6 Non-findings worth recording
 
@@ -464,7 +466,12 @@ warns a full index build "takes a while." Two structural improvements:
    `SECURITY.md` (§3.5), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and
    `CITATION.cff` now ship, and Dependabot config was already present — so
    GitHub's community profile is complete and research users can cite the tool.
-   A `pip-audit` CI step is the one remaining item under this heading.
+   ✅ **`pip-audit` now shipped** as a weekly (+ on-demand) scheduled workflow
+   (`.github/workflows/security-audit.yml`) that audits the full resolved
+   dependency tree and opens a tracking issue on a finding — scheduled rather
+   than a hard PR gate because advisories land continuously on transitive deps
+   the project doesn't control, so a per-PR gate would flap red on unrelated
+   changes (the same non-blocking canary reasoning as the live-catalog run).
 6. ✅ **Shipped.** A rendered documentation site now exists:
    `mkdocs.yml` + `docs_src/` build a mkdocs-material site whose API reference
    is generated from the existing docstrings by mkdocstrings, and whose CLI
@@ -509,8 +516,8 @@ warns a full index build "takes a while." Two structural improvements:
 |---|---|---|---|
 | 11 | ⏳ **`py.typed` shipped (this PR)** — the marker is now in the wheel + sdist, so downstream type checkers consume the inline types; adding mypy/pyright to CI is still open | package + CI | small |
 | 12 | ✅ **Done.** The lazy-imagery driver now injects `geotiff.js` with a pinned SHA-384 `integrity` digest (`GEOTIFF_SRI`) + `crossorigin="anonymous"`, so the browser verifies the bytes before running them; the digest is reproducible from the npm registry tarball (documented inline) and a mismatch degrades to a clean "Fetch failed" | `_lazy_imagery.py`, `tests/test_lazy_imagery.py` | small |
-| 13 | Parse listing XML with `defusedxml` (or document the trust boundary) | `catalog.py` | small |
-| 14 | ⏳ **Mostly done.** `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) now ship; Dependabot config was already present. Remaining: a `pip-audit` CI step | `.github/`, repo root | small |
+| 13 | ✅ **Done.** `UmbraCatalog._parse_listing` parses both S3 `ListObjectsV2` responses through `defusedxml` (`forbid_dtd=True`), so entity-expansion / XXE payloads on the remote, untrusted listing are rejected as a clean `CatalogError` rather than expanded; `defusedxml` added to core deps (pure-Python, no transitive deps); offline-tested with billion-laughs / XXE / malformed bodies | `catalog.py`, `pyproject.toml`, `tests/test_catalog.py` | small |
+| 14 | ✅ **Done.** `SECURITY.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) ship; Dependabot config was already present; and `pip-audit --strict` now runs weekly (+ on-demand) via `.github/workflows/security-audit.yml`, opening a tracking issue on a finding (scheduled canary, not a hard PR gate) | `.github/`, repo root | small |
 | 15 | ✅ **Done (this PR).** Version single-sourced from `umbra_py.__version__` via hatchling's dynamic version, so `pyproject.toml` and `__init__.py` can no longer drift | `pyproject.toml`, `__init__.py` | small |
 | 16 | Wire `pytest --cov` + Codecov badge into CI | CI | small |
 | 17 | Publish a nightly prebuilt `catalog.db` as a rolling release artifact (scheduled Action) | new workflow | medium |

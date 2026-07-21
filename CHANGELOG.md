@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Security
+- **Defused XML parsing of the S3 bucket listing + a scheduled `pip-audit`
+  dependency audit (`CODEBASE_ANALYSIS.md` §6 P2 #13 / P2 #14, §5.2.5).** The
+  catalog's core discovery path parses S3 `ListObjectsV2` responses — remote,
+  untrusted XML (the listing base is configurable) — and did so with the stdlib
+  `xml.etree`, which is exposed to the entity-expansion ("billion laughs") and
+  external-entity (XXE) attack classes. `UmbraCatalog._parse_listing` now routes
+  both listing parse sites through **`defusedxml`** (`forbid_dtd=True`), so a DTD,
+  internal entity expansion, or external reference is rejected outright and turned
+  into a clean `CatalogError` instead of memory exhaustion or a filesystem read.
+  `defusedxml` (pure-Python, zero transitive deps) is added to the core
+  dependencies; offline-tested with billion-laughs / XXE / malformed payloads and
+  an end-to-end hostile listing response. Separately, a new
+  `.github/workflows/security-audit.yml` runs `pip-audit --strict` against the
+  full resolved dependency tree weekly (and on demand), opening a tracking issue
+  on a finding — the same non-blocking canary pattern as the live-catalog run,
+  chosen over a hard PR gate because advisories land continuously on transitive
+  deps the project doesn't control. Closes the two remaining security-hygiene
+  items the codebase analysis named as open.
 - **Subresource Integrity on the browser-side `geotiff.js` loader
   (`CODEBASE_ANALYSIS.md` §3.4 / P2 #12).** The lazy-imagery driver
   (`umbra map --lazy-imagery`, `umbra demo`) fetches `geotiff.js` from a pinned
