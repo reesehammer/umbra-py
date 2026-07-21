@@ -60,9 +60,10 @@ def geocode_place(
         session = default_session()
 
     try:
+        params: dict[str, str | int] = {"q": query, "format": "jsonv2", "limit": 1}
         resp = session.get(
             _NOMINATIM_SEARCH_URL,
-            params={"q": query, "format": "jsonv2", "limit": 1},
+            params=params,
             timeout=timeout,
             headers={"Accept-Language": "en"},
         )

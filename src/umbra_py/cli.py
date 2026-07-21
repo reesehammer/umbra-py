@@ -8,6 +8,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 import click
 
@@ -140,7 +141,7 @@ def _built_note(built_at: object) -> str:
 
 def _search_source(
     local: bool, db_path: str | None, token: str | None = None
-) -> tuple[object, bool]:
+) -> tuple[UmbraCatalog | CatalogIndex, bool]:
     """Pick the search backend: the local index (when ``--local``/``--db`` is
     given), the Canopy commercial archive (when a ``token`` is given), or a live
     open-data :class:`UmbraCatalog`. Returns ``(source, is_index)``."""
@@ -186,10 +187,10 @@ def _gather_items(
         label = live_label
     try:
         with OrbitSpinner(label):
-            return list(source.search(**search_kwargs))  # type: ignore[attr-defined]
+            return list(source.search(**search_kwargs))  # type: ignore[arg-type]
     finally:
-        if is_index:
-            source.close()  # type: ignore[attr-defined]
+        if isinstance(source, CatalogIndex):
+            source.close()
 
 
 def _local_index_options(func):
@@ -510,7 +511,7 @@ def search(
         if not as_json:
             click.echo(f"{found} item(s).")
     finally:
-        if index:
+        if isinstance(source, CatalogIndex):
             source.close()
 
 
@@ -645,7 +646,7 @@ def watch_cmd(
     Pair it with 'umbra change --narrate' or 'umbra describe' for a standing
     analyst: new pass lands -> composite against the previous pass -> narration.
     """
-    from .watch import MetaWatchStore, watch, watch_key
+    from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
     search_bbox = _resolve_search_bbox(bbox, place)
     product_types = list(products) or None
@@ -661,15 +662,17 @@ def watch_cmd(
 
     state_path = _index_path(state_db)
     source, is_index = _search_source(local, index_db)
-    reuse = is_index and Path(getattr(source, "path", "")) == state_path
-    store_index = source if reuse else CatalogIndex(state_path)
+    reuse = isinstance(source, CatalogIndex) and Path(getattr(source, "path", "")) == state_path
+    store_index = source if reuse and isinstance(source, CatalogIndex) else CatalogIndex(state_path)
     store = MetaWatchStore(store_index)
 
     try:
         label = "Checking local index" if is_index else "Checking Umbra archive"
         with OrbitSpinner(f"{label} for new acquisitions"):
+            # Both backends satisfy SearchSource at runtime (runtime_checkable);
+            # the cast bridges mypy's stricter view of the loose protocol.
             result = watch(
-                source,
+                cast(SearchSource, source),
                 name=watch_name,
                 store=store,
                 reset=reset,
@@ -682,7 +685,7 @@ def watch_cmd(
                 limit=limit,
             )
     finally:
-        if is_index:
+        if isinstance(source, CatalogIndex):
             source.close()
         if not reuse:
             store_index.close()

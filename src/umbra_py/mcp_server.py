@@ -34,7 +34,7 @@ from __future__ import annotations
 import io
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
@@ -44,7 +44,7 @@ from .exceptions import MissingDependencyError
 from .geocode import geocode_place as _geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
-from .watch import MetaWatchStore, watch, watch_key
+from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.fastmcp import FastMCP
@@ -107,7 +107,9 @@ def _source_label(is_index: bool, is_archive: bool) -> str:
     return "live-catalog"
 
 
-def _search_source(local: bool | None, token: str | None = None) -> tuple[object, bool]:
+def _search_source(
+    local: bool | None, token: str | None = None
+) -> tuple[UmbraCatalog | CatalogIndex, bool]:
     """Pick the search backend.
 
     A configured Canopy ``token`` selects Umbra's authenticated commercial
@@ -294,7 +296,9 @@ def search_catalog(
         search_area = resolved_area
         search_fuzzy = False
 
-    resolved_bbox = tuple(bbox) if bbox else None
+    # bbox is a 4-element [minx, miny, maxx, maxy]; cast the length-erased
+    # ``tuple(...)`` back to the fixed-arity bbox type the backends expect.
+    resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
@@ -317,7 +321,7 @@ def search_catalog(
         )
         cards = [item.to_llm_context() for item in results]
     finally:
-        if is_index:
+        if isinstance(source, CatalogIndex):
             source.close()
 
     return {
@@ -533,7 +537,9 @@ def watch_site(
     straight to ``change_composite`` / ``timescan``, closing the standing-analyst
     loop (new pass → composite → describe) without leaving the conversation.
     """
-    resolved_bbox = tuple(bbox) if bbox else None
+    # bbox is a 4-element [minx, miny, maxx, maxy]; cast the length-erased
+    # ``tuple(...)`` back to the fixed-arity bbox type watch_key expects.
+    resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
         resolved_bbox, resolved_place = _geocode_place(place)
@@ -544,7 +550,7 @@ def watch_site(
     # so a watch persists across MCP sessions. Reuse the index connection when
     # the search already opened one; otherwise open the index just for the store
     # (CatalogIndex creates the DB + meta table on first use).
-    store_index = source if is_index else CatalogIndex(default_index_path())
+    store_index = source if isinstance(source, CatalogIndex) else CatalogIndex(default_index_path())
 
     resolved_products = list(products) if products else None
     watch_name = name or watch_key(
@@ -557,8 +563,10 @@ def watch_site(
         fuzzy=fuzzy,
     )
     try:
+        # Both backends satisfy SearchSource at runtime (runtime_checkable); the
+        # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
         result = watch(
-            source,
+            cast(SearchSource, source),
             name=watch_name,
             store=MetaWatchStore(store_index),
             reset=reset,

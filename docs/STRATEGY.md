@@ -1844,6 +1844,18 @@ full resolved dependency tree (all extras) weekly and on demand, opening a
 tracking issue on a finding. It is a scheduled canary rather than a hard PR
 gate, for the same reason as the live-catalog canary: advisories land
 continuously on transitive dependencies the project doesn't control, so a
-per-PR gate would flap red on changes unrelated to the one under review. Still
-open otherwise: a SessionStart hook / permission allowlist for remote agent
-sessions.
+per-PR gate would flap red on changes unrelated to the one under review.
+
+Also now shipped: a **`mypy` type-check gate** (`CODEBASE_ANALYSIS.md` P2 #11) —
+a `type-check` CI job that verifies the inline types the shipped `py.typed`
+marker promises downstream, rather than shipping an unchecked promise. It runs
+against a core `[dev]` install (the un-stubbed optional libraries are
+import-ignored, so it checks umbra-py's own types, not dependencies it doesn't
+control) with `warn_unused_ignores` + `warn_redundant_casts` on so stale
+suppressions can't accumulate. Landing it fixed 18 genuine type issues across 7
+modules, several of them latent bugs (a `date > None` comparison in the
+read-through search's freshness-horizon, an `isoformat()`/sort-key on a
+possibly-`None` datetime in the visual builders, a `.submit()` on a possibly-`None`
+async executor, and loosely-`object`-typed search backends now narrowed to the
+`UmbraCatalog | CatalogIndex` union). Still open otherwise: a SessionStart hook /
+permission allowlist for remote agent sessions.

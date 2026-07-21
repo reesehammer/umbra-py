@@ -43,6 +43,34 @@ jobs:
       - name: Test (offline)
         run: pytest -q
 
+  # The package ships a py.typed marker, so downstream type checkers trust its
+  # inline annotations. This job verifies they are actually consistent instead
+  # of shipping an unchecked promise. It runs against a core [dev] install (no
+  # optional extras), matching the [tool.mypy] config: the untyped optional
+  # libraries (rasterio, fastapi, sarpy, ...) are import-ignored, so only
+  # umbra-py's own types are checked.
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install package
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Type check
+        run: mypy
+
   # The core matrix installs only [dev], so every test needing an optional
   # extra (viz / load / convert / export) importorskips there — silently.
   # This job installs everything so those tests actually run on every PR.

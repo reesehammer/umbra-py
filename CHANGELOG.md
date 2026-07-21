@@ -42,7 +42,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path. This closes the last open security-review item for code the project
   controls; Folium's own vendored CDN assets remain out of scope.
 
-### Added
+### Changed
+- **A `mypy` type-check gate now verifies the `py.typed` promise
+  (`CODEBASE_ANALYSIS.md` P2 #11).** The package ships a `py.typed` marker, so
+  downstream type checkers trust its inline annotations — but nothing in CI
+  verified those annotations were actually consistent, so the library shipped an
+  *unchecked* promise. A new `type-check` job in `.github/workflows/ci.yml` runs
+  `mypy` on every PR, backed by a `[tool.mypy]` config (`warn_unused_ignores` +
+  `warn_redundant_casts` on, so stale ignores/casts can't accumulate). It runs
+  against a core `[dev]` install: the optional, un-stubbed third-party libraries
+  behind the extras (`rasterio`, `fastapi`, `sarpy`, `folium`, `PIL`, `click`,
+  `mcp`, …) are import-ignored, so the gate checks *umbra-py's own* types rather
+  than flapping on dependencies it doesn't control. `mypy`, `types-requests` and
+  `types-defusedxml` are added to the `dev` extra. Landing the gate surfaced and
+  fixed **18 genuine type issues** across 7 modules, several of them latent bugs:
+  a `date > None` comparison in `CatalogIndex.search_live`'s freshness-horizon
+  logic (`index.py`), a `datetime.isoformat()` on a possibly-`None` value in the
+  timeline map builder and a `None`-unsafe sort key in the change-frame selector
+  (`viz.py`), a `.submit()` on a possibly-`None` executor in the async artifact
+  path (`serve.py`), a possibly-`None` href handed to `_has` during an
+  incremental index update (`index.py`), and loosely-`object`-typed search
+  backends in the CLI and MCP server (now the precise `UmbraCatalog | CatalogIndex`
+  union, with `close()` guarded by `isinstance` narrowing). All fixes are
+  behavior-preserving; the full offline suite is unchanged and green.
 - **`umbra gallery --local` renders from baked thumbnails (`DEMO_APP_GAPS.md`
   G6).** The thumbnail bake shipped the primitive (`umbra index bake-thumbnails`)
   and the `umbra serve` / `umbra demo` consumers, but the *gallery* contact sheet

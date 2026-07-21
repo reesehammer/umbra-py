@@ -78,6 +78,9 @@ dev = [
     "responses>=0.23",
     "httpx>=0.27",
     "ruff>=0.4",
+    "mypy>=1.8",
+    "types-requests>=2.28",
+    "types-defusedxml>=0.7",
 ]
 # The rendered documentation site (mkdocs-material + mkdocstrings), built from
 # the same docstrings the package already ships. `mkdocs-click` renders the CLI
@@ -123,6 +126,19 @@ select = ["E", "F", "I", "UP", "B", "W"]
 # FastAPI's dependency/parameter markers are called in argument defaults by
 # design (Query(...), Body(...)); that is the framework idiom, not a B008 bug.
 extend-immutable-calls = ["fastapi.Query", "fastapi.Body", "fastapi.Path", "fastapi.Depends"]
+
+[tool.mypy]
+# The package ships a py.typed marker (PEP 561), so downstream type checkers
+# consume these inline annotations -- this config makes CI verify they are
+# actually consistent, rather than shipping an unchecked promise. It runs
+# against a core install: the optional third-party libraries behind the extras
+# (rasterio, fastapi, sarpy, folium, PIL, click, mcp, ...) ship no stubs, so
+# their imports are ignored and only umbra-py's own types are checked.
+python_version = "3.10"
+files = ["src/umbra_py"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
