@@ -22,7 +22,9 @@ from datetime import date, datetime
 from typing import Any
 from urllib.parse import quote
 
+import defusedxml.ElementTree as _defused_et
 import requests
+from defusedxml.common import DefusedXmlException
 
 from ._geometry import Geometry
 from ._geometry import to_geojson as _geometry_to_geojson
@@ -182,6 +184,27 @@ class UmbraCatalog:
         except requests.RequestException as exc:
             raise CatalogError(f"Failed to read catalog document {url!r}: {exc}") from exc
 
+    @staticmethod
+    def _parse_listing(content: bytes) -> ET.Element:
+        """Parse an S3 ``ListObjectsV2`` response body defensively.
+
+        The bucket listing is remote input parsed on the library's core
+        discovery path, and the listing base is configurable (a caller may
+        point the catalog at an arbitrary host), so the response is untrusted.
+        Parsing it with :mod:`defusedxml` rejects DTDs, internal entity
+        expansion, and external-entity references outright -- closing the
+        billion-laughs / XXE class the stdlib ``xml.etree`` parser is exposed
+        to -- and turns any such payload, or malformed XML, into a clean
+        :class:`CatalogError` instead of resource exhaustion or a raw parse
+        traceback.
+        """
+        try:
+            return _defused_et.fromstring(content, forbid_dtd=True)
+        except DefusedXmlException as exc:
+            raise CatalogError(f"Refused to parse unsafe bucket-listing XML: {exc}") from exc
+        except ET.ParseError as exc:
+            raise CatalogError(f"Malformed bucket-listing XML: {exc}") from exc
+
     def _list_prefix(self, prefix: str) -> tuple[list[str], list[str]]:
         """List one level under ``prefix``; return ``(subdirs, files)``.
 
@@ -205,7 +228,7 @@ class UmbraCatalog:
                 resp.raise_for_status()
             except requests.RequestException as exc:
                 raise CatalogError(f"Failed to list bucket prefix {url!r}: {exc}") from exc
-            root = ET.fromstring(resp.content)
+            root = self._parse_listing(resp.content)
             for cp in root.findall(f"{_S3_NS}CommonPrefixes"):
                 p = cp.findtext(f"{_S3_NS}Prefix")
                 if p:
@@ -242,7 +265,7 @@ class UmbraCatalog:
                 resp.raise_for_status()
             except requests.RequestException as exc:
                 raise CatalogError(f"Failed to list bucket prefix {url!r}: {exc}") from exc
-            root = ET.fromstring(resp.content)
+            root = self._parse_listing(resp.content)
             for c in root.findall(f"{_S3_NS}Contents"):
                 k = c.findtext(f"{_S3_NS}Key")
                 if k:

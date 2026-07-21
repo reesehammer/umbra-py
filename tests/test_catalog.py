@@ -7,6 +7,7 @@ import pytest
 import responses
 
 from umbra_py.catalog import _SIDECAR_WORKERS, UmbraCatalog, _acq_date, _task_name
+from umbra_py.exceptions import CatalogError
 
 
 @pytest.mark.parametrize(
@@ -447,6 +448,61 @@ def test_list_prefix_follows_continuation_token():
     assert all("list-type=2" in url for url in seen_urls)
     # The delimiter must survive alongside list-type=2 on the first request.
     assert "delimiter=" in seen_urls[0]
+
+
+# -- XML hardening (docs/CODEBASE_ANALYSIS.md §6 P2 #13) ---------------------
+#
+# The bucket listing is remote, untrusted XML parsed on the core discovery
+# path. ``UmbraCatalog._parse_listing`` routes it through defusedxml so an
+# entity-expansion ("billion laughs") or external-entity (XXE) payload is
+# rejected outright rather than exhausting memory or reaching the filesystem.
+
+_BILLION_LAUGHS = (
+    '<?xml version="1.0"?>'
+    "<!DOCTYPE lolz ["
+    '<!ENTITY lol "lol">'
+    '<!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+    '<!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">'
+    "]>"
+    f'<ListBucketResult xmlns="{_S3_NS}"><Contents><Key>&lol2;</Key></Contents>'
+    "</ListBucketResult>"
+).encode()
+
+_XXE = (
+    '<?xml version="1.0"?>'
+    '<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+    f'<ListBucketResult xmlns="{_S3_NS}"><Contents><Key>&xxe;</Key></Contents>'
+    "</ListBucketResult>"
+).encode()
+
+
+@pytest.mark.parametrize("payload", [_BILLION_LAUGHS, _XXE], ids=["billion-laughs", "xxe"])
+def test_parse_listing_rejects_malicious_xml(payload):
+    """DTD / entity-expansion / external-entity payloads raise, never expand."""
+    with pytest.raises(CatalogError):
+        UmbraCatalog._parse_listing(payload)
+
+
+def test_parse_listing_rejects_malformed_xml():
+    """Truncated / non-XML bodies fail loudly as a CatalogError, not a raw traceback."""
+    with pytest.raises(CatalogError):
+        UmbraCatalog._parse_listing(b"<ListBucketResult><Contents>")
+
+
+def test_parse_listing_accepts_well_formed_listing():
+    """A normal ListObjectsV2 body still parses to its keys."""
+    body = _list_result(contents=["sar-data/tasks/a/k0"], common_prefixes=["sar-data/tasks/a/"])
+    root = UmbraCatalog._parse_listing(body.encode())
+    assert root.findtext(f"{{{_S3_NS}}}Contents/{{{_S3_NS}}}Key") == "sar-data/tasks/a/k0"
+
+
+@responses.activate
+def test_list_prefix_rejects_malicious_response_body():
+    """An end-to-end hostile listing response is refused, not parsed."""
+    cat = UmbraCatalog()
+    responses.add(responses.GET, f"{cat._list_base}/", body=_BILLION_LAUGHS, status=200)
+    with pytest.raises(CatalogError):
+        cat._list_prefix("sar-data/tasks/")
 
 
 # -- concurrent sidecar fetching (docs/CODEBASE_ANALYSIS.md §4.2 / #9) --------
