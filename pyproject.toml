@@ -77,7 +77,12 @@ dev = [
     "pytest-cov>=4.1",
     "responses>=0.23",
     "httpx>=0.27",
-    "ruff>=0.4",
+    # Capped below 0.16: ruff 0.16.0 began formatting fenced code blocks inside
+    # Markdown, which reformats the snippets in `examples/*.md` (and other .md)
+    # that were written against earlier ruff, turning `ruff format --check .`
+    # red on an unrelated file set. Cap keeps CI tooling deterministic; lift it
+    # deliberately in a dedicated PR that also reformats the Markdown examples.
+    "ruff>=0.4,<0.16",
     "mypy>=1.8",
     "types-requests>=2.28",
     "types-defusedxml>=0.7",
