@@ -162,6 +162,51 @@ def test_export_round_trip_carries_baked_place(tmp_path):
     assert back["properties"]["umbra:place"] == "Reykjavík, Iceland"
 
 
+def test_export_normalizes_mixed_list_scalar_property(tmp_path):
+    """A property that is a list on some items and a bare object on others (the
+    real-catalog `providers` drift) must not abort the export: the scalar rows
+    are wrapped into single-element lists so pyarrow gets a uniform column.
+    Regression for the publish-index crash (issue #102):
+    `ArrowInvalid: cannot mix list and non-list, non-null values`.
+    """
+    pytest.importorskip("stac_geoparquet")
+    provider = {
+        "name": "Umbra Lab Inc",
+        "roles": ["producer", "host"],
+        "url": "https://umbra.space",
+    }
+    list_item = _make_item("a", (0, 0, 1, 1))
+    list_item.raw["properties"]["providers"] = [provider]
+    scalar_item = _make_item("b", (10, 10, 11, 11))
+    scalar_item.raw["properties"]["providers"] = dict(provider)
+    out = tmp_path / "catalog.parquet"
+
+    assert export_geoparquet([list_item, scalar_item], out) == 2
+
+    back = {d["id"]: d for d in _read_back(out)}
+    assert back["a"]["properties"]["providers"] == [provider]
+    # The scalar occurrence was wrapped into a single-element list.
+    assert back["b"]["properties"]["providers"] == [provider]
+    # Normalization never mutated the source document.
+    assert scalar_item.raw["properties"]["providers"] == provider
+
+
+def test_export_leaves_uniform_property_untouched(tmp_path):
+    """A property that is scalar on every item stays scalar -- normalization
+    only fires when a property genuinely drifts between list and non-list."""
+    pytest.importorskip("stac_geoparquet")
+    a = _make_item("a", (0, 0, 1, 1))
+    a.raw["properties"]["platform"] = "umbra"
+    b = _make_item("b", (10, 10, 11, 11))
+    b.raw["properties"]["platform"] = "umbra"
+    out = tmp_path / "catalog.parquet"
+
+    assert export_geoparquet([a, b], out) == 2
+    back = {d["id"]: d for d in _read_back(out)}
+    assert back["a"]["properties"]["platform"] == "umbra"
+    assert back["b"]["properties"]["platform"] == "umbra"
+
+
 def test_cli_index_export(tmp_path):
     pytest.importorskip("stac_geoparquet")
     from click.testing import CliRunner

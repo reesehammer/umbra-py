@@ -58,6 +58,41 @@ def _export_doc(item: UmbraItem) -> dict[str, Any]:
     return doc
 
 
+def _normalize_mixed_property_types(docs: list[dict[str, Any]]) -> None:
+    """Make properties that drift between list and scalar uniform across ``docs``.
+
+    Umbra's catalog is not perfectly uniform: some acquisitions encode a
+    property as a single object where others -- and the STAC spec -- use a
+    list. ``providers`` is the observed case: a list of provider objects on
+    most items, but a bare object on a handful. stac-geoparquet infers one
+    Arrow type per column, so a column that is a list in one row and a scalar
+    in another aborts the whole export with ``cannot mix list and non-list,
+    non-null values``. Wrap the scalar occurrences in a single-element list so
+    the column is uniform; this is lossless and, for ``providers``, is the
+    spec-correct shape. Rebinds each doc's ``properties`` to a fresh dict, so
+    ``item.raw`` is never mutated.
+    """
+    kinds: dict[str, set[str]] = {}
+    for doc in docs:
+        for key, val in (doc.get("properties") or {}).items():
+            if val is None:
+                continue
+            kinds.setdefault(key, set()).add("list" if isinstance(val, list) else "scalar")
+    mixed = {key for key, seen in kinds.items() if seen == {"list", "scalar"}}
+    if not mixed:
+        return
+    for doc in docs:
+        props = doc.get("properties")
+        if not props:
+            continue
+        normalized = dict(props)
+        for key in mixed:
+            val = normalized.get(key)
+            if val is not None and not isinstance(val, list):
+                normalized[key] = [val]
+        doc["properties"] = normalized
+
+
 def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> int:
     """Write items to a stac-geoparquet file; return how many were written.
 
@@ -73,6 +108,7 @@ def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> in
     docs = [_export_doc(item) for item in items if item.geometry]
     if not docs:
         raise UmbraError("No items with a footprint geometry to export.")
+    _normalize_mixed_property_types(docs)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
