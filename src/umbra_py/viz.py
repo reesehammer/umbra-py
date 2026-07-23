@@ -50,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .constants import ATTRIBUTION
 from .exceptions import AssetNotFoundError, MissingDependencyError
 from .models import UmbraItem
 
@@ -402,6 +403,42 @@ def _install_lazy_imagery(
     )
 
 
+# Umbra's open data is CC-BY-4.0, which requires the data credit be shown
+# wherever the data is used. A Folium map's default basemap only carries the
+# *tile* provider's attribution (OpenStreetMap); the Umbra footprints and SAR
+# overlays drawn on top are the licensed data, and their notice was missing.
+# Register it with Leaflet's attribution control so it sits beside the OSM
+# credit -- the standard place a web map shows its data sources -- rather than
+# only inside per-marker popups a viewer has to click to reveal. Emitted as a
+# MacroElement (the same runtime-script mechanism as _image_overlay_swipe_shim),
+# so the notice is baked into the saved HTML and is asserted offline. ATTRIBUTION
+# is a fixed package constant (no untrusted input), JSON-encoded into the call.
+_ATTRIBUTION_JS = (
+    "{% macro script(this, kwargs) %}\n"
+    "{{ this._parent.get_name() }}.attributionControl.addAttribution("
+    + json.dumps(ATTRIBUTION)
+    + ");\n"
+    "{% endmacro %}"
+)
+
+
+def _add_attribution(folium_map: Any) -> None:
+    """Add the mandatory Umbra CC-BY data credit to a map's attribution control.
+
+    The default Folium basemap credits only the tile provider; this adds the
+    Umbra open-data licence notice (:data:`umbra_py.constants.ATTRIBUTION`)
+    alongside it, satisfying CC-BY-4.0's attribution requirement on the
+    generated map itself (``umbra map`` / ``--timeline`` / ``umbra swipe``).
+    """
+    from branca.element import MacroElement  # noqa: PLC0415
+    from jinja2 import Template  # noqa: PLC0415
+
+    el = MacroElement()
+    el._name = "UmbraAttribution"
+    el._template = Template(_ATTRIBUTION_JS)
+    el.add_to(folium_map)
+
+
 def footprint_map(
     items: Iterable[UmbraItem],
     *,
@@ -475,6 +512,7 @@ def footprint_map(
         center = (0.0, 0.0)
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=zoom_start or 2)
+    _add_attribution(m)
 
     rendered_imagery: set[str] = set()
     if imagery:
@@ -1843,6 +1881,7 @@ def timeline_map(
         center = (0.0, 0.0)
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=zoom_start)
+    _add_attribution(m)
 
     if features:
         TimestampedGeoJson(
@@ -1955,6 +1994,7 @@ def swipe_map(
     center = ((bbottom + btop) / 2, (bleft + bright) / 2)
 
     m = folium.Map(location=center, tiles=tiles, zoom_start=2)
+    _add_attribution(m)
     # One full-map pane per overlay so the side-by-side control can clip each
     # independently in layer-point space (see _SWIPE_SHIM_JS). Panes must be
     # created before the overlays that reference them.

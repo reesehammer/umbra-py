@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **CC-BY data attribution now shown on the interactive maps
+  (`DEMO_APP_GAPS.md` G8).** Umbra open data is CC-BY-4.0, which requires the
+  data credit be displayed wherever the data is used. The Folium maps
+  (`umbra map`, `umbra map --timeline`, `umbra swipe`) surfaced the notice only
+  inside per-marker popups, while the default basemap credited only the
+  OpenStreetMap *tiles* — the Umbra footprints and SAR overlays drawn on top
+  (the licensed data) had no visible attribution. A shared `viz._add_attribution`
+  helper now registers `constants.ATTRIBUTION` with Leaflet's attribution control
+  on every generated map, so the credit sits beside the OSM notice — the standard
+  place a web map shows its data sources, matching what `umbra demo`,
+  `umbra gallery`, and `umbra tiles` already do. Emitted as a Folium
+  `MacroElement` (the same runtime-script mechanism as the swipe shim), so the
+  notice is baked into the saved HTML and is offline-tested in
+  `tests/test_viz.py`. No new dependency, no behaviour change beyond the added
+  credit line.
+
 ### Security
 - **Defused XML parsing of the S3 bucket listing + a scheduled `pip-audit`
   dependency audit (`CODEBASE_ANALYSIS.md` §6 P2 #13 / P2 #14, §5.2.5).** The

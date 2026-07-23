@@ -1443,6 +1443,33 @@ same 500 lines of glue first, and many give up."*
 > maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
 > Umbra).
 >
+> **Update (2026-07-23, map attribution):** the **interactive maps now carry the
+> mandatory CC-BY data credit** (`DEMO_APP_GAPS.md` G8 — supporting
+> infrastructure, §7). The funnel's most-shared outputs are the artifacts a
+> curious analyst opens and *forwards* — the maps `umbra map`, `umbra map
+> --timeline` and `umbra swipe` write — and Umbra's open data is CC-BY-4.0, whose
+> attribution requirement follows the data wherever it travels. Those Folium maps
+> surfaced the licence notice only inside per-marker popups a viewer had to click
+> to reveal, while the default basemap credited only the OpenStreetMap *tiles* —
+> so the one thing legally required to appear, the credit for the Umbra footprints
+> and SAR overlays that *are* the licensed data, was effectively absent from a
+> shared page. A shared `viz._add_attribution` helper now registers
+> `constants.ATTRIBUTION` with Leaflet's attribution control on every generated
+> map, so the credit sits beside the OSM notice — the standard place a web map
+> shows its data sources, and exactly what `umbra demo`, `umbra gallery` and
+> `umbra tiles` already do (the gallery's own footer already carried it). Not a
+> new capability — the trust/compliance floor under the shareable outputs the
+> whole funnel depends on (§3's "trust the scientific audience needs"): a project
+> that widens the funnel by making Umbra's data easy to *show* must ship outputs
+> that honour the licence when they are shown. It holds the project's grain and
+> testability (§3): **no model is called** and **no dependency is added** — the
+> notice rides a Folium `MacroElement` (the same runtime-script mechanism as the
+> swipe shim), so it is baked into the saved HTML and asserted offline in
+> `tests/test_viz.py` across all three maps. The remaining strategic gaps are
+> unchanged and largely non-code: 5.5's fully-calibrated image-space facet
+> integration / MultiRTC interop and the maintainer-side adoption moves (5.3
+> registries, PyPI publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one

@@ -273,13 +273,23 @@ demo starts with a git clone.
 
 ### G8 — Demo-grade UX polish is outside Folium's reach
 
-Attribution display (CC-BY is mandatory — the string exists in `constants.py`
-but the map templates surface it only in popups), loading/progress states,
-mobile layout, keyboard/accessibility, error surfaces ("this COG failed to
-stream") — Folium's template model gives little control over any of these.
-This is not a criticism of the library (Folium is the right choice for
-notebook output); it's a signal that the demo front end should be its own
-small JS app, not a bigger Folium template.
+✅ **Attribution display — done.** CC-BY is mandatory, and the interactive
+Folium maps (`umbra map`, `umbra map --timeline`, `umbra swipe`) previously
+surfaced the licence notice only inside per-marker popups a viewer had to click
+to reveal — while the default basemap credited only the OpenStreetMap tiles, not
+the Umbra footprints/overlays drawn on top (the licensed data). The shared
+`viz._add_attribution` helper now registers `constants.ATTRIBUTION` with
+Leaflet's attribution control on every generated map, so the credit sits beside
+the OSM notice — the standard place a web map shows its data sources, matching
+what `umbra demo`, `umbra gallery`, and `umbra tiles` already do. Baked into the
+saved HTML and offline-tested in `tests/test_viz.py`.
+
+The remaining polish — loading/progress states, mobile layout,
+keyboard/accessibility, error surfaces ("this COG failed to stream") — Folium's
+template model gives little control over. This is not a criticism of the library
+(Folium is the right choice for notebook output); it's a signal that the demo
+front end should be its own small JS app, not a bigger Folium template (which is
+exactly what `umbra demo` is).
 
 ---
 
