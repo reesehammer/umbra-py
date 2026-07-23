@@ -36,6 +36,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` is ledgered as an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **`umbra index export` (stac-geoparquet) no longer crashes on catalog
+  drift in the `providers` property (issue #102).** Most Umbra acquisitions
+  encode the STAC `providers` property as a list of provider objects
+  (spec-correct), but a handful carry a single bare object. stac-geoparquet
+  infers one Arrow type per column, so a column that is a list on some rows
+  and a scalar on others aborted the whole export with
+  `ArrowInvalid: cannot mix list and non-list, non-null values`. This crashed
+  the weekly `publish-index` workflow so the rolling `catalog-index` release
+  was never produced, which in turn made the live catalog canary fail with a
+  404 fetching the missing `catalog.db`. `export_geoparquet` now normalizes
+  any property that drifts between list and scalar across the exported items,
+  wrapping the scalar occurrences in single-element lists — lossless, and for
+  `providers` the spec-correct shape (`item.raw` is never mutated). The live
+  canary also now skips, rather than errors, when the `catalog-index` release
+  asset isn't published yet, since that availability gap is not the catalog
+  drift the canary exists to catch. Covered by `tests/test_export.py`.
 - **CC-BY data attribution now shown on the interactive maps
   (`DEMO_APP_GAPS.md` G8).** Umbra open data is CC-BY-4.0, which requires the
   data credit be displayed wherever the data is used. The Folium maps

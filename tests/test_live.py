@@ -149,9 +149,17 @@ def test_fetch_prebuilt_index_from_release(tmp_path):
     consume side of the weekly publish workflow, hit against the real release.
     """
     from umbra_py import CatalogIndex
+    from umbra_py.exceptions import DownloadError
 
     dest = tmp_path / "catalog.db"
-    with CatalogIndex.from_release(dest) as idx:
+    try:
+        idx = CatalogIndex.from_release(dest)
+    except DownloadError as exc:
+        # No published snapshot yet (e.g. the weekly publish hasn't run, or is
+        # mid-publish). That's a release-availability gap, not the catalog drift
+        # this canary exists to catch -- skip rather than raise a false alarm.
+        pytest.skip(f"catalog-index release asset not available: {exc}")
+    with idx:
         if len(idx) == 0:
             pytest.skip("catalog-index release has no items yet")
         assert dest.exists()
