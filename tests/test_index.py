@@ -696,6 +696,29 @@ def test_search_live_merges_index_and_new_live_items(tmp_path):
     assert {i.id for i in found} == {"a", "b", "c", "d"}
 
 
+def test_search_live_forwards_acquisition_filters_to_both_streams(tmp_path):
+    """The polarization / incidence / resolution filters reach both the index
+    query and the live delta walk, so the read-through path filters like a plain
+    search on either side."""
+    cat = _RecordingCatalog([_D])
+    with _index(tmp_path) as idx:
+        list(
+            idx.search_live(
+                cat,
+                overlap_days=0,
+                polarizations=["VV"],
+                min_incidence=20.0,
+                max_incidence=40.0,
+                max_resolution=0.5,
+            )
+        )
+    live_kwargs = cat.calls[0]
+    assert live_kwargs["polarizations"] == ["VV"]
+    assert live_kwargs["min_incidence"] == 20.0
+    assert live_kwargs["max_incidence"] == 40.0
+    assert live_kwargs["max_resolution"] == 0.5
+
+
 def test_search_live_deduplicates_overlap_by_href(tmp_path):
     """An acquisition present in both the index and the live delta yields once."""
     cat = _RecordingCatalog([_B])  # _B is already indexed -> a pure overlap

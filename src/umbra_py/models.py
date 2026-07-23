@@ -388,6 +388,66 @@ class UmbraItem:
             item_rings = [bbox_ring(self.bbox)]
         return geometries_intersect(item_rings, geometry)
 
+    def matches_filters(
+        self,
+        *,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
+    ) -> bool:
+        """Whether this item satisfies the SAR acquisition-property filters.
+
+        These are the first-class radar-discovery filters an analyst reaches for
+        beyond geography and date -- polarization, incidence angle and spatial
+        resolution -- read from the STAC ``sar:``/``view:`` properties the item
+        already parses (:attr:`polarizations`, :attr:`incidence_angle`,
+        :attr:`resolution`). Every argument is optional; a ``None``/empty one is
+        no constraint, so a call with no arguments always returns ``True``.
+
+        - ``polarizations``: keep the item if it exposes *at least one* of the
+          requested polarizations (case-insensitive), e.g. ``["VV"]``. This is
+          the filter that keeps a change composite comparing like with like --
+          HH and VV image different scattering physics (see
+          :data:`~umbra_py.constants.POLARIZATION_CAVEAT`).
+        - ``min_incidence`` / ``max_incidence``: inclusive bounds on the view
+          incidence angle in degrees.
+        - ``max_resolution``: keep the item only if it is *at least this fine* --
+          both the range and azimuth resolution must be ``<= max_resolution``
+          metres.
+
+        Each filter is a **hard predicate**: when it is set, an item that lacks
+        the corresponding metadata is *excluded* (an absent value can't be
+        confirmed to match), matching the STAC Query-extension convention that a
+        property predicate does not select items missing that property. This is
+        deliberately unlike the geometric :meth:`intersects_bbox` /
+        :meth:`intersects_polygon` filters, which fall back to a coarser datum
+        when a footprint is missing: those have a fallback, these categorical /
+        numeric properties do not, so "present and satisfies" is the honest test.
+        No model is called and no new dependency is used -- pure metadata
+        comparison, so it is fully deterministic and offline-testable.
+        """
+        if polarizations:
+            wanted = {p.upper() for p in polarizations}
+            have = {p.upper() for p in self.polarizations}
+            if not (wanted & have):
+                return False
+        if min_incidence is not None or max_incidence is not None:
+            inc = self.incidence_angle
+            if inc is None:
+                return False
+            if min_incidence is not None and inc < min_incidence:
+                return False
+            if max_incidence is not None and inc > max_incidence:
+                return False
+        if max_resolution is not None:
+            rng, azi = self.resolution
+            if rng is None or azi is None:
+                return False
+            if rng > max_resolution or azi > max_resolution:
+                return False
+        return True
+
     def metadata_summary(self) -> dict[str, Any]:
         """A compact, human-friendly subset of the item's metadata."""
         rng, azi = self.resolution

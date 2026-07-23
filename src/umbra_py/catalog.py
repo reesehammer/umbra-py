@@ -288,6 +288,10 @@ class UmbraCatalog:
         product_types: list[str] | None = None,
         area: str | None = None,
         fuzzy: bool = False,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -329,6 +333,21 @@ class UmbraCatalog:
             drops a result). So ``area="utah centerfield"`` or
             ``area="centrfield"`` still reaches ``"Centerfield, Utah"``.
             No model call -- see ``docs/AI_INTEGRATION_IDEAS.md`` C1.
+        polarizations:
+            Keep only items exposing at least one of these polarizations
+            (case-insensitive, e.g. ``["VV"]``) -- the SAR-native filter that
+            keeps a change comparison like-with-like (HH and VV image different
+            physics). An item with no polarization metadata is excluded.
+        min_incidence, max_incidence:
+            Inclusive bounds (degrees) on the view incidence angle
+            (:attr:`UmbraItem.incidence_angle`). An item with no incidence
+            metadata is excluded when either bound is set.
+        max_resolution:
+            Keep only items at least this fine -- both range and azimuth
+            resolution ``<= max_resolution`` metres. An item missing either
+            resolution value is excluded. See :meth:`UmbraItem.matches_filters`
+            for the exact acquisition-property semantics (a set filter excludes
+            items lacking that property, matching the STAC Query extension).
         limit:
             Stop after yielding this many items.
         max_per_task:
@@ -351,6 +370,12 @@ class UmbraCatalog:
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
         wanted = {p.upper() for p in product_types} if product_types else None
+        acq_filters: dict[str, Any] = {
+            "polarizations": polarizations,
+            "min_incidence": min_incidence,
+            "max_incidence": max_incidence,
+            "max_resolution": max_resolution,
+        }
 
         if self.token:
             yield from self._search_archive(
@@ -361,6 +386,7 @@ class UmbraCatalog:
                 wanted=wanted,
                 area=area,
                 fuzzy=fuzzy,
+                acq_filters=acq_filters,
                 limit=limit,
                 max_per_task=max_per_task,
             )
@@ -382,6 +408,8 @@ class UmbraCatalog:
                     continue
                 if wanted is not None and not (wanted & set(item.available_assets)):
                     continue
+                if not item.matches_filters(**acq_filters):
+                    continue
                 yield item
                 count += 1
                 per_task += 1
@@ -402,6 +430,7 @@ class UmbraCatalog:
         wanted: set[str] | None,
         area: str | None,
         fuzzy: bool,
+        acq_filters: dict[str, Any],
         limit: int | None,
         max_per_task: int | None,
     ) -> Iterator[UmbraItem]:
@@ -412,8 +441,9 @@ class UmbraCatalog:
         ``rel="next"`` pagination links, building an :class:`UmbraItem` from each
         returned feature (whose asset hrefs are already resolvable URLs, so no
         rewrite is needed). ``bbox`` and the date interval are pushed down to the
-        API; ``product_types`` and ``area``/``fuzzy`` are applied client-side to
-        keep exact parity with the open-bucket walk.
+        API; ``product_types``, ``area``/``fuzzy`` and the acquisition-property
+        filters (``acq_filters``: polarizations / incidence / resolution) are
+        applied client-side to keep exact parity with the open-bucket walk.
         """
         body: dict[str, Any] = {}
         if self.collections:
@@ -448,6 +478,8 @@ class UmbraCatalog:
                 if wanted is not None and not (wanted & set(item.available_assets)):
                     continue
                 if area and not task_matches(area, item.task or "", fuzzy=fuzzy):
+                    continue
+                if not item.matches_filters(**acq_filters):
                     continue
                 if max_per_task is not None:
                     seen = per_task.get(item.task, 0)

@@ -209,6 +209,10 @@ def search_catalog(
     start: str | None = None,
     end: str | None = None,
     products: list[str] | None = None,
+    polarizations: list[str] | None = None,
+    min_incidence: float | None = None,
+    max_incidence: float | None = None,
+    max_resolution: float | None = None,
     limit: int = 20,
     max_per_task: int | None = None,
     local: bool | None = None,
@@ -241,8 +245,14 @@ def search_catalog(
     relative expression (``today``, ``yesterday``, ``3 months ago``,
     ``last month``), resolved deterministically with no model call;
     ``products`` to restrict to product types
-    (any of GEC, SICD, SIDD, CPHD); ``limit`` to cap results; ``max_per_task``
-    to cap items per site (use 1 for a one-pin-per-site overview).
+    (any of GEC, SICD, SIDD, CPHD); the SAR acquisition-property filters
+    ``polarizations`` (keep items exposing any of these, e.g. ``["VV"]`` -- the
+    filter that keeps a change comparison like-with-like), ``min_incidence`` /
+    ``max_incidence`` (view incidence-angle bounds in degrees) and
+    ``max_resolution`` (keep items at least this fine, in metres) -- each a hard
+    predicate that excludes items missing that metadata; ``limit`` to cap
+    results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
+    overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
     present (instant) and fall back to a live S3 walk otherwise. When the server
@@ -316,6 +326,10 @@ def search_catalog(
             product_types=list(products) if products else None,
             area=search_area,
             fuzzy=search_fuzzy,
+            polarizations=list(polarizations) if polarizations else None,
+            min_incidence=min_incidence,
+            max_incidence=max_incidence,
+            max_resolution=max_resolution,
             limit=limit,
             max_per_task=max_per_task,
         )

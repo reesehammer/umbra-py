@@ -233,6 +233,62 @@ def _fuzzy_option(func):
     )(func)
 
 
+def _acquisition_filter_options(func):
+    """Attach the shared SAR acquisition-property filters (``--pol``,
+    ``--min-incidence`` / ``--max-incidence``, ``--max-resolution``).
+
+    These are the first-class radar-discovery filters beyond geography and date
+    -- the metadata is already on every :class:`~umbra_py.models.UmbraItem`, so
+    this closes the "gather everything, then filter client-side" gap. A set
+    filter excludes items lacking that property (the STAC Query-extension
+    convention); see :meth:`UmbraItem.matches_filters`.
+    """
+    func = click.option(
+        "--max-resolution",
+        type=float,
+        default=None,
+        help="Keep only items at least this fine: both range and azimuth "
+        "resolution <= this many metres. Items missing a resolution are excluded.",
+    )(func)
+    func = click.option(
+        "--max-incidence",
+        type=float,
+        default=None,
+        help="Keep only items with view incidence angle <= this many degrees. "
+        "Items missing an incidence angle are excluded.",
+    )(func)
+    func = click.option(
+        "--min-incidence",
+        type=float,
+        default=None,
+        help="Keep only items with view incidence angle >= this many degrees. "
+        "Items missing an incidence angle are excluded.",
+    )(func)
+    func = click.option(
+        "--pol",
+        "polarizations",
+        multiple=True,
+        help="Keep only items exposing this polarization (e.g. VV, HH; "
+        "repeatable, case-insensitive, matches if the item has ANY of them). "
+        "The filter that keeps a change comparison like-with-like -- HH and VV "
+        "image different physics. Items with no polarization metadata are excluded.",
+    )(func)
+    return func
+
+
+def _acquisition_filter_kwargs(
+    polarizations, min_incidence, max_incidence, max_resolution
+) -> dict[str, object]:
+    """Normalise the ``_acquisition_filter_options`` values into ``search``
+    keyword arguments (an empty ``--pol`` tuple becomes ``None``)."""
+    return {
+        "polarizations": list(polarizations) or None,
+        "min_incidence": min_incidence,
+        "max_incidence": max_incidence,
+        "max_resolution": max_resolution,
+    }
+
+
 def _token_option(func):
     """Attach the shared ``--token`` option that points a render/analysis command
     at Umbra's authenticated Canopy commercial archive instead of the open bucket.
@@ -386,6 +442,7 @@ def cli() -> None:
     "reach 'Centerfield, Utah'). Deterministic, no model call; a strict "
     "superset of the default substring match, so it never drops a result.",
 )
+@_acquisition_filter_options
 @click.option("--limit", type=int, default=20, show_default=True, help="Max results.")
 @click.option(
     "--max-per-task",
@@ -437,6 +494,10 @@ def search(
     products,
     area,
     fuzzy,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     limit,
     max_per_task,
     as_json,
@@ -474,6 +535,7 @@ def search(
         product_types=list(products) or None,
         area=area,
         fuzzy=fuzzy,
+        **_acquisition_filter_kwargs(polarizations, min_incidence, max_incidence, max_resolution),
         limit=limit,
         max_per_task=max_per_task,
     )

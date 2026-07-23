@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **SAR acquisition-property search filters — polarization, incidence angle and
+  resolution — across every discovery surface (`STRATEGY.md` §3 "discovery is
+  the moat", `AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on).** Search already
+  filtered by geography (`bbox` / `intersects` / `place`), date and product type
+  — but not by the SAR-native properties an analyst reaches for next, so those
+  had to be filtered client-side after the fact (the "same 500 lines of glue"
+  the strategy names). `search(...)` now accepts `polarizations` (keep items
+  exposing at least one, e.g. `["VV"]` — the filter that keeps a change
+  comparison like-with-like), `min_incidence` / `max_incidence` (view
+  incidence-angle bounds in degrees) and `max_resolution` (keep items at least
+  this fine, in metres). They are threaded through **every discovery surface so
+  the backends agree**: the live open-bucket walk, the local `CatalogIndex`, the
+  read-through `search_live`, the Canopy commercial archive (applied client-side
+  like `product_types`), `umbra search` (`--pol` / `--min-incidence` /
+  `--max-incidence` / `--max-resolution`), and the MCP `search_catalog` tool
+  (so agents filter too). The metadata is already parsed on every `UmbraItem`
+  (`sar:polarizations`, `view:incidence_angle`, `sar:resolution_*`), so no
+  schema change is needed — the shared predicate `UmbraItem.matches_filters`
+  runs in Python on each candidate, exactly as the polygon test does. Each
+  filter is a **hard predicate**: a set filter excludes an item lacking that
+  property (the STAC Query-extension convention), deliberately unlike the
+  geometric filters' coarser-datum fallback. No model is called and no
+  dependency is added; the whole surface is offline-tested
+  (`tests/test_acquisition_filters.py` across the predicate, index, live walk,
+  archive, CLI and MCP). Wiring these filters into the render/analysis commands
+  (`change`, `timescan`, …), the `umbra serve` STAC Query extension, and
+  `umbra ask` is ledgered as an additive follow-on in `TODO.md`.
+
 ### Fixed
 - **CC-BY data attribution now shown on the interactive maps
   (`DEMO_APP_GAPS.md` G8).** Umbra open data is CC-BY-4.0, which requires the

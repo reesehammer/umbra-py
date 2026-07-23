@@ -68,6 +68,27 @@ _SEARCH_PARAMETERS: dict[str, str] = {
         "Restrict to items exposing these product types (any of "
         f"{', '.join(PRODUCT_ASSETS)}). Omit to accept all."
     ),
+    "polarizations": (
+        "Keep only items exposing at least one of these polarizations (e.g. "
+        "['VV'], case-insensitive). The SAR-native filter that keeps a change "
+        "comparison like-with-like -- HH and VV image different scattering "
+        "physics and must not be differenced. An item with no polarization "
+        "metadata is excluded when this is set."
+    ),
+    "min_incidence": (
+        "Lower bound (inclusive, degrees) on the view incidence angle. An item "
+        "with no incidence metadata is excluded when this is set."
+    ),
+    "max_incidence": (
+        "Upper bound (inclusive, degrees) on the view incidence angle. An item "
+        "with no incidence metadata is excluded when this is set."
+    ),
+    "max_resolution": (
+        "Keep only items at least this fine: both range and azimuth resolution "
+        "must be <= this many metres. An item missing a resolution is excluded. "
+        "A set acquisition-property filter excludes items lacking that property "
+        "(the STAC Query-extension convention)."
+    ),
     "limit": "Maximum number of items to return.",
     "max_per_task": (
         "Cap items per task. Use 1 for a 'one pin per site' world view; omit "

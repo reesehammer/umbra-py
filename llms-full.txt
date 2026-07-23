@@ -29,6 +29,10 @@ Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogInde
 - **start** — Earliest acquisition date, inclusive. An ISO YYYY-MM-DD date, a bare year or year-month (2024, 2024-03), or a relative expression resolved deterministically with no model call: 'today', 'yesterday', '3 months ago', 'last month'. Spans snap to their first day.
 - **end** — Latest acquisition date, inclusive. Same formats as start; a bare year, month or period ('2024', 'last month') snaps to that span's last day, so start='2024' end='2024' covers the whole year.
 - **products** — Restrict to items exposing these product types (any of GEC, CSI, SIDD, SICD, CPHD). Omit to accept all.
+- **polarizations** — Keep only items exposing at least one of these polarizations (e.g. ['VV'], case-insensitive). The SAR-native filter that keeps a change comparison like-with-like -- HH and VV image different scattering physics and must not be differenced. An item with no polarization metadata is excluded when this is set.
+- **min_incidence** — Lower bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
+- **max_incidence** — Upper bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
+- **max_resolution** — Keep only items at least this fine: both range and azimuth resolution must be <= this many metres. An item missing a resolution is excluded. A set acquisition-property filter excludes items lacking that property (the STAC Query-extension convention).
 - **limit** — Maximum number of items to return.
 - **max_per_task** — Cap items per task. Use 1 for a 'one pin per site' world view; omit for the full time series of each site.
 

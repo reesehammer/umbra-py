@@ -231,6 +231,39 @@ agent-framework reach trilogy is complete.
 
 ---
 
+## Acquisition-property search filters follow-ons (polarization / incidence / resolution shipped)
+
+- **Surfaced in:** the SAR acquisition-property filters PR (`STRATEGY.md` §3 /
+  `AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on).
+- **Code:** `src/umbra_py/models.py` (`UmbraItem.matches_filters`),
+  `catalog.py` / `index.py` (`search`, `search_live`, `_search_archive`),
+  `umbra search` in `cli.py` (`_acquisition_filter_options`),
+  `mcp_server.py` (`search_catalog`), `context.py` (`_SEARCH_PARAMETERS`).
+
+`search(polarizations=…, min_incidence=…, max_incidence=…, max_resolution=…)`
+filters by the SAR-native acquisition properties across the live walk, the local
+index, the read-through search, the Canopy archive, `umbra search` and the MCP
+`search_catalog` tool — one shared predicate (`UmbraItem.matches_filters`), no
+schema change, deterministic and offline-tested. Additive follow-ons, none a
+blocker:
+
+- **Wire the filters into the render/analysis commands.** `change`, `timescan`,
+  `swipe`, `gallery`, `map` and `chips` gather through `_gather_items`, so adding
+  the shared `_acquisition_filter_options` decorator + threading the kwargs would
+  let `umbra change --pol VV` gather a single-polarization series directly (today
+  the change command only *warns* on a mixed-polarization selection). Mechanical,
+  per-command signature edits.
+- **Expose the filters on the `umbra serve` STAC Query extension.** `parse_query`
+  already maps `product_types` / `area`; extending it (and the GET-param path)
+  with `sar:polarizations` (`in`/`eq`), `view:incidence_angle` (`gte`/`lte`) and
+  `sar:resolution_*` (`lte`) would let `pystac-client` and OpenAPI agents filter
+  on them too — the "every surface agrees" bar. Needs the numeric operators and
+  a small `parse_query` contract change.
+- **Let `umbra ask` plan the filters.** `planner.parse_plan` re-validates every
+  model-emitted field; adding the acquisition properties there would let a plain
+  sentence ("VV scenes at low incidence over Utah") resolve to a real search,
+  with the deterministic layer still validating each value.
+
 ## Grow the `umbra serve` STAC API (query extensions + a hosted instance)
 
 - **Surfaced in:** the `umbra serve` STAC API PR (`AI_INTEGRATION_IDEAS.md` B2 /

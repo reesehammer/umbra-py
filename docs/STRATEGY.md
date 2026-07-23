@@ -1443,6 +1443,45 @@ same 500 lines of glue first, and many give up."*
 > maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
 > Umbra).
 >
+> **Update (2026-07-23, SAR acquisition-property search filters):** **search now
+> filters by the SAR-native properties an analyst reaches for — polarization,
+> incidence angle and resolution — across every discovery surface**
+> (`AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on). §3 names discovery as the
+> project's *moat* — "the only thing with no substitute is search over a catalog
+> that has no search API" — yet search could only be narrowed by geography, date
+> and product type. The SAR-native filters every analyst reaches for next
+> (give me *VV* scenes, at *low incidence*, at *sub-metre* resolution) had to be
+> applied by hand after the fact — more of "the same 500 lines of glue" §1 says
+> drives people away, and the metadata was *already parsed on every*
+> `UmbraItem` (`sar:polarizations`, `view:incidence_angle`, `sar:resolution_*`),
+> just not filterable. `search(polarizations=…, min_incidence=…, max_incidence=…,
+> max_resolution=…)` closes that, threaded through *every* surface so the backends
+> agree: the live `UmbraCatalog` walk, the SQLite `CatalogIndex` (filtered in
+> Python on each reconstructed item, exactly as the polygon test is — so no schema
+> change), the read-through `search_live`, the Canopy commercial archive (applied
+> client-side so a loose server can't leak non-matches), `umbra search`
+> (`--pol` / `--min-incidence` / `--max-incidence` / `--max-resolution`), and the
+> `search_catalog` MCP tool (so agents — §1's co-equal users — filter by
+> acquisition geometry too). The `--pol` filter is the one that keeps a change
+> comparison *like-with-like* — HH and VV image different scattering physics
+> (the caveat the library has always carried), now a filter, not just a warning.
+> It holds the project's grain and testability (§3): the whole thing is one
+> shared, dependency-free predicate (`UmbraItem.matches_filters`) — pure metadata
+> comparison, **no model, no new dependency, no schema migration** — and each
+> filter is a *hard* predicate that excludes an item lacking that property (the
+> STAC Query-extension convention), deliberately unlike the geometric filters'
+> coarser-datum fallback and documented as such. **No model is called** and the
+> whole path is offline-tested (`tests/test_acquisition_filters.py`) across the
+> predicate, the index, the live walk, the archive, the CLI and MCP. It layers on
+> the same discovery substrate the whole project rests on, so it stays graceful
+> under upstream obsolescence. Wiring the same filters into the render/analysis
+> commands (`umbra change --pol VV`), the `umbra serve` STAC Query extension, and
+> `umbra ask` is ledgered as an additive follow-on in `TODO.md`. The remaining
+> strategic gaps are otherwise unchanged and largely non-code: 5.5's
+> fully-calibrated image-space facet integration / MultiRTC interop and the
+> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
+> Umbra).
+>
 > **Update (2026-07-23, map attribution):** the **interactive maps now carry the
 > mandatory CC-BY data credit** (`DEMO_APP_GAPS.md` G8 — supporting
 > infrastructure, §7). The funnel's most-shared outputs are the artifacts a
