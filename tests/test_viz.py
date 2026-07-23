@@ -1768,3 +1768,49 @@ def test_popup_html_keeps_and_escapes_http_href():
     html = _popup_html(item)
     assert "open STAC item" in html
     assert "https://example.com/item.json?a=1&amp;b=2" in html
+
+
+# --- CC-BY data attribution on the interactive maps (DEMO_APP_GAPS G8) ---
+# Umbra open data is CC-BY-4.0; the licence notice must appear on every map we
+# generate, not just inside per-marker popups. It is registered with Leaflet's
+# attribution control so it renders beside the OSM tile credit.
+
+
+def test_footprint_map_carries_ccby_attribution(sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import viz as viz_mod
+    from umbra_py.constants import ATTRIBUTION
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = viz_mod.footprint_map([item]).get_root().render()
+
+    assert "attributionControl.addAttribution" in html
+    assert ATTRIBUTION in html
+
+
+def test_timeline_map_carries_ccby_attribution(sample_item_dict):
+    pytest.importorskip("folium")
+    from umbra_py import timeline_map
+    from umbra_py.constants import ATTRIBUTION
+
+    item = UmbraItem.from_dict(sample_item_dict)
+    html = timeline_map([item]).get_root().render()
+
+    assert "attributionControl.addAttribution" in html
+    assert ATTRIBUTION in html
+
+
+def test_swipe_map_carries_ccby_attribution(monkeypatch):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("folium")
+    pytest.importorskip("PIL")
+    from umbra_py import viz as viz_mod
+    from umbra_py.constants import ATTRIBUTION
+
+    monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
+
+    before, after = _swipe_items()
+    html = viz_mod.swipe_map(before, after).get_root().render()
+
+    assert "attributionControl.addAttribution" in html
+    assert ATTRIBUTION in html
