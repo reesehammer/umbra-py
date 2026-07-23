@@ -1413,7 +1413,10 @@ def select_change_frames(
     if len(pool) < 2:
         pool = dated  # no same-pol pair exists; compare across pols instead.
 
-    pool = sorted(pool, key=lambda i: i.datetime)
+    # Every item in `pool` came from `dated` (datetime is not None); the
+    # ``or datetime.min`` fallback is unreachable but keeps the sort key typed
+    # as a plain ``datetime`` for the type checker.
+    pool = sorted(pool, key=lambda i: i.datetime or datetime.min)
     if frames is None:
         return pool  # whole series, for a time-lapse
     n = min(frames, len(pool))
@@ -1795,13 +1798,18 @@ def timeline_map(
     features: list[dict[str, Any]] = []
     bbox_inputs: list[dict[str, Any]] = []
     for item in plottable:
+        # `plottable` holds only items whose datetime is not None (filtered
+        # above), so this is always set -- the assert documents the invariant
+        # and narrows the type for the checker.
+        dt = item.datetime
+        assert dt is not None
         lazy_url, lazy_bounds = lazy_urls.get(item.id, (None, None))
         features.append(
             {
                 "type": "Feature",
                 "geometry": geoms[item.id],
                 "properties": {
-                    "times": [item.datetime.isoformat()],
+                    "times": [dt.isoformat()],
                     "popup": _popup_html(
                         item,
                         location=locations.get(item.id),

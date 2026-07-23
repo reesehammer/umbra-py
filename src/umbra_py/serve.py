@@ -1406,6 +1406,10 @@ def build_app(
         it is ``queued`` on the executor and the response is ``202 Accepted``
         with a ``Location`` header pointing at the poll URL.
         """
+        # The async artifact routes are only mounted when an executor exists
+        # (``job_executor`` is set whenever artifacts are enabled), so this
+        # closure never runs without one.
+        assert job_executor is not None
         key = artifact_cache_key(kind, [it.id for it in items], options)
         base = str(request.base_url).rstrip("/")
         if _cache_file(key, suffix).exists():

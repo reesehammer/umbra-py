@@ -259,6 +259,11 @@ _BLANK_TILE = (
 class _ViewerHandler(BaseHTTPRequestHandler):
     """Serve the viewer page and on-demand SAR tiles for one scene."""
 
+    # The handler always runs under a ``_ViewerServer`` (created below), which
+    # carries the ``tiler`` and ``index_html`` the request paths read; declare
+    # the narrower type so those attribute reads type-check.
+    server: _ViewerServer
+
     # Quiet by default: a pan/zoom session fires hundreds of tile requests and
     # logging each would bury the one line the user needs (the URL).
     def log_message(self, *args: Any) -> None:  # noqa: D401
@@ -440,6 +445,10 @@ def make_viewer_server(
     httpd.tiler = tiler
     httpd.index_html = _viewer_html(tiler)
     bound_host, bound_port = httpd.server_address[:2]
+    # server_address is typed loosely (host may be bytes); a bound TCP host is a
+    # string, so decode defensively for the URL rather than formatting bytes.
+    if isinstance(bound_host, bytes):
+        bound_host = bound_host.decode()
     url = f"http://{bound_host}:{bound_port}/"
     return httpd, url
 

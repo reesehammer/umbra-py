@@ -472,7 +472,7 @@ class CatalogIndex:
         catalog = catalog or UmbraCatalog()
         scanned = added = refreshed = 0
         for item in catalog.search(start=start, **search_kwargs):  # type: ignore[arg-type]
-            existed = bool(item.href) and self._has(item.href)
+            existed = item.href is not None and self._has(item.href)
             if self.add(item):
                 scanned += 1
                 if existed:
@@ -805,12 +805,11 @@ class CatalogIndex:
         # live walk only needs to cover from there forward (minus the overlap),
         # but never older than the caller's own start bound.
         max_acq = self._conn.execute("SELECT MAX(acq_date) FROM items").fetchone()[0]
+        delta_start: date | None
         if max_acq is not None:
-            delta_start: date | None = date.fromisoformat(max_acq) - timedelta(
-                days=max(0, overlap_days)
-            )
-            if start_d is not None and start_d > delta_start:
-                delta_start = start_d
+            horizon = date.fromisoformat(max_acq) - timedelta(days=max(0, overlap_days))
+            # Never walk older than the caller's own start bound.
+            delta_start = max(horizon, start_d) if start_d is not None else horizon
         else:
             # Empty index: nothing to prune against, so walk the caller's window.
             delta_start = start_d
