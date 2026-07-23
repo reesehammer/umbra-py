@@ -656,6 +656,10 @@ class CatalogIndex:
         product_types: list[str] | None = None,
         area: str | None = None,
         fuzzy: bool = False,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -673,6 +677,13 @@ class CatalogIndex:
         footprint intersects the polygon. Its bounding box is pushed into SQL as
         a cheap prefilter and the exact polygon test then runs in Python on each
         candidate, so the result matches :meth:`UmbraCatalog.search` exactly.
+
+        The acquisition-property filters (``polarizations``, ``min_incidence`` /
+        ``max_incidence``, ``max_resolution``) mean exactly what they do on
+        :meth:`UmbraCatalog.search`. They are read from each item's stored STAC
+        document (already reconstructed here) and applied in Python via
+        :meth:`UmbraItem.matches_filters`, the same way the polygon test runs, so
+        both backends agree without a schema change.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -736,6 +747,13 @@ class CatalogIndex:
             item.place = place
             if intersects is not None and not item.intersects_polygon(intersects):
                 continue
+            if not item.matches_filters(
+                polarizations=polarizations,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+            ):
+                continue
             if max_per_task is not None:
                 seen = per_task.get(item.task, 0)
                 if seen >= max_per_task:
@@ -759,6 +777,10 @@ class CatalogIndex:
         product_types: list[str] | None = None,
         area: str | None = None,
         fuzzy: bool = False,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -788,7 +810,9 @@ class CatalogIndex:
         added, and ``built_at`` is re-stamped then, exactly as :meth:`update`.
 
         The keyword filters (``bbox``, ``start``, ``end``, ``product_types``,
-        ``area``, ``fuzzy``, ``limit``, ``max_per_task``) mean exactly what they
+        ``area``, ``fuzzy``, the acquisition-property filters ``polarizations`` /
+        ``min_incidence`` / ``max_incidence`` / ``max_resolution``, ``limit``,
+        ``max_per_task``) mean exactly what they
         do on :meth:`search` / :meth:`UmbraCatalog.search`; ``start`` bounds both
         streams (the live delta never walks older than the caller asked for, even
         when the freshness horizon is older). ``overlap_days`` (default 1)
@@ -821,6 +845,10 @@ class CatalogIndex:
             "product_types": product_types,
             "area": area,
             "fuzzy": fuzzy,
+            "polarizations": polarizations,
+            "min_incidence": min_incidence,
+            "max_incidence": max_incidence,
+            "max_resolution": max_resolution,
         }
         index_stream = self.search(start=start_d, **filters)  # type: ignore[arg-type]
         catalog = catalog or UmbraCatalog()
