@@ -151,3 +151,22 @@ markers = [
     "network: tests that require live network access to Umbra's public catalog",
 ]
 addopts = "-m 'not network'"
+
+# Coverage is measured only in the `test-all-extras` CI job, which installs
+# every optional extra so the visual / serve / convert / agent modules actually
+# run (the core [dev] matrix import-skips them, so its numbers would understate
+# the real figure). The floor guards against regressions without chasing 100% on
+# the interactive-only branches (the TTY spinner, `if TYPE_CHECKING:` blocks).
+[tool.coverage.run]
+source = ["umbra_py"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+]

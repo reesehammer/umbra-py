@@ -93,5 +93,24 @@ jobs:
       - name: Install package with all extras
         run: uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"
 
-      - name: Test (offline, all extras)
-        run: pytest -q
+      # This is the one job where every module actually runs, so it is also
+      # where coverage is meaningful. The floor guards against regressions; it
+      # sits a couple of points below the current figure so ordinary branch
+      # fluctuation across Python patch releases doesn't turn CI red. The XML
+      # report feeds the Codecov badge in the README.
+      - name: Test (offline, all extras) with coverage
+        run: >-
+          pytest -q
+          --cov=umbra_py
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-fail-under=88
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          # Never let a coverage-upload hiccup (or an unconfigured Codecov
+          # integration) fail the build — the gate above is the real check.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

@@ -1,0 +1,14 @@
+# Codecov is informational only. The enforcing coverage gate is
+# `--cov-fail-under` in the CI `test-all-extras` job (see .github/workflows/
+# ci.yml); Codecov here just renders the trend and the README badge. Its status
+# checks must never block a PR merge, and it should not post PR comments.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment: false
