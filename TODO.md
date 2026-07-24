@@ -312,10 +312,23 @@ blocker:
   rejection, and endpoint filtering by polarization / incidence range / max
   resolution across GET, POST top-level, POST query object, top-level override,
   and pagination survival).
-- **Let `umbra ask` plan the filters.** `planner.parse_plan` re-validates every
-  model-emitted field; adding the acquisition properties there would let a plain
-  sentence ("VV scenes at low incidence over Utah") resolve to a real search,
-  with the deterministic layer still validating each value.
+- ~~**Let `umbra ask` plan the filters.**~~ ✅ **Done.** The planner's JSON
+  schema now carries `polarizations`, `min_incidence`, `max_incidence`, and
+  `max_resolution` (`SearchPlan` fields, `_PLAN_KEYS`, the system-prompt schema
+  block), and `planner.parse_plan` — the determinism boundary — validates each
+  before it becomes a filter: polarizations upper-cased/de-duplicated (an open
+  set, like `serve.parse_polarizations`), incidence/resolution coerced to
+  positive floats (`_coerce_positive_float`; a hallucinated `0` is a
+  self-describing `AskError`), and inverted incidence bounds rejected like a
+  start-after-end date. The resolved filters render into the audited
+  `umbra search …` command (`--pol` repeatable, `--min-incidence` /
+  `--max-incidence` / `--max-resolution`) and flow through
+  `SearchPlan.to_search_kwargs()` into the same `UmbraItem.matches_filters`
+  predicate every other surface shares, so a plain sentence ("VV scenes at low
+  incidence over Utah") now resolves to a real filtered search. No new model call
+  beyond the existing planning step, no new dependency; offline-tested in
+  `tests/test_planner.py`. This closes the last named surface in this
+  acquisition-filter follow-on.
 
 ## Grow the `umbra serve` STAC API (query extensions + a hosted instance)
 
