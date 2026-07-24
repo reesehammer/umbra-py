@@ -1,0 +1,27 @@
+# Keep the build context small and the image reproducible: ship only the
+# package source + metadata the wheel build needs, never local caches, VCS
+# history, tests, docs, or notebooks.
+.git
+.github
+.gitignore
+.pre-commit-config.yaml
+.ruff_cache
+.mypy_cache
+.pytest_cache
+**/__pycache__
+*.pyc
+.venv
+venv
+build
+dist
+*.egg-info
+tests
+examples
+docs
+docs_src
+mkdocs.yml
+site
+*.db
+*.parquet
+*.pmtiles
+CHANGELOG.md

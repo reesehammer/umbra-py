@@ -559,6 +559,30 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ## Done
 
+- **One-command Docker self-hosting of `umbra serve` + a `/healthz` probe
+  (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The read-only STAC
+  API could be run locally (`pip install 'umbra-py[serve]'; umbra serve`) but had
+  no packaging story, so standing it up on a host meant a Python install and a
+  hand-rolled `umbra index fetch` + process manager. Shipped a `Dockerfile`,
+  `docker-compose.yml`, `.dockerignore` and `docker-entrypoint.sh` so
+  `docker compose up` fetches the published index snapshot on first boot (into a
+  `/data` volume, no S3 crawl) and serves the STAC API — the image runs
+  unprivileged, persists index + render cache across restarts, doubles as the CLI
+  (`docker run --rm umbra-py search …`), and is tuned by env vars
+  (`UMBRA_SERVE_LIVE`, `UMBRA_FETCH_INDEX`, `UMBRA_INDEX_URL`, `UMBRA_SERVE_ARGS`,
+  a `UMBRA_EXTRAS=serve,viz` build arg for the render endpoints). Added a
+  purpose-built **`GET /healthz`** liveness/readiness endpoint to `build_app`
+  (pure builder `serve.health_document`): `200` once the server is up, with a
+  `ready` flag distinguishing a still-fetching first boot — wired to the image's
+  `HEALTHCHECK` and fit for a Kubernetes probe. A new `docker.yml` CI job builds
+  the image and smoke-tests it end to end (CLI passthrough, `docker compose
+  config`, and a live-mode server answering `/` + `/healthz` with no external
+  network); `/healthz` is offline-tested in `tests/test_serve.py`. Documented in
+  a new `docs_src/deploy.md` and a README "Self-host it with Docker" section.
+  This closed the Docker half of the G7 packaging/hosting gap. **Still open under
+  G7:** a GitHub Pages deploy of the static `umbra demo` / `catalog.pmtiles`
+  showcase (the docs site already deploys to Pages; the showcase is the remaining
+  piece).
 - **SAR acquisition-property filters on the `umbra serve` STAC Query extension.**
   The read-only STAC API previously exposed only `product_types` / `area` /
   `fuzzy` over `/search` and `/collections/{id}/items`, even though the

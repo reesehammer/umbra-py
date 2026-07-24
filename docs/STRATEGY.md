@@ -238,9 +238,12 @@ from:
 
 **Demo / hosting polish (was `DEMO_APP_GAPS` G7 + Path A polish)**
 
-- Packaging/hosting: a Dockerfile + compose for one-command self-hosting of
-  `umbra serve`, and a GitHub Pages deployment of the static `umbra demo` /
-  `catalog.pmtiles` showcase.
+- Packaging/hosting: ~~a Dockerfile + compose for one-command self-hosting of
+  `umbra serve`~~ **shipped** (`Dockerfile` + `docker-compose.yml` +
+  `docker-entrypoint.sh`, a first-boot index fetch, a `/healthz` probe, and a
+  `docker.yml` CI smoke test — see the CHANGELOG). Still open: a **GitHub Pages
+  deployment of the static `umbra demo` / `catalog.pmtiles` showcase** (the
+  docs site already deploys to Pages; the showcase is the remaining piece).
 - Bake per-item thumbnails / place labels into the *published* weekly snapshot
   (gated on egress) and precompute showcase swipe/change/timescan artifacts for
   ~6–10 curated sites (R4 for the static path).

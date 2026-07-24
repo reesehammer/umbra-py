@@ -984,6 +984,35 @@ generated explorer gains an "Analyze this view" panel whose Change / Timescan /
 Swipe buttons render each product over the currently-filtered acquisitions on
 demand. Without `--server-url` the page stays a fully static single file.
 
+### Self-host it with Docker
+
+To stand the STAC API up without a local Python install, the repo ships a
+`Dockerfile` and a `docker-compose.yml`. One command builds the image, fetches
+the published catalog index on first boot (no S3 crawl), and serves it:
+
+```bash
+docker compose up            # http://localhost:8000  (OpenAPI docs at /docs)
+```
+
+or with plain Docker:
+
+```bash
+docker build -t umbra-py .
+docker run -p 8000:8000 -v umbra-data:/data umbra-py
+```
+
+The container exposes a `GET /healthz` liveness/readiness probe (wired to a
+Docker `HEALTHCHECK`), persists the fetched index and render cache to the
+`/data` volume so restarts are instant, and runs as an unprivileged user. Tune
+it with environment variables — `UMBRA_SERVE_LIVE=1` walks S3 per request with
+no index, `UMBRA_FETCH_INDEX=0` skips the first-boot fetch, `UMBRA_INDEX_URL`
+points at a fork/mirror snapshot, and `UMBRA_SERVE_ARGS="--no-artifacts"` bounds
+COG-streaming egress for a public instance. Build with
+`--build-arg UMBRA_EXTRAS=serve,viz` to also enable the on-demand
+`/artifacts/...` render endpoints. The image doubles as the CLI:
+`docker run --rm umbra-py search --area "Beet Piler" --limit 5`. See
+[`docs_src/deploy.md`](docs_src/deploy.md) for the full reference.
+
 ## What the data looks like
 
 Each Umbra acquisition is a STAC item exposing these assets, from easiest to
