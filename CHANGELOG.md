@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`narrate_change` on the LangChain and LlamaIndex tool surfaces — full
+  agent-framework parity (`AI_INTEGRATION_IDEAS.md` C2 / `STRATEGY.md` §5.4
+  agent-reach follow-on).** The C2 number-grounded change-narration tool
+  (`umbra change --narrate`) shipped on the MCP server as `narrate_change` — the
+  sibling of `describe_scene` — but the LangChain and LlamaIndex wrappers still
+  exposed only twelve of the server's thirteen tools, so `narrate_change` was the
+  one MCP tool an agent built on those two frameworks could not reach. It is now
+  registered on both `umbra_py.langchain.umbra_tools()` and
+  `umbra_py.llamaindex.umbra_tools()`, bringing all three front doors (MCP,
+  LangChain, LlamaIndex) to the identical inventory. As with every JSON tool, it
+  is the **same** deterministic callable the MCP server exposes — imported
+  verbatim, not re-wrapped — so the surfaces cannot drift, and it holds the
+  determinism boundary (`AI_INTEGRATION_IDEAS.md` §A4): the change composite and
+  the per-block decibel grid are produced deterministically, the model **only
+  interprets** (its reply passes the `parse_narration` boundary), and every
+  narration is stamped with the CC-BY attribution and an `AI_PROVENANCE` note. It
+  is now the **second** opt-in model tool on these surfaces (with
+  `describe_scene`), gated on the `[ai]` key exactly as on the CLI and MCP, so it
+  never runs implicitly; a text-only or no-`viz` install still drops it via
+  `include_render=False` only for the render tools (the model tools gate
+  themselves at call time). Offline-tested in `tests/test_langchain.py` and
+  `tests/test_llamaindex.py` (surface parity, same-callable no-drift, an
+  end-to-end narration through each wrapper with an injected narrator + render,
+  and the mixed-polarization refusal) with no `[ai]`/`[viz]` extra, no key, and no
+  network; the README LangChain/LlamaIndex tool inventories and the module
+  docstrings are updated. This completes the MCP → LangChain → LlamaIndex reach
+  for the change-narration capability, closing the last named tool-parity
+  follow-on across the agent front doors.
 - **A branch-coverage gate + Codecov badge in CI (`CODEBASE_ANALYSIS.md` P2 #16
   / `STRATEGY.md` §8 structural debt).** The test suite was already
   comprehensive (991 offline tests mirroring the whole package) but nothing

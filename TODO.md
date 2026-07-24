@@ -250,7 +250,7 @@ discovery half of the deliverable — is still open. Follow-ons named in the B1
 doc: ~~a LangChain community tool wrapper reusing the same tool shapes~~ ✅
 **done** (`umbra_py.langchain` / `[langchain]` extra, see below); ~~the parallel
 LlamaIndex wrapper~~ ✅ **done** (`umbra_py.llamaindex` / `[llamaindex]` extra —
-`umbra_tools()` returns the same nine JSON callables (reused verbatim from
+`umbra_tools()` returns the same ten JSON callables (reused verbatim from
 `mcp_server`, so all three front doors cannot drift) as native
 `FunctionTool`s, plus the three render tools re-implemented natively (returning
 a `RenderResult` whose string form is the caption and whose `.png` rides on the
@@ -444,7 +444,7 @@ log). Optional follow-ons that build on them, not blockers:
   guards). ~~The parallel **LlamaIndex** `FunctionTool` wrapper — same callables,
   a third registration — is the remaining reach step.~~ ✅ **Done**
   (`umbra_py.llamaindex` / `[llamaindex]` extra). `umbra_tools()` wraps the same
-  nine MCP callables as native `FunctionTool`s (single source of truth, no drift)
+  ten MCP callables as native `FunctionTool`s (single source of truth, no drift)
   plus the three render tools re-implemented natively (a `RenderResult` carrying
   the caption as its string form and the PNG on `.png`, surfaced as
   `ToolOutput.raw_output`, so the surface never pulls in the MCP SDK).
@@ -506,9 +506,20 @@ open and builds on the same boundary:
   narration is stamped with CC-BY + `AI_PROVENANCE`. Offline-tested in
   `tests/test_mcp_server.py` with an injected narrator + render (no `[ai]`/`[viz]`
   extra, no key, no network), including the mixed-polarization refusal and the
-  missing-key setup error. Remaining reach follow-on: surface `narrate_change` on the
-  LangChain / LlamaIndex wrappers too (they wrap a fixed list of MCP callables, so it
-  is a one-line add to each `_JSON_TOOLS`, kept out of this PR to stay scoped).
+  missing-key setup error. ~~Remaining reach follow-on: surface `narrate_change`
+  on the LangChain / LlamaIndex wrappers too.~~ ✅ **Done.** `narrate_change` is now
+  registered in both `umbra_py.langchain` and `umbra_py.llamaindex` `_JSON_TOOLS`
+  (imported verbatim from `mcp_server`, so no drift — the same callable on all
+  three front doors), bringing the LangChain / LlamaIndex inventories to full
+  parity with the MCP server's thirteen tools. It is the second opt-in model tool
+  on those surfaces (with `describe_scene`), gated on the `[ai]` key so it never
+  runs implicitly, and holds the same determinism/`AI_PROVENANCE` boundary.
+  Offline-tested in `tests/test_langchain.py` / `tests/test_llamaindex.py`
+  (surface parity, same-callable no-drift, an end-to-end narration through each
+  wrapper with an injected narrator + render, and the mixed-polarization refusal);
+  the README agent-tool inventories and the two module docstrings were updated.
+  This completes the MCP → LangChain → LlamaIndex agent-framework reach for the
+  change-narration capability.
 - ~~**MCP `describe_scene` tool.**~~ ✅ **Done.** `umbra-mcp` gained a
   `describe_scene(url, asset, db, max_size, model)` tool (plus a `describe-scene`
   workflow prompt) wrapping `describe()` unchanged, so an MCP client gets the
