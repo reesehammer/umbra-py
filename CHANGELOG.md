@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A branch-coverage gate + Codecov badge in CI (`CODEBASE_ANALYSIS.md` P2 #16
+  / `STRATEGY.md` §8 structural debt).** The test suite was already
+  comprehensive (991 offline tests mirroring the whole package) but nothing
+  turned that into a visible, enforced number. The `test-all-extras` CI job —
+  the one job that installs every optional extra, so the visual / serve /
+  convert / agent modules actually execute instead of import-skipping — now runs
+  `pytest` under `coverage` with branch coverage and a `--cov-fail-under=88`
+  floor, so a change that drops coverage below the bar fails CI. The floor sits a
+  couple of points under the current ~90 % branch figure so ordinary
+  fluctuation across Python patch releases doesn't turn the build red on an
+  unrelated PR. Coverage config lives in `[tool.coverage.run]` /
+  `[tool.coverage.report]` in `pyproject.toml` (source-scoped to `umbra_py`,
+  branch mode, with the interactive-only / `TYPE_CHECKING` branches excluded);
+  `pytest-cov` was already a `[dev]` dependency, so no new install. The job also
+  uploads `coverage.xml` to Codecov (non-blocking — `fail_ci_if_error: false` —
+  and gated by `codecov.yml` to `informational` status with no PR comments, so
+  an unconfigured or flaky Codecov integration can never block a merge; the
+  enforcing gate is the local `--cov-fail-under`), and the README gains CI and
+  Codecov badges alongside the existing ones. Deterministic, offline, and adds
+  no runtime dependency — purely a quality signal for contributors and a
+  credibility marker for the ecosystem-visibility push (`STRATEGY.md` §5.3).
 - **MCP `narrate_change` tool — a number-grounded VLM reading of *what changed*
   over the flagship server (C2 second half, `AI_INTEGRATION_IDEAS.md` C2).** The
   CLI's `umbra change --narrate` (module `narrate.py`) has a vision model narrate

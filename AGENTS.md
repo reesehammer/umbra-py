@@ -66,7 +66,7 @@ tests/
   test_live.py       # marked `network`, skipped by default
   data/sample_item.json
 examples/            # planned notebooks (v0.2); see examples/README.md
-.github/workflows/ci.yml  # lint + format check + offline pytest, matrix 3.10/3.11/3.12
+.github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
 TODO.md              # ledger of follow-ups intentionally scoped out of merged PRs
 ```
@@ -94,6 +94,10 @@ pytest -q                            # offline only; default excludes network te
 
 # Optional: run the live integration tests against Umbra's public catalog
 pytest -m network
+
+# Coverage is gated in CI's `test-all-extras` job (every extra installed), not
+# the core matrix. Reproduce it with all extras installed:
+pytest --cov=umbra_py --cov-report=term-missing --cov-fail-under=88
 
 # Try the CLI
 umbra --help

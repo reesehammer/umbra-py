@@ -232,7 +232,11 @@ from:
   of the CLI commands that still duplicate them (was `CODEBASE_ANALYSIS` P3 #18).
 - Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
   gallery) with re-exports preserved (was P3 #19).
-- Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).
+- ~~Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).~~ **shipped** —
+  the `test-all-extras` job (the one job where every module actually runs)
+  measures branch coverage behind a `--cov-fail-under` floor and uploads to
+  Codecov (non-blocking); README carries the CI + coverage badges. See the
+  CHANGELOG.
 - SQLite R\*Tree upgrade *iff* the index grows to hundreds of thousands of
   items (the schema-version marker already makes this a migration, not a break).
 

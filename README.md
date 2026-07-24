@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/reesehammer/umbra-py/actions/workflows/ci.yml/badge.svg)](https://github.com/reesehammer/umbra-py/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/reesehammer/umbra-py/branch/main/graph/badge.svg)](https://codecov.io/gh/reesehammer/umbra-py)
 [![Docs](https://img.shields.io/badge/docs-reesehammer.github.io%2Fumbra--py-informational.svg)](https://reesehammer.github.io/umbra-py/)
 
 **A Python-first toolkit to make [Umbra](https://umbra.space/open-data/) SAR open data easy to discover, load, download, and analyze.**

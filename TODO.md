@@ -627,6 +627,26 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ## Done
 
+- **Branch-coverage gate + Codecov badge in CI (`CODEBASE_ANALYSIS.md` P2 #16 /
+  `STRATEGY.md` §8 structural debt).** The 991-test offline suite already covered
+  the package thoroughly, but nothing enforced or surfaced the number. Wired
+  `pytest --cov` into the `test-all-extras` CI job (the only job with every extra
+  installed, so the visual / serve / convert / agent modules actually run rather
+  than import-skip): it now runs under `coverage` in branch mode behind a
+  `--cov-fail-under=88` floor (a couple of points under the current ~90 % so
+  normal per-Python-release fluctuation doesn't red an unrelated PR), and uploads
+  `coverage.xml` to Codecov. Coverage config lives in `[tool.coverage.run]` /
+  `[tool.coverage.report]` in `pyproject.toml` (source `umbra_py`, branch mode,
+  interactive-only / `TYPE_CHECKING` branches excluded); `pytest-cov` was already
+  a `[dev]` dep. The Codecov upload is strictly non-blocking (`fail_ci_if_error:
+  false` + a `codecov.yml` pinning status to `informational` with no PR
+  comments), so an unconfigured/flaky Codecov can never block a merge — the
+  enforcing gate is the local `--cov-fail-under`. README gained CI + Codecov
+  badges. No runtime dependency, deterministic, offline. Follow-ons, none a
+  blocker: raise the floor toward the real figure once it's stable across a few
+  runs; add a `codecov.yml` `patch` target once the project is registered on
+  Codecov so new code carries its own coverage; optionally enable the Codecov PR
+  comment if maintainers want per-PR deltas surfaced inline.
 - **One-command Docker self-hosting of `umbra serve` + a `/healthz` probe
   (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The read-only STAC
   API could be run locally (`pip install 'umbra-py[serve]'; umbra serve`) but had
