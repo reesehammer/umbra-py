@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SAR acquisition-property filters on the `umbra serve` STAC Query extension
+  (`STRATEGY.md` §3 "every surface agrees", `TODO.md` acquisition-filter
+  follow-on).** The `umbra serve` STAC API previously exposed only
+  `product_types` / `area` / `fuzzy` over `/search` and
+  `/collections/{id}/items`, even though every other surface (search, the render
+  commands, the MCP server) can also filter by the SAR-native properties. It now
+  filters on them too — three ways, matching the existing product-type pattern:
+  GET params (`?polarizations=VV,VH&min_incidence=20&max_incidence=40&max_resolution=0.5`),
+  plain top-level POST body fields, and a proper STAC **Query extension** object
+  using the namespaced property names (`{"sar:polarizations": {"in": ["VV"]}}`,
+  `{"view:incidence_angle": {"gte": 20, "lte": 40}}`,
+  `{"sar:resolution": {"lte": 0.5}}`). `parse_query` gained a numeric range
+  operator (`gte`/`lte` together for the incidence range) alongside its scalar
+  operators and now returns a `QueryFilters` NamedTuple; an unsupported operator
+  or a non-numeric value is a hard `400`, never a silent drop. The filters push
+  down to the same `UmbraItem.matches_filters` predicate every other surface
+  shares (no new filtering logic, no schema change, no model call, no new
+  dependency), and GET pagination carries them into the `next` link — so
+  `pystac-client`, the QGIS STAC plugin and OpenAPI-driven agents can now filter
+  the archive by polarization / incidence / resolution. Offline-tested in
+  `tests/test_serve.py`. This was the last discovery surface that couldn't filter
+  on the SAR properties.
 - **SAR acquisition-property filters on the render/analysis commands (`STRATEGY.md`
   §3 "every surface agrees", `TODO.md` acquisition-filter follow-on).** The
   `--pol` / `--min-incidence` / `--max-incidence` / `--max-resolution` filters

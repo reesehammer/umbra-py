@@ -915,20 +915,26 @@ and interactive docs at `/docs`. Queries hit the local index, so they answer in
 milliseconds; `umbra serve --live` walks S3 per request instead if you'd rather
 not build an index first.
 
-Beyond the STAC core filters, `/search` also exposes the index's two
-Umbra-specific filters via the STAC **Query extension** — `product_types`
-(which product a scene carries) and free-text `area` (a task/site substring,
-with an optional `fuzzy` toggle). Pass them as GET params, plain `POST` body
-fields, or a STAC `query` object:
+Beyond the STAC core filters, `/search` also exposes the index's Umbra-specific
+filters via the STAC **Query extension** — `product_types` (which product a
+scene carries), free-text `area` (a task/site substring, with an optional
+`fuzzy` toggle), and the SAR acquisition properties `sar:polarizations`,
+`view:incidence_angle` (a `gte`/`lte` range) and `sar:resolution` (an `lte`
+bound on both range and azimuth resolution, in metres). Pass them as GET params,
+plain `POST` body fields, or a STAC `query` object:
 
 ```bash
-# GET: GEC scenes over a named site
-curl "http://127.0.0.1:8000/search?product_types=GEC&area=Beet+Piler&fuzzy=true"
+# GET: VV GEC scenes over a named site, 20-40° incidence, at least 0.5 m
+curl "http://127.0.0.1:8000/search?product_types=GEC&area=Beet+Piler&fuzzy=true\
+&polarizations=VV&min_incidence=20&max_incidence=40&max_resolution=0.5"
 
 # POST: the same, as a STAC Query extension body
 curl -X POST http://127.0.0.1:8000/search \
   -H 'content-type: application/json' \
-  -d '{"query": {"product_types": {"in": ["GEC"]}, "area": {"like": "Beet Piler"}}}'
+  -d '{"query": {"product_types": {"in": ["GEC"]}, "area": {"like": "Beet Piler"},
+       "sar:polarizations": {"in": ["VV"]},
+       "view:incidence_angle": {"gte": 20, "lte": 40},
+       "sar:resolution": {"lte": 0.5}}}'
 ```
 
 Beyond discovery, `umbra serve` also **renders the visual products on demand**,
