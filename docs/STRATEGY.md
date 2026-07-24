@@ -262,7 +262,14 @@ from:
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 
-- A SessionStart hook / permission allowlist for remote coding-agent sessions.
+- ~~A SessionStart hook / permission allowlist for remote coding-agent sessions.~~
+  **shipped** — `.claude/hooks/session-start.sh` (registered in
+  `.claude/settings.json`) installs the package editable with every extra on a
+  Claude-Code-on-the-web container so `ruff` / `mypy` / `pytest` and the `umbra`
+  CLI work from the first turn (mirroring CI's `test-all-extras` job), and the
+  same `settings.json` pre-approves the documented dev-loop + read-only commands.
+  Gated on `$CLAUDE_CODE_REMOTE`, idempotent, synchronous, dev-tooling only (no
+  runtime code, nothing on the published package). See the CHANGELOG.
 
 **Maintainer / relationship actions (no code)**
 

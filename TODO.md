@@ -9,6 +9,30 @@ the bottom if the history is useful).
 
 ---
 
+## SessionStart hook follow-ons (`.claude/hooks/session-start.sh` shipped)
+
+- **Surfaced in:** the agent-session-hardening PR (`STRATEGY.md` §8).
+- **Code:** `.claude/hooks/session-start.sh`, `.claude/settings.json`.
+
+A `SessionStart` hook now installs umbra-py editable with every extra on a
+Claude-Code-on-the-web container (mirroring CI's `test-all-extras` job) so the
+linters, type-checker, test suite and `umbra` CLI all work from the first turn;
+`.claude/settings.json` also pre-approves the documented dev-loop + read-only
+commands. It runs synchronously. Follow-ons that build on it, none a blocker:
+
+- **Switch to async mode if startup latency matters.** The hook has no
+  `{"async": true}` line, so a web session waits for the ~10–30 s install before
+  the first turn — the safe default (no race where a check runs before its deps
+  exist). If maintainers prefer a faster session start, emit
+  `{"async": true, "asyncTimeout": 300000}` first and accept that early turns may
+  land before the install finishes.
+- **Trim the extras for a lighter/faster install.** The hook installs *all*
+  extras so nothing import-skips. If a maintainer only ever touches the core, a
+  `[dev]`-only install (matching the core CI matrix) is faster; the full set is
+  the deliberate default so the coverage-gated suite runs unabridged.
+
+---
+
 ## Index demo-denormalization follow-ons (`umbra index bake` shipped)
 
 - **Surfaced in:** the baked place-label PR (`docs/DEMO_APP_GAPS.md` G2/G6).

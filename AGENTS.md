@@ -107,6 +107,14 @@ umbra search --start 2024-02-08 --end 2024-02-08 --limit 3
 If any of the above fails on a clean checkout, that's a real bug — surface it
 before working around it.
 
+**Claude Code on the web:** a `SessionStart` hook
+(`.claude/hooks/session-start.sh`, registered in `.claude/settings.json`) already
+runs the editable all-extras install for you on a remote container, so `ruff`,
+`mypy`, `pytest` and the `umbra` CLI work from the first turn — you don't need to
+run the install by hand. The same `settings.json` pre-approves the read-only +
+dev-loop commands above. The hook is gated on `$CLAUDE_CODE_REMOTE`, so it's a
+no-op in a local checkout (where the venv flow above owns setup).
+
 ---
 
 ## 4. How to think before coding

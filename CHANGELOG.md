@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A SessionStart hook + permission allowlist for remote coding-agent sessions
+  (`STRATEGY.md` §8 agent-session hardening).** A fresh Claude-Code-on-the-web
+  container arrives with `uv` and the CLI linters on `PATH` but *without*
+  umbra-py installed, so `pytest`, `mypy`, and the `umbra` CLI all fail until an
+  agent hand-runs the editable install — the first turn of every web session was
+  spent re-deriving the setup in `AGENTS.md` §3. Added `.claude/hooks/session-start.sh`,
+  a `SessionStart` hook registered in a new `.claude/settings.json`, that installs
+  the package editable with **every** extra
+  (`uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"`),
+  mirroring CI's `test-all-extras` job so the whole offline suite runs rather than
+  import-skipping the viz / serve / convert / load / agent modules. It is gated on
+  `$CLAUDE_CODE_REMOTE` (a no-op locally, where `AGENTS.md` §3's venv flow owns
+  setup), idempotent (safe on resume/clear/compact — `uv` no-ops when nothing
+  changed), non-interactive, and synchronous so the environment is ready before
+  the first agent turn (no race where a check runs before its dependencies exist).
+  The same `settings.json` ships a conservative `permissions.allow` list for the
+  project's documented dev loop and read-only commands (`uv pip install`,
+  `ruff check`/`format`, `mypy`, `pytest`, `pre-commit run`, `umbra`, and
+  read-only `git status`/`diff`/`log`/`show`/`branch`/`add`), cutting the
+  permission prompts a web session would otherwise raise for its own CI checks —
+  no outward or destructive command (push, commit, reset) is pre-approved. No
+  runtime code changes and nothing on the published package (the `.claude/`
+  tree is dev tooling only), so it cannot affect users or the test suite. This
+  closes the agent-session-hardening item on the `STRATEGY.md` §8 critical path,
+  advancing the project's "agents are users; users are agents" principle
+  (`STRATEGY.md` §7.5) on the surface where this repo is itself developed.
 - **`narrate_change` on the LangChain and LlamaIndex tool surfaces — full
   agent-framework parity (`AI_INTEGRATION_IDEAS.md` C2 / `STRATEGY.md` §5.4
   agent-reach follow-on).** The C2 number-grounded change-narration tool
