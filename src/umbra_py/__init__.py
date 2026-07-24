@@ -92,7 +92,12 @@ from .semantic import (
     cosine_similarity,
     default_embedder,
 )
-from .showcase import assemble_showcase, build_showcase
+from .showcase import (
+    FeaturedSite,
+    assemble_showcase,
+    build_showcase,
+    select_featured_sites,
+)
 from .viewer import make_viewer_server, view
 from .viz import (
     change_animation,
@@ -229,6 +234,8 @@ __all__ = [
     "write_pmtiles",
     "build_showcase",
     "assemble_showcase",
+    "select_featured_sites",
+    "FeaturedSite",
     "build_viewer",
     "save_viewer",
     "default_pmtiles_path",

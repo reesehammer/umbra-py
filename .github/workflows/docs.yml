@@ -37,12 +37,18 @@ jobs:
       - name: Build (strict)
         run: mkdocs build --strict
 
-      # Build the static, zero-install showcase (a whole-catalog map + an
-      # interactive explorer over the published snapshot) into site/showcase/ so
-      # it deploys to GitHub Pages beside the docs. Main-only (it deploys only
-      # from main) and non-blocking: if the catalog-index release isn't published
-      # yet, or the fetch fails, the docs deploy must still go out, so this step
-      # never fails the job (DEMO_APP_GAPS.md G7 / STRATEGY.md §8).
+      # Build the static, zero-install showcase (a whole-catalog map, an
+      # interactive explorer over the published snapshot, and a gallery of
+      # precomputed change composites) into site/showcase/ so it deploys to
+      # GitHub Pages beside the docs. Main-only (it deploys only from main) and
+      # non-blocking: if the catalog-index release isn't published yet, or the
+      # fetch fails, the docs deploy must still go out, so this step never fails
+      # the job (DEMO_APP_GAPS.md G7 / R4, STRATEGY.md §8).
+      #
+      # --featured 6 renders six change composites, streaming only a downsampled
+      # overview of each scene (the `viz` extra arrives with `[all]` above); a
+      # site whose asset won't render is dropped with a warning, so a bad scene
+      # costs one tile rather than the gallery.
       - name: Build catalog showcase
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
@@ -53,6 +59,7 @@ jobs:
             --fetch-pmtiles \
             --max-per-task 1 \
             --limit 4000 \
+            --featured 6 \
             --out site/showcase \
             --updated "$(date -u +%Y-%m-%d)"
 

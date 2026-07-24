@@ -20,6 +20,11 @@ landing page:
   (:func:`umbra_py.demo.save_demo`) over a gathered slice of the catalog.
 * ``index.html`` -- the landing page :func:`build_showcase` renders, linking the
   two above plus the install command, the docs and the source.
+* ``featured/*.png`` -- optional **precomputed change composites** for a handful
+  of repeat-imaged sites (:func:`select_featured_sites`), shown as a gallery on
+  the landing page. A first-time visitor sees *what SAR change looks like*
+  immediately, with no render round-trip and no server; the explorer is still
+  there for anything beyond the marquee set.
 
 Design, in the repo's grain:
 
@@ -28,23 +33,31 @@ Design, in the repo's grain:
   pinned CDNs the underlying commands already use). The output directory drops
   straight onto any static host -- the ``.github/workflows/docs.yml`` Pages deploy
   copies it into ``site/showcase/`` next to the mkdocs build.
-* **Deterministic and offline-testable.** :func:`build_showcase` is a pure
-  string builder and :func:`assemble_showcase` only copies files and calls the
-  existing ``save_*`` writers, so the whole feature is covered without a network
-  or a ``viz`` extra (the CLI does the one networked step -- fetching the
-  published snapshot -- outside this module).
+* **Deterministic and offline-testable.** :func:`build_showcase` and
+  :func:`select_featured_sites` are pure, and :func:`assemble_showcase` only
+  copies files and calls the existing ``save_*`` writers -- the one step that
+  needs the ``viz`` extra (rendering a featured composite) goes through an
+  injectable ``featured_renderer``, so the whole feature is covered without a
+  network or a ``viz`` extra (the CLI does the other networked step -- fetching
+  the published snapshot -- outside this module).
 * **License propagation.** The mandatory CC-BY attribution rides on the landing
   page, exactly as it does on every other visual artifact.
 
 Was ``DEMO_APP_GAPS.md`` G7 / ``STRATEGY.md`` §8's "GitHub Pages deploy of the
-static ``umbra demo`` / ``catalog.pmtiles`` showcase".
+static ``umbra demo`` / ``catalog.pmtiles`` showcase" (and, for the featured
+gallery, its "precompute showcase artifacts for ~6-10 curated sites" R4
+follow-on).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
-from collections.abc import Iterable
+import warnings
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -67,6 +80,125 @@ _OWNER, _NAME = GITHUB_REPO.split("/", 1)
 DEFAULT_REPO_URL = f"https://github.com/{GITHUB_REPO}"
 DEFAULT_DOCS_URL = f"https://{_OWNER}.github.io/{_NAME}/"
 
+#: Default number of sites the featured gallery precomputes, and the number of
+#: passes composited into each. Two frames is the two-colour change view
+#: (green/magenta), which reads at thumbnail size; three is the temporal RGB.
+DEFAULT_FEATURED_COUNT = 6
+DEFAULT_FEATURED_FRAMES = 2
+
+#: Subdirectory the featured composites are written to, relative to the
+#: showcase root (so the whole directory stays relocatable).
+FEATURED_DIR = "featured"
+
+
+@dataclass(frozen=True)
+class FeaturedSite:
+    """A repeat-imaged site chosen for a precomputed change composite.
+
+    ``items`` is every usable pass of the site, oldest-first; the renderer
+    narrows it to the frames it composites (via
+    :func:`umbra_py.viz.select_change_frames`), so a caller can also use the
+    full series for a time-lapse.
+    """
+
+    task: str
+    items: list[UmbraItem]
+
+    @property
+    def label(self) -> str:
+        """Human-readable site name: the baked place label when the index has
+        one (``umbra index bake``), else the task codename."""
+        for item in self.items:
+            if item.place:
+                return item.place
+        return self.task
+
+    @property
+    def slug(self) -> str:
+        """Filesystem/URL-safe stem for this site's artifact."""
+        return _slug(self.task)
+
+    @property
+    def date_range(self) -> str | None:
+        """``"2024-01-05 - 2024-03-11"`` over the site's passes (a single date
+        when they share one), or ``None`` if nothing is dated."""
+        dates = sorted({i.datetime.date().isoformat() for i in self.items if i.datetime})
+        if not dates:
+            return None
+        return dates[0] if len(dates) == 1 else f"{dates[0]} \N{EN DASH} {dates[-1]}"
+
+
+@dataclass(frozen=True)
+class FeaturedArtifact:
+    """One rendered tile in the landing page's featured gallery."""
+
+    href: str
+    label: str
+    caption: str
+
+
+#: Renders one site's featured artifact to a path. Injectable so the whole
+#: assembler stays offline-testable; the default calls into ``umbra_py.viz``.
+FeaturedRenderer = Callable[[list[UmbraItem], Path], None]
+
+
+def _slug(value: str) -> str:
+    """Lowercase, ASCII-ish, hyphen-separated stem for a task name.
+
+    Umbra task names carry spaces, commas and non-ASCII characters
+    (``"Centerfield, Utah"``); the artifact filename ends up in a URL on a
+    static host, so reduce it to an unambiguous slug.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return cleaned or "site"
+
+
+def select_featured_sites(
+    items: Iterable[UmbraItem],
+    *,
+    count: int = DEFAULT_FEATURED_COUNT,
+    min_passes: int = 2,
+) -> list[FeaturedSite]:
+    """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
+
+    A change composite needs two or more dated passes over the *same* ground,
+    and Umbra files every pass of a site under one task directory -- so the
+    tasks with the most acquisitions in the candidate pool are exactly the ones
+    worth precomputing. Sites are ranked by pass count (descending) and then by
+    task name, so the selection is deterministic for a given pool rather than
+    dependent on iteration order.
+
+    Parameters
+    ----------
+    items:
+        The candidate pool (e.g. a ``--local`` search). Items with no task or no
+        datetime can't be grouped or ordered, so they are dropped.
+    count:
+        Maximum number of sites to return.
+    min_passes:
+        Passes a site needs before it qualifies (2 is the minimum a change
+        composite can use).
+
+    Returns the sites best-first, each carrying its passes oldest-first.
+    Deterministic and dependency-free -- it calls no renderer and no model.
+    """
+    if count <= 0:
+        return []
+    by_task: dict[str, list[UmbraItem]] = {}
+    for item in items:
+        if item.task and item.datetime is not None:
+            by_task.setdefault(item.task, []).append(item)
+
+    # Every pass here has a datetime (filtered above); the ``or datetime.min``
+    # fallback is unreachable but keeps the sort key typed, as in viz.py.
+    sites = [
+        FeaturedSite(task=task, items=sorted(passes, key=lambda i: i.datetime or datetime.min))
+        for task, passes in by_task.items()
+        if len(passes) >= min_passes
+    ]
+    sites.sort(key=lambda s: (-len(s.items), s.task))
+    return sites[:count]
+
 
 def build_showcase(
     *,
@@ -78,13 +210,15 @@ def build_showcase(
     updated: str | None = None,
     repo_url: str = DEFAULT_REPO_URL,
     docs_url: str = DEFAULT_DOCS_URL,
+    featured: Sequence[FeaturedArtifact] = (),
 ) -> str:
     """Render the showcase landing page as a self-contained HTML string.
 
-    The page is a small, dependency-free hero + card grid tying together the
-    artifacts :func:`assemble_showcase` writes. Each card is emitted only when
-    its target exists, so a metadata-only build (no ``map_href``) or an
-    explorer-less build (no ``explore_href``) still produces a coherent page.
+    The page is a small, dependency-free hero + optional featured gallery + card
+    grid tying together the artifacts :func:`assemble_showcase` writes. Each
+    card is emitted only when its target exists, so a metadata-only build (no
+    ``map_href``) or an explorer-less build (no ``explore_href``) still produces
+    a coherent page.
 
     Parameters
     ----------
@@ -92,6 +226,10 @@ def build_showcase(
         Relative links to the whole-catalog map viewer and the interactive
         explorer (typically ``"map.html"`` / ``"explore.html"``). ``None`` drops
         that card.
+    featured:
+        Precomputed change composites to show above the cards. Empty (the
+        default) drops the whole gallery section, so a metadata-only showcase is
+        byte-identical to one built before this option existed.
     title, tagline:
         Hero heading and one-line pitch.
     item_count:
@@ -154,6 +292,7 @@ def build_showcase(
         tagline=escape(tagline),
         styles=_STYLES,
         stats=stats,
+        featured=_featured_section(featured),
         cards="\n".join(cards),
         attribution=escape(ATTRIBUTION),
         repo_url=escape(repo_url),
@@ -188,6 +327,57 @@ def _stats_line(item_count: int | None, updated: str | None) -> str:
     return '    <p class="stats">' + " &middot; ".join(parts) + "</p>"
 
 
+def _featured_section(featured: Sequence[FeaturedArtifact]) -> str:
+    """Render the "what SAR change looks like" gallery (empty string when there
+    is nothing to show, so the page has no dangling heading).
+
+    Each tile links to its own full-size PNG -- deliberately not to a render
+    endpoint, so the section keeps working on a plain static host.
+    """
+    if not featured:
+        return ""
+    figures = "\n".join(
+        f'        <figure class="shot">\n'
+        f'          <a href="{escape(art.href, quote=True)}">'
+        f'<img src="{escape(art.href, quote=True)}" '
+        f'alt="SAR change composite of {escape(art.label, quote=True)}" '
+        f'loading="lazy"/></a>\n'
+        f"          <figcaption><strong>{escape(art.label)}</strong>"
+        f"<span>{escape(art.caption)}</span></figcaption>\n"
+        f"        </figure>"
+        for art in featured
+    )
+    return (
+        '    <section class="featured">\n'
+        "      <h2>What SAR change looks like</h2>\n"
+        '      <p class="lede">Each image composites repeat passes of one site onto a '
+        "shared grid: ground that stayed put reads gray, and anything that appeared "
+        "or vanished between passes is tinted by when it happened. Rendered ahead of "
+        "time from the open catalog \N{EM DASH} no account, no download.</p>\n"
+        '      <div class="shots">\n'
+        f"{figures}\n"
+        "      </div>\n"
+        "    </section>"
+    )
+
+
+def featured_caption(site: FeaturedSite, frames: int) -> str:
+    """One line of honest provenance under a featured tile: how many passes were
+    composited, over what dates, and what the colours mean.
+
+    The colour semantics come straight from :func:`umbra_py.viz.change_composite`
+    (two dates -> green/magenta, three -> temporal RGB); keep them in step.
+    """
+    colors = (
+        "green = new or brighter backscatter, magenta = gone or dimmer"
+        if frames == 2
+        else "earliest = red, middle = green, latest = blue"
+    )
+    span = site.date_range
+    passes = f"{frames} passes" if frames != 1 else "1 pass"
+    return f"{passes}, {span} \N{EM DASH} {colors}." if span else f"{passes} \N{EM DASH} {colors}."
+
+
 def assemble_showcase(
     dest_dir: str | os.PathLike,
     *,
@@ -195,6 +385,9 @@ def assemble_showcase(
     pmtiles_path: str | os.PathLike | None = None,
     viewer_title: str | None = None,
     demo_kwargs: dict[str, Any] | None = None,
+    featured_sites: Sequence[FeaturedSite] = (),
+    featured_frames: int = DEFAULT_FEATURED_FRAMES,
+    featured_renderer: FeaturedRenderer | None = None,
     **showcase_kwargs: Any,
 ) -> Path:
     """Assemble a static showcase directory and return its ``index.html`` path.
@@ -206,6 +399,8 @@ def assemble_showcase(
       basemap).
     * ``explore.html`` -- only when ``items`` is given and non-empty (the
       ``umbra demo`` interactive explorer).
+    * ``featured/<slug>.png`` -- one precomputed change composite per entry in
+      ``featured_sites`` (none by default).
     * ``index.html`` -- always (the landing page, with cards for whichever of the
       above were written).
 
@@ -214,6 +409,20 @@ def assemble_showcase(
     items:
         Acquisitions for the explorer. ``None`` or empty skips ``explore.html``
         and its card.
+    featured_sites:
+        Sites (from :func:`select_featured_sites`) to precompute a change
+        composite for. Empty (the default) leaves the page and the output
+        directory exactly as they were before this option existed.
+    featured_frames:
+        Passes composited into each featured image -- 2 (green/magenta) or 3
+        (temporal RGB), per :func:`umbra_py.viz.change_composite`.
+    featured_renderer:
+        ``(items, dest) -> None``, called once per featured site. Defaults to
+        :func:`umbra_py.viz.save_change_composite` over the frames
+        :func:`umbra_py.viz.select_change_frames` picks, which needs the ``viz``
+        extra and streams each scene's overview. A site whose render fails is
+        warned about and dropped, never fatal: one unreadable asset must not
+        cost the whole showcase.
     pmtiles_path:
         A local whole-catalog ``.pmtiles`` file to include. It is copied into
         ``dest_dir`` (so the directory is self-contained and relocatable) and the
@@ -261,16 +470,83 @@ def assemble_showcase(
         save_demo(item_list, dest / "explore.html", **(demo_kwargs or {}))
         explore_href = "explore.html"
 
+    featured = _render_featured(
+        dest,
+        featured_sites,
+        frames=featured_frames,
+        renderer=featured_renderer,
+    )
+
     index = dest / "index.html"
     index.write_text(
         build_showcase(
             map_href=map_href,
             explore_href=explore_href,
             item_count=len(item_list) if item_list is not None else None,
+            featured=featured,
             **showcase_kwargs,
         )
     )
     return index
+
+
+def _render_featured(
+    dest: Path,
+    sites: Sequence[FeaturedSite],
+    *,
+    frames: int,
+    renderer: FeaturedRenderer | None,
+) -> list[FeaturedArtifact]:
+    """Render one change composite per site into ``dest/featured/`` and return
+    the artifacts that actually landed (a failed render is skipped, not fatal)."""
+    if not sites:
+        return []
+    render = renderer if renderer is not None else _default_featured_renderer(frames)
+    out_dir = dest / FEATURED_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    artifacts: list[FeaturedArtifact] = []
+    used: set[str] = set()
+    for site in sites:
+        # Two task names can slug identically ("Beet Piler, ND" / "Beet Piler
+        # ND"); suffix rather than let one site silently overwrite the other's
+        # tile and show the same image twice.
+        stem = site.slug
+        while stem in used:
+            stem = f"{site.slug}-{len(used) + 1}"
+        used.add(stem)
+
+        png = out_dir / f"{stem}.png"
+        try:
+            render(site.items, png)
+        except Exception as exc:  # noqa: BLE001 - one bad scene must not fail the build
+            warnings.warn(
+                f"Skipping featured site {site.task!r}: {exc}", RuntimeWarning, stacklevel=2
+            )
+            continue
+        if not png.exists():  # a renderer that silently wrote nothing
+            continue
+        artifacts.append(
+            FeaturedArtifact(
+                href=f"{FEATURED_DIR}/{png.name}",
+                label=site.label,
+                caption=featured_caption(site, min(frames, len(site.items))),
+            )
+        )
+    return artifacts
+
+
+def _default_featured_renderer(frames: int, asset: str = "GEC") -> FeaturedRenderer:
+    """The production renderer: co-register the evenly-spaced frames of a site
+    and write the change composite. Needs the ``viz`` extra, and streams only a
+    downsampled overview of each scene."""
+
+    def render(items: list[UmbraItem], dest: Path) -> None:
+        from .viz import save_change_composite, select_change_frames  # noqa: PLC0415
+
+        save_change_composite(select_change_frames(items, frames=frames), dest, asset=asset)
+
+    return render
 
 
 _STYLES = """
@@ -315,6 +591,26 @@ _STYLES = """
     .card h2 { font-size: 1.15rem; margin: 0 0 .4rem; }
     .card p { color: var(--muted); font-size: .95rem; margin: 0; }
     .card code { background: rgba(124,156,255,.15); padding: .05em .35em; border-radius: 5px; }
+    .featured { margin: 0 0 2.5rem; }
+    .featured h2 { font-size: 1.4rem; margin: 0 0 .4rem; }
+    .featured .lede {
+      color: var(--muted); font-size: .95rem; margin: 0 0 1.25rem; max-width: 62ch;
+    }
+    .shots {
+      display: grid; gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+    .shot {
+      margin: 0; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; overflow: hidden;
+    }
+    .shot img {
+      display: block; width: 100%; aspect-ratio: 1; object-fit: cover;
+      background: #000;
+    }
+    .shot figcaption { padding: .75rem 1rem 1rem; font-size: .85rem; }
+    .shot figcaption strong { display: block; margin-bottom: .15rem; }
+    .shot figcaption span { color: var(--muted); }
     footer {
       color: var(--muted); font-size: .85rem; text-align: center;
       padding: 0 1.25rem 2.5rem; max-width: 640px;
@@ -337,6 +633,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       <p class="tagline">{tagline}</p>
 {stats}
     </header>
+{featured}
     <div class="grid">
 {cards}
     </div>
