@@ -753,6 +753,61 @@ def describe_scene(
     return description.to_dict()
 
 
+def narrate_change(
+    urls: list[str],
+    asset: str = "GEC",
+    db: bool = False,
+    max_size: int = 1024,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Return a grounded, plain-language reading of *what changed* between passes.
+
+    This is the second half of the C2 "VLM-in-the-loop" capability (``umbra change
+    --narrate``) on the MCP surface, the sibling of :func:`describe_scene`. Where
+    ``describe_scene`` has a model read *one* scene, this narrates the *change*
+    between two or three passes of the *same* site: it renders the change composite
+    (green = appeared, magenta = vanished) *and* computes a deterministic coarse
+    grid of signed backscatter change in decibels, hands both the picture and the
+    numbers to a vision model behind the packaged SAR-literacy prompt, and returns
+    a validated ``{summary, changes[], confidence, caveats[]}`` narration. Pass the
+    STAC URLs in time order; the passes must share one polarization (HH vs VV are
+    not comparable), so mixed-polarization input is refused.
+
+    The value over the client simply calling :func:`change_composite` itself is the
+    numeric grounding: the model is told to narrate *only* change the per-block dB
+    grid supports, so it cannot invent a change the pixels do not show, and the grid
+    rides along in ``change_stats`` so every statement is auditable against a number
+    a human (or a test) can recompute.
+
+    Like :func:`describe_scene`, this **consults a model** — the deliberate, opt-in
+    exception to the server's determinism boundary (``docs/AI_INTEGRATION_IDEAS.md``
+    §A4): the composite and the dB grid are produced deterministically, the model
+    **only interprets** (its reply passes the ``parse_narration`` boundary — nothing
+    it says becomes a coordinate, a URL, or a measurement; the measurements are the
+    grid's), and every narration is stamped with the CC-BY attribution and an
+    ``AI_PROVENANCE`` note so a model's reading of radar is never mistaken for
+    ground truth. It requires the ``[ai]`` extra plus a user-supplied vision key
+    (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``, optionally ``OPENAI_BASE_URL`` /
+    ``UMBRA_NARRATE_MODEL``) and the ``[viz]`` extra for the render; it raises a
+    helpful setup error when no key is configured, so it never runs implicitly. To
+    *see* the composite the narration is of, call :func:`change_composite` on the
+    same URLs.
+    """
+    # Import the function directly (as ``describe_scene`` does): the re-exported
+    # ``umbra_py.narrate`` attribute is the function, so ``from .narrate import
+    # narrate`` binds it while its body still resolves ``default_narrator`` / the
+    # render from its own module globals, keeping the [ai]-key gating and the
+    # offline stubbing intact.
+    from .narrate import narrate as _narrate_change
+
+    items = [_fetch_item(u) for u in urls]
+    if len(items) < 2:
+        raise ValueError("narrate_change needs at least two item URLs.")
+    _require_same_polarization(items)
+    narration = _narrate_change(items, model=model, asset=asset, max_size=max_size, db=db)
+    return narration.to_dict()
+
+
 def main() -> None:
     """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
     build_server().run()
@@ -782,8 +837,10 @@ def build_server() -> FastMCP:
             "semantics. Use search_catalog to find acquisitions (compact cards), "
             "get_item for one item's full metadata, and quicklook / "
             "change_composite / timescan to see the radar imagery. describe_scene "
-            "returns a SAR-literate model reading of a scene (the one tool that "
-            "consults a model, and only when an [ai] key is configured). All data "
+            "returns a SAR-literate model reading of a scene, and narrate_change "
+            "reads what changed between passes grounded in a per-block decibel grid "
+            "(the two tools that consult a model, and only when an [ai] key is "
+            "configured). All data "
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
@@ -801,6 +858,7 @@ def build_server() -> FastMCP:
         find_similar,
         find_similar_text,
         describe_scene,
+        narrate_change,
     ):
         server.add_tool(fn)
 
@@ -898,6 +956,30 @@ def build_server() -> FastMCP:
             "a measurement) and keeping the attribution line. Remember SAR rules: "
             "bright is backscatter not sunlight, a dark patch may be shadow not "
             "water, and one frame shows no change over time."
+        )
+
+    @server.prompt(
+        name="narrate-change",
+        description="Workflow: composite two passes and read what changed, grounded in numbers.",
+    )
+    def narrate_change_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
+        window = f" between {start} and {end}" if start or end else ""
+        return (
+            f"Report what changed at '{place}'{window} using the umbra tools (the "
+            "reading needs an [ai] vision key configured on the server):\n"
+            f"1. search_catalog(place='{place}'"
+            f"{f', start={start!r}' if start else ''}"
+            f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
+            "2. Pick the two or three most recent passes of the same polarization "
+            "(see each card's polarization_caveat).\n"
+            "3. change_composite(urls=[...]) on their stac_href URLs so you can see "
+            "the green (appeared) / magenta (vanished) change.\n"
+            "4. narrate_change(urls=[...]) on the same URLs — a vision model narrates "
+            "*what* changed, grounded in the per-block decibel grid returned as "
+            "change_stats, so every statement cites a number and none is invented.\n"
+            "5. Present the narration, noting it is an AI interpretation of radar "
+            "change (not a measurement), citing the change_stats blocks, and keeping "
+            "the attribution line."
         )
 
     @server.prompt(

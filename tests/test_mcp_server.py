@@ -63,6 +63,7 @@ def test_build_server_registers_expected_surface():
         "find_similar",
         "find_similar_text",
         "describe_scene",
+        "narrate_change",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
@@ -72,6 +73,7 @@ def test_build_server_registers_expected_surface():
         "watch-site",
         "find-similar-scenes",
         "describe-scene",
+        "narrate-change",
         "survey-region",
         "search-by-description",
     }
@@ -678,3 +680,125 @@ def test_describe_scene_without_key_raises_setup_error(sample_item_dict, monkeyp
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(MissingDependencyError, match="vision model API key"):
         ms.describe_scene(ITEM_URL)
+
+
+# --------------------------------------------------------------------------
+# narrate_change — a number-grounded VLM reading of *change* over MCP (C2)
+#
+# The sibling of describe_scene: it composites two passes, computes the
+# deterministic per-block dB grid, and has a model narrate only the change the
+# numbers support. Fully offline — the render (which normally streams the COGs
+# and needs the viz extra) and the model call are deterministic stand-ins, so
+# the whole path (fetch → render+grid → prompt → parse → provenance stamp) runs
+# with no [ai]/[viz] extra and no network.
+# --------------------------------------------------------------------------
+
+
+def _two_pass_urls(sample_item_dict):
+    """Two same-polarization passes of one site, registered with ``responses``."""
+    first_url = ITEM_URL
+    second_url = ITEM_URL.replace("item", "item2")
+    first = _with_polarization(sample_item_dict, "VV")
+    second = _with_polarization(sample_item_dict, "VV")
+    second["id"] = sample_item_dict["id"] + "-2"
+    responses.add(responses.GET, first_url, json=first, status=200)
+    responses.add(responses.GET, second_url, json=second, status=200)
+    return first_url, second_url
+
+
+@responses.activate
+def test_narrate_change_returns_validated_narration(sample_item_dict, monkeypatch):
+    import umbra_py.narrate  # noqa: F401  (ensure the submodule is imported)
+
+    # ``from umbra_py import narrate`` is the function; patch the real module's
+    # globals (the render + the model call) via sys.modules, as narrate.py's own
+    # tests do, so the whole path runs with no viz extra and no key.
+    nar = sys.modules["umbra_py.narrate"]
+
+    first_url, second_url = _two_pass_urls(sample_item_dict)
+
+    # Stand in for the render (no viz extra / no COG stream): return the composite
+    # PNG bytes plus a deterministic dB-change grid the narration is grounded in.
+    stats = nar.ChangeStats(
+        grid_rows=2,
+        grid_cols=2,
+        change_threshold_db=3.0,
+        bounds=(0.0, 0.0, 1.0, 1.0),
+        blocks=[],
+        scene_mean_abs_delta_db=4.2,
+        scene_changed_fraction=0.3,
+        peak_compass="northwest",
+        peak_direction="brightened",
+        peak_mean_delta_db=6.5,
+    )
+    monkeypatch.setattr(nar, "render_change_png", lambda items, **kw: (b"png-bytes", stats))
+
+    captured = {}
+
+    def _fake_narrator(*, model=None):
+        def narrator(messages):
+            captured["messages"] = messages
+            return json.dumps(
+                {
+                    "summary": "The northwest corner brightened by several dB between passes.",
+                    "changes": ["northwest block brightened ~6.5 dB"],
+                    "confidence": "medium",
+                    "caveats": ["one polarization only; speckle may inflate small blocks"],
+                }
+            )
+
+        return narrator
+
+    monkeypatch.setattr(nar, "default_narrator", _fake_narrator)
+
+    out = ms.narrate_change([first_url, second_url])
+    assert out["summary"].startswith("The northwest corner brightened")
+    assert out["changes"] == ["northwest block brightened ~6.5 dB"]
+    assert out["confidence"] == "medium"
+    # The item ids of both passes are recorded deterministically.
+    assert out["item_ids"] == [sample_item_dict["id"], sample_item_dict["id"] + "-2"]
+    # The narration is grounded in — and carries — the deterministic dB grid.
+    assert out["change_stats"]["peak_compass"] == "northwest"
+    assert out["change_stats"]["scene_mean_abs_delta_db"] == 4.2
+    # Provenance and attribution are stamped deterministically, never by the model.
+    assert out["attribution"]
+    assert out["provenance"]
+    # The model was shown the rendered composite and the numeric grid, not asked
+    # to invent them: the prompt carries the PNG bytes and the change numbers.
+    assert captured["messages"]["image_png"] == b"png-bytes"
+    assert "northwest" in captured["messages"]["user"]
+
+
+@responses.activate
+def test_narrate_change_refuses_mixed_polarization(sample_item_dict):
+    vv_url = ITEM_URL
+    hh_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, hh_url, json=_with_polarization(sample_item_dict, "HH"), status=200
+    )
+    # Mixed polarizations are not comparable, so change narration is refused before
+    # any render or model call — the same guard change_composite holds.
+    with pytest.raises(ValueError, match="polarization"):
+        ms.narrate_change([vv_url, hh_url])
+
+
+@responses.activate
+def test_narrate_change_without_key_raises_setup_error(sample_item_dict, monkeypatch):
+    import umbra_py.narrate  # noqa: F401  (ensure the submodule is imported)
+
+    nar = sys.modules["umbra_py.narrate"]
+
+    first_url, second_url = _two_pass_urls(sample_item_dict)
+    # Render is stubbed, but no key is configured -> the default narrator refuses
+    # rather than running implicitly.
+    stats = nar.ChangeStats(
+        grid_rows=1, grid_cols=1, change_threshold_db=3.0, bounds=(0.0, 0.0, 1.0, 1.0)
+    )
+    monkeypatch.setattr(nar, "render_change_png", lambda items, **kw: (b"png-bytes", stats))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(MissingDependencyError, match="vision model API key"):
+        ms.narrate_change([first_url, second_url])
