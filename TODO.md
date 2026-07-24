@@ -247,12 +247,20 @@ index, the read-through search, the Canopy archive, `umbra search` and the MCP
 schema change, deterministic and offline-tested. Additive follow-ons, none a
 blocker:
 
-- **Wire the filters into the render/analysis commands.** `change`, `timescan`,
-  `swipe`, `gallery`, `map` and `chips` gather through `_gather_items`, so adding
-  the shared `_acquisition_filter_options` decorator + threading the kwargs would
-  let `umbra change --pol VV` gather a single-polarization series directly (today
-  the change command only *warns* on a mixed-polarization selection). Mechanical,
-  per-command signature edits.
+- ~~**Wire the filters into the render/analysis commands.**~~ ✅ **Done.**
+  `change`, `timescan`, `swipe`, `gallery`, `map` and `chips` now carry the shared
+  `@_acquisition_filter_options` decorator (`--pol` / `--min-incidence` /
+  `--max-incidence` / `--max-resolution`), threaded through `_gather_items` via
+  `_acquisition_filter_kwargs`, so `umbra change --pol VV` gathers a
+  single-polarization series *directly* instead of relying on the after-the-fact
+  mixed-polarization warning (the warning still fires for an unfiltered mixed
+  selection). The filters apply only in search mode — passing explicit item URLs
+  is unaffected — and the set filters are recorded in the `--json` render
+  manifest's `parameters` (only when set, so an unfiltered render's manifest is
+  unchanged; `chips` writes its own manifest and is unaffected). Uses the same
+  predicate every other surface shares (`UmbraItem.matches_filters`), so no new
+  filtering logic; offline-tested in `tests/test_acquisition_filters.py` (each of
+  the six commands forwards the kwargs; the unset-→`None` case).
 - **Expose the filters on the `umbra serve` STAC Query extension.** `parse_query`
   already maps `product_types` / `area`; extending it (and the GET-param path)
   with `sar:polarizations` (`in`/`eq`), `view:incidence_angle` (`gte`/`lte`) and
