@@ -3013,6 +3013,221 @@ def tiles(
         click.echo(f"Wrote MapLibre viewer to {vpath}")
 
 
+@cli.command()
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name to a bounding box and gather the explorer's "
+    "items within it, via OpenStreetMap Nominatim. Mutually exclusive with --bbox.",
+)
+@click.option("--start", help="Earliest acquisition date for the explorer (see 'umbra demo').")
+@click.option("--end", help="Latest acquisition date for the explorer (see 'umbra demo').")
+@click.option(
+    "--area",
+    default=None,
+    help="Case-insensitive Umbra task/site name to gather for the explorer.",
+)
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Keep explorer items exposing this asset (repeatable).",
+)
+@click.option(
+    "--limit", type=int, default=2000, show_default=True, help="Max acquisitions to load."
+)
+@click.option(
+    "--max-per-task",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Cap items per Umbra task directory. The default '1' gives one marker "
+    "per distinct site -- a fast whole-archive overview fit for a landing page.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    required=True,
+    help="Output directory for the showcase site (index.html + map/explore pages).",
+)
+@click.option(
+    "--pmtiles",
+    "pmtiles_path",
+    default=None,
+    help="Local whole-catalog .pmtiles basemap to include (copied in beside a "
+    "MapLibre viewer). Mutually exclusive with --fetch-pmtiles.",
+)
+@click.option(
+    "--fetch-pmtiles",
+    is_flag=True,
+    help="Download the published whole-catalog 'catalog.pmtiles' basemap into "
+    "the showcase (the same artifact 'umbra tiles --fetch' pulls) instead of "
+    "supplying one with --pmtiles.",
+)
+@click.option("--pmtiles-url", default=None, help="Override the --fetch-pmtiles asset URL.")
+@click.option(
+    "--no-explore",
+    "explore",
+    is_flag=True,
+    default=True,
+    flag_value=False,
+    help="Skip building the interactive 'umbra demo' explorer page (a "
+    "map-only showcase). By default an explorer is built from the gathered slice.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Product the explorer's on-click 'Get SAR image' button streams.",
+)
+@click.option(
+    "--no-lazy-imagery",
+    "lazy_imagery",
+    is_flag=True,
+    default=True,
+    flag_value=False,
+    help="Build the explorer metadata-only (no on-click SAR overlay button).",
+)
+@click.option("--title", default=None, help="Override the landing-page title.")
+@click.option("--tagline", default=None, help="Override the landing-page one-line pitch.")
+@click.option(
+    "--updated",
+    default=None,
+    help="Freshness stamp shown on the landing page (e.g. the index build date).",
+)
+@_local_index_options
+@_fuzzy_option
+def showcase(
+    bbox,
+    place,
+    start,
+    end,
+    area,
+    fuzzy,
+    products,
+    limit,
+    max_per_task,
+    out_dir,
+    pmtiles_path,
+    fetch_pmtiles,
+    pmtiles_url,
+    explore,
+    asset,
+    lazy_imagery,
+    title,
+    tagline,
+    updated,
+    local,
+    db_path,
+) -> None:
+    """Assemble a static, hostable showcase site into a directory.
+
+    This composes the pieces the other visual commands already produce into one
+    self-contained folder you drop on any static host (GitHub Pages, a bucket):
+
+    \b
+      index.html    a landing page linking the pieces below + install/docs/source
+      map.html      a MapLibre viewer over the whole-catalog PMTiles basemap
+      explore.html  the interactive 'umbra demo' catalog explorer
+
+    Give the basemap with --pmtiles PATH, or --fetch-pmtiles to pull the
+    published 'catalog.pmtiles' (the same artifact 'umbra tiles --fetch' fetches).
+    The explorer is built from a gathered slice of the catalog (--local answers
+    from a prebuilt index in milliseconds; --max-per-task 1, the default, gives a
+    one-pin-per-site overview); pass --no-explore for a map-only showcase.
+
+    Needs no extra: every page is self-contained HTML, so this runs in a core
+    install and is the front end the '.github/workflows/docs.yml' Pages deploy
+    publishes beside the docs.
+    """
+    if pmtiles_path and fetch_pmtiles:
+        raise click.ClickException("Pass either --pmtiles or --fetch-pmtiles, not both.")
+    if pmtiles_url is not None and not fetch_pmtiles:
+        raise click.ClickException("--pmtiles-url only applies with --fetch-pmtiles.")
+
+    from .showcase import assemble_showcase  # noqa: PLC0415
+
+    dest = Path(out_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Resolve the basemap: a supplied file, a fetched published snapshot, or none.
+    basemap: Path | None = None
+    if pmtiles_path:
+        basemap = Path(pmtiles_path)
+        if not basemap.exists():
+            raise click.ClickException(f"PMTiles file not found: {basemap}")
+    elif fetch_pmtiles:
+        from .pmtiles import fetch_prebuilt_pmtiles  # noqa: PLC0415
+
+        basemap = dest / "catalog.pmtiles"
+        with OrbitSpinner("Fetching prebuilt catalog basemap") as spinner:
+
+            def tally(done: int, total: int | None) -> None:
+                spinner.label = (
+                    f"Fetching prebuilt catalog basemap ({done / total:.0%})"
+                    if total
+                    else f"Fetching prebuilt catalog basemap ({done / 1e6:.0f} MB)"
+                )
+
+            fetch_prebuilt_pmtiles(basemap, url=pmtiles_url, progress=tally)
+
+    # Gather the explorer's items unless a map-only showcase was requested.
+    items: list[UmbraItem] = []
+    if explore:
+        search_bbox = _resolve_search_bbox(bbox, place)
+        items = _gather_items(
+            local=local,
+            db_path=db_path,
+            bbox=search_bbox,
+            start=start,
+            end=end,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=list(products) or None,
+            limit=limit,
+            max_per_task=max_per_task,
+        )
+        if not items:
+            raise click.ClickException("No items matched the search for the explorer.")
+
+    if basemap is None and not items:
+        raise click.ClickException(
+            "Nothing to show: supply a basemap (--pmtiles / --fetch-pmtiles) "
+            "and/or build the explorer (drop --no-explore)."
+        )
+
+    showcase_kwargs: dict[str, str] = {}
+    if title:
+        showcase_kwargs["title"] = title
+    if tagline:
+        showcase_kwargs["tagline"] = tagline
+    if updated:
+        showcase_kwargs["updated"] = updated
+
+    with OrbitSpinner("Assembling showcase site"):
+        index = assemble_showcase(
+            dest,
+            items=items or None,
+            pmtiles_path=basemap,
+            demo_kwargs={
+                "asset": asset,
+                "lazy_imagery": lazy_imagery,
+                "subtitle": _search_subtitle(place or area, bbox, start, end),
+            },
+            **showcase_kwargs,
+        )
+
+    pages = ["index.html"]
+    if basemap is not None:
+        pages.append("map.html")
+    if items:
+        pages.append("explore.html")
+    click.echo(f"Wrote showcase site ({', '.join(pages)}) to {index.parent}")
+
+
 @cli.command(name="map")
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
 @click.option(

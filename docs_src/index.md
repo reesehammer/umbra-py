@@ -10,6 +10,13 @@ data is excellent, but getting started is hard: it ships in specialized formats
 existing tooling is low-level. `umbra-py` makes working with it feel as
 approachable as working with Sentinel-1 or Landsat.
 
+!!! tip "Try it now — no install"
+    Browse and search the whole open archive from your browser in the
+    **[live showcase](https://reesehammer.github.io/umbra-py/showcase/)**: a
+    zoomable whole-catalog map and an
+    interactive explorer, hosted on GitHub Pages, no account or download
+    required. Build your own with [`umbra showcase`](cli.md).
+
 !!! note "Status"
     v0.1 / early alpha. The discovery + download core works against Umbra's
     live catalog today; processing helpers are minimal and growing.

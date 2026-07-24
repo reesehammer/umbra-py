@@ -87,3 +87,31 @@ The server sends a permissive read-only CORS policy, so a browser front end on
 another origin (including a static [`umbra demo`](cli.md) page) can call
 `/search` and the render endpoints cross-origin. Terminate TLS at your proxy and
 forward to the container's port; `GET /healthz` is a cheap upstream health check.
+
+## Static showcase (no server)
+
+For a zero-install *front door* — no API, no container — [`umbra
+showcase`](cli.md) assembles a static site you drop on any static host:
+
+```bash
+umbra index fetch            # pull the published catalog snapshot (no crawl)
+umbra showcase \
+    --local \
+    --fetch-pmtiles \
+    --out ./showcase
+```
+
+That writes a self-contained directory:
+
+- `index.html` — a landing page linking the pieces below plus install/docs/source;
+- `map.html` — a MapLibre viewer over the whole-catalog `catalog.pmtiles` basemap
+  (copied in beside it), so the folder is relocatable;
+- `explore.html` — the interactive [`umbra demo`](cli.md) explorer over a
+  one-pin-per-site overview of the catalog.
+
+Every page is self-contained HTML, so it needs no extra and no backend. This is
+what the repository's own **[hosted showcase](https://reesehammer.github.io/umbra-py/showcase/)**
+is: the `.github/workflows/docs.yml` Pages job runs `umbra showcase` after the
+mkdocs build and publishes `site/showcase/` beside the docs. Point `--pmtiles`
+at a locally built basemap instead of `--fetch-pmtiles` for an offline build, or
+pass `--no-explore` for a map-only page.

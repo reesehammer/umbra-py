@@ -79,6 +79,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra semantic info` — Show what a semantic index holds: task-vector count, model and dimension.
 - `umbra semantic search` — Rank Umbra task/site names by how well they match a plain-language QUERY.
 - `umbra serve` — Run a read-only STAC API over the catalog index (HTTP server).
+- `umbra showcase` — Assemble a static, hostable showcase site into a directory.
 - `umbra swipe` — Render an interactive before/after swipe map of two SAR passes.
 - `umbra tiles` — Tile the whole catalog into a single-file PMTiles vector archive.
 - `umbra timescan` — Collapse a whole SAR time series into one temporal-statistics image.
