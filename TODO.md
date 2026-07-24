@@ -73,6 +73,37 @@ Follow-ons that build on it, none a blocker:
 
 ---
 
+## Static GitHub Pages showcase follow-ons (`umbra showcase` shipped)
+
+- **Surfaced in:** the GitHub Pages showcase PR (`docs/DEMO_APP_GAPS.md` G7 /
+  `STRATEGY.md` §8 demo/hosting).
+- **Code:** `src/umbra_py/showcase.py` (`build_showcase` / `assemble_showcase`),
+  `umbra showcase` in `cli.py`, the `Build catalog showcase` step in
+  `.github/workflows/docs.yml`.
+
+`umbra showcase` composes the whole-catalog PMTiles map (`umbra tiles`), the
+interactive explorer (`umbra demo`) and a self-contained landing page into one
+static, hostable directory; the `docs.yml` Pages job publishes it to
+`/showcase/` beside the docs (non-blocking, main-only). Follow-ons that build on
+it, none a blocker:
+
+- **Enable Pages for the repo (maintainer).** The `docs.yml` deploy job (and so
+  the showcase publish) is skipped until Settings → Pages → Source is set to
+  "GitHub Actions". Until then the showcase builds in CI but isn't served.
+- **Precompute a few curated showcase artifacts.** The landing page links a
+  live map + explorer; baking swipe/change/timescan images for ~6–10 marquee
+  sites into the showcase (the R4 static-path polish) would give a first-time
+  visitor an instant "what SAR change looks like" without a render round-trip.
+- **Auto-stamp the freshness date from the index.** The CI step passes the run
+  date to `--updated`; reading the fetched index's `built_at` (as `umbra index
+  info` does) would show the *snapshot's* age rather than the build's.
+- **Wire the PMTiles basemap into the explorer itself.** Today `map.html` and
+  `explore.html` are siblings; the `umbra demo --pmtiles` follow-on (see the
+  PMTiles section below) would let the explorer scale to the whole catalog too,
+  collapsing the two pages into one.
+
+---
+
 ## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
 
 - **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).

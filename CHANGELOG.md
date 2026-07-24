@@ -7,6 +7,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GitHub Pages showcase of the static `umbra demo` / `catalog.pmtiles`
+  explorer (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The toolkit
+  already produced every piece of a zero-install catalog demo — the
+  whole-archive PMTiles basemap (`umbra tiles`), the interactive explorer
+  (`umbra demo`), the published snapshots a fresh install fetches with no crawl —
+  but had nowhere to *put* them. New `umbra showcase` (module `showcase.py`,
+  `build_showcase` / `assemble_showcase`, both exported) composes them into one
+  self-contained, hostable directory: `index.html` (a dependency-free landing
+  page linking the pieces plus install/docs/source, carrying the mandatory CC-BY
+  attribution and the not-affiliated disclaimer), `map.html` (the MapLibre viewer
+  over the whole-catalog basemap, with the `.pmtiles` archive copied in beside it
+  so the folder is relocatable), and `explore.html` (the `umbra demo` explorer
+  over a gathered slice — `--max-per-task 1` by default for a one-pin-per-site
+  overview). The basemap comes from a local `--pmtiles PATH` or `--fetch-pmtiles`
+  (the same published `catalog.pmtiles` `umbra tiles --fetch` pulls); `--no-explore`
+  makes a map-only page. The `.github/workflows/docs.yml` Pages job now runs
+  `umbra index fetch` + `umbra showcase` after the mkdocs build and publishes
+  `site/showcase/` beside the docs — a **non-blocking, main-only** step, so a
+  not-yet-published `catalog-index` release or a failed fetch never breaks the
+  docs deploy. It is a *composer*, not a new renderer: `build_showcase` is a pure
+  string builder and `assemble_showcase` only copies a file and calls the existing
+  `save_viewer` / `save_demo` writers, so it needs no network and no `viz` extra
+  and is fully offline-tested in `tests/test_showcase.py` (landing-page cards /
+  stats / attribution and card-dropping; the three-file assemble + basemap copy;
+  map-only / explore-only; the same-file-in-dest guard; and the CLI's build,
+  `--no-explore`, `--fetch-pmtiles`, and the source/guard errors). Documented in
+  `docs_src/deploy.md` and linked from the docs landing page. This closes the
+  GitHub Pages half of the G7 packaging/hosting gap — the last named demo/hosting
+  code item in `STRATEGY.md` §8.
 - **One-command Docker self-hosting of `umbra serve` + a `/healthz` probe
   (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The repo now ships a
   `Dockerfile`, a `docker-compose.yml`, a `.dockerignore` and a
