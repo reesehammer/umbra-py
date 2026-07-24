@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **MCP `narrate_change` tool — a number-grounded VLM reading of *what changed*
+  over the flagship server (C2 second half, `AI_INTEGRATION_IDEAS.md` C2).** The
+  CLI's `umbra change --narrate` (module `narrate.py`) has a vision model narrate
+  the change between two or three passes of a site, grounded in a deterministic
+  per-block decibel grid so every statement cites a number rather than vibes — but
+  an MCP/agent client could only get the raw `change_composite` image, not the
+  reading. Added `narrate_change(urls, asset, db, max_size, model)` to `umbra-mcp`,
+  the sibling of `describe_scene` and now the second (and only other) tool on the
+  server that consults a model: it composites the same-polarization passes, computes
+  the `ChangeStats` dB grid, hands both the picture and the numbers to the model
+  behind the packaged SAR-literacy prompt, and returns the validated
+  `{summary, changes[], confidence, caveats[]}` narration with the grid embedded as
+  `change_stats` so an agent can audit every statement against a recomputable number.
+  It wraps the shipped `narrate()` unchanged, so the CLI and MCP surfaces cannot
+  drift; it refuses mixed polarizations before any render or model call (the same
+  guard `change_composite` holds); and it holds the determinism boundary
+  (`AI_INTEGRATION_IDEAS.md` §A4) — the composite and the grid are deterministic, the
+  model only interprets (its reply passes the `parse_narration` boundary and never
+  becomes a coordinate, URL, or measurement), and every narration is stamped with the
+  CC-BY attribution and the `AI_PROVENANCE` note. Gated (like the CLI) on the `[ai]`
+  extra plus a user-supplied vision key: it raises a helpful setup error when none is
+  configured, so it never runs implicitly. Shipped with a packaged `narrate-change`
+  workflow prompt (search → composite → narrate → present as an AI interpretation,
+  citing the `change_stats` blocks) and announced in the server's instructions.
+  Because the model call is an injectable `Narrator` and the render an injectable
+  `ChangeRenderer`, the whole path is offline-tested in `tests/test_mcp_server.py`
+  with deterministic stand-ins — validated narration returned and grid carried
+  through, the mixed-polarization refusal, and the missing-key setup error — with no
+  `[ai]`/`[viz]` extra and no network. This completes the C2 "VLM-in-the-loop" pair
+  (`describe_scene` reads one scene; `narrate_change` narrates change) on the
+  AI-native surface.
 - **`umbra ask` now plans the SAR acquisition-property filters (`STRATEGY.md`
   §3 acquisition-filter follow-on).** The polarization / incidence-angle /
   resolution filters already shipped on every other surface — `umbra search`,

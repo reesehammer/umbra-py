@@ -481,16 +481,40 @@ rendered quicklook plus the A3 context card and returns a provenance-stamped
 `{summary, observed_features[], confidence, caveats[]}`. The rest of C2 is still
 open and builds on the same boundary:
 
-- **`umbra change --narrate`** (the second half of C2): after writing a change
-  composite, send it with the color-semantics legend and a coarse per-block
-  |Δ|-in-dB sidecar to a VLM and return a plain-language, number-grounded change
-  report — so the narration cites the deterministic statistics, not vibes. Reuse
-  `describe.py`'s `Describer`/`parse_*` boundary and the `AI_PROVENANCE` stamp.
+- ~~**`umbra change --narrate`** (the second half of C2).~~ ✅ **Done**
+  (`src/umbra_py/narrate.py`). After rendering a change composite, `compute_change_stats`
+  divides the co-registered scene into a coarse grid and measures the mean *signed*
+  backscatter change in decibels per block; the composite PNG and that dB grid go to
+  a VLM, which returns a validated `ChangeNarration` (`{summary, changes[], confidence,
+  caveats[]}`) grounded in — and carrying — the deterministic grid, so every statement
+  cites a number, not vibes. Reuses `describe.py`'s provider plumbing and the
+  `parse_*` boundary, stamps every narration with CC-BY + `AI_PROVENANCE`, and (like
+  `describe`) the model call is an injectable `Narrator` and the render an injectable
+  `ChangeRenderer`, so the whole path is offline-tested with no `[ai]`/`[viz]` extra.
+- ~~**MCP `narrate_change` tool.**~~ ✅ **Done.** `umbra-mcp` gained a
+  `narrate_change(urls, asset, db, max_size, model)` tool (plus a `narrate-change`
+  workflow prompt) wrapping `narrate()` unchanged — the sibling of `describe_scene`
+  on the MCP surface, and the **second** (and only other) tool that consults a model.
+  It composites two or three same-polarization passes, computes the deterministic
+  per-block dB grid, has the model narrate *only* the change the numbers support, and
+  returns the validated `ChangeNarration` dict with the grid embedded as
+  `change_stats` so an agent can audit every statement. Gated (like the CLI) on the
+  `[ai]` key — it raises the same setup error and never runs implicitly — refuses mixed
+  polarizations before any render or model call (the same guard `change_composite`
+  holds), and holds the determinism boundary (`AI_INTEGRATION_IDEAS.md` §A4): the
+  picture and the numbers are deterministic, the model only interprets, and every
+  narration is stamped with CC-BY + `AI_PROVENANCE`. Offline-tested in
+  `tests/test_mcp_server.py` with an injected narrator + render (no `[ai]`/`[viz]`
+  extra, no key, no network), including the mixed-polarization refusal and the
+  missing-key setup error. Remaining reach follow-on: surface `narrate_change` on the
+  LangChain / LlamaIndex wrappers too (they wrap a fixed list of MCP callables, so it
+  is a one-line add to each `_JSON_TOOLS`, kept out of this PR to stay scoped).
 - ~~**MCP `describe_scene` tool.**~~ ✅ **Done.** `umbra-mcp` gained a
   `describe_scene(url, asset, db, max_size, model)` tool (plus a `describe-scene`
   workflow prompt) wrapping `describe()` unchanged, so an MCP client gets the
   structured `{summary, observed_features, confidence, caveats}` reading directly.
-  It is the **one tool on the server that consults a model**, a deliberate opt-in
+  It is one of the **two tools on the server that consult a model** (with
+  `narrate_change` above), a deliberate opt-in
   exception gated (like the CLI) on the `[ai]` key — it raises the same setup error
   and never runs implicitly. The boundary holds: the picture and the metadata card
   are deterministic, the model only interprets (its reply passes `parse_description`),

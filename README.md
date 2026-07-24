@@ -803,19 +803,22 @@ The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `download_asset`, `watch_site`
 (report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
-index) and `describe_scene` (a SAR-literate model reading of one scene) tools; a
-`umbra://context` resource with the product-type table and search
-semantics; and packaged `monitor-site` / `watch-site` / `find-similar-scenes` /
-`describe-scene` / `survey-region` prompts. The imagery tools return
+index), `describe_scene` (a SAR-literate model reading of one scene) and
+`narrate_change` (a model reading of *what changed* between passes, grounded in
+a per-block decibel grid) tools; a `umbra://context` resource with the
+product-type table and search semantics; and packaged `monitor-site` /
+`watch-site` / `find-similar-scenes` / `describe-scene` / `narrate-change` /
+`survey-region` prompts. The imagery tools return
 the rendered PNG as an MCP image block, so the model *sees* the radar scene. In
 keeping with the library's design, the server stays deterministic — it
-searches, geocodes and renders; the client's model plans and narrates. The one
-opt-in exception is `describe_scene`, which consults a vision model to *read* a
-scene (only when an `[ai]` key is configured), and even it holds the boundary:
-the model only interprets, its reply is validated, and every reading is stamped
-as an AI interpretation. It even refuses to composite mixed polarizations (HH
-and VV aren't comparable), and the CC-BY attribution line travels with every
-result.
+searches, geocodes and renders; the client's model plans and narrates. The two
+opt-in exceptions are `describe_scene` and `narrate_change`, which consult a
+vision model to *read* a scene or *narrate* change (only when an `[ai]` key is
+configured), and even they hold the boundary: the model only interprets, its
+reply is validated, and every reading is stamped as an AI interpretation
+(`narrate_change` narrates only the change its deterministic dB grid supports).
+The server refuses to composite mixed polarizations (HH and VV aren't
+comparable), and the CC-BY attribution line travels with every result.
 
 ### Drive it from a LangChain / LangGraph agent
 
