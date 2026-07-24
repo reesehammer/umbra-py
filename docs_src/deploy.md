@@ -98,6 +98,7 @@ umbra index fetch            # pull the published catalog snapshot (no crawl)
 umbra showcase \
     --local \
     --fetch-pmtiles \
+    --featured 6 \
     --out ./showcase
 ```
 
@@ -107,7 +108,8 @@ That writes a self-contained directory:
 - `map.html` — a MapLibre viewer over the whole-catalog `catalog.pmtiles` basemap
   (copied in beside it), so the folder is relocatable;
 - `explore.html` — the interactive [`umbra demo`](cli.md) explorer over a
-  one-pin-per-site overview of the catalog.
+  one-pin-per-site overview of the catalog;
+- `featured/*.png` — one precomputed change composite per featured site.
 
 Every page is self-contained HTML, so it needs no extra and no backend. This is
 what the repository's own **[hosted showcase](https://reesehammer.github.io/umbra-py/showcase/)**
@@ -115,3 +117,23 @@ is: the `.github/workflows/docs.yml` Pages job runs `umbra showcase` after the
 mkdocs build and publishes `site/showcase/` beside the docs. Point `--pmtiles`
 at a locally built basemap instead of `--fetch-pmtiles` for an offline build, or
 pass `--no-explore` for a map-only page.
+
+### Featured change composites
+
+`--featured N` renders a change composite for the `N` most repeat-imaged sites in
+the catalog and puts them on the landing page, so a first-time visitor sees *what
+SAR change looks like* immediately — no render round-trip, no server, and it
+still works on a plain static host. Name the sites yourself with a repeatable
+`--featured-area` instead, and pick two-colour (green = new, magenta = gone) or
+three-date temporal RGB with `--featured-frames`:
+
+```bash
+umbra showcase --local --featured-area "Centerfield, Utah" \
+    --featured-area "Beet Piler" --featured-frames 3 --out ./showcase
+```
+
+This is the one step that needs the `viz` extra
+(`pip install "umbra-py[viz]"`); it streams only a downsampled overview of each
+scene, and a site whose asset won't render is skipped with a warning rather than
+failing the build. Without `--featured` the showcase is unchanged and stays
+stdlib-only.

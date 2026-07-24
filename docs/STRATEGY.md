@@ -251,9 +251,14 @@ from:
   explorer + a landing page into a static `site/showcase/`, and the `docs.yml`
   Pages job publishes it beside the docs — non-blocking and main-only; see the
   CHANGELOG).
+- ~~Precompute showcase change artifacts for ~6–10 curated sites (R4 for the
+  static path).~~ **shipped** — `umbra showcase --featured N` renders a change
+  composite for the most repeat-imaged sites (or the ones `--featured-area`
+  names) into `featured/` and puts them on the landing page as a captioned
+  gallery, and the `docs.yml` Pages job passes `--featured 6`; see the CHANGELOG.
+  Still open under R4: the *swipe* and *timescan* variants of the same idea.
 - Bake per-item thumbnails / place labels into the *published* weekly snapshot
-  (gated on egress) and precompute showcase swipe/change/timescan artifacts for
-  ~6–10 curated sites (R4 for the static path).
+  (gated on egress).
 
 **SAR-processing depth (was workstream 5.5)**
 

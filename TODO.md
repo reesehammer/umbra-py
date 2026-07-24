@@ -114,10 +114,28 @@ it, none a blocker:
 - **Enable Pages for the repo (maintainer).** The `docs.yml` deploy job (and so
   the showcase publish) is skipped until Settings → Pages → Source is set to
   "GitHub Actions". Until then the showcase builds in CI but isn't served.
-- **Precompute a few curated showcase artifacts.** The landing page links a
-  live map + explorer; baking swipe/change/timescan images for ~6–10 marquee
-  sites into the showcase (the R4 static-path polish) would give a first-time
-  visitor an instant "what SAR change looks like" without a render round-trip.
+- ~~**Precompute a few curated showcase artifacts.**~~ ✅ **Done** for the change
+  view (`umbra showcase --featured N` / `--featured-area` /
+  `showcase.select_featured_sites`). The landing page led with a live map +
+  explorer and *no SAR imagery*, so seeing what the archive looks like meant
+  clicking in and waiting on a render. `--featured N` now renders a change
+  composite for the N most repeat-imaged sites ahead of time into a relocatable
+  `featured/` subdirectory and shows them as a captioned gallery — the R4
+  "instant what-SAR-change-looks-like" for the static path. Selection is a pure,
+  deterministic function (group by task — Umbra files every pass of a site under
+  one task directory — keep tasks with enough dated passes, rank by pass count
+  then name); `--featured-area` curates by name instead, and `--featured-frames
+  2|3` picks the green/magenta or temporal-RGB view. Every caption states the
+  pass count, date range and colour semantics, so a tile is never a picture
+  without provenance. The render goes through an injectable `featured_renderer`
+  (default: the existing `viz.select_change_frames` + `save_change_composite`,
+  streaming only a downsampled overview), so the whole path is offline-tested
+  with no network and no `viz` extra; a site that won't render is warned about
+  and dropped rather than failing the build. `docs.yml` passes `--featured 6`.
+  Remaining under R4: the **swipe** and **timescan** variants of the same
+  gallery — `viz.save_swipe_map` writes an HTML page rather than a PNG, so it
+  needs a different tile shape (a link card, not an `<img>`), and a timescan
+  tile is the same shape as the change tile with a second renderer.
 - **Auto-stamp the freshness date from the index.** The CI step passes the run
   date to `--updated`; reading the fetched index's `built_at` (as `umbra index
   info` does) would show the *snapshot's* age rather than the build's.
@@ -380,9 +398,13 @@ store). **The STAC Query extension now exposes the index's Umbra-specific filter
 top-level POST fields, or a STAC `query` object — advertised via the
 `item-search#query` conformance class. Open follow-ons:
 
-- **Geometry `intersects`.** The Query extension now covers `product_types` and
-  `area`; geometry `intersects` still needs more than the stored footprint bbox
-  (a real polygon-in-polygon test), so it remains unexposed.
+- ~~**Geometry `intersects`.**~~ ✅ **Done** (stale entry — it shipped with the
+  polygon `intersects` search, see the CHANGELOG). `serve.parse_intersects`
+  accepts a GeoJSON geometry on `GET /search` (as a JSON string) and in the POST
+  body, rejects it alongside `bbox` per the spec, and threads it through
+  `run_search` to the backend, where `CatalogIndex` pushes the polygon's bbox
+  into SQL as a prefilter and then runs the exact `UmbraItem.intersects_polygon`
+  test. Offline-tested in `tests/test_geometry.py`.
 - **A hosted community instance.** The local-first server has no operational
   cost; a public instance is a policy decision (COG-streaming egress) that would
   make the archive queryable with zero install — pair it with the demo front end

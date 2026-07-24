@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 
@@ -38,6 +38,9 @@ from .viz import (
     select_change_frames,
     write_geojson,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .showcase import FeaturedSite
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
@@ -191,6 +194,64 @@ def _gather_items(
     finally:
         if isinstance(source, CatalogIndex):
             source.close()
+
+
+def _gather_featured_sites(
+    *,
+    count: int,
+    areas: tuple[str, ...],
+    pool_limit: int,
+    frames: int,
+    local: bool,
+    db_path: str | None,
+    search_kwargs: dict[str, Any],
+) -> list[FeaturedSite]:
+    """Resolve the sites ``umbra showcase --featured`` precomputes a composite for.
+
+    Two modes, mirroring the flags: explicit ``--featured-area`` names are
+    curated one search at a time (the best-covered site per name wins), while a
+    bare ``--featured N`` auto-selects the most repeat-imaged sites from a pool
+    of at most ``pool_limit`` acquisitions. Either way the selection itself is
+    :func:`umbra_py.showcase.select_featured_sites` — deterministic, no render.
+
+    ``search_kwargs`` carries the rest of the showcase's search (bbox, dates,
+    product type) as a dict rather than ``**kwargs`` so the two ``live_label`` /
+    ``area`` values this function supplies itself can't be shadowed.
+    """
+    from .showcase import select_featured_sites  # noqa: PLC0415
+
+    if not areas and count <= 0:
+        return []
+
+    if areas:
+        sites: list[FeaturedSite] = []
+        for area in areas:
+            pool = _gather_items(
+                local=local,
+                db_path=db_path,
+                area=area,
+                limit=pool_limit,
+                live_label=f"Searching {area}",
+                **search_kwargs,
+            )
+            found = select_featured_sites(pool, count=1, min_passes=frames)
+            if found:
+                sites.append(found[0])
+            else:
+                click.echo(
+                    f"No site with {frames}+ passes matched --featured-area {area!r}; skipping it.",
+                    err=True,
+                )
+        return sites
+
+    pool = _gather_items(
+        local=local,
+        db_path=db_path,
+        limit=pool_limit,
+        live_label="Searching for repeat-imaged sites",
+        **search_kwargs,
+    )
+    return select_featured_sites(pool, count=count, min_passes=frames)
 
 
 def _local_index_options(func):
@@ -3091,6 +3152,37 @@ def tiles(
     flag_value=False,
     help="Build the explorer metadata-only (no on-click SAR overlay button).",
 )
+@click.option(
+    "--featured",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Precompute a change composite for this many repeat-imaged sites and "
+    "show them as a gallery on the landing page. Needs the 'viz' extra and "
+    "streams each scene's overview; 0 (the default) skips the gallery.",
+)
+@click.option(
+    "--featured-area",
+    "featured_areas",
+    multiple=True,
+    help="Curate a featured site by name instead of auto-selecting (repeatable, "
+    "matched like --area). Implies --featured for the sites named.",
+)
+@click.option(
+    "--featured-frames",
+    type=click.Choice(["2", "3"]),
+    default="2",
+    show_default=True,
+    help="Passes per featured composite: 2 (green=new, magenta=gone) or 3 (temporal RGB).",
+)
+@click.option(
+    "--featured-limit",
+    type=int,
+    default=1500,
+    show_default=True,
+    help="Size of the candidate pool the auto-selected featured sites are "
+    "chosen from (tasks are scanned in name order).",
+)
 @click.option("--title", default=None, help="Override the landing-page title.")
 @click.option("--tagline", default=None, help="Override the landing-page one-line pitch.")
 @click.option(
@@ -3117,6 +3209,10 @@ def showcase(
     explore,
     asset,
     lazy_imagery,
+    featured,
+    featured_areas,
+    featured_frames,
+    featured_limit,
     title,
     tagline,
     updated,
@@ -3132,6 +3228,7 @@ def showcase(
       index.html    a landing page linking the pieces below + install/docs/source
       map.html      a MapLibre viewer over the whole-catalog PMTiles basemap
       explore.html  the interactive 'umbra demo' catalog explorer
+      featured/     precomputed change composites (with --featured / --featured-area)
 
     Give the basemap with --pmtiles PATH, or --fetch-pmtiles to pull the
     published 'catalog.pmtiles' (the same artifact 'umbra tiles --fetch' fetches).
@@ -3139,14 +3236,20 @@ def showcase(
     from a prebuilt index in milliseconds; --max-per-task 1, the default, gives a
     one-pin-per-site overview); pass --no-explore for a map-only showcase.
 
-    Needs no extra: every page is self-contained HTML, so this runs in a core
-    install and is the front end the '.github/workflows/docs.yml' Pages deploy
-    publishes beside the docs.
+    --featured N precomputes a change composite for the N most repeat-imaged
+    sites in the catalog (or name them yourself with repeated --featured-area)
+    and puts them on the landing page, so a first-time visitor sees what SAR
+    change looks like with no render round-trip. That step alone needs the
+    'viz' extra and streams each scene's overview; without it every page is
+    self-contained HTML, so this runs in a core install and is the front end
+    the '.github/workflows/docs.yml' Pages deploy publishes beside the docs.
     """
     if pmtiles_path and fetch_pmtiles:
         raise click.ClickException("Pass either --pmtiles or --fetch-pmtiles, not both.")
     if pmtiles_url is not None and not fetch_pmtiles:
         raise click.ClickException("--pmtiles-url only applies with --fetch-pmtiles.")
+    if featured < 0:
+        raise click.ClickException("--featured must be zero or more.")
 
     from .showcase import assemble_showcase  # noqa: PLC0415
 
@@ -3193,13 +3296,33 @@ def showcase(
         if not items:
             raise click.ClickException("No items matched the search for the explorer.")
 
-    if basemap is None and not items:
+    # Resolve the marquee sites for the precomputed change gallery. This is a
+    # second, separate gather: the explorer's slice is capped at one item per
+    # task (a whole-archive overview), while a change composite needs several
+    # passes of the *same* site.
+    featured_sites = _gather_featured_sites(
+        count=featured,
+        areas=featured_areas,
+        pool_limit=featured_limit,
+        frames=int(featured_frames),
+        local=local,
+        db_path=db_path,
+        search_kwargs={
+            "bbox": _resolve_search_bbox(bbox, place),
+            "start": start,
+            "end": end,
+            "fuzzy": fuzzy,
+            "product_types": [asset],
+        },
+    )
+
+    if basemap is None and not items and not featured_sites:
         raise click.ClickException(
             "Nothing to show: supply a basemap (--pmtiles / --fetch-pmtiles) "
             "and/or build the explorer (drop --no-explore)."
         )
 
-    showcase_kwargs: dict[str, str] = {}
+    showcase_kwargs: dict[str, Any] = {}
     if title:
         showcase_kwargs["title"] = title
     if tagline:
@@ -3207,7 +3330,10 @@ def showcase(
     if updated:
         showcase_kwargs["updated"] = updated
 
-    with OrbitSpinner("Assembling showcase site"):
+    label = "Assembling showcase site"
+    if featured_sites:
+        label = f"Rendering {len(featured_sites)} featured composite(s) + showcase site"
+    with OrbitSpinner(label):
         index = assemble_showcase(
             dest,
             items=items or None,
@@ -3217,6 +3343,8 @@ def showcase(
                 "lazy_imagery": lazy_imagery,
                 "subtitle": _search_subtitle(place or area, bbox, start, end),
             },
+            featured_sites=featured_sites,
+            featured_frames=int(featured_frames),
             **showcase_kwargs,
         )
 
@@ -3225,6 +3353,9 @@ def showcase(
         pages.append("map.html")
     if items:
         pages.append("explore.html")
+    rendered = sorted((dest / "featured").glob("*.png")) if featured_sites else []
+    if rendered:
+        pages.append(f"featured/ ({len(rendered)} composites)")
     click.echo(f"Wrote showcase site ({', '.join(pages)}) to {index.parent}")
 
 

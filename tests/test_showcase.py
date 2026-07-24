@@ -6,12 +6,19 @@ contract to pin down is (1) the landing page carries the right links, stats and
 attribution and drops the cards it has no target for, and (2) the assembler
 writes exactly the files the inputs justify and copies the basemap in beside its
 viewer. It is stdlib-only, so none of this needs a network or the viz extra.
+
+The featured gallery adds a third contract: which repeat-imaged sites get
+precomputed (a pure, deterministic selection) and that one unrenderable site is
+skipped rather than failing the whole build. The one step that would need the
+viz extra -- rendering a composite -- goes through an injectable renderer, so
+these stay offline too.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from umbra_py import pmtiles, showcase
@@ -45,6 +52,25 @@ def _item(item_id: str = "a", lon: float = -110.0, lat: float = 39.0) -> UmbraIt
     return UmbraItem.from_dict(
         doc, href=f"https://x.s3.amazonaws.com/tasks/Site/t/{item_id}/i.json"
     )
+
+
+def _pass(task: str, day: int, *, place: str | None = None) -> UmbraItem:
+    """One acquisition of ``task`` on 2024-01-``day`` (the featured-gallery unit:
+    what matters is the task grouping and the date, not the footprint)."""
+    item = UmbraItem.from_dict(
+        {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": f"{task}-{day}",
+            "bbox": [-110.0, 39.0, -109.9, 39.1],
+            "geometry": None,
+            "properties": {"datetime": f"2024-01-{day:02d}T00:00:00Z"},
+            "assets": {},
+        },
+        href=f"https://x.s3.amazonaws.com/sar-data/tasks/{task}/t/{day}/i.json",
+    )
+    item.place = place
+    return item
 
 
 # --- landing page ---------------------------------------------------------
@@ -262,3 +288,296 @@ def test_cli_showcase_fetch_pmtiles(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert (out / "catalog.pmtiles").read_bytes()[:7] == b"PMTiles"
     assert (out / "map.html").exists()
+
+
+# --- featured-site selection ----------------------------------------------
+def test_select_featured_sites_ranks_by_pass_count():
+    """The most repeat-imaged sites win, ties broken by task name, so the
+    selection is reproducible for a given pool."""
+    items = [
+        *[_pass("Bravo", d) for d in (1, 2, 3)],
+        *[_pass("Alpha", d) for d in (4, 5, 6)],
+        *[_pass("Delta", d) for d in (7, 8)],
+        _pass("Echo", 9),  # single pass -- can't be composited
+    ]
+    sites = showcase.select_featured_sites(items, count=6)
+
+    assert [s.task for s in sites] == ["Alpha", "Bravo", "Delta"]
+    # Passes come back oldest-first, ready for a change composite.
+    assert [i.datetime.day for i in sites[0].items] == [4, 5, 6]
+
+
+def test_select_featured_sites_respects_count_and_min_passes():
+    items = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
+
+    assert [s.task for s in showcase.select_featured_sites(items, count=1)] == ["Alpha"]
+    # Three frames need three passes: Bravo's two no longer qualify.
+    assert [s.task for s in showcase.select_featured_sites(items, min_passes=3)] == ["Alpha"]
+    assert showcase.select_featured_sites(items, count=0) == []
+
+
+def test_select_featured_sites_drops_ungroupable_items():
+    """No task (nothing to group by) or no datetime (nothing to order by) means
+    the item can't feed a change composite."""
+    undated = UmbraItem.from_dict(
+        {"type": "Feature", "stac_version": "1.0.0", "id": "u", "properties": {}, "assets": {}},
+        href="https://x.s3.amazonaws.com/sar-data/tasks/Alpha/t/9/i.json",
+    )
+    untasked = UmbraItem.from_dict(
+        {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "n",
+            "properties": {"datetime": "2024-01-01T00:00:00Z"},
+            "assets": {},
+        },
+        href=None,
+    )
+    pool = [_pass("Alpha", 1), undated, untasked, untasked]
+
+    assert showcase.select_featured_sites(pool) == []
+
+
+def test_featured_site_label_slug_and_dates():
+    site = showcase.select_featured_sites(
+        [_pass("Beet Piler, ND", 5, place="Grand Forks"), _pass("Beet Piler, ND", 9)]
+    )[0]
+
+    # A baked place label beats the task codename; the slug is URL-safe.
+    assert site.label == "Grand Forks"
+    assert site.slug == "beet-piler-nd"
+    assert site.date_range == "2024-01-05 \N{EN DASH} 2024-01-09"
+    # Falls back to the task when no pass carries a place label, and passes that
+    # share a day report the single date rather than an empty range.
+    same_day = showcase.select_featured_sites([_pass("Alpha", 1), _pass("Alpha", 1)])[0]
+    assert same_day.label == "Alpha"
+    assert same_day.date_range == "2024-01-01"
+    # A directly-built site with nothing dated has no range to report.
+    assert showcase.FeaturedSite(task="Alpha", items=[]).date_range is None
+
+
+# --- featured gallery -----------------------------------------------------
+def test_build_showcase_has_no_featured_section_by_default():
+    html = showcase.build_showcase(explore_href="explore.html")
+    assert "What SAR change looks like" not in html
+    assert 'class="featured"' not in html
+
+
+def test_assemble_renders_featured_with_injected_renderer(tmp_path):
+    sites = showcase.select_featured_sites(
+        [
+            *[_pass("Alpha", d, place="Centerfield, Utah") for d in (1, 5, 9)],
+            *[_pass("Bravo", d) for d in (2, 4)],
+        ]
+    )
+    rendered: list[tuple[int, Path]] = []
+
+    def fake_render(items, dest):
+        rendered.append((len(items), dest))
+        dest.write_bytes(b"\x89PNG")
+
+    out = tmp_path / "site"
+    showcase.assemble_showcase(out, featured_sites=sites, featured_renderer=fake_render)
+
+    # One PNG per site, under the relocatable featured/ subdirectory.
+    assert sorted(p.name for p in (out / "featured").glob("*.png")) == [
+        "alpha.png",
+        "bravo.png",
+    ]
+    assert [n for n, _ in rendered] == [3, 2]
+
+    idx = (out / "index.html").read_text()
+    assert "What SAR change looks like" in idx
+    assert 'src="featured/alpha.png"' in idx
+    assert "Centerfield, Utah" in idx  # baked place label, not the task codename
+    # The caption states the passes, the dates and the colour semantics.
+    assert "2 passes, 2024-01-01 \N{EN DASH} 2024-01-09" in idx
+    assert "green = new or brighter backscatter" in idx
+
+
+def test_assemble_featured_three_frames_caption(tmp_path):
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 2, 3)])
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out,
+        featured_sites=sites,
+        featured_frames=3,
+        featured_renderer=lambda items, dest: dest.write_bytes(b"\x89PNG"),
+    )
+    idx = (out / "index.html").read_text()
+    assert "3 passes" in idx
+    assert "earliest = red, middle = green, latest = blue" in idx
+
+
+def test_assemble_featured_skips_a_failed_render(tmp_path):
+    """One unreadable scene must cost its own tile, not the whole showcase."""
+    sites = showcase.select_featured_sites(
+        [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
+    )
+
+    def flaky(items, dest):
+        if "bravo" in dest.name:
+            raise RuntimeError("asset 404")
+        dest.write_bytes(b"\x89PNG")
+
+    out = tmp_path / "site"
+    with pytest.warns(RuntimeWarning, match="Bravo"):
+        showcase.assemble_showcase(out, featured_sites=sites, featured_renderer=flaky)
+
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+    idx = (out / "index.html").read_text()
+    assert 'src="featured/alpha.png"' in idx
+    assert "bravo.png" not in idx
+
+
+def test_assemble_featured_drops_a_silent_no_op_renderer(tmp_path):
+    """A renderer that writes nothing yields no tile (never a broken <img>)."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 2)])
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out, items=[_item()], featured_sites=sites, featured_renderer=lambda items, dest: None
+    )
+    assert "What SAR change looks like" not in (out / "index.html").read_text()
+
+
+def test_assemble_without_featured_writes_no_directory(tmp_path):
+    out = tmp_path / "site"
+    showcase.assemble_showcase(out, items=[_item()])
+    assert not (out / "featured").exists()
+
+
+# --- CLI: featured --------------------------------------------------------
+def _stub_featured_renderer(monkeypatch):
+    """Replace the viz-backed default renderer with one that just writes bytes."""
+
+    def factory(frames, asset="GEC"):
+        def render(items, dest):
+            dest.write_bytes(b"\x89PNG" + str(frames).encode() + asset.encode())
+
+        return render
+
+    monkeypatch.setattr("umbra_py.showcase._default_featured_renderer", factory)
+
+
+def test_cli_showcase_featured_auto_selects(tmp_path, monkeypatch):
+    pool = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli, ["showcase", "--local", "--out", str(out), "--featured", "1", "--no-lazy-imagery"]
+    )
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+    assert "featured/ (1 composites)" in result.output
+    assert "What SAR change looks like" in (out / "index.html").read_text()
+
+
+def test_cli_showcase_featured_area_curates(tmp_path, monkeypatch):
+    """--featured-area runs one search per name and takes that site's best match."""
+    seen: list[str | None] = []
+
+    def fake_gather(**kwargs):
+        seen.append(kwargs.get("area"))
+        if kwargs.get("area") == "Alpha":
+            return [_pass("Alpha", d) for d in (1, 2)]
+        return []  # the curated name that matches nothing
+
+    monkeypatch.setattr("umbra_py.cli._gather_items", fake_gather)
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "showcase",
+            "--local",
+            "--out",
+            str(out),
+            "--no-explore",
+            "--featured-area",
+            "Alpha",
+            "--featured-area",
+            "Nowhere",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # One gather per curated name, and only the matched one produced a tile.
+    assert seen == ["Alpha", "Nowhere"]
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+    assert "matched --featured-area 'Nowhere'" in result.output
+
+
+def test_cli_showcase_featured_zero_never_gathers_a_pool(tmp_path, monkeypatch):
+    """The default (--featured 0, no --featured-area) costs nothing: no second
+    search, no featured/ directory, and a page identical to before."""
+    calls: list[dict] = []
+
+    def fake_gather(**kwargs):
+        calls.append(kwargs)
+        return [_item()]
+
+    monkeypatch.setattr("umbra_py.cli._gather_items", fake_gather)
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli, ["showcase", "--local", "--out", str(out), "--no-lazy-imagery"]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1  # the explorer's gather only
+    assert not (out / "featured").exists()
+    assert "What SAR change looks like" not in (out / "index.html").read_text()
+
+
+def test_cli_showcase_rejects_negative_featured(tmp_path):
+    result = CliRunner().invoke(
+        cli, ["showcase", "--no-explore", "--out", str(tmp_path / "s"), "--featured", "-1"]
+    )
+    assert result.exit_code != 0
+    assert "--featured must be zero or more" in result.output
+
+
+def test_default_featured_renderer_calls_viz(monkeypatch, tmp_path):
+    """The production renderer is the one path the injectable tests skip: pin
+    that it picks evenly-spaced frames and writes a change composite."""
+    calls: dict[str, object] = {}
+
+    def fake_select(items, *, frames):
+        calls["frames"] = frames
+        return list(items)[:frames]
+
+    def fake_save(items, dest, *, asset):
+        calls["n"] = len(list(items))
+        calls["asset"] = asset
+        Path(dest).write_bytes(b"\x89PNG")
+        return Path(dest)
+
+    monkeypatch.setattr("umbra_py.viz.select_change_frames", fake_select)
+    monkeypatch.setattr("umbra_py.viz.save_change_composite", fake_save)
+
+    render = showcase._default_featured_renderer(3, asset="CSI")
+    dest = tmp_path / "x.png"
+    render([_pass("Alpha", d) for d in (1, 2, 3, 4)], dest)
+
+    assert calls == {"frames": 3, "n": 3, "asset": "CSI"}
+    assert dest.exists()
+
+
+def test_slug_collisions_and_unsluggable_names(tmp_path):
+    """Two task names that slug alike get distinct files (one must not silently
+    overwrite the other's tile), and a name with no ASCII left still gets one."""
+    sites = showcase.select_featured_sites(
+        [
+            *[_pass("Beet Piler, ND", d) for d in (1, 2)],
+            *[_pass("Beet Piler ND", d) for d in (3, 4)],
+            *[_pass("空港", d) for d in (5, 6)],
+        ],
+    )
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out, featured_sites=sites, featured_renderer=lambda items, dest: dest.write_bytes(b"x")
+    )
+
+    names = sorted(p.name for p in (out / "featured").glob("*.png"))
+    assert names == ["beet-piler-nd-2.png", "beet-piler-nd.png", "site.png"]
+    assert len(names) == len(sites)

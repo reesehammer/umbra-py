@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Precomputed change composites on the static showcase — `umbra showcase
+  --featured` (`DEMO_APP_GAPS.md` R4 / `STRATEGY.md` §8 demo polish).** The
+  hosted showcase gave a first-time visitor a map and an explorer but *no SAR
+  imagery*: seeing what this archive actually looks like meant clicking into the
+  explorer and waiting on a render. `umbra showcase --featured N` now renders a
+  change composite for the `N` most repeat-imaged sites in the catalog ahead of
+  time, writes them to a relocatable `featured/` subdirectory, and puts them on
+  the landing page as a captioned gallery — so the first thing a visitor sees is
+  *what SAR change looks like*, with no render round-trip, no account and no
+  server. Site selection is a new pure function,
+  `select_featured_sites(items, count=…, min_passes=…)`: Umbra files every pass
+  of a site under one task directory, so the tasks with the most acquisitions in
+  the candidate pool are exactly the ones worth precomputing; sites are ranked by
+  pass count then task name, making the choice reproducible for a given pool
+  rather than dependent on iteration order. A maintainer can curate explicitly
+  instead with a repeatable `--featured-area` (matched like `--area`, one search
+  per name), and `--featured-frames 2|3` picks the two-colour (green = new or
+  brighter, magenta = gone or dimmer) or three-date temporal-RGB view; each
+  caption states the pass count, the date range and the colour semantics, so a
+  tile is never a picture without provenance. Rendering goes through an
+  injectable `featured_renderer` (defaulting to the existing
+  `viz.select_change_frames` + `viz.save_change_composite`, which stream only a
+  downsampled overview per scene), so the whole feature is offline-tested with no
+  network and no `viz` extra; a site whose asset won't render is warned about and
+  dropped, never fatal — one bad scene costs its own tile, not the showcase. New
+  public API `select_featured_sites` / `FeaturedSite`; `--featured` defaults to
+  `0`, so a showcase built without it is byte-identical to before and stays
+  stdlib-only. The `.github/workflows/docs.yml` Pages job now passes
+  `--featured 6` (still `continue-on-error`, still main-only). This closes the
+  R4 "precompute showcase artifacts for ~6–10 curated sites" item on the
+  `STRATEGY.md` §8 critical path.
 - **A SessionStart hook + permission allowlist for remote coding-agent sessions
   (`STRATEGY.md` §8 agent-session hardening).** A fresh Claude-Code-on-the-web
   container arrives with `uv` and the CLI linters on `PATH` but *without*
