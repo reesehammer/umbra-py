@@ -205,7 +205,7 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   belongs behind a future `[ai]` extra and runs only when the user asks. The
   AI-*legible* surface — `UmbraItem.to_llm_context()`, `llm_context()`,
   `__geo_interface__`, `--json` output — is pure data with no model call, so it
-  stays in the core. See `docs/AI_INTEGRATION_IDEAS.md` §A4/§6.
+  stays in the core. See the design principles in `docs/STRATEGY.md` §7.
 
 ---
 
