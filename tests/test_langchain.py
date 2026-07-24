@@ -40,6 +40,7 @@ _EXPECTED_NAMES = {
     "find_similar",
     "find_similar_text",
     "describe_scene",
+    "narrate_change",
     "quicklook",
     "change_composite",
     "timescan",
@@ -94,6 +95,9 @@ def test_json_tools_are_the_same_callables_as_mcp():
     assert lc.search_catalog is ms.search_catalog
     assert lc.get_item is ms.get_item
     assert lc.watch_site is ms.watch_site
+    # narrate_change is the C2 change-narration tool -- the last MCP tool to reach
+    # the agent surfaces; it is the same callable here (no drift), not re-wrapped.
+    assert lc.narrate_change is ms.narrate_change
     assert lc.quicklook is not ms.quicklook
     assert lc.change_composite is not ms.change_composite
 
@@ -203,3 +207,93 @@ def test_timescan_needs_two_urls(sample_item_dict):
     responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
     with pytest.raises(ValueError, match="at least two"):
         lc.timescan([ITEM_URL])
+
+
+# --------------------------------------------------------------------------
+# narrate_change — the C2 number-grounded change reading, over LangChain.
+#
+# It is the same MCP callable (no drift), the second opt-in tool that consults a
+# model. The render and the model call are deterministic stand-ins, so the whole
+# path runs through the StructuredTool wrapper with no [ai]/[viz] extra and no
+# network.
+# --------------------------------------------------------------------------
+
+
+def _with_polarization(item_dict, pol):
+    import copy
+
+    d = copy.deepcopy(item_dict)
+    d["properties"]["sar:polarizations"] = [pol]
+    return d
+
+
+@responses.activate
+def test_narrate_change_tool_returns_validated_narration(sample_item_dict, monkeypatch):
+    import sys
+
+    import umbra_py.narrate  # noqa: F401  (ensure the submodule is imported)
+
+    nar = sys.modules["umbra_py.narrate"]
+
+    first_url = ITEM_URL
+    second_url = ITEM_URL.replace("item", "item2")
+    first = _with_polarization(sample_item_dict, "VV")
+    second = _with_polarization(sample_item_dict, "VV")
+    second["id"] = sample_item_dict["id"] + "-2"
+    responses.add(responses.GET, first_url, json=first, status=200)
+    responses.add(responses.GET, second_url, json=second, status=200)
+
+    stats = nar.ChangeStats(
+        grid_rows=2,
+        grid_cols=2,
+        change_threshold_db=3.0,
+        bounds=(0.0, 0.0, 1.0, 1.0),
+        blocks=[],
+        scene_mean_abs_delta_db=4.2,
+        scene_changed_fraction=0.3,
+        peak_compass="northwest",
+        peak_direction="brightened",
+        peak_mean_delta_db=6.5,
+    )
+    monkeypatch.setattr(nar, "render_change_png", lambda items, **kw: (b"png-bytes", stats))
+
+    def _fake_narrator(*, model=None):
+        def narrator(messages):
+            return json.dumps(
+                {
+                    "summary": "The northwest corner brightened by several dB between passes.",
+                    "changes": ["northwest block brightened ~6.5 dB"],
+                    "confidence": "medium",
+                    "caveats": ["one polarization only"],
+                }
+            )
+
+        return narrator
+
+    monkeypatch.setattr(nar, "default_narrator", _fake_narrator)
+
+    narrate = _tool(lc.umbra_tools(), "narrate_change")
+    out = narrate.invoke({"urls": [first_url, second_url]})
+
+    assert out["summary"].startswith("The northwest corner brightened")
+    assert out["item_ids"] == [first["id"], second["id"]]
+    # The narration carries the deterministic dB grid and the provenance stamp.
+    assert out["change_stats"]["peak_compass"] == "northwest"
+    assert out["attribution"]
+    assert out["provenance"]
+
+
+@responses.activate
+def test_narrate_change_refuses_mixed_polarization(sample_item_dict):
+    vv_url = ITEM_URL
+    hh_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, hh_url, json=_with_polarization(sample_item_dict, "HH"), status=200
+    )
+
+    # Called directly, the shared guard refuses mixing HH and VV (not comparable).
+    with pytest.raises(ValueError, match="polarization"):
+        lc.narrate_change([vv_url, hh_url])

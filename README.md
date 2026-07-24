@@ -846,16 +846,18 @@ agent = create_react_agent(my_chat_model, umbra_tools())
 
 `umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
 `index_stats`, `download_asset`, `watch_site`, `find_similar` /
-`find_similar_text`, `describe_scene` and the `quicklook` / `change_composite` /
-`timescan` render tools — each schema inferred from the function signature and
-each description from its docstring. *Images are the API*: the render tools use
-LangChain's `content_and_artifact` response format, so the `ToolMessage` carries
-a text caption and the raw PNG on `.artifact` for a downstream multimodal model
-to *see* the radar scene. Pass `include_render=False` for a JSON-only surface (a
-text-only model, or an install without the `viz` extra). The determinism boundary
-is preserved: the tools search, geocode and render; the agent's model plans and
-narrates, with `describe_scene` the one opt-in exception (a vision reading, only
-when an `[ai]` key is configured).
+`find_similar_text`, `describe_scene`, `narrate_change` and the `quicklook` /
+`change_composite` / `timescan` render tools — the full MCP inventory, each
+schema inferred from the function signature and each description from its
+docstring. *Images are the API*: the render tools use LangChain's
+`content_and_artifact` response format, so the `ToolMessage` carries a text
+caption and the raw PNG on `.artifact` for a downstream multimodal model to *see*
+the radar scene. Pass `include_render=False` for a JSON-only surface (a text-only
+model, or an install without the `viz` extra). The determinism boundary is
+preserved: the tools search, geocode and render; the agent's model plans and
+narrates, with `describe_scene` and `narrate_change` the two opt-in exceptions
+(vision readings of a scene and of two-pass change, only when an `[ai]` key is
+configured).
 
 ### Drive it from a LlamaIndex agent
 
@@ -879,16 +881,16 @@ agent = ReActAgent.from_tools(tools, llm=my_llm)
 
 `umbra_tools()` returns the same inventory as the LangChain adapter
 (`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `download_asset`,
-`watch_site`, `find_similar` / `find_similar_text`, `describe_scene` and the
-`quicklook` / `change_composite` / `timescan` render tools) — each name and
-description inferred from the function's docstring and each argument schema from
-its signature. *Images are the API*: LlamaIndex has no `content_and_artifact`
-split, so the render tools return a `RenderResult` whose string form is the
-caption and whose `.png` (surfaced as the `ToolOutput.raw_output`) carries the raw
-PNG for a downstream multimodal model to *see* the radar scene. Pass
-`include_render=False` for a JSON-only surface. The determinism boundary is
-preserved exactly as on the other surfaces: `describe_scene` is the one opt-in
-model call.
+`watch_site`, `find_similar` / `find_similar_text`, `describe_scene`,
+`narrate_change` and the `quicklook` / `change_composite` / `timescan` render
+tools) — each name and description inferred from the function's docstring and each
+argument schema from its signature. *Images are the API*: LlamaIndex has no
+`content_and_artifact` split, so the render tools return a `RenderResult` whose
+string form is the caption and whose `.png` (surfaced as the
+`ToolOutput.raw_output`) carries the raw PNG for a downstream multimodal model to
+*see* the radar scene. Pass `include_render=False` for a JSON-only surface. The
+determinism boundary is preserved exactly as on the other surfaces:
+`describe_scene` and `narrate_change` are the two opt-in model calls.
 
 ### Serve it as a STAC API (`umbra serve`)
 

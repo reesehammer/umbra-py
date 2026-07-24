@@ -18,10 +18,12 @@ doors present one inventory and can never drift:
 
 - **Deterministic core, AI at the edges.** Almost nothing here calls a model:
   the tools search, geocode, download and render; the *agent's* model plans and
-  narrates. The one deliberate, opt-in exception is ``describe_scene`` (the C2
-  VLM reading), which consults a vision model only when an ``[ai]`` key is
-  configured — and even then a model output never becomes a coordinate, a URL, or
-  a filter without passing through the deterministic layer first.
+  narrates. The two deliberate, opt-in exceptions are ``describe_scene`` (the C2
+  VLM reading of one scene) and ``narrate_change`` (the C2 number-grounded VLM
+  reading of *what changed* between passes), which consult a vision model only
+  when an ``[ai]`` key is configured — and even then a model output never becomes
+  a coordinate, a URL, or a filter without passing through the deterministic
+  layer first.
 - **Images are the API.** The ``quicklook`` / ``change_composite`` / ``timescan``
   tools return a :class:`RenderResult`: its string form is the caption a
   text-only agent reads, and the raw PNG rides on ``.png`` (surfaced as the
@@ -67,6 +69,7 @@ from .mcp_server import (  # noqa: F401 - re-exported for direct use
     geocode_place,
     get_item,
     index_stats,
+    narrate_change,
     search_catalog,
     watch_site,
 )
@@ -182,7 +185,7 @@ def timescan(
 
 # The JSON-returning tools, shared verbatim with the MCP server (compact context
 # cards, geocoding, index status, downloads, standing watch, similarity search,
-# and the one opt-in VLM reading). Each gates its own optional key/index at call
+# and the two opt-in VLM readings). Each gates its own optional key/index at call
 # time with a helpful error, so all are safe to register unconditionally.
 _JSON_TOOLS = (
     search_catalog,
@@ -194,6 +197,7 @@ _JSON_TOOLS = (
     find_similar,
     find_similar_text,
     describe_scene,
+    narrate_change,
 )
 
 # The "images are the API" render tools, returning a RenderResult (caption + PNG).
@@ -239,6 +243,7 @@ __all__ = [
     "find_similar",
     "find_similar_text",
     "describe_scene",
+    "narrate_change",
     "quicklook",
     "change_composite",
     "timescan",
