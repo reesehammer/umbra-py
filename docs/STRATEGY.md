@@ -1538,6 +1538,35 @@ same 500 lines of glue first, and many give up."*
 > maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
 > Umbra).
 >
+> **Update (2026-07-24, filters on the STAC API):** the **SAR acquisition-property
+> filters now reach the `umbra serve` STAC Query extension** — the last discovery
+> surface that couldn't filter on them (§3 / the "every surface agrees" bar). The
+> STAC API façade (`AI_INTEGRATION_IDEAS.md` B2) is the browser-facing sibling of
+> the MCP server: it restores `/search` over a catalog Umbra publishes with *no*
+> search API (§2), and it is what `pystac-client`, the QGIS STAC plugin,
+> `stac-browser`, leafmap and OpenAPI-driven agents actually speak. It already
+> exposed `product_types` / `area` / `fuzzy`; it now also filters on the SAR-native
+> properties three ways — GET params (`?polarizations=VV,VH&min_incidence=20&max_incidence=40&max_resolution=0.5`),
+> plain top-level POST fields, and a proper STAC Query object using the namespaced
+> property names (`{"sar:polarizations": {"in": ["VV"]}}`,
+> `{"view:incidence_angle": {"gte": 20, "lte": 40}}`,
+> `{"sar:resolution": {"lte": 0.5}}`). This is pure funnel-widening on the highest
+> STAC-standards-reach surface the project has (§1): the exact filter an analyst
+> reaches for after bbox and date is now answerable by the *standard* tooling, not
+> just this library's own CLI/MCP. It holds the project's grain and testability
+> (§3): **no model, no new dependency, no schema change** — the filters push down
+> to the one `UmbraItem.matches_filters` predicate every surface already shares,
+> `parse_query` grew a numeric-range operator (`gte`/`lte` together) alongside its
+> scalar operators and now returns a `QueryFilters` NamedTuple, an unsupported
+> operator or non-numeric value is a hard `400` (never a silent drop that would
+> return items the client asked to exclude), GET pagination carries the filters
+> into the `next` link, and the whole surface is offline-tested through the
+> in-process `TestClient`. With this, the only remaining "every surface agrees"
+> piece is letting `umbra ask` *plan* the filters (`TODO.md`); the higher-level
+> strategic gaps are unchanged and largely non-code: 5.5's fully-calibrated
+> image-space facet integration / MultiRTC interop and the maintainer-side
+> adoption moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
