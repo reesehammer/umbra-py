@@ -79,7 +79,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._geometry import Geometry, parse_geometry
 from .constants import (
@@ -116,8 +116,10 @@ CONFORMANCE_CLASSES = (
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/oas30",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
-    # The Query extension, mapped to the index's two Umbra-specific filters
-    # (``product_types`` and free-text ``area``); see :func:`parse_query`.
+    # The Query extension, mapped to the index's Umbra-specific filters
+    # (``product_types``, free-text ``area``) and the SAR acquisition
+    # properties (``sar:polarizations``, ``view:incidence_angle``,
+    # ``sar:resolution``); see :func:`parse_query`.
     "https://api.stacspec.org/v1.0.0/item-search#query",
 )
 
@@ -239,27 +241,96 @@ def parse_product_types(value: str | list[str] | None) -> list[str] | None:
     return wanted
 
 
-def parse_query(query: Any) -> tuple[list[str] | None, str | None]:
-    """Parse a STAC *Query* extension object into ``(product_types, area)``.
+def parse_polarizations(value: str | list[str] | None) -> list[str] | None:
+    """Parse a ``polarizations`` filter into an upper-cased list.
 
-    The Umbra index filters by two fields that aren't STAC core properties:
-    ``product_types`` (which asset a scene carries) and free-text ``area`` (a
-    task/site substring). This maps the Query extension onto them:
+    Accepts a comma-separated string (``"VV,VH"``) or a list; the match is
+    case-insensitive (an item is kept if it exposes *at least one* of the
+    requested polarizations, per :meth:`UmbraItem.matches_filters`). Unlike
+    :func:`parse_product_types` there is no fixed vocabulary to validate
+    against -- SAR polarizations are a small open set (``VV``/``VH``/``HH``/
+    ``HV``) and a value the archive never carries simply matches nothing.
+    Returns ``None`` for empty input.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = [str(p) for p in value]
+    else:
+        raise ValueError("polarizations must be a string or list")
+    wanted = [p.strip().upper() for p in parts if str(p).strip()]
+    return wanted or None
+
+
+def _as_float(prop: str, value: Any) -> float:
+    """Coerce a query value to a float, or raise a 400-worthy ``ValueError``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"query.{prop} value must be a number, got {value!r}") from exc
+
+
+def _opt_float(value: Any, field: str) -> float | None:
+    """Coerce an optional top-level POST body field to a float (``None`` stays)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number, got {value!r}") from exc
+
+
+class QueryFilters(NamedTuple):
+    """The Umbra-specific filters :func:`parse_query` extracts from a STAC query.
+
+    Every field defaults to ``None`` so an empty query is ``QueryFilters()`` and
+    a caller can read only the fields it threads through.
+    """
+
+    product_types: list[str] | None = None
+    area: str | None = None
+    polarizations: list[str] | None = None
+    min_incidence: float | None = None
+    max_incidence: float | None = None
+    max_resolution: float | None = None
+
+
+def parse_query(query: Any) -> QueryFilters:
+    """Parse a STAC *Query* extension object into the index's filters.
+
+    The Umbra index filters by fields that aren't STAC core properties. This
+    maps the Query extension onto them, matching the property names the
+    ``item_to_stac`` output already carries:
 
     - ``{"product_types": {"in": ["GEC", "SICD"]}}`` (or a bare list/string)
     - ``{"area": {"like": "Beet Piler"}}`` (``eq`` is treated the same; the
       index match is already a case-insensitive substring), or a bare string.
+    - ``{"sar:polarizations": {"in": ["VV"]}}`` (or ``eq``, or a bare
+      list/string) -- keep items exposing at least one of the polarizations.
+    - ``{"view:incidence_angle": {"gte": 20, "lte": 40}}`` -- inclusive bounds
+      on the view incidence angle (either or both operators).
+    - ``{"sar:resolution": {"lte": 0.5}}`` (or a bare number) -- keep items
+      whose range *and* azimuth resolution are both at most this fine (metres).
 
     Any other property, or an unsupported operator, is a :class:`ValueError` so
     a client's filter is never silently dropped (which would return items the
-    client asked to exclude). Returns ``(None, None)`` for an empty query.
+    client asked to exclude). Returns an empty :class:`QueryFilters` for an
+    empty query.
     """
     if query is None:
-        return (None, None)
+        return QueryFilters()
     if not isinstance(query, dict):
         raise ValueError("query must be an object")
 
-    supported = {"product_types", "area"}
+    supported = {
+        "product_types",
+        "area",
+        "sar:polarizations",
+        "view:incidence_angle",
+        "sar:resolution",
+    }
     unknown = sorted(set(query) - supported)
     if unknown:
         raise ValueError(
@@ -277,6 +348,18 @@ def parse_query(query: Any) -> tuple[list[str] | None, str | None]:
             return spec[keys[0]]
         return spec
 
+    def _numeric_range(prop: str, spec: Any) -> tuple[float | None, float | None]:
+        # A range property accepts ``gte`` and/or ``lte`` in one object (a bare
+        # value would be ``eq``, which the index has no exact-match filter for).
+        if not isinstance(spec, dict):
+            raise ValueError(f"query.{prop} needs a {{'gte': …, 'lte': …}} object")
+        extra = sorted(set(spec) - {"gte", "lte"})
+        if extra or not spec:
+            raise ValueError(f"query.{prop} supports operators ['gte', 'lte'], got {sorted(spec)}")
+        lo = _as_float(prop, spec["gte"]) if "gte" in spec else None
+        hi = _as_float(prop, spec["lte"]) if "lte" in spec else None
+        return lo, hi
+
     product_types = None
     if "product_types" in query:
         spec = _scalar("product_types", query["product_types"], ("in", "eq"))
@@ -287,7 +370,30 @@ def parse_query(query: Any) -> tuple[list[str] | None, str | None]:
         raw = _scalar("area", query["area"], ("like", "eq"))
         area = str(raw).strip() or None
 
-    return (product_types, area)
+    polarizations = None
+    if "sar:polarizations" in query:
+        spec = _scalar("sar:polarizations", query["sar:polarizations"], ("in", "eq"))
+        polarizations = parse_polarizations(spec)
+
+    min_incidence = max_incidence = None
+    if "view:incidence_angle" in query:
+        min_incidence, max_incidence = _numeric_range(
+            "view:incidence_angle", query["view:incidence_angle"]
+        )
+
+    max_resolution = None
+    if "sar:resolution" in query:
+        spec = _scalar("sar:resolution", query["sar:resolution"], ("lte",))
+        max_resolution = _as_float("sar:resolution", spec)
+
+    return QueryFilters(
+        product_types=product_types,
+        area=area,
+        polarizations=polarizations,
+        min_incidence=min_incidence,
+        max_incidence=max_incidence,
+        max_resolution=max_resolution,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -538,6 +644,10 @@ def run_search(
     product_types: list[str] | None = None,
     area: str | None = None,
     fuzzy: bool = False,
+    polarizations: list[str] | None = None,
+    min_incidence: float | None = None,
+    max_incidence: float | None = None,
+    max_resolution: float | None = None,
     limit: int = DEFAULT_LIMIT,
     offset: int = 0,
 ) -> tuple[list[UmbraItem], bool]:
@@ -546,8 +656,10 @@ def run_search(
     Returns ``(page_items, has_next)``. ``ids``, when given, filters by STAC
     item id in this layer (the index search filters by bbox/date/area, not id).
     ``product_types``, ``area`` and ``fuzzy`` are the Query-extension filters,
-    pushed down to the backend's ``search`` (both :class:`CatalogIndex` and the
-    live :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
+    and ``polarizations`` / ``min_incidence`` / ``max_incidence`` /
+    ``max_resolution`` are the SAR acquisition-property filters -- all pushed
+    down to the backend's ``search`` (both :class:`CatalogIndex` and the live
+    :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
     deterministic offset paging over the source's stable ordering: we request
     one extra item to decide whether a ``next`` link is warranted.
     """
@@ -564,6 +676,10 @@ def run_search(
         product_types=product_types,
         area=area,
         fuzzy=fuzzy,
+        polarizations=polarizations,
+        min_incidence=min_incidence,
+        max_incidence=max_incidence,
+        max_resolution=max_resolution,
         limit=cap,
     )
     if ids:
@@ -1131,6 +1247,10 @@ def build_app(
         product_types: list[str] | None = None,
         area: str | None = None,
         fuzzy: bool = False,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
         limit: int,
         offset: int,
         self_href: str,
@@ -1147,6 +1267,10 @@ def build_app(
                 product_types=product_types,
                 area=area,
                 fuzzy=fuzzy,
+                polarizations=polarizations,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
                 limit=limit,
                 offset=offset,
             )
@@ -1176,6 +1300,18 @@ def build_app(
         ),
         area: str | None = Query(default=None, description="Free-text task/site substring"),
         fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
+        polarizations: str | None = Query(
+            default=None, description="Comma-separated polarizations, e.g. VV,VH"
+        ),
+        min_incidence: float | None = Query(
+            default=None, description="Minimum view incidence angle (degrees)"
+        ),
+        max_incidence: float | None = Query(
+            default=None, description="Maximum view incidence angle (degrees)"
+        ),
+        max_resolution: float | None = Query(
+            default=None, description="Coarsest range/azimuth resolution to keep (metres)"
+        ),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
@@ -1185,6 +1321,7 @@ def build_app(
             parsed_bbox = parse_bbox(bbox)
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
+            wanted_pols = parse_polarizations(polarizations)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _do_search(
@@ -1196,6 +1333,10 @@ def build_app(
             product_types=wanted_products,
             area=area,
             fuzzy=fuzzy,
+            polarizations=wanted_pols,
+            min_incidence=min_incidence,
+            max_incidence=max_incidence,
+            max_resolution=max_resolution,
             limit=limit,
             offset=token,
             self_href=str(request.url),
@@ -1229,6 +1370,18 @@ def build_app(
         ),
         area: str | None = Query(default=None, description="Free-text task/site substring"),
         fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
+        polarizations: str | None = Query(
+            default=None, description="Comma-separated polarizations, e.g. VV,VH"
+        ),
+        min_incidence: float | None = Query(
+            default=None, description="Minimum view incidence angle (degrees)"
+        ),
+        max_incidence: float | None = Query(
+            default=None, description="Maximum view incidence angle (degrees)"
+        ),
+        max_resolution: float | None = Query(
+            default=None, description="Coarsest range/azimuth resolution to keep (metres)"
+        ),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
@@ -1242,6 +1395,7 @@ def build_app(
             parsed_geometry = parse_intersects(intersects)
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
+            wanted_pols = parse_polarizations(polarizations)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         id_list = [i for i in ids.split(",") if i] if ids else None
@@ -1255,6 +1409,10 @@ def build_app(
             product_types=wanted_products,
             area=area,
             fuzzy=fuzzy,
+            polarizations=wanted_pols,
+            min_incidence=min_incidence,
+            max_incidence=max_incidence,
+            max_resolution=max_resolution,
             limit=limit,
             offset=token,
             self_href=str(request.url),
@@ -1274,11 +1432,22 @@ def build_app(
             # The Query-extension filters can arrive either as a STAC ``query``
             # object or as plain top-level fields; a top-level field, when given,
             # overrides the same field inside ``query``.
-            query_products, query_area = parse_query(body.get("query"))
+            q = parse_query(body.get("query"))
             top_products = parse_product_types(body.get("product_types"))
-            wanted_products = top_products if top_products is not None else query_products
+            wanted_products = top_products if top_products is not None else q.product_types
             top_area = body.get("area")
-            area = str(top_area).strip() if top_area not in (None, "") else query_area
+            area = str(top_area).strip() if top_area not in (None, "") else q.area
+            top_pols = parse_polarizations(body.get("polarizations"))
+            polarizations = top_pols if top_pols is not None else q.polarizations
+            min_incidence = _opt_float(body.get("min_incidence"), "min_incidence")
+            if min_incidence is None:
+                min_incidence = q.min_incidence
+            max_incidence = _opt_float(body.get("max_incidence"), "max_incidence")
+            if max_incidence is None:
+                max_incidence = q.max_incidence
+            max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
+            if max_resolution is None:
+                max_resolution = q.max_resolution
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ids = body.get("ids")
@@ -1298,6 +1467,10 @@ def build_app(
                 product_types=wanted_products,
                 area=area,
                 fuzzy=fuzzy,
+                polarizations=polarizations,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
                 limit=limit,
                 offset=offset,
             )

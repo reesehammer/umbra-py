@@ -7,6 +7,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SAR acquisition-property filters on the `umbra serve` STAC Query extension
+  (`STRATEGY.md` §3 "every surface agrees", `TODO.md` acquisition-filter
+  follow-on).** The `umbra serve` STAC API previously exposed only
+  `product_types` / `area` / `fuzzy` over `/search` and
+  `/collections/{id}/items`, even though every other surface (search, the render
+  commands, the MCP server) can also filter by the SAR-native properties. It now
+  filters on them too — three ways, matching the existing product-type pattern:
+  GET params (`?polarizations=VV,VH&min_incidence=20&max_incidence=40&max_resolution=0.5`),
+  plain top-level POST body fields, and a proper STAC **Query extension** object
+  using the namespaced property names (`{"sar:polarizations": {"in": ["VV"]}}`,
+  `{"view:incidence_angle": {"gte": 20, "lte": 40}}`,
+  `{"sar:resolution": {"lte": 0.5}}`). `parse_query` gained a numeric range
+  operator (`gte`/`lte` together for the incidence range) alongside its scalar
+  operators and now returns a `QueryFilters` NamedTuple; an unsupported operator
+  or a non-numeric value is a hard `400`, never a silent drop. The filters push
+  down to the same `UmbraItem.matches_filters` predicate every other surface
+  shares (no new filtering logic, no schema change, no model call, no new
+  dependency), and GET pagination carries them into the `next` link — so
+  `pystac-client`, the QGIS STAC plugin and OpenAPI-driven agents can now filter
+  the archive by polarization / incidence / resolution. Offline-tested in
+  `tests/test_serve.py`. This was the last discovery surface that couldn't filter
+  on the SAR properties.
+- **SAR acquisition-property filters on the render/analysis commands (`STRATEGY.md`
+  §3 "every surface agrees", `TODO.md` acquisition-filter follow-on).** The
+  `--pol` / `--min-incidence` / `--max-incidence` / `--max-resolution` filters
+  shipped on `umbra search` and the MCP `search_catalog` tool; they now also apply
+  to the six commands that render or export the archive — `umbra change`,
+  `timescan`, `swipe`, `gallery`, `map` and `chips`. Each grows the shared
+  acquisition-filter options, threaded through the common `_gather_items` search
+  helper, so e.g. `umbra change --area "Beet Piler" --pol VV` gathers a
+  single-polarization series *directly* instead of relying on the after-the-fact
+  mixed-polarization warning (HH and VV image different physics, so a mixed change
+  composite can show polarization difference as apparent change). The filters
+  apply only in search mode (passing explicit item URLs is unaffected), reuse the
+  one shared predicate (`UmbraItem.matches_filters`) every other surface uses (no
+  new filtering logic, no schema change, no model call, no new dependency), and
+  the set values are recorded in the `--json` render manifest's `parameters` for
+  reproducibility (only when set, so an unfiltered render's manifest is unchanged).
+  Offline-tested in `tests/test_acquisition_filters.py`. Still ledgered in
+  `TODO.md`: exposing the filters on the `umbra serve` STAC Query extension and in
+  `umbra ask`.
 - **SAR acquisition-property search filters — polarization, incidence angle and
   resolution — across every discovery surface (`STRATEGY.md` §3 "discovery is
   the moat", `AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on).** Search already
@@ -31,9 +72,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   geometric filters' coarser-datum fallback. No model is called and no
   dependency is added; the whole surface is offline-tested
   (`tests/test_acquisition_filters.py` across the predicate, index, live walk,
-  archive, CLI and MCP). Wiring these filters into the render/analysis commands
-  (`change`, `timescan`, …), the `umbra serve` STAC Query extension, and
-  `umbra ask` is ledgered as an additive follow-on in `TODO.md`.
+  archive, CLI and MCP). These filters now also reach the render/analysis
+  commands (`change`, `timescan`, `swipe`, `gallery`, `map`, `chips` — see the
+  entry above); wiring them into the `umbra serve` STAC Query extension and
+  `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
 - **`umbra index export` (stac-geoparquet) no longer crashes on catalog

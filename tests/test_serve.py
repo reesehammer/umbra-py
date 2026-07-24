@@ -133,14 +133,23 @@ def test_parse_product_types_normalises_and_validates():
         serve.parse_product_types("GEC,NOPE")
 
 
+def test_parse_polarizations_normalises():
+    assert serve.parse_polarizations(None) is None
+    assert serve.parse_polarizations("") is None
+    assert serve.parse_polarizations("vv, vh") == ["VV", "VH"]
+    assert serve.parse_polarizations(["Hh"]) == ["HH"]
+    with pytest.raises(ValueError):
+        serve.parse_polarizations(5)
+
+
 def test_parse_query_maps_extension_to_index_filters():
-    assert serve.parse_query(None) == (None, None)
-    assert serve.parse_query({}) == (None, None)
+    assert serve.parse_query(None) == serve.QueryFilters()
+    assert serve.parse_query({}) == serve.QueryFilters()
     # Both the operator form and the bare-value shorthand are accepted.
-    assert serve.parse_query({"product_types": {"in": ["gec"]}}) == (["GEC"], None)
-    assert serve.parse_query({"product_types": "sicd"}) == (["SICD"], None)
-    assert serve.parse_query({"area": {"like": "Beet"}}) == (None, "Beet")
-    assert serve.parse_query({"area": "Beet"}) == (None, "Beet")
+    assert serve.parse_query({"product_types": {"in": ["gec"]}}).product_types == ["GEC"]
+    assert serve.parse_query({"product_types": "sicd"}).product_types == ["SICD"]
+    assert serve.parse_query({"area": {"like": "Beet"}}).area == "Beet"
+    assert serve.parse_query({"area": "Beet"}).area == "Beet"
     # An unknown property or operator is a hard error, never a silent drop.
     with pytest.raises(ValueError):
         serve.parse_query({"datetime": {"gte": "2024"}})
@@ -148,6 +157,53 @@ def test_parse_query_maps_extension_to_index_filters():
         serve.parse_query({"area": {"gt": "Beet"}})
     with pytest.raises(ValueError):
         serve.parse_query("not-an-object")
+
+
+def test_parse_query_maps_sar_acquisition_properties():
+    # Polarizations: operator form, bare list/string, all upper-cased.
+    assert serve.parse_query({"sar:polarizations": {"in": ["vv", "vh"]}}).polarizations == [
+        "VV",
+        "VH",
+    ]
+    assert serve.parse_query({"sar:polarizations": "hh"}).polarizations == ["HH"]
+    # Incidence: a gte/lte range, either or both bounds.
+    q = serve.parse_query({"view:incidence_angle": {"gte": 20, "lte": 40}})
+    assert (q.min_incidence, q.max_incidence) == (20.0, 40.0)
+    q = serve.parse_query({"view:incidence_angle": {"lte": 40}})
+    assert (q.min_incidence, q.max_incidence) == (None, 40.0)
+    # Resolution: an lte bound, or a bare-number shorthand for it.
+    assert serve.parse_query({"sar:resolution": {"lte": 0.5}}).max_resolution == 0.5
+    assert serve.parse_query({"sar:resolution": 0.5}).max_resolution == 0.5
+    # Several filters compose in one query object.
+    q = serve.parse_query(
+        {
+            "product_types": {"in": ["GEC"]},
+            "sar:polarizations": {"in": ["VV"]},
+            "view:incidence_angle": {"gte": 30},
+            "sar:resolution": {"lte": 1.0},
+        }
+    )
+    assert q.product_types == ["GEC"]
+    assert q.polarizations == ["VV"]
+    assert q.min_incidence == 30.0
+    assert q.max_resolution == 1.0
+
+
+def test_parse_query_rejects_bad_sar_operators_and_values():
+    # A range property needs an object with gte/lte, not a bare value or eq.
+    with pytest.raises(ValueError):
+        serve.parse_query({"view:incidence_angle": 30})
+    with pytest.raises(ValueError):
+        serve.parse_query({"view:incidence_angle": {"eq": 30}})
+    with pytest.raises(ValueError):
+        serve.parse_query({"view:incidence_angle": {}})
+    # Resolution only supports lte; a non-numeric value is a hard error.
+    with pytest.raises(ValueError):
+        serve.parse_query({"sar:resolution": {"gte": 0.5}})
+    with pytest.raises(ValueError):
+        serve.parse_query({"view:incidence_angle": {"gte": "wide"}})
+    with pytest.raises(ValueError):
+        serve.parse_query({"sar:resolution": "fine"})
 
 
 # --------------------------------------------------------------------------
@@ -334,6 +390,118 @@ def test_post_search_rejects_bad_query(client):
     assert client.post("/search", json={"query": {"nope": "x"}}).status_code == 400
     assert client.post("/search", json={"query": {"area": {"gt": "x"}}}).status_code == 400
     assert client.post("/search", json={"product_types": ["BOGUS"]}).status_code == 400
+
+
+# --------------------------------------------------------------------------
+# SAR acquisition-property filters over the API (pol / incidence / resolution)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sar_client(tmp_path, sample_item_dict) -> TestClient:
+    """A client over three items varied by polarization / incidence / resolution.
+
+    item-0: VV,       20 deg, 0.3 m
+    item-1: VH,       35 deg, 0.5 m
+    item-2: HH, HV,   50 deg, 1.5 m
+    """
+    specs = [
+        (["VV"], 20.0, 0.3),
+        (["VH"], 35.0, 0.5),
+        (["HH", "HV"], 50.0, 1.5),
+    ]
+    path = tmp_path / "sar.db"
+    with CatalogIndex(path) as idx:
+        for i, (pols, inc, res) in enumerate(specs):
+            doc = copy.deepcopy(sample_item_dict)
+            doc["id"] = f"item-{i}"
+            doc["properties"]["sar:polarizations"] = pols
+            doc["properties"]["view:incidence_angle"] = inc
+            doc["properties"]["sar:resolution_range"] = res
+            doc["properties"]["sar:resolution_azimuth"] = res
+            idx.add(UmbraItem.from_dict(doc, href=_href(i)))
+    return TestClient(serve.build_app(path))
+
+
+def _returned_ids(body: dict) -> list[str]:
+    return [f["id"] for f in body["features"]]
+
+
+def test_search_filters_by_polarization(sar_client):
+    assert _returned_ids(sar_client.get("/search?polarizations=VV").json()) == ["item-0"]
+    assert _returned_ids(sar_client.get("/search?polarizations=VH").json()) == ["item-1"]
+    # An item is kept if it exposes at least one requested polarization.
+    assert _returned_ids(sar_client.get("/search?polarizations=HV").json()) == ["item-2"]
+    assert sar_client.get("/search?polarizations=VV,VH").json()["context"]["returned"] == 2
+
+
+def test_search_filters_by_incidence_range(sar_client):
+    assert sar_client.get("/search?min_incidence=30").json()["context"]["returned"] == 2
+    assert sar_client.get("/search?max_incidence=40").json()["context"]["returned"] == 2
+    body = sar_client.get("/search?min_incidence=30&max_incidence=40").json()
+    assert _returned_ids(body) == ["item-1"]
+
+
+def test_search_filters_by_max_resolution(sar_client):
+    # max_resolution keeps items at least this fine (range AND azimuth <= value).
+    assert sar_client.get("/search?max_resolution=0.5").json()["context"]["returned"] == 2
+    assert _returned_ids(sar_client.get("/search?max_resolution=0.3").json()) == ["item-0"]
+
+
+def test_items_endpoint_filters_by_sar_properties(sar_client):
+    path = f"/collections/{COLLECTION}/items?polarizations=VV"
+    assert _returned_ids(sar_client.get(path).json()) == ["item-0"]
+    path = f"/collections/{COLLECTION}/items?min_incidence=45"
+    assert _returned_ids(sar_client.get(path).json()) == ["item-2"]
+
+
+def test_sar_filters_survive_pagination(sar_client):
+    page1 = sar_client.get("/search?min_incidence=30&limit=1").json()
+    next_link = next(link for link in page1["links"] if link["rel"] == "next")
+    assert "min_incidence=30" in next_link["href"]
+    href = next_link["href"].replace("http://testserver", "")
+    page2 = sar_client.get(href).json()
+    assert _returned_ids(page2) == ["item-2"]
+
+
+def test_post_search_query_extension_sar_properties(sar_client):
+    # The proper STAC Query object form, using the namespaced property names.
+    body = {
+        "query": {
+            "sar:polarizations": {"in": ["VV", "VH"]},
+            "view:incidence_angle": {"lte": 30},
+        }
+    }
+    assert _returned_ids(sar_client.post("/search", json=body).json()) == ["item-0"]
+    # A gte/lte incidence range in one object.
+    body = {"query": {"view:incidence_angle": {"gte": 30, "lte": 40}}}
+    assert _returned_ids(sar_client.post("/search", json=body).json()) == ["item-1"]
+    # Resolution lte.
+    body = {"query": {"sar:resolution": {"lte": 0.3}}}
+    assert _returned_ids(sar_client.post("/search", json=body).json()) == ["item-0"]
+
+
+def test_post_search_top_level_sar_fields_override_query(sar_client):
+    # A top-level field overrides the same field inside `query`.
+    body = {
+        "polarizations": ["HH"],
+        "query": {"sar:polarizations": {"in": ["VV"]}},
+    }
+    assert _returned_ids(sar_client.post("/search", json=body).json()) == ["item-2"]
+    # Top-level numeric fields also reach the index.
+    body = {"min_incidence": 45}
+    assert _returned_ids(sar_client.post("/search", json=body).json()) == ["item-2"]
+
+
+def test_post_search_rejects_bad_sar_query(sar_client):
+    assert (
+        sar_client.post("/search", json={"query": {"view:incidence_angle": 30}}).status_code == 400
+    )
+    assert (
+        sar_client.post("/search", json={"query": {"sar:resolution": {"gte": 1}}}).status_code
+        == 400
+    )
+    assert sar_client.post("/search", json={"min_incidence": "wide"}).status_code == 400
 
 
 def test_openapi_document_is_served(client):

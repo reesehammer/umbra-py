@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import click
 
@@ -278,15 +278,38 @@ def _acquisition_filter_options(func):
 
 def _acquisition_filter_kwargs(
     polarizations, min_incidence, max_incidence, max_resolution
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Normalise the ``_acquisition_filter_options`` values into ``search``
-    keyword arguments (an empty ``--pol`` tuple becomes ``None``)."""
+    keyword arguments (an empty ``--pol`` tuple becomes ``None``).
+
+    Typed ``dict[str, Any]`` (not ``object``) so the mapping unpacks cleanly with
+    ``**`` into ``_gather_items``/``search`` alongside their explicitly-typed
+    keyword parameters."""
     return {
         "polarizations": list(polarizations) or None,
         "min_incidence": min_incidence,
         "max_incidence": max_incidence,
         "max_resolution": max_resolution,
     }
+
+
+def _acquisition_filter_manifest(
+    polarizations, min_incidence, max_incidence, max_resolution
+) -> dict[str, object]:
+    """Return only the *set* acquisition filters, for a render manifest's
+    ``parameters`` -- so a rendered artifact records which SAR filters shaped the
+    acquisitions it was built from. Unset filters are omitted, so an unfiltered
+    render's manifest is byte-for-byte unchanged."""
+    out: dict[str, object] = {}
+    if polarizations:
+        out["polarizations"] = list(polarizations)
+    if min_incidence is not None:
+        out["min_incidence"] = min_incidence
+    if max_incidence is not None:
+        out["max_incidence"] = max_incidence
+    if max_resolution is not None:
+        out["max_resolution"] = max_resolution
+    return out
 
 
 def _token_option(func):
@@ -1619,6 +1642,7 @@ def convert(
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the dataset summary as JSON.")
 @_fuzzy_option
+@_acquisition_filter_options
 @_local_index_options
 @_token_option
 def chips(
@@ -1638,6 +1662,10 @@ def chips(
     max_search,
     as_json,
     fuzzy,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     token,
@@ -1689,6 +1717,9 @@ def chips(
             fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
+            **_acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
         )
         if not items:
             raise click.ClickException(
@@ -1828,6 +1859,7 @@ def chips(
 @_token_option
 @_fuzzy_option
 @_manifest_option
+@_acquisition_filter_options
 def change(
     item_urls,
     out_path,
@@ -1846,6 +1878,10 @@ def change(
     percentile,
     narrate,
     model,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     as_json,
@@ -1919,6 +1955,9 @@ def change(
             fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
+            **_acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
         )
         if len(found) < 2:
             raise click.ClickException(
@@ -2022,6 +2061,11 @@ def change(
             parameters["frames"] = frames
             if narrate:
                 parameters["narrate"] = True
+        parameters.update(
+            _acquisition_filter_manifest(
+                polarizations, min_incidence, max_incidence, max_resolution
+            )
+        )
         _emit_render_manifest(path, items, parameters, sidecars or None)
 
 
@@ -2098,6 +2142,7 @@ def change(
 @_token_option
 @_fuzzy_option
 @_manifest_option
+@_acquisition_filter_options
 def timescan(
     item_urls,
     out_path,
@@ -2112,6 +2157,10 @@ def timescan(
     max_size,
     db,
     percentile,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     as_json,
@@ -2172,6 +2221,9 @@ def timescan(
             fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
+            **_acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
         )
         if len(found) < 3:
             raise click.ClickException(
@@ -2203,7 +2255,15 @@ def timescan(
         _emit_render_manifest(
             path,
             items,
-            {"asset": asset, "max_size": max_size, "db": db, "percentile": percentile},
+            {
+                "asset": asset,
+                "max_size": max_size,
+                "db": db,
+                "percentile": percentile,
+                **_acquisition_filter_manifest(
+                    polarizations, min_incidence, max_incidence, max_resolution
+                ),
+            },
         )
     else:
         click.echo(f"Wrote timescan composite to {path}")
@@ -2275,6 +2335,7 @@ def timescan(
 @_token_option
 @_fuzzy_option
 @_manifest_option
+@_acquisition_filter_options
 def swipe(
     item_urls,
     out_path,
@@ -2288,6 +2349,10 @@ def swipe(
     max_size,
     db,
     percentile,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     as_json,
@@ -2340,6 +2405,9 @@ def swipe(
             fuzzy=fuzzy,
             product_types=[asset],
             limit=max_search,
+            **_acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
         )
         if len(found) < 2:
             raise click.ClickException(
@@ -2373,7 +2441,15 @@ def swipe(
         _emit_render_manifest(
             path,
             [before, after],
-            {"asset": asset, "max_size": max_size, "db": db, "percentile": percentile},
+            {
+                "asset": asset,
+                "max_size": max_size,
+                "db": db,
+                "percentile": percentile,
+                **_acquisition_filter_manifest(
+                    polarizations, min_incidence, max_incidence, max_resolution
+                ),
+            },
         )
     else:
         click.echo(f"Wrote swipe map to {path}")
@@ -2483,6 +2559,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
 @_token_option
 @_fuzzy_option
 @_manifest_option
+@_acquisition_filter_options
 def gallery(
     bbox,
     place,
@@ -2500,6 +2577,10 @@ def gallery(
     colormap,
     percentile,
     workers,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     as_json,
@@ -2536,6 +2617,7 @@ def gallery(
         product_types=list(products) or [asset],
         limit=limit,
         max_per_task=max_per_task,
+        **_acquisition_filter_kwargs(polarizations, min_incidence, max_incidence, max_resolution),
     )
     if not items:
         raise click.ClickException("No items matched the search.")
@@ -2576,6 +2658,9 @@ def gallery(
                 "max_size": max_size,
                 "db": db,
                 "percentile": percentile,
+                **_acquisition_filter_manifest(
+                    polarizations, min_incidence, max_incidence, max_resolution
+                ),
             },
         )
     else:
@@ -3029,6 +3114,7 @@ def tiles(
 @_local_index_options
 @_token_option
 @_manifest_option
+@_acquisition_filter_options
 def map_cmd(
     bbox,
     place,
@@ -3044,6 +3130,10 @@ def map_cmd(
     timeline,
     timeline_period,
     lazy_imagery,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
     local,
     db_path,
     as_json,
@@ -3066,6 +3156,7 @@ def map_cmd(
         product_types=list(products) or None,
         limit=limit,
         max_per_task=max_per_task,
+        **_acquisition_filter_kwargs(polarizations, min_incidence, max_incidence, max_resolution),
     )
     if not items:
         raise click.ClickException("No items matched the search.")
@@ -3143,6 +3234,9 @@ def map_cmd(
                 "lazy_imagery": lazy_imagery,
                 "timeline": timeline,
                 "geocode": geocode,
+                **_acquisition_filter_manifest(
+                    polarizations, min_incidence, max_incidence, max_resolution
+                ),
             },
         )
     else:

@@ -247,18 +247,40 @@ index, the read-through search, the Canopy archive, `umbra search` and the MCP
 schema change, deterministic and offline-tested. Additive follow-ons, none a
 blocker:
 
-- **Wire the filters into the render/analysis commands.** `change`, `timescan`,
-  `swipe`, `gallery`, `map` and `chips` gather through `_gather_items`, so adding
-  the shared `_acquisition_filter_options` decorator + threading the kwargs would
-  let `umbra change --pol VV` gather a single-polarization series directly (today
-  the change command only *warns* on a mixed-polarization selection). Mechanical,
-  per-command signature edits.
-- **Expose the filters on the `umbra serve` STAC Query extension.** `parse_query`
-  already maps `product_types` / `area`; extending it (and the GET-param path)
-  with `sar:polarizations` (`in`/`eq`), `view:incidence_angle` (`gte`/`lte`) and
-  `sar:resolution_*` (`lte`) would let `pystac-client` and OpenAPI agents filter
-  on them too — the "every surface agrees" bar. Needs the numeric operators and
-  a small `parse_query` contract change.
+- ~~**Wire the filters into the render/analysis commands.**~~ ✅ **Done.**
+  `change`, `timescan`, `swipe`, `gallery`, `map` and `chips` now carry the shared
+  `@_acquisition_filter_options` decorator (`--pol` / `--min-incidence` /
+  `--max-incidence` / `--max-resolution`), threaded through `_gather_items` via
+  `_acquisition_filter_kwargs`, so `umbra change --pol VV` gathers a
+  single-polarization series *directly* instead of relying on the after-the-fact
+  mixed-polarization warning (the warning still fires for an unfiltered mixed
+  selection). The filters apply only in search mode — passing explicit item URLs
+  is unaffected — and the set filters are recorded in the `--json` render
+  manifest's `parameters` (only when set, so an unfiltered render's manifest is
+  unchanged; `chips` writes its own manifest and is unaffected). Uses the same
+  predicate every other surface shares (`UmbraItem.matches_filters`), so no new
+  filtering logic; offline-tested in `tests/test_acquisition_filters.py` (each of
+  the six commands forwards the kwargs; the unset-→`None` case).
+- ~~**Expose the filters on the `umbra serve` STAC Query extension.**~~ ✅
+  **Done.** `umbra serve`'s `/search` and `/collections/{id}/items` now filter on
+  the SAR acquisition properties three ways — GET params (`?polarizations=VV,VH`,
+  `min_incidence`, `max_incidence`, `max_resolution`), plain top-level POST body
+  fields, and a proper STAC **Query extension** object using the namespaced
+  property names (`{"sar:polarizations": {"in": ["VV"]}}`,
+  `{"view:incidence_angle": {"gte": 20, "lte": 40}}`,
+  `{"sar:resolution": {"lte": 0.5}}`). `parse_query` now returns a
+  `QueryFilters` NamedTuple and gained a numeric range operator (`gte`/`lte`
+  together for incidence) alongside the existing scalar operators; an
+  unsupported operator or non-numeric value is a hard `400`, never a silent drop
+  (`parse_polarizations` / `_as_float` / `_opt_float` do the coercion). The
+  filters push down to the same `UmbraItem.matches_filters` predicate every other
+  surface shares (both `CatalogIndex` and the live `UmbraCatalog` `search`
+  already accept them), so `pystac-client` and OpenAPI agents now get the "every
+  surface agrees" bar. GET pagination carries the filters into the `next` link.
+  Offline-tested in `tests/test_serve.py` (parser mapping + operator/value
+  rejection, and endpoint filtering by polarization / incidence range / max
+  resolution across GET, POST top-level, POST query object, top-level override,
+  and pagination survival).
 - **Let `umbra ask` plan the filters.** `planner.parse_plan` re-validates every
   model-emitted field; adding the acquisition properties there would let a plain
   sentence ("VV scenes at low incidence over Utah") resolve to a real search,
@@ -282,11 +304,13 @@ the Done log), closing the self-serve R4 loop. **Async job semantics for long
 renders are now shipped** (see the Done log): a composite request can opt in to
 `"async": true`, get a `202 Accepted` + a job id, poll `GET /jobs/{id}`, and
 fetch the result from `GET /jobs/{id}/result` (the disk cache is the result
-store). **The STAC Query extension now exposes the index's two Umbra-specific
-filters** (see the Done log): `/search` and `/collections/{id}/items` take
-`product_types`, `area` and `fuzzy` (as GET params, top-level POST fields, or a
-STAC `query` object), advertised via the `item-search#query` conformance class.
-Open follow-ons:
+store). **The STAC Query extension now exposes the index's Umbra-specific filters**
+(see the Done log): `/search` and `/collections/{id}/items` take
+`product_types`, `area`, `fuzzy` **and the SAR acquisition properties**
+(`polarizations` / `sar:polarizations`, `min_incidence` / `max_incidence` /
+`view:incidence_angle`, `max_resolution` / `sar:resolution`) — as GET params,
+top-level POST fields, or a STAC `query` object — advertised via the
+`item-search#query` conformance class. Open follow-ons:
 
 - **Geometry `intersects`.** The Query extension now covers `product_types` and
   `area`; geometry `intersects` still needs more than the stored footprint bbox
@@ -535,6 +559,32 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ## Done
 
+- **SAR acquisition-property filters on the `umbra serve` STAC Query extension.**
+  The read-only STAC API previously exposed only `product_types` / `area` /
+  `fuzzy` over `/search` and `/collections/{id}/items`, even though the
+  `CatalogIndex`/`UmbraCatalog` `search` (and every other surface — CLI, MCP,
+  render commands) also filter by polarization, incidence and resolution. Wired
+  those SAR properties through the API three ways: GET params (`polarizations`,
+  `min_incidence`, `max_incidence`, `max_resolution`), plain top-level POST body
+  fields, and a proper STAC **Query extension** object with the namespaced
+  property names — `sar:polarizations` (`in`/`eq`, bare list/string),
+  `view:incidence_angle` (a `gte`/`lte` range, either or both bounds) and
+  `sar:resolution` (`lte`, or a bare-number shorthand). `parse_query` now returns
+  a `QueryFilters` NamedTuple and grew a numeric range parser (`view:incidence_angle`
+  is the first property to take two operators in one object) alongside the
+  existing scalar-operator path; new pure helpers `parse_polarizations` /
+  `_as_float` / `_opt_float` do the coercion, and an unsupported operator or a
+  non-numeric value is a hard `400` so a client's filter is never silently
+  dropped. The filters push down to the same `UmbraItem.matches_filters`
+  predicate the whole codebase shares (no new filtering logic), and GET
+  pagination carries them into the `next` link. Fully offline-tested through the
+  in-process `TestClient` (parser mapping + operator/value rejection; endpoint
+  filtering by polarization / incidence range / max resolution across GET, POST
+  top-level, POST query object, top-level-overrides-query, and pagination
+  survival). Was the "expose the filters on the `umbra serve` STAC Query
+  extension" acquisition-filter follow-on and the `umbra serve` open item — the
+  last surface that couldn't filter on the SAR properties, so "every surface
+  agrees" now holds.
 - **Download content-integrity verification against the S3 ETag MD5
   (`docs/CODEBASE_ANALYSIS.md` P1 #5 / §3.2).** `download_url` already verified
   the received byte count against `Content-Length` and used `If-Range` + a stored
