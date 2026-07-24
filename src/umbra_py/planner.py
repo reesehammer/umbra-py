@@ -15,8 +15,10 @@ way to add the model without giving up that boundary:
 2. Every field of that object is then re-validated by the deterministic layer
    (:func:`parse_plan`): dates go through :func:`umbra_py.parse_date_bound`,
    product types are checked against :data:`umbra_py.PRODUCT_ASSETS`, the bbox
-   is range-checked. **Nothing the model says becomes a filter without passing
-   through this validation**, so a hallucinated date or product type is an error,
+   is range-checked, and the SAR acquisition-property filters (polarizations,
+   incidence bounds, max resolution) are coerced and cross-checked. **Nothing the
+   model says becomes a filter without passing through this validation**, so a
+   hallucinated date, product type, or out-of-order incidence bound is an error,
    not a silent bad query.
 3. The resolved, deterministic ``umbra search`` command is *shown* before it
    runs, so the user audits the plan. The LLM plans; the library executes; the
@@ -98,6 +100,10 @@ class SearchPlan:
     start: str | None = None
     end: str | None = None
     product_types: list[str] = field(default_factory=list)
+    polarizations: list[str] = field(default_factory=list)
+    min_incidence: float | None = None
+    max_incidence: float | None = None
+    max_resolution: float | None = None
     limit: int | None = None
     max_per_task: int | None = None
     rationale: str | None = None
@@ -107,7 +113,11 @@ class SearchPlan:
 
         Omits ``place``/``bbox`` -- the caller resolves those into a single
         ``bbox`` (geocoding ``place``) in the deterministic execution layer,
-        exactly as the ``umbra search`` command does.
+        exactly as the ``umbra search`` command does. The SAR acquisition-property
+        filters (``polarizations`` / ``min_incidence`` / ``max_incidence`` /
+        ``max_resolution``) push straight through to the same
+        :meth:`~umbra_py.models.UmbraItem.matches_filters` predicate every other
+        surface shares.
         """
         return {
             "start": self.start,
@@ -115,6 +125,10 @@ class SearchPlan:
             "product_types": self.product_types or None,
             "area": self.area,
             "fuzzy": self.fuzzy,
+            "polarizations": self.polarizations or None,
+            "min_incidence": self.min_incidence,
+            "max_incidence": self.max_incidence,
+            "max_resolution": self.max_resolution,
             "limit": self.limit,
             "max_per_task": self.max_per_task,
         }
@@ -134,6 +148,10 @@ class SearchPlan:
             "start": self.start,
             "end": self.end,
             "product_types": self.product_types,
+            "polarizations": self.polarizations,
+            "min_incidence": self.min_incidence,
+            "max_incidence": self.max_incidence,
+            "max_resolution": self.max_resolution,
             "limit": self.limit,
             "max_per_task": self.max_per_task,
             "rationale": self.rationale,
@@ -153,6 +171,10 @@ _PLAN_KEYS = (
     "start",
     "end",
     "product_types",
+    "polarizations",
+    "min_incidence",
+    "max_incidence",
+    "max_resolution",
     "limit",
     "max_per_task",
     "rationale",
@@ -190,6 +212,18 @@ these keys (use null / [] / false when a filter does not apply):
   end           string | null    -- latest date, INCLUSIVE. Same forms as start.
   product_types array of string  -- subset of the product types in the context
                                     (e.g. ["GEC"]). [] means all.
+  polarizations array of string  -- keep only scenes exposing at least one of
+                                    these SAR polarizations (VV/VH/HH/HV,
+                                    case-insensitive). [] means any. Use this
+                                    when the request names a polarization or asks
+                                    to keep a comparison like-with-like.
+  min_incidence number | null    -- lower bound (inclusive, degrees) on the view
+                                    incidence angle. null for no lower bound.
+  max_incidence number | null    -- upper bound (inclusive, degrees) on the view
+                                    incidence angle. null for no upper bound.
+  max_resolution number | null   -- keep only scenes at least this fine: both
+                                    range and azimuth resolution <= this many
+                                    metres. null for no resolution constraint.
   limit         integer | null   -- max results; null for the tool default.
   max_per_task  integer | null   -- cap per site; 1 gives one pin per site.
   rationale     string           -- one short sentence: how you read the request.
@@ -283,6 +317,52 @@ def _coerce_products(value: Any) -> list[str]:
     return out
 
 
+def _coerce_polarizations(value: Any) -> list[str]:
+    """Normalise a model-emitted ``polarizations`` value into an upper-cased list.
+
+    Accepts a single string or a list/tuple of strings; each entry is
+    upper-cased and de-duplicated. SAR polarizations are a small open set
+    (``VV``/``VH``/``HH``/``HV``) with no fixed vocabulary to validate against --
+    a value the archive never carries simply matches nothing, exactly as
+    :func:`umbra_py.serve.parse_polarizations` and
+    :meth:`umbra_py.models.UmbraItem.matches_filters` treat it. Returns ``[]`` for
+    empty input.
+    """
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise AskError(f"polarizations must be a list, got {value!r}.")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise AskError(f"polarizations entries must be strings, got {item!r}.")
+        pol = item.strip().upper()
+        if pol and pol not in out:
+            out.append(pol)
+    return out
+
+
+def _coerce_positive_float(value: Any, field_name: str) -> float | None:
+    """Coerce an optional numeric filter (incidence/resolution) to a positive float.
+
+    Mirrors :func:`_coerce_positive_int`: an empty value is no constraint
+    (``None``), a non-number or a non-positive number is a self-describing
+    :class:`AskError` -- so a hallucinated ``max_resolution: 0`` is caught at the
+    determinism boundary, not passed to the backend.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError) as exc:
+        raise AskError(f"{field_name} must be a number, got {value!r}.") from exc
+    if n <= 0:
+        raise AskError(f"{field_name} must be positive, got {n}.")
+    return n
+
+
 def _coerce_positive_int(value: Any, field_name: str) -> int | None:
     if value in (None, ""):
         return None
@@ -338,6 +418,13 @@ def parse_plan(raw: dict[str, Any], question: str, *, today: date | None = None)
     if place and bbox:
         raise AskError("A plan may set place or bbox, not both.")
 
+    min_incidence = _coerce_positive_float(raw.get("min_incidence"), "min_incidence")
+    max_incidence = _coerce_positive_float(raw.get("max_incidence"), "max_incidence")
+    if min_incidence is not None and max_incidence is not None and min_incidence > max_incidence:
+        raise AskError(
+            f"min_incidence {min_incidence:g} is greater than max_incidence {max_incidence:g}."
+        )
+
     plan = SearchPlan(
         question=question,
         area=area.strip() if area else None,
@@ -347,6 +434,10 @@ def parse_plan(raw: dict[str, Any], question: str, *, today: date | None = None)
         start=_coerce_date_field(raw.get("start"), is_end=False, today=today),
         end=_coerce_date_field(raw.get("end"), is_end=True, today=today),
         product_types=_coerce_products(raw.get("product_types")),
+        polarizations=_coerce_polarizations(raw.get("polarizations")),
+        min_incidence=min_incidence,
+        max_incidence=max_incidence,
+        max_resolution=_coerce_positive_float(raw.get("max_resolution"), "max_resolution"),
         limit=_coerce_positive_int(raw.get("limit"), "limit"),
         max_per_task=_coerce_positive_int(raw.get("max_per_task"), "max_per_task"),
         rationale=(str(raw["rationale"]) if raw.get("rationale") else None),
@@ -380,6 +471,14 @@ def plan_to_argv(plan: SearchPlan) -> list[str]:
         argv += ["--end", plan.end]
     for product in plan.product_types:
         argv += ["--product", product]
+    for pol in plan.polarizations:
+        argv += ["--pol", pol]
+    if plan.min_incidence is not None:
+        argv += ["--min-incidence", f"{plan.min_incidence:g}"]
+    if plan.max_incidence is not None:
+        argv += ["--max-incidence", f"{plan.max_incidence:g}"]
+    if plan.max_resolution is not None:
+        argv += ["--max-resolution", f"{plan.max_resolution:g}"]
     if plan.limit is not None:
         argv += ["--limit", str(plan.limit)]
     if plan.max_per_task is not None:

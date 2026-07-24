@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra ask` now plans the SAR acquisition-property filters (`STRATEGY.md`
+  §3 acquisition-filter follow-on).** The polarization / incidence-angle /
+  resolution filters already shipped on every other surface — `umbra search`,
+  the local index, the Canopy archive, the render/analysis commands, the MCP
+  `search_catalog` tool, and the `umbra serve` STAC Query extension — but the
+  natural-language planner (`umbra ask`) couldn't emit them, so "VV scenes at
+  low incidence over Utah" lost the radar half of the request. The planner's JSON
+  schema now carries `polarizations`, `min_incidence`, `max_incidence`, and
+  `max_resolution` (`SearchPlan` fields, `_PLAN_KEYS`, and the system-prompt
+  schema block), and `parse_plan` — the determinism boundary — validates each one
+  before it can become a filter: polarizations are upper-cased and de-duplicated
+  (an open `VV`/`VH`/`HH`/`HV` set, unvalidated against a fixed vocabulary exactly
+  like `serve.parse_polarizations`, so an unknown value simply matches nothing),
+  incidence and resolution are coerced to positive floats (a hallucinated
+  `max_resolution: 0` is a self-describing `AskError`, not a silent bad query),
+  and inverted `min_incidence`/`max_incidence` bounds are rejected like a
+  start-after-end date. The resolved filters render into the audited
+  `umbra search …` command (`--pol` repeatable, `--min-incidence` /
+  `--max-incidence` / `--max-resolution`) via `plan_to_argv`, flow through
+  `SearchPlan.to_search_kwargs()` into the same
+  `UmbraItem.matches_filters` predicate every other surface shares, and appear in
+  the `--json` plan. No model call beyond the existing planning step and no new
+  dependency — the whole path is offline-tested in `tests/test_planner.py`
+  (validation of each filter, upper-casing/de-duplication, the positive-number and
+  inverted-bounds rejections, command rendering, and a CLI `--run` that forwards
+  every filter to the backend). This closes the last named surface in the
+  acquisition-filter follow-on: the filters are now reachable from a plain
+  sentence, deterministically validated.
 - **GitHub Pages showcase of the static `umbra demo` / `catalog.pmtiles`
   explorer (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The toolkit
   already produced every piece of a zero-install catalog demo — the

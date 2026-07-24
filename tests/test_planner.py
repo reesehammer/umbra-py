@@ -131,6 +131,56 @@ def test_parse_plan_ignores_unknown_keys_and_empty_values():
     assert plan.area is None and plan.place is None and plan.bbox is None
     assert plan.limit is None
     assert plan.product_types == []
+    # The acquisition-property filters default to "no constraint" too.
+    assert plan.polarizations == []
+    assert plan.min_incidence is None
+    assert plan.max_incidence is None
+    assert plan.max_resolution is None
+
+
+def test_parse_plan_resolves_acquisition_filters():
+    plan = parse_plan(
+        {
+            "polarizations": ["vv", "VH", "vv"],
+            "min_incidence": 20,
+            "max_incidence": 45.5,
+            "max_resolution": "0.5",
+        },
+        "q",
+        today=TODAY,
+    )
+    # Polarizations are upper-cased and de-duplicated (an open set, not validated
+    # against a fixed vocabulary -- an unknown value just matches nothing).
+    assert plan.polarizations == ["VV", "VH"]
+    assert plan.min_incidence == 20.0
+    assert plan.max_incidence == 45.5
+    # A numeric string coerces like any other number.
+    assert plan.max_resolution == 0.5
+
+
+def test_parse_plan_accepts_a_scalar_polarization():
+    plan = parse_plan({"polarizations": "HH"}, "q", today=TODAY)
+    assert plan.polarizations == ["HH"]
+
+
+def test_parse_plan_rejects_non_positive_acquisition_numbers():
+    for field_name in ("min_incidence", "max_incidence", "max_resolution"):
+        with pytest.raises(AskError, match="positive"):
+            parse_plan({field_name: 0}, "q", today=TODAY)
+    with pytest.raises(AskError, match="must be a number"):
+        parse_plan({"max_resolution": "fine"}, "q", today=TODAY)
+
+
+def test_parse_plan_rejects_inverted_incidence_bounds():
+    with pytest.raises(AskError, match="greater than max_incidence"):
+        parse_plan({"min_incidence": 45, "max_incidence": 20}, "q", today=TODAY)
+
+
+def test_parse_plan_rejects_malformed_polarizations():
+    with pytest.raises(AskError, match="polarizations must be a list"):
+        parse_plan({"polarizations": {"pol": "VV"}}, "q", today=TODAY)
+    with pytest.raises(AskError, match="entries must be strings"):
+        parse_plan({"polarizations": ["VV", 5]}, "q", today=TODAY)
 
 
 # --- command rendering ------------------------------------------------------
@@ -158,6 +208,23 @@ def test_plan_to_command_renders_bbox_and_max_per_task():
     cmd = plan_to_command(plan)
     assert "--bbox -118.3,33.7,-118.1,33.8" in cmd
     assert "--max-per-task 1" in cmd
+
+
+def test_plan_to_command_renders_acquisition_filters():
+    plan = SearchPlan(
+        question="q",
+        area="Centerfield, Utah",
+        polarizations=["VV", "VH"],
+        min_incidence=20.0,
+        max_incidence=45.0,
+        max_resolution=0.5,
+    )
+    cmd = plan_to_command(plan)
+    # Each polarization is its own repeatable --pol flag (the CLI convention).
+    assert "--pol VV --pol VH" in cmd
+    assert "--min-incidence 20" in cmd
+    assert "--max-incidence 45" in cmd
+    assert "--max-resolution 0.5" in cmd
 
 
 # --- ask(): end-to-end with an injected planner -----------------------------
@@ -302,6 +369,50 @@ def test_cli_ask_run_executes_the_search(fixed_plan, monkeypatch, sample_item_di
     assert fake.kwargs["fuzzy"] is True
     assert fake.kwargs["start"] == "2024-03-01"
     assert fake.kwargs["product_types"] == ["GEC"]
+
+
+def test_cli_ask_run_forwards_acquisition_filters(monkeypatch, sample_item_dict):
+    """A planned SAR filter (polarization/incidence/resolution) reaches the same
+    search backend every other surface uses, via ``plan.to_search_kwargs()``."""
+    reply = json.dumps(
+        {
+            "area": "Centerfield, Utah",
+            "polarizations": ["VV"],
+            "min_incidence": 20,
+            "max_incidence": 45,
+            "max_resolution": 0.5,
+            "rationale": "VV scenes at low incidence",
+        }
+    )
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda m: reply)
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+
+    class FakeSource:
+        def __init__(self):
+            self.kwargs = None
+
+        def search(self, **kwargs):
+            self.kwargs = kwargs
+            return iter([item])
+
+        def close(self):
+            pass
+
+    fake = FakeSource()
+    monkeypatch.setattr(
+        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+    )
+
+    result = CliRunner().invoke(cli, ["ask", "q", "--run"])
+    assert result.exit_code == 0, result.output
+    # The command shown to the user carries the validated filters.
+    assert "--pol VV" in result.output
+    assert "--min-incidence 20" in result.output
+    # ...and they reach the backend search as first-class keyword arguments.
+    assert fake.kwargs["polarizations"] == ["VV"]
+    assert fake.kwargs["min_incidence"] == 20.0
+    assert fake.kwargs["max_incidence"] == 45.0
+    assert fake.kwargs["max_resolution"] == 0.5
 
 
 def test_cli_ask_limit_flag_overrides_the_plan(fixed_plan, monkeypatch):
