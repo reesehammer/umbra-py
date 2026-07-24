@@ -245,6 +245,91 @@ def test_cli_search_local_filters_by_incidence_and_resolution(tmp_path):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Render / analysis commands forward the filters to the search backend
+# --------------------------------------------------------------------------
+
+
+_FILTER_ARGS = [
+    "--pol",
+    "VV",
+    "--min-incidence",
+    "20",
+    "--max-incidence",
+    "40",
+    "--max-resolution",
+    "0.5",
+]
+
+_EXPECTED_FORWARDED = {
+    "polarizations": ["VV"],
+    "min_incidence": 20.0,
+    "max_incidence": 40.0,
+    "max_resolution": 0.5,
+}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["change", "--out", "c.png", "--area", "SiteA"],
+        ["timescan", "--out", "t.png", "--area", "SiteA"],
+        ["swipe", "--out", "s.html", "--area", "SiteA"],
+        ["gallery", "--out", "g.html", "--area", "SiteA"],
+        ["map", "--out", "m.html", "--bbox", "0,0,1,1"],
+        ["chips", "--out", "chips_out", "--area", "SiteA"],
+    ],
+)
+def test_render_commands_forward_acquisition_filters(argv, monkeypatch, tmp_path):
+    """Each render/analysis command that gathers a search must thread the shared
+    SAR acquisition filters down to the search backend -- the ``--pol VV`` change
+    composite the docs promise. The fake ``_gather_items`` records the kwargs and
+    returns no items, so every command exits early with a clean error *after* the
+    kwargs are captured -- no render, no viz extra, no network."""
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def _fake_gather(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        # --local keeps the (patched) gather offline; the empty result makes the
+        # command bail cleanly, which is fine -- we only assert what it searched.
+        runner.invoke(cli, [argv[0], "--local", *argv[1:], *_FILTER_ARGS])
+
+    assert captured, f"{argv[0]} did not call _gather_items"
+    for key, val in _EXPECTED_FORWARDED.items():
+        assert captured[key] == val, (argv[0], key, captured.get(key))
+
+
+def test_render_command_unset_filters_forward_as_none(monkeypatch, tmp_path):
+    """With no filter flags, the render command forwards ``None`` for each --
+    an empty ``--pol`` tuple becomes ``None``, not ``[]`` -- so an unfiltered
+    render searches exactly as before."""
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def _fake_gather(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(cli, ["change", "--local", "--out", "c.png", "--area", "SiteA"])
+
+    assert captured["polarizations"] is None
+    assert captured["min_incidence"] is None
+    assert captured["max_incidence"] is None
+    assert captured["max_resolution"] is None
+
+
 def test_mcp_search_catalog_forwards_acquisition_filters(monkeypatch):
     mcp = pytest.importorskip("umbra_py.mcp_server")
 

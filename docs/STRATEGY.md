@@ -1509,6 +1509,35 @@ same 500 lines of glue first, and many give up."*
 > integration / MultiRTC interop and the maintainer-side adoption moves (5.3
 > registries, PyPI publish, 5.6 talking to Umbra).
 >
+> **Update (2026-07-24, filters on every render):** the **SAR acquisition-property
+> filters now reach the render/analysis commands, not just `search`** (§3 / the
+> "every surface agrees" bar named with the 2026-07-23 filters landing). The
+> filters (`--pol`, `--min-incidence` / `--max-incidence`, `--max-resolution`)
+> shipped on `umbra search` and the MCP `search_catalog` tool, but the six commands
+> a user reaches for to *look at* the archive — `change`, `timescan`, `swipe`,
+> `gallery`, `map`, `chips` — could not use them: they gathered every polarization
+> and incidence in range, and `change`/`timescan`/`swipe` could only *warn* after
+> the fact that a selection mixed polarizations (HH and VV image different physics,
+> so a mixed change composite shows polarization difference as apparent change).
+> This closes that: each command now carries the shared
+> `@_acquisition_filter_options` decorator, threaded through the common
+> `_gather_items` helper, so `umbra change --pol VV` gathers a like-with-like
+> single-polarization series *directly* rather than hoping the frame selector picks
+> one. It is pure funnel-widening (§1): the discovery surface newcomers and agents
+> reach for now filters on the SAR-native properties at the point they render, not
+> only at the point they list. It holds the project's grain and testability (§3):
+> **no model, no new dependency, no schema change** — it reuses the one predicate
+> every other surface already shares (`UmbraItem.matches_filters`), applies only in
+> search mode (explicit item URLs are untouched), records the set filters in the
+> `--json` render manifest for reproducibility, and is offline-tested for every
+> command. The remaining pieces of the "every surface agrees" line are the
+> non-render surfaces — exposing the filters as numeric operators on the `umbra
+> serve` STAC Query extension and letting `umbra ask` plan them (`TODO.md`). The
+> higher-level strategic gaps are unchanged and largely non-code: 5.5's
+> fully-calibrated image-space facet integration / MultiRTC interop and the
+> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
+> Umbra).
+>
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
