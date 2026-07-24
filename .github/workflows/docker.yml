@@ -1,0 +1,64 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded push's build is dead feedback; cancel it.
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build the self-hosting `umbra serve` image and smoke-test it end to end,
+  # so a broken Dockerfile / entrypoint fails review instead of a user's first
+  # `docker run`. Everything here is offline: the smoke test serves in live
+  # mode (no index, no S3 walk until an actual /search), so `/` and `/healthz`
+  # answer without any external network.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image (serve extra)
+        run: docker build --build-arg UMBRA_EXTRAS=serve -t umbra-py:ci .
+
+      - name: CLI passthrough works
+        run: docker run --rm umbra-py:ci --version
+
+      - name: Validate compose file
+        run: docker compose config >/dev/null
+
+      - name: Start the server (live mode -- no external network)
+        run: docker run -d --name umbra-serve -e UMBRA_SERVE_LIVE=1 -p 8000:8000 umbra-py:ci
+
+      - name: Wait for /healthz
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then
+              echo "healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "server did not become healthy in time" >&2
+          docker logs umbra-serve || true
+          exit 1
+
+      - name: Landing page is a STAC Catalog
+        run: |
+          curl -fsS http://127.0.0.1:8000/ \
+            | python -c "import sys,json; d=json.load(sys.stdin); assert d['type']=='Catalog'; print('landing OK')"
+
+      - name: /healthz reports a ready live backend
+        run: |
+          curl -fsS http://127.0.0.1:8000/healthz \
+            | python -c "import sys,json; d=json.load(sys.stdin); assert d['ready'] is True and d['backend']=='live', d; print('healthz OK')"
+
+      - name: Server logs
+        if: always()
+        run: docker logs umbra-serve || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f umbra-serve || true

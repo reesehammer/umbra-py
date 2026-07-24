@@ -495,6 +495,28 @@ def conformance() -> dict[str, Any]:
     return {"conformsTo": list(CONFORMANCE_CLASSES)}
 
 
+def health_document(*, backend: str, ready: bool, items: int | None = None) -> dict[str, Any]:
+    """Build the ``/healthz`` liveness/readiness document.
+
+    ``backend`` is ``"index"`` or ``"live"``; ``ready`` reports whether the
+    search backend can currently answer queries (a local index is present, or
+    live mode is configured); ``items`` is the indexed acquisition count when
+    known. The document is deliberately tiny so a container ``HEALTHCHECK`` or a
+    Kubernetes probe can poll it cheaply -- the endpoint itself always returns
+    ``200`` once the HTTP server is up (liveness), and ``ready`` distinguishes a
+    server that is still waiting on its first-boot index fetch (readiness).
+    """
+    doc: dict[str, Any] = {
+        "status": "ok" if ready else "starting",
+        "backend": backend,
+        "ready": ready,
+        "stac_version": STAC_VERSION,
+    }
+    if items is not None:
+        doc["items"] = items
+    return doc
+
+
 def _temporal_interval(temporal: tuple[str | None, str | None] | None) -> list[list[str | None]]:
     start, end = temporal or (None, None)
     return [[start, end]]
@@ -1218,6 +1240,31 @@ def build_app(
     @app.get("/conformance", tags=["STAC"])
     def get_conformance() -> dict[str, Any]:
         return conformance()
+
+    @app.get("/healthz", tags=["Ops"])
+    def get_health() -> dict[str, Any]:
+        # Liveness + readiness for container orchestration (a Docker
+        # HEALTHCHECK, a Kubernetes probe). Returns 200 whenever the HTTP
+        # server is up; the body's `ready` reports whether the search backend
+        # can answer queries yet -- on first boot the published-index fetch may
+        # still be in flight, so a server can be alive but not yet ready.
+        if live:
+            return health_document(backend="live", ready=True)
+        try:
+            source = open_source(index_path, live=False)
+        except FileNotFoundError:
+            return health_document(backend="index", ready=False)
+        try:
+            items: int | None = None
+            stats = getattr(source, "stats", None)
+            if stats is not None:
+                try:
+                    items = int(stats()["items"])
+                except (KeyError, TypeError, ValueError):
+                    items = None
+            return health_document(backend="index", ready=True, items=items)
+        finally:
+            _close(source)
 
     @app.get("/collections", tags=["STAC"])
     def get_collections(request: Request) -> dict[str, Any]:

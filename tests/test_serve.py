@@ -217,6 +217,54 @@ def test_landing_and_conformance_endpoints(client):
     assert set(serve.CONFORMANCE_CLASSES) <= set(body["conformsTo"])
 
 
+def test_healthz_reports_ready_index_with_item_count(client):
+    # The container/orchestration health probe: 200 + a ready index carrying the
+    # fixture's three acquisitions.
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["ready"] is True
+    assert body["backend"] == "index"
+    assert body["items"] == 3
+
+
+def test_healthz_is_alive_but_not_ready_without_an_index(tmp_path):
+    # First-boot / missing-index: the server is up (200) but reports not-ready,
+    # so a readiness probe holds traffic until the index fetch lands.
+    app = serve.build_app(tmp_path / "absent.db")
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "starting"
+    assert body["ready"] is False
+    assert "items" not in body
+
+
+def test_healthz_ready_in_live_mode(tmp_path):
+    # Live mode has no local index but can serve, so the probe is ready without
+    # touching S3 (no walk happens until an actual /search).
+    app = serve.build_app(tmp_path / "unused.db", live=True)
+    client = TestClient(app)
+    body = client.get("/healthz").json()
+    assert body["ready"] is True
+    assert body["backend"] == "live"
+
+
+def test_health_document_builder_shapes():
+    ready = serve.health_document(backend="index", ready=True, items=42)
+    assert ready == {
+        "status": "ok",
+        "backend": "index",
+        "ready": True,
+        "stac_version": serve.STAC_VERSION,
+        "items": 42,
+    }
+    starting = serve.health_document(backend="index", ready=False)
+    assert starting["status"] == "starting" and "items" not in starting
+
+
 def test_collections_endpoint_lists_the_single_collection(client):
     body = client.get("/collections").json()
     ids = [c["id"] for c in body["collections"]]

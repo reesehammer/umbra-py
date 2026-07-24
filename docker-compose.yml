@@ -1,0 +1,43 @@
+# One-command self-hosting of the Umbra STAC API.
+#
+#     docker compose up
+#
+# Brings up `umbra serve` on http://localhost:8000 (OpenAPI docs at /docs,
+# health at /healthz). On first boot it fetches the published catalog index
+# snapshot into the named `umbra-data` volume, so subsequent starts are instant
+# and the S3 archive is never re-crawled.
+services:
+  umbra-serve:
+    build:
+      context: .
+      # Swap to `serve,viz` to also enable the on-demand /artifacts render
+      # endpoints (pulls in rasterio/matplotlib -- a larger image).
+      args:
+        UMBRA_EXTRAS: serve
+    image: umbra-py:serve
+    ports:
+      - "8000:8000"
+    environment:
+      # Fetch the published index on first boot (set to 0 to skip, or use
+      # UMBRA_SERVE_LIVE=1 to walk S3 per request with no index).
+      UMBRA_FETCH_INDEX: "1"
+      # UMBRA_SERVE_LIVE: "1"
+      # UMBRA_INDEX_URL: "https://.../catalog.db"   # a fork/mirror snapshot
+      # UMBRA_SERVE_ARGS: "--no-artifacts"          # bound COG-streaming egress
+    volumes:
+      # Persist the fetched index + render cache across restarts.
+      - umbra-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status==200 else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  umbra-data:

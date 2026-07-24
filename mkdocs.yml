@@ -82,6 +82,7 @@ nav:
   - Install: install.md
   - Quickstart: quickstart.md
   - Example notebooks: guides/notebooks.md
+  - Deploy / self-host: deploy.md
   - CLI reference: cli.md
   - API reference:
       - Catalog search: reference/catalog.md

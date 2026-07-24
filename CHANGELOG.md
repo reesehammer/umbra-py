@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **One-command Docker self-hosting of `umbra serve` + a `/healthz` probe
+  (`STRATEGY.md` §8 demo/hosting, `DEMO_APP_GAPS.md` G7).** The repo now ships a
+  `Dockerfile`, a `docker-compose.yml`, a `.dockerignore` and a
+  `docker-entrypoint.sh`, so `docker compose up` (or `docker run -p 8000:8000
+  umbra-py`) stands the read-only STAC API up with no local Python install. On
+  first boot the entrypoint fetches the published catalog index snapshot into a
+  `/data` volume (no S3 crawl), then serves `/search`, `/collections`, the
+  OpenAPI docs at `/docs` and a new **`GET /healthz`** liveness/readiness probe.
+  `/healthz` returns `200` once the HTTP server is up (liveness) and its body's
+  `ready` flag reports whether the search backend can answer queries yet
+  (readiness — the first-boot fetch may still be in flight), so it fits a Docker
+  `HEALTHCHECK` and a Kubernetes probe directly (new pure builder
+  `serve.health_document`, wired into `build_app`). The image runs unprivileged,
+  persists the index + render cache to the `/data` volume, and doubles as the
+  CLI (`docker run --rm umbra-py search …`); env vars tune it (`UMBRA_SERVE_LIVE`
+  walks S3 with no index, `UMBRA_FETCH_INDEX=0` skips the fetch, `UMBRA_INDEX_URL`
+  points at a mirror, `UMBRA_SERVE_ARGS` forwards flags), and a
+  `--build-arg UMBRA_EXTRAS=serve,viz` build adds the on-demand `/artifacts/…`
+  render endpoints. A new `docker.yml` CI job builds the image and smoke-tests
+  it end to end (CLI passthrough, compose validation, and a live-mode server
+  answering `/` and `/healthz` with no external network); `/healthz` is
+  offline-tested in `tests/test_serve.py`. Docs: a new `docs_src/deploy.md`
+  reference and a README "Self-host it with Docker" section. This closes the
+  Docker half of the demo/hosting critical path (the static GitHub Pages
+  showcase deploy remains open).
 - **SAR acquisition-property filters on the `umbra serve` STAC Query extension
   (`STRATEGY.md` §3 "every surface agrees", `TODO.md` acquisition-filter
   follow-on).** The `umbra serve` STAC API previously exposed only
