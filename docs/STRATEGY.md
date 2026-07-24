@@ -1,14 +1,24 @@
 # umbra-py Strategy — Maximally Valuable to Umbra and the SAR Ecosystem
 
-*A living strategy document: why this project exists, where it sits in the
-ecosystem, and the ranked workstreams that make it valuable to Umbra (the
-company) and to everyone working with SAR open data. Update the status lines
-as things land; add new ideas at the bottom rather than rewriting history.
-Companion docs: [`CODEBASE_ANALYSIS.md`](CODEBASE_ANALYSIS.md) (code-level
-priorities), [`AI_INTEGRATION_IDEAS.md`](AI_INTEGRATION_IDEAS.md) (AI/MCP
-direction), [`DEMO_APP_GAPS.md`](DEMO_APP_GAPS.md) (demo-app readiness).*
-
-*Last updated: 2026-07-18.*
+> **How this file fits with the rest of the repo.** This is the single home for
+> the project's enduring *context*: why it exists, where it sits in the SAR
+> ecosystem, the design principles it holds to, and the remaining critical
+> path. It is deliberately **not** a status log.
+>
+> - **What has shipped** lives in [`CHANGELOG.md`](../CHANGELOG.md) (history,
+>   newest first) — the authoritative record. Do not re-narrate shipped work
+>   here.
+> - **Fine-grained open follow-ons** live in [`TODO.md`](../TODO.md) (the
+>   per-PR ledger of items intentionally scoped out of merged PRs).
+> - **This file** carries the durable "why" and the short list of genuinely
+>   open workstreams (§8).
+>
+> The three companion planning docs — `CODEBASE_ANALYSIS.md`,
+> `DEMO_APP_GAPS.md`, and `AI_INTEGRATION_IDEAS.md` — were analysis snapshots
+> whose plans are now largely executed. They have been consolidated into this
+> file and reduced to short pointers. Their historical item IDs (`C1`, `G6`,
+> `P2 #11`, workstream `5.x`, …) still appear in source docstrings and commit
+> messages; the detail behind each lives in git history and the CHANGELOG.
 
 ---
 
@@ -31,1484 +41,6 @@ These goals reinforce each other. The honest pitch to Umbra is not "no one
 can do this without us"; it's *"everyone who does this without us writes the
 same 500 lines of glue first, and many give up."*
 
-> **Critical-path note (2026-07-15):** the S3 pagination bug that silently
-> truncated every listing at 1,000 keys — the prerequisite the analysis, demo,
-> and AI-integration docs all named for any "full catalog" work — is fixed
-> (PR #29). Whole-catalog search, index builds, and renders are complete again.
-> Building on that, the **prebuilt-index consume side is now shipped**
-> (workstream 5.2): `umbra index fetch` / `CatalogIndex.from_release()` pulls
-> the weekly `catalog.db` snapshot, so a fresh install gets instant
-> whole-catalog `--local` search with no crawl. That was the last shared
-> prerequisite the demo / MCP / STAC-API layers were waiting on — those are now
-> unblocked.
->
-> **Update:** the **`umbra-mcp` MCP server has shipped** (`AI_INTEGRATION_IDEAS.md`
-> B1 — the flagship AI deliverable). Every MCP-enabled client is now a
-> zero-install natural-language front door to the archive; the imagery tools
-> return radar pictures, not just JSON. Getting it *listed* in the MCP
-> registries and Anthropic's directory is now part of workstream 5.3 ("make
-> adoption visible where Umbra looks").
->
-> **Update:** the **`umbra serve` STAC API façade has shipped** (`AI_INTEGRATION_IDEAS.md`
-> B2 / `DEMO_APP_GAPS.md` Path B). Umbra publishes a static STAC catalog and no
-> search API — the structural reason the standard geo tooling falls flat (§2) —
-> and this restores it: a read-only STAC API over the local index (`umbra serve`,
-> `[serve]` extra) that `pystac-client`, the QGIS STAC plugin, `stac-browser`,
-> leafmap, and OpenAPI-driven agents all speak. It is the browser-facing sibling
-> of the MCP server and the shared backend a self-serve demo app (`DEMO_APP_GAPS.md`)
-> needs. Materially, this widens the "discovery is the moat" surface (§3): the
-> search-over-a-catalog-with-no-search-API primitive is now reachable from every
-> STAC client, not just this library's own API — and it is exactly the kind of
-> component that would be graceful to *offer upstream* to Umbra (5.2).
->
-> **Update:** the **visual commands now render from the prebuilt index**
-> (`DEMO_APP_GAPS.md` G2 / Path A step 2). `umbra map`, `gallery`, `swipe`,
-> `change` and `timescan` take the same `--local` / `--index-db` flags as
-> `search`, so a fetched `catalog.db` turns whole-catalog maps and galleries into
-> instant, offline renders instead of a live S3 re-walk. Small but on the
-> critical path: it was the last "the index does nothing for the visual output"
-> gap, and it is the fast-render substrate the static-first demo (Path A) builds
-> on next.
->
-> **Update:** the **`llms.txt` context bundle has shipped**
-> (`AI_INTEGRATION_IDEAS.md` A2 — the last open Phase 2 item). `umbra llms-txt
-> [--full]` renders the [llms.txt-convention](https://llmstxt.org/) Markdown —
-> the *user* agent guide ("how to drive the library"), complementing `AGENTS.md`
-> (the contributor guide) and the machine-readable `umbra context` JSON — and
-> the committed repo-root `llms.txt` / `llms-full.txt` are that output. It is
-> pure adoption plumbing (widen the funnel, §1): any agent or newcomer can now
-> fetch one file and know which product to ask for, how to search, and that
-> attribution is mandatory — without reading the source. `llms-full.txt` is
-> assembled from facts already in the package (the domain document, the live CLI
-> tree, the module docstrings), so it can never drift from the code it
-> describes.
->
-> **Update:** the **deterministic first step of natural-language search has
-> shipped** (`AI_INTEGRATION_IDEAS.md` C1). `--start` / `--end` now accept human
-> date expressions (`2024`, `today`, `3 months ago`, `last month`) alongside
-> `YYYY-MM-DD`, resolved by a stdlib-only bound-aware calendar parser with no
-> model call. It lands in the single date choke point every command shares, so
-> `search`, `index build`, and all the visual commands gain it at once — pure
-> funnel-widening (§1): the query surface newcomers *and* agents reach for
-> reads the way people actually describe time, while the core stays fully
-> deterministic and offline-testable.
->
-> **Update:** the **deterministic fuzzy task matching step of natural-language
-> search has shipped** (`AI_INTEGRATION_IDEAS.md` C1). `area=` stays a literal
-> substring by default; `fuzzy=True` / `--fuzzy` widens it to a stdlib-only
-> token-wise match (`umbra_py.fuzzy`) — word-order- and punctuation-independent
-> and typo-tolerant, so `"utah centerfield"` or `"centrfield"` still reach
-> `"Centerfield, Utah"` with no model call. It is a strict superset of the
-> substring match and the live and index backends share the one matcher, so the
-> query surface newcomers and agents reach for tolerates how people actually
-> type a site name while the core stays deterministic — pure funnel-widening
-> (§1). The remaining C1 pieces (semantic/embedding aliasing and the LLM-planned
-> `umbra ask`) are the model-backed layer that builds on this deterministic base.
->
-> **Update:** the **LLM-planned `umbra ask` has shipped** (`AI_INTEGRATION_IDEAS.md`
-> C1 — the capstone of natural-language search and the first feature in the
-> package that calls a model). `umbra ask "…"` (`umbra_py.planner`, `[ai]` extra)
-> sends the user's sentence plus the `llm_context()` document to a configured
-> model (Anthropic or any OpenAI-compatible endpoint, user-supplied key) and gets
-> back the search *parameters* it maps to — but the model **only plans**: every
-> field is re-validated deterministically (`parse_plan`) and the resolved `umbra
-> search` command is shown before it runs. This is the honest funnel-widener the
-> whole C1 line was building toward (§1): a newcomer who can't yet name the
-> product type or phrase a bbox describes what they want in a sentence and gets a
-> real, auditable search — while the deterministic core, its testability, and the
-> trust of the scientific audience (the "model plans, library executes" boundary,
-> §3 novelty) are all preserved. The one open C1 piece is now the semantic
-> embedding index — the offline answer to task aliasing.
->
-> **Update:** the **semantic embedding index has shipped** (`AI_INTEGRATION_IDEAS.md`
-> C1 — the last open C1 piece, so **natural-language search is now complete**).
-> `umbra semantic build` embeds the catalog index's task names once, and `umbra
-> semantic search "grain storage north dakota"` ranks them by meaning to reach
-> `"Beet Piler - ND"` — the alias a query shares no word with, which the
-> deterministic `--fuzzy` matcher can't and shouldn't fake. It is the persistent,
-> offline, no-round-trip answer `umbra ask` only approximated, and it holds the
-> same funnel-widening line (§1): a newcomer who can *describe* a site but can't
-> *name* it now gets there. It also preserves the project's boundary and novelty
-> (§3): the only model call is turning text into a vector (an injectable embedder,
-> `[ai]` extra, never implicit), while storage, cosine ranking and the
-> audit-then-run command are all deterministic — and it stays graceful under
-> upstream obsolescence, since it layers on the same task list Umbra could publish
-> an index for tomorrow. With C1 done, the AI critical path moves to Tier C's
-> VLM-in-the-loop capabilities (scene description / change narration) and the
-> example notebooks; the single highest-value strategic move overall remains the
-> unstarted Canopy backend (5.1).
->
-> **Update:** the **first Tier C VLM-in-the-loop capability has shipped** —
-> `umbra describe` (`AI_INTEGRATION_IDEAS.md` C2). This is where the project's
-> AI thesis (§3 novelty) becomes a product: the library's outputs are *images
-> with precise metadata*, so `umbra describe <item-url>` renders an item's
-> quicklook, sends it plus the metadata context card to a configured vision model
-> (Anthropic or any OpenAI-compatible endpoint, user key), and returns a
-> structured, plain-language reading — `{summary, observed_features[], confidence,
-> caveats[]}`. It widens the funnel the honest way (§1): a newcomer who can search
-> but can't *read* SAR (why is water dark? is that shadow or an empty field?) now
-> gets the scene explained, with the SAR literacy encoded once in the packaged
-> prompt. It preserves the boundary and trust the scientific audience needs (§3):
-> the model **only interprets** — the picture and metadata are deterministic, the
-> reply is re-validated, and every description carries the CC-BY attribution plus
-> an explicit "AI-generated interpretation" provenance note, so a model's reading
-> of radar is never mistaken for a measurement. The remaining C2 piece is change
-> narration (`umbra change --narrate`); the example notebooks and the unstarted
-> Canopy backend (5.1) remain the higher-level critical path.
->
-> **Update:** the **second Tier C VLM capability has shipped, completing C2** —
-> `umbra change --narrate` (`AI_INTEGRATION_IDEAS.md` C2). Where `umbra describe`
-> reads one scene, this narrates the *change* between two passes — and it is the
-> honest version §3's novelty demands, because the narration is grounded in a
-> **deterministic per-block dB sidecar**, not just the picture. `umbra_py.narrate`
-> computes a coarse north-up grid of the mean *signed* backscatter change in
-> decibels (positive = brightened/appeared — the composite's green; negative =
-> dimmed/vanished — its magenta) and hands the model *both* the composite PNG and
-> that grid, so it narrates only change the numbers support; the grid ships next to
-> the image as `<out>.narration.json`, making every statement auditable against a
-> value a test can recompute. It widens the funnel the honest way (§1): a newcomer
-> who can render a change composite but can't *read* it now gets "what changed,
-> where, and how much (in dB)" in plain language. It preserves the boundary and
-> trust the scientific audience needs (§3): the picture and the numbers are
-> deterministic, the model **only interprets** (its reply passes the
-> `parse_narration` boundary and never becomes a filter or a measurement), and every
-> narration carries the CC-BY attribution plus the `AI_PROVENANCE` note. With C2
-> complete, the AI critical path moves to Tier C's C3 watch loops / C4 `umbra chips`
-> and the B3 example notebooks; the single highest-value strategic move overall
-> remains the unstarted Canopy backend (5.1).
->
-> **Update:** the **first C3 capability has shipped** — `umbra watch`
-> (`AI_INTEGRATION_IDEAS.md` C3), the "agent as a standing analyst" primitive.
-> SAR's value for monitoring is its cadence, so the funnel-widening move (§1) is
-> to make *standing* monitoring trivial: run the same search on a schedule and act
-> only on what is **new**. `umbra watch` (`umbra_py.watch`) packages the
-> idempotent delta — it searches (live or from the index), diffs against the set
-> of acquisitions previous runs already reported, returns only the new ones, and
-> remembers them in the index's `meta` table — while the scheduler (cron, a GitHub
-> Action, an agent loop) supplies the "when". It is machine-readable first
-> (`--json` delta, `--exit-code` for a shell `if`), so a monitoring pipeline needs
-> no glue. It preserves the boundary and novelty the scientific audience needs
-> (§3): **no model is called** — this is pure set arithmetic over the deterministic
-> search — and it layers on the same discovery moat the whole project is built on,
-> so it stays graceful under upstream obsolescence. Paired with the shipped
-> `umbra change --narrate`, the standing-analyst loop (new pass → composite →
-> narration → notify) is now assemblable end-to-end. The AI critical path moves to
-> C4 `umbra chips` and the B3 example notebooks; the single highest-value strategic
-> move overall remains the unstarted Canopy backend (5.1).
->
-> **Update:** **`umbra chips` has shipped** (`AI_INTEGRATION_IDEAS.md` C4 / the
-> ML-dataset-prep half of workstream 5.5). Umbra sells into ML-heavy analytics, so
-> the funnel-widening move (§1) is to make Umbra data trivially *trainable*:
-> `umbra chips` (`umbra_py.chips`, `[load]` extra) walks a search result and cuts
-> each scene's geocoded GeoTIFF into fixed-size, georeferenced training tiles
-> (GeoTIFF or `.npy`) with a manifest (`.jsonl` or `.geojson`) that attaches the
-> look-angle / resolution / polarization / license metadata a training pipeline
-> needs to every chip. It streams only each tile's bytes via `/vsicurl/` range
-> reads (no full download, memory bounded to one chip), drops partial edges and
-> mostly-nodata corners, and supports overlapping tiles via `stride`. It preserves
-> the boundary and novelty the scientific audience needs (§3): **no model is
-> called** — chipping is pure raster iteration + manifest logic in the
-> deterministic core — and it layers on the same discovery moat the project is
-> built on, so it stays graceful under upstream obsolescence. It makes umbra-py the
-> data-loading layer for SAR foundation-model and change-detection research (the
-> audience most likely to contribute back) and is the prerequisite the exploratory
-> archive-embedding work (C5) builds on. The remaining AI item is the B3 example
-> notebooks; the single highest-value strategic move overall remains the unstarted
-> Canopy backend (5.1).
->
-> **Update:** the **standing-analyst loop is now conversational** — the `umbra
-> watch` delta ships as a `watch_site` tool and a `watch-site` prompt on the
-> flagship MCP server (`AI_INTEGRATION_IDEAS.md` C3's optional follow-up, which
-> **completes C3**), reusing the `watch()` function unchanged. This is a direct
-> funnel-widening move (§1) on the highest-leverage surface the project has: an
-> MCP client can now ask "what's new at this site since I last checked?" and get
-> back only the delta — all of it on the first check, just the new passes after —
-> as context cards that feed straight into the existing `change_composite` /
-> `timescan` tools, so SAR-based monitoring (new pass → composite → describe) is a
-> zero-install conversation instead of a scripting project. It preserves the
-> boundary and novelty the scientific audience needs (§3): **no model is called**
-> — pure set arithmetic over the deterministic search — watch state persists in
-> the local index's `meta` table so it survives across sessions with no schema
-> change, and the source and store stay injectable, so it is fully offline-testable
-> without the SDK. The remaining AI item is the B3 example notebooks; the single
-> highest-value strategic move overall remains the unstarted Canopy backend (5.1).
->
-> **Update:** the **single highest-value strategic move has shipped — the Canopy
-> commercial-archive backend behind the same `search()` interface** (workstream
-> 5.1). `UmbraCatalog(token=…)` (and `umbra search --token …` /
-> `$UMBRA_CANOPY_TOKEN`) now searches Umbra's authenticated commercial archive
-> over its real STAC API (`api.canopy.umbra.space/archive/search`) instead of
-> crawling the open bucket — *the same call, one extra argument*, yielding the
-> same `UmbraItem`s so every downstream verb (download, quicklook, change,
-> chips, …) works unchanged against either archive. This is the funnel made
-> literal (§1): a user who learned the library on the free data is already
-> holding the exact tool they'd use as a paying Canopy customer, with no new
-> API to learn. It is the honest, standards-based version of the pitch — the
-> client speaks the STAC API standard (POST search body, `rel="next"`
-> pagination), the token is only ever sent to the Canopy endpoint (never the
-> open bucket), and the whole path is offline-testable against a mocked API with
-> no credentials, so it holds the library's testability and trust (§3). With
-> 5.1 landed, the two remaining strategic gaps are the B3 example notebooks
-> (5.4) and taking adoption visible where Umbra looks (5.3) — including opening
-> the "talk to Umbra" conversation (5.6), which is now concrete: the funnel runs
-> end to end from free bucket to paid archive in one library.
->
-> **Update:** the **release plumbing for the funnel's front door has shipped**
-> (`CODEBASE_ANALYSIS.md` P0 #2/#3, P2 #11/#15). With the whole funnel now built
-> — free-bucket search through the paid Canopy archive, all in one library — the
-> binding constraint on §1's thesis ("widen the funnel — more people successfully
-> using the open data") is no longer a missing *capability*; it is that the
-> README's first instruction, `pip install umbra-py`, still fails because the
-> package isn't on PyPI. The analysis doc names that the single highest-leverage
-> adoption gap, and it gates the two remaining strategic workstreams (5.3 "make
-> adoption visible" — every registry listing assumes an installable package — and,
-> after it, 5.6 "talk to Umbra"). This lands the code half of that gap: a
-> Trusted-Publishing (OIDC, no stored token) `release.yml` that builds, `twine
-> check`s, and guards the tag/version before publishing on a GitHub Release; a
-> single-sourced version (hatchling dynamic version, so `pyproject.toml` and
-> `__version__` can't drift); the `py.typed` marker so downstream type checkers
-> consume the inline types; and the fix to the stale `theminiverse`→`reesehammer`
-> repository-identity mismatch across `pyproject.toml`, `CHANGELOG`, and
-> `CONTRIBUTING`. What remains is a maintainer action, not code: register the PyPI
-> Trusted Publisher and cut the `v0.1.0` release, which fires the workflow. With
-> that, `pip install umbra-py` works and 5.3's registry/ecosystem listings become
-> unblocked.
->
-> **Update:** the **example notebook gallery has shipped** (workstream 5.4 /
-> `AI_INTEGRATION_IDEAS.md` B3 — the last standing item on the AI critical path
-> and "the thing DevRel links first"). Every AI-infused capability (C1–C4) and
-> the whole funnel (free bucket → paid Canopy archive) are built; what was still
-> missing was the *runnable, rendered* front door that turns a curious analyst
-> into a user. Three self-contained notebooks under `examples/` now supply it —
-> `01_hello_umbra` (search → summarize → quicklook, plus the geopandas /
-> `to_llm_context` paths), `02_download_and_open_gec` (stream a GEC into
-> analysis-ready `xarray`), and `03_change_detection` (composite two passes of a
-> repeat-imaged site). They hold the project's culture exactly (§3): each is a
-> *small deterministic search with `assert`s in its cells*, so it is a live eval
-> as much as a tutorial, and `tests/test_examples.py` keeps them from rotting
-> with a stdlib-only offline CI guard (well-formed, cells parse, only public
-> `umbra_py` symbols, CC-BY attribution present) plus an opt-in
-> `pytest -m network` execution against the live bucket. This is pure
-> funnel-widening (§1): the greatest-hits SAR workflows are now marketing Umbra
-> doesn't have to write, and the first thing a newcomer or a coding agent runs.
-> With the notebooks landed, the remaining strategic gaps are the SICD → geocoded
-> COG format work (5.5) and the maintainer-side adoption moves (5.3 registries,
-> 5.6 talking to Umbra) — the code funnel now runs end to end.
->
-> **Update:** the **archive scene-embedding capability has shipped**
-> (`AI_INTEGRATION_IDEAS.md` C5 — the last open AI item, so every idea in that
-> document is now built). `umbra embed` (`umbra_py.embed`, `[ai]` + `[viz]` extras)
-> embeds one quicklook per acquisition and ranks scenes by cosine similarity, so
-> `umbra embed similar <url>` finds acquisitions that *look like* a given one and
-> `umbra embed search "a flooded field"` finds them from a text description. This
-> is the project's novelty (§3) at its sharpest: a **genuinely new capability over
-> the archive** — visual similarity search that nothing in the Umbra ecosystem
-> offers, and that no amount of metadata search can fake. It also stays graceful
-> under the "moat is leased" risk (§3): it layers on the same discovery substrate
-> the whole project is built on, and the embedding table is exactly the kind of
-> artifact worth *offering upstream* (5.2) — publish it beside the nightly index and
-> the ecosystem gets scene-similarity search for free. It preserves the boundary
-> the scientific audience needs (§3): the only model call is turning an image or a
-> query into a vector (injectable, `[ai]` extra, never implicit), while rendering,
-> storage, cosine ranking and thresholding are stdlib-only — and the vectors live
-> in a sidecar `catalog.embed.db`, never inside the deterministic `catalog.db`, so a
-> core install is never asked to carry model-derived data it can't use. With C5
-> done, the remaining strategic gaps are unchanged and non-AI: the SICD → geocoded
-> COG format work (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6
-> talking to Umbra).
->
-> **Update:** the **HTTP/download path is now hardened** (`CODEBASE_ANALYSIS.md`
-> P1 #5/#6, §3.2/§4.3 — supporting infrastructure, §7). Strategy is only as
-> credible as the project's reliability, and the library's core job is fetching
-> data from a public bucket: `_http.default_session()` now retries transient S3
-> failures with backoff (so a single 503 no longer fails a multi-minute index
-> build — every caller inherits it), and `download_url` verifies each download
-> against `Content-Length` and validates a resume with `If-Range` (so a
-> truncated body fails loudly instead of renaming a silently-incomplete file, and
-> a changed remote object restarts cleanly instead of splicing). Not a new
-> capability — the reliability floor under every capability already shipped. The
-> strategic gaps above are unchanged.
->
-> **Update:** **live search is now concurrent** (`CODEBASE_ANALYSIS.md` §4.2 /
-> P1 #9 — supporting infrastructure, §7). Discovery is the moat (§3): the one
-> thing with no substitute is search over a catalog that has no search API, so
-> how *fast* that search feels is strategy, not polish. The catalog walk's last
-> serial bottleneck was the per-acquisition `*.stac.v2.json` sidecar GET — a
-> 50-item search paid ~50 latencies back to back. `UmbraCatalog._walk_task` now
-> fetches those sidecars through a bounded thread pool (mirroring the gallery's
-> proven pattern) while yielding in the same deterministic acquisition-date
-> order, so a task's wall time collapses from N serial fetches toward N/workers
-> with no change to *what* is returned. Not a new capability — the responsiveness
-> floor under the core operation every user and agent reaches for first. The
-> strategic gaps above are unchanged: SICD → geocoded COG (5.5) and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update:** the **first self-serve interactive demo application has shipped** —
-> `umbra demo` (`DEMO_APP_GAPS.md` G3/G4, Path A's front end). Every prior visual
-> command emits a *one-shot* artifact; the demo-gap analysis names the missing
-> piece as an *application* — a self-serve, full-catalog, interactive UX — and
-> this is that piece, delivered in the library's own grain: one self-contained
-> HTML page (Leaflet + `Leaflet.markercluster`, browser-side, no Python extra) over a whole
-> gathered slice of the catalog, with the client-side controls the doc flagged as
-> absent (free-text site search, a date-range slider, product-type chips), marker
-> **clustering** that scales past the Folium polygon ceiling, and a
-> click-to-quicklook SAR overlay reusing the proven `_lazy_imagery` geotiff.js
-> driver. It routes through the shared `_gather_items` helper, so `--local` builds
-> it from the prebuilt index in milliseconds — the "no multi-minute walk in the
-> user's critical path" a demo needs. This is the sharpest funnel-widener since
-> the notebooks (§1): the "make Umbra's SAR feel as approachable as Sentinel-1"
-> thesis is best sold by a page a curious analyst can *explore*, not a command
-> they must run — and it is the shared front end a Pages-hosted showcase (the
-> natural companion to 5.3's adoption moves) now builds on. It preserves the
-> project's grain and testability (§3): the generator is stdlib-only and fully
-> offline-testable, remote metadata reaches the page only as JSON placed via
-> `textContent`/`setAttribute` (never parsed as HTML), and it layers on the same
-> discovery substrate the whole project rests on, so it stays graceful under
-> upstream obsolescence. Remaining demo-app gaps are unchanged and additive:
-> PMTiles tiling for the *whole* acquisition set and R4's on-demand
-> change/swipe/timescan renders from the UI (`DEMO_APP_GAPS.md` Path A step 3 /
-> Path B). The higher-level strategic gaps are also unchanged: SICD → geocoded COG
-> (5.5) and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
-> Umbra).
->
-> **Update:** the **on-demand render endpoints have shipped on `umbra serve`**
-> (`DEMO_APP_GAPS.md` R4 / Path B step 2 — the server side of the last self-serve
-> demo requirement). `umbra serve` had restored *discovery* (a STAC search API
-> over a catalog with none); the demo-gap analysis's remaining self-serve
-> requirement was *triggering the visual products over any site*, not just a
-> curated set baked at build time. The server now does that: `GET
-> /artifacts/quicklook/{id}.png`, `POST /artifacts/change` and `POST
-> /artifacts/timescan` resolve the acquisitions from the same `CatalogIndex` and
-> render them by wrapping the existing `viz` functions unchanged, caching each
-> PNG to disk keyed by its inputs. It is the sharpest demo-critical-path move
-> since the demo page itself (§1): the "make Umbra's SAR feel as approachable as
-> Sentinel-1" thesis is best sold by a page a curious analyst can *act* on —
-> click a site, see it change over time — and this is the backend that closes the
-> loop over the whole archive rather than a handful of pre-baked showcases. It
-> preserves the project's grain and testability (§3): the renderers are
-> **injectable**, so the routes are unit-tested in the core install with no
-> network and no `viz` extra (the same discipline the STAC document builders
-> already hold), and the endpoints are opt-out (`--no-artifacts`) for a public
-> instance that wants to bound COG-streaming egress — the guardrail (§6) against
-> being the reason their S3 bill spikes. It layers on the same discovery substrate
-> the whole project rests on, so it stays graceful under upstream obsolescence.
-> Remaining demo gaps are unchanged and additive: the front-end "run this analysis
-> here" wiring that *calls* these endpoints, a `swipe` endpoint, async job
-> semantics for the longest renders, and the full-acquisition-set PMTiles tiling
-> (`DEMO_APP_GAPS.md` Path A step 3). The higher-level strategic gaps are also
-> unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption moves
-> (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the self-serve demo loop is now closed. `umbra serve`
-> gained `POST /artifacts/swipe` (an interactive before/after HTML page,
-> served from its own cache entry alongside the three PNG composites) and a
-> permissive read-only CORS policy, and `umbra demo --server-url` wires an
-> "Analyze this view" panel that POSTs the currently-filtered acquisitions to
-> the change/timescan/swipe endpoints and renders the result in place — the R4
-> "run this analysis here" affordance over *any* site (`DEMO_APP_GAPS.md` Path B
-> step 3). What remains under the demo heading is only async job semantics for
-> the longest renders and the full-acquisition-set PMTiles tiling.
->
-> **Update (2026-07-16):** the **async job semantics for the longest renders have
-> shipped** (`DEMO_APP_GAPS.md` Path B step 2 — the productized shape the
-> synchronous render endpoints deferred as an honest first slice). A composite
-> request can opt in to `"async": true` and get a `202 Accepted` + a job id back
-> immediately instead of holding the request for the whole render; it then polls
-> `GET /jobs/{id}` (`queued` → `running` → `succeeded` | `failed`) and fetches the
-> finished artifact from `GET /jobs/{id}/result`. The move that keeps it in the
-> project's grain (§3): there is **no separate result store** — the render still
-> writes the same content-addressed disk cache the synchronous path uses, so a
-> completed job's result *is* a cache entry, and an async request whose key is
-> already cached returns an already-`succeeded` job with no work. It preserves the
-> determinism and testability the scientific audience needs (§3): frame resolution
-> and validation stay synchronous (a bad request is still a fast `400`, never a
-> doomed job; a failed render is a `failed` job whose result endpoint mirrors the
-> sync status), and the queue's executor is **injectable**, so the whole path is
-> offline-testable with no wall-clock timing — the same discipline the injectable
-> renderers already hold. This productizes the demo's server backend for the
-> renders that actually take tens of seconds (a large `max_size`, a long
-> timescan). With it, the only remaining item under the demo heading is the
-> full-acquisition-set PMTiles tiling (Path A step 3); the higher-level strategic
-> gaps are unchanged: SICD → geocoded COG (5.5) and the maintainer-side adoption
-> moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **SICD → geocoded COG one-liner has shipped**
-> (`STRATEGY.md` 5.5 — the higher-level code gap named at the foot of nearly
-> every update above). Every path to the open data assumes the ``GEC`` asset is
-> already a geocoded COG; the complex ``SICD`` product is not — it lives in the
-> radar slant plane, so it does not open on a map, in QGIS, or in the
-> xarray/rioxarray stack without hand-rolled geocoding, which is exactly the
-> "same 500 lines of glue" the thesis (§1) says drives people away. `umbra
-> convert SRC DST` (and `umbra_py.convert.sicd_to_geocoded_cog`) closes that:
-> it detects amplitude and warps it onto a north-up EPSG:4326 cloud-optimized
-> GeoTIFF using SICD's *own* image-projection model — a lattice of ground control
-> points from `project_image_to_ground_geo` — so the sensor geometry, not a naive
-> corner-stretch, places the pixels. It stays in the project's grain and
-> testability (§3): the geocoding core (`_warp_gcps_to_cog`) is deliberately free
-> of any sarpy dependency, so it is offline-tested with a plain array and
-> hand-built GCPs against real `rasterio`, and the SICD read → amplitude → GCP →
-> warp path is exercised end to end with a faked reader (the same injectable
-> discipline the renderers and STAC builders already hold) — `convert.py` went
-> from zero tests to a full offline suite in the `[convert]` extra CI job. The
-> geocoding is an honest flat-earth first slice (pixels on the scene's HAE
-> plane): exact over flat terrain, adequate for map placement elsewhere, and
-> `--slant-plane` still emits the prior ungeoreferenced amplitude for quick
-> inspection. This directly serves the ML/analytics audience 5.5 targets (Umbra
-> data becomes trivially loadable) and unblocks the `04_sicd_amplitude` notebook
-> flagged in 5.4. What remains under 5.5 is full terrain orthorectification (a
-> DEM, MultiRTC interop) and RTC recipes; the other higher-level gaps are
-> unchanged: the demo's full-acquisition-set PMTiles tiling (Path A step 3) and
-> the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **whole-catalog PMTiles tiling has shipped** —
-> `umbra tiles` (`DEMO_APP_GAPS.md` Path A step 3, the last open code gap under
-> the demo heading). Discovery is the moat (§3), and the demo thesis (§1 — "make
-> Umbra's SAR feel as approachable as Sentinel-1") is best sold by a map a
-> curious analyst can *explore*; but every prior map surface embeds its features
-> in the page (Folium polygons in `umbra map`, an inline JSON blob in `umbra
-> demo`), which stops being fast at the *whole* acquisition set — the one view
-> that most says "this is a real archive." `umbra tiles` (`umbra_py.pmtiles`)
-> closes that: it pre-cuts the catalog's acquisition centroids into a vector-tile
-> pyramid and packages it as a single [PMTiles](https://github.com/protomaps/PMTiles)
-> file, so a map fetches only the tiles in view and stays fast at any scale, and
-> the file drops straight onto Pages or into a bucket — no tile server. The move
-> that keeps it in the project's grain and testability (§3): the demo-gap doc
-> sketched this as `export GeoJSON → tile with tippecanoe` (an external binary),
-> but because the geometry is *points*, the whole encoder — the Mapbox Vector
-> Tile protobuf and the PMTiles v3 container — is **pure standard library**, so it
-> runs in a core install and is fully offline-tested by decoding its own output
-> (and verified against the reference `pmtiles` / `mapbox-vector-tile` readers) —
-> the same discipline `export` and the STAC builders hold. `--viewer` emits a
-> self-contained MapLibre GL page over the archive (the same OpenStreetMap
-> basemap and mandatory CC-BY attribution the Leaflet demo uses), complementing
-> `umbra demo` rather than replacing it: `demo` for the interactive
-> filter-and-click slice, `tiles` for the fast zoom-anywhere whole-archive view.
-> It also stays graceful under the "moat is leased" risk (§3): the `.pmtiles`
-> file is exactly the kind of artifact worth *offering upstream* (5.2) — publish
-> it beside the nightly `catalog.db` and the ecosystem gets a whole-catalog
-> basemap for free. With Path A step 3 landed, the remaining strategic gaps are
-> non-demo and largely non-code: 5.5's full terrain orthorectification (a DEM,
-> MultiRTC interop) and RTC recipes, and the maintainer-side adoption moves (5.3
-> registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **generated HTML artifacts are now hardened
-> against injection from remote metadata** (`CODEBASE_ANALYSIS.md` §3.1 —
-> supporting infrastructure, §7). Strategy is only as credible as the project's
-> reliability, and the artifacts a curious analyst opens locally (the maps,
-> galleries, swipe/change pages, and the `umbra view` / `umbra demo` explorers)
-> are the funnel's front door — but they interpolate strings that come from
-> remote STAC JSON, and every discovery verb accepts *arbitrary* item URLs, so a
-> hostile document could inject a `<script>` or a `javascript:` link into a page
-> a user then opens from `file://`. A shared, dependency-free
-> `_html.safe_href()` (scheme allowlist + attribute-escaping) is now the single
-> gate for every clickable remote link, and every remote-derived string is
-> escaped before it reaches generated HTML — across `viz`, `_html`, `viewer`,
-> and `demo`, with regression tests for the escaping and the `javascript:`
-> rejection. Not a new capability — the trust floor under the shareable outputs
-> the whole funnel depends on (§3's "trust the scientific audience needs"). The
-> strategic gaps above are unchanged.
-
-> **Update (2026-07-16):** the **catalog index now refreshes incrementally** —
-> `umbra index update` / `CatalogIndex.update` (`CODEBASE_ANALYSIS.md` §4.4, the
-> "keep the crawl incremental" guardrail in §6). Discovery is the moat (§3), and
-> the prebuilt, published index is how that moat reaches a fresh install without a
-> multi-minute crawl (`umbra index fetch`, shipped). The missing half was
-> *staying* fresh cheaply: a full `umbra index build` fetches a sidecar for every
-> acquisition in the catalog — the N+1 round trips that dominate a crawl — so
-> refreshing a week-old snapshot re-read almost everything unchanged. `update`
-> closes that: it reads the newest acquisition date already indexed and re-walks
-> only from there (minus a small `--overlap-days` window for near-real-time
-> publish lag), so a weekly refresh reads just the new passes and upserts them
-> exactly as `build` does. It is pure funnel-widening infrastructure (§1): the
-> user who bootstrapped from the weekly snapshot now catches up in seconds rather
-> than re-downloading it, and the guardrail that the crawl stay polite and
-> incremental (§6) is now something a scheduled job can actually honor. It holds
-> the project's grain and testability (§3): no model, no new dependency, the
-> injectable catalog keeps the whole path offline-tested, and the bound's honest
-> limitation (acquisition date, not publish date — so back-dated late arrivals
-> want a widened window or a full build) is spelled out rather than hidden. The
-> published weekly snapshot is deliberately left as a full rebuild so it stays
-> authoritative. The remaining strategic gaps are unchanged and largely non-code:
-> 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-16):** **visual similarity search is now conversational** —
-> `umbra-mcp` gained `find_similar` / `find_similar_text` tools (plus a
-> `find-similar-scenes` prompt) surfacing the shipped `umbra embed` C5 capability
-> (`AI_INTEGRATION_IDEAS.md` §C5). This puts the project's *sharpest* novelty (§3 —
-> "a genuinely new capability over the archive that nothing in the Umbra ecosystem
-> offers, and that no amount of metadata search can fake") on the highest-leverage
-> surface it has: an MCP client can now say "find scenes that look like this flooded
-> field" and get back the closest archived acquisitions as cards whose STAC `href`
-> feeds straight into the existing `quicklook` / `change_composite` tools — the
-> search that lives in the pixels, closing the discover-then-view loop in one
-> conversation. It is a direct funnel-widener on the highest-leverage surface (§1),
-> reusing `SceneEmbeddingIndex` unchanged and holding the determinism boundary and
-> testability the scientific audience needs (§3): the tools gate on a prebuilt
-> sidecar `catalog.embed.db` and the `[ai]` key, the only model call is the
-> injectable embedder, and the whole path is offline-tested with a stand-in embedder
-> and renderer. It stays graceful under the "moat is leased" risk (§3): the
-> embedding table it queries is exactly the artifact worth *offering upstream* (5.2)
-> — publish it beside the nightly index and the ecosystem gets scene-similarity
-> search over MCP for free. The remaining strategic gaps are unchanged and largely
-> non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-16):** the **catalog index is now schema-versioned**
-> (`CODEBASE_ANALYSIS.md` §4.5 / P1 #10 — supporting infrastructure, §7).
-> Discovery is the moat (§3), and the way that moat now reaches a fresh install
-> without a multi-minute crawl is the *published* `catalog.db` snapshot users
-> `umbra index fetch` — which means the index is no longer a private cache but a
-> distributed artifact every `--local` path, the MCP server, `umbra serve`,
-> `umbra demo` and `umbra tiles` all consume. The one thing that turns a future
-> improvement of that index (the demo-oriented denormalizations
-> `DEMO_APP_GAPS.md` G2 wants — a precomputed centroid, a cached place label — or
-> an R\*Tree spatial upgrade) from a clean migration into a confusing break was
-> the missing schema-version marker: with DBs already in the wild, the next
-> schema change would fail every deployed snapshot with no explanation.
-> `CatalogIndex` now stamps `PRAGMA user_version` on create and checks it on
-> open — a fresh or pre-versioning database (`user_version 0`, which every
-> current snapshot reads) is adopted in place and stamped, while a database
-> written by a *newer* umbra-py, or a lower version with no migration path,
-> raises a self-describing `IndexSchemaError` (a clean CLI `error: …`) instead of
-> being silently misread. Not a new capability — the guardrail (§6 "keep the
-> crawl incremental" / reliability floor, §7) that keeps the prebuilt-index
-> distribution the whole discovery story now rests on evolvable. It holds the
-> project's grain and testability (§3): no model, no new dependency, and the
-> whole fresh/legacy/newer/older path is offline-tested against real SQLite
-> databases — mirroring the same `PRAGMA user_version` discipline the
-> `catalog.embed.db` sidecar already held. The remaining strategic gaps are
-> unchanged and largely non-code: 5.5's full terrain orthorectification (a DEM,
-> MultiRTC interop) and the maintainer-side adoption moves (5.3 registries, 5.6
-> talking to Umbra).
-
-> **Update (2026-07-16):** the **structured `--json` success output is now
-> complete across the CLI, finishing Tier A of the AI plan**
-> (`AI_INTEGRATION_IDEAS.md` §A1 — supporting infrastructure, §7). "Agents are
-> the new first-time users" (§3's AI thesis) is only true to the degree the tools
-> report back in a shape an agent can consume: the failure side shipped as the
-> machine-readable error contract, but the *success* side was still partial —
-> most commands ended in a human "Wrote … to …" line an agent had to parse. This
-> closes that: `umbra download --json` emits a `[{asset, path, bytes, sha256}, …]`
-> array (each file hashed with a streaming SHA-256, so a caller verifies what it
-> fetched without re-reading it), `umbra index info --json` emits the index
-> summary, and the five render commands (`change`/`timescan`/`swipe`/`gallery`/`map`)
-> emit a `{output, items_used, parameters}` manifest naming the artifact, the
-> acquisitions it was built from, and the settings used. It holds the project's
-> grain and testability (§3): human progress, warnings and the `--place`
-> "Resolved …" status line all go to stderr so stdout carries the JSON object
-> alone; the three new shapes are published as public API under `docs/schemas/`
-> (the same compatibility rules as `__all__`); and the whole surface is
-> offline-tested with injected renderers/downloads — no model, no network, no
-> `viz` extra. Pure funnel-widening (§1): the query-and-render surface newcomers
-> and agents reach for now answers in a shape a script or an LLM can branch on.
-> The remaining strategic gaps are unchanged and largely non-code: 5.5's full
-> terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
-> adoption moves (5.3 registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-16):** the **catalog index gained a keyed single-item
-> lookup** — `CatalogIndex.get(item_id)` (`CODEBASE_ANALYSIS.md` §4.5 —
-> supporting infrastructure, §7). Discovery is the moat (§3), and the way that
-> moat now reaches every consumer is the *published* `catalog.db` snapshot that
-> `--local` search, `umbra serve`, `umbra demo` and the MCP server all read.
-> Listing that catalog was covered (`search`); the one primitive still answered
-> by a *scan* was fetching a single acquisition by id — `umbra serve`'s
-> `/collections/{id}/items/{item_id}` filtered an id-scoped search over the
-> ordered result set, fine at today's scale but a full walk of the page as the
-> snapshot grows. `get()` closes that with an `idx_items_id`-backed point lookup
-> (the retrieval complement to `search`'s listing), and the serve item endpoint
-> resolves through it (`serve.get_one`), falling back to the id-filtered search
-> only for the live source that can't do a keyed read. Not a new capability —
-> the point-lookup floor under the retrieval interface every `--local` consumer
-> shares (§7). It holds the project's grain and testability (§3): no model, no
-> new dependency, the whole path offline-tested against real SQLite, and the
-> index is *additive* — added with `CREATE INDEX IF NOT EXISTS`, so existing and
-> fetched snapshots gain it on the next open with no `PRAGMA user_version` bump,
-> the first exercise of the additive-schema path the schema-version marker was
-> landed to enable. The remaining strategic gaps are unchanged and largely
-> non-code: 5.5's full terrain orthorectification (a DEM, MultiRTC interop) and
-> the maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-16):** **catalog search is now read-through** —
-> `CatalogIndex.search_live` / `umbra search --local --live`
-> (`CODEBASE_ANALYSIS.md` §4.4 / P3 #21 — the "make the index the default path"
-> gap, and the last open item under §4.4). Discovery is the moat (§3), and the
-> way that moat now reaches every consumer is the *published* `catalog.db`
-> snapshot users `umbra index fetch`; the tension left was that a local search
-> was instant but only as fresh as the snapshot, while a live search was current
-> but re-walked the whole bucket every call. `search_live` closes it: it answers
-> the whole query from the index *and* walks only acquisitions at or after the
-> index's freshness horizon (its newest indexed `acq_date` minus an overlap),
-> merges the two streams in the usual `(task, acq_date)` order, de-duplicates by
-> sidecar href, and — with the default `refresh=True` — upserts each new
-> acquisition the delta discovers as it is yielded, so the cache warms and the
-> next call walks even less. It is pure funnel-widening infrastructure (§1): the
-> user who bootstrapped from the weekly snapshot now gets *fast and fresh* from
-> one command instead of choosing between them, and the guardrail that the crawl
-> stay polite and incremental (§6) is honored — the delta reuses the same
-> recent-only sidecar pruning `umbra index update` already relies on. It holds
-> the project's grain and testability (§3): no model, no new dependency, the
-> injectable catalog keeps the whole path offline-tested, and it is delivered as
-> an explicit read-through method + `--live` flag rather than an implicit mode
-> change to `search`, so a plain `search` still means exactly what it did and a
-> read-only shared snapshot disables the write-back instead of failing. The
-> remaining strategic gaps are unchanged and largely non-code: 5.5's full terrain
-> orthorectification (a DEM, MultiRTC interop) and the maintainer-side adoption
-> moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **whole-catalog PMTiles basemap is now published
-> and fetchable** (`STRATEGY.md` 5.2, `DEMO_APP_GAPS.md` Path A step 3). `umbra
-> tiles` shipped the *encoder*; what a fresh install still lacked was the built
-> artifact — it had to crawl the bucket, build an index, and tile it before
-> seeing a whole-catalog map. The weekly `publish-index.yml` workflow now tiles
-> the freshly built index (`umbra tiles --local`, no second crawl) into a
-> single-file `catalog.pmtiles` and a `catalog.html` MapLibre viewer over it, and
-> uploads both to the rolling `catalog-index` release beside `catalog.db` /
-> `umbra-open-data.parquet`. The consume side is the exact visual sibling of
-> `umbra index fetch`: `pmtiles.fetch_prebuilt_pmtiles()` and a new `umbra tiles
-> --fetch` mode pull the published archive (resume-safe `download_url`, default
-> path beside the cached index, `--viewer` for a ready-to-open page), so a fresh
-> install — or a Pages showcase — gets a fast, zoom-anywhere map of the *entire*
-> archive with zero tiling. It stays in the project's grain and testability (§3):
-> stdlib-only, no new dependency, fully offline-tested against a mocked release
-> download and a round-tripped archive, and delivered as an explicit `--fetch`
-> mode rather than a change to the build path. This is precisely the static,
-> host-anywhere artifact 5.2 wants to *offer upstream* — publish the `.pmtiles`
-> next to `catalog.json` and the ecosystem gets a whole-catalog basemap for free.
-> The remaining strategic gaps are unchanged and largely non-code: 5.5's full
-> terrain orthorectification (a DEM, MultiRTC interop) and the maintainer-side
-> adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** **DEM terrain orthorectification has shipped** —
-> `umbra convert --dem` / `sicd_to_geocoded_cog(dem=…)` (`STRATEGY.md` 5.5, the
-> higher-level code gap named at the foot of nearly every update above). The SICD
-> geocoder shipped as an honest *flat-earth* first slice: it places every pixel on
-> the scene's single height-above-ellipsoid plane, exact over flat terrain but
-> mislocating relief — a hilltop is placed where the radar ray meets the plane,
-> not where it meets the ground. `--dem PATH` closes that: given any
-> rasterio-readable elevation model (a Copernicus/SRTM COG works), each
-> ground-control point is *walked onto the terrain surface* by the standard ortho
-> fixed-point iteration — project at a height, look up the DEM there, reproject,
-> repeat until the height it lands on stops moving — so the scene is genuinely
-> terrain-orthorectified rather than flat-projected. It directly serves the
-> ML/analytics audience 5.5 targets (Umbra data becomes trivially loadable *with
-> correct geolocation over relief*) and removes the largest remaining "same 500
-> lines of glue" the thesis (§1) says drives people away: hand-rolled DEM
-> geocoding. It stays in the project's grain and testability (§3): the refinement
-> loop and the DEM lookup are both **injectable** (`project` / `sample_height`
-> callables), so the whole path is offline-tested with plain callables and a
-> hand-written DEM raster — no sarpy DEM plumbing — against convergence to a
-> closed-form terrain fixed point, the flat-DEM and off-DEM (no-coverage) fallbacks,
-> the DEM sampler (ramp read, out-of-bounds/nodata masking, CRS reprojection), and
-> the end-to-end + CLI paths; the sarpy-facing HAE projector batches points sharing
-> a binned height into one call so the common early iterations stay a single
-> projection. The `--dem` mode supersedes `--projection`, and where the DEM has no
-> coverage a point falls back to the scene reference height rather than tearing.
-> What remains under 5.5 is the vertical-datum/geoid niceties and MultiRTC/RTC
-> interop (radiometric terrain correction, a different job from geometric
-> orthorectification); the other higher-level gaps are unchanged and non-code: the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **DEM auto-fetch has shipped** — `umbra convert
-> --dem auto` / `sicd_to_geocoded_cog(dem="auto")` (`STRATEGY.md` 5.5, closing the
-> last convert-side glue step named in `TODO.md`). Terrain orthorectification
-> landed as `--dem PATH`, but that still made the user go find, download, and
-> mosaic the right elevation tiles for the scene — "the same 500 lines of glue"
-> the thesis (§1) says drives people away, just relocated from geocoding to DEM
-> wrangling. `umbra_py.dem` removes it: `--dem auto` projects the scene's four
-> image corners to a geographic bbox, resolves the 1°×1° Copernicus GLO-30 tiles
-> covering it, pulls them from the public AWS Open Data bucket (skipping the
-> all-ocean gaps Copernicus omits with a 404, merging several into a mosaic), and
-> hands the result straight into the shipped terrain-ortho path — so a curious
-> analyst types one flag and gets a correctly geolocated scene over relief with no
-> DEM hunt. It holds the project's grain and testability (§3): the tile math (id
-> naming, bbox coverage, URL building) is **pure standard library** and
-> offline-tested with no network, the fetch reuses the resume-safe `download_url`
-> and is **injectable**, so the skip/merge/raise behaviour is covered with a
-> stub downloader (only the multi-tile `rasterio.merge` mosaic touches the
-> `[convert]` extra), and tiles are cached under the same XDG cache dir the index
-> uses so a second conversion over the same area re-downloads nothing. It stays
-> graceful under the "moat is leased" risk (§3): Copernicus GLO-30 is a public,
-> host-anywhere collection, so this depends on nothing Umbra-specific. This
-> directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
-> trivially loadable *and* correctly geolocated over terrain in one command). What
-> remains under 5.5 is the vertical-datum/geoid niceties and MultiRTC/RTC interop;
-> the other higher-level gaps are unchanged and non-code: the maintainer-side
-> adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-16):** the **vertical-datum / geoid handling has shipped** —
-> `umbra convert --geoid` / `sicd_to_geocoded_cog(geoid=…)` (`STRATEGY.md` 5.5,
-> the geocoding nicety named at the foot of the DEM-orthorectification updates
-> above). Terrain orthorectification walks each control point onto the DEM
-> surface, but it fed the sampled height straight into SICD's projection — and
-> global DEMs (Copernicus GLO-30, SRTM) quote height above the **EGM geoid**,
-> while SICD projects against the **ellipsoid**. That mismatch is the geoid
-> undulation `N` (up to ~±100 m worldwide), and treating an orthometric height as
-> if it were ellipsoidal mislocates relief by roughly `N·tan(look_angle)` on the
-> ground — the same systematic error terrain orthorectification exists to remove,
-> reintroduced through the vertical datum. `--geoid PATH` closes it: given any
-> rasterio-readable undulation grid (an EGM96/EGM2008 GeoTIFF), it adds `N` at each
-> point (`hae = orthometric + N`) before projecting, for survey-grade geolocation.
-> It directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
-> not just loadable and terrain-corrected but *vertically referenced correctly*),
-> and it holds the project's grain and testability (§3): the correction is a **pure
-> composition** of two injectable `(lons, lats) → heights` samplers
-> (`_geoid_corrected_sampler`) — the geoid grid is read with the very same
-> `_dem_height_sampler` the DEM uses — so the whole path is offline-tested with a
-> hand-written grid, with **no new dependency and no packaged EGM data**. It is an
-> honest optional layer: it requires `--dem` (it corrects DEM heights, so it is a
-> hard error without one), degrades gracefully to the uncorrected height where the
-> grid has no coverage, and without it the output is unchanged (correct to the
-> local geoid–ellipsoid separation, ample for map placement). What remains under
-> 5.5 is an optional `--geoid auto` (fetch a matching EGM grid for the scene, the
-> vertical sibling of `--dem auto`) and MultiRTC/RTC interop (radiometric terrain
-> correction, a different job); the other higher-level gaps are unchanged and
-> non-code: the maintainer-side adoption moves (5.3 registries, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-16):** the **`--geoid auto` grid fetch has shipped** — `umbra
-> convert --geoid auto` / `sicd_to_geocoded_cog(geoid="auto")` (`STRATEGY.md` 5.5,
-> the last convert-side glue nicety named at the foot of the geoid update above,
-> and the vertical sibling of the shipped `--dem auto`). Vertical-datum correction
-> landed as `--geoid PATH`, but that still made the user go find, download, and
-> point at the right EGM undulation grid — the same "same 500 lines of glue" the
-> thesis (§1) says drives people away, just moved from geocoding to grid-hunting,
-> exactly as `--dem PATH` had left DEM-hunting before `--dem auto` removed it. The
-> new `umbra_py.geoid` module removes it: `--geoid auto` fetches a global
-> geoid-undulation grid (the compact ~4 MB EGM96 15′ model PROJ distributes on
-> `cdn.proj.org` for datum transforms) once, caches it under the same XDG dir the
-> index and DEM tiles use, and hands it straight into the shipped `--geoid PATH`
-> correction unchanged — so `--dem auto --geoid auto` now gives a correctly
-> geolocated *and* vertically-referenced scene over relief with zero data hunting.
-> It holds the project's grain and testability (§3): the EGM grid is a **single
-> global file** (unlike a DEM there is nothing to tile — one file covers every
-> scene), the fetch reuses the resume-safe `download_url` and is **injectable**, so
-> the whole download-and-cache path is offline-tested with a stub downloader — no
-> network, no new dependency, no packaged EGM data. It stays graceful under the
-> "moat is leased" risk (§3): the EGM96/EGM2008 grids on the PROJ CDN are a public,
-> host-anywhere collection, so this depends on nothing Umbra-specific. This
-> directly serves the ML/analytics audience 5.5 targets (Umbra SICDs become
-> loadable, terrain-corrected, *and* vertically referenced in one command line).
-> What remains under 5.5 is only MultiRTC/RTC interop (radiometric terrain
-> correction, a different job from geometric orthorectification); the other
-> higher-level gaps are unchanged and non-code: the maintainer-side adoption moves
-> (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-17):** the **Canopy commercial-archive funnel is now complete
-> to full parity on the CLI** (workstream 5.1 — "the single highest-value
-> strategic move overall"). §5.1 shipped `UmbraCatalog(token=…)` and `umbra search
-> --token …` so the *same* `search()` interface queries Umbra's paid Canopy
-> archive; the honest gap left was that only *search* reached it. Every other verb
-> routes through `_gather_items`, which called `_search_source(local, db_path)` and
-> silently dropped the token — so on the command line a paying customer could
-> discover the paid archive but not `map`, `change`, `timescan`, `swipe`, `gallery`
-> or `chips` it. This closes that: those six render/analysis verbs now take the
-> same `--token` (a shared `_token_option` with the `$UMBRA_CANOPY_TOKEN` fallback
-> and a `_check_token_not_local` guard against combining it with a local index),
-> threaded through `_gather_items` → `_search_source(local, db_path, token)` to the
-> commercial backend. This is the funnel §1 describes made literal end to end: "a
-> user who learned the library on the free data is already holding the exact tool
-> they'd use as a paying Canopy customer" is now true for *every* verb, not just
-> `search` — the same flags, over the archive they pay for. It preserves the
-> boundary and testability the scientific audience needs (§3): **no model is
-> called** and no new dependency is added — this is pure backend-selection wiring —
-> the token is only ever sent to the Canopy endpoint (never the open bucket), and
-> the whole path is offline-tested against a `responses`-mocked STAC API (dispatch,
-> the token→archive flow, per-command wiring, the env-var fallback and the
-> mutual-exclusion guard) with no credentials and no network. The whole-catalog
-> explorers (`demo`, `tiles`) and the index/embedding builders stay on the open
-> bucket by design — they gather large catalog slices, where a live paid-archive
-> walk is out of place. The remaining 5.1 follow-ons are unchanged and need a real
-> token to verify (pushing `product_types`/`area` down as STAC query extensions, a
-> keyed `get_item(id)` archive lookup, live request/response-shape verification);
-> the higher-level gaps are also unchanged and largely non-code: 5.5's MultiRTC/RTC
-> interop and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-17):** the **geometric half of radiometric terrain correction
-> has shipped** — `umbra convert --rtc` / `sicd_to_geocoded_cog(rtc=True)`
-> (`STRATEGY.md` 5.5, the last remaining *code* item on the strategic critical path,
-> named at the foot of nearly every recent update). Terrain orthorectification
-> (`--dem`, shipped) fixes *where* each pixel lands but does nothing to *how bright*
-> it is — yet radar backscatter is strongly modulated by the local incidence angle,
-> so on relief a slope facing the radar looks bright and one facing away looks dark
-> from geometry alone, and that geometric modulation is exactly what makes SAR over
-> terrain hard to compare, threshold, or feed to a model. `--rtc` (which builds
-> directly on the shipped DEM infrastructure and requires it) removes it: after
-> geocoding, each pixel is scaled in the power domain by the cosine correction
-> `cos(reference) / cos(local_incidence)`, where the local incidence angle comes
-> from the DEM's own local slope (its surface normal) and the scene look geometry
-> (`SCPCOA.IncidenceAng`/`AzimAng`); the reference defaults to the scene incidence,
-> so flat terrain is left unchanged and only slopes are flattened. It directly
-> serves the ML/analytics audience 5.5 targets (Umbra data over relief becomes
-> comparable and trainable, not just correctly *placed*) and removes another slice
-> of the "same 500 lines of glue" the thesis (§1) says drives people away —
-> hand-rolled terrain flattening. It is an honest first slice, in the exact
-> flat-earth→DEM→geoid cadence the rest of `convert.py` follows: a geometric
-> normalisation of *detected amplitude*, not a calibrated gamma-nought product
-> (Umbra's open products are not radiometrically calibrated), documented as exactly
-> that. It holds the project's grain and testability (§3): the physics is a
-> **pure-numpy core** (terrain normals, look vector, correction factor) with
-> closed-form behaviour over a planar slope, so it is fully offline-tested with
-> hand-built arrays — only resampling the DEM onto the output grid touches rasterio
-> — and DEM gaps and radar-shadow slopes degrade gracefully (the factor is clamped,
-> gaps pass through unchanged) rather than tearing; **no model is called and no
-> dependency is added**. What remains under 5.5 is the *radiometric* remainder —
-> full gamma-nought illuminated-area normalisation and MultiRTC interop — a
-> heavier, calibration-oriented job than the geometric cosine correction shipped
-> here; the other higher-level gaps are unchanged and non-code: the maintainer-side
-> adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-17):** the **amplitude time-series notebook has shipped** —
-> `examples/04_amplitude_time_series.ipynb` (workstream 5.4 / `AI_INTEGRATION_IDEAS.md`
-> B3, one of the two remaining named notebooks). With every capability built, the
-> binding constraint on §1's thesis ("widen the funnel — more people successfully
-> using the open data") is adoption, and the notebook gallery is its front door:
-> the greatest-hits SAR workflows, runnable, that DevRel links first and that
-> double as live evals. The three shipped notebooks cover search→quicklook, stream
-> a GEC into `xarray`, and a two-pass change composite; this adds the *monitoring*
-> greatest-hit — SAR's killer app is cadence, so the natural analysis is a time
-> series. It reduces a site's repeat passes to one scalar each (mean backscatter in
-> dB, from `to_xarray(..., db=True)` over streamed decimated overviews — no full
-> download) and plots the trend, the whole-scene scalar complement to `umbra
-> timescan` (which keeps the map to show *where* activity happened) and `umbra
-> change` (which compares two passes in color). It holds the gallery's culture
-> exactly (§3): a small deterministic search with `assert`s in every code cell, so
-> it is a live eval as much as a tutorial, kept honest offline by
-> `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
-> symbols, CC-BY present) and executable end-to-end under `pytest -m network`. Pure
-> funnel-widening (§1), no new code surface and no model call. The remaining 5.4
-> notebooks are a detection-chips walkthrough (`umbra chips`) and the SICD-convert
-> showcase (`05_sicd_amplitude.ipynb`, paired with 5.5); the higher-level gaps are
-> unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-17):** the **detection-chips notebook has shipped** —
-> `examples/05_detection_chips.ipynb` (workstream 5.4 / `AI_INTEGRATION_IDEAS.md`
-> B3, the ML-dataset half of the gallery). Every capability is built; the binding
-> constraint on §1's thesis is adoption, and the notebook gallery is its front
-> door — the greatest-hits SAR workflows, runnable, that DevRel links first and
-> that double as live evals. The five shipped notebooks now cover
-> search→quicklook, stream a GEC into `xarray`, a two-pass change composite, an
-> amplitude time series, and — with this one — cutting the archive into
-> **training chips**. That last is the workflow the *model-training* audience (SAR
-> foundation models, change detection — the audience most likely to contribute
-> back, `AI_INTEGRATION_IDEAS.md` §C4) reaches for first: `umbra chips` walks one
-> scene's geocoded COG a window at a time over `/vsicurl` range reads (no full
-> download, memory bounded to one tile) and the notebook reads back the manifest
-> that makes each chip trainable — its geographic bbox, CRS and transform, and the
-> acquisition's look-angle / resolution / polarization / license. It holds the
-> gallery's culture exactly (§3): a small deterministic search with `assert`s in
-> every code cell, so it is a live eval as much as a tutorial, kept honest offline
-> by `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
-> symbols, CC-BY present) and executable end-to-end under `pytest -m network`.
-> Pure funnel-widening (§1), no new code surface and no model call. The one
-> gallery notebook still deferred is the SICD-convert showcase
-> (`06_sicd_amplitude.ipynb`, paired with 5.5): a SICD is a multi-gigabyte complex
-> product (a representative scene is ~8 GB), so a download-and-convert notebook
-> can't stay in the self-checking gallery's "small and fast" grain the way the
-> streamed-overview notebooks do — it wants a curated small scene or a pre-staged
-> fixture first. The higher-level gaps are unchanged and largely non-code: 5.5's
-> radiometric-RTC remainder and the maintainer-side adoption moves (5.3
-> registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-17):** the **Canopy commercial archive gained a keyed
-> single-item lookup** — `UmbraCatalog.get_item(item_id)` / `umbra info <id>
-> --token` (workstream 5.1 follow-on — the flagship "single highest-value strategic
-> move overall"). §5.1 made the paid archive *searchable* behind the same
-> `search()` interface, and every render/analysis verb reaches it; the retrieval
-> interface, though, was asymmetric — the *local* index had a keyed point lookup
-> (`CatalogIndex.get(item_id)`, shipped) but the commercial archive could only be
-> *listed*, not fetched by id. This closes that: `get_item(id)` is the retrieval
-> complement to `search`'s listing, implemented with the STAC API `ids` search
-> extension over the *same* `/archive/search` endpoint the search path already
-> POSTs to (`POST {"ids": [item_id], "limit": 1}`) — so it guesses no new endpoint
-> and, like the search backend, is fully offline-testable against a mocked API. It
-> is the funnel made a little more literal (§1): the paying customer who searched
-> the archive can now pull one acquisition straight back by id — the primitive an
-> MCP `get_item` tool, a permalink, or a re-fetch of a saved id all reach for. It
-> preserves the boundary and testability the scientific audience needs (§3): **no
-> model is called** and no new dependency is added — this is pure STAC-standard
-> wiring — the token is only ever sent to the Canopy endpoint, the lookup guards
-> against a server that ignores the `ids` filter (only the exact id is accepted),
-> and the whole path is offline-tested (`tests/test_canopy.py`,
-> `tests/test_cli_token.py`) with no credentials and no network. On the CLI it is
-> an additive, backward-compatible layer on `umbra info`: with `--token` (or
-> `$UMBRA_CANOPY_TOKEN`) the argument is an archive item id, without it the command
-> is the open-data sidecar-URL read it has always been. The remaining 5.1
-> follow-ons still need a real token to verify (pushing `product_types` down as a
-> STAC query extension, wiring the archive lookup into the MCP `get_item` tool, and
-> live request/response-shape verification); the higher-level gaps are unchanged
-> and largely non-code: 5.5's radiometric-RTC remainder and the maintainer-side
-> adoption moves (5.3 registries, 5.6 talking to Umbra).
-
-> **Update (2026-07-17):** the **code-side of the adoption-visibility workstream
-> has shipped** — `CITATION.cff`, `SECURITY.md`, and a Contributor Covenant 2.1
-> `CODE_OF_CONDUCT.md` (workstream 5.3 / `CODEBASE_ANALYSIS.md` P2 #14, P3 #22).
-> With the whole funnel built — free-bucket search through the paid Canopy archive,
-> every AI/MCP capability, the demo/serve/tiles surfaces, and SICD→COG with
-> DEM/geoid/RTC — the binding constraint on §1's thesis ("widen the funnel — more
-> people successfully using the open data") is no longer a missing *capability*; it
-> is that the project is not yet *discoverable or citable* where its audience
-> looks, which is exactly what 5.3 names. This lands the pieces of 5.3 that are
-> code/config rather than a maintainer action on another org's repo: a
-> machine-readable `CITATION.cff` (Citation File Format 1.2.0) so GitHub shows a
-> "Cite this repository" button and Zenodo / citation managers can read the
-> metadata — academic citations are the currency an open-data program exists to
-> generate, and companies count them (§4) — plus a `SECURITY.md` private-disclosure
-> policy (honest about the posture: anonymous HTTPS, no auth surface, remote
-> content and generated HTML as the trust boundary) and a `CODE_OF_CONDUCT.md`,
-> which together complete GitHub's Community Standards profile — the concrete
-> "makes the project easy to say yes to" signal §4 calls for ahead of 5.6's "talk
-> to Umbra" conversation. It holds the project's grain and testability (§3): no new
-> dependency and no code-surface change, and `CITATION.cff`'s `version` is kept in
-> lockstep with `umbra_py.__version__` by an offline, stdlib-only guard
-> (`tests/test_citation.py`), mirroring the golden-file discipline the `llms.txt`
-> bundle already uses — so a version bump can't silently leave the citation stale.
-> The remaining 5.3 items are maintainer actions, not code: the PyPI publish
-> (register the Trusted Publisher, cut `v0.1.0`), the open-data-registry /
-> STAC-Index / pyOpenSci listings, and minting the Zenodo DOI (then adding `doi:`
-> + `date-released:` to the file). With these, the strategic gaps left are the
-> maintainer-side moves above, the 5.6 "talk to Umbra" conversation, and 5.5's
-> radiometric-RTC remainder.
->
-> **Update (2026-07-17):** the **scene-reading VLM capability is now
-> conversational** — `umbra-mcp` gained a `describe_scene` tool and a
-> `describe-scene` prompt surfacing the shipped `umbra describe` C2 capability
-> (`AI_INTEGRATION_IDEAS.md` §C2). The MCP server is the highest-leverage surface
-> the project has (every MCP client becomes a zero-install front door to the
-> archive), and it already returns *pictures* of the radar; this adds the reading
-> of them — a client can now ask "what am I looking at?" and get a grounded,
-> SAR-literate `{summary, observed_features, confidence, caveats}` back, with the
-> radar-reading rules a general model lacks (bright ≠ hot, dark ≠ empty, speckle ≠
-> structure, one frame ≠ change) supplied once by the packaged prompt. It is a
-> direct funnel-widener on the highest-leverage surface (§1): the newcomer who can
-> search but can't *read* SAR now gets the scene explained inside the same
-> conversation, closing the discover → view → understand loop. It is a deliberate,
-> honest first: the **one tool on the server that consults a model**, gated (like
-> the CLI) on the `[ai]` key so it never runs implicitly, and it preserves the
-> determinism boundary and trust the scientific audience needs (§3) — the picture
-> and metadata are deterministic, the model **only interprets** (its reply passes
-> the `parse_description` boundary and never becomes a coordinate, URL, or filter),
-> every reading carries the CC-BY attribution plus the `AI_PROVENANCE` note, and
-> the describer and render are injectable so the whole tool is offline-tested with
-> no SDK, no key, and no network. The module's "nothing here calls a model"
-> invariant was revised to name this single exception rather than quietly break it.
-> The remaining strategic gaps are unchanged and largely non-code: 5.5's
-> radiometric-RTC remainder and the maintainer-side adoption moves (5.3 registries,
-> 5.6 talking to Umbra).
->
-> **Update (2026-07-17):** the **Canopy commercial archive is now reachable from
-> the flagship MCP server** — `umbra-mcp` gained a token concept (workstream 5.1
-> follow-on / `AI_INTEGRATION_IDEAS.md` §B1). The paid-archive funnel already ran
-> end to end on the CLI (search → every render/analysis verb → keyed `get_item`),
-> but the project's *highest-leverage surface* (§3 — every MCP client becomes a
-> zero-install front door to the archive) still only reached the free open bucket:
-> the MCP server had no token concept, the last named gap in 5.1's follow-ons. This
-> closes it: `umbra_py.mcp_server` reads `$UMBRA_CANOPY_TOKEN` once from the
-> server's environment (`_canopy_token()` — a secret the operator configures in the
-> MCP client's `env` block, **never** a tool argument the client's model handles or
-> can leak), and when it is set `search_catalog` and `watch_site` transparently
-> query Umbra's authenticated commercial archive (`source: "canopy-archive"`) while
-> `get_item` resolves a bare acquisition id through the shipped
-> `UmbraCatalog.get_item` STAC `ids` lookup — so a paying Canopy customer discovers,
-> monitors and retrieves the archive they pay for through the exact same
-> conversation a newcomer learned on the free data, with no new tool to learn. This
-> is the funnel §1 describes made literal on the surface that matters most (§1): the
-> tool a user onboards on *is* the tool they use as a customer. It preserves the
-> boundary and testability the scientific audience needs (§3): **no model is called**
-> and no new dependency is added — pure backend-selection wiring — the token is only
-> ever handed to the Canopy catalog (never surfaced in a result), the archive (a
-> live STAC API with no local index) is guarded against `local=True`, the rendering
-> tools stay URL-based open-data by design, and the whole path is offline-tested
-> against a fake archive catalog with no credentials and no network. The remaining
-> 5.1 follow-ons need a real token to verify (pushing `product_types` down as a STAC
-> query extension, verifying the live request/response shapes); the higher-level
-> gaps are unchanged and largely non-code: 5.5's radiometric-RTC remainder and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-17):** **polygon `intersects` search has shipped** — a true
-> footprint filter across every search surface (`AI_INTEGRATION_IDEAS.md` §B2 STAC
-> follow-on). §3 names discovery as the project's *moat* — "the only thing with no
-> substitute is search over a static STAC catalog that has no search API" — yet the
-> only spatial filter was a bounding box, and a rectangle is a blunt instrument: a
-> coast, a national border, a river basin, or any area of interest a user draws on a
-> map sweeps in a lot of empty ocean and neighbouring land, so the results need
-> hand-filtering afterward — more of "the same 500 lines of glue" §1 says drives
-> people away. `search(intersects=…)` keeps only acquisitions whose footprint
-> intersects a caller-supplied GeoJSON polygon (the standard STAC `intersects` every
-> geo tool already speaks), threaded through *every* surface so the backends agree:
-> the live `UmbraCatalog` walk, the SQLite `CatalogIndex` (its bbox pushed into SQL
-> as a cheap prefilter, the exact polygon test then run in Python), the read-through
-> `search_live`, the Canopy commercial archive (the polygon POSTed as STAC
-> `intersects` and re-checked client-side so a loose server can't leak non-matches),
-> `umbra search --intersects` (a `.geojson` file or inline JSON), the `umbra serve`
-> STAC API (`GET`/`POST /search`, mutually exclusive with `bbox` per the spec), and
-> the `search_catalog` MCP tool (so agents — §1's co-equal users — filter by AOI
-> too). It holds the project's grain and testability (§3): the geometry is a new
-> **dependency-free** core (`umbra_py._geometry`) — a stdlib GeoJSON parser and
-> closed-form intersection primitives (bbox reject, segment-crossing, ray-cast
-> point-in-polygon) over plain `(lon, lat)` tuples, **no shapely**, no compiled
-> geometry stack in the base install — and `UmbraItem.intersects_polygon` tests the
-> *actual* footprint (tighter than the bbox filter), falling back to the bbox when a
-> footprint is absent. Holes and antimeridian spans are handled over-inclusively
-> (they can only keep an item, never wrongly drop one — the safe direction for a
-> discovery filter) and documented as such; **no model is called** and the whole
-> path is offline-tested (`tests/test_geometry.py`) across core, item, catalog,
-> index, CLI, STAC API and MCP. The higher-level gaps are unchanged and largely
-> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
-> (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-18):** **semantic "describe the site" search is now
-> conversational** — `umbra-mcp`'s `search_catalog` gained a `semantic=True` mode
-> (`AI_INTEGRATION_IDEAS.md` §C1 follow-on). §3 frames the MCP server as the
-> project's *highest-leverage surface* ("agents are the new first-time users")
-> and the semantic embedding index as the project's *sharpest novelty* — reaching
-> a site by *meaning* ("grain storage north dakota" → "Beet Piler - ND") when the
-> query shares no word with the task label, the alias the deterministic `fuzzy`
-> matcher can't and shouldn't fake. That capability shipped complete on the CLI
-> (`umbra semantic search`), but the agent surface only reached the deterministic
-> `fuzzy=` token match; a newcomer *describing* a site to an MCP client fell back
-> to guessing its exact name. This closes that: `search_catalog(area=…,
-> semantic=True)` resolves the description to the closest task names through the
-> shipped `SemanticTaskIndex`, searches the best over the chosen backend, and
-> returns `resolved_area` plus the ranked `semantic_matches` so the resolution is
-> **auditable** — the same "show what will run" discipline `umbra ask` / `umbra
-> semantic search` hold — with a `min_score` threshold so a description that
-> matches nothing confidently returns an empty audit trail rather than an
-> arbitrary top pick, and a `search-by-description` prompt packaging the workflow.
-> It is a direct funnel-widener on the surface that matters most (§1): the tool a
-> user onboards on now takes a plain-language *description*, not just a name. It
-> preserves the boundary and testability the scientific audience needs (§3): the
-> only model call is turning the query into a vector (the injectable embedder,
-> gated — like the CLI — on a prebuilt semantic index and the `[ai]` key, so it
-> never runs implicitly), `semantic` and `fuzzy` are mutually exclusive, and the
-> whole path is offline-tested with a deterministic concept embedder (resolve,
-> empty-audit no-match, missing-index/missing-key errors) in
-> `tests/test_mcp_server.py` — **no key, no network, no new dependency**. It reuses
-> `SemanticTaskIndex` unchanged and layers on the same discovery substrate the
-> whole project rests on, so it stays graceful under upstream obsolescence. The
-> higher-level gaps are unchanged and largely non-code: 5.5's radiometric-RTC
-> remainder and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-18):** the **baked place labels now flow through every read
-> surface** (`docs/DEMO_APP_GAPS.md` G2 follow-on — supporting infrastructure,
-> §7). Discovery is the moat (§3), and the way that moat reaches every consumer is
-> the *published* `catalog.db` snapshot users `umbra index fetch`; PR #84 baked a
-> reverse-geocoded label onto `UmbraItem.place` so a demo shows a real place name
-> instead of the Umbra task *codename* — but only `umbra demo` consumed it, so
-> every other surface still fell back to the codename or paid a render-time
-> Nominatim call (its 1 req/s cap makes labelling thousands of items impractical).
-> This wires the one bake through the rest: `UmbraItem.to_llm_context()` (the agent
-> context card, §1's "agents are the new first-time users") prefers `.place`;
-> `umbra map` / `--timeline` use it directly and geocode lazily, so a fully-baked
-> `--local` render never touches the network; `umbra serve` surfaces it as a
-> namespaced `umbra:place` STAC property; and the stac-geoparquet export carries
-> `umbra:place` into the published snapshot, so a DuckDB / geopandas consumer — or
-> the ecosystem, if Umbra hosts the parquet upstream (5.2) — reads a real place
-> name with no re-geocoding. Pure funnel-widening (§1): every read surface newcomers
-> and agents reach for now shows *where* a scene is, not a codename. It holds the
-> project's grain and testability (§3): the baked label is preferred only when
-> present and never overrides the source document, **no model is called** and no
-> dependency is added, and the whole path is offline-tested across models, viz,
-> serve, and export. The higher-level gaps are unchanged and largely non-code:
-> 5.5's radiometric-RTC remainder and the maintainer-side adoption moves (5.3
-> registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-18):** the **baked thumbnail layer has shipped, closing the
-> last open demo-app gap** — `umbra index bake-thumbnails` (`docs/DEMO_APP_GAPS.md`
-> G6). Discovery is the moat (§3), and the way that moat reaches every consumer is
-> the *published* `catalog.db` snapshot users `umbra index fetch`; but every visual
-> surface — a gallery, an `umbra demo` preview, a `umbra serve` quicklook — still
-> re-streamed each scene's cloud-optimized GeoTIFF overview from S3 at *render*
-> time, so the *first* view of a whole catalog was network-bound and slow, the one
-> thing G6 (the last open gap in the demo-readiness doc) named as missing.
-> `bake_thumbnails` closes it in the exact grain of the shipped `bake_places`: it
-> renders a small PNG per acquisition once at build time and caches the bytes in an
-> additive `thumbnail` column (`user_version` 2 → 3, migrated in place — the second
-> exercise of the migration path the schema-version marker was landed to enable), so
-> `GET /artifacts/thumbnail/{id}.png` on `umbra serve` (a new endpoint wrapping
-> `CatalogIndex.get_thumbnail`) is an instant, offline file read instead of an S3
-> COG stream. It is pure funnel-widening infrastructure (§1): the analyst exploring
-> a fetched snapshot sees scenes immediately rather than waiting on a live re-walk,
-> and the baked thumbnail is exactly the kind of static artifact worth *offering
-> upstream* (5.2) — publish it beside the nightly `catalog.db` and the ecosystem
-> gets instant previews for free. It holds the project's grain and testability (§3):
-> **no model is called**, no dependency is added, the bake is idempotent and bounded
-> (`--limit`), the renderer is **injectable** (default `viz._thumbnail_png`) so the
-> whole path — bake, keyed lookup, the server endpoint, `umbra index info` coverage
-> — is offline-tested with a stand-in renderer, no network and no `viz` extra, and
-> the baked bytes never ride on `search`/`get` (which would bloat every `UmbraItem`
-> with a PNG). With G6 closed, the remaining gaps are unchanged and largely
-> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
-> (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-18):** the **standing-analyst monitoring notebook has
-> shipped** — `examples/06_site_monitoring.ipynb` (workstream 5.4 /
-> `AI_INTEGRATION_IDEAS.md` C3's "packaged monitoring recipe"). Every capability
-> is built; the binding constraint on §1's thesis ("widen the funnel — more
-> people successfully using the open data") is adoption, and the notebook gallery
-> is its front door — the greatest-hits SAR workflows, runnable, that DevRel links
-> first and that double as live evals. SAR's *killer application* is monitoring
-> (its whole edge is cadence — the same spot re-imaged through cloud and dark),
-> so the recipe most worth packaging is the standing-analyst loop, and the
-> primitives for it (`umbra watch`, `umbra change`, `umbra change --narrate`, the
-> `watch_site` MCP tool) had all shipped without one runnable example that wires
-> them together. This closes that: the notebook stands up a watch over a
-> repeat-imaged site, asserts the first run reports every pass as new *and* an
-> immediate re-run reports **zero** (the idempotency guarantee a scheduler depends
-> on — the property that makes "run it every hour" safe), then hands the new
-> passes to `select_change_frames` → `save_change_composite` for the "new pass
-> lands → composite → notify" action, with `umbra change --narrate`, the
-> `watch_site` MCP tool, and `MetaWatchStore` cross-run persistence named as the
-> next steps in prose. It holds the gallery's culture exactly (§3): a small
-> deterministic search with `assert`s in every code cell and **no model call**, so
-> it is a live eval as much as a tutorial, guarded offline by
-> `tests/test_examples.py` (well-formed, cells parse, only public `umbra_py`
-> symbols, CC-BY present) and executable end-to-end under `pytest -m network`.
-> Pure funnel-widening (§1), no new code surface. The one gallery notebook still
-> deferred is the SICD-convert showcase (`07_sicd_amplitude.ipynb`, paired with
-> 5.5, renumbered from `06`); the higher-level gaps are unchanged and largely
-> non-code: 5.5's radiometric-RTC remainder and the maintainer-side adoption moves
-> (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-18):** the **SICD-convert showcase notebook has shipped,
-> completing the gallery** — `examples/07_sicd_amplitude.ipynb` (workstream 5.4 /
-> the runnable front door for 5.5's SICD → geocoded COG capability). Every path in
-> this project assumes the `GEC` asset — the already-geocoded COG Umbra ships; the
-> *complex* `SICD` is the other half of the archive, and it lives in the radar
-> slant plane, so it does not open on a map, in QGIS, or in the xarray stack
-> without the sensor-model geocoding `umbra convert` shipped. That flagship 5.5
-> capability (HAE geocode, DEM terrain-ortho, geoid, `--rtc`, auto-fetch) had
-> extensive code and tests but **no runnable tutorial** — the one thing that turns
-> a curious analyst into a user (§1). This closes that: the notebook takes one
-> SICD from the open bucket, detects its amplitude in the slant plane (asserting
-> the CRS is `None` — an image, not a map), geocodes it onto a north-up EPSG:4326
-> COG with `sicd_to_geocoded_cog`, and asserts the output is EPSG:4326, carries COG
-> overviews, and **lands on the acquisition's own catalog footprint** — proof the
-> projection model placed the pixels on Earth, not just somewhere plausible. It
-> holds the gallery's culture exactly (§3): a small deterministic search with
-> `assert`s in every code cell and **no model call**, guarded offline by
-> `tests/test_examples.py`. The long-standing deferral premise — "a representative
-> SICD is ~8 GB, so it can't run quickly the way the streamed-overview notebooks
-> do" — is answered precisely as that note said it would be, with the *curated
-> small scene* it asked for: the smallest open SICDs (`Centerfield, Utah`,
-> ~370 MB) download and geocode in well under a minute, so the notebook executes
-> end-to-end under `pytest -m network` like the rest of the gallery (its live
-> execution guard now also `importorskip`s `sarpy`). Terrain orthorectification
-> (`--dem auto`), the geoid correction, and `--rtc` are named in prose as the next
-> step rather than executed, keeping the self-checking path lean. This is pure
-> funnel-widening (§1) with no new code surface: the greatest-hits SAR workflows —
-> now including the hardest-to-use, most-differentiated one — are all runnable
-> marketing Umbra doesn't have to write. With 5.4 complete, the remaining
-> strategic gaps are unchanged and largely non-code: 5.5's radiometric-RTC
-> remainder and the maintainer-side adoption moves (5.3 registries, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-18):** the **projected-area (foreshortening) RTC model has
-> shipped** — `umbra convert --rtc --rtc-model area` (`STRATEGY.md` 5.5, the last
-> remaining *code* item on the strategic critical path). Radiometric terrain
-> flattening shipped as the geometric *cosine* correction
-> `cos(reference)/cos(local_incidence)`, which uses the full 3-D local incidence
-> angle and so conflates range-direction foreshortening — the effect that actually
-> dominates radiometric terrain distortion — with azimuth-direction tilt, which
-> does not foreshorten. This adds a second, selectable model
-> (`sicd_to_geocoded_cog(rtc_model="area")`) that scales power by
-> `sin(local_range_incidence)/sin(reference)`, measuring incidence in the
-> *range–vertical* plane, so it corrects range foreshortening and layover directly
-> while leaving a pure azimuth slope unchanged — the physically-right separation the
-> cosine model can't make. It directly serves the ML/analytics audience 5.5 targets
-> (Umbra data over relief becomes more comparable and trainable) and removes another
-> slice of the "same 500 lines of glue" the thesis (§1) says drives people away —
-> hand-rolled foreshortening correction. It is an honest first-order slice, in the
-> exact flat-earth→DEM→geoid→cosine cadence the rest of `convert.py` follows: a
-> geometric normalisation of *detected amplitude*, documented as **not** the full
-> illuminated-area facet integration (Small 2011) or a calibrated gamma-nought
-> product (Umbra's open products are not radiometrically calibrated). It holds the
-> project's grain and testability (§3): the physics is a **pure-numpy core**
-> (`_range_local_incidence`, `_foreshortening_factor`) with closed-form behaviour
-> over a planar slope, so it is fully offline-tested with hand-built arrays —
-> including the cosine-vs-area distinction on a pure azimuth slope — only the
-> DEM-on-grid resample touches rasterio, DEM gaps and layover degrade gracefully,
-> and `rtc_model` defaults to `"cosine"` so **no existing call changes** and **no
-> dependency is added**. What remains under 5.5 is the *fully calibrated* remainder
-> — full gamma-nought illuminated-area facet integration and MultiRTC interop, a
-> heavier calibration-oriented job — and the maintainer-side adoption moves (5.3
-> registries, 5.6 talking to Umbra) are unchanged and non-code.
->
-> **Update (2026-07-18):** the **download path now verifies content integrity, not
-> just length** (`CODEBASE_ANALYSIS.md` §3.2 / P1 #5 — supporting infrastructure,
-> §7). Strategy is only as credible as the project's reliability, and the library's
-> core job is fetching data — often multi-GB SAR products — from a public bucket.
-> The HTTP hardening already retried transient failures and verified the byte count
-> and resume validator (`If-Range` + stored ETag); the one gap left was that a body
-> corrupted *in transit* still passed a correct `Content-Length`. `download_url`
-> now closes it: when the server exposes a single-part S3 `ETag` (the object's hex
-> MD5) it streams the finished file through MD5 and compares (`verify=True`
-> default), so silent on-the-wire corruption fails loudly with a `Checksum
-> mismatch` instead of landing a full-but-wrong file — and the corrupt `.part` is
-> discarded so a retry re-downloads cleanly rather than "resuming" it. Multipart
-> ETags (`"<hash>-<n>"`) aren't a plain MD5 and are skipped; `verify=False` opts
-> out. Not a new capability — the reliability floor under every download every
-> capability already shipped depends on, stdlib-only (`hashlib`), no new dependency,
-> offline-tested with a known body + its MD5. This closes the last open item in
-> `TODO.md`'s download-hardening ledger; the strategic gaps above are unchanged and
-> largely non-code.
->
-> **Update (2026-07-18):** the **prebuilt scene-embedding table is now published
-> and fetchable** (`STRATEGY.md` 5.2 "offer it upstream" / `AI_INTEGRATION_IDEAS.md`
-> C5's last open follow-on). Discovery is the moat (§3), and the way that moat now
-> reaches a fresh install without work is the *published* artifacts on the rolling
-> `catalog-index` release — `catalog.db` (`umbra index fetch`), the whole-catalog
-> `catalog.pmtiles` basemap (`umbra tiles --fetch`). The one capability whose reach
-> still stopped at a local build was the project's *sharpest* novelty (§3) — visual
-> similarity search over the archive (`umbra embed`, C5): embedding every quicklook
-> is expensive and model-backed, so a newcomer got the metadata index and the map
-> for free but had to render and embed thousands of scenes themselves before
-> `umbra embed similar` returned anything. This closes that: `umbra embed fetch` /
-> `fetch_prebuilt_embeddings()` / `SceneEmbeddingIndex.from_release()` pull a
-> published `catalog.embed.db` straight to the sibling of the catalog index, so
-> visual similarity search works with **no rebuild** — only the *query* still needs
-> an embedding key (the archive vectors arrive pre-built) — the exact embedding
-> sibling of `umbra index fetch` / `umbra tiles --fetch`. It is precisely the
-> static, host-anywhere artifact 5.2 wants to offer upstream: publish
-> `catalog.embed.db` beside `catalog.json` and the ecosystem gets scene-similarity
-> search over Umbra data for free. It stays in the project's grain and testability
-> (§3): the fetch calls **no model** and adds **no dependency** (it reuses the
-> resume-safe `download_url`), and the whole path is offline-tested against a mocked
-> release download + a round-tripped DB, with the model label preserved so a query
-> uses the matching model. Because the vectors are model-derived and
-> model-*specific* — unlike the deterministic `catalog.db` / `catalog.pmtiles` — the
-> *publish* is honestly opt-in: the weekly `publish-index.yml` gained a gated,
-> `continue-on-error` step that builds and uploads the table (recording the
-> embedding model prominently in the release notes) only when a maintainer has set
-> an `OPENAI_API_KEY` secret, so it never touches the deterministic index publish
-> and costs nothing until configured — the same "plumbing shipped, publish is a
-> maintainer action" shape the PyPI release already follows. With this, the
-> published-artifact trio (searchable index, visual basemap, similarity vectors) is
-> complete on the consume side, and the remaining strategic gaps are unchanged and
-> largely non-code: 5.5's fully-calibrated radiometric-RTC remainder and the
-> maintainer-side adoption moves (5.3 registries, 5.6 talking to Umbra).
->
-> **Update (2026-07-18, docs site):** the project now ships a **rendered
-> documentation site** — the highest-leverage remaining *code* investment for
-> discoverability (CODEBASE_ANALYSIS §5.2 #6 / P3 #20), and the anchor the
-> `llms.txt` idea pointed at. `mkdocs.yml` + `docs_src/` build a mkdocs-material
-> site whose API reference is generated by **mkdocstrings** from the docstrings
-> the package already ships, and whose CLI reference is generated by
-> **mkdocs-click** straight from the Click group, so neither can drift from the
-> code or from `umbra --help`. `.github/workflows/docs.yml` builds it `--strict`
-> on every PR (a broken cross-reference fails review) and deploys to GitHub
-> Pages from `main`. This graduates the README from doing a docs site's job to
-> being the front door of one. It follows the established "plumbing shipped,
-> flip is a maintainer action" shape: the deploy waits only on a maintainer
-> enabling Pages (Settings → Pages → Source: GitHub Actions). The remaining
-> strategic gaps are otherwise unchanged and largely non-code: 5.5's
-> fully-calibrated radiometric-RTC remainder and the maintainer-side adoption
-> moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
->
-> **Update (2026-07-18, demo thumbnails):** the **flagship self-serve explorer
-> now leads with a picture** — `umbra demo --server-url` wires the baked SAR
-> quicklook thumbnail into a clicked scene's detail panel (`DEMO_APP_GAPS.md`
-> G6). The demo is "the sharpest funnel-widener since the notebooks" (§1 — "make
-> Umbra's SAR feel as approachable as Sentinel-1" is best sold by a page a
-> curious analyst can *explore*), and the thumbnail bake (PR #86) shipped the
-> primitive and the `GET /artifacts/thumbnail/{id}.png` server endpoint but left
-> the explorer itself unwired, so clicking a scene showed only metadata. Now the
-> panel opens with the radar image, served straight from the index as an offline
-> local-bytes read (quicklook-render fallback), with the heavier on-click COG
-> overlay left as the deeper look — the "images are the API" principle (the whole
-> project's superpower for AI *and* for humans) reaching the one surface a
-> newcomer actually clicks first. It stays in the project's grain and testability
-> (§3): the generator is stdlib-only and fully offline-tested, the preview is
-> gated on `--server-url` so the default build stays a fully static single file,
-> a scene with no baked thumbnail 404s and the element is dropped (never a broken
-> image), and the remote item id is url-encoded into a path under the trusted
-> server base. Not a new capability — the last-mile client wiring that finishes
-> the demo bake the whole G6 thread has been building. The remaining strategic
-> gaps are unchanged and largely non-code: 5.5's fully-calibrated
-> radiometric-RTC remainder and the maintainer-side adoption moves (5.3
-> registries, PyPI publish, 5.6 talking to Umbra).
->
-> **Update (2026-07-18, gamma-nought RTC):** the **third radiometric-terrain
-> model has shipped** — `umbra convert --rtc --rtc-model gamma` /
-> `sicd_to_geocoded_cog(rtc_model="gamma")` (`STRATEGY.md` 5.5), advancing the one
-> code gap named at the foot of nearly every update above: the fully-calibrated
-> RTC remainder. It directly serves the ML/analytics audience 5.5 targets — Umbra
-> data becomes not just loadable and terrain-corrected but *radiometrically
-> normalised the gamma-nought way* — removing more of the "same 500 lines of glue"
-> the thesis (§1) says drives people away. Where the shipped `cosine` model
-> normalises against the *ground*-projected area and `area` handles only the
-> range-plane foreshortening, `gamma` scales power by `cos(reference) * nz /
-> cos(local_incidence)`: it normalises by the local illuminated *facet* area
-> projected into the plane perpendicular to the look direction — the gamma-nought
-> convention — using the full 3-D facet normal *and* the true tilted-facet-area
-> term `nz = cos(slope)` both other models omit (a facet whose ground-projected
-> area is one pixel has true area `1/nz`, so its illuminated area per pixel scales
-> as `cos(local_incidence)/nz`). It holds the project's grain and testability (§3):
-> it is an honest first slice — a normalisation of *detected amplitude*, not a
-> calibrated product, and documented as **not** the full image-space facet
-> integration with layover accumulation (Small 2011) or MultiRTC interop, which
-> stay deferred — and the physics is a pure-numpy core (`_facet_area_factor`)
-> offline-tested against closed-form planar-slope behaviour (flat terrain
-> unchanged, the exact `nz`-scaling relative to the cosine factor, DEM-gap safety,
-> and the shadow/clamp floor), with only the DEM-on-grid resample touching
-> rasterio. Third value in the public `RTC_MODELS`; `rtc_model` still defaults to
-> `"cosine"`, so existing calls and CLI invocations are unchanged. The remaining
-> strategic gaps are unchanged and largely non-code: 5.5's fully-calibrated
-> image-space facet integration / MultiRTC interop and the maintainer-side
-> adoption moves (5.3 registries, PyPI publish, 5.6 talking to Umbra).
->
-> **Update (2026-07-18, offline gallery):** the **`umbra gallery` contact sheet
-> now renders from the baked index** — a `--local` / `--index-db` gallery embeds
-> any thumbnail already baked into `catalog.db` (`umbra index bake-thumbnails`)
-> straight from local bytes (`viz.gallery(baked=…)` fed by
-> `CatalogIndex.get_thumbnail`) instead of re-streaming each scene's
-> cloud-optimized overview from S3 (`DEMO_APP_GAPS.md` G6). Discovery is the moat
-> (§3), and *visual* discovery — browse-before-you-download — is the gallery's job;
-> making it answer from the published snapshot moves it onto the same fast, offline
-> path `search` / `map` / `demo` already take, so the whole-catalog contact sheet
-> renders in milliseconds rather than N network-bound COG fetches. It is pure
-> funnel-widening infrastructure (§1): a fresh install that `umbra index fetch`ed a
-> baked snapshot browses the archive visually with **no `viz` extra at all** (the
-> `rasterio` fail-fast is now raised only when an un-baked tile actually needs a
-> stream), so the visual front door opens in a core install. Not a new capability —
-> the render-side reuse of the shipped `bake_thumbnails` primitive that `umbra
-> serve` and `umbra demo` already consume, so the three preview surfaces now share
-> one cache and cannot drift. It holds the project's grain and testability (§3): no
-> model, no new dependency, `baked=None` leaves a plain live `umbra gallery`
-> byte-for-byte unchanged, and the whole path (baked-only needs no viz extra, the
-> baked+streamed mix, and `umbra gallery --local` streaming nothing over a
-> bake-thumbnailed index) is offline-tested. The remaining strategic gaps are
-> unchanged and largely non-code: 5.5's fully-calibrated image-space facet
-> integration / MultiRTC interop and the maintainer-side adoption moves (5.3
-> registries, PyPI publish, 5.6 talking to Umbra).
->
-> **Update (2026-07-18, concurrent index):** the **catalog index is now safe for
-> concurrent, multi-process access** (`CODEBASE_ANALYSIS.md` §4.5 — supporting
-> infrastructure, §7). Discovery is the moat (§3), and the way that moat now
-> reaches every consumer is the *published* `catalog.db` snapshot users `umbra
-> index fetch` — which turned the index from a private single-process cache into
-> a *shared* artifact several processes read at once: a running `umbra serve`
-> (itself a web server answering concurrent requests), `umbra demo` and the MCP
-> server all read it while a CLI writer (`umbra index update` / `build` /
-> `bake-*`) may be refreshing it in another terminal. The connection was still
-> opened with SQLite's single-process defaults (rollback journal, no busy
-> timeout), so a reader that arrived while a writer held a transaction could fail
-> outright with `database is locked` — a real failure mode on exactly the shared
-> surfaces the discovery story now rests on. `CatalogIndex._configure_connection`
-> closes that: every connection sets a `busy_timeout` (a contended access waits
-> up to 5 s rather than erroring at once) and switches the file to WAL journal
-> mode (best-effort — swallowed on a read-only medium), under which a reader never
-> blocks on the writer and a single writer never blocks readers. Not a new
-> capability — the reliability floor under the prebuilt-index distribution the
-> whole discovery story now depends on (§7). It holds the project's grain and
-> testability (§3): **no model is called** and **no dependency is added** (two
-> stdlib `PRAGMA`s), WAL needs only the writable file-and-directory the index
-> already required (it ensures the schema on every open), `check_same_thread`
-> stays at its default because `umbra serve` already opens a fresh backend per
-> request, and the whole path is offline-tested (the PRAGMAs, WAL persistence
-> across reopen, and a second connection reading during an open write
-> transaction). The strategic gaps above are unchanged and largely non-code:
-> 5.5's fully-calibrated image-space facet integration / MultiRTC interop and the
-> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-21, XML hardening):** the **remote bucket-listing XML is now
-> parsed defensively, and a scheduled `pip-audit` closes the last security-hygiene
-> gap** (`CODEBASE_ANALYSIS.md` §6 P2 #13 / P2 #14 — supporting infrastructure,
-> §7). Discovery is the moat (§3), and the one operation with no substitute —
-> search over a catalog with no search API — reads *remote, untrusted* XML: the
-> S3 `ListObjectsV2` responses `UmbraCatalog` walks, over a listing base a caller
-> can point elsewhere. Those two parse sites used the stdlib `xml.etree`, exposed
-> to the entity-expansion ("billion laughs") and external-entity (XXE) attack
-> classes — the same "trust the scientific audience needs" (§3) the generated-HTML
-> escaping and the SRI loader already hardened, but on the *input* side of the
-> core discovery path. `UmbraCatalog._parse_listing` now routes both through
-> **`defusedxml`** (`forbid_dtd=True`), so a DTD, internal entity expansion, or
-> external reference is refused outright and surfaced as a clean `CatalogError`
-> instead of memory exhaustion or a filesystem read; `defusedxml` is pure-Python
-> with zero transitive deps, so the lean core (§ the `ai = requests` ethos) is
-> preserved, and the whole path is offline-tested with billion-laughs / XXE /
-> malformed payloads. Paired with it, a weekly `pip-audit --strict` workflow
-> (`.github/workflows/security-audit.yml`) audits the full dependency tree and
-> opens a tracking issue on a finding — a non-blocking canary, not a hard PR gate,
-> for the same reason the live-catalog canary is scheduled (advisories land
-> continuously on transitive deps the project doesn't control). Not a new
-> capability — the trust floor under the discovery operation the whole funnel
-> depends on (§7), closing the two security-hygiene items the analysis named as
-> still open. The remaining strategic gaps are unchanged and largely non-code:
-> 5.5's fully-calibrated image-space facet integration / MultiRTC interop and the
-> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-23, SAR acquisition-property search filters):** **search now
-> filters by the SAR-native properties an analyst reaches for — polarization,
-> incidence angle and resolution — across every discovery surface**
-> (`AI_INTEGRATION_IDEAS.md` §B2 STAC follow-on). §3 names discovery as the
-> project's *moat* — "the only thing with no substitute is search over a catalog
-> that has no search API" — yet search could only be narrowed by geography, date
-> and product type. The SAR-native filters every analyst reaches for next
-> (give me *VV* scenes, at *low incidence*, at *sub-metre* resolution) had to be
-> applied by hand after the fact — more of "the same 500 lines of glue" §1 says
-> drives people away, and the metadata was *already parsed on every*
-> `UmbraItem` (`sar:polarizations`, `view:incidence_angle`, `sar:resolution_*`),
-> just not filterable. `search(polarizations=…, min_incidence=…, max_incidence=…,
-> max_resolution=…)` closes that, threaded through *every* surface so the backends
-> agree: the live `UmbraCatalog` walk, the SQLite `CatalogIndex` (filtered in
-> Python on each reconstructed item, exactly as the polygon test is — so no schema
-> change), the read-through `search_live`, the Canopy commercial archive (applied
-> client-side so a loose server can't leak non-matches), `umbra search`
-> (`--pol` / `--min-incidence` / `--max-incidence` / `--max-resolution`), and the
-> `search_catalog` MCP tool (so agents — §1's co-equal users — filter by
-> acquisition geometry too). The `--pol` filter is the one that keeps a change
-> comparison *like-with-like* — HH and VV image different scattering physics
-> (the caveat the library has always carried), now a filter, not just a warning.
-> It holds the project's grain and testability (§3): the whole thing is one
-> shared, dependency-free predicate (`UmbraItem.matches_filters`) — pure metadata
-> comparison, **no model, no new dependency, no schema migration** — and each
-> filter is a *hard* predicate that excludes an item lacking that property (the
-> STAC Query-extension convention), deliberately unlike the geometric filters'
-> coarser-datum fallback and documented as such. **No model is called** and the
-> whole path is offline-tested (`tests/test_acquisition_filters.py`) across the
-> predicate, the index, the live walk, the archive, the CLI and MCP. It layers on
-> the same discovery substrate the whole project rests on, so it stays graceful
-> under upstream obsolescence. Wiring the same filters into the render/analysis
-> commands (`umbra change --pol VV`), the `umbra serve` STAC Query extension, and
-> `umbra ask` is ledgered as an additive follow-on in `TODO.md`. The remaining
-> strategic gaps are otherwise unchanged and largely non-code: 5.5's
-> fully-calibrated image-space facet integration / MultiRTC interop and the
-> maintainer-side adoption moves (5.3 registries, PyPI publish, 5.6 talking to
-> Umbra).
->
-> **Update (2026-07-23, map attribution):** the **interactive maps now carry the
-> mandatory CC-BY data credit** (`DEMO_APP_GAPS.md` G8 — supporting
-> infrastructure, §7). The funnel's most-shared outputs are the artifacts a
-> curious analyst opens and *forwards* — the maps `umbra map`, `umbra map
-> --timeline` and `umbra swipe` write — and Umbra's open data is CC-BY-4.0, whose
-> attribution requirement follows the data wherever it travels. Those Folium maps
-> surfaced the licence notice only inside per-marker popups a viewer had to click
-> to reveal, while the default basemap credited only the OpenStreetMap *tiles* —
-> so the one thing legally required to appear, the credit for the Umbra footprints
-> and SAR overlays that *are* the licensed data, was effectively absent from a
-> shared page. A shared `viz._add_attribution` helper now registers
-> `constants.ATTRIBUTION` with Leaflet's attribution control on every generated
-> map, so the credit sits beside the OSM notice — the standard place a web map
-> shows its data sources, and exactly what `umbra demo`, `umbra gallery` and
-> `umbra tiles` already do (the gallery's own footer already carried it). Not a
-> new capability — the trust/compliance floor under the shareable outputs the
-> whole funnel depends on (§3's "trust the scientific audience needs"): a project
-> that widens the funnel by making Umbra's data easy to *show* must ship outputs
-> that honour the licence when they are shown. It holds the project's grain and
-> testability (§3): **no model is called** and **no dependency is added** — the
-> notice rides a Folium `MacroElement` (the same runtime-script mechanism as the
-> swipe shim), so it is baked into the saved HTML and asserted offline in
-> `tests/test_viz.py` across all three maps. The remaining strategic gaps are
-> unchanged and largely non-code: 5.5's fully-calibrated image-space facet
-> integration / MultiRTC interop and the maintainer-side adoption moves (5.3
-> registries, PyPI publish, 5.6 talking to Umbra).
->
 ## 2. The landscape: life without umbra-py
 
 Every existing path to the open data is workable but not easy, for one
@@ -1526,7 +58,8 @@ API**, which breaks the standard tooling that makes other missions feel easy.
   `pystac-client` + `stackstac`/`odc-stac`, but that stack assumes a STAC
   *API*. Against a static catalog you're reduced to crawling thousands of
   nested `catalog.json` files with plain `pystac` and filtering client-side.
-  The QGIS STAC plugin and leafmap search hit the same wall.
+  The QGIS STAC plugin and leafmap search hit the same wall. (This is the wall
+  `umbra serve`'s read-only STAC API façade removes — see §5.2.)
 - **Google Earth Engine.** The
   [community catalog](https://gee-community-catalog.org/projects/umbra_opendata/)
   mirrors GEC products as an ImageCollection — genuinely elegant if you live
@@ -1554,7 +87,8 @@ Two consequences to keep in mind:
   cloud-optimized GeoTIFFs, so once someone has a URL, plain
   rasterio/rioxarray/QGIS can stream them. The part with no substitute is
   search over a catalog that has no search API (`UmbraCatalog`,
-  `CatalogIndex`, and the published geoparquet snapshot).
+  `CatalogIndex`, the published geoparquet snapshot, and now the `umbra serve`
+  STAC API).
 - **The moat is leased, not owned.** Umbra could publish a stac-geoparquet
   index or a public STAC API tomorrow, obsoleting the crawler layer. That's
   fine — it would be a *win* for the mission, and the viz / quicklook /
@@ -1575,299 +109,79 @@ Two consequences to keep in mind:
   their docs.
 
 **Risks:** (1) upstream obsolescence of the crawler layer (acceptable, see
-above); (2) the name — `umbra-py` trades on their trademark, and an
-unrelated [`Umbra` package](https://pypi.org/project/Umbra/) already exists
-on PyPI. Raise the naming question with Umbra proactively; the existing
-"not affiliated" disclaimer plus asking first makes the project easy to say
-yes to.
+§3); (2) the name — `umbra-py` trades on their trademark, and an unrelated
+[`Umbra` package](https://pypi.org/project/Umbra/) already exists on PyPI.
+Raise the naming question with Umbra proactively; the existing "not
+affiliated" disclaimer plus asking first makes the project easy to say yes to.
 
 ## 5. Workstreams, ranked by leverage
 
-### 5.1 Canopy backend behind the same `search()` interface — **shipped** (PR #45)
+Status here is a one-line marker, not a log — the shipped detail is in the
+CHANGELOG, the open follow-ons in `TODO.md`. Workstream numbers (`5.1`…`5.6`)
+are stable identifiers cited from source docstrings; keep them.
 
-The single highest-value move, now landed. Same three lines of code against
-the open bucket by default; pass a Canopy token —
-`UmbraCatalog(token=...)`, or `umbra search --token …` / `$UMBRA_CANOPY_TOKEN`
-— and the *same* `search()` interface queries
-`api.canopy.umbra.space/archive/search` (a real STAC API) over the
-commercial archive instead. Every user onboarded on open data is then already
-holding the tool they'd use as a paying customer — the funnel, made literal.
+### 5.1 Canopy backend behind the same `search()` interface — **shipped**
 
-Design notes that keep it honest and testable:
+Pass a Canopy token (`UmbraCatalog(token=…)`, `umbra search --token …`, or
+`$UMBRA_CANOPY_TOKEN`) and the *same* `search()` interface queries the
+commercial archive's real STAC API instead of the open bucket — the funnel
+made literal. Reachable across the whole CLI (`map`/`gallery`/`change`/…),
+plus a keyed `get_item` lookup and the MCP server. **Open:** push
+`product_types` down as a STAC filter extension once the exact Canopy field
+names are confirmed, and verify request/response shapes against the live API
+(needs a real token — see `TODO.md`).
 
-- **One interface, two archives.** `bbox` and the date bounds are pushed down
-  to the STAC API; `product_types` and `area`/`fuzzy` are applied to the
-  returned items exactly as on the open-bucket path, so the filters mean the
-  same thing on both. Both paths yield `UmbraItem`s, so every downstream verb
-  (download, quicklook, change, chips, …) works unchanged against either.
-- **STAC-API standard, not a bespoke wrapper.** The client POSTs a standard
-  STAC item-search body and follows `rel="next"` pagination (POST-merge or GET
-  token links), so it is offline-testable against a mocked API with no
-  credentials — and it degrades to a clear "token rejected" error on 401/403.
-- **The token never touches the open bucket.** Bearer auth is only ever sent
-  to the configured Canopy endpoint.
+### 5.2 Continuously rebuilt, published catalog index — **shipped**
 
-The commercial-archive backend is now reachable from the *whole* CLI, not just
-`umbra search`: the render/analysis verbs (`map`, `gallery`, `change`,
-`timescan`, `swipe`, `chips`) all take the same `--token` (threaded through
-`_gather_items`), so a paying customer discovers *and* renders the archive they
-pay for with the identical flags — the funnel made literal end to end.
-
-The commercial archive now also has a **keyed single-item lookup** to match its
-listing: `UmbraCatalog.get_item(item_id)` (surfaced as `umbra info <id> --token`)
-fetches one acquisition by STAC id via the standard `ids` search extension over the
-same `/archive/search` endpoint — the retrieval sibling of `umbra search --token`,
-so the archive's retrieval interface now matches the local index's
-`CatalogIndex.get`.
-
-The commercial archive is now also reachable from the flagship **MCP server**:
-`umbra-mcp` reads `$UMBRA_CANOPY_TOKEN` from its environment (a secret the
-operator configures once, never a model-supplied argument), and when set
-`search_catalog` / `watch_site` query the archive (`source: "canopy-archive"`)
-and `get_item` resolves an acquisition id through `UmbraCatalog.get_item` — so a
-paying customer discovers, monitors and retrieves the paid archive through the
-same conversation a newcomer learned on the free data.
-
-Open follow-ons (not blockers, and each needs a real token to verify): pushing
-`product_types` down as a STAC query/filter extension once the exact Canopy field
-names are confirmed, and verifying the exact request/response shapes against the
-live API. See `TODO.md`.
-
-### 5.2 Continuously rebuilt, published catalog index — **shipped** (PR #26)
-
-One crawl shouldn't be everyone's crawl.
-
-- ✅ `export_geoparquet()` / `umbra index export` write a
-  [stac-geoparquet](https://stac-geoparquet.org/) snapshot of an index —
-  queryable by DuckDB / geopandas / pyarrow / rustac, no umbra-py needed on
-  the consuming side. Every row carries a `self` link back to its sidecar.
-- ✅ `.github/workflows/publish-index.yml` rebuilds the full index weekly
-  and publishes `umbra-open-data.parquet` + `catalog.db` on the rolling
-  `catalog-index` GitHub release.
-- ✅ **Consume side shipped:** `umbra index fetch` /
-  `CatalogIndex.from_release()` downloads the published `catalog.db` snapshot
-  to the default index path (via the resume-safe `download_url`), so a fresh
-  install runs whole-catalog `--local` search out of the box — no crawl.
-  `umbra index build` now stamps a `built_at` date and `umbra index info`
-  reports snapshot staleness.
-- ✅ **Whole-catalog basemap now published too:** the same weekly workflow
-  tiles the freshly built index into a single-file `catalog.pmtiles` (plus a
-  `catalog.html` MapLibre viewer over it) and uploads both to the
-  `catalog-index` release. `umbra tiles --fetch` / `fetch_prebuilt_pmtiles()`
-  pull it — the visual sibling of `umbra index fetch`, and exactly the kind of
-  static, host-anywhere artifact worth offering upstream. A fresh install (or a
-  Pages showcase) now gets a fast, zoom-anywhere map of the *entire* archive
-  with no local tiling step.
-- ✅ **Scene-similarity vectors now publishable + fetchable too:** the same
-  rolling `catalog-index` release can carry a `catalog.embed.db` scene-embedding
-  sidecar (one image vector per acquisition, the `umbra embed` C5 index), and
-  `umbra embed fetch` / `fetch_prebuilt_embeddings()` /
-  `SceneEmbeddingIndex.from_release()` pull it — the embedding sibling of
-  `umbra index fetch` / `umbra tiles --fetch` — so a fresh install runs visual
-  similarity search over the *whole* archive with no rebuild (only the query needs
-  a key). Unlike the deterministic `catalog.db` / `catalog.pmtiles`, the vectors
-  are model-specific, so the publish is opt-in: the weekly workflow builds and
-  uploads the table (recording the embedding model in the release notes) only when
-  a maintainer sets an `OPENAI_API_KEY` secret, gated and non-blocking so it never
-  affects the deterministic publish.
-- ⬜ **Then offer it upstream:** "here's the pipeline; host the parquet (and the
-  `.pmtiles` basemap, and the `catalog.embed.db` similarity vectors) next to
-  `catalog.json` in your bucket and the whole ecosystem gets a search API — a
-  whole-catalog map — and visual scene-similarity search — for free." If Umbra
-  adopts it, this project is part of their data program's infrastructure.
+`export_geoparquet()` / `umbra index export` write a
+[stac-geoparquet](https://stac-geoparquet.org/) snapshot; the weekly
+`publish-index.yml` workflow rebuilds the full index and publishes
+`catalog.db`, `umbra-open-data.parquet`, a whole-catalog `catalog.pmtiles`
+basemap, and (opt-in) a `catalog.embed.db` similarity sidecar on the rolling
+`catalog-index` release; the consume side (`umbra index fetch`,
+`umbra tiles --fetch`, `umbra embed fetch`) pulls them so a fresh install gets
+instant whole-catalog `--local` search, a zoomable basemap, and visual
+similarity search with no crawl. **Open (maintainer):** *offer it upstream* —
+"host the parquet, the `.pmtiles` basemap, and the similarity vectors next to
+`catalog.json` and the whole ecosystem gets a search API, a whole-catalog map,
+and scene-similarity search for free." If Umbra adopts it, this project is
+part of their data program's infrastructure.
 
 ### 5.3 Make adoption visible where Umbra looks — **partial**
 
-- ⬜ PR to [awslabs/open-data-registry](https://github.com/awslabs/open-data-registry/blob/main/datasets/umbra-open-data.yaml)
-  adding umbra-py under the Umbra entry's "Tools & Applications" (maintainer
-  action — a PR against another org's repo).
-- ⬜ Get listed on the [STAC Index](https://stacindex.org/) ecosystem page
-  (maintainer action).
-- ✅ **`CITATION.cff` shipped** — machine-readable citation metadata (Citation
-  File Format 1.2.0), version-synced to `umbra_py.__version__` by an offline
-  test, so GitHub renders a "Cite this repository" button and Zenodo / citation
-  managers can consume it. Publications using Umbra data are what an open data
-  program exists to generate, and companies count them. The Zenodo DOI itself is
-  a maintainer action (mint on the first release, then add `doi:` +
-  `date-released:` to the file). Shipped alongside it: `SECURITY.md` (private
-  disclosure policy) and a Contributor Covenant 2.1 `CODE_OF_CONDUCT.md`,
-  completing GitHub's Community Standards profile — the "easy to say yes to"
-  signal §4 names.
+`CITATION.cff`, `SECURITY.md`, and a Contributor Covenant `CODE_OF_CONDUCT.md`
+ship, completing GitHub's community profile. **Open (mostly maintainer
+actions):** a PR to
+[awslabs/open-data-registry](https://github.com/awslabs/open-data-registry/blob/main/datasets/umbra-open-data.yaml)
+adding umbra-py under the Umbra entry's "Tools & Applications"; a listing on
+the [STAC Index](https://stacindex.org/) ecosystem page; registering
+`umbra-mcp` in the MCP registries and Anthropic's directory; and minting the
+Zenodo DOI on the first release.
 
 ### 5.4 Demo notebooks that create SAR converts — **shipped**
 
-An `examples/` gallery for the greatest hits: change detection over one of
-Umbra's time-series sites, an amplitude time series, detection chips
-(ship/aircraft). Each notebook is marketing Umbra doesn't have to write and
-the thing DevRel links first. The markdown walkthroughs in `examples/` are a
-start; notebooks with rendered output travel further.
-
-- ✅ **The first three notebooks have shipped** — `01_hello_umbra.ipynb`
-  (search → summarize → quicklook, plus the geopandas / `to_llm_context` paths),
-  `02_download_and_open_gec.ipynb` (stream a GEC into analysis-ready `xarray`),
-  and `03_change_detection.ipynb` (composite two passes of a repeat-imaged
-  site). Each is *self-checking* — small deterministic searches, `assert`s in
-  the code cells — so it doubles as a live eval, and `tests/test_examples.py`
-  keeps them from drifting: an offline, stdlib-only CI guard (well-formed, cells
-  parse, only public `umbra_py` symbols, CC-BY present) plus an opt-in
-  `pytest -m network` end-to-end execution.
-- ✅ **The amplitude time-series notebook has shipped** —
-  `04_amplitude_time_series.ipynb` reduces a site's repeat passes to one number
-  each (mean backscatter in dB via `to_xarray(..., db=True)` over streamed
-  decimated overviews) and plots the series — the scalar, whole-scene complement
-  to `timescan` (which keeps the map) and `change` (which compares two passes).
-  Like the others it is self-checking (a small deterministic search with
-  `assert`s) and guarded offline by `tests/test_examples.py`.
-- ✅ **The detection-chips notebook has shipped** —
-  `05_detection_chips.ipynb` cuts one scene into fixed-size, georeferenced
-  training chips with `umbra chips` (streamed via `/vsicurl`, no full download)
-  and reads back the manifest that makes each chip trainable — bbox, CRS,
-  look-angle, polarization, license. Like the others it is self-checking (a
-  deterministic one-day search with `assert`s) and guarded offline by
-  `tests/test_examples.py`.
-- ✅ **The standing-analyst monitoring notebook has shipped** —
-  `06_site_monitoring.ipynb` wires `umbra watch` → `select_change_frames` →
-  `save_change_composite` into one runnable recipe: it stands up a watch over a
-  repeat-imaged site, asserts the first run reports every pass as new and an
-  immediate re-run reports **zero** (the idempotency a scheduler depends on),
-  then composites the new passes into a change image. SAR's killer application is
-  monitoring, so this is the copy-pasteable "new pass lands → composite → notify"
-  loop the C3 work was building toward — with `umbra change --narrate`, the
-  `watch_site` MCP tool, and `MetaWatchStore` persistence named as the next steps
-  in prose. Like the rest of the gallery it is self-checking (no model call) and
-  guarded offline by `tests/test_examples.py`.
-- ✅ **The SICD-convert showcase has shipped** — `07_sicd_amplitude.ipynb`
-  (paired with the SICD → geocoded COG work in 5.5) closes the gallery. It takes
-  one SICD from the open archive, detects its amplitude in the slant plane (CRS
-  `None` — an image, not a map), then geocodes it onto a north-up EPSG:4326 COG
-  with `sicd_to_geocoded_cog` and asserts the result is EPSG:4326, carries COG
-  overviews, and lands on the acquisition's catalog footprint. The deferral
-  premise (a "representative scene is ~8 GB") is answered exactly as that note
-  said it would be — with a *curated small scene*: the smallest open SICDs
-  (`Centerfield, Utah`, ~370 MB) download and convert in well under a minute, so
-  the notebook runs end-to-end under `pytest -m network` like the rest of the
-  gallery (its live execution guard now also `importorskip`s `sarpy`). Terrain
-  orthorectification (`--dem auto`), the geoid correction, and `--rtc` are named
-  in prose as the next step rather than executed, to keep the self-checking path
-  lean. With it, workstream 5.4 is **complete** — the whole notebook gallery, the
-  greatest-hits SAR workflows DevRel links first, now exists and doubles as a
-  live eval.
+The full `examples/` notebook gallery (`01`–`07`: hello → download/open GEC →
+change detection → amplitude time series → detection chips → site monitoring →
+SICD amplitude) exists and doubles as a live eval — each notebook is
+self-checking and guarded offline by `tests/test_examples.py`.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 
-SICD → geocoded COG one-liner, RTC recipes (interop with MultiRTC), and ML
-dataset prep. Umbra sells into ML-heavy analytics; tooling that makes Umbra
-data trivially trainable increases demand for Umbra pixels.
+ML dataset prep (`umbra chips`) and SICD → geocoded COG (`umbra convert`,
+including DEM/`--dem auto` orthorectification, geoid handling, and three RTC
+flattening models: `cosine`/`area`/`gamma`) all ship. **Open:** the *fully
+calibrated* remainder of RTC — full gamma-nought illuminated-area facet
+integration in image space (vs. the shipped per-pixel `gamma` approximation)
+— and MultiRTC interop. This is a heavier, calibration-oriented job (Umbra's
+open products are not radiometrically calibrated) and stays deferred.
 
-- ✅ **ML dataset prep shipped** (`umbra chips` / `umbra_py.chips`, `[load]`
-  extra): chips scenes into fixed-size, georeferenced training tiles with the
-  look-angle / resolution / polarization / license metadata attached per chip in
-  a `.jsonl`, `.geojson`, or `.parquet` (stac-geoparquet, `[export]` extra —
-  queryable by DuckDB / geopandas at scale) manifest. See
-  `AI_INTEGRATION_IDEAS.md` C4.
-- ✅ **SICD → geocoded COG shipped** (`umbra convert` / `umbra_py.convert`,
-  `[convert]` extra): `sicd_to_geocoded_cog()` detects amplitude from the
-  complex product and warps it onto a north-up EPSG:4326 cloud-optimized GeoTIFF
-  using SICD's own image-projection model (a lattice of ground control points),
-  so the scene opens straight onto a map, in QGIS, or as a georeferenced array
-  via `to_xarray`. `umbra convert SRC DST` geocodes by default; `--slant-plane`
-  keeps the prior ungeoreferenced amplitude for quick inspection. The geocoding
-  is a flat-earth first slice (pixels on the scene's HAE plane): exact over flat
-  terrain, adequate for map placement elsewhere.
-- ✅ **DEM terrain orthorectification shipped** (`umbra convert --dem` /
-  `sicd_to_geocoded_cog(dem=…)`): given any rasterio-readable elevation model, each
-  ground-control point is walked onto the terrain surface by the standard ortho
-  fixed-point iteration (project → sample the DEM → reproject, until it converges),
-  so relief lands in its true ground position instead of on a single flat height
-  plane. `--dem` supersedes `--projection`; off-DEM points fall back to the scene
-  height. The refinement loop and DEM lookup are injectable, so the whole path is
-  offline-tested with plain callables and a hand-written DEM raster.
-- ✅ **DEM auto-fetch shipped** (`umbra convert --dem auto` / `umbra_py.dem`):
-  `dem="auto"` resolves the 1°×1° Copernicus GLO-30 tiles covering the scene's
-  projected footprint, pulls them from the public AWS Open Data bucket (skipping
-  the all-ocean gaps that 404, merging several into a mosaic), and
-  terrain-orthorectifies against the result — so terrain orthorectification no
-  longer starts with hand-finding a DEM. The tile math (id naming, bbox coverage)
-  is stdlib-only and offline-tested; the fetch reuses the resume-safe
-  `download_url` and is injectable, so the whole path is covered without network.
-- ✅ **Vertical-datum / geoid handling shipped** (`umbra convert --geoid` /
-  `sicd_to_geocoded_cog(geoid=…)`): global DEMs quote height above the EGM geoid,
-  but SICD projects against the ellipsoid, so an optional undulation grid adds the
-  geoid–ellipsoid separation `N` to each sampled DEM height (`hae = orthometric +
-  N`) before projecting — survey-grade placement over relief. It requires `--dem`,
-  degrades gracefully off the grid, and is a pure composition of two injectable
-  height samplers, so it is offline-tested with a hand-written grid and needs no
-  packaged EGM data.
-- ✅ **`--geoid auto` shipped** (`umbra convert --geoid auto` /
-  `umbra_py.geoid`): the vertical sibling of `--dem auto`. `--geoid PATH` still
-  made the user find and download an EGM undulation grid; `--geoid auto` /
-  `sicd_to_geocoded_cog(geoid="auto")` fetches a global geoid grid (the compact
-  EGM96 15′ model PROJ distributes on `cdn.proj.org`) once, caches it beside the
-  DEM tiles, and feeds it into the shipped `--geoid PATH` correction unchanged —
-  so survey-grade vertical referencing over relief is one flag. The grid is a
-  single global file (nothing to tile), the fetch reuses the resume-safe
-  `download_url` and is injectable, so the whole path is offline-tested without
-  the CDN, with no new dependency and no packaged EGM data.
-- ✅ **Radiometric terrain flattening shipped** (`umbra convert --rtc` /
-  `sicd_to_geocoded_cog(rtc=True)`): the geometric half of RTC. After geocoding
-  against a DEM, each pixel is scaled in the power domain by the cosine correction
-  `cos(reference)/cos(local_incidence)`, where the local incidence angle is derived
-  from the DEM's local slope (surface normal) and the scene look geometry
-  (`SCPCOA.IncidenceAng`/`AzimAng`), so slopes tilted toward or away from the radar
-  no longer look artificially bright or dark. The reference defaults to the scene
-  incidence (flat terrain unchanged); `--rtc-ref-angle` overrides it. It requires
-  `--dem`. This is an honest geometric normalisation of detected amplitude, not a
-  calibrated gamma-nought product; the physics is a pure-numpy core (normals, look
-  vector, correction factor) offline-tested against closed-form planar-slope
-  behaviour, with only the DEM-on-grid resample touching rasterio, and DEM
-  gaps/radar-shadow slopes degrading gracefully.
-- ✅ **Projected-area (foreshortening) RTC model shipped** (`umbra convert --rtc
-  --rtc-model area` / `sicd_to_geocoded_cog(rtc_model="area")`): a second,
-  selectable flattening model alongside the default `cosine`. It scales power by
-  `sin(local_range_incidence)/sin(reference)`, measuring incidence in the
-  *range–vertical* plane, so it targets the range-direction foreshortening and
-  layover that dominate radiometric terrain distortion — separating them from the
-  azimuth-direction tilt the per-pixel cosine model folds in. On flat terrain both
-  models reduce to the scene incidence (default reference), so only slopes change;
-  DEM gaps and layover degrade gracefully (factor one over gaps, floored/clamped in
-  layover). It is an honest first-order step toward area-based gamma-nought
-  normalisation; the physics is a pure-numpy core (`_range_local_incidence`,
-  `_foreshortening_factor`) offline-tested against closed-form planar-slope
-  behaviour (including the cosine-vs-area distinction on a pure azimuth slope),
-  with only the DEM-on-grid resample touching rasterio. New public constant
-  `RTC_MODELS`; `rtc_model` defaults to `"cosine"`, so existing calls are unchanged.
-- ✅ **Per-pixel facet-area (gamma-nought) RTC model shipped** (`umbra convert --rtc
-  --rtc-model gamma` / `sicd_to_geocoded_cog(rtc_model="gamma")`): a third,
-  selectable flattening model. It scales power by `cos(reference) * nz /
-  cos(local_incidence)`, normalising by the local illuminated *facet* area projected
-  into the plane perpendicular to the look direction — the gamma-nought convention.
-  It uses the full 3-D facet normal (like `cosine`, unlike the range-plane `area`)
-  *and* adds the true tilted-facet-area term `nz = cos(slope)` both other models omit
-  (a facet whose ground-projected area is one pixel has true area `1/nz`, so the
-  illuminated area per pixel scales as `cos(local_incidence)/nz`). On flat terrain
-  `nz == 1` and it coincides with the other two, so only slopes change. Like them it
-  is an honest first slice — a normalisation of detected amplitude, not a calibrated
-  product; the physics is a pure-numpy core (`_facet_area_factor`) offline-tested
-  against closed-form planar-slope behaviour (flat unchanged, the exact `nz`-scaling
-  vs the cosine factor, DEM-gap safety, shadow/clamp floor), with only the
-  DEM-on-grid resample touching rasterio. Third value in `RTC_MODELS`; `rtc_model`
-  still defaults to `"cosine"`.
-- ⬜ Remaining geocoding niceties: the *fully calibrated* remainder of RTC — the
-  full gamma-nought illuminated-area *facet integration in image space* (integrating
-  the projected local illuminated area per pixel over the DEM in slant/azimuth image
-  space with layover accumulation, rather than the per-pixel facet-area
-  approximation the `gamma` model shipped above) and MultiRTC interop — is a heavier,
-  calibration-oriented job (Umbra's open products are not radiometrically calibrated)
-  and is still open.
-
-### 5.6 Then actually talk to Umbra — **not started**
+### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
 
 Sequenced after 5.2–5.3 so the pitch is concrete, not a favor: "unofficial
 toolkit, N downloads/month, here's a hosted search index you can adopt,
-here's the notebook gallery — link us from the open data page, and tell us
-if the `umbra-py` name is a problem." Good outcomes, any of which locks in
-the niche: a docs link, a registry listing, co-marketing, or them
-upstreaming the index.
+here's the notebook gallery — link us from the open data page, and tell us if
+the `umbra-py` name is a problem." Good outcomes, any of which locks in the
+niche: a docs link, a registry listing, co-marketing, or upstreaming the index.
 
 ## 6. Guardrails
 
@@ -1879,49 +193,74 @@ upstreaming the index.
 - **Don't position against Canopy.** This is the on-ramp to their
   commercial product, not a competitor to it.
 
-## 7. Supporting infrastructure — **shipped** (PR #26)
+## 7. Design principles to hold onto
 
-Strategy is only as credible as the project's reliability. In place:
+These are the durable rules the AI-integration and demo work were built on;
+they apply to every future change (consolidated from the former
+`AI_INTEGRATION_IDEAS.md` §6).
 
-- **All-extras CI job** — the optional-extra test suites (viz / load /
-  convert / export) run on every PR instead of silently skipping.
-- **Weekly live-catalog canary** — `pytest -m network` against the real
-  bucket; catalog drift (Umbra changing layout or naming, which has
-  happened before) opens a tracking issue instead of surfacing as a user
-  bug report.
-- **Weekly index publish** — doubles as a second canary: a red publish run
-  means the crawl itself broke.
-- **CI hygiene** — dependency caching, superseded-run cancellation,
-  grouped Dependabot updates for Actions and pip.
+1. **Deterministic core, AI at the edges.** Models plan, describe, and
+   narrate; the library searches, downloads, and renders. Never let a model
+   output become a coordinate, a URL, or a filter without passing through the
+   deterministic layer. (This is the `§A4`/`§6.1` determinism boundary cited
+   from `planner.py`, `describe.py`, `narrate.py`, and `mcp_server.py`.)
+2. **Images are the API.** The library's superpower for AI is that its
+   outputs are pictures with provenance. Prefer returning renderable artifacts
+   (MCP image blocks, PNGs with JSON sidecars) over prose.
+3. **Context is a product surface.** `llms.txt`, context cards, tool
+   descriptions, and packaged prompts deserve the same review bar as code —
+   they are what the agent "reads" instead of the README.
+4. **License propagation is non-negotiable.** CC-BY attribution must survive
+   every AI transformation, including model-generated text about the data.
+5. **Agents are users; users are agents.** Every improvement for one (JSON
+   errors, stable schemas, runnable examples, resumable operations) compounds
+   for the other. Build once, serve both.
 
-Now shipped from the same review: the **PyPI release workflow with trusted
-publishing** (`.github/workflows/release.yml` — OIDC, no stored token, tag/version
-guard) plus a **single-sourced version** (hatchling dynamic version from
-`__version__`), the **`py.typed` marker**, and the fix to the
-`theminiverse`/`reesehammer` **repository-identity mismatch** across
-`pyproject.toml`, `CHANGELOG.md`, and `CONTRIBUTING.md`. The one remaining
-step is a maintainer action, not code: register the PyPI Trusted Publisher for
-`reesehammer/umbra-py` and cut the `v0.1.0` GitHub Release (which fires the
-workflow and claims the name).
+## 8. Current status & remaining critical path
 
-Also now shipped: a **weekly dependency security audit** —
-`.github/workflows/security-audit.yml` runs `pip-audit --strict` against the
-full resolved dependency tree (all extras) weekly and on demand, opening a
-tracking issue on a finding. It is a scheduled canary rather than a hard PR
-gate, for the same reason as the live-catalog canary: advisories land
-continuously on transitive dependencies the project doesn't control, so a
-per-PR gate would flap red on changes unrelated to the one under review.
+The three original planning docs are essentially executed — the S3 pagination
+fix (PR #29), the prebuilt/published index, the MCP server, the `umbra serve`
+STAC API, natural-language search (`umbra ask`), the `umbra demo` self-serve
+explorer, `umbra tiles` PMTiles, `umbra describe`/`watch`/`chips`/`embed`, and
+the `umbra convert` SICD/DEM/RTC pipeline have all shipped (see the CHANGELOG).
+What remains, grouped by the kind of work rather than by the old doc it came
+from:
 
-Also now shipped: a **`mypy` type-check gate** (`CODEBASE_ANALYSIS.md` P2 #11) —
-a `type-check` CI job that verifies the inline types the shipped `py.typed`
-marker promises downstream, rather than shipping an unchecked promise. It runs
-against a core `[dev]` install (the un-stubbed optional libraries are
-import-ignored, so it checks umbra-py's own types, not dependencies it doesn't
-control) with `warn_unused_ignores` + `warn_redundant_casts` on so stale
-suppressions can't accumulate. Landing it fixed 18 genuine type issues across 7
-modules, several of them latent bugs (a `date > None` comparison in the
-read-through search's freshness-horizon, an `isoformat()`/sort-key on a
-possibly-`None` datetime in the visual builders, a `.submit()` on a possibly-`None`
-async executor, and loosely-`object`-typed search backends now narrowed to the
-`UmbraCatalog | CatalogIndex` union). Still open otherwise: a SessionStart hook /
-permission allowlist for remote agent sessions.
+**Structural code debt (schedule, don't rush)**
+
+- Extract the shared search-vs-URLs gathering + common Click option groups out
+  of the CLI commands that still duplicate them (was `CODEBASE_ANALYSIS` P3 #18).
+- Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
+  gallery) with re-exports preserved (was P3 #19).
+- Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).
+- SQLite R\*Tree upgrade *iff* the index grows to hundreds of thousands of
+  items (the schema-version marker already makes this a migration, not a break).
+
+**Demo / hosting polish (was `DEMO_APP_GAPS` G7 + Path A polish)**
+
+- Packaging/hosting: a Dockerfile + compose for one-command self-hosting of
+  `umbra serve`, and a GitHub Pages deployment of the static `umbra demo` /
+  `catalog.pmtiles` showcase.
+- Bake per-item thumbnails / place labels into the *published* weekly snapshot
+  (gated on egress) and precompute showcase swipe/change/timescan artifacts for
+  ~6–10 curated sites (R4 for the static path).
+
+**SAR-processing depth (was workstream 5.5)**
+
+- Fully calibrated gamma-nought RTC (facet integration in image space) and
+  MultiRTC interop — heavy, research-oriented, deferred.
+
+**Agent-session hardening (was `STRATEGY` §7 follow-on)**
+
+- A SessionStart hook / permission allowlist for remote coding-agent sessions.
+
+**Maintainer / relationship actions (no code)**
+
+- Register the PyPI Trusted Publisher and cut the `v0.1.0` GitHub Release to
+  claim the name (release plumbing already ships).
+- The ecosystem-visibility actions in §5.3, the "offer it upstream" move in
+  §5.2, and the "talk to Umbra" conversation in §5.6.
+
+Fine-grained follow-ons for individual shipped features are tracked in
+[`TODO.md`](../TODO.md); the record of everything already delivered is in
+[`CHANGELOG.md`](../CHANGELOG.md).

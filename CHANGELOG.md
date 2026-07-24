@@ -105,6 +105,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controls; Folium's own vendored CDN assets remain out of scope.
 
 ### Changed
+- **Consolidated the planning docs so status lives in one place.** The four
+  `docs/*.md` planning/analysis documents had become living status logs whose
+  ✅-shipped narration duplicated the CHANGELOG and whose open items overlapped
+  `TODO.md` — so identifying the current critical path meant reading ~260 KB of
+  mostly-completed notes. `docs/STRATEGY.md` is now the single home for the
+  project's enduring context (thesis, ecosystem landscape, design principles,
+  guardrails) plus a concise "current status & remaining critical path" section
+  (§8); the shipped history stays in `CHANGELOG.md` and the per-PR follow-ons in
+  `TODO.md`. `docs/CODEBASE_ANALYSIS.md`, `docs/DEMO_APP_GAPS.md`, and
+  `docs/AI_INTEGRATION_IDEAS.md` are reduced to short pointer stubs (their
+  filenames and historical item IDs — `C1`, `G6`, `P2 #11`, `5.5`, … — are kept
+  so the ~25 source-docstring citations and the `llms.txt` links still resolve;
+  the full text remains in git history). `AGENTS.md`'s determinism-boundary
+  reference now points at `STRATEGY.md` §7.
 - **A `mypy` type-check gate now verifies the `py.typed` promise
   (`CODEBASE_ANALYSIS.md` P2 #11).** The package ships a `py.typed` marker, so
   downstream type checkers trust its inline annotations — but nothing in CI
