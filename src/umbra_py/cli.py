@@ -27,6 +27,7 @@ from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
 from .pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
+from .showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
 from .viz import (
     save_change_animation,
     save_change_composite,
@@ -202,18 +203,22 @@ def _gather_featured_sites(
     count: int,
     areas: tuple[str, ...],
     pool_limit: int,
-    frames: int,
+    min_passes: int,
     local: bool,
     db_path: str | None,
     search_kwargs: dict[str, Any],
 ) -> list[FeaturedSite]:
-    """Resolve the sites ``umbra showcase --featured`` precomputes a composite for.
+    """Resolve the sites ``umbra showcase --featured`` precomputes an artifact for.
 
     Two modes, mirroring the flags: explicit ``--featured-area`` names are
     curated one search at a time (the best-covered site per name wins), while a
     bare ``--featured N`` auto-selects the most repeat-imaged sites from a pool
     of at most ``pool_limit`` acquisitions. Either way the selection itself is
     :func:`umbra_py.showcase.select_featured_sites` — deterministic, no render.
+
+    ``min_passes`` is what the chosen ``--featured-view`` needs of a site (a
+    change composite wants its ``--featured-frames``, a timescan three, a swipe
+    two), so a site the view could not render is dropped before any network work.
 
     ``search_kwargs`` carries the rest of the showcase's search (bbox, dates,
     product type) as a dict rather than ``**kwargs`` so the two ``live_label`` /
@@ -235,12 +240,13 @@ def _gather_featured_sites(
                 live_label=f"Searching {area}",
                 **search_kwargs,
             )
-            found = select_featured_sites(pool, count=1, min_passes=frames)
+            found = select_featured_sites(pool, count=1, min_passes=min_passes)
             if found:
                 sites.append(found[0])
             else:
                 click.echo(
-                    f"No site with {frames}+ passes matched --featured-area {area!r}; skipping it.",
+                    f"No site with {min_passes}+ passes matched --featured-area "
+                    f"{area!r}; skipping it.",
                     err=True,
                 )
         return sites
@@ -252,7 +258,7 @@ def _gather_featured_sites(
         live_label="Searching for repeat-imaged sites",
         **search_kwargs,
     )
-    return select_featured_sites(pool, count=count, min_passes=frames)
+    return select_featured_sites(pool, count=count, min_passes=min_passes)
 
 
 def _local_index_options(func):
@@ -3269,9 +3275,19 @@ def tiles(
     type=int,
     default=0,
     show_default=True,
-    help="Precompute a change composite for this many repeat-imaged sites and "
-    "show them as a gallery on the landing page. Needs the 'viz' extra and "
-    "streams each scene's overview; 0 (the default) skips the gallery.",
+    help="Precompute an artifact for this many repeat-imaged sites and show "
+    "them as a gallery on the landing page. Needs the 'viz' extra and streams "
+    "each scene's overview; 0 (the default) skips the gallery.",
+)
+@click.option(
+    "--featured-view",
+    type=click.Choice(FEATURED_VIEW_NAMES),
+    default=DEFAULT_FEATURED_VIEW,
+    show_default=True,
+    help="What to precompute per featured site: 'change' (a 2/3-date "
+    "composite), 'timescan' (the whole series collapsed to temporal "
+    "statistics, needs 3+ passes) or 'swipe' (an interactive before/after "
+    "page linked from the gallery).",
 )
 @click.option(
     "--featured-area",
@@ -3285,7 +3301,8 @@ def tiles(
     type=click.Choice(["2", "3"]),
     default="2",
     show_default=True,
-    help="Passes per featured composite: 2 (green=new, magenta=gone) or 3 (temporal RGB).",
+    help="Passes per featured composite: 2 (green=new, magenta=gone) or 3 "
+    "(temporal RGB). Applies to --featured-view change only.",
 )
 @click.option(
     "--featured-limit",
@@ -3323,6 +3340,7 @@ def showcase(
     asset,
     lazy_imagery,
     featured,
+    featured_view,
     featured_areas,
     featured_frames,
     featured_limit,
@@ -3341,7 +3359,7 @@ def showcase(
       index.html    a landing page linking the pieces below + install/docs/source
       map.html      a MapLibre viewer over the whole-catalog PMTiles basemap
       explore.html  the interactive 'umbra demo' catalog explorer
-      featured/     precomputed change composites (with --featured / --featured-area)
+      featured/     precomputed artifacts (with --featured / --featured-area)
 
     Give the basemap with --pmtiles PATH, or --fetch-pmtiles to pull the
     published 'catalog.pmtiles' (the same artifact 'umbra tiles --fetch' fetches).
@@ -3355,13 +3373,15 @@ def showcase(
     needs a basemap and ignores the explorer's search options -- nothing is
     gathered, because the archive is the data source.
 
-    --featured N precomputes a change composite for the N most repeat-imaged
-    sites in the catalog (or name them yourself with repeated --featured-area)
-    and puts them on the landing page, so a first-time visitor sees what SAR
-    change looks like with no render round-trip. That step alone needs the
-    'viz' extra and streams each scene's overview; without it every page is
-    self-contained HTML, so this runs in a core install and is the front end
-    the '.github/workflows/docs.yml' Pages deploy publishes beside the docs.
+    --featured N precomputes an artifact for the N most repeat-imaged sites in
+    the catalog (or name them yourself with repeated --featured-area) and puts
+    them on the landing page, so a first-time visitor sees what SAR change looks
+    like with no render round-trip. --featured-view picks which artifact: a
+    'change' composite (the default), a whole-series 'timescan' composite, or an
+    interactive before/after 'swipe' page the gallery links to. That step alone
+    needs the 'viz' extra and streams each scene's overview; without it every
+    page is self-contained HTML, so this runs in a core install and is the front
+    end the '.github/workflows/docs.yml' Pages deploy publishes beside the docs.
     """
     if pmtiles_path and fetch_pmtiles:
         raise click.ClickException("Pass either --pmtiles or --fetch-pmtiles, not both.")
@@ -3431,7 +3451,7 @@ def showcase(
         count=featured,
         areas=featured_areas,
         pool_limit=featured_limit,
-        frames=int(featured_frames),
+        min_passes=FEATURED_VIEWS[featured_view].min_passes_for(int(featured_frames)),
         local=local,
         db_path=db_path,
         search_kwargs={
@@ -3477,6 +3497,7 @@ def showcase(
             ),
             featured_sites=featured_sites,
             featured_frames=int(featured_frames),
+            featured_view=featured_view,
             **showcase_kwargs,
         )
 
@@ -3485,9 +3506,10 @@ def showcase(
         pages.append("map.html")
     if items or unified:
         pages.append("explore.html")
-    rendered = sorted((dest / "featured").glob("*.png")) if featured_sites else []
+    suffix = FEATURED_VIEWS[featured_view].suffix
+    rendered = sorted((dest / "featured").glob(f"*{suffix}")) if featured_sites else []
     if rendered:
-        pages.append(f"featured/ ({len(rendered)} composites)")
+        pages.append(f"featured/ ({len(rendered)} {featured_view} artifacts)")
     click.echo(f"Wrote showcase site ({', '.join(pages)}) to {index.parent}")
 
 

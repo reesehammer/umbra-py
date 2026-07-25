@@ -132,10 +132,29 @@ it, none a blocker:
   streaming only a downsampled overview), so the whole path is offline-tested
   with no network and no `viz` extra; a site that won't render is warned about
   and dropped rather than failing the build. `docs.yml` passes `--featured 6`.
-  Remaining under R4: the **swipe** and **timescan** variants of the same
+  ~~Remaining under R4: the **swipe** and **timescan** variants of the same
   gallery — `viz.save_swipe_map` writes an HTML page rather than a PNG, so it
   needs a different tile shape (a link card, not an `<img>`), and a timescan
-  tile is the same shape as the change tile with a second renderer.
+  tile is the same shape as the change tile with a second renderer.~~ ✅ **Done**
+  (`umbra showcase --featured-view {change,timescan,swipe}` /
+  `assemble_showcase(featured_view=…)` / `showcase.FEATURED_VIEWS`), so **R4 is
+  closed**. The gallery precomputed exactly one thing, but the same marquee
+  selection feeds the toolkit's other two comparators — a `timescan` collapses a
+  site's *whole* pass series into one mean/peak/variability still (3+ passes, and
+  it ignores `--featured-frames` by design, so its caption counts every pass), and
+  a `swipe` writes a self-contained before/after page over the same two frames
+  `select_change_frames` picks for the change view. The four things that actually
+  differ between the views live in one `FeaturedView` record: artifact suffix,
+  qualifying `min_passes` (via `min_passes_for()`, so a site the view can't render
+  is dropped *before* any network work), tile `kind` and the section's copy. That
+  last shape difference is what the gallery had to grow: a `"page"` artifact has
+  no still to preview, so it renders as a link card in the same frame as an
+  `"image"` tile with an identical caption. Selection stays pure, rendering stays
+  behind the injectable `featured_renderer` (offline-tested, no `viz` extra), a
+  failed render is still warned-and-dropped, and `change` is still the default —
+  a showcase built without the flag is byte-identical to before. Follow-on:
+  `docs.yml` still deploys the `change` gallery; a hosted page showing more than
+  one view at once would need the section repeated per view rather than chosen.
 - **Auto-stamp the freshness date from the index.** The CI step passes the run
   date to `--updated`; reading the fetched index's `built_at` (as `umbra index
   info` does) would show the *snapshot's* age rather than the build's.

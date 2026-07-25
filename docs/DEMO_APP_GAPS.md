@@ -28,9 +28,13 @@
 >   whole-catalog vector-tile source (the sidebar filters compile to MapLibre
 >   expressions evaluated inside the tiles), so `umbra showcase --unified` — what
 >   the Pages job now deploys — is *one* page covering every acquisition with the
->   filters, instead of a click-only map beside a sliced explorer. Remaining
->   optional polish: baking thumbnails/labels into the *published* snapshot and
->   the swipe/timescan variants of the featured gallery. **Footprint polygons are
+>   filters, instead of a click-only map beside a sliced explorer. **R4 is now
+>   fully closed**: `umbra showcase --featured-view {change,timescan,swipe}`
+>   renders the same marquee selection as a whole-series timescan composite or as
+>   a self-contained before/after swipe page (shown as a link card, since an
+>   interactive page has no still to preview), so all three variants of the
+>   featured gallery ship. Remaining optional polish: baking thumbnails/labels
+>   into the *published* snapshot. **Footprint polygons are
 >   now tiled too** (a `footprints` layer clipped per tile, from zoom 6 up), so the
 >   whole-archive explorer draws coverage shape as you zoom in. **And the on-click
 >   "Get SAR image" COG overlay now works over the whole archive too** — the last

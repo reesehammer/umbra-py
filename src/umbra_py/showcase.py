@@ -26,11 +26,14 @@ landing page:
   and ``map.html`` dropped. A visitor lands on a single page covering every
   acquisition **with** the filters, instead of choosing between a whole-catalog
   map they can only click and a filterable explorer over a slice.
-* ``featured/*.png`` -- optional **precomputed change composites** for a handful
-  of repeat-imaged sites (:func:`select_featured_sites`), shown as a gallery on
-  the landing page. A first-time visitor sees *what SAR change looks like*
+* ``featured/*`` -- optional **precomputed artifacts** for a handful of
+  repeat-imaged sites (:func:`select_featured_sites`), shown as a gallery on the
+  landing page. A first-time visitor sees *what SAR change looks like*
   immediately, with no render round-trip and no server; the explorer is still
-  there for anything beyond the marquee set.
+  there for anything beyond the marquee set. Three views of the same marquee set
+  are available (:data:`FEATURED_VIEWS`): the two-or-three-date ``change``
+  composite, the whole-series ``timescan`` composite, and the interactive
+  before/after ``swipe`` map.
 
 Design, in the repo's grain:
 
@@ -98,6 +101,114 @@ FEATURED_DIR = "featured"
 
 
 @dataclass(frozen=True)
+class FeaturedView:
+    """One way of precomputing a marquee site's story for the landing page.
+
+    The featured gallery started as a single view -- a change composite per site
+    -- but the same selection feeds two more renderings of the same data, and
+    they differ in exactly the four ways this record captures: what the renderer
+    writes (``suffix``), how many passes a site needs to qualify
+    (``min_passes``), how the tile is shaped (``kind``: a still ``"image"`` or a
+    link card for a ``"page"``), and what the section says about it.
+
+    Attributes
+    ----------
+    name:
+        The view's CLI name (``umbra showcase --featured-view``).
+    suffix:
+        Extension of the artifact the renderer writes (``".png"`` for a still,
+        ``".html"`` for an interactive page).
+    kind:
+        ``"image"`` -- the tile is the picture itself; ``"page"`` -- the tile is
+        a link card, because there is no still to show.
+    min_passes:
+        Passes a site needs before the view can render it (see
+        :meth:`min_passes_for`).
+    heading, lede:
+        The gallery section's heading and one-paragraph explanation. The lede is
+        emitted as trusted inline markup (module constants, never user input).
+    alt_template:
+        ``str.format`` template for an image tile's ``alt`` text, given
+        ``label``. Unused for ``"page"`` tiles.
+    """
+
+    name: str
+    suffix: str
+    kind: str
+    min_passes: int
+    heading: str
+    lede: str
+    alt_template: str = ""
+
+    def min_passes_for(self, frames: int) -> int:
+        """Passes a site needs to qualify for this view at ``frames``.
+
+        Only the change view's requirement moves with ``--featured-frames`` (it
+        composites exactly that many passes); the timescan needs its statistical
+        minimum whatever ``frames`` says, and a swipe is always two.
+        """
+        return max(self.min_passes, frames) if self.name == "change" else self.min_passes
+
+
+#: The featured-gallery views, keyed by their ``--featured-view`` name. The
+#: change view is the default and the original behaviour; the other two are the
+#: same marquee selection rendered by the other two ``viz`` comparators.
+FEATURED_VIEWS: dict[str, FeaturedView] = {
+    "change": FeaturedView(
+        name="change",
+        suffix=".png",
+        kind="image",
+        min_passes=2,
+        heading="What SAR change looks like",
+        lede=(
+            "Each image composites repeat passes of one site onto a shared grid: "
+            "ground that stayed put reads gray, and anything that appeared or "
+            "vanished between passes is tinted by when it happened. Rendered ahead "
+            "of time from the open catalog \N{EM DASH} no account, no download."
+        ),
+        alt_template="SAR change composite of {label}",
+    ),
+    "timescan": FeaturedView(
+        name="timescan",
+        suffix=".png",
+        kind="image",
+        min_passes=3,
+        heading="What a whole time series looks like",
+        lede=(
+            "Each image collapses <em>every</em> pass of one site into one picture "
+            "of temporal statistics on a shared grid: average backscatter in red, "
+            "the peak in green, and how much each pixel varied across the series in "
+            "blue. Stable terrain reads gray or yellow; anything that came and went "
+            "\N{EM DASH} ships through a berth, vehicles in a lot, a field flooding "
+            "\N{EM DASH} glows blue or cyan."
+        ),
+        alt_template="SAR timescan composite of {label}",
+    ),
+    "swipe": FeaturedView(
+        name="swipe",
+        suffix=".html",
+        kind="page",
+        min_passes=2,
+        heading="Sweep between two passes",
+        lede=(
+            "Each tile opens a co-registered before/after map of one site with a "
+            "draggable divider: the earlier pass fills one side, the later one the "
+            "other, and sweeping the seam wipes one over the identical ground. It "
+            "is the most direct way to <em>feel</em> what moved between two dates. "
+            "Every map is a self-contained page, rendered ahead of time from the "
+            "open catalog."
+        ),
+    ),
+}
+
+#: The view built when none is named -- the original featured gallery.
+DEFAULT_FEATURED_VIEW = "change"
+
+#: Ordered view names, for the CLI's ``--featured-view`` choice.
+FEATURED_VIEW_NAMES = tuple(FEATURED_VIEWS)
+
+
+@dataclass(frozen=True)
 class FeaturedSite:
     """A repeat-imaged site chosen for a precomputed change composite.
 
@@ -136,11 +247,18 @@ class FeaturedSite:
 
 @dataclass(frozen=True)
 class FeaturedArtifact:
-    """One rendered tile in the landing page's featured gallery."""
+    """One rendered tile in the landing page's featured gallery.
+
+    ``kind`` mirrors the :class:`FeaturedView` that produced it: an ``"image"``
+    tile *is* the picture, a ``"page"`` tile is a link card onto an interactive
+    HTML artifact that has no still to show.
+    """
 
     href: str
     label: str
     caption: str
+    kind: str = "image"
+    alt: str = ""
 
 
 #: Renders one site's featured artifact to a path. Injectable so the whole
@@ -217,6 +335,7 @@ def build_showcase(
     repo_url: str = DEFAULT_REPO_URL,
     docs_url: str = DEFAULT_DOCS_URL,
     featured: Sequence[FeaturedArtifact] = (),
+    featured_view: str = DEFAULT_FEATURED_VIEW,
     unified: bool = False,
 ) -> str:
     """Render the showcase landing page as a self-contained HTML string.
@@ -239,9 +358,12 @@ def build_showcase(
         --unified``). It only changes that card's copy — there is no separate
         map page to send people to, because the explorer is one.
     featured:
-        Precomputed change composites to show above the cards. Empty (the
-        default) drops the whole gallery section, so a metadata-only showcase is
-        byte-identical to one built before this option existed.
+        Precomputed artifacts to show above the cards. Empty (the default) drops
+        the whole gallery section, so a metadata-only showcase is byte-identical
+        to one built before this option existed.
+    featured_view:
+        Which :data:`FEATURED_VIEWS` entry produced ``featured`` — it selects the
+        section's heading and lede. Ignored when ``featured`` is empty.
     title, tagline:
         Hero heading and one-line pitch.
     item_count:
@@ -315,7 +437,7 @@ def build_showcase(
         tagline=escape(tagline),
         styles=_STYLES,
         stats=stats,
-        featured=_featured_section(featured),
+        featured=_featured_section(featured, featured_view),
         cards="\n".join(cards),
         attribution=escape(ATTRIBUTION),
         repo_url=escape(repo_url),
@@ -350,33 +472,25 @@ def _stats_line(item_count: int | None, updated: str | None) -> str:
     return '    <p class="stats">' + " &middot; ".join(parts) + "</p>"
 
 
-def _featured_section(featured: Sequence[FeaturedArtifact]) -> str:
-    """Render the "what SAR change looks like" gallery (empty string when there
-    is nothing to show, so the page has no dangling heading).
+def _featured_section(
+    featured: Sequence[FeaturedArtifact], view: str = DEFAULT_FEATURED_VIEW
+) -> str:
+    """Render the precomputed-artifact gallery (empty string when there is
+    nothing to show, so the page has no dangling heading).
 
-    Each tile links to its own full-size PNG -- deliberately not to a render
-    endpoint, so the section keeps working on a plain static host.
+    Each tile points at its own file inside ``featured/`` -- deliberately not at
+    a render endpoint, so the section keeps working on a plain static host. The
+    heading and lede come from the :class:`FeaturedView` that produced the
+    artifacts, and each tile takes the shape that view's output justifies.
     """
     if not featured:
         return ""
-    figures = "\n".join(
-        f'        <figure class="shot">\n'
-        f'          <a href="{escape(art.href, quote=True)}">'
-        f'<img src="{escape(art.href, quote=True)}" '
-        f'alt="SAR change composite of {escape(art.label, quote=True)}" '
-        f'loading="lazy"/></a>\n'
-        f"          <figcaption><strong>{escape(art.label)}</strong>"
-        f"<span>{escape(art.caption)}</span></figcaption>\n"
-        f"        </figure>"
-        for art in featured
-    )
+    spec = FEATURED_VIEWS.get(view, FEATURED_VIEWS[DEFAULT_FEATURED_VIEW])
+    figures = "\n".join(_featured_tile(art) for art in featured)
     return (
         '    <section class="featured">\n'
-        "      <h2>What SAR change looks like</h2>\n"
-        '      <p class="lede">Each image composites repeat passes of one site onto a '
-        "shared grid: ground that stayed put reads gray, and anything that appeared "
-        "or vanished between passes is tinted by when it happened. Rendered ahead of "
-        "time from the open catalog \N{EM DASH} no account, no download.</p>\n"
+        f"      <h2>{escape(spec.heading)}</h2>\n"
+        f'      <p class="lede">{spec.lede}</p>\n'
         '      <div class="shots">\n'
         f"{figures}\n"
         "      </div>\n"
@@ -384,21 +498,61 @@ def _featured_section(featured: Sequence[FeaturedArtifact]) -> str:
     )
 
 
-def featured_caption(site: FeaturedSite, frames: int) -> str:
-    """One line of honest provenance under a featured tile: how many passes were
-    composited, over what dates, and what the colours mean.
+def _featured_tile(art: FeaturedArtifact) -> str:
+    """One gallery tile, shaped by what its renderer wrote.
 
-    The colour semantics come straight from :func:`umbra_py.viz.change_composite`
-    (two dates -> green/magenta, three -> temporal RGB); keep them in step.
+    An ``"image"`` artifact is shown inline and links to itself at full size. A
+    ``"page"`` artifact (the swipe map) has no still to preview, so its tile is a
+    link card in the same frame -- the caption below is identical either way, so
+    the two shapes read as one gallery.
     """
-    colors = (
-        "green = new or brighter backscatter, magenta = gone or dimmer"
-        if frames == 2
-        else "earliest = red, middle = green, latest = blue"
+    href = escape(art.href, quote=True)
+    caption = (
+        f"          <figcaption><strong>{escape(art.label)}</strong>"
+        f"<span>{escape(art.caption)}</span></figcaption>\n"
     )
+    if art.kind == "page":
+        body = (
+            f'          <a class="glyph" href="{href}">'
+            f'<span aria-hidden="true">\N{SQUARE WITH LEFT HALF BLACK}</span>'
+            f'<span class="open">Open the swipe map</span></a>\n'
+        )
+        return f'        <figure class="shot shot--page">\n{body}{caption}        </figure>'
+    alt = escape(art.alt or art.label, quote=True)
+    body = f'          <a href="{href}"><img src="{href}" alt="{alt}" loading="lazy"/></a>\n'
+    return f'        <figure class="shot">\n{body}{caption}        </figure>'
+
+
+def featured_caption(site: FeaturedSite, frames: int, *, view: str = DEFAULT_FEATURED_VIEW) -> str:
+    """One line of honest provenance under a featured tile: how many passes went
+    in, over what dates, and what the colours (or the interaction) mean.
+
+    The semantics come straight from the ``viz`` renderer behind each view --
+    :func:`umbra_py.viz.change_composite` (two dates -> green/magenta, three ->
+    temporal RGB), :func:`umbra_py.viz.timescan_composite` (mean/max/std as RGB
+    over the *whole* series) and :func:`umbra_py.viz.swipe_map` (two passes
+    behind a divider); keep them in step.
+    """
+    if view == "timescan":
+        # The timescan summarises every pass, not a selection of `frames`.
+        used = len(site.items)
+        detail = (
+            "red = average backscatter, green = peak, blue = variability; "
+            "stable ground reads gray, anything that came and went glows blue/cyan"
+        )
+    elif view == "swipe":
+        used = 2
+        detail = "drag the divider to sweep the later pass over the earlier one"
+    else:
+        used = frames
+        detail = (
+            "green = new or brighter backscatter, magenta = gone or dimmer"
+            if frames == 2
+            else "earliest = red, middle = green, latest = blue"
+        )
     span = site.date_range
-    passes = f"{frames} passes" if frames != 1 else "1 pass"
-    return f"{passes}, {span} \N{EM DASH} {colors}." if span else f"{passes} \N{EM DASH} {colors}."
+    passes = f"{used} passes" if used != 1 else "1 pass"
+    return f"{passes}, {span} \N{EM DASH} {detail}." if span else f"{passes} \N{EM DASH} {detail}."
 
 
 def assemble_showcase(
@@ -411,6 +565,7 @@ def assemble_showcase(
     demo_kwargs: dict[str, Any] | None = None,
     featured_sites: Sequence[FeaturedSite] = (),
     featured_frames: int = DEFAULT_FEATURED_FRAMES,
+    featured_view: str = DEFAULT_FEATURED_VIEW,
     featured_renderer: FeaturedRenderer | None = None,
     **showcase_kwargs: Any,
 ) -> Path:
@@ -425,8 +580,8 @@ def assemble_showcase(
     * ``explore.html`` -- the ``umbra demo`` interactive explorer: over the
       copied archive when ``unified=True``, otherwise over ``items`` (and
       skipped when those are absent or empty).
-    * ``featured/<slug>.png`` -- one precomputed change composite per entry in
-      ``featured_sites`` (none by default).
+    * ``featured/<slug>.png`` (or ``.html`` for the swipe view) -- one
+      precomputed artifact per entry in ``featured_sites`` (none by default).
     * ``index.html`` -- always (the landing page, with cards for whichever of the
       above were written).
 
@@ -436,19 +591,30 @@ def assemble_showcase(
         Acquisitions for the explorer. ``None`` or empty skips ``explore.html``
         and its card.
     featured_sites:
-        Sites (from :func:`select_featured_sites`) to precompute a change
-        composite for. Empty (the default) leaves the page and the output
-        directory exactly as they were before this option existed.
+        Sites (from :func:`select_featured_sites`) to precompute an artifact
+        for. Empty (the default) leaves the page and the output directory
+        exactly as they were before this option existed.
     featured_frames:
         Passes composited into each featured image -- 2 (green/magenta) or 3
-        (temporal RGB), per :func:`umbra_py.viz.change_composite`.
+        (temporal RGB), per :func:`umbra_py.viz.change_composite`. Only the
+        ``"change"`` view uses it: a timescan summarises the whole series and a
+        swipe is always two passes.
+    featured_view:
+        Which of :data:`FEATURED_VIEWS` to render -- ``"change"`` (the default
+        two/three-date composite), ``"timescan"`` (the whole series collapsed to
+        temporal statistics) or ``"swipe"`` (an interactive before/after page).
+        It selects the default renderer, the artifact extension and the gallery
+        section's copy.
     featured_renderer:
         ``(items, dest) -> None``, called once per featured site. Defaults to
-        :func:`umbra_py.viz.save_change_composite` over the frames
-        :func:`umbra_py.viz.select_change_frames` picks, which needs the ``viz``
-        extra and streams each scene's overview. A site whose render fails is
-        warned about and dropped, never fatal: one unreadable asset must not
-        cost the whole showcase.
+        the ``viz`` function behind ``featured_view``
+        (:func:`umbra_py.viz.save_change_composite` over the frames
+        :func:`umbra_py.viz.select_change_frames` picks,
+        :func:`umbra_py.viz.save_timescan_composite`, or
+        :func:`umbra_py.viz.save_swipe_map`), which needs the ``viz`` extra and
+        streams each scene's overview. A site whose render fails is warned about
+        and dropped, never fatal: one unreadable asset must not cost the whole
+        showcase.
     pmtiles_path:
         A local whole-catalog ``.pmtiles`` file to include. It is copied into
         ``dest_dir`` (so the directory is self-contained and relocatable) and the
@@ -479,6 +645,11 @@ def assemble_showcase(
     """
     if unified and pmtiles_path is None:
         raise ValueError("unified=True needs a pmtiles_path (the archive is the data source)")
+    if featured_view not in FEATURED_VIEWS:
+        raise ValueError(
+            f"unknown featured_view {featured_view!r}; expected one of "
+            f"{', '.join(FEATURED_VIEW_NAMES)}"
+        )
 
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -525,6 +696,7 @@ def assemble_showcase(
         dest,
         featured_sites,
         frames=featured_frames,
+        view=featured_view,
         renderer=featured_renderer,
     )
 
@@ -536,6 +708,7 @@ def assemble_showcase(
             unified=unified,
             item_count=len(item_list) if item_list is not None else None,
             featured=featured,
+            featured_view=featured_view,
             **showcase_kwargs,
         )
     )
@@ -547,13 +720,15 @@ def _render_featured(
     sites: Sequence[FeaturedSite],
     *,
     frames: int,
+    view: str = DEFAULT_FEATURED_VIEW,
     renderer: FeaturedRenderer | None,
 ) -> list[FeaturedArtifact]:
-    """Render one change composite per site into ``dest/featured/`` and return
-    the artifacts that actually landed (a failed render is skipped, not fatal)."""
+    """Render one artifact per site into ``dest/featured/`` and return the ones
+    that actually landed (a failed render is skipped, not fatal)."""
     if not sites:
         return []
-    render = renderer if renderer is not None else _default_featured_renderer(frames)
+    spec = FEATURED_VIEWS[view]
+    render = renderer if renderer is not None else _default_featured_renderer(frames, view=view)
     out_dir = dest / FEATURED_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -568,37 +743,67 @@ def _render_featured(
             stem = f"{site.slug}-{len(used) + 1}"
         used.add(stem)
 
-        png = out_dir / f"{stem}.png"
+        out_path = out_dir / f"{stem}{spec.suffix}"
         try:
-            render(site.items, png)
+            render(site.items, out_path)
         except Exception as exc:  # noqa: BLE001 - one bad scene must not fail the build
             warnings.warn(
                 f"Skipping featured site {site.task!r}: {exc}", RuntimeWarning, stacklevel=2
             )
             continue
-        if not png.exists():  # a renderer that silently wrote nothing
+        if not out_path.exists():  # a renderer that silently wrote nothing
             continue
+        label = site.label
         artifacts.append(
             FeaturedArtifact(
-                href=f"{FEATURED_DIR}/{png.name}",
-                label=site.label,
-                caption=featured_caption(site, min(frames, len(site.items))),
+                href=f"{FEATURED_DIR}/{out_path.name}",
+                label=label,
+                caption=featured_caption(site, min(frames, len(site.items)), view=view),
+                kind=spec.kind,
+                alt=spec.alt_template.format(label=label) if spec.alt_template else "",
             )
         )
     return artifacts
 
 
-def _default_featured_renderer(frames: int, asset: str = "GEC") -> FeaturedRenderer:
-    """The production renderer: co-register the evenly-spaced frames of a site
-    and write the change composite. Needs the ``viz`` extra, and streams only a
-    downsampled overview of each scene."""
+def _default_featured_renderer(
+    frames: int, asset: str = "GEC", *, view: str = DEFAULT_FEATURED_VIEW
+) -> FeaturedRenderer:
+    """The production renderer for ``view``. Needs the ``viz`` extra, and streams
+    only a downsampled overview of each scene.
 
-    def render(items: list[UmbraItem], dest: Path) -> None:
+    * ``change`` -- co-register the evenly-spaced ``frames`` of a site and write
+      the change composite.
+    * ``timescan`` -- collapse the site's *whole* series into one temporal
+      statistics image (mean/max/std as RGB).
+    * ``swipe`` -- write a self-contained before/after page over the site's first
+      and last comparable passes.
+    """
+
+    def render_change(items: list[UmbraItem], dest: Path) -> None:
         from .viz import save_change_composite, select_change_frames  # noqa: PLC0415
 
         save_change_composite(select_change_frames(items, frames=frames), dest, asset=asset)
 
-    return render
+    def render_timescan(items: list[UmbraItem], dest: Path) -> None:
+        from .viz import save_timescan_composite  # noqa: PLC0415
+
+        save_timescan_composite(items, dest, asset=asset)
+
+    def render_swipe(items: list[UmbraItem], dest: Path) -> None:
+        from .viz import save_swipe_map, select_change_frames  # noqa: PLC0415
+
+        # The same two-frame selection the change view uses (largest
+        # single-polarization group, earliest and latest), so the two views tell
+        # the same story about a site.
+        before, after = select_change_frames(items, frames=2)
+        save_swipe_map(before, after, dest, asset=asset)
+
+    return {
+        "change": render_change,
+        "timescan": render_timescan,
+        "swipe": render_swipe,
+    }[view]
 
 
 _STYLES = """
@@ -660,6 +865,16 @@ _STYLES = """
       display: block; width: 100%; aspect-ratio: 1; object-fit: cover;
       background: #000;
     }
+    .shot--page .glyph {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: .5rem; aspect-ratio: 1;
+      text-decoration: none; color: inherit;
+      background: linear-gradient(135deg, var(--border), var(--panel));
+      border-bottom: 1px solid var(--border); font-size: 2.5rem;
+      transition: background .12s ease;
+    }
+    .shot--page .glyph .open { font-size: .9rem; color: var(--accent); }
+    .shot--page .glyph:hover { background: linear-gradient(135deg, var(--panel), var(--border)); }
     .shot figcaption { padding: .75rem 1rem 1rem; font-size: .85rem; }
     .shot figcaption strong { display: block; margin-bottom: .15rem; }
     .shot figcaption span { color: var(--muted); }

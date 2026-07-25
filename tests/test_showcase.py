@@ -450,9 +450,9 @@ def test_assemble_without_featured_writes_no_directory(tmp_path):
 def _stub_featured_renderer(monkeypatch):
     """Replace the viz-backed default renderer with one that just writes bytes."""
 
-    def factory(frames, asset="GEC"):
+    def factory(frames, asset="GEC", *, view="change"):
         def render(items, dest):
-            dest.write_bytes(b"\x89PNG" + str(frames).encode() + asset.encode())
+            dest.write_bytes(b"\x89PNG" + str(frames).encode() + asset.encode() + view.encode())
 
         return render
 
@@ -470,7 +470,7 @@ def test_cli_showcase_featured_auto_selects(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
-    assert "featured/ (1 composites)" in result.output
+    assert "featured/ (1 change artifacts)" in result.output
     assert "What SAR change looks like" in (out / "index.html").read_text()
 
 
@@ -680,3 +680,166 @@ def test_cli_showcase_unified_conflicts_with_no_explore(tmp_path):
     )
     assert result.exit_code != 0
     assert "opposite" in result.output
+
+
+# --- featured views: timescan + swipe -------------------------------------
+def test_featured_view_table_min_passes():
+    """Only the change view's requirement tracks --featured-frames; the timescan
+    needs its statistical minimum and a swipe is always two."""
+    views = showcase.FEATURED_VIEWS
+    assert showcase.FEATURED_VIEW_NAMES == ("change", "timescan", "swipe")
+    assert views["change"].min_passes_for(2) == 2
+    assert views["change"].min_passes_for(3) == 3
+    assert views["timescan"].min_passes_for(2) == 3
+    assert views["swipe"].min_passes_for(3) == 2
+
+
+def test_assemble_featured_timescan_view(tmp_path):
+    """The timescan tile is a still like the change tile, but its caption counts
+    the *whole* series (the renderer summarises every pass, not a selection)."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 4, 7, 9)], min_passes=3)
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out,
+        featured_sites=sites,
+        featured_view="timescan",
+        featured_renderer=lambda items, dest: dest.write_bytes(b"\x89PNG"),
+    )
+
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+    idx = (out / "index.html").read_text()
+    assert "What a whole time series looks like" in idx
+    assert 'src="featured/alpha.png"' in idx
+    assert 'alt="SAR timescan composite of Alpha"' in idx
+    # Every pass, not --featured-frames of them, and the timescan's own colours.
+    assert "4 passes, 2024-01-01 \N{EN DASH} 2024-01-09" in idx
+    assert "red = average backscatter, green = peak, blue = variability" in idx
+    assert "green = new or brighter backscatter" not in idx
+
+
+def test_assemble_featured_swipe_view(tmp_path):
+    """A swipe map is an HTML page, so its tile is a link card rather than an
+    <img> -- the one shape difference between the three views."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 5)])
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out,
+        featured_sites=sites,
+        featured_view="swipe",
+        featured_renderer=lambda items, dest: dest.write_text("<html>swipe</html>"),
+    )
+
+    assert [p.name for p in (out / "featured").glob("*")] == ["alpha.html"]
+    idx = (out / "index.html").read_text()
+    assert "Sweep between two passes" in idx
+    assert 'class="shot shot--page"' in idx
+    assert 'href="featured/alpha.html"' in idx
+    assert "<img" not in idx  # no still exists for this view
+    assert "2 passes, 2024-01-01 \N{EN DASH} 2024-01-05" in idx
+    assert "drag the divider" in idx
+
+
+def test_assemble_rejects_an_unknown_featured_view(tmp_path):
+    with pytest.raises(ValueError, match="unknown featured_view"):
+        showcase.assemble_showcase(tmp_path / "site", featured_view="nope")
+
+
+def test_default_featured_renderer_timescan_calls_viz(monkeypatch, tmp_path):
+    """The timescan renderer hands viz the site's *whole* series."""
+    calls: dict[str, object] = {}
+
+    def fake_save(items, dest, *, asset):
+        calls["n"] = len(list(items))
+        calls["asset"] = asset
+        Path(dest).write_bytes(b"\x89PNG")
+        return Path(dest)
+
+    monkeypatch.setattr("umbra_py.viz.save_timescan_composite", fake_save)
+
+    render = showcase._default_featured_renderer(2, asset="GEC", view="timescan")
+    dest = tmp_path / "x.png"
+    render([_pass("Alpha", d) for d in (1, 2, 3, 4)], dest)
+
+    assert calls == {"n": 4, "asset": "GEC"}
+    assert dest.exists()
+
+
+def test_default_featured_renderer_swipe_calls_viz(monkeypatch, tmp_path):
+    """The swipe renderer reuses select_change_frames' two-frame pick, so the
+    swipe and change views tell the same story about a site."""
+    calls: dict[str, object] = {}
+
+    def fake_select(items, *, frames):
+        calls["frames"] = frames
+        items = list(items)
+        return [items[0], items[-1]]
+
+    def fake_save(before, after, dest, *, asset):
+        calls["pair"] = (before.id, after.id)
+        calls["asset"] = asset
+        Path(dest).write_text("<html/>")
+        return Path(dest)
+
+    monkeypatch.setattr("umbra_py.viz.select_change_frames", fake_select)
+    monkeypatch.setattr("umbra_py.viz.save_swipe_map", fake_save)
+
+    render = showcase._default_featured_renderer(3, asset="CSI", view="swipe")
+    dest = tmp_path / "x.html"
+    render([_pass("Alpha", d) for d in (1, 2, 3)], dest)
+
+    assert calls == {"frames": 2, "pair": ("Alpha-1", "Alpha-3"), "asset": "CSI"}
+    assert dest.exists()
+
+
+def test_cli_showcase_featured_view_timescan_needs_three_passes(tmp_path, monkeypatch):
+    """--featured-view timescan raises the bar a site must clear before any
+    render is attempted: a two-pass site can't be summarised statistically."""
+    pool = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "showcase",
+            "--local",
+            "--out",
+            str(out),
+            "--no-explore",
+            "--featured",
+            "5",
+            "--featured-view",
+            "timescan",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+    assert "featured/ (1 timescan artifacts)" in result.output
+    assert "What a whole time series looks like" in (out / "index.html").read_text()
+
+
+def test_cli_showcase_featured_view_swipe(tmp_path, monkeypatch):
+    pool = [_pass("Alpha", d) for d in (1, 2)]
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "showcase",
+            "--local",
+            "--out",
+            str(out),
+            "--no-explore",
+            "--featured",
+            "1",
+            "--featured-view",
+            "swipe",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in (out / "featured").glob("*")] == ["alpha.html"]
+    assert "featured/ (1 swipe artifacts)" in result.output
+    assert 'href="featured/alpha.html"' in (out / "index.html").read_text()

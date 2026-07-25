@@ -7,6 +7,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Timescan and swipe views for the showcase's featured gallery — the last open
+  R4 item (`DEMO_APP_GAPS.md` R4 / `STRATEGY.md` §8 demo polish).** The featured
+  gallery precomputed exactly one thing: a two-or-three-date change composite per
+  marquee site. But the same deterministic selection feeds the toolkit's other
+  two comparators, and each answers a question the change composite can't — *what
+  did this site do across its whole history?* and *what actually moved between
+  these two dates?* `umbra showcase --featured-view {change,timescan,swipe}` now
+  picks which:
+  - **`timescan`** collapses a site's **entire** pass series into one
+    `viz.timescan_composite` still (red = mean backscatter, green = peak, blue =
+    temporal variability), so ground that came and went glows blue/cyan. It needs
+    3+ passes rather than 2, and its caption counts every pass composited — not
+    `--featured-frames` of them, which the view deliberately ignores.
+  - **`swipe`** writes a self-contained `viz.swipe_map` **page** per site — two
+    co-registered passes behind a draggable divider — over the same two frames
+    `select_change_frames` picks for the change view, so the two views tell the
+    same story about a site.
+  The view is one record (`showcase.FeaturedView`, in `FEATURED_VIEWS`) carrying
+  the four things that actually differ: the artifact extension, the passes a site
+  must have, the tile shape and the section's copy. That last difference is the
+  one the gallery had to grow for: a swipe map is HTML with no still to preview,
+  so a `"page"` artifact renders as a **link card** in the same frame as an
+  `"image"` tile — identical caption, identical provenance line, so the two
+  shapes read as one gallery. `min_passes_for()` keeps the qualifying bar with
+  the view, so `--featured-view timescan` drops the two-pass sites *before* any
+  network work rather than failing a render. Everything else is unchanged:
+  selection stays the pure `select_featured_sites`, rendering still goes through
+  the injectable `featured_renderer` (so the whole path is offline-tested with no
+  network and no `viz` extra), a site that won't render is still warned about and
+  dropped rather than fatal, and the default is still `change` — a showcase built
+  without the new flag is byte-identical to one built before it. Offline-tested
+  in `tests/test_showcase.py`.
 - **Click-to-quicklook SAR imagery over the *whole archive* — the tiles now
   reference each acquisition's COG (`DEMO_APP_GAPS.md` Path A / `STRATEGY.md` §8
   demo polish).** The whole-archive explorer (`umbra demo --pmtiles`, what the
