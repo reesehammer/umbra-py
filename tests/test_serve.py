@@ -1012,6 +1012,46 @@ def test_artifacts_can_be_disabled(index_path, tmp_path):
     assert not ({"quicklook", "change", "timescan", "swipe", "stats"} & rels)
 
 
+def test_bad_render_input_maps_to_400(index_path, tmp_path):
+    """A render's ``ValueError`` is the *client's* mistake -- acquisitions whose
+    footprints share no ground is the common one -- so it must answer ``400``
+    with the explanation, not a ``500`` that reads as a server fault. Shared by
+    every artifact route, so the picture endpoints get it too."""
+
+    def boom(items, opts):
+        raise ValueError("Footprints do not all overlap, so the intersection is empty.")
+
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom, stats=boom)
+    app = serve.build_app(index_path, renderers=renderers, cache_dir=tmp_path / "art")
+    client = TestClient(app, raise_server_exceptions=False)
+    for route in ("/artifacts/stats", "/artifacts/change"):
+        resp = client.post(route, json={"ids": ["item-0", "item-1"]})
+        assert resp.status_code == 400, route
+        assert "do not all overlap" in resp.json()["detail"]
+
+
+def test_bad_render_input_fails_an_async_job_with_400(index_path, tmp_path):
+    """The async path mirrors the synchronous one: a bad-input render becomes a
+    ``failed`` job whose result endpoint answers ``400``, not ``500``."""
+
+    def boom(items, opts):
+        raise ValueError("Footprints do not all overlap, so the intersection is empty.")
+
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom, stats=boom)
+    app = serve.build_app(
+        index_path,
+        renderers=renderers,
+        cache_dir=tmp_path / "art",
+        job_executor=serve._InlineJobExecutor(),
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    job = client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"], "async": True}).json()
+    assert job["status"] == "failed"
+    result = client.get(f"/jobs/{job['id']}/result")
+    assert result.status_code == 400
+    assert "do not all overlap" in result.json()["detail"]
+
+
 def test_missing_render_extra_maps_to_501(index_path, tmp_path):
     from umbra_py.exceptions import MissingDependencyError
 

@@ -1138,7 +1138,12 @@ curl -o change.png http://127.0.0.1:8000/jobs/<job-id>/result
 These endpoints are what `umbra demo --server-url <serve URL>` calls: the
 generated explorer gains an "Analyze this view" panel whose Change / Timescan /
 Swipe buttons render each product over the currently-filtered acquisitions on
-demand. Without `--server-url` the page stays a fully static single file.
+demand, and whose **Quantify** button measures them instead — it POSTs the same
+view to `/artifacts/stats` and reads out the answer: how many decibels the site
+moved between its first and last pass, how much ground crossed the change
+threshold (in km², since the endpoint stacks on the site's UTM grid), which
+block moved most and between which two passes, and the north-up heat-grid of
+signed change. Without `--server-url` the page stays a fully static single file.
 
 ### Self-host it with Docker
 

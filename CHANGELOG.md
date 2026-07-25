@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A "Quantify" button in the `umbra demo` analyze panel — the self-serve
+  explorer can now *measure*, not only look (the first open follow-on of the
+  `POST /artifacts/stats` PR, `TODO.md`; `DEMO_APP_GAPS.md` R4).** With
+  `--server-url` the explorer offered Change / Timescan / Swipe, and every one
+  of them was a picture: a visitor could see that a site changed but had no way
+  to say *by how much* without leaving the page for the CLI. The numeric
+  endpoint that answers that shipped last week and had no client. **Quantify**
+  is it: the fourth button POSTs the same currently-filtered acquisitions to
+  `POST /artifacts/stats` and reads the reduction out in the sidebar — the mean
+  decibel change between the first and last pass with its direction, the
+  fraction of the site that moved past the change threshold **and that area in
+  km²** (the endpoint stacks on the site's UTM grid, so the number means
+  something), which block moved most and between which two passes, and the
+  north-up ASCII heat-grid of signed change per block. The request always asks
+  for the `blocks: 3` breakdown, because a scene-wide mean *dilutes* a change
+  that moved one corner hard — the same reason `blocks` exists at all.
+  Everything the panel prints is a number the server measured; it formats and
+  never computes, so the page and `umbra stack --stats` cannot disagree, and the
+  document's CC-BY attribution and its calibration caveat ride along with the
+  numbers into the browser (design principle 4). The panel is the one both
+  explorers share, so the embedded-slice and whole-archive PMTiles pages gain
+  the button together and cannot drift; the readout is built with `textContent`,
+  so a remote string never parses as HTML; and with no `--server-url` the page
+  is a fully static single file exactly as before. Offline-tested in
+  `tests/test_demo.py`, and the generated panel was additionally driven against
+  a real `stack_stats` document end to end.
+
+  Alongside it, a **client mistake stopped reading as a server error** (the
+  stats PR's other follow-on): `_serve_artifact` and the async job runner mapped
+  only `MissingDependencyError`, so bad input to a render — acquisitions whose
+  footprints share no ground under `extent="intersection"`, the failure this
+  button makes easy to hit from a filtered view — surfaced as a `500` (or a
+  `500` job) that a caller can only read as "the server broke". A render's
+  `ValueError` is now a `400` carrying the explanation, on the synchronous and
+  async paths alike and for every artifact route, not just stats. Offline-tested
+  in `tests/test_serve.py`.
+
 - **Measure a site over HTTP: `POST /artifacts/stats` on `umbra serve` (the last
   open follow-on of the datacube PR, `TODO.md`; `STRATEGY.md` §5.5 / §7.2).**
   The STAC API façade could already *show* change over any site on demand — a
