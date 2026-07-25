@@ -515,8 +515,9 @@ umbra demo --local --area "Centerfield" --server-url http://localhost:8000 --out
 # ...or point the same explorer at a whole-catalog PMTiles archive and it covers
 # the ENTIRE catalog instead of a searched slice: the browser range-reads only
 # the tiles in view, so the filters work over every acquisition from a page that
-# stays a few KB, with footprint outlines appearing as you zoom in. Nothing is
-# searched or embedded -- the archive is the data.
+# stays a few KB, with footprint outlines appearing as you zoom in and the same
+# click-to-quicklook SAR overlay on every scene the archive references a COG for.
+# Nothing is searched or embedded -- the archive is the data.
 umbra tiles --fetch --out catalog.pmtiles
 umbra demo --pmtiles catalog.pmtiles --out explorer.html
 
@@ -526,8 +527,11 @@ umbra demo --pmtiles catalog.pmtiles --out explorer.html
 # where embedding every footprint in the page stops being fast. Each scene is
 # tiled as a centroid at every zoom and as its clipped footprint polygon from
 # zoom 6 down, so zooming in shows coverage shape, not just a marker (add
-# --no-footprints for a smaller centroids-only archive). --viewer also writes a
-# MapLibre GL page that renders it; host the two side by side.
+# --no-footprints for a smaller centroids-only archive). Each feature also
+# references its GEC cloud-optimized GeoTIFF, so a viewer over the archive can
+# stream the picture on click (--cog-asset picks the product, --no-cog omits it).
+# --viewer also writes a MapLibre GL page that renders it; host the two side by
+# side.
 umbra tiles --local --out catalog.pmtiles --viewer catalog.html
 
 # ...or skip the tiling entirely: the weekly workflow already publishes a

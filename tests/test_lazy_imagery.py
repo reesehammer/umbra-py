@@ -382,3 +382,79 @@ def test_cli_map_lazy_imagery_only_html(monkeypatch, tmp_path, sample_item_dict)
     )
     assert result.exit_code != 0
     assert "lazy" in result.output.lower() and "html" in result.output.lower()
+
+
+# --- the two map engines the one driver places overlays with ----------------
+
+
+def test_driver_script_defaults_to_leaflet_placement():
+    """Folium maps and the embedded-slice explorer are Leaflet pages; the
+    default build must stay exactly the imageOverlay it always was."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "L.imageOverlay(dataUrl, bounds" in js
+    assert "map.removeLayer(handle)" in js
+    assert "addSource" not in js
+
+
+def test_driver_script_maplibre_build_uses_an_image_source():
+    """MapLibre GL has no imageOverlay: the equivalent is an `image` source
+    (the data URL plus its four corners) drawn by a `raster` layer."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0, engine="maplibre")
+    assert "map.addSource" in js and "type: 'image'" in js
+    assert "type: 'raster'" in js
+    assert "coordinates: [[west, north], [east, north], [east, south], [west, south]]" in js
+    # Removal has to drop both halves, or a re-click leaves an orphan source.
+    assert "map.removeLayer(ids.layer)" in js and "map.removeSource(ids.source)" in js
+    # The Leaflet placement must not ride along on a page with no Leaflet.
+    assert "L.imageOverlay" not in js
+
+
+def test_maplibre_overlay_ids_are_sanitized():
+    """Acquisition ids come from remote metadata and become MapLibre style
+    keys, so anything outside [A-Za-z0-9_-] is collapsed first."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0, engine="maplibre")
+    assert "replace(/[^A-Za-z0-9_-]/g, '_')" in js
+
+
+def test_maplibre_overlay_slots_under_the_pages_own_layers():
+    """MapLibre stacks by insertion order, so without a beforeId the image
+    would bury the markers that opened it."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0, engine="maplibre")
+    assert "window.umbraOverlayBeforeId" in js
+    assert "(beforeId && map.getLayer(beforeId)) ? beforeId : undefined" in js
+
+
+def test_both_engines_share_everything_above_the_placement():
+    """The point of parametrising placement rather than forking the driver:
+    the fetch, decode, stretch and button state machine stay one copy."""
+    from umbra_py import _lazy_imagery as li
+
+    shared = (
+        "GeoTIFF.fromUrl",
+        "pickOverview",
+        "computeStretch",
+        "rasterToDataURL",
+        "window.umbraToggleSarImage",
+        "layers[id] = addOverlay(map, id, dataUrl, bounds);",
+    )
+    for engine in ("leaflet", "maplibre"):
+        js = li.driver_script(percentile_low=2.0, percentile_high=98.0, engine=engine)
+        for snippet in shared:
+            assert snippet in js, (engine, snippet)
+
+
+def test_unknown_engine_is_rejected():
+    """A typo must fail loudly at build time, not emit a page whose button
+    silently does nothing."""
+    from umbra_py import _lazy_imagery as li
+
+    with pytest.raises(ValueError, match="Unknown map engine"):
+        li.driver_script(percentile_low=2.0, percentile_high=98.0, engine="openlayers")

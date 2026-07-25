@@ -268,8 +268,15 @@ from:
   centroids, which is what the embedded-slice mode still has over it.~~
   **shipped** — the archive now carries a `footprints` polygon layer (clipped per
   tile, from zoom 6 up) beside the centroids, and both the explorer and the
-  minimal viewer draw coverage shape as you zoom in; the embedded-slice mode's one
-  remaining extra is the on-click "Get SAR image" COG overlay. See the CHANGELOG.
+  minimal viewer draw coverage shape as you zoom in. ~~The embedded-slice mode's
+  one remaining extra is the on-click "Get SAR image" COG overlay.~~ **shipped
+  too** — every tiled feature now references its GEC cloud-optimized GeoTIFF (a
+  bare filename resolved against the `stac_href` the tiles already carry) plus the
+  bounds to place it, and the shared geotiff.js driver gained a MapLibre
+  `image`-source placement beside its Leaflet `imageOverlay` one, so the
+  whole-archive explorer streams the radar picture on click like the slice one.
+  The two modes now differ only in the two fields vector tiles do not encode
+  (polarizations and the per-product asset list). See the CHANGELOG.
 - Bake per-item thumbnails / place labels into the *published* weekly snapshot
   (gated on egress).
 

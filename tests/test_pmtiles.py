@@ -722,3 +722,143 @@ def test_cli_tiles_url_without_fetch_is_rejected(monkeypatch):
     )
     assert result.exit_code != 0
     assert "--url only applies with --fetch" in result.output
+
+
+# --- the COG reference each feature carries (the on-click "Get SAR image") ---
+
+
+def _imaged_item(item_id: str = "imaged", lon: float = 0.0, lat: float = 0.0) -> UmbraItem:
+    """An item whose GEC asset is resolvable, as the real catalog's are.
+
+    Umbra publishes every asset with an empty ``href`` and a v1-style asset
+    *key*; the public product is a sibling of the item's own sidecar, which is
+    what :func:`umbra_py.pmtiles._cog_reference` collapses to a basename.
+    """
+    item = _item(item_id, lon, lat)
+    item.assets = {"a1_MM.tif": {"href": "", "type": "image/tiff; application=geotiff"}}
+    return item
+
+
+def test_features_reference_the_cog_as_a_sidecar_relative_basename():
+    """The URL prefix is identical for every acquisition and already present as
+    ``stac_href``, so tiling it again -- in every tile, at every zoom -- would be
+    pure bloat. Only the filename is stored; the page rebuilds the URL."""
+    item = _imaged_item()
+    props = pmtiles._item_properties(item, "GEC")
+
+    assert props["cog"] == "a1_GEC.tif"
+    assert "/" not in props["cog"]
+    # ...and it really is the URL the deterministic layer resolves.
+    assert item.href.rsplit("/", 1)[0] + "/" + props["cog"] == item.asset_href("GEC")
+
+
+def test_features_carry_placement_bounds_in_the_drivers_own_order():
+    """``bounds`` is handed to the shared geotiff.js driver verbatim, so it must
+    be its ``data-bounds`` string: south,west,north,east."""
+    props = pmtiles._item_properties(_imaged_item(lon=10.0, lat=20.0), "GEC")
+
+    south, west, north, east = (float(v) for v in props["bounds"].split(","))
+    min_lon, min_lat, max_lon, max_lat = _imaged_item(lon=10.0, lat=20.0).bbox
+    assert (south, west, north, east) == (min_lat, min_lon, max_lat, max_lon)
+
+
+def test_an_absolute_asset_href_is_kept_whole():
+    """A product that is *not* a sibling of the sidecar cannot be rebuilt from
+    the basename, so the full URL rides along instead of a wrong one."""
+    item = _imaged_item()
+    item.assets = {"a1_MM.tif": {"href": "https://other.example.com/deep/path/a1_GEC.tif"}}
+
+    assert pmtiles._item_properties(item, "GEC")["cog"] == (
+        "https://other.example.com/deep/path/a1_GEC.tif"
+    )
+
+
+def test_a_product_nested_under_the_sidecar_stays_absolute():
+    """Only a *direct* sibling collapses to a basename. A product one directory
+    deeper would be rebuilt at the wrong URL, so it keeps the full href."""
+    item = _imaged_item()
+    nested = item.href.rsplit("/", 1)[0] + "/products/a1_GEC.tif"
+    item.assets = {"a1_MM.tif": {"href": nested}}
+
+    assert pmtiles._item_properties(item, "GEC")["cog"] == nested
+
+
+def test_an_item_with_no_bbox_has_no_placement_bounds():
+    """The overlay is stretched to the footprint bbox, so without one there is
+    nowhere to put it."""
+    item = _imaged_item()
+    item.bbox = None
+
+    assert pmtiles._cog_bounds(item) is None
+    assert "cog" not in pmtiles._item_properties(item, "GEC")
+
+
+def test_an_item_with_no_gec_asset_tiles_no_cog_at_all():
+    """A viewer keys its button on these properties, so a scene whose image
+    cannot be resolved must carry neither -- a half-populated feature would
+    offer a button that 404s."""
+    props = pmtiles._item_properties(_item("bare", 0.0, 0.0), "GEC")
+    assert "cog" not in props and "bounds" not in props
+
+
+def test_an_asset_that_stays_s3_only_tiles_no_cog():
+    """``s3://`` points into the *private* processing bucket and is not
+    anonymously fetchable from a browser; with no public sidecar href and no
+    task id to derive one from, there is nothing to offer."""
+    item = _imaged_item()
+    item.href = None
+    item.properties.pop("umbra:task_id", None)
+    item.assets = {"a1_MM.tif": {"href": "s3://private-bucket/a1_GEC.tif"}}
+
+    props = pmtiles._item_properties(item, "GEC")
+    assert "cog" not in props and "bounds" not in props
+
+
+def test_cog_asset_none_tiles_metadata_only():
+    props = pmtiles._item_properties(_imaged_item(), None)
+    assert "cog" not in props and "bounds" not in props
+    assert props["id"] == "imaged"  # ...but the lean metadata is untouched
+
+
+def test_the_cog_reference_survives_the_tile_round_trip():
+    """End to end: the property has to come back out of the encoded archive, in
+    both layers, so clicking a centroid or its footprint offers the same image."""
+    lon, lat = 5.0, 5.0
+    archive = pmtiles.build_pmtiles([_imaged_item("round", lon, lat)], max_zoom=7)
+    header = _parse_header(archive)
+    layers = _decode_mvt(_find_tile(archive, header, 7, lon, lat))
+
+    for layer in ("acquisitions", "footprints"):
+        props = layers[layer][0].props
+        assert props["cog"] == "a1_GEC.tif"
+        assert props["bounds"]
+
+
+def test_metadata_advertises_the_cog_fields():
+    archive = pmtiles.build_pmtiles([_imaged_item()], max_zoom=7)
+    header = _parse_header(archive)
+    meta = json.loads(
+        gzip.decompress(archive[header["meta_off"] : header["meta_off"] + header["meta_len"]])
+    )
+    fields = meta["vector_layers"][0]["fields"]
+    assert {"cog", "bounds"} <= set(fields)
+
+    lean = pmtiles.build_pmtiles([_imaged_item()], max_zoom=7, cog_asset=None)
+    lean_header = _parse_header(lean)
+    off, length = lean_header["meta_off"], lean_header["meta_len"]
+    lean_meta = json.loads(gzip.decompress(lean[off : off + length]))
+    assert not {"cog", "bounds"} & set(lean_meta["vector_layers"][0]["fields"])
+
+
+def test_cli_tiles_no_cog_writes_a_leaner_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_imaged_item()])
+
+    default = tmp_path / "with.pmtiles"
+    lean = tmp_path / "without.pmtiles"
+    for out, extra in ((default, []), (lean, ["--no-cog"])):
+        result = CliRunner().invoke(
+            cli, ["tiles", "--local", "--out", str(out), "--max-zoom", "7", *extra]
+        )
+        assert result.exit_code == 0, result.output
+
+    assert len(lean.read_bytes()) < len(default.read_bytes())

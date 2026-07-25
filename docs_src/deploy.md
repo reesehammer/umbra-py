@@ -128,10 +128,20 @@ viewer over the archive you can only pan and click, plus `explore.html` over a
 *gathered slice* (`--local --max-per-task 1` for a one-pin-per-site overview).
 Both modes now draw footprint outlines — the unified one from the archive's
 footprint polygons (tiled from zoom 6 up), the embedded one from the slice it
-carries — so the remaining reason to build the pair is the slice's on-click "Get
-SAR image" COG overlay, which needs per-asset URLs vector tiles have no room for.
-The two modes are exclusive — in unified mode nothing is gathered, because the
-archive is the data source.
+carries — and both offer the on-click "Get SAR image" COG overlay, the unified
+one from the COG reference each tiled feature carries. What is left to the
+embedded pair is only the two fields vector tiles do not encode: an
+acquisition's polarizations and its per-product asset list. The two modes are
+exclusive — in unified mode nothing is gathered, because the archive is the data
+source.
+
+!!! note "The published basemap"
+
+    `--fetch-pmtiles` pulls the weekly-published `catalog.pmtiles`, which gains
+    the COG references on its next `publish-index.yml` run. Until then the
+    unified explorer built from it shows no "Get SAR image" button (a page over
+    an archive without the references degrades to metadata, it does not error);
+    `umbra tiles --local --out catalog.pmtiles` builds one with them now.
 
 ### Featured change composites
 

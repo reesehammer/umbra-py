@@ -152,8 +152,12 @@ it, none a blocker:
   on-click COG overlay. ~~Remaining optional polish: the non-unified build is the
   only one that shows footprints, so tiling polygons would close the last gap
   between the two.~~ ✅ **Done** — the archive now carries footprint polygons (see
-  the PMTiles section), so the unified explorer draws outlines too; the pair's one
-  remaining extra is the on-click "Get SAR image" COG overlay.
+  the PMTiles section), so the unified explorer draws outlines too. ~~The pair's
+  one remaining extra is the on-click "Get SAR image" COG overlay.~~ ✅ **Done**
+  — the archive references each acquisition's GEC COG, so the unified explorer
+  streams the picture on click too (see the PMTiles section). The non-unified
+  pair now differs only in the two fields tiles do not encode (polarizations and
+  the per-product asset list).
 
 ---
 
@@ -179,10 +183,9 @@ none a blocker:
   thumbnail preview and the "Analyze this view" panel moved into one shared,
   map-engine-agnostic script both explorers drive, so the two modes cannot drift.
   ~~Vector tiles carry centroids and lean metadata, so the footprint outline and
-  the on-click "Get SAR image" overlay remain embedded-slice features~~ — the
-  outline shipped with the footprint layer below; tiles still carry no per-asset
-  COG URLs, so "Get SAR image" stays an embedded-slice feature — documented,
-  not silent. `--pmtiles` with a search option is a hard error rather than a
+  the on-click "Get SAR image" overlay remain embedded-slice features~~ — both
+  shipped: the outline with the footprint layer below, the overlay with the COG
+  reference below it. `--pmtiles` with a search option is a hard error rather than a
   quietly unfiltered page. Offline-tested in `tests/test_demo.py` and
   `tests/test_showcase.py`; the generated page was also exercised in a real
   browser (archive range-reads, every filter, click-to-detail).
@@ -211,6 +214,30 @@ none a blocker:
   centroids-only archive, and the metadata advertises only the layers actually
   present, so an older archive draws no outlines rather than erroring.
   Offline-tested in `tests/test_pmtiles.py` and `tests/test_demo.py`.
+- ~~**Reference each acquisition's COG so a viewer can show the picture.**~~
+  ✅ **Done** (the `cog` + `bounds` properties / `build_pmtiles(cog_asset=…)`,
+  `umbra tiles --cog-asset` / `--no-cog`). Tiles carried metadata only, so the
+  whole-archive explorer stopped at "a scene exists here" while the
+  embedded-slice one could stream the radar image on click — the last capability
+  gap between the two. Every tiled feature (centroid *and* footprint) now carries
+  a reference to its GEC cloud-optimized GeoTIFF plus the `"S,W,N,E"` bounds to
+  place it, and `umbra demo --pmtiles` offers the same "Get SAR image" button
+  over it. Kept lean: the product is a sibling of the item's STAC sidecar in the
+  public bucket, so what is tiled is the bare filename (~30 bytes) and the page
+  rebuilds the URL against the `stac_href` the tiles already carried — a
+  non-sibling absolute href is stored whole instead, and an asset that resolves
+  to nothing anonymously fetchable is omitted entirely (no button rather than a
+  button that 404s). `driver_script(engine=…)` grew a MapLibre `image`-source
+  placement beside the Leaflet `imageOverlay` one; everything above the
+  placement — CDN load, range-read, overview pick, percentile stretch, canvas
+  paint, button state machine — stays one implementation. `--no-cog` writes the
+  previous metadata-only archive, and a page reading one simply shows no button.
+  Offline-tested in `tests/test_pmtiles.py`, `tests/test_demo.py` and
+  `tests/test_lazy_imagery.py`. Follow-ons: the published weekly
+  `catalog.pmtiles` only gains the references on its next `publish-index.yml`
+  run, so the hosted showcase shows no button until then; and the overlay is a
+  bbox-stretched quick look (the same approximation the slice explorer makes),
+  not a reprojection.
 
 ---
 

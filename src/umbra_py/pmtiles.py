@@ -53,6 +53,16 @@ low-zoom tiles are the ones every visitor loads first. Both layers carry the
 same lean set of string properties (id, place, product, date, platform) —
 enough to style, label and click a feature; the full metadata still lives one
 STAC link away.
+
+They also carry a **reference to the acquisition's GEC cloud-optimized GeoTIFF**
+(``cog``, plus the ``bounds`` to place it), which is what lets a viewer over the
+archive stream the actual radar picture on click rather than stopping at
+metadata — the last capability the embedded-slice ``umbra demo`` had over the
+whole-archive one (``DEMO_APP_GAPS.md`` Path A). It stays lean because the
+product sits *next to* the item's STAC sidecar in the public bucket, so what is
+tiled is the bare filename and the page rebuilds the URL against the
+``stac_href`` it already carries. Pass ``cog_asset=None`` for a metadata-only
+archive.
 """
 
 from __future__ import annotations
@@ -69,6 +79,7 @@ from typing import Any, NamedTuple
 
 from ._geometry import Ring, bbox_ring, rings_from_geojson
 from .constants import ATTRIBUTION, CATALOG_INDEX_PMTILES_URL
+from .exceptions import AssetNotFoundError
 from .models import UmbraItem
 
 # --- PMTiles v3 header constants -----------------------------------------
@@ -92,6 +103,12 @@ FOOTPRINT_LAYER = "footprints"
 #: Lowest zoom at which footprint polygons are written. Below this a footprint
 #: is sub-pixel, and these are the tiles every visitor loads first.
 FOOTPRINT_MIN_ZOOM = 6
+
+#: Product whose COG each tiled feature references by default, so a viewer can
+#: stream the picture on click. GEC is the detected-amplitude, map-projected
+#: GeoTIFF -- the one product that is both cloud-optimized and directly
+#: displayable, and the same default ``umbra map``/``umbra demo`` use.
+DEFAULT_COG_ASSET = "GEC"
 
 # Pinned CDN assets for the viewer. An unpinned CDN can regress a generated page
 # without warning, the same discipline the Leaflet demo and _lazy_imagery apply.
@@ -505,8 +522,68 @@ def _tile_polygons(
     return out
 
 
-def _item_properties(item: UmbraItem) -> dict[str, Any]:
-    """The lean string properties each tiled point carries (id, place, ...)."""
+def _cog_reference(item: UmbraItem, asset: str) -> str | None:
+    """The tiled, page-resolvable reference to an item's ``asset`` COG.
+
+    The published products sit *next to* the item's ``*.stac.v2.json`` sidecar
+    in the open-data bucket, so for the overwhelmingly common case the COG URL
+    is ``dirname(stac_href) + "/" + basename`` — and since every tiled feature
+    already carries ``stac_href``, storing the bare **basename** costs ~30 bytes
+    a feature instead of ~180 for a full URL repeated at every zoom. When the
+    resolved href is *not* a sibling of the sidecar (an item that publishes an
+    absolute asset href elsewhere), the full ``https`` URL is stored instead and
+    the page uses it as-is. Returns ``None`` when the asset is missing or its
+    URL cannot be resolved to something anonymously fetchable.
+    """
+    try:
+        href = item.asset_href(asset)
+    except AssetNotFoundError:
+        return None
+    if not href.startswith(("http://", "https://")):
+        return None  # an empty or s3:// href is not fetchable from a browser
+    sibling_prefix = (
+        f"{item.href.rsplit('/', 1)[0]}/"
+        if item.href and item.href.startswith(("http://", "https://"))
+        else None
+    )
+    if sibling_prefix and href.startswith(sibling_prefix):
+        basename = href[len(sibling_prefix) :]
+        # Only a *direct* sibling collapses to a basename; anything with a
+        # further path segment must stay absolute or the page would rebuild the
+        # wrong URL.
+        if "/" not in basename:
+            return basename
+    return href
+
+
+def _cog_bounds(item: UmbraItem) -> str | None:
+    """Placement bounds for the on-click overlay, as ``"S,W,N,E"``.
+
+    The string form (rather than four numeric fields) is deliberate: it is the
+    exact ``data-bounds`` payload
+    :func:`umbra_py._lazy_imagery.popup_button_html` writes, so the page hands
+    it to the shared driver untouched. Coordinates are rounded to 5 decimals
+    (~1 m) — the overlay is a bbox-stretched quick look, so more precision would
+    only inflate every tile.
+    """
+    if item.bbox is None:
+        return None
+    min_lon, min_lat, max_lon, max_lat = item.bbox
+    return ",".join(
+        f"{v:.5f}".rstrip("0").rstrip(".") for v in (min_lat, min_lon, max_lat, max_lon)
+    )
+
+
+def _item_properties(item: UmbraItem, cog_asset: str | None = None) -> dict[str, Any]:
+    """The lean string properties each tiled point carries (id, place, ...).
+
+    With ``cog_asset`` set, two more ride along — ``cog`` (the asset's COG,
+    basename-relative to ``stac_href`` where it is a sibling) and ``bounds``
+    (its footprint as ``"S,W,N,E"``) — which is what lets the whole-archive
+    explorer offer the same on-click "Get SAR image" overlay as the
+    embedded-slice page. Absent for an item whose asset cannot be resolved, so
+    the page simply omits the button for it.
+    """
     dt = item.datetime
     props: dict[str, Any] = {
         "id": item.id,
@@ -516,6 +593,12 @@ def _item_properties(item: UmbraItem) -> dict[str, Any]:
         "platform": item.platform,
         "stac_href": item.href,
     }
+    if cog_asset:
+        cog = _cog_reference(item, cog_asset)
+        bounds = _cog_bounds(item)
+        if cog and bounds:
+            props["cog"] = cog
+            props["bounds"] = bounds
     return {k: v for k, v in props.items() if v is not None}
 
 
@@ -527,6 +610,7 @@ def build_pmtiles(
     layer_name: str = "acquisitions",
     footprints: bool = True,
     footprint_min_zoom: int = FOOTPRINT_MIN_ZOOM,
+    cog_asset: str | None = DEFAULT_COG_ASSET,
     name: str = "Umbra open-data catalog",
     description: str | None = None,
 ) -> bytes:
@@ -555,6 +639,13 @@ def build_pmtiles(
         Lowest zoom carrying footprint polygons (default
         :data:`FOOTPRINT_MIN_ZOOM`). Below it a footprint is sub-pixel, so the
         polygons would only inflate the low-zoom tiles a viewer loads first.
+    cog_asset:
+        Product whose cloud-optimized GeoTIFF each feature references, so a
+        viewer can stream it on click (default :data:`DEFAULT_COG_ASSET`, the
+        detected-amplitude GEC; ``"CSI"`` also works). This is what gives
+        ``umbra demo --pmtiles`` the same on-click "Get SAR image" overlay as
+        the embedded-slice explorer. Pass ``None`` for a metadata-only archive
+        with no image references.
     name, description:
         Metadata recorded in the archive (surfaced by PMTiles-aware tooling).
 
@@ -570,7 +661,7 @@ def build_pmtiles(
         point = _item_point(item)
         if point is None:
             continue
-        props = _item_properties(item)
+        props = _item_properties(item, cog_asset)
         points.append((point, props))
         if footprints and (rings := _item_rings(item)) is not None:
             outlines.append((rings, props))
@@ -639,6 +730,11 @@ def build_pmtiles(
         "platform": "String",
         "stac_href": "String",
     }
+    if cog_asset:
+        # Declared even if some items resolved no COG -- the field describes the
+        # layer's schema, and a viewer keys its button off the per-feature value.
+        fields["cog"] = "String"
+        fields["bounds"] = "String"
     vector_layers = [
         {
             "id": layer_name,
