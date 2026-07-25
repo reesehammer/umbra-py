@@ -32,9 +32,16 @@
 >   optional polish: baking thumbnails/labels into the *published* snapshot and
 >   the swipe/timescan variants of the featured gallery. **Footprint polygons are
 >   now tiled too** (a `footprints` layer clipped per tile, from zoom 6 up), so the
->   whole-archive explorer draws coverage shape as you zoom in — the
->   embedded-slice explorer's one remaining extra is the on-click "Get SAR image"
->   COG overlay.
+>   whole-archive explorer draws coverage shape as you zoom in. **And the on-click
+>   "Get SAR image" COG overlay now works over the whole archive too** — the last
+>   capability the embedded-slice explorer had over it: each tiled feature
+>   references its GEC cloud-optimized GeoTIFF (a bare filename resolved against
+>   the `stac_href` the tiles already carry) plus the bounds to place it, and the
+>   shared geotiff.js driver grew a MapLibre placement beside its Leaflet one, so
+>   any acquisition in the archive is one click from its radar picture. Path A's
+>   front end is now a superset of the slice explorer on every axis but the two
+>   fields vector tiles do not encode (polarizations and the per-product asset
+>   list).
 >
 > The original item IDs (`G1`–`G8`, `R1`–`R7`, Path A/B step numbers) are still
 > cited from source docstrings; the detail behind each is in this file's git

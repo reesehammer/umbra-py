@@ -26,7 +26,7 @@ from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
-from .pmtiles import FOOTPRINT_MIN_ZOOM
+from .pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
 from .viz import (
     save_change_animation,
     save_change_composite,
@@ -2814,9 +2814,9 @@ def gallery(
     "acquisition in that archive from vector tiles read on demand instead of an "
     "embedded search slice -- the whole-archive explorer, in a page that stays a "
     "few KB. Footprint outlines come from the archive's footprint polygons where "
-    "it carries them. The search options don't apply in this mode (filter in the "
-    "page instead), and tiles carry no per-asset COG URLs, so the 'Get SAR image' "
-    "overlay stays an embedded-slice feature.",
+    "it carries them, and the on-click 'Get SAR image' overlay works for any "
+    "acquisition the archive references a COG for. The search options don't "
+    "apply in this mode -- filter in the page instead.",
 )
 @_local_index_options
 @_fuzzy_option
@@ -2894,6 +2894,8 @@ def demo(
             subtitle="Every acquisition in the tiled open-data catalog.",
             server_url=server_url,
             pmtiles_url=pmtiles_url,
+            lazy_imagery=lazy_imagery,
+            percentile=_parse_percentile(percentile),
         )
         click.echo(f"Wrote whole-archive explorer over {pmtiles_url} to {path}")
         return
@@ -3050,6 +3052,22 @@ def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_p
     "sub-pixel, so tiling it only inflates the tiles a viewer loads first.",
 )
 @click.option(
+    "--cog-asset",
+    default=DEFAULT_COG_ASSET,
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Product whose cloud-optimized GeoTIFF each tiled acquisition "
+    "references, so a viewer ('umbra demo --pmtiles') can stream the picture on "
+    "click. GEC is the detected, map-projected GeoTIFF; CSI also works.",
+)
+@click.option(
+    "--no-cog",
+    is_flag=True,
+    default=False,
+    help="Tile metadata only, with no image reference (a smaller archive whose "
+    "viewers show no 'Get SAR image' button).",
+)
+@click.option(
     "--viewer",
     "viewer_path",
     default=None,
@@ -3076,6 +3094,8 @@ def tiles(
     max_zoom,
     footprints,
     footprint_min_zoom,
+    cog_asset,
+    no_cog,
     viewer_path,
     local,
     db_path,
@@ -3087,9 +3107,12 @@ def tiles(
     pyramid so a map fetches only the tiles in view -- the fast, zoom-anywhere
     whole-archive answer. Each acquisition is tiled as a centroid at every zoom
     and (unless --no-footprints) as its clipped footprint polygon from
-    --footprint-min-zoom down, so zooming in shows coverage shape. The output is
-    one .pmtiles file: drop it on GitHub Pages or in a bucket, no tile server.
-    With --viewer it also writes a MapLibre GL page that renders it.
+    --footprint-min-zoom down, so zooming in shows coverage shape. Each feature
+    also references its --cog-asset cloud-optimized GeoTIFF, so a viewer over the
+    archive ('umbra demo --pmtiles') can stream the actual radar picture on
+    click. The output is one .pmtiles file: drop it on GitHub Pages or in a
+    bucket, no tile server. With --viewer it also writes a MapLibre GL page that
+    renders it.
 
     Skip the tiling entirely with --fetch: the weekly index workflow publishes a
     ready-made whole-catalog 'catalog.pmtiles' on the catalog-index release, so a
@@ -3145,6 +3168,7 @@ def tiles(
             max_zoom=max_zoom,
             footprints=footprints,
             footprint_min_zoom=footprint_min_zoom,
+            cog_asset=None if no_cog else cog_asset,
         )
     size_mb = path.stat().st_size / 1e6
     click.echo(f"Wrote PMTiles archive of {len(items)} acquisition(s) to {path} ({size_mb:.2f} MB)")

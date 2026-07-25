@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Click-to-quicklook SAR imagery over the *whole archive* — the tiles now
+  reference each acquisition's COG (`DEMO_APP_GAPS.md` Path A / `STRATEGY.md` §8
+  demo polish).** The whole-archive explorer (`umbra demo --pmtiles`, what the
+  hosted `umbra showcase --unified` deploys) could tell you a scene exists, where
+  it is and what it covers — but not what it *looks like*. Streaming the picture
+  on click was the last capability the embedded-slice explorer had over it, for a
+  data reason: vector tiles carried lean metadata and no per-asset COG URL. They
+  do now. `build_pmtiles` writes two more properties on every feature (centroid
+  *and* footprint): `cog`, a reference to the acquisition's GEC cloud-optimized
+  GeoTIFF, and `bounds`, its footprint as the `"S,W,N,E"` string the shared
+  driver places overlays with. So **any acquisition in the archive is one click
+  from its actual radar image**, at whole-catalog scale, from a static page.
+  The reference stays lean: the published product is a *sibling* of the item's
+  STAC sidecar in the public bucket, so what is tiled is the bare filename
+  (~30 bytes) and the page rebuilds the URL against the `stac_href` the tiles
+  already carried — an absolute href that is not a sibling is stored whole
+  instead, and only `http(s)` survives on either path (these strings come from
+  remote metadata and end up in a `fetch()`). An asset that resolves to nothing
+  anonymously fetchable is omitted entirely, so a scene without one shows no
+  button rather than one that 404s. On the page side,
+  `_lazy_imagery.driver_script(engine=…)` grew a **MapLibre placement** (an
+  `image` source plus a `raster` layer, slotted under the acquisition layers via
+  `window.umbraOverlayBeforeId` so the markers that opened it stay clickable)
+  beside the existing Leaflet `imageOverlay` one; everything above the placement
+  — the SRI-pinned geotiff.js load, the range-read, the overview pick, the
+  percentile stretch, the canvas paint and the button state machine — remains a
+  single implementation, as does the button builder both explorers call.
+  `umbra tiles --cog-asset` picks the product (default `GEC`; `CSI` also works)
+  and `--no-cog` writes the previous metadata-only archive; `umbra demo
+  --pmtiles --no-lazy-imagery` builds the page without the driver. An archive
+  tiled before this change simply shows no button, and the published weekly
+  `catalog.pmtiles` gains the references on its next `publish-index.yml` run.
+  Offline tested in `tests/test_pmtiles.py` (basename collapse, the absolute-href
+  fallback, the driver's bounds order, unresolvable assets, the tile round trip
+  through both layers, metadata fields, CLI), `tests/test_demo.py` and
+  `tests/test_lazy_imagery.py` (both placements, id sanitising, layer ordering,
+  and that the two engines share everything above the placement).
 - **Footprint polygons in the whole-catalog vector tiles — coverage shape in the
   hosted explorer (`TODO.md` "Tile polygons, not just centroids" /
   `STRATEGY.md` §8 demo polish).** `umbra tiles` tiled one *centroid* per

@@ -409,6 +409,82 @@ def test_both_modes_share_one_analyze_panel(sample_item_dict):
     assert demo._SHARED_JS in archive_page
 
 
+def test_build_demo_pmtiles_mode_offers_the_sar_overlay():
+    """The last thing the embedded-slice explorer had over the whole-archive
+    one: clicking a scene in the tiled archive must offer the same on-click
+    "Get SAR image" overlay, driven by the same geotiff.js driver."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+
+    assert _config(html)["lazyImagery"] is True
+    # The shared button builder, wired to the driver's toggle contract.
+    assert "window.umbraSarButton(p.id, cogUrl(p), p.bounds)" in html
+    assert "window.umbraToggleSarImage" in html
+    # ...and the driver itself is shipped, keyed by the geotiff.js CDN pin.
+    from umbra_py._lazy_imagery import GEOTIFF_JS
+
+    assert GEOTIFF_JS in html
+
+
+def test_build_demo_pmtiles_mode_places_the_overlay_with_maplibre():
+    """MapLibre has no ``imageOverlay``; the page must ship the image-source
+    build of the driver, and publish the map the driver falls back to."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+
+    assert "window.umbraLazyMap = map" in html
+    assert "type: 'image'" in html and "'raster-fade-duration'" in html
+    # The Leaflet placement must not leak onto a page with no Leaflet loaded.
+    assert "L.imageOverlay" not in html
+    # The overlay slots under the acquisition layers so they stay clickable.
+    assert "window.umbraOverlayBeforeId = FILL_ID" in html
+
+
+def test_build_demo_pmtiles_mode_rebuilds_the_cog_url_safely():
+    """``cog`` is a basename resolved against ``stac_href``; both come from
+    remote metadata and end up in a fetch(), so only http(s) may survive."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert "function cogUrl(p)" in html
+    # An absolute reference is used as-is, a relative one joined to the sidecar
+    # directory -- and anything that is not http(s) resolves to null.
+    assert r"if (/^https?:\/\//.test(cog)) return cog;" in html
+    # A non-http(s) sidecar href, or a `cog` with a path in it, resolves to null
+    # rather than to a rebuilt-wrong (or javascript:) URL.
+    assert r"if (!/^https?:\/\//.test(href) || cog.indexOf('/') !== -1) return null;" in html
+
+
+def test_build_demo_pmtiles_metadata_only_drops_the_overlay():
+    """``lazy_imagery=False`` must reach the whole-archive page too: no driver,
+    no geotiff.js CDN dependency at click time."""
+    from umbra_py._lazy_imagery import GEOTIFF_JS
+
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles", lazy_imagery=False)
+    assert _config(html)["lazyImagery"] is False
+    assert GEOTIFF_JS not in html
+
+
+def test_both_modes_share_one_sar_button_builder(sample_item_dict):
+    """Same button, same driver contract, one implementation -- only the
+    placement differs, and that lives in the driver."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    slice_page = demo.build_demo([item])
+    archive_page = demo.build_demo([], pmtiles_url="c.pmtiles")
+    for page in (slice_page, archive_page):
+        assert "window.umbraSarButton = function" in page
+
+
+def test_cli_demo_pmtiles_honours_no_lazy_imagery(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    out = tmp_path / "demo.html"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["demo", "--pmtiles", "c.pmtiles", "--no-lazy-imagery", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert '"lazyImagery":false' in out.read_text().replace(" ", "")
+
+
 def test_build_demo_default_mode_is_unchanged(sample_item_dict):
     """No ``pmtiles_url`` must leave the proven embedded-slice page alone."""
     item = UmbraItem.from_dict(sample_item_dict, href=_HREF)

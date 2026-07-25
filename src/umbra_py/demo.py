@@ -57,11 +57,15 @@ Design, deliberately in the repo's grain:
   archive carries each acquisition twice — a centroid at every zoom and its
   clipped **footprint polygon** at the deeper ones — so the page draws coverage
   shape as you zoom in, filtered by the same expression as the markers and
-  clickable to the same detail panel. The one honest remaining trade: tiles carry
-  lean metadata, not per-asset COG URLs, so the on-click "Get SAR image" overlay
-  is a feature of the embedded-slice mode only — a server-backed build still
-  leads the detail panel with the baked thumbnail, and "Analyze this view" still
-  works.
+  clickable to the same detail panel. The **on-click "Get SAR image" overlay
+  works here too** — the last thing the embedded-slice mode had over the
+  whole-archive one: the archive's features carry a reference to each
+  acquisition's GEC COG and the bounds to place it (kept lean as a filename
+  resolved against the ``stac_href`` the tiles already carry), and the page
+  ships a MapLibre-placing build of the *same* geotiff.js driver, so any scene
+  in the archive is one click from its actual radar picture. So the whole-archive
+  explorer is now a superset of the slice one on every axis but the two fields
+  tiles do not encode (polarizations and the per-product asset list).
 
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
@@ -239,11 +243,14 @@ def build_demo(
         few kilobytes whatever the catalog's size, and the sidebar filters run as
         MapLibre expressions over the tiles. Footprint outlines are drawn from
         the archive's :data:`umbra_py.pmtiles.FOOTPRINT_LAYER` polygons where it
-        carries them (a centroids-only archive just shows the markers).
-        ``items``, ``asset``, ``lazy_imagery`` and ``percentile`` do not apply in
-        this mode (tiles carry lean metadata, not per-asset COG URLs);
-        ``server_url`` still does. ``None`` (default) keeps the embedded-slice
-        Leaflet page unchanged.
+        carries them (a centroids-only archive just shows the markers), and the
+        on-click SAR overlay is offered for any feature whose tile carries a COG
+        reference (:func:`umbra_py.pmtiles.build_pmtiles`'s ``cog_asset``, on by
+        default; an archive tiled without it simply shows no button). ``items``
+        and ``asset`` do not apply in this mode — the archive is the data source,
+        and it fixes the product it references — but ``lazy_imagery``,
+        ``percentile`` and ``server_url`` all do. ``None`` (default) keeps the
+        embedded-slice Leaflet page unchanged.
     pmtiles_layer:
         Source-layer name of the archive's centroid points. Must match the one it
         was written with (:func:`umbra_py.pmtiles.build_pmtiles` defaults to
@@ -258,6 +265,8 @@ def build_demo(
             title=title,
             subtitle=subtitle,
             server_url=server_url,
+            lazy_imagery=lazy_imagery,
+            percentile=percentile,
         )
 
     items = list(items)
@@ -313,6 +322,8 @@ def _build_pmtiles_demo(
     title: str,
     subtitle: str | None,
     server_url: str | None,
+    lazy_imagery: bool = True,
+    percentile: tuple[float, float] = (2.0, 98.0),
 ) -> str:
     """Render the whole-archive explorer over a ``.pmtiles`` catalog.
 
@@ -328,6 +339,14 @@ def _build_pmtiles_demo(
     chip go missing for the whole archive. For the same reason the date inputs
     start empty (unbounded) instead of framing a sample's extent, which would
     silently hide most of the archive behind a default filter.
+
+    The on-click "Get SAR image" overlay works here too: the archive's features
+    carry a ``cog`` reference and its ``bounds`` (see
+    :func:`umbra_py.pmtiles.build_pmtiles`'s ``cog_asset``), so the detail panel
+    can hand the same shared geotiff.js driver an absolute URL — built here as a
+    MapLibre-placing build of that one driver rather than a second one. An
+    archive tiled without those properties simply shows no button, so an older
+    ``.pmtiles`` keeps working unchanged.
     """
     from .pmtiles import (  # noqa: PLC0415
         FOOTPRINT_LAYER,
@@ -345,8 +364,21 @@ def _build_pmtiles_demo(
         "pmtilesUrl": pmtiles_url,
         "pmtilesLayer": layer,
         "pmtilesFootprintLayer": FOOTPRINT_LAYER,
+        "lazyImagery": bool(lazy_imagery),
     }
     config_json = json.dumps(config, separators=(",", ":")).replace("</", "<\\/")
+
+    from ._lazy_imagery import driver_script  # noqa: PLC0415
+
+    driver = (
+        driver_script(
+            percentile_low=percentile[0],
+            percentile_high=percentile[1],
+            engine="maplibre",
+        )
+        if lazy_imagery
+        else ""
+    )
 
     return _PAGE_TEMPLATE.format(
         title=escape(title),
@@ -357,7 +389,7 @@ def _build_pmtiles_demo(
         styles=_STYLES,
         config_json=config_json,
         app_js=_SHARED_JS + _PMTILES_APP_JS,
-        driver_js="",
+        driver_js=driver,
     )
 
 
@@ -477,6 +509,25 @@ window.umbraThumb = function (base, id) {
   };
   thumb.src = base + '/artifacts/thumbnail/' + encodeURIComponent(id) + '.png';
   return thumb;
+};
+
+// The on-click "Get SAR image" button, or null when the page is metadata-only
+// or the scene has no resolvable COG. Built with DOM APIs (setAttribute /
+// textContent never parse HTML, so remote strings need no escaping) and wired
+// to the shared driver's umbraToggleSarImage contract -- which the page ships
+// in whichever placing build its map engine needs, so this builder is the same
+// on both. `bounds` is the driver's "south,west,north,east" data-bounds string.
+window.umbraSarButton = function (id, url, bounds) {
+  if (!id || !url || !bounds || !window.umbraToggleSarImage) return null;
+  var btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'umbra-sar-btn';
+  btn.setAttribute('data-item-id', id);
+  btn.setAttribute('data-asset-url', url);
+  btn.setAttribute('data-bounds', bounds);
+  btn.setAttribute('data-state', 'idle');
+  btn.textContent = 'Get SAR image';
+  btn.onclick = function () { window.umbraToggleSarImage(btn); };
+  return btn;
 };
 
 // The "Analyze this view" panel (R4): POST the currently-filtered acquisitions
@@ -679,19 +730,11 @@ _APP_JS = """
       pw.appendChild(a); panel.appendChild(pw);
     }
 
-    // On-click SAR overlay button: built with DOM APIs (setAttribute /
-    // textContent never parse HTML, so no escaping of remote strings is
-    // needed) and wired to the shared driver's umbraToggleSarImage contract.
-    if (CFG.lazyImagery && p.lazy_url && p.lazy_bounds && window.umbraToggleSarImage) {
-      var btn = document.createElement('button');
-      btn.type = 'button'; btn.className = 'umbra-sar-btn';
-      btn.setAttribute('data-item-id', p.id);
-      btn.setAttribute('data-asset-url', p.lazy_url);
-      btn.setAttribute('data-bounds', p.lazy_bounds.join(','));
-      btn.setAttribute('data-state', 'idle');
-      btn.textContent = 'Get SAR image';
-      btn.onclick = function () { window.umbraToggleSarImage(btn); };
-      panel.appendChild(btn);
+    // On-click SAR overlay button (the shared builder; this side already has
+    // the resolved COG URL and bbox embedded in the feature).
+    if (CFG.lazyImagery && p.lazy_url && p.lazy_bounds) {
+      var btn = window.umbraSarButton(p.id, p.lazy_url, p.lazy_bounds.join(','));
+      if (btn) panel.appendChild(btn);
     }
 
     // Draw the selected item's footprint so the point gets geographic context.
@@ -833,6 +876,29 @@ _PMTILES_APP_JS = """
   });
   map.addControl(new maplibregl.NavigationControl(), 'top-left');
   map.addControl(new maplibregl.AttributionControl({ customAttribution: CFG.attribution }));
+  // Publish the map for the shared lazy-imagery driver, which resolves its
+  // target by walking the DOM for a Folium map and then falling back here. The
+  // MapLibre-placing build of that driver is what this page ships. The driver
+  // slots each SAR overlay *under* this layer, so the footprints and markers
+  // that opened it stay drawn and clickable on top of the imagery.
+  window.umbraLazyMap = map;
+  window.umbraOverlayBeforeId = FILL_ID;
+
+  // Rebuild the acquisition's COG URL from what the tiles carry. `cog` is
+  // normally the bare filename of a product sitting next to the item's STAC
+  // sidecar in the public bucket (kept lean: the URL prefix would otherwise be
+  // repeated in every tile at every zoom), so it is resolved against
+  // `stac_href`; an already-absolute reference is used as-is. Only http(s)
+  // survives -- these strings come from remote metadata, and the driver hands
+  // whatever it gets to fetch().
+  function cogUrl(p) {
+    if (!p || !p.cog) return null;
+    var cog = String(p.cog);
+    if (/^https?:\\/\\//.test(cog)) return cog;
+    var href = String(p.stac_href || '');
+    if (!/^https?:\\/\\//.test(href) || cog.indexOf('/') !== -1) return null;
+    return href.replace(/[^/]*$/, '') + cog;
+  }
 
   var serverBase = CFG.serverUrl ? String(CFG.serverUrl).replace(/\\/+$/, '') : null;
   // The acquisitions currently drawn -- the "view" the analysis buttons act on.
@@ -914,7 +980,7 @@ _PMTILES_APP_JS = """
   // --- detail panel ---
   // Vector tiles carry the acquisition's geometry and its lean metadata, so this
   // panel is the slice app's minus the fields tiles do not encode
-  // (polarizations, per-asset COG URLs -- hence no "Get SAR image" button here).
+  // (polarizations, the per-product asset list).
   function showDetail(p) {
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
@@ -939,6 +1005,13 @@ _PMTILES_APP_JS = """
       a.textContent = 'open STAC item';
       var pw = document.createElement('p'); pw.style.marginTop = '8px';
       pw.appendChild(a); panel.appendChild(pw);
+    }
+
+    // On-click SAR overlay button: the same shared builder and the same
+    // geotiff.js driver the slice app uses, over the COG the tiles reference.
+    if (CFG.lazyImagery) {
+      var btn = window.umbraSarButton(p.id, cogUrl(p), p.bounds);
+      if (btn) panel.appendChild(btn);
     }
   }
 

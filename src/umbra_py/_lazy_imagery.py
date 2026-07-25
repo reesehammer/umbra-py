@@ -7,7 +7,12 @@ streams a low-resolution overview of the GEC cloud-optimized GeoTIFF
 directly from the Umbra public bucket via HTTP range requests, applies
 the same percentile stretch that :func:`umbra_py.viz._stretch_to_rgba`
 performs in Python, paints the result to a ``<canvas>``, and drops it
-on the map as a plain Leaflet ``L.imageOverlay``.
+on the map as an image overlay placed at the item's footprint bbox --
+a Leaflet ``L.imageOverlay`` on a Folium or ``umbra demo`` page, a
+MapLibre ``image`` source plus ``raster`` layer on the whole-archive
+PMTiles explorer (``driver_script(engine=...)``). Only those two lines
+differ between the engines; the fetch, decode, stretch and button state
+machine are one implementation.
 
 **Why bare geotiff.js and not georaster-layer-for-leaflet.** The
 georaster bundle decodes COGs inside Webpack-generated Web Workers.
@@ -77,6 +82,7 @@ def driver_script(
     *,
     percentile_low: float,
     percentile_high: float,
+    engine: str = "leaflet",
 ) -> str:
     """Return the JS module that wires every button to the COG fetcher.
 
@@ -85,6 +91,15 @@ def driver_script(
     percentile_low, percentile_high:
         Contrast-stretch cuts, mirroring
         :func:`umbra_py.viz._stretch_to_rgba`'s defaults of ``(2, 98)``.
+    engine:
+        Which map library places the decoded overlay: ``"leaflet"`` (the
+        default, for Folium maps and the embedded-slice ``umbra demo``
+        page) or ``"maplibre"`` (for the whole-archive PMTiles explorer).
+        Everything above the placement -- the CDN load, the range-read,
+        the overview pick, the percentile stretch, the canvas paint and
+        the button state machine -- is identical; only the two lines that
+        add and remove the overlay differ, so the two pages share one
+        driver rather than one each.
 
     The returned snippet embeds the CDN URL (pinned at module level) as
     a JSON-encoded JS string literal, so a future bump to a URL with
@@ -97,12 +112,18 @@ def driver_script(
     robust against Jupyter cell reruns and multi-map pages, where a
     single bound ``map_var`` closure would go stale.
     """
+    try:
+        overlay_ops = _OVERLAY_OPS[engine]
+    except KeyError:
+        supported = ", ".join(sorted(_OVERLAY_OPS))
+        raise ValueError(f"Unknown map engine {engine!r}. Supported: {supported}.") from None
     return _DRIVER_TEMPLATE.format(
         plo=float(percentile_low),
         phi=float(percentile_high),
         max_dim=_MAX_RENDER_DIM,
         geotiff_url=json.dumps(GEOTIFF_JS),
         geotiff_sri=json.dumps(GEOTIFF_SRI),
+        overlay_ops=overlay_ops,
     )
 
 
@@ -142,6 +163,77 @@ def popup_button_html(
     )
 
 
+# The two map-library-specific lines, substituted into the driver as
+# `{overlay_ops}`. Both define the same pair of functions, so the driver body
+# above them is engine-agnostic: `addOverlay` returns an opaque handle that
+# `removeOverlay` later takes back.
+#
+# These are substituted *values*, not template text, so their braces are
+# single (unlike `_DRIVER_TEMPLATE`'s, which are doubled for `str.format`).
+_LEAFLET_OVERLAY_OPS = """
+  function addOverlay(map, id, dataUrl, bounds) {
+    var layer = L.imageOverlay(dataUrl, bounds, { opacity: 1.0 });
+    layer.addTo(map);
+    return layer;
+  }
+
+  function removeOverlay(map, id, handle) {
+    map.removeLayer(handle);
+  }
+"""
+
+# MapLibre GL has no `imageOverlay`; the equivalent is an `image` source
+# (a data URL plus its four corner coordinates) drawn by a `raster` layer.
+# Source/layer ids are derived from the acquisition id, which comes from
+# remote metadata -- so it is sanitized to `[A-Za-z0-9_-]` before being used
+# as a style id (MapLibre keys its style objects by these strings).
+_MAPLIBRE_OVERLAY_OPS = """
+  function overlayIds(id) {
+    var safe = String(id).replace(/[^A-Za-z0-9_-]/g, '_');
+    return { source: 'umbra-sar-src-' + safe, layer: 'umbra-sar-lyr-' + safe };
+  }
+
+  function addOverlay(map, id, dataUrl, bounds) {
+    // bounds arrive as Leaflet's [[south, west], [north, east]]; an image
+    // source wants its corners as [lon, lat], clockwise from the top left.
+    var south = bounds[0][0], west = bounds[0][1];
+    var north = bounds[1][0], east = bounds[1][1];
+    var ids = overlayIds(id);
+    removeOverlay(map, id, ids);  // idempotent: a stale style entry would throw
+    map.addSource(ids.source, {
+      type: 'image',
+      url: dataUrl,
+      coordinates: [[west, north], [east, north], [east, south], [west, south]]
+    });
+    // MapLibre stacks layers in insertion order, so without a `beforeId` the
+    // image would bury the markers and footprints that opened it. A page that
+    // publishes `window.umbraOverlayBeforeId` gets the overlay slotted under
+    // that layer (Leaflet's pane order gives this for free); one that does not
+    // just gets it on top, as before.
+    var beforeId = window.umbraOverlayBeforeId;
+    map.addLayer({
+      id: ids.layer,
+      type: 'raster',
+      source: ids.source,
+      paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 }
+    }, (beforeId && map.getLayer(beforeId)) ? beforeId : undefined);
+    return ids;
+  }
+
+  function removeOverlay(map, id, handle) {
+    var ids = handle || overlayIds(id);
+    if (map.getLayer(ids.layer)) { map.removeLayer(ids.layer); }
+    if (map.getSource(ids.source)) { map.removeSource(ids.source); }
+  }
+"""
+
+#: Map engine -> the overlay add/remove pair the driver is built with.
+_OVERLAY_OPS: dict[str, str] = {
+    "leaflet": _LEAFLET_OVERLAY_OPS,
+    "maplibre": _MAPLIBRE_OVERLAY_OPS,
+}
+
+
 # The flow:
 #  1. First click loads geotiff.js once (dynamic <script>, no workers).
 #  2. GeoTIFF.fromUrl(url) opens the COG (headers only at first).
@@ -150,13 +242,13 @@ def popup_button_html(
 #  4. readRasters() decodes that overview on the main thread.
 #  5. Percentile stretch over the first band (invalid / non-positive /
 #     nodata pixels -> transparent), matching _stretch_to_rgba.
-#  6. Paint to a canvas, toDataURL, drop on the map as L.imageOverlay
-#     placed at the item's STAC footprint bbox.
-#  7. Cache the layer keyed by item id; second click removes it.
+#  6. Paint to a canvas, toDataURL, drop it on the map at the item's STAC
+#     footprint bbox via the engine's addOverlay (see `{overlay_ops}`).
+#  7. Cache the overlay handle keyed by item id; second click removes it.
 _DRIVER_TEMPLATE = """
 (function() {{
   if (window.umbraToggleSarImage) {{ return; }}  // idempotent across re-renders
-  var layers = {{}};  // item_id -> L.imageOverlay
+  var layers = {{}};  // item_id -> the engine's overlay handle
   var libPromise = null;
   var GEOTIFF_URL = {geotiff_url};
   var GEOTIFF_SRI = {geotiff_sri};
@@ -179,7 +271,7 @@ _DRIVER_TEMPLATE = """
     // it, so their DOM-walk resolution above is untouched.
     return window.umbraLazyMap || null;
   }}
-
+{overlay_ops}
   function loadLib() {{
     if (libPromise) return libPromise;
     libPromise = new Promise(function(resolve, reject) {{
@@ -331,9 +423,7 @@ _DRIVER_TEMPLATE = """
         return;
       }}
       var dataUrl = rasterToDataURL(data, rasters.width, rasters.height, stretch, noData);
-      var layer = L.imageOverlay(dataUrl, bounds, {{ opacity: 1.0 }});
-      layer.addTo(map);
-      layers[id] = layer;
+      layers[id] = addOverlay(map, id, dataUrl, bounds);
       button.disabled = false;
       button.textContent = 'Remove SAR image';
       button.setAttribute('data-state', 'loaded');
@@ -348,10 +438,10 @@ _DRIVER_TEMPLATE = """
 
   function removeLayer(button) {{
     var id = button.getAttribute('data-item-id');
-    var layer = layers[id];
-    if (layer) {{
+    var handle = layers[id];
+    if (handle) {{
       var map = findMapForButton(button);
-      if (map) {{ map.removeLayer(layer); }}
+      if (map) {{ removeOverlay(map, id, handle); }}
       delete layers[id];
     }}
     button.textContent = 'Get SAR image';
