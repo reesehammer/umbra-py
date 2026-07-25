@@ -339,6 +339,23 @@ becomes "the northeast brightened 12 dB, between the February and March passes".
 `.` marks ground no two passes both observed. `umbra stack --blocks 6` prints it
 (and implies `--stats`), and the agent tools take the same `blocks` argument.
 
+A peak interval says how hard a block moved, not what its history looked like —
+a corner that drifted 3 dB every pass and one that jumped 12 dB once and held
+both report a single number. `block_series=True` keeps the whole sequence each
+peak was picked from:
+
+```python
+spatial = stack_stats(cube, blocks=6, block_series=True)["spatial"]
+[s["mean_delta_db"] for s in spatial["blocks"][5]["series"]]  # [0.1, 0.2, 11.8]
+```
+
+Every consecutive step, oldest first, in the same shape as `peak_interval` — so
+the trend is plottable rather than inferred. It is the largest thing this
+reduction emits (`blocks²` × `passes−1` records), so it is opt-in and needs a
+`blocks` grid to hang on. `umbra stack --blocks 6 --block-series` prints it, the
+agent tools take the same `block_series` argument, and `POST /artifacts/stats`
+accepts `"block_series": true`.
+
 ### Fast, repeatable search with a local index
 
 Umbra publishes no STAC API, so every search re-walks the public S3 bucket —

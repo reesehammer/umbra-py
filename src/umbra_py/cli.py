@@ -1478,6 +1478,13 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "Implies --stats; 6 is a good starting grid.",
 )
 @click.option(
+    "--block-series",
+    is_flag=True,
+    help="With --blocks: report each block's whole pass-to-pass sequence, not "
+    "only the interval it moved most in -- so a block that drifted every pass "
+    "reads differently from one that jumped once and held.",
+)
+@click.option(
     "--change-threshold-db",
     type=float,
     default=3.0,
@@ -1574,6 +1581,7 @@ def stack(
     out_path,
     stats,
     blocks,
+    block_series,
     change_threshold_db,
     area,
     fuzzy,
@@ -1626,6 +1634,8 @@ def stack(
     lon/lat centre to find it by, and the consecutive pair of passes it moved
     most between -- so a change confined to one corner, which a scene-wide
     mean hides, reads as "the northeast brightened, between these two passes".
+    --block-series keeps each block's whole sequence rather than just that
+    peak, which is what distinguishes a steady drift from a single step.
 
     Two ways to choose what to stack:
 
@@ -1646,6 +1656,8 @@ def stack(
     _check_token_not_local(token, local, db_path)
     if blocks < 0:
         raise click.BadParameter("--blocks must be 0 (off) or a positive grid size.")
+    if block_series and not blocks:
+        raise click.UsageError("--block-series needs --blocks N (the series lives on a block).")
     stats = stats or bool(blocks)
     if not (out_path or stats):
         raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
@@ -1712,7 +1724,12 @@ def stack(
         )
         path = _write_stack_geotiff(cube, out_path) if out_path else None
         summary = (
-            stack_stats(cube, change_threshold_db=change_threshold_db, blocks=blocks)
+            stack_stats(
+                cube,
+                change_threshold_db=change_threshold_db,
+                blocks=blocks,
+                block_series=block_series,
+            )
             if stats
             else None
         )

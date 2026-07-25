@@ -344,6 +344,33 @@ def test_stack_stats_blocks_add_the_spatial_breakdown(sample_item_dict, monkeypa
     assert spatial["peak_block"]["direction"] == "brighter"
 
 
+@responses.activate
+def test_stack_stats_block_series_is_opt_in_on_the_agent_surface(sample_item_dict, monkeypatch):
+    """An agent asks for the whole history only when the shape is the question."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+    monkeypatch.setattr(load, "to_stack", lambda items, **kwargs: _constant_cube())
+
+    urls = [ITEM_URL, second_url]
+    # Default off: the payload an agent gets for blocks=N is unchanged.
+    assert all("series" not in b for b in ms.stack_stats(urls, blocks=2)["spatial"]["blocks"])
+
+    blocks = ms.stack_stats(urls, blocks=2, block_series=True)["spatial"]["blocks"]
+    for block in blocks:
+        # Two passes -> the one interval the block's peak was picked from.
+        assert block["series"] == [block["peak_interval"]]
+
+    # A series with no grid to hang on is refused rather than silently dropped.
+    with pytest.raises(ValueError, match="block_series needs a blocks grid"):
+        ms.stack_stats(urls, block_series=True)
+
+
 def _constant_cube():
     """A tiny two-pass dB cube on a projected grid, built without any I/O."""
     np = pytest.importorskip("numpy")

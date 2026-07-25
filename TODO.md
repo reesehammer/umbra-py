@@ -815,10 +815,28 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   `None`, not zero. `--blocks` implies `--stats` and rides in the render
   manifest's `stats` field; the agent default is `0` so the payload only grows
   when a model asks *where*. Offline-tested in `tests/test_load.py` and
-  `tests/test_mcp_server.py`. Still open under this heading: the block series is
+  `tests/test_mcp_server.py`. ~~Still open under this heading: the block series is
   reported per block rather than as a per-block *time series* — each block's full
   pass-to-pass sequence is computed and then reduced to its peak, so surfacing
-  all of it is a payload decision, not new arithmetic.
+  all of it is a payload decision, not new arithmetic.~~ ✅ **Done**
+  (`stack_stats(blocks=N, block_series=True)` / `umbra stack --block-series` /
+  the `block_series` argument on the `stack_stats` tool across MCP, LangChain and
+  LlamaIndex / `"block_series": true` on `POST /artifacts/stats`). Exactly the
+  payload decision named here: each block now carries a `series` array of every
+  consecutive pass-to-pass record, oldest first, in the same shape as
+  `peak_interval` — which is what tells a steady drift apart from a single step,
+  a distinction one peak cannot carry. The loop that found the peak collects
+  instead of comparing and `peak_interval` became a `max()` over what it
+  collected, so the peak is visibly a member of the sequence and the cost is
+  response size alone. Opt-in, and it needs `blocks`: a series with no grid to
+  hang on is a hard error raised before any of the work (a `400` on the server),
+  not a silently dropped flag. An unobserved block reports an empty series,
+  matching its `None` net change, and the default is off so every existing
+  payload is byte-identical. Offline-tested in `tests/test_load.py`,
+  `tests/test_serve.py` and `tests/test_mcp_server.py`. Follow-on, not a blocker:
+  nothing *renders* the series yet — the `umbra demo` Quantify readout is the
+  natural first client (see the sparkline follow-on below, which the per-block
+  series now also feeds).
 - ~~**The same reduction on `umbra serve`.**~~ ✅ **Done** (`POST
   /artifacts/stats`). The STAC API façade served four artifacts and every one was
   a picture; this one answers the same change question in JSON. It reuses the
@@ -849,7 +867,9 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
     in `tests/test_demo.py`. Follow-on, not a blocker: the readout prints the
     net first→last record and the peak block, but the per-pass series
     (`doc.passes`) is fetched and unused — a sparkline of pass-to-pass change
-    would use it, and is a presentation decision, not new data.
+    would use it, and is a presentation decision, not new data. The endpoint now
+    also takes `"block_series": true`, so the same sparkline could be drawn *per
+    block* (the peak block's own history) rather than only scene-wide.
   - ~~**A client mistake that reads as a server error.**~~ ✅ **Done.** A
     render's `ValueError` — footprints that don't all overlap under
     `extent="intersection"` being the common one, and the one the Quantify

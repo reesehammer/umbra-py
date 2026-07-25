@@ -20,7 +20,10 @@ spatial half of the answer — the scene cut into an N×N grid, each block
 reporting its own net change, a compass label and lon/lat centre, and the pair
 of passes it moved most between — so a change confined to one corner, which the
 scene-wide mean dilutes, reads as *where* and *when*. `umbra stack --blocks N`
-prints the same breakdown.
+prints the same breakdown. Adding `block_series=True` (`umbra stack
+--block-series`) keeps each block's *whole* pass-to-pass sequence rather than
+only the interval it moved most in, which is what distinguishes a steady drift
+from a single step.
 
 ::: umbra_py.to_xarray
 

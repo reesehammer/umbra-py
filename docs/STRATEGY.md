@@ -178,7 +178,9 @@ cube or multi-band GeoTIFF that `stackstac`/`odc-stac` can't produce here, see
 `stack_stats` agent tool / `POST /artifacts/stats` on `umbra serve` / the
 `umbra demo` explorer's **Quantify** button, and to a
 *located* answer by its `blocks=N` spatial breakdown, which says which part of a
-site moved and between which two passes)
+site moved and between which two passes — and, with `block_series=True`, each
+block's whole pass-to-pass sequence rather than only the interval it moved most
+in, which is what tells a steady drift apart from a single step)
 and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
 orthorectification, geoid handling, and three RTC flattening models:
 `cosine`/`area`/`gamma`) all ship. **Open:** the *fully
