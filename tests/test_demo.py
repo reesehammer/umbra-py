@@ -125,8 +125,10 @@ def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
     html = demo.build_demo([item], server_url="http://localhost:8000/")
     # The preview reuses the one server base (also used by the analyze panel).
     assert "serverBase" in html
-    # It targets the baked-thumbnail endpoint, url-encoding the remote id.
-    assert "/artifacts/thumbnail/' + encodeURIComponent(p.id) + '.png'" in html
+    # It targets the baked-thumbnail endpoint, url-encoding the remote id (the
+    # builder is shared with the whole-archive PMTiles explorer).
+    assert "/artifacts/thumbnail/' + encodeURIComponent(id) + '.png'" in html
+    assert "window.umbraThumb(serverBase, p.id)" in html
     # The image class exists in the stylesheet, and the element is dropped on a
     # 404 (a scene with no baked thumbnail) rather than shown broken.
     assert ".umbra-thumb" in html
@@ -298,3 +300,136 @@ def test_demo_feature_prefers_baked_place_label():
     unlabelled = UmbraItem(id="y", bbox=(0.0, 0.0, 1.0, 1.0), href=_HREF)
     fallback = demo._demo_feature(unlabelled, {})
     assert fallback["properties"]["place"] == unlabelled.task
+
+
+# --- whole-archive mode over PMTiles ----------------------------------------
+
+
+def test_build_demo_pmtiles_mode_reads_the_tiled_archive():
+    """With ``pmtiles_url`` the page becomes a MapLibre vector map over the
+    archive: the archive URL and source-layer travel in the config, the pinned
+    MapLibre + PMTiles bundles replace Leaflet, and nothing is embedded."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+
+    cfg = _config(html)
+    assert cfg["pmtilesUrl"] == "catalog.pmtiles"
+    assert cfg["pmtilesLayer"] == "acquisitions"
+    # The whole point: the page carries no item slice at all.
+    assert "features" not in cfg
+
+    assert "pmtiles://" in html
+    assert "maplibre-gl" in html
+    # ...and not the embedded-slice stack.
+    assert "markerClusterGroup" not in html
+    assert "leaflet.js" not in html
+    # Attribution still rides along, as on every other visual artifact.
+    assert "CC BY 4.0" in html
+
+
+def test_build_demo_pmtiles_mode_ignores_items():
+    """The archive is the data source, so handing items in must not embed them
+    -- the page has to stay the same size for a catalog of any size."""
+    items = [UmbraItem(id=f"i{n}", bbox=(0.0, 0.0, 1.0, 1.0), href=_HREF) for n in range(50)]
+    with_items = demo.build_demo(items, pmtiles_url="catalog.pmtiles")
+    without = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert with_items == without
+    assert "i49" not in with_items
+
+
+def test_build_demo_pmtiles_mode_keeps_the_sidebar_contract():
+    """Same explorer, different data source: the sidebar controls the slice app
+    wires are all still present and driven."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    for element_id in ("umbra-text", "umbra-start", "umbra-end", "umbra-products", "umbra-reset"):
+        assert f'id="{element_id}"' in html
+    # The filters are pushed into the tiles as MapLibre expressions rather than
+    # evaluated over an in-page array.
+    assert "setFilter" in html
+    assert "index-of" in html
+
+
+def test_build_demo_pmtiles_mode_offers_the_closed_product_set():
+    """Facets cannot be derived from a slice the page never reads, so the chips
+    are the known product set and the date range starts unbounded (framing a
+    sample's extent would hide most of the archive behind a default filter)."""
+    from umbra_py.constants import PRODUCT_ASSETS
+
+    cfg = _config(demo.build_demo([], pmtiles_url="catalog.pmtiles"))
+    assert cfg["products"] == list(PRODUCT_ASSETS)
+    assert "dateMin" not in cfg and "dateMax" not in cfg
+
+
+def test_build_demo_pmtiles_mode_wires_the_server_panels():
+    """A server-backed whole-archive page keeps both `umbra serve` affordances:
+    the thumbnail preview (G6) and the "Analyze this view" panel (R4)."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles", server_url="http://localhost:8000/")
+    cfg = _config(html)
+    assert cfg["serverUrl"] == "http://localhost:8000/"
+    assert "umbraAnalyzePanel" in html
+    assert "/artifacts/thumbnail/" in html
+
+    static = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert _config(static)["serverUrl"] is None
+
+
+def test_build_demo_pmtiles_layer_is_configurable():
+    cfg = _config(demo.build_demo([], pmtiles_url="c.pmtiles", pmtiles_layer="scenes"))
+    assert cfg["pmtilesLayer"] == "scenes"
+
+
+def test_both_modes_share_one_analyze_panel(sample_item_dict):
+    """The detail-row builder, the thumbnail preview and the analysis panel are
+    map-engine agnostic, so both explorers must ship the *same* code rather than
+    each carrying a copy that could drift."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    slice_page = demo.build_demo([item], server_url="http://s")
+    archive_page = demo.build_demo([], pmtiles_url="c.pmtiles", server_url="http://s")
+    for helper in ("window.umbraRow", "window.umbraThumb", "window.umbraAnalyzePanel"):
+        assert helper in slice_page
+        assert helper in archive_page
+    assert demo._SHARED_JS in slice_page
+    assert demo._SHARED_JS in archive_page
+
+
+def test_build_demo_default_mode_is_unchanged(sample_item_dict):
+    """No ``pmtiles_url`` must leave the proven embedded-slice page alone."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    assert "markerClusterGroup" in html
+    assert "maplibre" not in html
+    assert "pmtiles" not in html
+    assert len(_config(html)["features"]) == 1
+
+
+def test_cli_demo_pmtiles_builds_without_searching(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    def _no_search(self, **_kw):  # pragma: no cover - must never be reached
+        raise AssertionError("--pmtiles must not walk the catalog")
+
+    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_search)
+
+    out = tmp_path / "demo.html"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["demo", "--pmtiles", "catalog.pmtiles", "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "whole-archive explorer" in result.output
+    assert "pmtiles://" in out.read_text()
+
+
+def test_cli_demo_pmtiles_refuses_search_options(tmp_path):
+    """Search flags would be gathered and thrown away, so they are an error
+    rather than a silently unfiltered page."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["demo", "--pmtiles", "c.pmtiles", "--area", "Center", "--out", str(tmp_path / "d.html")],
+    )
+    assert result.exit_code != 0
+    assert "--area" in result.output

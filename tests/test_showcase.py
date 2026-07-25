@@ -581,3 +581,102 @@ def test_slug_collisions_and_unsluggable_names(tmp_path):
     names = sorted(p.name for p in (out / "featured").glob("*.png"))
     assert names == ["beet-piler-nd-2.png", "beet-piler-nd.png", "site.png"]
     assert len(names) == len(sites)
+
+
+# --- unified (one-page) showcase --------------------------------------------
+
+
+def test_assemble_unified_writes_one_explorer_over_the_archive(tmp_path):
+    """--unified collapses the map/explorer pair: the explorer reads the copied
+    ``.pmtiles`` archive itself, so there is no separate viewer page to send a
+    visitor to and no embedded slice to cap what they can see."""
+    archive = tmp_path / "catalog.pmtiles"
+    archive.write_bytes(pmtiles.build_pmtiles([_item("a"), _item("b", -111.0, 40.0)], max_zoom=3))
+
+    out = tmp_path / "site"
+    index = showcase.assemble_showcase(out, pmtiles_path=archive, unified=True)
+
+    assert not (out / "map.html").exists()
+    explore = (out / "explore.html").read_text()
+    # The archive is copied in beside the page, which references it by name.
+    assert (out / "catalog.pmtiles").read_bytes()[:7] == b"PMTiles"
+    assert "'pmtiles://' + CFG.pmtilesUrl" in explore
+    assert '"pmtilesUrl":"catalog.pmtiles"' in explore
+
+    page = index.read_text()
+    assert "Explore the whole archive" in page
+    assert "explore.html" in page
+    assert "map.html" not in page
+
+
+def test_assemble_unified_ignores_a_gathered_slice(tmp_path):
+    """Items are not the data source in unified mode, so their count must not be
+    reported as the showcase's coverage."""
+    archive = tmp_path / "catalog.pmtiles"
+    archive.write_bytes(pmtiles.build_pmtiles([_item("a")], max_zoom=3))
+
+    out = tmp_path / "site"
+    index = showcase.assemble_showcase(
+        out, items=[_item("a"), _item("b", -111.0, 40.0)], pmtiles_path=archive, unified=True
+    )
+    page = index.read_text()
+    assert "2 acquisitions" not in page
+    # ...and the slice is not embedded in the explorer either.
+    assert '"features"' not in (out / "explore.html").read_text()
+
+
+def test_assemble_unified_requires_an_archive(tmp_path):
+    with pytest.raises(ValueError, match="pmtiles_path"):
+        showcase.assemble_showcase(tmp_path / "site", items=[_item("a")], unified=True)
+
+
+def test_build_showcase_explore_card_copy_depends_on_mode():
+    sliced = showcase.build_showcase(explore_href="explore.html")
+    whole = showcase.build_showcase(explore_href="explore.html", unified=True)
+    assert "Search &amp; filter interactively" in sliced
+    assert "Explore the whole archive" in whole
+
+
+def test_cli_showcase_unified(tmp_path, monkeypatch):
+    """The CLI flag builds the one-page showcase and never gathers a slice."""
+
+    def _no_gather(**_kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError("--unified must not gather items")
+
+    monkeypatch.setattr("umbra_py.cli._gather_items", _no_gather)
+    archive = tmp_path / "catalog.pmtiles"
+    archive.write_bytes(pmtiles.build_pmtiles([_item("a")], max_zoom=3))
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli, ["showcase", "--unified", "--pmtiles", str(archive), "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "explore.html" in result.output
+    assert "map.html" not in result.output
+    assert not (out / "map.html").exists()
+
+
+def test_cli_showcase_unified_needs_a_basemap(tmp_path):
+    result = CliRunner().invoke(cli, ["showcase", "--unified", "--out", str(tmp_path / "site")])
+    assert result.exit_code != 0
+    assert "--pmtiles" in result.output
+
+
+def test_cli_showcase_unified_conflicts_with_no_explore(tmp_path):
+    archive = tmp_path / "catalog.pmtiles"
+    archive.write_bytes(pmtiles.build_pmtiles([_item("a")], max_zoom=3))
+    result = CliRunner().invoke(
+        cli,
+        [
+            "showcase",
+            "--unified",
+            "--no-explore",
+            "--pmtiles",
+            str(archive),
+            "--out",
+            str(tmp_path / "s"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "opposite" in result.output

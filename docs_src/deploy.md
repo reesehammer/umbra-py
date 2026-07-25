@@ -96,7 +96,7 @@ showcase`](cli.md) assembles a static site you drop on any static host:
 ```bash
 umbra index fetch            # pull the published catalog snapshot (no crawl)
 umbra showcase \
-    --local \
+    --unified \
     --fetch-pmtiles \
     --featured 6 \
     --out ./showcase
@@ -105,10 +105,9 @@ umbra showcase \
 That writes a self-contained directory:
 
 - `index.html` — a landing page linking the pieces below plus install/docs/source;
-- `map.html` — a MapLibre viewer over the whole-catalog `catalog.pmtiles` basemap
-  (copied in beside it), so the folder is relocatable;
-- `explore.html` — the interactive [`umbra demo`](cli.md) explorer over a
-  one-pin-per-site overview of the catalog;
+- `explore.html` — the interactive [`umbra demo`](cli.md) explorer, reading the
+  whole-catalog `catalog.pmtiles` archive (copied in beside it, so the folder is
+  relocatable): **every** acquisition in the catalog, with live filters;
 - `featured/*.png` — one precomputed change composite per featured site.
 
 Every page is self-contained HTML, so it needs no extra and no backend. This is
@@ -117,6 +116,20 @@ is: the `.github/workflows/docs.yml` Pages job runs `umbra showcase` after the
 mkdocs build and publishes `site/showcase/` beside the docs. Point `--pmtiles`
 at a locally built basemap instead of `--fetch-pmtiles` for an offline build, or
 pass `--no-explore` for a map-only page.
+
+### One page or two
+
+`--unified` is the recommended shape and the one the hosted showcase uses: the
+explorer reads the tiled archive itself, so a visitor gets the whole catalog
+*and* the filters on a single page.
+
+Drop `--unified` and you get the original pair instead — `map.html`, a MapLibre
+viewer over the archive you can only pan and click, plus `explore.html` over a
+*gathered slice* (`--local --max-per-task 1` for a one-pin-per-site overview).
+That is still the right build when you want the slice's extras: an embedded
+explorer carries footprint outlines and the on-click "Get SAR image" COG overlay,
+which vector tiles have no room for. The two modes are exclusive — in unified
+mode nothing is gathered, because the archive is the data source.
 
 ### Featured change composites
 

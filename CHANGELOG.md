@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Whole-archive interactive explorer — `umbra demo --pmtiles` and the one-page
+  `umbra showcase --unified` (`DEMO_APP_GAPS.md` Path A / `STRATEGY.md` §8 demo
+  polish).** The explorer and the whole-catalog map were separate artifacts for a
+  structural reason: `umbra demo` embedded its acquisitions in the page as JSON,
+  which is the right shape for a search result but caps the explorer at whatever
+  fits in a download, so covering the archive meant `umbra tiles`' click-only
+  MapLibre viewer with no filters. `umbra demo --pmtiles PATH-OR-URL` (or
+  `build_demo(pmtiles_url=…)`) removes the cap: the page swaps its embedded-slice
+  Leaflet cluster for a **MapLibre GL vector layer over a whole-catalog
+  `.pmtiles` archive** — the one `umbra tiles` writes and `publish-index.yml`
+  already publishes — and the browser range-reads only the tiles in view, so
+  **every acquisition in the catalog is explorable from a page that stays a few
+  kilobytes**. The sidebar is unchanged and now filters the whole archive: the
+  free-text search, date range and product chips compile to MapLibre filter
+  expressions evaluated inside the tiles (`index-of` over place/id, lexical date
+  bounds, per-product exclusions), matching `passesFilter`'s semantics down to
+  "a missing date never fails a date filter". The detail-row builder, the baked
+  thumbnail preview (G6) and the whole "Analyze this view" panel (R4) were
+  factored into one shared, map-engine-agnostic script both explorers drive, so
+  the two modes cannot drift; a server-backed whole-archive page keeps both
+  `umbra serve` affordances. The trade is documented rather than papered over:
+  vector tiles carry centroids and lean metadata, not footprint polygons or
+  per-asset COG URLs, so the footprint outline and the on-click "Get SAR image"
+  overlay stay embedded-slice features. `umbra showcase --unified` /
+  `assemble_showcase(unified=True)` builds the showcase on top of it as **one
+  page instead of two**: `explore.html` reads the copied `catalog.pmtiles`
+  directly, `map.html` is not written, and the landing page sends a visitor to a
+  single explorer covering the whole catalog *with* the filters. Both modes
+  refuse to silently ignore what they can't honour — `--pmtiles` with a search
+  option, or `--unified` without a basemap / with `--no-explore`, is an error, not
+  a quietly different page. `.github/workflows/docs.yml` now builds the hosted
+  showcase with `--unified` (still `continue-on-error`, still main-only). Needs no
+  extra and no network to generate; deterministic and offline-tested in
+  `tests/test_demo.py` and `tests/test_showcase.py`, and the generated page was
+  exercised end to end in a real browser (archive range-reads, every filter,
+  click-to-detail). Without `--pmtiles` / `--unified` every existing page is
+  unchanged. This closes the "wire the PMTiles source into `umbra demo`" and
+  "wire the PMTiles basemap into the explorer itself" follow-ons in `TODO.md`.
 - **Precomputed change composites on the static showcase — `umbra showcase
   --featured` (`DEMO_APP_GAPS.md` R4 / `STRATEGY.md` §8 demo polish).** The
   hosted showcase gave a first-time visitor a map and an explorer but *no SAR

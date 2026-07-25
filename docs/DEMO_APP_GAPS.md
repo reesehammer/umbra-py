@@ -23,9 +23,16 @@
 >   docs). The **R4 precomputed-artifact polish is shipped too**, for the change
 >   view: `umbra showcase --featured N` renders a change composite per marquee
 >   site into `featured/` and shows them as a captioned gallery on the landing
->   page (the Pages job passes `--featured 6`). Remaining optional polish: baking
->   thumbnails/labels into the *published* snapshot, and the swipe/timescan
->   variants of the featured gallery.
+>   page (the Pages job passes `--featured 6`). And **Path A's last structural
+>   cap is gone**: `umbra demo --pmtiles` gives the interactive explorer a
+>   whole-catalog vector-tile source (the sidebar filters compile to MapLibre
+>   expressions evaluated inside the tiles), so `umbra showcase --unified` — what
+>   the Pages job now deploys — is *one* page covering every acquisition with the
+>   filters, instead of a click-only map beside a sliced explorer. Remaining
+>   optional polish: baking thumbnails/labels into the *published* snapshot, the
+>   swipe/timescan variants of the featured gallery, and tiling footprint
+>   polygons (the one thing the embedded-slice explorer still has over the
+>   whole-archive one).
 >
 > The original item IDs (`G1`–`G8`, `R1`–`R7`, Path A/B step numbers) are still
 > cited from source docstrings; the detail behind each is in this file's git

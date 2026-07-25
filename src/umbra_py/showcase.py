@@ -20,6 +20,12 @@ landing page:
   (:func:`umbra_py.demo.save_demo`) over a gathered slice of the catalog.
 * ``index.html`` -- the landing page :func:`build_showcase` renders, linking the
   two above plus the install command, the docs and the source.
+* **or one page instead of two** (``umbra showcase --unified``): the explorer
+  now reads a tiled archive directly (:func:`umbra_py.demo.build_demo`'s
+  ``pmtiles_url``), so ``explore.html`` can be built *over* ``catalog.pmtiles``
+  and ``map.html`` dropped. A visitor lands on a single page covering every
+  acquisition **with** the filters, instead of choosing between a whole-catalog
+  map they can only click and a filterable explorer over a slice.
 * ``featured/*.png`` -- optional **precomputed change composites** for a handful
   of repeat-imaged sites (:func:`select_featured_sites`), shown as a gallery on
   the landing page. A first-time visitor sees *what SAR change looks like*
@@ -211,6 +217,7 @@ def build_showcase(
     repo_url: str = DEFAULT_REPO_URL,
     docs_url: str = DEFAULT_DOCS_URL,
     featured: Sequence[FeaturedArtifact] = (),
+    unified: bool = False,
 ) -> str:
     """Render the showcase landing page as a self-contained HTML string.
 
@@ -226,6 +233,11 @@ def build_showcase(
         Relative links to the whole-catalog map viewer and the interactive
         explorer (typically ``"map.html"`` / ``"explore.html"``). ``None`` drops
         that card.
+    unified:
+        Set when ``explore_href`` points at an explorer built over the *whole*
+        tiled archive rather than a gathered slice (``umbra showcase
+        --unified``). It only changes that card's copy — there is no separate
+        map page to send people to, because the explorer is one.
     featured:
         Precomputed change composites to show above the cards. Empty (the
         default) drops the whole gallery section, so a metadata-only showcase is
@@ -256,7 +268,18 @@ def build_showcase(
                 "\N{WORLD MAP}",
             )
         )
-    if explore_href:
+    if explore_href and unified:
+        cards.append(
+            _card(
+                explore_href,
+                "Explore the whole archive",
+                "Every acquisition in the open catalog on one zoomable map, with "
+                "live filters for place, date range and product type \N{EM DASH} "
+                "no install, no search round-trip.",
+                "\N{LEFT-POINTING MAGNIFYING GLASS}",
+            )
+        )
+    elif explore_href:
         cards.append(
             _card(
                 explore_href,
@@ -383,6 +406,7 @@ def assemble_showcase(
     *,
     items: Iterable[UmbraItem] | None = None,
     pmtiles_path: str | os.PathLike | None = None,
+    unified: bool = False,
     viewer_title: str | None = None,
     demo_kwargs: dict[str, Any] | None = None,
     featured_sites: Sequence[FeaturedSite] = (),
@@ -396,9 +420,11 @@ def assemble_showcase(
 
     * ``map.html`` + a copy of the ``.pmtiles`` archive -- only when
       ``pmtiles_path`` is given (the MapLibre viewer over the whole-catalog
-      basemap).
-    * ``explore.html`` -- only when ``items`` is given and non-empty (the
-      ``umbra demo`` interactive explorer).
+      basemap). With ``unified=True`` the archive is still copied in but
+      ``map.html`` is not written: the explorer below covers it.
+    * ``explore.html`` -- the ``umbra demo`` interactive explorer: over the
+      copied archive when ``unified=True``, otherwise over ``items`` (and
+      skipped when those are absent or empty).
     * ``featured/<slug>.png`` -- one precomputed change composite per entry in
       ``featured_sites`` (none by default).
     * ``index.html`` -- always (the landing page, with cards for whichever of the
@@ -427,6 +453,16 @@ def assemble_showcase(
         A local whole-catalog ``.pmtiles`` file to include. It is copied into
         ``dest_dir`` (so the directory is self-contained and relocatable) and the
         viewer references it by name. ``None`` skips ``map.html`` and its card.
+    unified:
+        Build **one** page instead of two. The showcase's map and explorer have
+        always been siblings — a whole-catalog viewer you can only click, and an
+        explorer with real filters over a gathered slice — because the explorer
+        had no way to read a tiled archive. It has one now
+        (:func:`umbra_py.demo.build_demo`'s ``pmtiles_url``), so ``unified=True``
+        builds ``explore.html`` *over the copied archive* and drops ``map.html``:
+        the landing page sends a visitor to a single explorer covering every
+        acquisition, with the filters. Requires ``pmtiles_path``; ``items`` is
+        unused in this mode (the archive is the data source).
     viewer_title:
         Title for the map viewer page (defaults to the landing-page title).
     demo_kwargs:
@@ -441,30 +477,45 @@ def assemble_showcase(
     ``save_viewer`` / ``save_demo`` writers, so it needs no network and no
     ``viz`` extra.
     """
+    if unified and pmtiles_path is None:
+        raise ValueError("unified=True needs a pmtiles_path (the archive is the data source)")
+
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
 
     item_list = list(items) if items is not None else None
 
     map_href: str | None = None
+    archive_name: str | None = None
     if pmtiles_path is not None:
-        from .pmtiles import save_viewer  # noqa: PLC0415
-
         src = Path(pmtiles_path)
         copied = dest / src.name
-        # Copy the archive in beside the viewer unless it is already there (a
-        # caller may hand us a path that is already inside dest_dir).
+        # Copy the archive in beside the page that reads it unless it is already
+        # there (a caller may hand us a path that is already inside dest_dir).
         if copied.resolve() != src.resolve():
             shutil.copyfile(src, copied)
-        save_viewer(
-            copied.name,
-            dest / "map.html",
-            title=viewer_title or showcase_kwargs.get("title", DEFAULT_TITLE),
-        )
-        map_href = "map.html"
+        archive_name = copied.name
+        if not unified:
+            from .pmtiles import save_viewer  # noqa: PLC0415
+
+            save_viewer(
+                archive_name,
+                dest / "map.html",
+                title=viewer_title or showcase_kwargs.get("title", DEFAULT_TITLE),
+            )
+            map_href = "map.html"
 
     explore_href: str | None = None
-    if item_list:
+    if unified:
+        from .demo import save_demo  # noqa: PLC0415
+
+        # One page over the whole tiled archive: no item list, no map sibling.
+        save_demo([], dest / "explore.html", pmtiles_url=archive_name, **(demo_kwargs or {}))
+        explore_href = "explore.html"
+        # The gathered slice is not what the page shows, so its size must not be
+        # reported as the showcase's coverage.
+        item_list = None
+    elif item_list:
         from .demo import save_demo  # noqa: PLC0415
 
         save_demo(item_list, dest / "explore.html", **(demo_kwargs or {}))
@@ -482,6 +533,7 @@ def assemble_showcase(
         build_showcase(
             map_href=map_href,
             explore_href=explore_href,
+            unified=unified,
             item_count=len(item_list) if item_list is not None else None,
             featured=featured,
             **showcase_kwargs,
