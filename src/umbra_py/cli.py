@@ -25,6 +25,7 @@ from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
+from .load import STACK_EXTENTS
 from .models import UmbraItem
 from .pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
 from .showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
@@ -1441,6 +1442,222 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
             db=db,
         )
     click.echo(f"Wrote GeoTIFF to {path}")
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Output multi-band GeoTIFF path (one band per acquisition, oldest first).",
+)
+@click.option(
+    "--area",
+    default=None,
+    help="Search mode: name of an Umbra site (e.g. 'Centerfield') to gather "
+    "automatically instead of passing URLs. Combine with --start/--end to "
+    "bound the time range.",
+)
+@click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Search mode: geocode a place name (e.g. 'California', 'Tokyo') to a "
+    "bounding box and stack within it, via OpenStreetMap Nominatim. Mutually "
+    "exclusive with --bbox; the match is rectangular, so it can include nearby "
+    "areas outside the named place.",
+)
+@click.option(
+    "--start",
+    help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
+    "(2024, 2024-03), or relative ('3 months ago', 'last month').",
+)
+@click.option(
+    "--end",
+    help="Search mode: latest acquisition date (same formats as --start).",
+)
+@click.option(
+    "--max-search",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Search mode: cap how many acquisitions the search pulls into the stack.",
+)
+@click.option(
+    "--asset",
+    default="GEC",
+    show_default=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Which product to stack. GEC (the geocoded GeoTIFF) is the sensible "
+    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
+    "rasters.",
+)
+@click.option(
+    "--clip-bbox",
+    default=None,
+    help="Clip the cube to a lon/lat window 'min_lon,min_lat,max_lon,max_lat' "
+    "inside whatever --extent selected. (Distinct from --bbox, which filters "
+    "which acquisitions the search returns.)",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=1024,
+    show_default=True,
+    help="Longest side of the shared grid in pixels. Larger is sharper but "
+    "fetches more bytes (~quadratic), and the grid is shared by every band.",
+)
+@click.option(
+    "--extent",
+    type=click.Choice(STACK_EXTENTS, case_sensitive=False),
+    default="intersection",
+    show_default=True,
+    help="intersection: only ground every acquisition covers, so no cell has a "
+    "gap. union: all ground any acquisition covers, NaN outside each scene.",
+)
+@click.option(
+    "--db",
+    is_flag=True,
+    help="Stack the decibel (log-amplitude) scale -- the radiometrically "
+    "meaningful scale for differencing, where a backscatter ratio becomes a "
+    "subtraction.",
+)
+@_local_index_options
+@_token_option
+@_fuzzy_option
+@_manifest_option
+@_acquisition_filter_options
+def stack(
+    item_urls,
+    out_path,
+    area,
+    fuzzy,
+    bbox,
+    place,
+    start,
+    end,
+    max_search,
+    asset,
+    clip_bbox,
+    max_size,
+    extent,
+    db,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
+    local,
+    db_path,
+    as_json,
+    token,
+) -> None:
+    """Co-register a site's acquisitions into one analysis-ready datacube.
+
+    The time-series half of `umbra load`, and the step between *search* and
+    *analysis*: several passes over one site are warped onto a shared
+    EPSG:4326 grid and written as a multi-band float32 GeoTIFF -- one band per
+    acquisition, oldest first, each described by its timestamp. Because the
+    bands are pixel-aligned, band arithmetic is an honest per-ground-cell
+    comparison, so the file drops straight into QGIS, GDAL, rioxarray or a
+    notebook.
+
+    Where `umbra change` and `umbra timescan` render this comparison as a
+    *picture*, this writes the *numbers*. In Python, ``umbra_py.to_stack``
+    returns the same cube as an xarray DataArray with a real ``time``
+    dimension (``cube.mean("time")``, ``cube.diff("time")``, ...).
+
+    Two ways to choose what to stack:
+
+    \b
+    - Pass 2+ STAC JSON URLs directly (order doesn't matter).
+    - Or search: give --area (or --bbox / --place) with --start/--end and the
+      command gathers a site's acquisitions automatically.
+
+    Stack one polarization: mixing VV and VH puts a polarization difference on
+    the time axis where you'll read it as change (--pol filters the search).
+    Only downsampled overviews are streamed via HTTP range requests -- no full
+    download. Requires the load extra (``pip install "umbra-py[load]"``).
+    """
+    from .load import stack_to_geotiff  # noqa: PLC0415
+
+    _check_token_not_local(token, local, db_path)
+    search_mode = any(v for v in (area, bbox, place, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+        )
+
+    if item_urls:
+        if len(item_urls) < 2:
+            raise click.BadParameter("a stack needs 2 or more item URLs of the same site.")
+        items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
+    else:
+        if not (area or bbox or place):
+            raise click.UsageError(
+                "Give --area, --bbox or --place (optionally with --start/--end) to "
+                "search, or pass item URLs directly."
+            )
+        search_bbox = _resolve_search_bbox(bbox, place)
+        found = _gather_items(
+            local=local,
+            db_path=db_path,
+            token=token,
+            bbox=search_bbox,
+            start=start,
+            end=end,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=[asset],
+            limit=max_search,
+            **_acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
+        )
+        if len(found) < 2:
+            raise click.ClickException(
+                f"Need at least 2 {asset} acquisitions to stack; the search found "
+                f"{len(found)}. Widen the date range or area."
+            )
+        # The whole series (single-polarization where possible), oldest-first.
+        items = select_change_frames(found, frames=None)
+        if len({tuple(i.polarizations) for i in items}) > 1:
+            click.echo(
+                "warning: selected acquisitions have mixed polarizations; a "
+                "polarization difference will appear on the time axis as if it "
+                "were change. Re-run with --pol to stack one polarization.",
+                err=True,
+            )
+        if not as_json:
+            span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+
+    with OrbitSpinner(f"Stacking {len(items)} acquisitions"):
+        path = stack_to_geotiff(
+            items,
+            out_path,
+            asset=asset,
+            bbox=_parse_bbox(clip_bbox),
+            max_size=max_size,
+            db=db,
+            extent=extent,
+        )
+    if as_json:
+        _emit_render_manifest(
+            path,
+            items,
+            {
+                "asset": asset,
+                "max_size": max_size,
+                "extent": extent,
+                "db": db,
+                **_acquisition_filter_manifest(
+                    polarizations, min_incidence, max_incidence, max_resolution
+                ),
+            },
+        )
+    else:
+        click.echo(f"Wrote {len(items)}-band datacube to {path}")
 
 
 @cli.command()

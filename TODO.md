@@ -745,6 +745,47 @@ not blockers:
 
 ---
 
+## Time-series datacube follow-ons (`to_stack` / `umbra stack` shipped)
+
+- **Surfaced in:** the datacube PR (`docs/STRATEGY.md` §2 / 5.5).
+- **Code:** `src/umbra_py/load.py` (`to_stack`, `stack_to_geotiff`,
+  `STACK_EXTENTS`, `_stack_bounds`, `_mask_slice`), `umbra stack` in `cli.py`.
+
+`to_stack` co-registers several acquisitions onto one shared EPSG:4326 grid and
+returns a `(time, y, x)` `xarray.DataArray`; `stack_to_geotiff` / `umbra stack`
+write the same cube as a multi-band GeoTIFF. Deterministic, no model call,
+behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
+
+- **A projected (equal-area) output grid.** The cube is built on a lon/lat grid,
+  the same quick-look approximation `viz._coregister_bands` makes, so cells are
+  not equal-area and the stretch grows with latitude. It is the right default
+  (one grid works anywhere, and comparing a cell to *itself* across dates is
+  unaffected), but an opt-in `crs=` that warps to the scene's native UTM zone —
+  or to a caller-supplied CRS — would make area/distance measurements correct
+  without a reprojection step. The `WarpedVRT` call already takes a `crs`, so
+  this is a parameter and a grid-derivation branch, not a rewrite.
+- **Lazy / chunked reads.** Every slice is read eagerly into memory, so the cube
+  is bounded by `max_size` × the number of acquisitions. Yielding a dask-backed
+  array (one chunk per acquisition) would let a long series stack at higher
+  resolution than fits in RAM. `xarray` is already a dependency of `[load]`;
+  `dask` would be a new optional one, so this is deliberately deferred until
+  someone hits the ceiling.
+- **Share the co-registration with `viz`.** `viz._coregister_bands` does the
+  same warp-and-decimate for the render commands and predates this. They now
+  differ in what they return (bare arrays + bounds vs. a labelled cube) and in
+  masking (`viz` keeps raw values for its own stretch), so they were left
+  separate rather than forced into one function; if a third caller appears,
+  extract the shared VRT/grid step.
+- **A notebook in the gallery.** `examples/` has no stacking notebook; the
+  natural one is "search a site → `to_stack` → baseline vs. latest → map the dB
+  delta", self-checking like the rest and guarded by `tests/test_examples.py`.
+- **Surface it on the agent front doors.** `to_stack` returns numbers rather
+  than a picture, so it has no MCP / LangChain / LlamaIndex tool. A tool
+  returning summary statistics over the cube (rather than the cube itself) would
+  fit the "images/JSON are the API" boundary; the raw array does not.
+
+---
+
 ## C5 archive-embedding follow-ons (`umbra embed` shipped)
 
 - **Surfaced in:** the `umbra embed` PR (`AI_INTEGRATION_IDEAS.md` C5 /

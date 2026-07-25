@@ -60,7 +60,7 @@ _MODULE_GUIDE: tuple[tuple[str, str], ...] = (
     ("index.py", "CatalogIndex"),
     ("models.py", "UmbraItem"),
     ("download.py", "download_asset"),
-    ("load.py", "to_xarray / to_geotiff"),
+    ("load.py", "to_xarray / to_stack / to_geotiff"),
     ("viz.py", "quicklook / maps / change / timescan / gallery"),
     ("context.py", "llm_context"),
     ("mcp_server.py", "umbra-mcp"),

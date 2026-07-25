@@ -191,3 +191,361 @@ def test_cli_load_writes_geotiff(tmp_path, monkeypatch):
     with rasterio.open(out) as ds:
         assert ds.count == 1
         assert max(ds.width, ds.height) <= 8
+
+
+# --- Time-series stacking (``to_stack`` / ``stack_to_geotiff`` / ``umbra stack``) ---
+#
+# Each scene is a constant-valued UTM raster, optionally shifted east, so a
+# co-registered slice is trivially checkable: inside the shared footprint every
+# cell of slice N must read that scene's fill value, and outside it must be NaN.
+
+
+def _stack_scene(path, *, x_offset=0.0, value=1.0, width=40, height=40):
+    """Write a constant-valued north-up UTM GeoTIFF shifted ``x_offset`` metres east."""
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0 + x_offset, 4000000.0, 10.0, 10.0),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(np.full((height, width), float(value), dtype="float32"), 1)
+    return path
+
+
+def _stack_item(tif, item_id, when):
+    item = UmbraItem(id=item_id, properties={"datetime": when})
+    item.asset_href = lambda asset="GEC", _p=str(tif): _p  # type: ignore[method-assign]
+    return item
+
+
+def _three_scenes(tmp_path):
+    """Three same-footprint passes with fills 2/4/8, returned newest-first."""
+    return [
+        _stack_item(
+            _stack_scene(tmp_path / f"s{n}.tif", value=v), f"acq-{n}", f"2024-0{n}-08T12:00:00Z"
+        )
+        for n, v in ((3, 8.0), (2, 4.0), (1, 2.0))
+    ]
+
+
+def test_to_stack_orders_by_time_and_carries_provenance(tmp_path):
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32)
+
+    assert cube.dims == ("time", "y", "x")
+    assert cube.shape[0] == 3
+    # Input was newest-first; the cube is oldest-first.
+    assert list(cube["item_id"].values) == ["acq-1", "acq-2", "acq-3"]
+    assert list(cube["time"].values) == sorted(cube["time"].values)
+    # y descends (north-up), x ascends.
+    assert cube["y"].values[0] > cube["y"].values[-1]
+    assert cube["x"].values[0] < cube["x"].values[-1]
+    assert cube.attrs["crs"] == "EPSG:4326"
+    assert cube.attrs["extent"] == "intersection"
+    assert cube.attrs["units"] == "amplitude"
+    assert "CC BY 4.0" in cube.attrs["attribution"]
+    # Same footprint every pass: each slice is its own fill value throughout.
+    for i, value in enumerate((2.0, 4.0, 8.0)):
+        assert np.nanmin(cube.values[i]) == pytest.approx(value)
+        assert np.nanmax(cube.values[i]) == pytest.approx(value)
+
+
+def test_to_stack_intersection_keeps_only_shared_ground(tmp_path):
+    """Offset passes align onto the overlap, and every cell has a full series."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    cube = to_stack(items, max_size=32)
+
+    # The scenes are 400 m wide and offset by 200 m, so the intersection is
+    # half as wide as either -- and no cell is NaN in either slice.
+    assert not np.isnan(cube.values).any()
+    assert cube.values[0] == pytest.approx(2.0)
+    assert cube.values[1] == pytest.approx(8.0)
+    left, _, right, _ = cube.attrs["bounds"]
+    single = to_stack([items[0]], max_size=32)
+    assert right - left < (single.attrs["bounds"][2] - single.attrs["bounds"][0])
+
+
+def test_to_stack_union_pads_each_slice_with_nan(tmp_path):
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    inter = to_stack(items, max_size=32, extent="intersection")
+    cube = to_stack(items, max_size=32, extent="union")
+
+    assert cube.attrs["extent"] == "union"
+    # Union spans both footprints, so it is wider than the intersection...
+    ul, _, ur, _ = cube.attrs["bounds"]
+    il, _, ir, _ = inter.attrs["bounds"]
+    assert (ur - ul) > (ir - il)
+    # ...and each slice reads NaN over ground it never covered: the far west
+    # column belongs to `a` alone, the far east column to `b` alone.
+    assert np.isnan(cube.values[1, :, 0]).all()
+    assert np.isnan(cube.values[0, :, -1]).all()
+    # Where a slice does have data it is still that scene's fill value.
+    assert np.nanmax(cube.values[0]) == pytest.approx(2.0)
+    assert np.nanmax(cube.values[1]) == pytest.approx(8.0)
+
+
+def test_to_stack_non_overlapping_footprints_raise(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif"), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200_000.0), "b", "2024-02-01T00:00:00Z"
+        ),
+    ]
+    with pytest.raises(ValueError, match="do not all overlap"):
+        to_stack(items, max_size=32)
+    # union has no such requirement.
+    assert to_stack(items, max_size=32, extent="union").shape[0] == 2
+
+
+def test_to_stack_rejects_undated_and_empty(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    tif = _stack_scene(tmp_path / "a.tif")
+    dated = _stack_item(tif, "dated", "2024-01-01T00:00:00Z")
+    undated = UmbraItem(id="no-date", properties={})
+    undated.asset_href = lambda asset="GEC": str(tif)  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="no datetime"):
+        to_stack([dated, undated])
+    with pytest.raises(ValueError, match="at least one acquisition"):
+        to_stack([])
+
+
+def test_to_stack_bad_extent_and_bbox(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    items = _three_scenes(tmp_path)
+    with pytest.raises(ValueError, match="extent must be one of"):
+        to_stack(items, extent="everything")
+    with pytest.raises(ValueError, match="does not overlap"):
+        to_stack(items, bbox=(0.0, 0.0, 0.001, 0.001))
+
+
+def test_to_stack_db_scale(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32, db=True)
+
+    assert cube.name == "backscatter_db"
+    assert cube.attrs["units"] == "dB"
+    assert cube.values[0] == pytest.approx(20.0 * math.log10(2.0), abs=1e-4)
+
+
+def test_stack_to_geotiff_writes_a_band_per_date(tmp_path):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from umbra_py import stack_to_geotiff
+
+    out = stack_to_geotiff(_three_scenes(tmp_path), tmp_path / "cube.tif", max_size=32)
+
+    assert out.exists()
+    with rasterio.open(out) as ds:
+        assert ds.count == 3
+        assert ds.dtypes[0] == "float32"
+        assert ds.crs.to_epsg() == 4326
+        assert np.isnan(ds.nodata)
+        # Bands are oldest-first and self-describing.
+        assert [d.split()[-1] for d in ds.descriptions] == ["acq-1", "acq-2", "acq-3"]
+        assert ds.descriptions[0].startswith("2024-01-08")
+        assert ds.tags()["item_ids"] == "acq-1,acq-2,acq-3"
+        assert "CC BY 4.0" in ds.tags()["attribution"]
+        assert ds.read([2])[0] == pytest.approx(4.0)
+
+
+def test_cli_stack_writes_datacube(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif", value=2.0),
+        "two": _stack_scene(tmp_path / "two.tif", value=8.0),
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+
+    out = tmp_path / "cube.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "stack",
+            "http://example.com/one.json",
+            "http://example.com/two.json",
+            "--out",
+            str(out),
+            "--max-size",
+            "16",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2-band datacube" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.count == 2
+        assert max(ds.width, ds.height) <= 16
+        assert ds.read([1])[0] == pytest.approx(2.0)
+        assert ds.read([2])[0] == pytest.approx(8.0)
+
+
+def test_cli_stack_needs_two_urls(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["stack", "http://example.com/one.json", "--out", str(tmp_path / "c.tif")]
+    )
+    assert result.exit_code != 0
+    assert "2 or more item URLs" in result.output
+
+
+def _step_scene(path, *, pixel_m, width, height):
+    """A scene whose west half reads 2.0 and east half 8.0, on a ``pixel_m`` grid.
+
+    Two of these at different source resolutions cover identical ground, so a
+    co-registered stack must put the step at the same output column in both --
+    which a constant-valued scene cannot detect.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    data = np.full((height, width), 2.0, dtype="float32")
+    data[:, width // 2 :] = 8.0
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, pixel_m, pixel_m),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(data, 1)
+    return path
+
+
+def test_to_stack_slices_are_pixel_aligned_across_source_grids(tmp_path):
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    coarse = _step_scene(tmp_path / "coarse.tif", pixel_m=10.0, width=40, height=40)
+    fine = _step_scene(tmp_path / "fine.tif", pixel_m=5.0, width=80, height=80)
+    cube = to_stack(
+        [
+            _stack_item(coarse, "coarse", "2024-01-01T00:00:00Z"),
+            _stack_item(fine, "fine", "2024-02-01T00:00:00Z"),
+        ],
+        max_size=64,
+    )
+
+    # First column at (or past) the step, per slice, along a mid-row.
+    row = cube.shape[1] // 2
+    steps = [int(np.argmax(cube.values[i, row, :] > 5.0)) for i in range(2)]
+    assert steps[0] == steps[1], f"step edge lands on different columns: {steps}"
+    assert 0 < steps[0] < cube.shape[2]
+
+
+def test_cli_stack_json_manifest(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif", value=2.0),
+        "two": _stack_scene(tmp_path / "two.tif", value=8.0),
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+
+    out = tmp_path / "cube.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "stack",
+            "http://example.com/one.json",
+            "http://example.com/two.json",
+            "--out",
+            str(out),
+            "--max-size",
+            "16",
+            "--extent",
+            "union",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(result.stdout)
+    assert manifest["output"] == str(out)
+    assert manifest["items_used"] == ["one", "two"]
+    assert manifest["parameters"]["extent"] == "union"
+    assert manifest["parameters"]["max_size"] == 16

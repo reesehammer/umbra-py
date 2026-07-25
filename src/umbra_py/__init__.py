@@ -66,7 +66,7 @@ from .geoid import (
 )
 from .index import CatalogIndex, UpdateResult, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
-from .load import to_geotiff, to_xarray
+from .load import STACK_EXTENTS, stack_to_geotiff, to_geotiff, to_stack, to_xarray
 from .models import ItemCollection, UmbraItem
 from .narrate import (
     ChangeNarration,
@@ -142,6 +142,9 @@ __all__ = [
     "ItemCollection",
     "to_xarray",
     "to_geotiff",
+    "to_stack",
+    "stack_to_geotiff",
+    "STACK_EXTENTS",
     "sicd_to_amplitude_geotiff",
     "sicd_to_geocoded_cog",
     "fetch_dem_for_bbox",
