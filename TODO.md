@@ -830,19 +830,34 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   (`stats_frames`), which additionally refuses a mixed-polarization selection
   because the HH/VV difference would land on the time axis and read as change.
   `Renderers` gained a `stats` member, so the route is offline-testable with no
-  `load` extra installed. Offline-tested in `tests/test_serve.py`. Follow-ons,
-  neither a blocker:
-  - **A "Quantify" button in the `umbra demo` analyze panel.** With
-    `--server-url` the explorer offers Change / Timescan / Swipe — all three
-    pictures. The numeric endpoint is the missing fourth: render `net_change`
-    plus the `grid_text` heat-grid for the currently-filtered acquisitions and
-    the self-serve loop can *measure*, not just look. (`src/umbra_py/demo.py`.)
-  - **A client mistake that reads as a server error.** A `to_stack` failure that
-    is really bad input — footprints that don't all overlap under
-    `extent="intersection"` — surfaces as a `500` (or a failed job) rather than a
-    `400`, since `_serve_artifact` only maps `MissingDependencyError`. The
-    composite endpoints behave the same way for render failures, so the fix is a
-    shared one: map `ValueError` from a render to a `400` for all of them.
+  `load` extra installed. Offline-tested in `tests/test_serve.py`. Both
+  follow-ons are now closed:
+  - ~~**A "Quantify" button in the `umbra demo` analyze panel.**~~ ✅ **Done.**
+    The explorer's analyze panel offered Change / Timescan / Swipe — three
+    pictures — so a visitor could see that a site changed but not say by how
+    much. **Quantify** is the numeric fourth: it POSTs the same filtered
+    acquisitions to `POST /artifacts/stats` and reads the reduction out in the
+    sidebar — the mean dB change first→last with its direction, the fraction of
+    the site past the change threshold and that area in km², the block that
+    moved most and the interval it moved in, and the north-up `grid_text`
+    heat-grid. The request always asks for `blocks: 3`, since a scene-wide mean
+    dilutes a change that moved one corner. The panel *formats* the server's
+    numbers and computes none of its own (so the page and `umbra stack --stats`
+    cannot disagree), carries the document's CC-BY attribution and calibration
+    caveat into the browser, and is the panel both explorers share, so the
+    embedded-slice and PMTiles pages gained the button together. Offline-tested
+    in `tests/test_demo.py`. Follow-on, not a blocker: the readout prints the
+    net first→last record and the peak block, but the per-pass series
+    (`doc.passes`) is fetched and unused — a sparkline of pass-to-pass change
+    would use it, and is a presentation decision, not new data.
+  - ~~**A client mistake that reads as a server error.**~~ ✅ **Done.** A
+    render's `ValueError` — footprints that don't all overlap under
+    `extent="intersection"` being the common one, and the one the Quantify
+    button makes easy to hit from a filtered view — now maps to a `400` carrying
+    the explanation instead of a `500`. Fixed in the shared place named here, so
+    it holds for every artifact route (`_serve_artifact`) and on the async path
+    too (`_run_job`, a `failed` job whose result endpoint answers `400`).
+    Offline-tested in `tests/test_serve.py`.
 
 ---
 

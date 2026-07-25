@@ -110,9 +110,42 @@ def test_build_demo_server_url_wires_analysis_panel(sample_item_dict):
     # Stored verbatim; the trailing slash is trimmed client-side.
     assert cfg["serverUrl"] == "http://localhost:8000/"
     assert "/artifacts/' + spec.kind" in html
-    # The three products are wired.
-    for btn in ("umbra-btn-change", "umbra-btn-timescan", "umbra-btn-swipe"):
+    # The four products are wired.
+    for btn in ("umbra-btn-change", "umbra-btn-timescan", "umbra-btn-swipe", "umbra-btn-stats"):
         assert btn in html
+
+
+def test_analyze_panel_quantify_button_measures_the_view(sample_item_dict):
+    """The fourth analysis product is numbers, not a picture: "Quantify" POSTs
+    the filtered view to ``/artifacts/stats`` and reads out the measurement --
+    the last open follow-on of the stats endpoint."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+
+    # The button, and a spec that asks the numeric endpoint for the spatial
+    # breakdown (a scene-wide mean dilutes a change that moved one corner).
+    assert '<button id="umbra-btn-stats"' in html
+    assert "kind: 'stats'" in html
+    assert "body: { blocks: 3 }" in html
+    # A JSON answer is parsed, not turned into an object URL like the PNG/HTML
+    # products, and rendered by the readout.
+    assert "return spec.json ? r.json() : r.blob();" in html
+    assert "renderStats(data, resultEl)" in html
+    # The readout states the measurement's headline numbers, says which block
+    # moved most and when, and shows the north-up heat-grid -- each read from
+    # the server's own document, never recomputed client-side.
+    for field in (
+        "doc.net_change",
+        "net.changed_area_km2",
+        "doc.change_threshold_db",
+        "spatial.peak_block",
+        "pb.peak_interval",
+        "spatial.grid_text",
+    ):
+        assert field in html
+    # License propagation survives the trip to the browser (design principle 4).
+    assert "doc.attribution" in html
+    assert "doc.caveats" in html
 
 
 def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):

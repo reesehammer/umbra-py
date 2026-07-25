@@ -1697,6 +1697,12 @@ def build_app(
         serve a ``text/html`` product from its own cache entry without confusing
         it with the PNG composites (a swipe and a change over the same items are
         distinct files).
+
+        A render's ``ValueError`` is the client's mistake, not the server's --
+        acquisitions whose footprints share no ground under
+        ``extent="intersection"`` is the common one -- so it answers ``400``
+        with the message rather than a ``500`` the caller can only read as "the
+        server broke".
         """
         key = artifact_cache_key(kind, [it.id for it in items], options)
         path = _cache_file(key, suffix)
@@ -1710,6 +1716,8 @@ def build_app(
             payload = render()
         except MissingDependencyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         _write_cache(path, payload)
         return Response(
             content=payload,
@@ -1722,15 +1730,19 @@ def build_app(
 
         Renders, writes the shared disk cache, and records the terminal state on
         the job. A missing render extra becomes a ``failed`` job the result
-        endpoint reports as ``501`` (mirroring the synchronous path); any other
-        error becomes a ``500``. Exceptions never escape -- they are the job's
-        recorded outcome, not a crash of the worker thread.
+        endpoint reports as ``501`` and bad input a ``400`` (mirroring the
+        synchronous path); any other error becomes a ``500``. Exceptions never
+        escape -- they are the job's recorded outcome, not a crash of the worker
+        thread.
         """
         job_store.mark_running(job)
         try:
             payload = render()
         except MissingDependencyError as exc:
             job_store.mark_failed(job, str(exc), 501)
+            return
+        except ValueError as exc:
+            job_store.mark_failed(job, str(exc), 400)
             return
         except Exception as exc:  # noqa: BLE001 - surfaced to the client via job status
             job_store.mark_failed(job, str(exc), 500)

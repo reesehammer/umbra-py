@@ -3108,7 +3108,8 @@ def gallery(
     help="Base URL of a running 'umbra serve' instance (e.g. "
     "http://localhost:8000). When set, the explorer gains an 'Analyze this "
     "view' panel whose buttons render change/timescan/swipe products over the "
-    "currently-filtered acquisitions on demand. Omit for a fully static page.",
+    "currently-filtered acquisitions on demand, plus a Quantify button that "
+    "measures the same view in numbers. Omit for a fully static page.",
 )
 @click.option(
     "--pmtiles",
@@ -3158,7 +3159,10 @@ def demo(
     Pass --server-url pointing at a running 'umbra serve' to add an "Analyze
     this view" panel that renders change/timescan/swipe products over the
     currently-filtered acquisitions on demand (the server does the raster work
-    and caches results); without it the page stays fully static.
+    and caches results), and a Quantify button that measures them instead:
+    how many decibels the site moved first-to-last, how much ground crossed
+    the change threshold in km2, and which block moved most, when. Without
+    --server-url the page stays fully static.
 
     Pass --pmtiles PATH-OR-URL to explore the WHOLE archive instead of a
     gathered slice: the page draws every acquisition in a '.pmtiles' catalog

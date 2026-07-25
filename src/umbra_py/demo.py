@@ -23,12 +23,22 @@ Design, deliberately in the repo's grain:
 * **Optionally server-backed for analysis (R4).** With ``server_url`` set to a
   running ``umbra serve`` instance, the sidebar gains an "Analyze this view"
   panel: its buttons POST the currently-filtered acquisitions to the server's
-  ``/artifacts/change|timescan|swipe`` endpoints and render the returned
+  ``/artifacts/change|timescan|swipe|stats`` endpoints and render the returned
   artifact in place — the "run this analysis here" affordance the demo-gap
   analysis calls the last self-serve gap (``DEMO_APP_GAPS.md`` R4 / Path B). The
   server does the heavy raster work and caches every result; the page itself
   stays a static file (the panel is simply hidden when no ``server_url`` is
   configured, so the default build is unchanged).
+
+  Three of those products are pictures; **"Quantify"** is the one that is
+  numbers. It POSTs the same filtered view to ``POST /artifacts/stats`` and
+  reads out :func:`~umbra_py.load.stack_stats`' measurement — how much the site
+  moved between its first and last pass (mean decibels, the fraction of ground
+  past the change threshold, and the area in km², since the endpoint stacks on
+  the site's UTM grid), which block moved most and between which two passes, and
+  the north-up ASCII heat-grid of signed change. So the self-serve loop can
+  *measure*, not only look. The panel formats the server's numbers and computes
+  none of its own, so the page and ``umbra stack --stats`` cannot disagree.
 
 * **Instant thumbnail preview when server-backed (G6).** With ``server_url``
   set, clicking a scene *leads* its detail panel with a small SAR picture pulled
@@ -228,9 +238,11 @@ def build_demo(
         Base URL of a running ``umbra serve`` instance
         (e.g. ``"http://localhost:8000"``). When set, the sidebar gains an
         "Analyze this view" panel whose buttons POST the currently-filtered
-        acquisitions to the server's ``/artifacts/change|timescan|swipe``
+        acquisitions to the server's ``/artifacts/change|timescan|swipe|stats``
         endpoints and show the returned artifact — the R4 "run this analysis
-        here" affordance (``DEMO_APP_GAPS.md``). It also turns on the instant
+        here" affordance (``DEMO_APP_GAPS.md``). Three of them render a picture;
+        "Quantify" (``/artifacts/stats``) reads out the numeric measurement
+        instead. It also turns on the instant
         thumbnail preview in the detail panel (served from the endpoint's
         ``/artifacts/thumbnail/{id}.png`` baked thumbnail, ``DEMO_APP_GAPS.md``
         G6). When ``None`` (default) the page stays fully static and
@@ -471,6 +483,17 @@ html, body { margin: 0; height: 100%; }
 .umbra-analyze-status { font-size: 12px; color: #444; margin: 8px 0 0; min-height: 16px; }
 #umbra-analyze-result img { max-width: 100%; margin-top: 8px; border: 1px solid #ddd; }
 #umbra-analyze-result a { font-size: 12px; }
+.umbra-stats { font-size: 12px; margin-top: 8px; }
+.umbra-stats p { margin: 0 0 4px; }
+.umbra-stats .headline { font-weight: 600; }
+.umbra-stats .brighter { color: #b45309; }
+.umbra-stats .dimmer { color: #2b6cb0; }
+.umbra-stats pre {
+  font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; margin: 6px 0 4px;
+  padding: 6px; background: #f7f7f7; border: 1px solid #ddd; border-radius: 3px;
+  overflow-x: auto;
+}
+.umbra-stats .note { color: #666; }
 """
 
 # Pieces both explorer modes use verbatim: the detail-panel row builder, the
@@ -535,14 +558,28 @@ window.umbraSarButton = function (id, url, bounds) {
 // returns the records currently in view as {id, when} objects; the panel does
 // the chronological sort, the cap and the request. Returns a handle whose
 // viewChanged() the caller invokes whenever the view changes.
+//
+// Three of the four products are pictures; "Quantify" is the numeric one
+// (POST /artifacts/stats), so a spec says how to read its response: `html`
+// opens a page in a tab, `json` renders the measurement, and the default paints
+// the returned PNG.
 window.umbraAnalyzePanel = function (base, collect) {
   var analyzeBox = document.getElementById('umbra-analyze');
   var statusEl = document.getElementById('umbra-analyze-status');
   var resultEl = document.getElementById('umbra-analyze-result');
   var buttons = [
-    { el: document.getElementById('umbra-btn-change'), kind: 'change', min: 2, html: false },
-    { el: document.getElementById('umbra-btn-timescan'), kind: 'timescan', min: 3, html: false },
-    { el: document.getElementById('umbra-btn-swipe'), kind: 'swipe', min: 2, html: true }
+    { el: document.getElementById('umbra-btn-change'), kind: 'change',
+      label: 'change', verb: 'Rendering change', min: 2, html: false },
+    { el: document.getElementById('umbra-btn-timescan'), kind: 'timescan',
+      label: 'timescan', verb: 'Rendering timescan', min: 3, html: false },
+    { el: document.getElementById('umbra-btn-swipe'), kind: 'swipe',
+      label: 'swipe', verb: 'Rendering swipe', min: 2, html: true },
+    { el: document.getElementById('umbra-btn-stats'), kind: 'stats',
+      label: 'measurement', verb: 'Measuring change', min: 2, json: true,
+      // A scene-wide mean dilutes a change that moved one corner hard, so the
+      // page always asks for the spatial breakdown too -- it is what turns
+      // "the site changed" into "the northeast corner brightened".
+      body: { blocks: 3 } }
   ];
   analyzeBox.style.display = '';
   var CAP = 120;
@@ -573,31 +610,106 @@ window.umbraAnalyzePanel = function (base, collect) {
     buttons.forEach(function (b) { b.el.disabled = n < b.min; });
   }
 
+  // Every number below is one the server measured: the panel formats, it never
+  // computes, so what the page says and what `stack_stats` says cannot drift.
+  function signedDb(v) { return (v > 0 ? '+' : '') + v + ' dB'; }
+  function percent(f) {
+    return f == null ? '\\u2014' : (Math.round(f * 1000) / 10) + '%';
+  }
+  function day(stamp) { return String(stamp || '').slice(0, 10); }
+
+  function statsLine(box, text, cls) {
+    var p = document.createElement('p');
+    p.textContent = text;
+    if (cls) p.className = cls;
+    box.appendChild(p);
+    return p;
+  }
+
+  // The measurement, read out of the /artifacts/stats document: how much the
+  // site moved first-to-last, where it moved most, and the north-up heat-grid
+  // of signed change. Built with textContent, so remote strings never parse as
+  // HTML; the CC-BY attribution the document carries rides along with it.
+  function renderStats(doc, resultEl) {
+    var box = document.createElement('div');
+    box.className = 'umbra-stats';
+    var passes = doc.passes || [];
+    var span = passes.length
+      ? ' (' + day(passes[0].datetime) + ' \\u2192 ' +
+        day(passes[passes.length - 1].datetime) + ')'
+      : '';
+    var net = doc.net_change;
+    if (!net) {
+      statsLine(box, 'No ground was observed on both the first and last pass, ' +
+        'so there is nothing to compare. Filter to passes over one site.', 'headline');
+    } else {
+      var dir = net.mean_delta_db >= 0 ? 'brighter' : 'dimmer';
+      statsLine(box, signedDb(net.mean_delta_db) + ' mean across ' + passes.length +
+        ' passes' + span + ' \\u2014 ' + dir + '.', 'headline ' + dir);
+      var moved = percent(net.changed_fraction) + ' of the site moved \\u2265' +
+        doc.change_threshold_db + ' dB';
+      statsLine(box, net.changed_area_km2 == null
+        ? moved + ' (no area \\u2014 the measurement grid is geographic).'
+        : moved + ' (' + net.changed_area_km2 + ' km\\u00b2).');
+    }
+    var spatial = doc.spatial;
+    if (spatial && spatial.peak_block) {
+      var pb = spatial.peak_block;
+      var when = pb.peak_interval
+        ? ', mostly between ' + day(pb.peak_interval.from_datetime) +
+          ' and ' + day(pb.peak_interval.to_datetime)
+        : '';
+      statsLine(box, 'Moved most in the ' + pb.compass + ': ' +
+        signedDb(pb.mean_delta_db) + ' (' + pb.direction + ')' + when + '.');
+    }
+    if (spatial && spatial.grid_text) {
+      var pre = document.createElement('pre');
+      pre.textContent = spatial.grid_text;
+      box.appendChild(pre);
+      statsLine(box, 'Signed dB change per block, north-up (' + spatial.grid_rows +
+        '\\u00d7' + spatial.grid_cols + '); "." was never observed on both passes.',
+        'note');
+    }
+    if (doc.caveats && doc.caveats.length) statsLine(box, doc.caveats[0], 'note');
+    if (doc.attribution) statsLine(box, doc.attribution, 'note');
+    resultEl.appendChild(box);
+  }
+
   function runAnalysis(spec) {
     var ids = analysisIds();
     if (ids.length < spec.min) {
       statusEl.textContent = 'Need at least ' + spec.min +
-        ' filtered acquisitions for ' + spec.kind + ' (have ' + ids.length + ').';
+        ' filtered acquisitions for ' + spec.label + ' (have ' + ids.length + ').';
       return;
     }
     setBusy(true);
-    statusEl.textContent = 'Rendering ' + spec.kind + ' over ' +
+    statusEl.textContent = spec.verb + ' over ' +
       ids.length + ' acquisitions\\u2026';
     resultEl.innerHTML = '';
+    var payload = { ids: ids };
+    if (spec.body) {
+      for (var k in spec.body) {
+        if (Object.prototype.hasOwnProperty.call(spec.body, k)) payload[k] = spec.body[k];
+      }
+    }
     fetch(base + '/artifacts/' + spec.kind, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: ids })
+      body: JSON.stringify(payload)
     }).then(function (r) {
       if (!r.ok) {
         return r.json().then(function (e) {
           throw new Error((e && e.detail) || ('HTTP ' + r.status));
         }, function () { throw new Error('HTTP ' + r.status); });
       }
-      return r.blob();
-    }).then(function (blob) {
-      var url = URL.createObjectURL(blob);
-      statusEl.textContent = spec.kind + ' ready.';
+      return spec.json ? r.json() : r.blob();
+    }).then(function (data) {
+      statusEl.textContent = spec.label + ' ready.';
+      if (spec.json) {
+        renderStats(data, resultEl);
+        return;
+      }
+      var url = URL.createObjectURL(data);
       if (spec.html) {
         // Swipe is a full interactive HTML page: open it in a new tab and
         // leave a link behind (popup blockers may swallow the auto-open).
@@ -1119,6 +1231,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         <button id="umbra-btn-change" type="button">Change</button>
         <button id="umbra-btn-timescan" type="button">Timescan</button>
         <button id="umbra-btn-swipe" type="button">Swipe</button>
+        <button id="umbra-btn-stats" type="button"
+                title="Measure the change in numbers">Quantify</button>
       </div>
       <p id="umbra-analyze-status" class="umbra-analyze-status"></p>
       <div id="umbra-analyze-result"></div>
