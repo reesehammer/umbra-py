@@ -38,7 +38,11 @@ Deliberately in the repo's grain:
   attribution the Leaflet demo uses. Keeping it separate leaves the proven
   ``umbra demo`` page untouched — the two are complementary: ``demo`` for the
   interactive, filter-and-click slice; ``tiles`` for the fast, zoom-anywhere
-  whole-archive view.
+  whole-archive view. The archive this module writes is also what the explorer
+  reads in its whole-archive mode (``umbra demo --pmtiles`` /
+  :func:`umbra_py.demo.build_demo`'s ``pmtiles_url``), which gets the filters and
+  the zoom-anywhere reach at once; :func:`build_viewer` stays the minimal,
+  no-sidebar view of the same data.
 
 The catalog rows the tiles carry are points with a lean set of string
 properties (id, place, product, date, platform) — enough to style and label a

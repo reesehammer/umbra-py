@@ -257,6 +257,15 @@ from:
   names) into `featured/` and puts them on the landing page as a captioned
   gallery, and the `docs.yml` Pages job passes `--featured 6`; see the CHANGELOG.
   Still open under R4: the *swipe* and *timescan* variants of the same idea.
+- ~~Let the interactive explorer scale to the whole catalog (Path A's last
+  structural cap) and collapse the showcase's map/explorer pair into one page.~~
+  **shipped** — `umbra demo --pmtiles` draws every acquisition from a
+  whole-catalog `.pmtiles` archive read by range request, with the sidebar filters
+  compiled to MapLibre expressions evaluated inside the tiles, and `umbra showcase
+  --unified` (what `docs.yml` now deploys) builds the showcase as a single
+  explorer over that archive instead of a click-only map plus a sliced explorer.
+  See the CHANGELOG. Still open: tiling footprint *polygons* rather than
+  centroids, which is what the embedded-slice mode still has over it.
 - Bake per-item thumbnails / place labels into the *published* weekly snapshot
   (gated on egress).
 

@@ -2804,6 +2804,18 @@ def gallery(
     "view' panel whose buttons render change/timescan/swipe products over the "
     "currently-filtered acquisitions on demand. Omit for a fully static page.",
 )
+@click.option(
+    "--pmtiles",
+    "pmtiles_url",
+    default=None,
+    help="URL or page-relative path of a whole-catalog .pmtiles archive (from "
+    "'umbra tiles' / 'umbra tiles --fetch'). The explorer then draws EVERY "
+    "acquisition in that archive from vector tiles read on demand instead of an "
+    "embedded search slice -- the whole-archive explorer, in a page that stays a "
+    "few KB. The search options don't apply in this mode (filter in the page "
+    "instead), and tiles carry no footprints or COG URLs, so the footprint "
+    "outline and the 'Get SAR image' overlay are embedded-slice features.",
+)
 @_local_index_options
 @_fuzzy_option
 def demo(
@@ -2821,6 +2833,7 @@ def demo(
     lazy_imagery,
     percentile,
     server_url,
+    pmtiles_url,
     local,
     db_path,
 ) -> None:
@@ -2839,11 +2852,49 @@ def demo(
     this view" panel that renders change/timescan/swipe products over the
     currently-filtered acquisitions on demand (the server does the raster work
     and caches results); without it the page stays fully static.
+
+    Pass --pmtiles PATH-OR-URL to explore the WHOLE archive instead of a
+    gathered slice: the page draws every acquisition in a '.pmtiles' catalog
+    (from 'umbra tiles') as a MapLibre vector layer read by range request, so
+    the same sidebar filters cover the entire catalog from a page that stays a
+    few KB. Nothing is searched or embedded in that mode.
     """
     if not out_path.lower().endswith((".html", ".htm")):
         raise click.ClickException("Explorer output must be an .html file.")
 
     from .demo import save_demo  # noqa: PLC0415
+
+    if pmtiles_url:
+        # The archive *is* the data source, so a search would be gathered and
+        # thrown away. Refuse rather than silently ignore the flags -- a user who
+        # asked for a filtered explorer must not get an unfiltered one.
+        ignored = {
+            "--bbox": bbox,
+            "--place": place,
+            "--start": start,
+            "--end": end,
+            "--area": area,
+            "--product": products,
+            "--max-per-task": max_per_task,
+            "--local": local,
+            "--index-db": db_path,
+        }
+        named = [flag for flag, value in ignored.items() if value]
+        if named:
+            raise click.ClickException(
+                f"--pmtiles draws the whole archive from vector tiles, so "
+                f"{', '.join(named)} would have no effect. Drop them and filter "
+                f"in the page, or drop --pmtiles to explore a searched slice."
+            )
+        path = save_demo(
+            [],
+            out_path,
+            subtitle="Every acquisition in the tiled open-data catalog.",
+            server_url=server_url,
+            pmtiles_url=pmtiles_url,
+        )
+        click.echo(f"Wrote whole-archive explorer over {pmtiles_url} to {path}")
+        return
 
     search_bbox = _resolve_search_bbox(bbox, place)
     items = _gather_items(
@@ -3129,6 +3180,14 @@ def tiles(
 )
 @click.option("--pmtiles-url", default=None, help="Override the --fetch-pmtiles asset URL.")
 @click.option(
+    "--unified",
+    is_flag=True,
+    help="Build ONE page instead of two: the explorer reads the .pmtiles "
+    "archive directly, so it covers every acquisition (with the filters) and "
+    "the separate map.html is dropped. Needs a basemap (--pmtiles / "
+    "--fetch-pmtiles); the explorer's search options don't apply.",
+)
+@click.option(
     "--no-explore",
     "explore",
     is_flag=True,
@@ -3206,6 +3265,7 @@ def showcase(
     pmtiles_path,
     fetch_pmtiles,
     pmtiles_url,
+    unified,
     explore,
     asset,
     lazy_imagery,
@@ -3236,6 +3296,12 @@ def showcase(
     from a prebuilt index in milliseconds; --max-per-task 1, the default, gives a
     one-pin-per-site overview); pass --no-explore for a map-only showcase.
 
+    --unified collapses the two map pages into one: the explorer reads the
+    .pmtiles archive itself, so a visitor gets every acquisition in the catalog
+    *and* the live filters on a single page, and map.html is not written. That
+    needs a basemap and ignores the explorer's search options -- nothing is
+    gathered, because the archive is the data source.
+
     --featured N precomputes a change composite for the N most repeat-imaged
     sites in the catalog (or name them yourself with repeated --featured-area)
     and puts them on the landing page, so a first-time visitor sees what SAR
@@ -3250,6 +3316,13 @@ def showcase(
         raise click.ClickException("--pmtiles-url only applies with --fetch-pmtiles.")
     if featured < 0:
         raise click.ClickException("--featured must be zero or more.")
+    if unified and not (pmtiles_path or fetch_pmtiles):
+        raise click.ClickException(
+            "--unified builds the explorer over the tiled archive, so it needs a "
+            "basemap: pass --pmtiles PATH or --fetch-pmtiles."
+        )
+    if unified and not explore:
+        raise click.ClickException("--unified and --no-explore ask for opposite things.")
 
     from .showcase import assemble_showcase  # noqa: PLC0415
 
@@ -3277,9 +3350,10 @@ def showcase(
 
             fetch_prebuilt_pmtiles(basemap, url=pmtiles_url, progress=tally)
 
-    # Gather the explorer's items unless a map-only showcase was requested.
+    # Gather the explorer's items unless a map-only showcase was requested, or
+    # --unified made the tiled archive itself the explorer's data source.
     items: list[UmbraItem] = []
-    if explore:
+    if explore and not unified:
         search_bbox = _resolve_search_bbox(bbox, place)
         items = _gather_items(
             local=local,
@@ -3316,7 +3390,7 @@ def showcase(
         },
     )
 
-    if basemap is None and not items and not featured_sites:
+    if basemap is None and not items and not featured_sites and not unified:
         raise click.ClickException(
             "Nothing to show: supply a basemap (--pmtiles / --fetch-pmtiles) "
             "and/or build the explorer (drop --no-explore)."
@@ -3338,20 +3412,25 @@ def showcase(
             dest,
             items=items or None,
             pmtiles_path=basemap,
-            demo_kwargs={
-                "asset": asset,
-                "lazy_imagery": lazy_imagery,
-                "subtitle": _search_subtitle(place or area, bbox, start, end),
-            },
+            unified=unified,
+            demo_kwargs=(
+                {"subtitle": "Every acquisition in the tiled open-data catalog."}
+                if unified
+                else {
+                    "asset": asset,
+                    "lazy_imagery": lazy_imagery,
+                    "subtitle": _search_subtitle(place or area, bbox, start, end),
+                }
+            ),
             featured_sites=featured_sites,
             featured_frames=int(featured_frames),
             **showcase_kwargs,
         )
 
     pages = ["index.html"]
-    if basemap is not None:
+    if basemap is not None and not unified:
         pages.append("map.html")
-    if items:
+    if items or unified:
         pages.append("explore.html")
     rendered = sorted((dest / "featured").glob("*.png")) if featured_sites else []
     if rendered:

@@ -139,10 +139,19 @@ it, none a blocker:
 - **Auto-stamp the freshness date from the index.** The CI step passes the run
   date to `--updated`; reading the fetched index's `built_at` (as `umbra index
   info` does) would show the *snapshot's* age rather than the build's.
-- **Wire the PMTiles basemap into the explorer itself.** Today `map.html` and
-  `explore.html` are siblings; the `umbra demo --pmtiles` follow-on (see the
-  PMTiles section below) would let the explorer scale to the whole catalog too,
-  collapsing the two pages into one.
+- ~~**Wire the PMTiles basemap into the explorer itself.**~~ ✅ **Done**
+  (`umbra showcase --unified` / `assemble_showcase(unified=True)`). `map.html` and
+  `explore.html` were siblings — a whole-catalog viewer you could only click, and
+  a filterable explorer over a gathered slice — because the explorer had no way to
+  read a tiled archive. It has one now (see the `umbra demo --pmtiles` entry
+  below), so `--unified` builds `explore.html` *over* the copied
+  `catalog.pmtiles`, writes no `map.html`, and the landing page leads to a single
+  explorer covering the whole catalog with the filters. `docs.yml` builds the
+  hosted showcase this way. Dropping `--unified` still gives the original pair,
+  which remains the right build when you want the slice's footprint outlines and
+  on-click COG overlay. Remaining optional polish: the non-unified build is the
+  only one that shows footprints, so tiling polygons (see the PMTiles section)
+  would close the last gap between the two.
 
 ---
 
@@ -155,11 +164,23 @@ it, none a blocker:
 MapLibre GL viewer, no extra, no tippecanoe) is shipped, closing the demo's
 full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
 
-- **Wire the PMTiles source into `umbra demo`.** The demo embeds its gathered
-  slice as inline JSON; an opt-in `--pmtiles <url>` that swaps the Leaflet
-  cluster layer for a MapLibre vector layer over a tiled archive would let the
-  interactive explorer scale to the whole catalog too (today `tiles` ships its
-  own separate MapLibre viewer to keep the proven demo page untouched).
+- ~~**Wire the PMTiles source into `umbra demo`.**~~ ✅ **Done** (`umbra demo
+  --pmtiles PATH-OR-URL` / `build_demo(pmtiles_url=…)`, and the one-page `umbra
+  showcase --unified` built on it). The demo embedded its gathered slice as inline
+  JSON, which capped the explorer at whatever fits in a download; `--pmtiles`
+  swaps the Leaflet cluster for a MapLibre GL vector layer over a whole-catalog
+  archive read by range request, so the whole catalog is explorable from a page
+  that stays a few KB. The sidebar filters compile to MapLibre expressions
+  evaluated inside the tiles and keep `passesFilter`'s exact semantics (including
+  "a missing date never fails a date filter"); the detail rows, the baked
+  thumbnail preview and the "Analyze this view" panel moved into one shared,
+  map-engine-agnostic script both explorers drive, so the two modes cannot drift.
+  Vector tiles carry centroids and lean metadata, so the footprint outline and the
+  on-click "Get SAR image" overlay remain embedded-slice features — documented,
+  not silent. `--pmtiles` with a search option is a hard error rather than a
+  quietly unfiltered page. Offline-tested in `tests/test_demo.py` and
+  `tests/test_showcase.py`; the generated page was also exercised in a real
+  browser (archive range-reads, every filter, click-to-detail).
 - **Leaf directories for very large catalogs.** The writer emits a single root
   directory, which is spec-valid and ample for the current catalog (thousands of
   tiles). If the tile count ever grows past a comfortable root-directory size,

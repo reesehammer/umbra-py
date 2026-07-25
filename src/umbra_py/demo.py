@@ -42,6 +42,24 @@ Design, deliberately in the repo's grain:
   thumbnail 404s and the element is dropped, so a metadata-only scene is never a
   broken image; without ``server_url`` the panel is unchanged.
 
+* **Whole-archive mode over PMTiles.** The default page embeds the gathered
+  slice as JSON, which is the right shape for a search result but caps the
+  explorer at whatever fits in a download. Pass ``pmtiles_url`` and the page
+  swaps its embedded-slice Leaflet cluster for a **MapLibre GL vector layer over
+  a whole-catalog ``.pmtiles`` archive** (the one :mod:`umbra_py.pmtiles` /
+  ``umbra tiles`` writes and ``publish-index.yml`` publishes): the browser
+  range-reads only the tiles for the current view, so the *entire* archive is
+  explorable from a page that stays a few kilobytes, and the same sidebar
+  filters (free-text, date range, product chips) run as MapLibre filter
+  expressions evaluated inside the tiles. This is the ``DEMO_APP_GAPS.md`` Path A
+  follow-on that collapses the showcase's separate whole-catalog *map* and
+  interactive *explorer* into one page (``umbra showcase --unified``). The
+  trade is honest and documented: vector tiles carry acquisition centroids and
+  their lean metadata, not footprint polygons or per-asset COG URLs, so the
+  footprint outline and the on-click "Get SAR image" overlay are features of the
+  embedded-slice mode only — a server-backed build still leads the detail panel
+  with the baked thumbnail, and "Analyze this view" still works.
+
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
   (``umbra index fetch`` / ``umbra index build``) in milliseconds instead of
@@ -78,7 +96,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from .constants import ATTRIBUTION
+from .constants import ATTRIBUTION, PRODUCT_ASSETS
 from .models import UmbraItem
 
 # Pinned CDN assets. Bumped deliberately -- an unpinned CDN can regress a
@@ -174,6 +192,8 @@ def build_demo(
     lazy_imagery: bool = True,
     percentile: tuple[float, float] = (2.0, 98.0),
     server_url: str | None = None,
+    pmtiles_url: str | None = None,
+    pmtiles_layer: str = "acquisitions",
 ) -> str:
     """Render items as a single self-contained interactive explorer page.
 
@@ -181,7 +201,9 @@ def build_demo(
     ----------
     items:
         The acquisitions to explore. Any without a footprint or bbox are
-        dropped (they cannot be mapped).
+        dropped (they cannot be mapped). **Ignored when ``pmtiles_url`` is set**
+        — that mode draws every acquisition from the tiled archive instead, so
+        the page carries no embedded slice at all.
     title, subtitle:
         Header text; ``subtitle`` is a good place for the search terms that
         produced the page.
@@ -206,9 +228,33 @@ def build_demo(
         ``/artifacts/thumbnail/{id}.png`` baked thumbnail, ``DEMO_APP_GAPS.md``
         G6). When ``None`` (default) the page stays fully static and
         self-contained, exactly as before.
+    pmtiles_url:
+        Location of a whole-catalog ``.pmtiles`` archive relative to the page
+        (e.g. ``"catalog.pmtiles"``) or an absolute URL. When set the explorer
+        draws **every** acquisition in that archive from vector tiles read by
+        range request, instead of the embedded ``items`` slice: the page stays a
+        few kilobytes whatever the catalog's size, and the sidebar filters run as
+        MapLibre expressions over the tiles. ``items``, ``asset``,
+        ``lazy_imagery`` and ``percentile`` do not apply in this mode (tiles
+        carry centroids and lean metadata, not footprints or COG URLs);
+        ``server_url`` still does. ``None`` (default) keeps the embedded-slice
+        Leaflet page unchanged.
+    pmtiles_layer:
+        Source-layer name inside the archive. Must match the one it was written
+        with (:func:`umbra_py.pmtiles.build_pmtiles` defaults to
+        ``"acquisitions"``, as does this).
 
     Returns the HTML as a string; use :func:`save_demo` to write it to disk.
     """
+    if pmtiles_url:
+        return _build_pmtiles_demo(
+            pmtiles_url,
+            layer=pmtiles_layer,
+            title=title,
+            subtitle=subtitle,
+            server_url=server_url,
+        )
+
     items = list(items)
     from .viz import _resolve_lazy_urls  # noqa: PLC0415
 
@@ -247,10 +293,60 @@ def build_demo(
     return _PAGE_TEMPLATE.format(
         title=escape(title),
         head_links=_HEAD_LINKS,
+        script_links=_SCRIPT_LINKS,
         styles=_STYLES,
         config_json=config_json,
-        app_js=_APP_JS,
+        app_js=_SHARED_JS + _APP_JS,
         driver_js=driver,
+    )
+
+
+def _build_pmtiles_demo(
+    pmtiles_url: str,
+    *,
+    layer: str,
+    title: str,
+    subtitle: str | None,
+    server_url: str | None,
+) -> str:
+    """Render the whole-archive explorer over a ``.pmtiles`` catalog.
+
+    Same page, same sidebar, same server-backed panels — a MapLibre GL vector
+    layer over the tiled archive in place of the embedded-slice Leaflet cluster.
+    No item list is needed (or used): the browser range-reads the archive, so
+    the generated HTML is the same handful of kilobytes for a catalog of any
+    size.
+
+    The product chips come from :data:`umbra_py.constants.PRODUCT_ASSETS` rather
+    than from a scanned slice — the product set is closed and known, and deriving
+    it from a *sample* of a catalog the page does not otherwise read would let a
+    chip go missing for the whole archive. For the same reason the date inputs
+    start empty (unbounded) instead of framing a sample's extent, which would
+    silently hide most of the archive behind a default filter.
+    """
+    config = {
+        "title": title,
+        "subtitle": subtitle,
+        "attribution": ATTRIBUTION,
+        "products": list(PRODUCT_ASSETS),
+        "serverUrl": server_url or None,
+        "pmtilesUrl": pmtiles_url,
+        "pmtilesLayer": layer,
+    }
+    config_json = json.dumps(config, separators=(",", ":")).replace("</", "<\\/")
+
+    from .pmtiles import MAPLIBRE_CSS, MAPLIBRE_JS, PMTILES_JS  # noqa: PLC0415
+
+    return _PAGE_TEMPLATE.format(
+        title=escape(title),
+        head_links=f'<link rel="stylesheet" href="{MAPLIBRE_CSS}"/>',
+        script_links=(
+            f'<script src="{MAPLIBRE_JS}"></script>\n<script src="{PMTILES_JS}"></script>'
+        ),
+        styles=_STYLES,
+        config_json=config_json,
+        app_js=_SHARED_JS + _PMTILES_APP_JS,
+        driver_js="",
     )
 
 
@@ -334,6 +430,137 @@ html, body { margin: 0; height: 100%; }
 #umbra-analyze-result a { font-size: 12px; }
 """
 
+# Pieces both explorer modes use verbatim: the detail-panel row builder, the
+# server-backed thumbnail preview (G6), and the whole "Analyze this view" panel
+# (R4). They are map-engine agnostic -- they touch only the DOM and the
+# `umbra serve` HTTP contract -- so the Leaflet embedded-slice app and the
+# MapLibre whole-archive app drive the identical code rather than each carrying
+# its own copy that could drift. Like every script here it is a *static* string:
+# each app hands it the values it needs at call time.
+_SHARED_JS = """
+// One metadata row in the detail panel. textContent never parses HTML, so
+// remote strings need no escaping.
+window.umbraRow = function (label, value) {
+  var tr = document.createElement('tr');
+  var th = document.createElement('th'); th.textContent = label;
+  var td = document.createElement('td'); td.textContent = (value == null ? '\\u2014' : value);
+  tr.appendChild(th); tr.appendChild(td);
+  return tr;
+};
+
+// An instant SAR picture of the selected scene, or null when the page was
+// built without a server. `umbra serve` serves the baked quicklook thumbnail
+// (umbra index bake-thumbnails) straight from the index -- an offline file read
+// -- and falls back to a quicklook render for a scene not yet baked. The id is
+// remote metadata, so it is URL-encoded into the path (the scheme is our own
+// trusted server base, so no javascript:-style breakout is possible); an
+// unbaked/unrenderable scene 404s and the onerror handler drops the element
+// rather than showing a broken image.
+window.umbraThumb = function (base, id) {
+  if (!base || !id) return null;
+  var thumb = document.createElement('img');
+  thumb.className = 'umbra-thumb';
+  thumb.alt = 'SAR quicklook thumbnail';
+  thumb.onerror = function () {
+    if (thumb.parentNode) thumb.parentNode.removeChild(thumb);
+  };
+  thumb.src = base + '/artifacts/thumbnail/' + encodeURIComponent(id) + '.png';
+  return thumb;
+};
+
+// The "Analyze this view" panel (R4): POST the currently-filtered acquisitions
+// to a running `umbra serve` and show the artifact it renders. `collect()`
+// returns the records currently in view as {id, when} objects; the panel does
+// the chronological sort, the cap and the request. Returns a handle whose
+// viewChanged() the caller invokes whenever the view changes.
+window.umbraAnalyzePanel = function (base, collect) {
+  var analyzeBox = document.getElementById('umbra-analyze');
+  var statusEl = document.getElementById('umbra-analyze-status');
+  var resultEl = document.getElementById('umbra-analyze-result');
+  var buttons = [
+    { el: document.getElementById('umbra-btn-change'), kind: 'change', min: 2, html: false },
+    { el: document.getElementById('umbra-btn-timescan'), kind: 'timescan', min: 3, html: false },
+    { el: document.getElementById('umbra-btn-swipe'), kind: 'swipe', min: 2, html: true }
+  ];
+  analyzeBox.style.display = '';
+  var CAP = 120;
+
+  function analysisIds() {
+    // Ids of the filtered acquisitions in chronological order (the server
+    // resolves them and picks each product's frames). Sampled down to CAP so
+    // the POST body -- and the server-side id scan -- stay bounded while
+    // keeping the temporal span (first and last always survive).
+    var fs = (collect() || []).filter(function (r) { return r && r.id && r.when; });
+    fs.sort(function (a, b) { return a.when < b.when ? -1 : (a.when > b.when ? 1 : 0); });
+    var ids = fs.map(function (r) { return r.id; });
+    if (ids.length <= CAP) return ids;
+    var picked = [];
+    for (var i = 0; i < CAP; i++) {
+      picked.push(ids[Math.round(i * (ids.length - 1) / (CAP - 1))]);
+    }
+    // Adjacent samples can collapse to the same id; de-dup, order preserved.
+    return picked.filter(function (v, i, a) { return a.indexOf(v) === i; });
+  }
+
+  function setBusy(busy) {
+    buttons.forEach(function (b) { b.el.disabled = busy; });
+  }
+
+  function viewChanged() {
+    var n = analysisIds().length;
+    buttons.forEach(function (b) { b.el.disabled = n < b.min; });
+  }
+
+  function runAnalysis(spec) {
+    var ids = analysisIds();
+    if (ids.length < spec.min) {
+      statusEl.textContent = 'Need at least ' + spec.min +
+        ' filtered acquisitions for ' + spec.kind + ' (have ' + ids.length + ').';
+      return;
+    }
+    setBusy(true);
+    statusEl.textContent = 'Rendering ' + spec.kind + ' over ' +
+      ids.length + ' acquisitions\\u2026';
+    resultEl.innerHTML = '';
+    fetch(base + '/artifacts/' + spec.kind, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids })
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().then(function (e) {
+          throw new Error((e && e.detail) || ('HTTP ' + r.status));
+        }, function () { throw new Error('HTTP ' + r.status); });
+      }
+      return r.blob();
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      statusEl.textContent = spec.kind + ' ready.';
+      if (spec.html) {
+        // Swipe is a full interactive HTML page: open it in a new tab and
+        // leave a link behind (popup blockers may swallow the auto-open).
+        var a = document.createElement('a');
+        a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = 'open ' + spec.kind + ' map \\u2197';
+        resultEl.appendChild(a);
+        window.open(url, '_blank', 'noopener');
+      } else {
+        var img = document.createElement('img');
+        img.src = url; img.alt = spec.kind + ' composite over the filtered view';
+        resultEl.appendChild(img);
+      }
+    }).catch(function (err) {
+      statusEl.textContent = 'Failed: ' + (err && err.message ? err.message : err);
+    }).then(function () { setBusy(false); viewChanged(); });
+  }
+
+  buttons.forEach(function (b) {
+    b.el.addEventListener('click', function () { runAnalysis(b); });
+  });
+  return { viewChanged: viewChanged };
+};
+"""
+
 # The application. A *static* string (no Python interpolation): every dynamic
 # value arrives through window.UMBRA_DEMO. It builds the map, a clustered marker
 # layer over item centroids (the scale answer -- thousands of points instead of
@@ -411,40 +638,18 @@ _APP_JS = """
   }
 
   // --- detail panel ---
-  function row(label, value) {
-    var tr = document.createElement('tr');
-    var th = document.createElement('th'); th.textContent = label;
-    var td = document.createElement('td'); td.textContent = (value == null ? '\\u2014' : value);
-    tr.appendChild(th); tr.appendChild(td);
-    return tr;
-  }
-
   function showDetail(feature) {
     var p = feature.properties;
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
 
-    // Lead with an instant SAR picture of the selected scene. `umbra serve`
-    // serves the baked quicklook thumbnail (umbra index bake-thumbnails)
-    // straight from the index -- an offline file read -- and falls back to a
-    // quicklook render for a scene not yet baked. Only wired when the page was
+    // Lead with an instant SAR picture of the selected scene when the page was
     // built with a server_url; without one the panel stays metadata-only and
-    // the page is fully static. `p.id` is remote metadata, so it is
-    // URL-encoded into the path (the scheme is our own trusted server base, so
-    // no javascript:-style breakout is possible); an unbaked/unrenderable scene
-    // 404s and the onerror handler drops the element rather than showing a
-    // broken image.
-    if (serverBase && p.id) {
-      var thumb = document.createElement('img');
-      thumb.className = 'umbra-thumb';
-      thumb.alt = 'SAR quicklook thumbnail';
-      thumb.onerror = function () {
-        if (thumb.parentNode) thumb.parentNode.removeChild(thumb);
-      };
-      thumb.src = serverBase + '/artifacts/thumbnail/' + encodeURIComponent(p.id) + '.png';
-      panel.appendChild(thumb);
-    }
+    // the page is fully static.
+    var thumb = window.umbraThumb(serverBase, p.id);
+    if (thumb) panel.appendChild(thumb);
 
+    var row = window.umbraRow;
     var table = document.createElement('table');
     table.appendChild(row('ID', p.id));
     table.appendChild(row('Place', p.place));
@@ -528,97 +733,16 @@ _APP_JS = """
 
   // --- server-backed analysis (R4): POST the filtered view to `umbra serve` ---
   // Only wired when the page was built with a server_url; otherwise the panel
-  // stays hidden and the page is fully static.
+  // stays hidden and the page is fully static. The panel itself is shared with
+  // the whole-archive PMTiles app; this side only supplies the records in view.
   var onViewChanged = null;
   if (serverBase) {
-    var base = serverBase;
-    var analyzeBox = document.getElementById('umbra-analyze');
-    var statusEl = document.getElementById('umbra-analyze-status');
-    var resultEl = document.getElementById('umbra-analyze-result');
-    var buttons = [
-      { el: document.getElementById('umbra-btn-change'), kind: 'change', min: 2, html: false },
-      { el: document.getElementById('umbra-btn-timescan'), kind: 'timescan', min: 3, html: false },
-      { el: document.getElementById('umbra-btn-swipe'), kind: 'swipe', min: 2, html: true }
-    ];
-    analyzeBox.style.display = '';
-    var CAP = 120;
-
-    function analysisIds() {
-      // Ids of the filtered acquisitions in chronological order (the server
-      // resolves them and picks each product's frames). Sampled down to CAP so
-      // the POST body -- and the server-side id scan -- stay bounded while
-      // keeping the temporal span (first and last always survive).
-      var fs = shownFeatures.filter(function (f) { return f.properties.id && f.properties.date; });
-      fs.sort(function (a, b) {
-        var da = a.properties.datetime || a.properties.date;
-        var db = b.properties.datetime || b.properties.date;
-        return da < db ? -1 : (da > db ? 1 : 0);
+    var analyze = window.umbraAnalyzePanel(serverBase, function () {
+      return shownFeatures.map(function (f) {
+        return { id: f.properties.id, when: f.properties.datetime || f.properties.date };
       });
-      var ids = fs.map(function (f) { return f.properties.id; });
-      if (ids.length <= CAP) return ids;
-      var picked = [];
-      for (var i = 0; i < CAP; i++) {
-        picked.push(ids[Math.round(i * (ids.length - 1) / (CAP - 1))]);
-      }
-      // Adjacent samples can collapse to the same id; de-dup, order preserved.
-      return picked.filter(function (v, i, a) { return a.indexOf(v) === i; });
-    }
-
-    function setBusy(busy) {
-      buttons.forEach(function (b) { b.el.disabled = busy; });
-    }
-
-    onViewChanged = function () {
-      var n = analysisIds().length;
-      buttons.forEach(function (b) { b.el.disabled = n < b.min; });
-    };
-
-    function runAnalysis(spec) {
-      var ids = analysisIds();
-      if (ids.length < spec.min) {
-        statusEl.textContent = 'Need at least ' + spec.min +
-          ' filtered acquisitions for ' + spec.kind + ' (have ' + ids.length + ').';
-        return;
-      }
-      setBusy(true);
-      statusEl.textContent = 'Rendering ' + spec.kind + ' over ' +
-        ids.length + ' acquisitions\\u2026';
-      resultEl.innerHTML = '';
-      fetch(base + '/artifacts/' + spec.kind, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: ids })
-      }).then(function (r) {
-        if (!r.ok) {
-          return r.json().then(function (e) {
-            throw new Error((e && e.detail) || ('HTTP ' + r.status));
-          }, function () { throw new Error('HTTP ' + r.status); });
-        }
-        return r.blob();
-      }).then(function (blob) {
-        var url = URL.createObjectURL(blob);
-        statusEl.textContent = spec.kind + ' ready.';
-        if (spec.html) {
-          // Swipe is a full interactive HTML page: open it in a new tab and
-          // leave a link behind (popup blockers may swallow the auto-open).
-          var a = document.createElement('a');
-          a.href = url; a.target = '_blank'; a.rel = 'noopener';
-          a.textContent = 'open ' + spec.kind + ' map \\u2197';
-          resultEl.appendChild(a);
-          window.open(url, '_blank', 'noopener');
-        } else {
-          var img = document.createElement('img');
-          img.src = url; img.alt = spec.kind + ' composite over the filtered view';
-          resultEl.appendChild(img);
-        }
-      }).catch(function (err) {
-        statusEl.textContent = 'Failed: ' + (err && err.message ? err.message : err);
-      }).then(function () { setBusy(false); onViewChanged(); });
-    }
-
-    buttons.forEach(function (b) {
-      b.el.addEventListener('click', function () { runAnalysis(b); });
     });
+    onViewChanged = analyze.viewChanged;
   }
 
   render();
@@ -628,8 +752,225 @@ _APP_JS = """
 })();
 """
 
-_PAGE_TEMPLATE = (
-    """<!DOCTYPE html>
+# The whole-archive application. Same sidebar, same detail panel, same
+# server-backed analysis -- a MapLibre GL vector layer over the tiled catalog in
+# place of the embedded-slice Leaflet cluster. The filters become MapLibre
+# expressions evaluated inside the tiles, so filtering scales with the archive
+# rather than with what fits in the page. Static string, like _APP_JS: the
+# archive URL, layer name and server base arrive through window.UMBRA_DEMO.
+_PMTILES_APP_JS = """
+(function () {
+  var CFG = window.UMBRA_DEMO || {};
+  var LAYER = CFG.pmtilesLayer || 'acquisitions';
+  var LAYER_ID = 'umbra-acq';
+
+  var protocol = new pmtiles.Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile);
+
+  var map = new maplibregl.Map({
+    container: 'umbra-map',
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: 'raster',
+          tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          attribution: '&copy; OpenStreetMap contributors'
+        },
+        umbra: { type: 'vector', url: 'pmtiles://' + CFG.pmtilesUrl }
+      },
+      layers: [
+        { id: 'osm', type: 'raster', source: 'osm' },
+        {
+          id: LAYER_ID,
+          type: 'circle',
+          source: 'umbra',
+          'source-layer': LAYER,
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 2.5, 8, 5, 12, 7],
+            'circle-color': '#e6194b',
+            'circle-opacity': 0.75,
+            'circle-stroke-width': 1,
+            'circle-stroke-color': '#ffffff'
+          }
+        }
+      ]
+    },
+    center: [0, 20],
+    zoom: 1.4
+  });
+  map.addControl(new maplibregl.NavigationControl(), 'top-left');
+  map.addControl(new maplibregl.AttributionControl({ customAttribution: CFG.attribution }));
+
+  var serverBase = CFG.serverUrl ? String(CFG.serverUrl).replace(/\\/+$/, '') : null;
+  // The acquisitions currently drawn -- the "view" the analysis buttons act on.
+  var shownFeatures = [];
+  var state = { text: '', start: '', end: '', products: {} };
+  (CFG.products || []).forEach(function (p) { state.products[p] = true; });
+
+  // --- filters, as MapLibre expressions evaluated inside the vector tiles ---
+  // The equivalent of the embedded-slice app's passesFilter(), except the
+  // renderer applies it to the whole archive without the page ever holding it.
+  function filterExpression() {
+    var clauses = ['all'];
+    (CFG.products || []).forEach(function (p) {
+      // A product is "on" unless explicitly toggled off (matching the slice
+      // app), so only the off ones become exclusions.
+      if (state.products[p] === false) clauses.push(['!=', ['get', 'product'], p]);
+    });
+    // `any` short-circuits, so the guard both keeps a date-less feature out of a
+    // string comparison against null *and* keeps it visible -- the same "a
+    // missing date never fails a date filter" rule passesFilter() applies in the
+    // embedded-slice app.
+    if (state.start) {
+      clauses.push(['any', ['!', ['has', 'date']], ['>=', ['get', 'date'], state.start]]);
+    }
+    if (state.end) {
+      clauses.push(['any', ['!', ['has', 'date']], ['<=', ['get', 'date'], state.end]]);
+    }
+    if (state.text) {
+      clauses.push(['>=', ['index-of', state.text, ['downcase', ['concat',
+        ['coalesce', ['get', 'place'], ''], ' ',
+        ['coalesce', ['get', 'id'], '']]]], 0]);
+    }
+    return clauses.length === 1 ? null : clauses;
+  }
+
+  var countEl = document.getElementById('umbra-count');
+
+  function applyFilter() {
+    if (!map.getLayer(LAYER_ID)) return;
+    map.setFilter(LAYER_ID, filterExpression());
+    // The filter takes effect on the next frame, so read the view after it.
+    map.once('render', scheduleRefresh);
+  }
+
+  // Recomputing the view is a query over everything drawn, so coalesce the
+  // bursts of events a pan or a filter change produces into one pass.
+  var refreshTimer = null;
+  function scheduleRefresh() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(function () { refreshTimer = null; refreshView(); }, 250);
+  }
+
+  // What is actually on screen after the renderer has applied the filter. There
+  // is no whole-archive count to show -- the page never holds the archive --
+  // so the honest number is "in view", and panning or zooming loads more.
+  function refreshView() {
+    if (!map.getLayer(LAYER_ID)) return;
+    var seen = {};
+    var out = [];
+    var rendered = map.queryRenderedFeatures({ layers: [LAYER_ID] });
+    for (var i = 0; i < rendered.length; i++) {
+      var p = rendered[i].properties || {};
+      if (!p.id || seen[p.id]) continue;
+      seen[p.id] = true;
+      out.push(p);
+    }
+    shownFeatures = out;
+    countEl.textContent = out.length + ' acquisition' + (out.length === 1 ? '' : 's') +
+      ' in view \\u2014 pan or zoom to load more of the archive';
+    if (typeof onViewChanged === 'function') onViewChanged();
+  }
+
+  // --- detail panel ---
+  // Vector tiles carry the acquisition centroid and its lean metadata, so this
+  // panel is the slice app's minus the fields tiles do not encode (footprint
+  // polygon, polarizations, per-asset COG URLs -- hence no "Get SAR image"
+  // button here).
+  function showDetail(p) {
+    var panel = document.getElementById('umbra-detail');
+    panel.innerHTML = '';
+
+    var thumb = window.umbraThumb(serverBase, p.id);
+    if (thumb) panel.appendChild(thumb);
+
+    var row = window.umbraRow;
+    var table = document.createElement('table');
+    table.appendChild(row('ID', p.id));
+    table.appendChild(row('Place', p.place));
+    table.appendChild(row('Acquired', p.date));
+    table.appendChild(row('Platform', p.platform));
+    table.appendChild(row('Product', p.product));
+    panel.appendChild(table);
+
+    // The STAC href comes from remote metadata; only http(s) may reach an
+    // anchor (a javascript: scheme would be a clickable script link).
+    if (p.stac_href && /^https?:\\/\\//.test(String(p.stac_href))) {
+      var a = document.createElement('a');
+      a.href = p.stac_href; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = 'open STAC item';
+      var pw = document.createElement('p'); pw.style.marginTop = '8px';
+      pw.appendChild(a); panel.appendChild(pw);
+    }
+  }
+
+  map.on('click', LAYER_ID, function (e) {
+    var f = e.features && e.features[0];
+    if (f) showDetail(f.properties || {});
+  });
+  map.on('mouseenter', LAYER_ID, function () { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', LAYER_ID, function () { map.getCanvas().style.cursor = ''; });
+
+  // --- wire controls (the same sidebar ids the slice app uses) ---
+  var textInput = document.getElementById('umbra-text');
+  textInput.addEventListener('input', function () {
+    state.text = textInput.value.trim().toLowerCase(); applyFilter();
+  });
+  var startInput = document.getElementById('umbra-start');
+  var endInput = document.getElementById('umbra-end');
+  startInput.addEventListener('change', function () {
+    state.start = startInput.value; applyFilter();
+  });
+  endInput.addEventListener('change', function () {
+    state.end = endInput.value; applyFilter();
+  });
+
+  var chipBox = document.getElementById('umbra-products');
+  (CFG.products || []).forEach(function (prod) {
+    var chip = document.createElement('span');
+    chip.className = 'umbra-chip active';
+    chip.textContent = prod;
+    chip.addEventListener('click', function () {
+      state.products[prod] = chip.classList.toggle('active');
+      applyFilter();
+    });
+    chipBox.appendChild(chip);
+  });
+
+  document.getElementById('umbra-reset').addEventListener('click', function () {
+    state.text = ''; textInput.value = '';
+    state.start = ''; startInput.value = '';
+    state.end = ''; endInput.value = '';
+    (CFG.products || []).forEach(function (p) { state.products[p] = true; });
+    Array.prototype.forEach.call(chipBox.children, function (c) { c.classList.add('active'); });
+    applyFilter();
+  });
+
+  // --- server-backed analysis (R4), the same shared panel the slice app uses ---
+  var onViewChanged = null;
+  if (serverBase) {
+    var analyze = window.umbraAnalyzePanel(serverBase, function () {
+      return shownFeatures.map(function (p) { return { id: p.id, when: p.date }; });
+    });
+    onViewChanged = analyze.viewChanged;
+  }
+
+  map.on('load', applyFilter);
+  // `idle` means "everything has finished loading and rendering" and is the
+  // natural moment to read the view -- but a basemap that never settles (a
+  // blocked or flaky tile host) would starve it, leaving the count blank while
+  // the acquisitions themselves draw fine. `moveend` and `sourcedata` cover
+  // that: between them every pan, zoom and tile arrival is accounted for, and
+  // the debounce keeps the overlap to one pass.
+  map.on('idle', scheduleRefresh);
+  map.on('moveend', scheduleRefresh);
+  map.on('sourcedata', scheduleRefresh);
+})();
+"""
+
+_PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -673,9 +1014,7 @@ _PAGE_TEMPLATE = (
   </aside>
   <div id="umbra-map"></div>
 </div>
-"""
-    + _SCRIPT_LINKS
-    + """
+{script_links}
 <script id="umbra-data" type="application/json"></script>
 <script>window.UMBRA_DEMO = {config_json};</script>
 <script>
@@ -697,4 +1036,3 @@ _PAGE_TEMPLATE = (
 </body>
 </html>
 """
-)
