@@ -76,7 +76,7 @@ jobs:
 
           - \`umbra-open-data.parquet\` — [stac-geoparquet](https://stac-geoparquet.org/): query it directly with DuckDB, geopandas, pyarrow or rustac.
           - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`.
-          - \`catalog.pmtiles\` — single-file whole-catalog vector basemap for \`umbra tiles --fetch\`; drop onto any static host or read by range request from a MapLibre page.
+          - \`catalog.pmtiles\` — single-file whole-catalog vector basemap for \`umbra tiles --fetch\`; drop onto any static host or read by range request from a MapLibre page. Carries an \`acquisitions\` centroid layer at every zoom and a \`footprints\` polygon layer from zoom 6 up.
           - \`catalog.html\` — a ready-to-open MapLibre GL viewer over the published \`catalog.pmtiles\`.
 
           \`\`\`

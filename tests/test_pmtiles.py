@@ -3,16 +3,20 @@
 The generator is stdlib-only, so these run in a core install with no network
 and no viz/load extras. The discipline mirrors ``test_export`` / the STAC
 document tests: we *decode our own output* -- parse the PMTiles v3 header and
-directory, and decode a Mapbox Vector Tile back into points -- and assert the
-catalog survives the round trip. The JavaScript viewer runs in a browser and
-isn't reachable from pytest, so we stop at "the page ships the right wiring".
+directory, and decode a Mapbox Vector Tile back into points and footprint
+polygons -- and assert the catalog survives the round trip. The JavaScript
+viewer runs in a browser and isn't reachable from pytest, so we stop at "the
+page ships the right wiring".
 """
 
 from __future__ import annotations
 
 import gzip
+import json
 import struct
+from typing import NamedTuple
 
+import pytest
 from click.testing import CliRunner
 
 from umbra_py import pmtiles
@@ -155,60 +159,84 @@ def _parse_header(data: bytes) -> dict:
     }
 
 
-def _decode_mvt_points(tile: bytes) -> list[dict]:
-    """Decode a one-layer point MVT into a list of property dicts.
+class _DecodedFeature(NamedTuple):
+    """One decoded MVT feature: geometry type, its parts, and its properties."""
 
-    Just enough of the wire format to prove the features and their string
-    properties survived: layer name, keys, string values, and one point per
-    feature.
+    geom_type: int
+    parts: list[list[tuple[int, int]]]
+    props: dict
+
+
+def _decode_mvt(tile: bytes) -> dict[str, list[_DecodedFeature]]:
+    """Decode an MVT into ``{layer_name: [feature, ...]}``.
+
+    Just enough of the wire format to prove the features survived: layer names,
+    keys, values, geometry types and the geometry command stream (so a polygon's
+    rings come back as coordinates, not an opaque blob).
     """
+    layers: dict[str, list[_DecodedFeature]] = {}
     pos = 0
-    layer_bytes = None
     while pos < len(tile):
         key, pos = _read_uvarint(tile, pos)
         field, wire = key >> 3, key & 0x7
         if field == 3 and wire == 2:  # Tile.layers
             length, pos = _read_uvarint(tile, pos)
-            layer_bytes = tile[pos : pos + length]
+            name, feats = _decode_layer(tile[pos : pos + length])
             pos += length
-        else:  # pragma: no cover - single-layer tiles only
+            assert name not in layers, "a layer name must appear once per tile"
+            layers[name] = feats
+        else:  # pragma: no cover
             raise AssertionError("unexpected top-level field")
-    assert layer_bytes is not None
+    return layers
 
+
+def _decode_layer(buf: bytes) -> tuple[str, list[_DecodedFeature]]:
+    name = ""
     keys: list[str] = []
     values: list[object] = []
-    feature_tags: list[list[int]] = []
+    raw: list[tuple[int, list[list[tuple[int, int]]], list[int]]] = []
     pos = 0
-    while pos < len(layer_bytes):
-        key, pos = _read_uvarint(layer_bytes, pos)
+    while pos < len(buf):
+        key, pos = _read_uvarint(buf, pos)
         field, wire = key >> 3, key & 0x7
-        if field == 3 and wire == 2:  # keys
-            length, pos = _read_uvarint(layer_bytes, pos)
-            keys.append(layer_bytes[pos : pos + length].decode("utf-8"))
+        if field == 1 and wire == 2:  # name
+            length, pos = _read_uvarint(buf, pos)
+            name = buf[pos : pos + length].decode("utf-8")
+            pos += length
+        elif field == 3 and wire == 2:  # keys
+            length, pos = _read_uvarint(buf, pos)
+            keys.append(buf[pos : pos + length].decode("utf-8"))
             pos += length
         elif field == 4 and wire == 2:  # values
-            length, pos = _read_uvarint(layer_bytes, pos)
-            values.append(_decode_value(layer_bytes[pos : pos + length]))
+            length, pos = _read_uvarint(buf, pos)
+            values.append(_decode_value(buf[pos : pos + length]))
             pos += length
         elif field == 2 and wire == 2:  # features
-            length, pos = _read_uvarint(layer_bytes, pos)
-            feature_tags.append(_decode_feature_tags(layer_bytes[pos : pos + length]))
+            length, pos = _read_uvarint(buf, pos)
+            raw.append(_decode_feature(buf[pos : pos + length]))
             pos += length
         elif wire == 0:
-            _v, pos = _read_uvarint(layer_bytes, pos)
+            _v, pos = _read_uvarint(buf, pos)
         elif wire == 2:
-            length, pos = _read_uvarint(layer_bytes, pos)
+            length, pos = _read_uvarint(buf, pos)
             pos += length
         else:  # pragma: no cover
             raise AssertionError("unexpected layer field wire type")
 
     out = []
-    for tags in feature_tags:
-        props = {}
-        for i in range(0, len(tags), 2):
-            props[keys[tags[i]]] = values[tags[i + 1]]
-        out.append(props)
-    return out
+    for gtype, parts, tags in raw:
+        props = {keys[tags[i]]: values[tags[i + 1]] for i in range(0, len(tags), 2)}
+        out.append(_DecodedFeature(gtype, parts, props))
+    return name, out
+
+
+def _decode_mvt_points(tile: bytes, layer: str = "acquisitions") -> list[dict]:
+    """The property dicts of ``layer``'s features, which must all be points."""
+    feats = _decode_mvt(tile).get(layer, [])
+    for feat in feats:
+        assert feat.geom_type == 1, "feature geometry must be a point"
+        assert feat.parts and len(feat.parts[0]) == 1
+    return [feat.props for feat in feats]
 
 
 def _decode_value(buf: bytes) -> object:
@@ -224,10 +252,11 @@ def _decode_value(buf: bytes) -> object:
     raise AssertionError("unexpected value field")  # pragma: no cover
 
 
-def _decode_feature_tags(buf: bytes) -> list[int]:
+def _decode_feature(buf: bytes) -> tuple[int, list[list[tuple[int, int]]], list[int]]:
     pos = 0
     tags: list[int] = []
-    saw_point = False
+    gtype = 0
+    geometry: list[int] = []
     while pos < len(buf):
         key, pos = _read_uvarint(buf, pos)
         field, wire = key >> 3, key & 0x7
@@ -239,16 +268,48 @@ def _decode_feature_tags(buf: bytes) -> list[int]:
                 tags.append(t)
         elif field == 3 and wire == 0:  # type
             gtype, pos = _read_uvarint(buf, pos)
-            saw_point = gtype == 1
-        elif field == 4 and wire == 2:  # geometry
+        elif field == 4 and wire == 2:  # geometry (packed commands)
             length, pos = _read_uvarint(buf, pos)
-            pos += length
+            end = pos + length
+            while pos < end:
+                g, pos = _read_uvarint(buf, pos)
+                geometry.append(g)
         elif wire == 0:
             _v, pos = _read_uvarint(buf, pos)
         else:  # pragma: no cover
             raise AssertionError("unexpected feature field")
-    assert saw_point, "feature geometry must be a point"
-    return tags
+    return gtype, _decode_geometry(geometry), tags
+
+
+def _decode_geometry(cmds: list[int]) -> list[list[tuple[int, int]]]:
+    """Walk an MVT command stream back into parts (rings, for a polygon)."""
+
+    def unzigzag(value: int) -> int:
+        return (value >> 1) ^ -(value & 1)
+
+    parts: list[list[tuple[int, int]]] = []
+    cx = cy = 0
+    pos = 0
+    while pos < len(cmds):
+        cmd, count = cmds[pos] & 0x7, cmds[pos] >> 3
+        pos += 1
+        if cmd == 1:  # MoveTo starts a new part
+            for _ in range(count):
+                cx += unzigzag(cmds[pos])
+                cy += unzigzag(cmds[pos + 1])
+                pos += 2
+                parts.append([(cx, cy)])
+        elif cmd == 2:  # LineTo extends the current part
+            for _ in range(count):
+                cx += unzigzag(cmds[pos])
+                cy += unzigzag(cmds[pos + 1])
+                pos += 2
+                parts[-1].append((cx, cy))
+        elif cmd == 7:  # ClosePath: the ring's first point is implied
+            assert count == 1
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected geometry command {cmd}")
+    return parts
 
 
 def _tile_bytes(archive: bytes, header: dict, tile_id: int) -> bytes | None:
@@ -281,8 +342,6 @@ def test_metadata_advertises_the_vector_layer():
     archive = pmtiles.build_pmtiles([_item("a", 0.0, 0.0)], max_zoom=2)
     header = _parse_header(archive)
     meta = gzip.decompress(archive[header["meta_off"] : header["meta_off"] + header["meta_len"]])
-    import json
-
     doc = json.loads(meta)
     assert doc["vector_layers"][0]["id"] == "acquisitions"
     assert "CC BY 4.0" in doc["attribution"]
@@ -334,6 +393,169 @@ def test_identical_tiles_are_deduplicated():
     assert header["num_entries"] == 9  # one tile per zoom 0..8
 
 
+# --- footprint polygons ---------------------------------------------------
+def _tile_to_lonlat(zoom: int, tx: int, ty: int, px: int, py: int) -> tuple[float, float]:
+    """Inverse of ``_lonlat_to_tile_fraction`` for a point in a tile's space."""
+    import math
+
+    n = 1 << zoom
+    fx = tx + px / 4096.0
+    fy = ty + py / 4096.0
+    lon = fx / n * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * fy / n))))
+    return lon, lat
+
+
+def _find_tile(archive: bytes, header: dict, zoom: int, lon: float, lat: float) -> bytes:
+    fx, fy = pmtiles._lonlat_to_tile_fraction(lon, lat, zoom)
+    tile = _tile_bytes(archive, header, pmtiles.zxy_to_tileid(zoom, int(fx), int(fy)))
+    assert tile is not None
+    return tile
+
+
+def test_footprint_polygon_round_trips_with_its_properties():
+    lon, lat = -122.4, 37.8
+    archive = pmtiles.build_pmtiles([_item("scene-1", lon, lat, task="San Francisco")], max_zoom=7)
+    header = _parse_header(archive)
+    layers = _decode_mvt(_find_tile(archive, header, 7, lon, lat))
+
+    assert set(layers) == {"acquisitions", pmtiles.FOOTPRINT_LAYER}
+    (footprint,) = layers[pmtiles.FOOTPRINT_LAYER]
+    assert footprint.geom_type == 3  # POLYGON
+    assert footprint.props["id"] == "scene-1"
+    assert footprint.props["place"] == "San Francisco"  # same lean metadata as the point
+    # One ring, the four corners of the item's square footprint (ClosePath means
+    # the closing duplicate is not stored).
+    (ring,) = footprint.parts
+    assert len(ring) == 4
+    # MVT requires an exterior ring to wind clockwise in the tile's y-down space.
+    assert pmtiles._signed_area(ring) > 0
+    # The ring projects back onto the footprint it came from (d = 0.02 degrees).
+    corners = [_tile_to_lonlat(7, *_tile_xy(7, lon, lat), px, py) for px, py in ring]
+    assert min(c[0] for c in corners) == pytest.approx(lon - 0.02, abs=0.002)
+    assert max(c[0] for c in corners) == pytest.approx(lon + 0.02, abs=0.002)
+    assert min(c[1] for c in corners) == pytest.approx(lat - 0.02, abs=0.002)
+    assert max(c[1] for c in corners) == pytest.approx(lat + 0.02, abs=0.002)
+
+
+def _tile_xy(zoom: int, lon: float, lat: float) -> tuple[int, int]:
+    fx, fy = pmtiles._lonlat_to_tile_fraction(lon, lat, zoom)
+    return int(fx), int(fy)
+
+
+def test_footprints_start_at_their_min_zoom():
+    # The low-zoom tiles every visitor loads first stay centroid-only: a
+    # footprint is sub-pixel there.
+    lon, lat = 10.0, 10.0
+    archive = pmtiles.build_pmtiles([_item("solo", lon, lat)], min_zoom=0, max_zoom=7)
+    header = _parse_header(archive)
+    assert pmtiles.FOOTPRINT_MIN_ZOOM == 6
+    for zoom in range(0, 6):
+        assert set(_decode_mvt(_find_tile(archive, header, zoom, lon, lat))) == {"acquisitions"}
+    for zoom in (6, 7):
+        assert pmtiles.FOOTPRINT_LAYER in _decode_mvt(_find_tile(archive, header, zoom, lon, lat))
+
+
+def test_footprints_can_be_switched_off():
+    lon, lat = 10.0, 10.0
+    items = [_item("solo", lon, lat)]
+    plain = pmtiles.build_pmtiles(items, max_zoom=7, footprints=False)
+    header = _parse_header(plain)
+    assert set(_decode_mvt(_find_tile(plain, header, 7, lon, lat))) == {"acquisitions"}
+    # ... and the archive is smaller than the footprint-carrying default.
+    assert len(plain) < len(pmtiles.build_pmtiles(items, max_zoom=7))
+    # The metadata advertises only the layer that is actually there.
+    meta = json.loads(
+        gzip.decompress(plain[header["meta_off"] : header["meta_off"] + header["meta_len"]])
+    )
+    assert [layer["id"] for layer in meta["vector_layers"]] == ["acquisitions"]
+
+
+def test_metadata_advertises_the_footprint_layer():
+    archive = pmtiles.build_pmtiles([_item("a", 0.0, 0.0)], max_zoom=7)
+    header = _parse_header(archive)
+    meta = json.loads(
+        gzip.decompress(archive[header["meta_off"] : header["meta_off"] + header["meta_len"]])
+    )
+    layers = {layer["id"]: layer for layer in meta["vector_layers"]}
+    assert set(layers) == {"acquisitions", "footprints"}
+    assert layers["footprints"]["minzoom"] == pmtiles.FOOTPRINT_MIN_ZOOM
+    assert layers["footprints"]["maxzoom"] == 7
+    assert set(layers["footprints"]["fields"]) == set(layers["acquisitions"]["fields"])
+
+
+def test_a_footprint_spanning_a_tile_seam_is_clipped_into_both_tiles():
+    # lon 0 is a tile boundary at every zoom, so a footprint straddling it must
+    # appear -- clipped -- in the tiles on either side.
+    d = 0.4
+    doc = {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": "straddler",
+        "bbox": [-d, 40.0 - d, d, 40.0 + d],
+        "geometry": None,  # exercise the bbox-rectangle fallback too
+        "properties": {"datetime": "2024-05-04T00:00:00Z", "sar:product_type": "GEC"},
+        "assets": {},
+    }
+    item = UmbraItem.from_dict(doc, href=_HREF.format(task="Seam"))
+    archive = pmtiles.build_pmtiles([item], max_zoom=7)
+    header = _parse_header(archive)
+
+    west = _decode_mvt(_find_tile(archive, header, 7, -d / 2, 40.0))
+    east = _decode_mvt(_find_tile(archive, header, 7, d / 2, 40.0))
+    for layers in (west, east):
+        (footprint,) = layers[pmtiles.FOOTPRINT_LAYER]
+        (ring,) = footprint.parts
+        assert len(ring) >= 4
+        assert pmtiles._signed_area(ring) > 0
+        # Clipped to the tile plus the documented buffer, never the whole span.
+        assert all(-64 <= x <= 4096 + 64 for x, _y in ring)
+    # The seam splits the footprint, so each side keeps only part of its width.
+    west_x = [x for x, _y in west[pmtiles.FOOTPRINT_LAYER][0].parts[0]]
+    assert max(west_x) >= 4096  # runs up to (and just past) the eastern edge
+    east_x = [x for x, _y in east[pmtiles.FOOTPRINT_LAYER][0].parts[0]]
+    assert min(east_x) <= 0  # ... and continues from the western one
+
+
+def test_tile_polygons_wind_clockwise_whichever_way_the_input_runs():
+    square = [(10.0, 10.0), (10.1, 10.0), (10.1, 10.1), (10.0, 10.1), (10.0, 10.0)]
+    for ring in (square, list(reversed(square))):
+        (polygons,) = pmtiles._tile_polygons([ring], 7).values()
+        (encoded,) = polygons
+        assert pmtiles._signed_area(encoded) > 0
+
+
+def test_clipping_drops_a_ring_that_misses_the_tile_entirely():
+    # A tile inside a footprint's *bounding box* need not be inside the footprint
+    # (a diagonal one clears the corner tiles), so the clip has to come back empty
+    # and that tile carry no polygon at all.
+    outside = [(5000.0, 5000.0), (6000.0, 5000.0), (6000.0, 6000.0)]
+    assert pmtiles._clip_ring(outside, -64.0, 4096.0 + 64.0) == []
+    # A ring squeezed below one integer coordinate leaves nothing drawable.
+    assert len(pmtiles._quantize_ring([(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.1)])) < 3
+
+
+def test_a_footprint_straddling_the_antimeridian_keeps_only_its_centroid():
+    # The only way an Umbra footprint spans half the globe is a bbox wrapping the
+    # antimeridian, where the lon/lat ring is not the footprint -- tiling it
+    # would paint a world-wide row.
+    doc = {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": "wrapped",
+        "bbox": [-179.9, 10.0, 179.9, 10.2],
+        "geometry": None,
+        "properties": {"datetime": "2024-05-04T00:00:00Z", "sar:product_type": "GEC"},
+        "assets": {},
+    }
+    item = UmbraItem.from_dict(doc, href=_HREF.format(task="Wrapped"))
+    archive = pmtiles.build_pmtiles([item], max_zoom=7)
+    header = _parse_header(archive)
+    layers = _decode_mvt(_find_tile(archive, header, 7, 0.0, 10.1))
+    assert [f.props["id"] for f in layers["acquisitions"]] == ["wrapped"]
+    assert pmtiles.FOOTPRINT_LAYER not in layers
+
+
 def test_build_raises_without_a_footprint():
     doc = {
         "type": "Feature",
@@ -344,8 +566,6 @@ def test_build_raises_without_a_footprint():
         "assets": {},
     }
     item = UmbraItem.from_dict(doc, href=_HREF.format(task="x"))
-    import pytest
-
     with pytest.raises(ValueError, match="no items with a footprint"):
         pmtiles.build_pmtiles([item])
 
@@ -361,6 +581,15 @@ def test_build_viewer_points_at_the_archive_and_layer():
     assert "CC BY 4.0" in html
     # The circle layer reads the same source-layer the archive writes.
     assert '"acquisitions"' in html or "acquisitions" in html
+
+
+def test_build_viewer_draws_the_footprint_layer():
+    html = pmtiles.build_viewer("catalog.pmtiles")
+    assert f'"footprintLayer":"{pmtiles.FOOTPRINT_LAYER}"' in html
+    # A translucent fill plus an outline over the footprint polygons, and the
+    # fill is a click target alongside the centroid circles.
+    assert "acq-fill" in html and "acq-outline" in html
+    assert '["acq", "acq-fill"]' in html
 
 
 # --- CLI ------------------------------------------------------------------
@@ -379,6 +608,24 @@ def test_cli_tiles_writes_archive_and_viewer(tmp_path, monkeypatch):
     assert viewer.exists()
     assert "catalog.pmtiles" in viewer.read_text()
     assert "Wrote PMTiles archive of 2 acquisition(s)" in result.output
+
+
+def test_cli_tiles_no_footprints_writes_a_centroids_only_archive(tmp_path, monkeypatch):
+    items = [_item("a", -122.4, 37.8)]
+    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: items)
+
+    def run(*extra: str) -> bytes:
+        out = tmp_path / f"c{len(extra)}.pmtiles"
+        result = CliRunner().invoke(
+            cli, ["tiles", "--local", "--out", str(out), "--max-zoom", "7", *extra]
+        )
+        assert result.exit_code == 0, result.output
+        return out.read_bytes()
+
+    default, plain = run(), run("--no-footprints")
+    for archive, expected in ((default, {"acquisitions", "footprints"}), (plain, {"acquisitions"})):
+        header = _parse_header(archive)
+        assert set(_decode_mvt(_find_tile(archive, header, 7, -122.4, 37.8))) == expected
 
 
 def test_cli_tiles_rejects_bad_extension(tmp_path, monkeypatch):

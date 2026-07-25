@@ -126,10 +126,12 @@ explorer reads the tiled archive itself, so a visitor gets the whole catalog
 Drop `--unified` and you get the original pair instead — `map.html`, a MapLibre
 viewer over the archive you can only pan and click, plus `explore.html` over a
 *gathered slice* (`--local --max-per-task 1` for a one-pin-per-site overview).
-That is still the right build when you want the slice's extras: an embedded
-explorer carries footprint outlines and the on-click "Get SAR image" COG overlay,
-which vector tiles have no room for. The two modes are exclusive — in unified
-mode nothing is gathered, because the archive is the data source.
+Both modes now draw footprint outlines — the unified one from the archive's
+footprint polygons (tiled from zoom 6 up), the embedded one from the slice it
+carries — so the remaining reason to build the pair is the slice's on-click "Get
+SAR image" COG overlay, which needs per-asset URLs vector tiles have no room for.
+The two modes are exclusive — in unified mode nothing is gathered, because the
+archive is the data source.
 
 ### Featured change composites
 

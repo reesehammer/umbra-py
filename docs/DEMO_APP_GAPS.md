@@ -29,10 +29,12 @@
 >   expressions evaluated inside the tiles), so `umbra showcase --unified` — what
 >   the Pages job now deploys — is *one* page covering every acquisition with the
 >   filters, instead of a click-only map beside a sliced explorer. Remaining
->   optional polish: baking thumbnails/labels into the *published* snapshot, the
->   swipe/timescan variants of the featured gallery, and tiling footprint
->   polygons (the one thing the embedded-slice explorer still has over the
->   whole-archive one).
+>   optional polish: baking thumbnails/labels into the *published* snapshot and
+>   the swipe/timescan variants of the featured gallery. **Footprint polygons are
+>   now tiled too** (a `footprints` layer clipped per tile, from zoom 6 up), so the
+>   whole-archive explorer draws coverage shape as you zoom in — the
+>   embedded-slice explorer's one remaining extra is the on-click "Get SAR image"
+>   COG overlay.
 >
 > The original item IDs (`G1`–`G8`, `R1`–`R7`, Path A/B step numbers) are still
 > cited from source docstrings; the detail behind each is in this file's git
