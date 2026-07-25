@@ -1676,7 +1676,8 @@ def stack(
             )
         if not as_json:
             span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
-            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+            # To stderr when --stats will print JSON, so stdout stays one object.
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).", err=stats)
 
     with OrbitSpinner(f"Stacking {len(items)} acquisitions"):
         cube = to_stack(

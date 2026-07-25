@@ -913,3 +913,35 @@ def test_cli_stack_needs_an_output_or_stats(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_mod.cli, ["stack", *urls])
     assert result.exit_code != 0
     assert "--out to write the datacube, --stats to measure it" in result.output
+
+
+def test_cli_stack_stats_keeps_stdout_json_in_search_mode(tmp_path, monkeypatch):
+    """The search-mode "Selected N of M" note must not precede the JSON."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif", value=2.0),
+        "two": _stack_scene(tmp_path / "two.tif", value=8.0),
+    }
+    found = [
+        UmbraItem(id=name, properties={"datetime": f"2024-0{n}-08T12:00:00Z"})
+        for n, name in enumerate(paths, start=1)
+    ]
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+    monkeypatch.setattr(cli_mod, "_gather_items", lambda **kwargs: found)
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["stack", "--area", "SiteA", "--stats", "--max-size", "16"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Selected 2 of 2" in result.stderr
+    assert json.loads(result.stdout)["count"] == 2
