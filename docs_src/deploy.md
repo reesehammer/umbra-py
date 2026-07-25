@@ -108,7 +108,8 @@ That writes a self-contained directory:
 - `explore.html` — the interactive [`umbra demo`](cli.md) explorer, reading the
   whole-catalog `catalog.pmtiles` archive (copied in beside it, so the folder is
   relocatable): **every** acquisition in the catalog, with live filters;
-- `featured/*.png` — one precomputed change composite per featured site.
+- `featured/*` — one precomputed artifact per featured site (a `.png` composite,
+  or a `.html` swipe map with `--featured-view swipe`).
 
 Every page is self-contained HTML, so it needs no extra and no backend. This is
 what the repository's own **[hosted showcase](https://reesehammer.github.io/umbra-py/showcase/)**
@@ -143,18 +144,35 @@ source.
     an archive without the references degrades to metadata, it does not error);
     `umbra tiles --local --out catalog.pmtiles` builds one with them now.
 
-### Featured change composites
+### Featured artifacts
 
-`--featured N` renders a change composite for the `N` most repeat-imaged sites in
+`--featured N` precomputes an artifact for the `N` most repeat-imaged sites in
 the catalog and puts them on the landing page, so a first-time visitor sees *what
 SAR change looks like* immediately — no render round-trip, no server, and it
 still works on a plain static host. Name the sites yourself with a repeatable
-`--featured-area` instead, and pick two-colour (green = new, magenta = gone) or
-three-date temporal RGB with `--featured-frames`:
+`--featured-area` instead:
 
 ```bash
 umbra showcase --local --featured-area "Centerfield, Utah" \
     --featured-area "Beet Piler" --featured-frames 3 --out ./showcase
+```
+
+`--featured-view` picks *what* is precomputed from the same marquee selection:
+
+| `--featured-view` | Artifact | Site needs | Reads |
+| --- | --- | --- | --- |
+| `change` (default) | `featured/<site>.png` | 2 passes (3 with `--featured-frames 3`) | green = new/brighter, magenta = gone/dimmer (or temporal RGB) |
+| `timescan` | `featured/<site>.png` | 3+ passes | the **whole** series as one image — red = mean, green = peak, blue = variability, so anything that came and went glows blue/cyan |
+| `swipe` | `featured/<site>.html` | 2 passes | an interactive before/after map with a draggable divider, linked from the gallery as a card |
+
+`--featured-frames` applies to the `change` view only: a timescan summarises
+every pass it has, and a swipe is always two. Sites that can't clear a view's
+minimum are dropped before any render is attempted, so `--featured-view
+timescan` quietly skips the two-pass sites that `change` would have used.
+
+```bash
+umbra showcase --local --featured 6 --featured-view timescan --out ./showcase
+umbra showcase --local --featured 6 --featured-view swipe --out ./showcase
 ```
 
 This is the one step that needs the `viz` extra

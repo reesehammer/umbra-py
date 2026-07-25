@@ -256,7 +256,12 @@ from:
   composite for the most repeat-imaged sites (or the ones `--featured-area`
   names) into `featured/` and puts them on the landing page as a captioned
   gallery, and the `docs.yml` Pages job passes `--featured 6`; see the CHANGELOG.
-  Still open under R4: the *swipe* and *timescan* variants of the same idea.
+  ~~Still open under R4: the *swipe* and *timescan* variants of the same idea.~~
+  **shipped too** — `umbra showcase --featured-view {change,timescan,swipe}`
+  renders the same marquee selection as a whole-series *timescan* composite
+  (mean/peak/variability as RGB, 3+ passes) or as a self-contained before/after
+  *swipe* page, which the gallery shows as a link card since an interactive page
+  has no still to preview. **R4 is closed.**
 - ~~Let the interactive explorer scale to the whole catalog (Path A's last
   structural cap) and collapse the showcase's map/explorer pair into one page.~~
   **shipped** — `umbra demo --pmtiles` draws every acquisition from a
