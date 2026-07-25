@@ -1517,6 +1517,14 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "gap. union: all ground any acquisition covers, NaN outside each scene.",
 )
 @click.option(
+    "--crs",
+    default=None,
+    help="CRS of the shared output grid. Default is lon/lat (EPSG:4326), whose "
+    "cells are not equal-area; 'utm' picks the UTM zone the site falls in so "
+    "every cell covers the same ground (what area measurements need). Any CRS "
+    "string also works (e.g. EPSG:32633). --clip-bbox stays lon/lat either way.",
+)
+@click.option(
     "--db",
     is_flag=True,
     help="Stack the decibel (log-amplitude) scale -- the radiometrically "
@@ -1542,6 +1550,7 @@ def stack(
     clip_bbox,
     max_size,
     extent,
+    crs,
     db,
     polarizations,
     min_incidence,
@@ -1555,12 +1564,15 @@ def stack(
     """Co-register a site's acquisitions into one analysis-ready datacube.
 
     The time-series half of `umbra load`, and the step between *search* and
-    *analysis*: several passes over one site are warped onto a shared
-    EPSG:4326 grid and written as a multi-band float32 GeoTIFF -- one band per
-    acquisition, oldest first, each described by its timestamp. Because the
-    bands are pixel-aligned, band arithmetic is an honest per-ground-cell
-    comparison, so the file drops straight into QGIS, GDAL, rioxarray or a
-    notebook.
+    *analysis*: several passes over one site are warped onto one shared grid
+    and written as a multi-band float32 GeoTIFF -- one band per acquisition,
+    oldest first, each described by its timestamp. Because the bands are
+    pixel-aligned, band arithmetic is an honest per-ground-cell comparison, so
+    the file drops straight into QGIS, GDAL, rioxarray or a notebook.
+
+    The grid is lon/lat (EPSG:4326) by default, whose cells stretch with
+    latitude; pass --crs utm (or any CRS) when cells have to be equal-area,
+    e.g. to turn a count of changed cells into an area.
 
     Where `umbra change` and `umbra timescan` render this comparison as a
     *picture*, this writes the *numbers*. In Python, ``umbra_py.to_stack``
@@ -1641,6 +1653,7 @@ def stack(
             max_size=max_size,
             db=db,
             extent=extent,
+            crs=crs,
         )
     if as_json:
         _emit_render_manifest(
@@ -1650,6 +1663,7 @@ def stack(
                 "asset": asset,
                 "max_size": max_size,
                 "extent": extent,
+                "crs": crs or "EPSG:4326",
                 "db": db,
                 **_acquisition_filter_manifest(
                     polarizations, min_incidence, max_incidence, max_resolution

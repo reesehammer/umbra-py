@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A projected, equal-area datacube grid: `to_stack(crs=…)` / `umbra stack
+  --crs` (first follow-on of the datacube PR, `TODO.md`).** `to_stack` built its
+  shared grid in lon/lat, which is the right default — one grid works anywhere,
+  and comparing a cell to *itself* across dates is unaffected — but degrees are
+  not a unit of ground: cells stretch with latitude, so counting changed cells
+  is not measuring an area and distances are distorted. The cube was therefore
+  honest for *change* and wrong for *quantity*, and the only fix was to
+  reproject the result afterwards (resampling twice). `crs=` now names the CRS
+  the shared grid is built in, so the co-registration lands there directly:
+  `crs="utm"` (`STACK_AUTO_CRS`) resolves the UTM zone containing the stacked
+  ground — read off the sources' own footprints, so a caller who doesn't know
+  the zone still gets metre-sized, equal-area cells — and any other value is a
+  CRS name (`"EPSG:32633"`, a PROJ or WKT string) validated through `rasterio`,
+  so a typo raises here instead of silently warping to nothing. `bbox` /
+  `--clip-bbox` stays lon/lat whatever the cube's CRS (transformed internally,
+  and still reported in the caller's own degrees when it misses the site), the
+  grid derivation is unchanged beyond its units, and the `attrs["crs"]` /
+  `attrs["bounds"]` / coordinate axes follow the target CRS. `stack_to_geotiff`
+  and `umbra stack --crs` pass it through, and the written GeoTIFF now carries
+  the *resolved* CRS in its tags, so a file built with `--crs utm` says which
+  zone it landed in. Default behavior is unchanged (`crs=None` → EPSG:4326).
+  Deterministic, no model call, no new dependency (the same `[load]` extra),
+  and offline-tested in `tests/test_load.py`: the auto-UTM zone/hemisphere
+  derivation, uniform near-square cells in metres, an explicit CRS, a rejected
+  bad CRS, lon/lat clipping under a projected cube, and the CLI end-to-end.
+
 - **Time-series datacubes: `umbra_py.to_stack` / `stack_to_geotiff` / `umbra
   stack` (`STRATEGY.md` §2–§3 — the `stackstac`/`odc-stac` parity gap).** The
   library could load *one* scene into a labelled array (`to_xarray`) and could

@@ -7,7 +7,9 @@ write a GeoTIFF. Requires the `[load]` extra.
 onto one shared grid and returns a `(time, y, x)` datacube — the step
 `stackstac` / `odc-stac` play elsewhere in the STAC ecosystem, which can't be
 pointed at Umbra because successive passes over a site arrive in whatever UTM
-zone and extent each acquisition used.
+zone and extent each acquisition used. The shared grid is lon/lat by default;
+`crs="utm"` (or any CRS) builds it in projected units instead, so its cells are
+equal-area and a cell count is a measurement.
 
 ::: umbra_py.to_xarray
 
