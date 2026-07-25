@@ -264,8 +264,12 @@ from:
   compiled to MapLibre expressions evaluated inside the tiles, and `umbra showcase
   --unified` (what `docs.yml` now deploys) builds the showcase as a single
   explorer over that archive instead of a click-only map plus a sliced explorer.
-  See the CHANGELOG. Still open: tiling footprint *polygons* rather than
-  centroids, which is what the embedded-slice mode still has over it.
+  See the CHANGELOG. ~~Still open: tiling footprint *polygons* rather than
+  centroids, which is what the embedded-slice mode still has over it.~~
+  **shipped** — the archive now carries a `footprints` polygon layer (clipped per
+  tile, from zoom 6 up) beside the centroids, and both the explorer and the
+  minimal viewer draw coverage shape as you zoom in; the embedded-slice mode's one
+  remaining extra is the on-click "Get SAR image" COG overlay. See the CHANGELOG.
 - Bake per-item thumbnails / place labels into the *published* weekly snapshot
   (gated on egress).
 

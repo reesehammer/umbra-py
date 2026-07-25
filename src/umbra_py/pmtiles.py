@@ -21,15 +21,14 @@ project keeps.
 Deliberately in the repo's grain:
 
 * **No extra, no tippecanoe.** The demo-gap doc sketched this step as
-  ``export GeoJSON → tile with tippecanoe`` — an external binary. Because the
-  catalog geometry we tile is *points* (one centroid per acquisition), the whole
+  ``export GeoJSON → tile with tippecanoe`` — an external binary. The whole
   encoder — the `Mapbox Vector Tile
   <https://github.com/mapbox/vector-tile-spec>`_ protobuf and the `PMTiles v3
   <https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md>`_ container —
-  fits in the standard library (``struct``, ``gzip``, varint arithmetic). So the
-  generator runs in a core install and is fully offline-testable by decoding its
-  own output, the same discipline :mod:`umbra_py.export` and the STAC document
-  builders hold.
+  fits in the standard library (``struct``, ``gzip``, varint arithmetic),
+  polygon clipping included. So the generator runs in a core install and is
+  fully offline-testable by decoding its own output, the same discipline
+  :mod:`umbra_py.export` and the STAC document builders hold.
 
 * **The viewer is a static sibling, not a rewrite of the demo.** :func:`build_viewer`
   emits a self-contained MapLibre GL page that points at a ``.pmtiles`` URL via
@@ -44,9 +43,16 @@ Deliberately in the repo's grain:
   the zoom-anywhere reach at once; :func:`build_viewer` stays the minimal,
   no-sidebar view of the same data.
 
-The catalog rows the tiles carry are points with a lean set of string
-properties (id, place, product, date, platform) — enough to style and label a
-marker; the full metadata still lives one STAC link away.
+Each acquisition is tiled **twice**: as a centroid point in the
+``acquisitions`` layer (what a whole-world view needs — one marker per scene at
+any zoom), and, from :data:`FOOTPRINT_MIN_ZOOM` up, as its clipped footprint
+polygon in the ``footprints`` layer, so zooming in shows *coverage shape*
+rather than a dot. The polygon layer starts partway down the pyramid on
+purpose: at world zooms a 5–25 km footprint is smaller than a pixel, and the
+low-zoom tiles are the ones every visitor loads first. Both layers carry the
+same lean set of string properties (id, place, product, date, platform) —
+enough to style, label and click a feature; the full metadata still lives one
+STAC link away.
 """
 
 from __future__ import annotations
@@ -59,8 +65,9 @@ import os
 import struct
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from ._geometry import Ring, bbox_ring, rings_from_geojson
 from .constants import ATTRIBUTION, CATALOG_INDEX_PMTILES_URL
 from .models import UmbraItem
 
@@ -73,6 +80,18 @@ _TILETYPE_MVT = 1
 # MVT tile extent: the integer coordinate space inside each tile. 4096 is the
 # spec's near-universal default (the value tippecanoe and MapLibre assume).
 _EXTENT = 4096
+# How far outside its tile a clipped polygon may keep coordinates. MVT allows
+# out-of-extent geometry, and that margin is what puts a footprint's clipped
+# edge *under* the neighbouring tile's seam instead of drawn on it. 64/4096
+# matches the buffer tippecanoe writes by default.
+_TILE_BUFFER = 64.0
+
+#: Source-layer name of the acquisition-footprint polygons (the point centroids
+#: live in ``build_pmtiles``' ``layer_name``, default ``"acquisitions"``).
+FOOTPRINT_LAYER = "footprints"
+#: Lowest zoom at which footprint polygons are written. Below this a footprint
+#: is sub-pixel, and these are the tiles every visitor loads first.
+FOOTPRINT_MIN_ZOOM = 6
 
 # Pinned CDN assets for the viewer. An unpinned CDN can regress a generated page
 # without warning, the same discipline the Leaflet demo and _lazy_imagery apply.
@@ -169,13 +188,46 @@ def _encode_value(value: Any) -> bytes:
     raise TypeError(f"unsupported MVT value type: {type(value).__name__}")
 
 
-def _encode_mvt(features: list[tuple[int, int, dict[str, Any]]], layer_name: str) -> bytes:
-    """Encode a single vector tile holding point ``features``.
+class _Feature(NamedTuple):
+    """One tile feature: a geometry type, its parts, and its properties.
 
-    Each feature is ``(px, py, properties)`` with ``px``/``py`` already in the
-    tile's ``[0, extent]`` integer coordinate space. Returns the uncompressed
-    protobuf bytes of a one-layer ``Tile`` message.
+    ``parts`` is a list of point sequences in the tile's integer coordinate
+    space: one single-point part for a POINT, one part per (already clipped and
+    clockwise-wound) exterior ring for a POLYGON.
     """
+
+    geom_type: int  # MVT GeomType: 1 = POINT, 3 = POLYGON
+    parts: list[list[tuple[int, int]]]
+    props: dict[str, Any]
+
+
+def _encode_geometry(feature: _Feature) -> list[int]:
+    """The MVT command/parameter integers for one feature's geometry.
+
+    The cursor starts at ``(0, 0)`` for every feature and every point is written
+    as a zigzagged delta from it, so a part's first point is a MoveTo and the
+    rest one LineTo run; a polygon part ends with ClosePath (which re-states the
+    ring's first point, so the closing duplicate must already be dropped).
+    """
+    cmds: list[int] = []
+    cx = cy = 0
+    for part in feature.parts:
+        fx, fy = part[0]
+        cmds += [1 | (1 << 3), _zigzag(fx - cx), _zigzag(fy - cy)]  # MoveTo, count 1
+        cx, cy = fx, fy
+        rest = part[1:]
+        if rest:
+            cmds.append(2 | (len(rest) << 3))  # LineTo, count len(rest)
+            for px, py in rest:
+                cmds += [_zigzag(px - cx), _zigzag(py - cy)]
+                cx, cy = px, py
+        if feature.geom_type == 3:
+            cmds.append(7 | (1 << 3))  # ClosePath, count 1
+    return cmds
+
+
+def _encode_layer(layer_name: str, features: list[_Feature]) -> bytes:
+    """Encode one MVT ``Layer`` message body (the field body, not its tag)."""
     keys: list[str] = []
     key_index: dict[str, int] = {}
     values: list[bytes] = []
@@ -195,24 +247,21 @@ def _encode_mvt(features: list[tuple[int, int, dict[str, Any]]], layer_name: str
         return value_index[vkey]
 
     feature_msgs: list[bytes] = []
-    for fid, (px, py, props) in enumerate(features):
+    for fid, feature in enumerate(features):
         tags: list[int] = []
-        for name, value in props.items():
+        for name, value in feature.props.items():
             if value is None:
                 continue
             tags.append(intern_key(name))
             tags.append(intern_value(value))
-        # Point geometry: one MoveTo (command 1, count 1), then the zigzagged
-        # delta from the cursor origin (0, 0).
-        geometry = [(1 & 0x7) | (1 << 3), _zigzag(px), _zigzag(py)]
 
         body = bytearray()
         body += _uvarint((1 << 3) | 0) + _uvarint(fid)  # id
         if tags:
             packed_tags = b"".join(_uvarint(t) for t in tags)
             body += _uvarint((2 << 3) | 2) + _uvarint(len(packed_tags)) + packed_tags
-        body += _uvarint((3 << 3) | 0) + _uvarint(1)  # type = POINT
-        packed_geom = b"".join(_uvarint(g) for g in geometry)
+        body += _uvarint((3 << 3) | 0) + _uvarint(feature.geom_type)  # type
+        packed_geom = b"".join(_uvarint(g) for g in _encode_geometry(feature))
         body += _uvarint((4 << 3) | 2) + _uvarint(len(packed_geom)) + packed_geom
         feature_msgs.append(bytes(body))
 
@@ -228,9 +277,22 @@ def _encode_mvt(features: list[tuple[int, int, dict[str, Any]]], layer_name: str
     for val in values:
         layer += _uvarint((4 << 3) | 2) + _uvarint(len(val)) + val
     layer += _uvarint((5 << 3) | 0) + _uvarint(_EXTENT)  # extent
+    return bytes(layer)
 
+
+def _encode_mvt(layers: list[tuple[str, list[_Feature]]]) -> bytes:
+    """Encode one vector tile from ``(layer_name, features)`` pairs.
+
+    Empty layers are skipped, so a tile that only carries footprints (or only
+    centroids) holds just the one layer. Returns the uncompressed protobuf bytes
+    of the ``Tile`` message.
+    """
     tile = bytearray()
-    tile += _uvarint((3 << 3) | 2) + _uvarint(len(layer)) + bytes(layer)  # layers
+    for layer_name, features in layers:
+        if not features:
+            continue
+        body = _encode_layer(layer_name, features)
+        tile += _uvarint((3 << 3) | 2) + _uvarint(len(body)) + body  # layers
     return bytes(tile)
 
 
@@ -335,6 +397,114 @@ def _item_point(item: UmbraItem) -> tuple[float, float] | None:
     return ((min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0)
 
 
+def _item_rings(item: UmbraItem) -> list[Ring] | None:
+    """An item's exterior footprint rings in lon/lat, or None if unusable.
+
+    Prefers the item's own polygon and falls back to the bbox rectangle — the
+    same order :meth:`UmbraItem.intersects_polygon` uses. A ring spanning more
+    than half the globe is dropped: an Umbra footprint is at most tens of
+    kilometres across, so such a span means the ring straddles the antimeridian,
+    where the lon/lat path is not the footprint (and would tile a world-wide row
+    of it). The centroid point is still written for those items.
+    """
+    rings = rings_from_geojson(item.geometry)
+    if rings is None:
+        rings = [bbox_ring(item.bbox)] if item.bbox is not None else []
+    usable = [r for r in rings if max(p[0] for p in r) - min(p[0] for p in r) <= 180.0]
+    return usable or None
+
+
+def _open_ring(ring: Ring) -> Ring:
+    """Drop a closed ring's repeated final position (MVT's ClosePath implies it)."""
+    return list(ring[:-1]) if len(ring) > 1 and ring[0] == ring[-1] else list(ring)
+
+
+def _clip_edge(ring: Ring, axis: int, bound: float, keep_ge: bool) -> Ring:
+    """Sutherland–Hodgman clip of ``ring`` against one axis-aligned half-plane."""
+
+    def inside(pt: tuple[float, float]) -> bool:
+        return pt[axis] >= bound if keep_ge else pt[axis] <= bound
+
+    out: Ring = []
+    for i, cur in enumerate(ring):
+        nxt = ring[(i + 1) % len(ring)]
+        cur_in, nxt_in = inside(cur), inside(nxt)
+        if cur_in:
+            out.append(cur)
+        if cur_in != nxt_in:
+            t = (bound - cur[axis]) / (nxt[axis] - cur[axis])
+            out.append((cur[0] + (nxt[0] - cur[0]) * t, cur[1] + (nxt[1] - cur[1]) * t))
+    return out
+
+
+def _clip_ring(ring: Ring, lo: float, hi: float) -> Ring:
+    """Clip ``ring`` to the square ``[lo, hi]`` in both axes (empty if outside).
+
+    Sutherland–Hodgman against a convex box: exact for the convex quadrilaterals
+    SAR footprints are, and for a concave ring it can only add a degenerate edge
+    along the box (which renders identically), never lose covered area.
+    """
+    clipped = ring
+    for axis, bound, keep_ge in ((0, lo, True), (0, hi, False), (1, lo, True), (1, hi, False)):
+        clipped = _clip_edge(clipped, axis, bound, keep_ge)
+        if not clipped:
+            return []
+    return clipped
+
+
+def _quantize_ring(ring: Ring) -> list[tuple[int, int]]:
+    """Round a ring to integer tile coordinates, dropping repeated positions."""
+    out: list[tuple[int, int]] = []
+    for x, y in ring:
+        pt = (int(round(x)), int(round(y)))
+        if not out or pt != out[-1]:
+            out.append(pt)
+    if len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    return out
+
+
+def _signed_area(ring: list[tuple[int, int]]) -> float:
+    """Twice the shoelace area; positive means clockwise in MVT's y-down space."""
+    total = 0
+    for i, (x1, y1) in enumerate(ring):
+        x2, y2 = ring[(i + 1) % len(ring)]
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
+
+
+def _tile_polygons(
+    rings: list[Ring], zoom: int
+) -> dict[tuple[int, int], list[list[tuple[int, int]]]]:
+    """Clip footprint ``rings`` into every tile they touch at ``zoom``.
+
+    Returns ``{(tile_x, tile_y): [ring, ...]}`` with each ring in that tile's
+    integer coordinate space (buffered past the extent, per :data:`_TILE_BUFFER`)
+    and wound clockwise, as the MVT spec requires of an exterior ring.
+    """
+    n = 1 << zoom
+    margin = _TILE_BUFFER / _EXTENT  # the buffer, in tiles
+    out: dict[tuple[int, int], list[list[tuple[int, int]]]] = {}
+    for ring in rings:
+        projected = [_lonlat_to_tile_fraction(lon, lat, zoom) for lon, lat in _open_ring(ring)]
+        xs = [p[0] for p in projected]
+        ys = [p[1] for p in projected]
+        x0 = max(int(math.floor(min(xs) - margin)), 0)
+        x1 = min(int(math.floor(max(xs) + margin)), n - 1)
+        y0 = max(int(math.floor(min(ys) - margin)), 0)
+        y1 = min(int(math.floor(max(ys) + margin)), n - 1)
+        for tx in range(x0, x1 + 1):
+            for ty in range(y0, y1 + 1):
+                local = [((fx - tx) * _EXTENT, (fy - ty) * _EXTENT) for fx, fy in projected]
+                quantized = _quantize_ring(_clip_ring(local, -_TILE_BUFFER, _EXTENT + _TILE_BUFFER))
+                if len(quantized) < 3:
+                    continue  # clipped away, or collapsed below a drawable ring
+                if _signed_area(quantized) < 0:
+                    quantized.reverse()
+                out.setdefault((tx, ty), []).append(quantized)
+    return out
+
+
 def _item_properties(item: UmbraItem) -> dict[str, Any]:
     """The lean string properties each tiled point carries (id, place, ...)."""
     dt = item.datetime
@@ -355,10 +525,12 @@ def build_pmtiles(
     min_zoom: int = 0,
     max_zoom: int = 9,
     layer_name: str = "acquisitions",
+    footprints: bool = True,
+    footprint_min_zoom: int = FOOTPRINT_MIN_ZOOM,
     name: str = "Umbra open-data catalog",
     description: str | None = None,
 ) -> bytes:
-    """Build a single-file PMTiles archive of the catalog's acquisition centroids.
+    """Build a single-file PMTiles archive of the catalog's acquisitions.
 
     Parameters
     ----------
@@ -371,9 +543,18 @@ def build_pmtiles(
         The default ``0..9`` covers world view down to city scale, which is where
         SAR sites read individually; raise ``max_zoom`` for denser sites.
     layer_name:
-        The vector-tile source-layer name. The viewer's style references it, so
-        keep it in sync with :func:`build_viewer` (both default to
-        ``"acquisitions"``).
+        The vector-tile source-layer name of the centroid points. The viewer's
+        style references it, so keep it in sync with :func:`build_viewer` (both
+        default to ``"acquisitions"``).
+    footprints:
+        Also tile each acquisition's footprint *polygon* into the
+        :data:`FOOTPRINT_LAYER` layer, clipped to each tile it touches, so a
+        zoomed-in map shows coverage shape rather than a marker. Pass ``False``
+        for a centroids-only archive (smaller, what earlier versions wrote).
+    footprint_min_zoom:
+        Lowest zoom carrying footprint polygons (default
+        :data:`FOOTPRINT_MIN_ZOOM`). Below it a footprint is sub-pixel, so the
+        polygons would only inflate the low-zoom tiles a viewer loads first.
     name, description:
         Metadata recorded in the archive (surfaced by PMTiles-aware tooling).
 
@@ -383,7 +564,16 @@ def build_pmtiles(
     if min_zoom < 0 or max_zoom < min_zoom or max_zoom > 26:
         raise ValueError("require 0 <= min_zoom <= max_zoom <= 26")
 
-    points = [(pt, _item_properties(i)) for i in items if (pt := _item_point(i)) is not None]
+    points: list[tuple[tuple[float, float], dict[str, Any]]] = []
+    outlines: list[tuple[list[Ring], dict[str, Any]]] = []
+    for item in items:
+        point = _item_point(item)
+        if point is None:
+            continue
+        props = _item_properties(item)
+        points.append((point, props))
+        if footprints and (rings := _item_rings(item)) is not None:
+            outlines.append((rings, props))
     if not points:
         raise ValueError("no items with a footprint to tile")
 
@@ -393,7 +583,7 @@ def build_pmtiles(
     center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
 
     # Bucket every point into the tile that holds it at each zoom.
-    tiles: dict[tuple[int, int, int], list[tuple[int, int, dict[str, Any]]]] = {}
+    tiles: dict[tuple[int, int, int], dict[str, list[_Feature]]] = {}
     for (lon, lat), props in points:
         for zoom in range(min_zoom, max_zoom + 1):
             fx, fy = _lonlat_to_tile_fraction(lon, lat, zoom)
@@ -402,7 +592,17 @@ def build_pmtiles(
             ty = min(int(fy), n - 1)
             px = min(max(int(round((fx - tx) * _EXTENT)), 0), _EXTENT)
             py = min(max(int(round((fy - ty) * _EXTENT)), 0), _EXTENT)
-            tiles.setdefault((zoom, tx, ty), []).append((px, py, props))
+            layers = tiles.setdefault((zoom, tx, ty), {})
+            layers.setdefault(layer_name, []).append(_Feature(1, [[(px, py)]], props))
+
+    # Clip each footprint into every tile it touches, from footprint_min_zoom up.
+    footprint_zoom = max(min_zoom, footprint_min_zoom)
+    has_footprints = bool(outlines) and footprint_zoom <= max_zoom
+    for rings, props in outlines:
+        for zoom in range(footprint_zoom, max_zoom + 1):
+            for (tx, ty), polygons in _tile_polygons(rings, zoom).items():
+                layers = tiles.setdefault((zoom, tx, ty), {})
+                layers.setdefault(FOOTPRINT_LAYER, []).append(_Feature(3, polygons, props))
 
     # Encode each tile, compress, and deduplicate identical contents. Walk tiles
     # in Hilbert (tile_id) order so the data section stays clustered.
@@ -411,7 +611,16 @@ def build_pmtiles(
     entries: list[tuple[int, int, int, int]] = []
     seen: dict[bytes, tuple[int, int]] = {}
     for (zoom, tx, ty), feats in ordered:
-        blob = _gzip(_encode_mvt(feats, layer_name))
+        # A fixed layer order keeps identical content byte-identical (so the
+        # dedup below catches it) regardless of which layer a tile saw first.
+        blob = _gzip(
+            _encode_mvt(
+                [
+                    (layer_name, feats.get(layer_name, [])),
+                    (FOOTPRINT_LAYER, feats.get(FOOTPRINT_LAYER, [])),
+                ]
+            )
+        )
         digest = hashlib.sha256(blob).digest()
         if digest in seen:
             offset, length = seen[digest]
@@ -422,29 +631,43 @@ def build_pmtiles(
         entries.append((zxy_to_tileid(zoom, tx, ty), offset, length, 1))
 
     directory = _gzip(_serialize_directory(entries))
+    fields = {
+        "id": "String",
+        "place": "String",
+        "product": "String",
+        "date": "String",
+        "platform": "String",
+        "stac_href": "String",
+    }
+    vector_layers = [
+        {
+            "id": layer_name,
+            "description": "One point per Umbra open-data acquisition.",
+            "minzoom": min_zoom,
+            "maxzoom": max_zoom,
+            "fields": dict(fields),
+        }
+    ]
+    if has_footprints:
+        vector_layers.append(
+            {
+                "id": FOOTPRINT_LAYER,
+                "description": "One clipped footprint polygon per Umbra open-data acquisition.",
+                "minzoom": footprint_zoom,
+                "maxzoom": max_zoom,
+                "fields": dict(fields),
+            }
+        )
     metadata = _gzip(
         json.dumps(
             {
                 "name": name,
-                "description": description or f"{name} — acquisition footprint centroids.",
+                "description": description
+                or f"{name} — acquisition centroids"
+                + (" and footprints." if has_footprints else "."),
                 "attribution": ATTRIBUTION,
                 "type": "overlay",
-                "vector_layers": [
-                    {
-                        "id": layer_name,
-                        "description": "One point per Umbra open-data acquisition.",
-                        "minzoom": min_zoom,
-                        "maxzoom": max_zoom,
-                        "fields": {
-                            "id": "String",
-                            "place": "String",
-                            "product": "String",
-                            "date": "String",
-                            "platform": "String",
-                            "stac_href": "String",
-                        },
-                    }
-                ],
+                "vector_layers": vector_layers,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -541,9 +764,12 @@ def build_viewer(
     ``pmtiles_url`` is the location of the archive relative to the page (e.g.
     ``"catalog.pmtiles"``) or an absolute URL; the page reads it by range
     request via the pinned ``pmtiles`` protocol plugin and draws every
-    acquisition as a circle over an OpenStreetMap basemap, with a click popup and
-    the mandatory CC-BY attribution. ``layer_name`` must match the archive's
-    source-layer (:func:`build_pmtiles`' default is ``"acquisitions"``).
+    acquisition as a circle over an OpenStreetMap basemap — plus its footprint
+    outline where the archive carries one (:data:`FOOTPRINT_LAYER`, written from
+    :data:`FOOTPRINT_MIN_ZOOM` up) — with a click popup and the mandatory CC-BY
+    attribution. ``layer_name`` must match the archive's point source-layer
+    (:func:`build_pmtiles`' default is ``"acquisitions"``); a centroids-only
+    archive simply draws no outlines.
     """
     from html import escape
 
@@ -551,6 +777,7 @@ def build_viewer(
         {
             "pmtiles": pmtiles_url,
             "layer": layer_name,
+            "footprintLayer": FOOTPRINT_LAYER,
             "attribution": ATTRIBUTION,
         },
         separators=(",", ":"),
@@ -593,6 +820,23 @@ const map = new maplibregl.Map({
     },
     layers: [
       { id: "osm", type: "raster", source: "osm" },
+      // Coverage shape, from the footprint polygons the archive carries at the
+      // deeper zooms. An archive written without them simply has no features
+      // here, so these two layers draw nothing and the circles stand alone.
+      {
+        id: "acq-fill",
+        type: "fill",
+        source: "umbra",
+        "source-layer": CFG.footprintLayer,
+        paint: { "fill-color": "#e6194b", "fill-opacity": 0.15 },
+      },
+      {
+        id: "acq-outline",
+        type: "line",
+        source: "umbra",
+        "source-layer": CFG.footprintLayer,
+        paint: { "line-color": "#e6194b", "line-width": 1.2, "line-opacity": 0.9 },
+      },
       {
         id: "acq",
         type: "circle",
@@ -615,8 +859,13 @@ const map = new maplibregl.Map({
 map.addControl(new maplibregl.NavigationControl(), "top-left");
 map.addControl(new maplibregl.AttributionControl({ customAttribution: CFG.attribution }));
 
-map.on("click", "acq", (e) => {
-  const f = e.features && e.features[0];
+const CLICKABLE = ["acq", "acq-fill"];
+
+// One handler over both layers: a centroid sits on top of its own footprint, so
+// per-layer handlers would open two identical popups on the same click.
+map.on("click", (e) => {
+  const layers = CLICKABLE.filter((l) => map.getLayer(l));
+  const f = map.queryRenderedFeatures(e.point, { layers })[0];
   if (!f) return;
   const p = f.properties || {};
   const div = document.createElement("div");
@@ -642,8 +891,12 @@ map.on("click", "acq", (e) => {
   new maplibregl.Popup().setLngLat(e.lngLat).setDOMContent(div).addTo(map);
 });
 
-map.on("mouseenter", "acq", () => (map.getCanvas().style.cursor = "pointer"));
-map.on("mouseleave", "acq", () => (map.getCanvas().style.cursor = ""));
+// The centroid and its footprint carry the same properties, so hovering either
+// promises the same popup -- and at high zoom the polygon is the easier target.
+for (const id of CLICKABLE) {
+  map.on("mouseenter", id, () => (map.getCanvas().style.cursor = "pointer"));
+  map.on("mouseleave", id, () => (map.getCanvas().style.cursor = ""));
+}
 """
 
 _VIEWER_TEMPLATE = """<!DOCTYPE html>

@@ -54,11 +54,14 @@ Design, deliberately in the repo's grain:
   expressions evaluated inside the tiles. This is the ``DEMO_APP_GAPS.md`` Path A
   follow-on that collapses the showcase's separate whole-catalog *map* and
   interactive *explorer* into one page (``umbra showcase --unified``). The
-  trade is honest and documented: vector tiles carry acquisition centroids and
-  their lean metadata, not footprint polygons or per-asset COG URLs, so the
-  footprint outline and the on-click "Get SAR image" overlay are features of the
-  embedded-slice mode only — a server-backed build still leads the detail panel
-  with the baked thumbnail, and "Analyze this view" still works.
+  archive carries each acquisition twice — a centroid at every zoom and its
+  clipped **footprint polygon** at the deeper ones — so the page draws coverage
+  shape as you zoom in, filtered by the same expression as the markers and
+  clickable to the same detail panel. The one honest remaining trade: tiles carry
+  lean metadata, not per-asset COG URLs, so the on-click "Get SAR image" overlay
+  is a feature of the embedded-slice mode only — a server-backed build still
+  leads the detail panel with the baked thumbnail, and "Analyze this view" still
+  works.
 
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
@@ -234,14 +237,16 @@ def build_demo(
         draws **every** acquisition in that archive from vector tiles read by
         range request, instead of the embedded ``items`` slice: the page stays a
         few kilobytes whatever the catalog's size, and the sidebar filters run as
-        MapLibre expressions over the tiles. ``items``, ``asset``,
-        ``lazy_imagery`` and ``percentile`` do not apply in this mode (tiles
-        carry centroids and lean metadata, not footprints or COG URLs);
+        MapLibre expressions over the tiles. Footprint outlines are drawn from
+        the archive's :data:`umbra_py.pmtiles.FOOTPRINT_LAYER` polygons where it
+        carries them (a centroids-only archive just shows the markers).
+        ``items``, ``asset``, ``lazy_imagery`` and ``percentile`` do not apply in
+        this mode (tiles carry lean metadata, not per-asset COG URLs);
         ``server_url`` still does. ``None`` (default) keeps the embedded-slice
         Leaflet page unchanged.
     pmtiles_layer:
-        Source-layer name inside the archive. Must match the one it was written
-        with (:func:`umbra_py.pmtiles.build_pmtiles` defaults to
+        Source-layer name of the archive's centroid points. Must match the one it
+        was written with (:func:`umbra_py.pmtiles.build_pmtiles` defaults to
         ``"acquisitions"``, as does this).
 
     Returns the HTML as a string; use :func:`save_demo` to write it to disk.
@@ -324,6 +329,13 @@ def _build_pmtiles_demo(
     start empty (unbounded) instead of framing a sample's extent, which would
     silently hide most of the archive behind a default filter.
     """
+    from .pmtiles import (  # noqa: PLC0415
+        FOOTPRINT_LAYER,
+        MAPLIBRE_CSS,
+        MAPLIBRE_JS,
+        PMTILES_JS,
+    )
+
     config = {
         "title": title,
         "subtitle": subtitle,
@@ -332,10 +344,9 @@ def _build_pmtiles_demo(
         "serverUrl": server_url or None,
         "pmtilesUrl": pmtiles_url,
         "pmtilesLayer": layer,
+        "pmtilesFootprintLayer": FOOTPRINT_LAYER,
     }
     config_json = json.dumps(config, separators=(",", ":")).replace("</", "<\\/")
-
-    from .pmtiles import MAPLIBRE_CSS, MAPLIBRE_JS, PMTILES_JS  # noqa: PLC0415
 
     return _PAGE_TEMPLATE.format(
         title=escape(title),
@@ -762,7 +773,10 @@ _PMTILES_APP_JS = """
 (function () {
   var CFG = window.UMBRA_DEMO || {};
   var LAYER = CFG.pmtilesLayer || 'acquisitions';
+  var FOOTPRINT_LAYER = CFG.pmtilesFootprintLayer || 'footprints';
   var LAYER_ID = 'umbra-acq';
+  var FILL_ID = 'umbra-footprint-fill';
+  var OUTLINE_ID = 'umbra-footprint-line';
 
   var protocol = new pmtiles.Protocol();
   maplibregl.addProtocol('pmtiles', protocol.tile);
@@ -782,6 +796,23 @@ _PMTILES_APP_JS = """
       },
       layers: [
         { id: 'osm', type: 'raster', source: 'osm' },
+        // Coverage shape from the archive's footprint polygons (written at the
+        // deeper zooms). A centroids-only archive has no features here, so these
+        // draw nothing and the page is exactly the circles-only one it was.
+        {
+          id: FILL_ID,
+          type: 'fill',
+          source: 'umbra',
+          'source-layer': FOOTPRINT_LAYER,
+          paint: { 'fill-color': '#e6194b', 'fill-opacity': 0.15 }
+        },
+        {
+          id: OUTLINE_ID,
+          type: 'line',
+          source: 'umbra',
+          'source-layer': FOOTPRINT_LAYER,
+          paint: { 'line-color': '#e6194b', 'line-width': 1.2, 'line-opacity': 0.9 }
+        },
         {
           id: LAYER_ID,
           type: 'circle',
@@ -841,7 +872,13 @@ _PMTILES_APP_JS = """
 
   function applyFilter() {
     if (!map.getLayer(LAYER_ID)) return;
-    map.setFilter(LAYER_ID, filterExpression());
+    var expr = filterExpression();
+    // Every layer reads the same properties, so one expression filters the
+    // markers and their outlines together -- a hidden scene must not leave its
+    // footprint drawn.
+    [LAYER_ID, FILL_ID, OUTLINE_ID].forEach(function (id) {
+      if (map.getLayer(id)) map.setFilter(id, expr);
+    });
     // The filter takes effect on the next frame, so read the view after it.
     map.once('render', scheduleRefresh);
   }
@@ -875,10 +912,9 @@ _PMTILES_APP_JS = """
   }
 
   // --- detail panel ---
-  // Vector tiles carry the acquisition centroid and its lean metadata, so this
-  // panel is the slice app's minus the fields tiles do not encode (footprint
-  // polygon, polarizations, per-asset COG URLs -- hence no "Get SAR image"
-  // button here).
+  // Vector tiles carry the acquisition's geometry and its lean metadata, so this
+  // panel is the slice app's minus the fields tiles do not encode
+  // (polarizations, per-asset COG URLs -- hence no "Get SAR image" button here).
   function showDetail(p) {
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
@@ -906,12 +942,16 @@ _PMTILES_APP_JS = """
     }
   }
 
-  map.on('click', LAYER_ID, function (e) {
-    var f = e.features && e.features[0];
-    if (f) showDetail(f.properties || {});
+  // A centroid and its footprint carry the same properties, so clicking either
+  // opens the same detail -- and zoomed in, the polygon is the easier target.
+  [LAYER_ID, FILL_ID].forEach(function (id) {
+    map.on('click', id, function (e) {
+      var f = e.features && e.features[0];
+      if (f) showDetail(f.properties || {});
+    });
+    map.on('mouseenter', id, function () { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', id, function () { map.getCanvas().style.cursor = ''; });
   });
-  map.on('mouseenter', LAYER_ID, function () { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', LAYER_ID, function () { map.getCanvas().style.cursor = ''; });
 
   // --- wire controls (the same sidebar ids the slice app uses) ---
   var textInput = document.getElementById('umbra-text');

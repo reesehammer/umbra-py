@@ -26,6 +26,7 @@ from .export import export_geoparquet
 from .geocode import geocode_place
 from .index import CatalogIndex, default_index_path
 from .models import UmbraItem
+from .pmtiles import FOOTPRINT_MIN_ZOOM
 from .viz import (
     save_change_animation,
     save_change_composite,
@@ -2812,9 +2813,10 @@ def gallery(
     "'umbra tiles' / 'umbra tiles --fetch'). The explorer then draws EVERY "
     "acquisition in that archive from vector tiles read on demand instead of an "
     "embedded search slice -- the whole-archive explorer, in a page that stays a "
-    "few KB. The search options don't apply in this mode (filter in the page "
-    "instead), and tiles carry no footprints or COG URLs, so the footprint "
-    "outline and the 'Get SAR image' overlay are embedded-slice features.",
+    "few KB. Footprint outlines come from the archive's footprint polygons where "
+    "it carries them. The search options don't apply in this mode (filter in the "
+    "page instead), and tiles carry no per-asset COG URLs, so the 'Get SAR image' "
+    "overlay stays an embedded-slice feature.",
 )
 @_local_index_options
 @_fuzzy_option
@@ -3032,6 +3034,22 @@ def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_p
     "read individually; raise it for denser sites at the cost of a larger file.",
 )
 @click.option(
+    "--footprints/--no-footprints",
+    default=True,
+    show_default=True,
+    help="Also tile each acquisition's footprint polygon (clipped per tile) so a "
+    "zoomed-in map shows coverage shape, not just a marker. --no-footprints "
+    "writes a smaller centroids-only archive.",
+)
+@click.option(
+    "--footprint-min-zoom",
+    type=int,
+    default=FOOTPRINT_MIN_ZOOM,
+    show_default=True,
+    help="Lowest zoom carrying footprint polygons. Below it a footprint is "
+    "sub-pixel, so tiling it only inflates the tiles a viewer loads first.",
+)
+@click.option(
     "--viewer",
     "viewer_path",
     default=None,
@@ -3056,6 +3074,8 @@ def tiles(
     fetch_url,
     min_zoom,
     max_zoom,
+    footprints,
+    footprint_min_zoom,
     viewer_path,
     local,
     db_path,
@@ -3063,11 +3083,13 @@ def tiles(
     """Tile the whole catalog into a single-file PMTiles vector archive.
 
     Where 'umbra map' and 'umbra demo' embed every footprint in the page (great
-    up to a few thousand items), this pre-cuts the catalog's acquisition
-    centroids into a vector tile pyramid so a map fetches only the tiles in view
-    -- the fast, zoom-anywhere whole-archive answer. The output is one .pmtiles
-    file: drop it on GitHub Pages or in a bucket, no tile server. With --viewer
-    it also writes a MapLibre GL page that renders it.
+    up to a few thousand items), this pre-cuts the catalog into a vector tile
+    pyramid so a map fetches only the tiles in view -- the fast, zoom-anywhere
+    whole-archive answer. Each acquisition is tiled as a centroid at every zoom
+    and (unless --no-footprints) as its clipped footprint polygon from
+    --footprint-min-zoom down, so zooming in shows coverage shape. The output is
+    one .pmtiles file: drop it on GitHub Pages or in a bucket, no tile server.
+    With --viewer it also writes a MapLibre GL page that renders it.
 
     Skip the tiling entirely with --fetch: the weekly index workflow publishes a
     ready-made whole-catalog 'catalog.pmtiles' on the catalog-index release, so a
@@ -3116,7 +3138,14 @@ def tiles(
         raise click.ClickException("No items matched the search.")
 
     with OrbitSpinner(f"Tiling {len(items)} acquisition(s) (z{min_zoom}-z{max_zoom})"):
-        path = write_pmtiles(items, out_path, min_zoom=min_zoom, max_zoom=max_zoom)
+        path = write_pmtiles(
+            items,
+            out_path,
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+            footprints=footprints,
+            footprint_min_zoom=footprint_min_zoom,
+        )
     size_mb = path.stat().st_size / 1e6
     click.echo(f"Wrote PMTiles archive of {len(items)} acquisition(s) to {path} ({size_mb:.2f} MB)")
 

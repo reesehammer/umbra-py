@@ -149,9 +149,11 @@ it, none a blocker:
   explorer covering the whole catalog with the filters. `docs.yml` builds the
   hosted showcase this way. Dropping `--unified` still gives the original pair,
   which remains the right build when you want the slice's footprint outlines and
-  on-click COG overlay. Remaining optional polish: the non-unified build is the
-  only one that shows footprints, so tiling polygons (see the PMTiles section)
-  would close the last gap between the two.
+  on-click COG overlay. ~~Remaining optional polish: the non-unified build is the
+  only one that shows footprints, so tiling polygons would close the last gap
+  between the two.~~ ✅ **Done** — the archive now carries footprint polygons (see
+  the PMTiles section), so the unified explorer draws outlines too; the pair's one
+  remaining extra is the on-click "Get SAR image" COG overlay.
 
 ---
 
@@ -160,9 +162,10 @@ it, none a blocker:
 - **Surfaced in:** the `umbra tiles` PR (`docs/DEMO_APP_GAPS.md` Path A step 3).
 - **Code:** `src/umbra_py/pmtiles.py`, `umbra tiles` in `cli.py`.
 
-`umbra tiles` (a stdlib-only PMTiles v3 writer over acquisition centroids + a
-MapLibre GL viewer, no extra, no tippecanoe) is shipped, closing the demo's
-full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
+`umbra tiles` (a stdlib-only PMTiles v3 writer over acquisition centroids *and*
+footprint polygons + a MapLibre GL viewer, no extra, no tippecanoe) is shipped,
+closing the demo's full-acquisition-set tiling gap. Follow-ons that build on it,
+none a blocker:
 
 - ~~**Wire the PMTiles source into `umbra demo`.**~~ ✅ **Done** (`umbra demo
   --pmtiles PATH-OR-URL` / `build_demo(pmtiles_url=…)`, and the one-page `umbra
@@ -175,8 +178,10 @@ full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
   "a missing date never fails a date filter"); the detail rows, the baked
   thumbnail preview and the "Analyze this view" panel moved into one shared,
   map-engine-agnostic script both explorers drive, so the two modes cannot drift.
-  Vector tiles carry centroids and lean metadata, so the footprint outline and the
-  on-click "Get SAR image" overlay remain embedded-slice features — documented,
+  ~~Vector tiles carry centroids and lean metadata, so the footprint outline and
+  the on-click "Get SAR image" overlay remain embedded-slice features~~ — the
+  outline shipped with the footprint layer below; tiles still carry no per-asset
+  COG URLs, so "Get SAR image" stays an embedded-slice feature — documented,
   not silent. `--pmtiles` with a search option is a hard error rather than a
   quietly unfiltered page. Offline-tested in `tests/test_demo.py` and
   `tests/test_showcase.py`; the generated page was also exercised in a real
@@ -186,10 +191,26 @@ full-acquisition-set tiling gap. Follow-ons that build on it, none a blocker:
   tiles). If the tile count ever grows past a comfortable root-directory size,
   add leaf-directory splitting (the PMTiles spec's mechanism) so readers still
   fetch a small root first.
-- **Tile polygons, not just centroids.** Points are what a whole-catalog overview
-  needs; tiling the actual footprints (clipping polygons to tile boundaries)
-  would let the viewer show coverage shape at high zoom — more encoder work
-  (clipping, MoveTo/LineTo/ClosePath commands) for a niche gain.
+- ~~**Tile polygons, not just centroids.**~~ ✅ **Done** (the `footprints`
+  source-layer / `pmtiles.FOOTPRINT_LAYER`, `umbra tiles --no-footprints` /
+  `--footprint-min-zoom`). A centroid tells you a scene exists but not what it
+  covers, and the outline was the last thing the embedded-slice explorer had over
+  the whole-archive one. `build_pmtiles` now writes each acquisition twice: its
+  centroid in `acquisitions` at every zoom, and its footprint polygon — clipped to
+  each tile it touches — in `footprints` from `FOOTPRINT_MIN_ZOOM` (6) up, where a
+  footprint first spans more than a pixel (keeping the low-zoom tiles every
+  visitor loads first centroid-only). `umbra demo --pmtiles` and `build_viewer`
+  draw it as a fill + outline; in the explorer one filter expression drives the
+  markers and outlines together and clicking a polygon opens the same detail panel
+  as its centroid. Still stdlib-only: the MVT polygon command stream, a
+  Sutherland–Hodgman clip against the buffered tile box, and the spec's clockwise
+  exterior winding are a few pure functions, verified by decoding the archive's
+  own output back into rings (and cross-checked once against an independent MVT
+  decoder). A ring spanning more than half the globe (an antimeridian-wrapping
+  bbox) keeps its centroid and is not tiled. `--no-footprints` writes the previous
+  centroids-only archive, and the metadata advertises only the layers actually
+  present, so an older archive draws no outlines rather than erroring.
+  Offline-tested in `tests/test_pmtiles.py` and `tests/test_demo.py`.
 
 ---
 

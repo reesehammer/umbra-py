@@ -7,6 +7,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Footprint polygons in the whole-catalog vector tiles — coverage shape in the
+  hosted explorer (`TODO.md` "Tile polygons, not just centroids" /
+  `STRATEGY.md` §8 demo polish).** `umbra tiles` tiled one *centroid* per
+  acquisition, so the whole-archive explorer (`umbra demo --pmtiles`, what
+  `umbra showcase --unified` deploys) could only ever draw a marker — zooming in
+  never revealed *what a scene covers*, and the embedded-slice explorer's
+  footprint outline was the one thing it still had over the whole-archive one.
+  `build_pmtiles` now writes each acquisition **twice**: its centroid in the
+  `acquisitions` layer at every zoom, and its footprint polygon — clipped to
+  every tile it touches — in a new `footprints` layer from
+  `FOOTPRINT_MIN_ZOOM` (6) up, where a footprint first spans more than a pixel.
+  Both explorers draw the new layer as a translucent fill plus an outline: in
+  `umbra demo --pmtiles` the sidebar's one filter expression drives the markers
+  and the outlines together (a hidden scene cannot leave its footprint drawn) and
+  clicking a polygon opens the same detail panel as clicking its centroid, and
+  `build_viewer`'s minimal page gets the same fill/outline pair and popup. The
+  encoder stays **stdlib-only** — no tippecanoe, no geometry dependency: the MVT
+  polygon command stream (MoveTo / LineTo / ClosePath), Sutherland–Hodgman
+  clipping against the buffered tile box, and the clockwise exterior-ring winding
+  the spec requires are all a few pure functions, and the archive is verified by
+  decoding its own output back into rings. A footprint spanning more than half the
+  globe (a bbox wrapping the antimeridian, where the lon/lat ring is not the
+  footprint) keeps its centroid and is not tiled, rather than painting a
+  world-wide row. `umbra tiles --no-footprints` writes the previous
+  centroids-only archive, and `--footprint-min-zoom` moves the threshold; the
+  archive metadata advertises whichever layers are actually present, so an older
+  centroids-only archive simply draws no outlines in the new viewers. Offline
+  tested in `tests/test_pmtiles.py` (polygon + property round trip through a
+  full geometry decoder, the min-zoom boundary, seam clipping into both tiles,
+  winding regardless of input order, the antimeridian guard, metadata, CLI) and
+  `tests/test_demo.py`; the encoded tiles were also cross-checked against an
+  independent MVT decoder.
 - **Whole-archive interactive explorer — `umbra demo --pmtiles` and the one-page
   `umbra showcase --unified` (`DEMO_APP_GAPS.md` Path A / `STRATEGY.md` §8 demo
   polish).** The explorer and the whole-catalog map were separate artifacts for a

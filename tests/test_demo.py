@@ -372,6 +372,24 @@ def test_build_demo_pmtiles_mode_wires_the_server_panels():
     assert _config(static)["serverUrl"] is None
 
 
+def test_build_demo_pmtiles_mode_draws_the_footprint_polygons():
+    """The archive carries footprint polygons at the deeper zooms, so the page
+    draws coverage shape -- filtered with, and clickable like, the markers."""
+    from umbra_py.pmtiles import FOOTPRINT_LAYER
+
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert _config(html)["pmtilesFootprintLayer"] == FOOTPRINT_LAYER
+    # A fill (the click target) and an outline layer over the footprint layer.
+    assert "umbra-footprint-fill" in html
+    assert "umbra-footprint-line" in html
+    assert "'fill'" in html and "'line'" in html
+    # One filter expression drives markers and outlines together: a scene hidden
+    # by the sidebar must not leave its footprint drawn.
+    assert "[LAYER_ID, FILL_ID, OUTLINE_ID].forEach" in html
+    # Clicking the polygon opens the same detail panel as clicking the centroid.
+    assert "[LAYER_ID, FILL_ID].forEach" in html
+
+
 def test_build_demo_pmtiles_layer_is_configurable():
     cfg = _config(demo.build_demo([], pmtiles_url="c.pmtiles", pmtiles_layer="scenes"))
     assert cfg["pmtilesLayer"] == "scenes"
