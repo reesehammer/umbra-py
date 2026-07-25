@@ -66,7 +66,15 @@ from .geoid import (
 )
 from .index import CatalogIndex, UpdateResult, default_index_path
 from .llms_txt import llms_full_txt, llms_txt
-from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_to_geotiff, to_geotiff, to_stack, to_xarray
+from .load import (
+    STACK_AUTO_CRS,
+    STACK_EXTENTS,
+    stack_stats,
+    stack_to_geotiff,
+    to_geotiff,
+    to_stack,
+    to_xarray,
+)
 from .models import ItemCollection, UmbraItem
 from .narrate import (
     ChangeNarration,
@@ -144,6 +152,7 @@ __all__ = [
     "to_geotiff",
     "to_stack",
     "stack_to_geotiff",
+    "stack_stats",
     "STACK_AUTO_CRS",
     "STACK_EXTENTS",
     "sicd_to_amplitude_geotiff",

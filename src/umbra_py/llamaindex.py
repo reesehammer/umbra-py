@@ -71,6 +71,7 @@ from .mcp_server import (  # noqa: F401 - re-exported for direct use
     index_stats,
     narrate_change,
     search_catalog,
+    stack_stats,
     watch_site,
 )
 
@@ -184,14 +185,16 @@ def timescan(
 
 
 # The JSON-returning tools, shared verbatim with the MCP server (compact context
-# cards, geocoding, index status, downloads, standing watch, similarity search,
-# and the two opt-in VLM readings). Each gates its own optional key/index at call
-# time with a helpful error, so all are safe to register unconditionally.
+# cards, geocoding, index status, time-series statistics, downloads, standing
+# watch, similarity search, and the two opt-in VLM readings). Each gates its own
+# optional key/index at call time with a helpful error, so all are safe to
+# register unconditionally.
 _JSON_TOOLS = (
     search_catalog,
     get_item,
     geocode_place,
     index_stats,
+    stack_stats,
     download_asset,
     watch_site,
     find_similar,
@@ -238,6 +241,7 @@ __all__ = [
     "get_item",
     "geocode_place",
     "index_stats",
+    "stack_stats",
     "download_asset",
     "watch_site",
     "find_similar",

@@ -35,6 +35,7 @@ _EXPECTED_NAMES = {
     "get_item",
     "geocode_place",
     "index_stats",
+    "stack_stats",
     "download_asset",
     "watch_site",
     "find_similar",
@@ -95,6 +96,9 @@ def test_json_tools_are_the_same_callables_as_mcp():
     assert lc.search_catalog is ms.search_catalog
     assert lc.get_item is ms.get_item
     assert lc.watch_site is ms.watch_site
+    # stack_stats is deterministic arithmetic returning JSON, so it needs no
+    # native reimplementation the way the image tools do.
+    assert lc.stack_stats is ms.stack_stats
     # narrate_change is the C2 change-narration tool -- the last MCP tool to reach
     # the agent surfaces; it is the same callable here (no drift), not re-wrapped.
     assert lc.narrate_change is ms.narrate_change

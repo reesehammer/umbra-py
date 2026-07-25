@@ -58,6 +58,7 @@ def test_build_server_registers_expected_surface():
         "quicklook",
         "change_composite",
         "timescan",
+        "stack_stats",
         "download_asset",
         "watch_site",
         "find_similar",
@@ -71,6 +72,7 @@ def test_build_server_registers_expected_surface():
     assert prompts == {
         "monitor-site",
         "watch-site",
+        "quantify-change",
         "find-similar-scenes",
         "describe-scene",
         "narrate-change",
@@ -272,6 +274,85 @@ def test_change_composite_refuses_mixed_polarization(sample_item_dict):
     )
     with pytest.raises(ValueError, match="polarization"):
         ms.change_composite([vv_url, hh_url])
+
+
+@responses.activate
+def test_stack_stats_measures_the_series_in_numbers(sample_item_dict, monkeypatch):
+    """The quantitative counterpart to the render tools: JSON, no model, no image."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+
+    seen: dict = {}
+
+    def fake_to_stack(items, **kwargs):
+        seen.update(kwargs)
+        seen["items"] = list(items)
+        return _constant_cube()
+
+    monkeypatch.setattr(load, "to_stack", fake_to_stack)
+    out = ms.stack_stats([ITEM_URL, second_url], bbox=[1.0, 2.0, 3.0, 4.0])
+
+    # The agent surface asks for the projected grid and the decibel scale, so the
+    # areas it reports are equal-area and the deltas are radiometric.
+    assert seen["crs"] == "utm"
+    assert seen["db"] is True
+    assert seen["bbox"] == (1.0, 2.0, 3.0, 4.0)
+    assert len(seen["items"]) == 2
+    assert out["count"] == 2
+    assert out["net_change"]["mean_delta_db"] == pytest.approx(6.0206, abs=0.01)
+    assert out["net_change"]["changed_area_km2"] is not None
+    assert out["attribution"] == ms.ATTRIBUTION
+    assert out["caveats"]
+
+
+def _constant_cube():
+    """A tiny two-pass dB cube on a projected grid, built without any I/O."""
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+
+    values = np.stack([np.full((4, 4), 0.0), np.full((4, 4), 6.0206)]).astype("float32")
+    return xr.DataArray(
+        values,
+        dims=("time", "y", "x"),
+        coords={
+            "time": np.array(
+                ["2024-01-08T12:00:00", "2024-02-08T12:00:00"], dtype="datetime64[ns]"
+            ),
+            "y": [40.0, 30.0, 20.0, 10.0],
+            "x": [0.0, 10.0, 20.0, 30.0],
+            "item_id": ("time", ["a", "b"]),
+        },
+        attrs={
+            "crs": "EPSG:32633",
+            "transform": (10.0, 0.0, 0.0, 0.0, -10.0, 50.0),
+            "bounds": (0.0, 0.0, 40.0, 50.0),
+            "extent": "intersection",
+            "units": "dB",
+            "product_type": "GEC",
+        },
+    )
+
+
+@responses.activate
+def test_stack_stats_refuses_mixed_polarization_and_a_single_pass(sample_item_dict):
+    vv_url = ITEM_URL
+    hh_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, hh_url, json=_with_polarization(sample_item_dict, "HH"), status=200
+    )
+    with pytest.raises(ValueError, match="polarization"):
+        ms.stack_stats([vv_url, hh_url])
+    with pytest.raises(ValueError, match="at least two item URLs"):
+        ms.stack_stats([vv_url])
 
 
 @responses.activate

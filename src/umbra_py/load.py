@@ -629,6 +629,198 @@ def to_stack(
     )
 
 
+def _cell_area_m2(crs_name: str, xres: float, yres: float) -> float | None:
+    """Ground area of one cell in m², or ``None`` when cells aren't equal-area.
+
+    A geographic grid's cells shrink toward the poles, so counting them measures
+    nothing; only a projected CRS with known linear units yields an area (scaled
+    to metres, so a CRS in survey feet still answers in m²).
+    """
+    rasterio = _require("rasterio")
+
+    crs = rasterio.crs.CRS.from_user_input(crs_name)
+    if crs.is_geographic:
+        return None
+    factor = crs.linear_units_factor[1]
+    return abs(xres * yres) * factor * factor
+
+
+def _pair_change(
+    np: Any,
+    earlier_db: Any,
+    later_db: Any,
+    *,
+    threshold_db: float,
+    cell_area_m2: float | None,
+) -> dict[str, Any] | None:
+    """Signed backscatter change between two co-registered dB slices.
+
+    Only cells observed on *both* passes are compared, so ``extent="union"``
+    padding never reads as change. ``None`` when the two passes share no cell.
+    """
+    both = np.isfinite(earlier_db) & np.isfinite(later_db)
+    compared = int(both.sum())
+    if compared == 0:
+        return None
+    delta = later_db[both] - earlier_db[both]
+    brightened = int(np.count_nonzero(delta >= threshold_db))
+    dimmed = int(np.count_nonzero(delta <= -threshold_db))
+    changed = brightened + dimmed
+    return {
+        "compared_cells": compared,
+        "mean_delta_db": round(float(np.mean(delta)), 3),
+        "mean_abs_delta_db": round(float(np.mean(np.abs(delta))), 3),
+        "brightened_fraction": round(brightened / compared, 4),
+        "dimmed_fraction": round(dimmed / compared, 4),
+        "changed_fraction": round(changed / compared, 4),
+        "changed_area_km2": (
+            round(changed * cell_area_m2 / 1e6, 4) if cell_area_m2 is not None else None
+        ),
+    }
+
+
+def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict[str, Any]:
+    """Summarize a datacube's *time* axis as a JSON-ready statistics series.
+
+    The reporting companion to :func:`to_stack`: the cube itself is an array, but
+    the question a multi-date search is usually asking — *how did this site
+    change, and by how much?* — has a small numeric answer. This reduces the
+    ``(time, y, x)`` cube to one record per pass (distribution statistics plus
+    the signed change against the pass before it) and one net baseline → latest
+    record, all plain JSON so it fits a CLI print, a manifest, or an agent tool
+    result without carrying pixels around.
+
+    Complementary to :func:`~umbra_py.narrate.compute_change_stats`, which cuts
+    *two* passes into spatial blocks to say **where** change sits. This walks the
+    whole series to say **when** it happened and **how much** ground moved.
+
+    Parameters
+    ----------
+    cube:
+        A cube from :func:`to_stack` — dimensions ``("time", "y", "x")`` with the
+        ``item_id`` coordinate and ``crs`` / ``transform`` / ``units`` attributes
+        it sets. Slices must already be co-registered; nothing is re-gridded here.
+    change_threshold_db:
+        How many decibels a cell has to move between two passes to count as
+        changed. 3 dB (a doubling of backscatter power) is the same default
+        ``umbra change --narrate`` grounds its narration on.
+
+    Returns
+    -------
+    dict
+        ``{count, units, product_type, grid, passes, net_change,
+        change_threshold_db, license, attribution, caveats}``. Each entry in
+        ``passes`` carries ``item_id``, ``datetime``, ``valid_fraction`` and the
+        distribution of that pass (``mean``/``median``/``std``/``p5``/``p95``, in
+        the cube's own ``units``), plus ``change_vs_previous`` (``None`` for the
+        first pass). ``net_change`` compares the first pass to the last.
+
+        Change is **always** reported in decibels — a ratio of backscatter is a
+        difference on the log scale — whether the cube holds dB or linear
+        amplitude, so the numbers mean the same thing either way.
+        ``changed_area_km2`` is ``None`` unless the cube's grid is projected
+        (see :func:`to_stack`'s ``crs``), because counting geographic cells
+        measures nothing.
+    """
+    np = _require("numpy")
+
+    values = np.asarray(cube.values, dtype="float64")
+    if values.ndim != 3:
+        raise ValueError(f"stack_stats needs a (time, y, x) cube; got {values.ndim}D.")
+
+    units = str(cube.attrs.get("units", "amplitude"))
+    if units == "dB":
+        db_view = values
+    else:
+        # Change is a ratio of backscatter, i.e. a difference in dB, so a linear
+        # cube is compared on the log scale it should be compared on.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            db_view = np.where(values > 0, 20.0 * np.log10(values), np.nan)
+
+    xres, _, _, _, yres, _ = cube.attrs["transform"]
+    crs_name = str(cube.attrs["crs"])
+    area = _cell_area_m2(crs_name, xres, yres)
+    cells = values.shape[1] * values.shape[2]
+
+    stamps = [f"{str(t)[:19]}Z" for t in cube["time"].values]
+    ids = [str(v) for v in cube["item_id"].values]
+
+    passes: list[dict[str, Any]] = []
+    for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True)):
+        slab = values[i]
+        finite = np.isfinite(slab)
+        n_valid = int(finite.sum())
+        observed = slab[finite]
+        record: dict[str, Any] = {
+            "item_id": item_id,
+            "datetime": stamp,
+            "valid_cells": n_valid,
+            "valid_fraction": round(n_valid / cells, 4) if cells else 0.0,
+            "mean": round(float(np.mean(observed)), 3) if n_valid else None,
+            "median": round(float(np.median(observed)), 3) if n_valid else None,
+            "std": round(float(np.std(observed)), 3) if n_valid else None,
+            "p5": round(float(np.percentile(observed, 5)), 3) if n_valid else None,
+            "p95": round(float(np.percentile(observed, 95)), 3) if n_valid else None,
+            "change_vs_previous": (
+                _pair_change(
+                    np,
+                    db_view[i - 1],
+                    db_view[i],
+                    threshold_db=change_threshold_db,
+                    cell_area_m2=area,
+                )
+                if i
+                else None
+            ),
+        }
+        passes.append(record)
+
+    caveats = [
+        "Umbra's open products are not radiometrically calibrated, so decibel "
+        "values are relative: compare a cell to itself across dates, not to "
+        "another site or sensor.",
+        "A decibel change is a measurement, not an interpretation -- differing "
+        "look geometry between passes moves backscatter too.",
+    ]
+    if area is None:
+        caveats.append(
+            f"The cube's grid is geographic ({crs_name}), whose cells are not "
+            "equal-area, so no changed area is reported. Rebuild the cube with "
+            f"crs={STACK_AUTO_CRS!r} (or a projected CRS) to measure area."
+        )
+
+    return {
+        "count": len(passes),
+        "units": units,
+        "product_type": cube.attrs.get("product_type"),
+        "change_threshold_db": change_threshold_db,
+        "grid": {
+            "crs": crs_name,
+            "width": values.shape[2],
+            "height": values.shape[1],
+            "cell_size": [abs(float(xres)), abs(float(yres))],
+            "cell_area_m2": round(area, 4) if area is not None else None,
+            "bounds": [float(v) for v in cube.attrs["bounds"]],
+            "extent": cube.attrs.get("extent"),
+        },
+        "passes": passes,
+        "net_change": (
+            _pair_change(
+                np,
+                db_view[0],
+                db_view[-1],
+                threshold_db=change_threshold_db,
+                cell_area_m2=area,
+            )
+            if len(passes) > 1
+            else None
+        ),
+        "license": DATA_LICENSE,
+        "attribution": ATTRIBUTION,
+        "caveats": caveats,
+    }
+
+
 def stack_to_geotiff(
     items: Iterable[UmbraItem],
     dest: str | os.PathLike,
@@ -650,11 +842,21 @@ def stack_to_geotiff(
     the item ids carried in the file tags, so the time axis survives the trip
     into QGIS, GDAL or any GIS. Nodata is ``NaN``; deflate-compressed and tiled.
     """
+    cube = to_stack(items, asset=asset, bbox=bbox, max_size=max_size, db=db, extent=extent, crs=crs)
+    return _write_stack_geotiff(cube, dest)
+
+
+def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
+    """Write a :func:`to_stack` cube out as the multi-band GeoTIFF.
+
+    Split from :func:`stack_to_geotiff` so a caller that already holds the cube
+    (``umbra stack --stats``, which also measures it) writes the file without
+    stacking the series a second time.
+    """
     rasterio = _require("rasterio")
     _require("numpy")
     from affine import Affine  # noqa: PLC0415
 
-    cube = to_stack(items, asset=asset, bbox=bbox, max_size=max_size, db=db, extent=extent, crs=crs)
     data = cube.values
     stamps = [str(t)[:19] for t in cube["time"].values]
     ids = [str(v) for v in cube["item_id"].values]
@@ -680,7 +882,7 @@ def stack_to_geotiff(
         dst.update_tags(
             item_ids=",".join(ids),
             datetimes=",".join(stamps),
-            extent=extent,
+            extent=cube.attrs["extent"],
             # The resolved CRS, so a file built with crs="utm" says which zone.
             crs=cube.attrs["crs"],
             units=cube.attrs["units"],

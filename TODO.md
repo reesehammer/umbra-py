@@ -30,6 +30,15 @@ commands. It runs synchronously. Follow-ons that build on it, none a blocker:
   extras so nothing import-skips. If a maintainer only ever touches the core, a
   `[dev]`-only install (matching the core CI matrix) is faster; the full set is
   the deliberate default so the coverage-gated suite runs unabridged.
+- **`mypy` disagrees between the hook's environment and CI's.** Surfaced by the
+  `stack_stats` PR. CI's `type-check` job installs only `[dev]`, so Pillow is
+  absent and `[tool.mypy]`'s import-ignore covers it; the hook installs every
+  extra, so Pillow's stubs *are* checked and `viz.py:1706`'s `Image.ADAPTIVE`
+  reads as `[attr-defined]`. CI is green and the code is correct (`ADAPTIVE` is a
+  real Pillow constant the stubs place elsewhere), but every remote agent session
+  starts with one failing `mypy` line. Smallest fix: `cast` the constant or
+  narrow the ignore at that call site, so the documented dev loop is clean in
+  both environments.
 
 ---
 
@@ -780,10 +789,20 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
 - **A notebook in the gallery.** `examples/` has no stacking notebook; the
   natural one is "search a site → `to_stack` → baseline vs. latest → map the dB
   delta", self-checking like the rest and guarded by `tests/test_examples.py`.
-- **Surface it on the agent front doors.** `to_stack` returns numbers rather
-  than a picture, so it has no MCP / LangChain / LlamaIndex tool. A tool
-  returning summary statistics over the cube (rather than the cube itself) would
-  fit the "images/JSON are the API" boundary; the raw array does not.
+- ~~**Surface it on the agent front doors.**~~ ✅ **Done** (`umbra_py.stack_stats`
+  / `umbra stack --stats` / the `stack_stats` tool on MCP, LangChain and
+  LlamaIndex, plus the `quantify-change` MCP prompt). The raw array was never the
+  thing to hand a model; `stack_stats(cube)` reduces it to JSON — per-pass
+  distribution, the signed dB change against the previous pass, and a net
+  first-to-last record with `changed_area_km2` when the grid is projected — which
+  is what crossed the "images/JSON are the API" boundary. The agent tool defaults
+  to `crs="utm"` and the dB scale so the numbers are equal-area and radiometric
+  without the model choosing; the CLI reuses the same callable, with `--out` now
+  optional so `--stats` alone measures without writing. Offline-tested in
+  `tests/test_load.py` and `tests/test_mcp_server.py`. Follow-ons: nothing
+  reports a *spatial* breakdown over the whole series (`narrate.compute_change_stats`
+  blocks two passes; a per-block series would be the merge of the two), and
+  `umbra serve` has no `/stats` endpoint over the same reduction.
 
 ---
 

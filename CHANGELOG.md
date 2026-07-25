@@ -7,6 +7,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The datacube as an answer, not an array: `stack_stats` / `umbra stack
+  --stats` / the `stack_stats` agent tool (second follow-on of the datacube PR,
+  `TODO.md`; `STRATEGY.md` §7.5).** `to_stack` produced the co-registered cube
+  but left every consumer to reduce it themselves — and the reduction is where
+  the domain knowledge sits (mask the padding, compare on the log scale, refuse
+  to call a geographic cell count an area). Worse, the cube was invisible to the
+  agent front doors: `change_composite` and `timescan` could show a model *where*
+  a site changed, and nothing could tell it *how much*. `stack_stats(cube)` now
+  reduces a cube to plain JSON — one record per pass (`valid_fraction` plus
+  `mean`/`median`/`std`/`p5`/`p95` in the cube's own units) with the signed
+  change against the pass before it, and one net first-to-last record. Change is
+  **always** reported in decibels, whether the cube holds dB or linear
+  amplitude, because a ratio of backscatter is a difference on the log scale; a
+  cell counts as changed once it moves past `change_threshold_db` (3 dB, the
+  same default `umbra change --narrate` grounds its narration on), reported as
+  `brightened_fraction` / `dimmed_fraction` / `changed_fraction` and — only when
+  the cube's grid is projected — as `changed_area_km2`, so `--crs utm` is what
+  turns a count into a measurement and a lon/lat grid answers `None` rather than
+  something wrong. Only cells observed on *both* passes are compared, so
+  `extent="union"` padding can never read as change. The complement to
+  `narrate.compute_change_stats`, which blocks *two* passes spatially to say
+  where change sits: this walks the whole series to say when it happened and how
+  much ground moved. Every payload carries the CC-BY line and the caveats an
+  interpretation needs (the open products are not radiometrically calibrated, so
+  decibels are relative to the same ground on another date; look geometry moves
+  backscatter too). `umbra stack --stats` prints the object — and `--out` is now
+  optional, so `--stats` alone measures a site without writing a file, while
+  both together write the GeoTIFF *and* measure it from the one stack (the
+  "Wrote …" note moves to stderr so stdout stays a single parseable object, and
+  under `--json` the statistics ride inside the render manifest's new optional
+  `stats` field, see `docs/schemas/render-manifest.schema.json`). The same
+  callable is registered as the `stack_stats` tool on all three agent front
+  doors (MCP, LangChain, LlamaIndex) — defaulting to `crs="utm"` and the decibel
+  scale so an agent's numbers are equal-area and radiometric by construction,
+  refusing mixed polarizations like the render tools, and joined by a packaged
+  `quantify-change` MCP prompt that pairs the measurement with a timescan. No
+  model call anywhere in the path; offline-tested in `tests/test_load.py`
+  (hand-checkable 6.02 dB doublings, area on a projected grid vs. `None` on a
+  geographic one, thresholding, union overlap-only comparison, the CLI's three
+  output modes) and `tests/test_mcp_server.py`.
+
 - **A projected, equal-area datacube grid: `to_stack(crs=…)` / `umbra stack
   --crs` (first follow-on of the datacube PR, `TODO.md`).** `to_stack` built its
   shared grid in lon/lat, which is the right default — one grid works anywhere,

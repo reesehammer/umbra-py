@@ -295,6 +295,26 @@ multi-band GeoTIFF — one band per acquisition, each described by its timestamp
 for QGIS, GDAL, or anything that isn't Python. Where `umbra change` and
 `umbra timescan` render this comparison as a *picture*, this is the *numbers*.
 
+And when the answer you want *is* a number, `stack_stats` reduces the cube for
+you — no array handling at all:
+
+```python
+from umbra_py import stack_stats
+
+stats = stack_stats(cube)                   # JSON-ready, no pixels
+stats["net_change"]["mean_delta_db"]        # -4.7  (first pass → last)
+stats["net_change"]["changed_area_km2"]     # 1.83  (cells past 3 dB, needs crs=)
+stats["passes"][-1]["change_vs_previous"]   # the latest pass alone
+```
+
+Each pass gets its distribution (mean/median/spread) and the signed decibel
+change against the pass before it, so a series reads as a trend rather than a
+pile of scenes. Change is always in dB — a ratio of backscatter is a difference
+on the log scale — and `changed_area_km2` is `None` unless the grid is projected,
+because counting geographic cells measures nothing. `umbra stack --stats` prints
+the same object, and the `stack_stats` agent tool returns it over MCP /
+LangChain / LlamaIndex.
+
 ### Fast, repeatable search with a local index
 
 Umbra publishes no STAC API, so every search re-walks the public S3 bucket —
@@ -877,15 +897,17 @@ Register it with an MCP client (Claude Desktop shown):
 ```
 
 The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
-`quicklook`, `change_composite`, `timescan`, `download_asset`, `watch_site`
+`quicklook`, `change_composite`, `timescan`, `stack_stats` (the same change
+question in numbers: per-pass decibel statistics and how much ground moved, in
+km²), `download_asset`, `watch_site`
 (report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
 index), `describe_scene` (a SAR-literate model reading of one scene) and
 `narrate_change` (a model reading of *what changed* between passes, grounded in
 a per-block decibel grid) tools; a `umbra://context` resource with the
 product-type table and search semantics; and packaged `monitor-site` /
-`watch-site` / `find-similar-scenes` / `describe-scene` / `narrate-change` /
-`survey-region` prompts. The imagery tools return
+`watch-site` / `quantify-change` / `find-similar-scenes` / `describe-scene` /
+`narrate-change` / `survey-region` prompts. The imagery tools return
 the rendered PNG as an MCP image block, so the model *sees* the radar scene. In
 keeping with the library's design, the server stays deterministic — it
 searches, geocodes and renders; the client's model plans and narrates. The two
@@ -920,7 +942,7 @@ agent = create_react_agent(my_chat_model, umbra_tools())
 ```
 
 `umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
-`index_stats`, `download_asset`, `watch_site`, `find_similar` /
+`index_stats`, `stack_stats`, `download_asset`, `watch_site`, `find_similar` /
 `find_similar_text`, `describe_scene`, `narrate_change` and the `quicklook` /
 `change_composite` / `timescan` render tools — the full MCP inventory, each
 schema inferred from the function signature and each description from its
@@ -955,7 +977,8 @@ agent = ReActAgent.from_tools(tools, llm=my_llm)
 ```
 
 `umbra_tools()` returns the same inventory as the LangChain adapter
-(`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `download_asset`,
+(`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `stack_stats`,
+`download_asset`,
 `watch_site`, `find_similar` / `find_similar_text`, `describe_scene`,
 `narrate_change` and the `quicklook` / `change_composite` / `timescan` render
 tools) — each name and description inferred from the function's docstring and each
