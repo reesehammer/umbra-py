@@ -15,7 +15,12 @@ equal-area and a cell count is a measurement.
 after: one record per pass (its distribution and the signed decibel change
 against the pass before it) plus a net first-to-last record, all plain JSON. It
 is what `umbra stack --stats` prints and what the `stack_stats` agent tool
-returns over MCP / LangChain / LlamaIndex.
+returns over MCP / LangChain / LlamaIndex. Its `blocks=N` argument adds the
+spatial half of the answer — the scene cut into an N×N grid, each block
+reporting its own net change, a compass label and lon/lat centre, and the pair
+of passes it moved most between — so a change confined to one corner, which the
+scene-wide mean dilutes, reads as *where* and *when*. `umbra stack --blocks N`
+prints the same breakdown.
 
 ::: umbra_py.to_xarray
 

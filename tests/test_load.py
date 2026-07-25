@@ -807,6 +807,156 @@ def test_stack_stats_compares_only_ground_both_passes_cover(tmp_path):
     assert stats["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
 
 
+# --- The spatial breakdown (``stack_stats(blocks=N)`` / ``umbra stack --blocks``) ---
+#
+# One corner brightens on the last pass only, so the answer is checkable by hand
+# in both axes: on a 4x4 grid the northeast block reads +12.04 dB (two doublings)
+# net, every other block reads 0.0, and the interval that moved is the last one.
+
+
+def _corner_scene(path, *, base=2.0, corner=2.0, width=40, height=40):
+    """A scene reading ``base`` everywhere but its northeast sixteenth.
+
+    The hot patch is exactly one cell of a 4x4 block grid, so a breakdown at that
+    resolution isolates it and a scene-wide mean dilutes it sixteen-fold.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    data = np.full((height, width), float(base), dtype="float32")
+    data[: height // 4, width * 3 // 4 :] = float(corner)
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(data, 1)
+    return path
+
+
+def _corner_series(tmp_path):
+    """Three passes; only the northeast corner, and only on the last, changes."""
+    return [
+        _stack_item(_corner_scene(tmp_path / "p1.tif"), "acq-1", "2024-01-08T12:00:00Z"),
+        _stack_item(_corner_scene(tmp_path / "p2.tif"), "acq-2", "2024-02-08T12:00:00Z"),
+        _stack_item(
+            _corner_scene(tmp_path / "p3.tif", corner=8.0), "acq-3", "2024-03-08T12:00:00Z"
+        ),
+    ]
+
+
+def _block(spatial, row, col):
+    return next(b for b in spatial["blocks"] if (b["row"], b["col"]) == (row, col))
+
+
+def test_stack_stats_blocks_locate_change_in_space_and_in_time(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_corner_series(tmp_path), max_size=32, crs="utm")
+    spatial = stack_stats(cube, blocks=4)["spatial"]
+
+    assert (spatial["grid_rows"], spatial["grid_cols"]) == (4, 4)
+    assert len(spatial["blocks"]) == 16
+    assert spatial["bounds_crs"] == "EPSG:32633"
+
+    # Where: the northeast corner block moved two doublings, the southwest none.
+    northeast = _block(spatial, 0, 3)
+    southwest = _block(spatial, 3, 0)
+    assert northeast["compass"] == "northeast"
+    assert southwest["compass"] == "southwest"
+    assert northeast["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+    assert northeast["net_change"]["changed_fraction"] == 1.0
+    assert southwest["net_change"]["mean_delta_db"] == pytest.approx(0.0, abs=0.01)
+    assert southwest["net_change"]["changed_fraction"] == 0.0
+
+    # When: the change landed on the last interval, not the first.
+    assert northeast["peak_interval"]["from_item_id"] == "acq-2"
+    assert northeast["peak_interval"]["to_item_id"] == "acq-3"
+    assert northeast["peak_interval"]["to_datetime"] == "2024-03-08T12:00:00Z"
+    assert northeast["peak_interval"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+    assert northeast["peak_interval"]["changed_area_km2"] > 0
+
+    # And the headline points at that block without the caller scanning the grid.
+    peak = spatial["peak_block"]
+    assert (peak["row"], peak["col"], peak["compass"]) == (0, 3, "northeast")
+    assert peak["direction"] == "brighter"
+
+    # Scene-wide, the same change is a sixteenth of the ground and all but
+    # disappears -- which is the reason to ask for the breakdown at all.
+    assert stack_stats(cube)["net_change"]["mean_delta_db"] == pytest.approx(
+        2 * _DOUBLING_DB / 16, abs=0.05
+    )
+
+
+def test_stack_stats_blocks_carry_locatable_geometry(tmp_path):
+    """A block is only useful if you can put it back on the ground."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    spatial = stack_stats(to_stack(_corner_series(tmp_path), max_size=32, crs="utm"), blocks=4)[
+        "spatial"
+    ]
+    northeast = _block(spatial, 0, 3)
+    southwest = _block(spatial, 3, 0)
+
+    # Bounds are in the cube's own (projected) CRS, north-up and non-overlapping.
+    left, bottom, right, top = northeast["bounds"]
+    assert left < right and bottom < top
+    assert bottom >= southwest["bounds"][3]
+    assert left >= southwest["bounds"][2]
+
+    # The lon/lat centre is what a map or a geocoder needs, so it comes back in
+    # degrees whatever the grid's CRS -- north and east of the opposite corner.
+    lon, lat = northeast["center_lonlat"]
+    assert -180 <= lon <= 180 and -90 <= lat <= 90
+    assert lat > southwest["center_lonlat"][1]
+    assert lon > southwest["center_lonlat"][0]
+
+    # The ASCII grid is north-up, one row per block row, and marks the hot corner.
+    lines = spatial["grid_text"].splitlines()
+    assert len(lines) == 4
+    assert "+12.0" in lines[0]
+    assert "+12.0" not in lines[-1]
+
+
+def test_stack_stats_skips_the_breakdown_by_default(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32)
+    assert "spatial" not in stack_stats(cube)
+    assert "spatial" not in stack_stats(cube, blocks=0)
+
+
+def test_stack_stats_blocks_never_read_unobserved_ground_as_change(tmp_path):
+    """Blocks outside the overlap have nothing to compare, not a change of zero."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=300.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    spatial = stack_stats(to_stack(items, max_size=32, extent="union"), blocks=4)["spatial"]
+
+    unobserved = [b for b in spatial["blocks"] if b["net_change"] is None]
+    assert unobserved, "the west and east edges are imaged on one pass only"
+    assert all(b["peak_interval"] is None for b in unobserved)
+    # An unimaged block is a gap in the map, not a zero.
+    assert "   ." in spatial["grid_text"]
+
+
 def test_stack_stats_rejects_a_non_cube(tmp_path):
     pytest.importorskip("xarray")
     from umbra_py import stack_stats, to_stack
@@ -862,6 +1012,32 @@ def test_cli_stack_stats_measures_without_writing_a_file(tmp_path, monkeypatch):
     assert stats["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
     assert stats["net_change"]["changed_area_km2"] is not None
     assert not list(tmp_path.glob("*cube*"))
+
+
+def test_cli_stack_blocks_implies_stats_and_adds_the_breakdown(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    # No --stats and no --out: --blocks alone measures the site spatially.
+    result = CliRunner().invoke(
+        cli_mod.cli, ["stack", *urls, "--blocks", "4", "--max-size", "16", "--crs", "utm"]
+    )
+
+    assert result.exit_code == 0, result.output
+    spatial = json.loads(result.stdout)["spatial"]
+    assert (spatial["grid_rows"], len(spatial["blocks"])) == (4, 16)
+    assert spatial["peak_block"]["compass"]
+    assert len(spatial["grid_text"].splitlines()) == 4
+
+    bad = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--blocks", "-1"])
+    assert bad.exit_code != 0
+    assert "--blocks must be 0" in bad.output
 
 
 def test_cli_stack_stats_alongside_the_file_and_in_the_manifest(tmp_path, monkeypatch):

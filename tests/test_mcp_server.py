@@ -311,6 +311,39 @@ def test_stack_stats_measures_the_series_in_numbers(sample_item_dict, monkeypatc
     assert out["caveats"]
 
 
+@responses.activate
+def test_stack_stats_blocks_add_the_spatial_breakdown(sample_item_dict, monkeypatch):
+    """The agent asks *where* on the site by passing blocks=N; no model, no image."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+    monkeypatch.setattr(load, "to_stack", lambda items, **kwargs: _constant_cube())
+
+    plain = ms.stack_stats([ITEM_URL, second_url])
+    out = ms.stack_stats([ITEM_URL, second_url], blocks=2)
+
+    assert "spatial" not in plain
+    spatial = out["spatial"]
+    assert (spatial["grid_rows"], len(spatial["blocks"])) == (2, 4)
+    assert {b["compass"] for b in spatial["blocks"]} == {
+        "northwest",
+        "northeast",
+        "southwest",
+        "southeast",
+    }
+    # The cube brightens uniformly, so every block reports the same doubling and
+    # each carries a lon/lat centre to locate it by.
+    for block in spatial["blocks"]:
+        assert block["net_change"]["mean_delta_db"] == pytest.approx(6.0206, abs=0.01)
+        assert len(block["center_lonlat"]) == 2
+    assert spatial["peak_block"]["direction"] == "brighter"
+
+
 def _constant_cube():
     """A tiny two-pass dB cube on a projected grid, built without any I/O."""
     np = pytest.importorskip("numpy")
