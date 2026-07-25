@@ -739,6 +739,16 @@ def _imaged_item(item_id: str = "imaged", lon: float = 0.0, lat: float = 0.0) ->
     return item
 
 
+def test_features_prefer_the_baked_place_label_over_the_task_codename():
+    """A `umbra tiles --local` over a baked index (CatalogIndex.bake_places)
+    should show the real place name, like the demo and the parquet export do."""
+    item = _item("scene-1", -122.4, 37.8, task="Golden Gate Site")
+    assert pmtiles._item_properties(item)["place"] == "Golden Gate Site"
+
+    item.place = "San Francisco, California"
+    assert pmtiles._item_properties(item)["place"] == "San Francisco, California"
+
+
 def test_features_reference_the_cog_as_a_sidecar_relative_basename():
     """The URL prefix is identical for every acquisition and already present as
     ``stac_href``, so tiling it again -- in every tile, at every zoom -- would be

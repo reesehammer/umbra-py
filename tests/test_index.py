@@ -1036,6 +1036,79 @@ def test_bake_places_respects_limit(tmp_path):
         assert idx.bake_places(geocoder=geo) == 1
 
 
+def _site_passes(task, bboxes, prefix):
+    """Repeat passes over one site: same task, near-identical footprints."""
+    return [
+        _make_item(
+            task,
+            f"2024-05-{n + 1:02d}-00-00-00_UMBRA-04",
+            f"{prefix}{n}",
+            f"2024-05-{n + 1:02d}T00:00:00Z",
+            bbox,
+        )
+        for n, bbox in enumerate(bboxes)
+    ]
+
+
+def test_bake_places_by_site_geocodes_once_per_site(tmp_path):
+    """One lookup per site labels every pass over it -- the whole-catalog mode."""
+    passes = _site_passes(
+        "SiteRepeat",
+        [(0, 0, 1, 1), (0.01, 0.01, 1.01, 1.01), (0.02, 0.02, 1.02, 1.02)],
+        "r",
+    )
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path, items=(*passes, _B)) as idx:
+        # Four acquisitions, but only two sites -> two throttled lookups.
+        assert idx.bake_places(geocoder=geo, by_site=True) == 4
+        assert len(calls) == 2
+        places = {i.id: i.place for i in idx.search()}
+    # Every pass takes the one label, resolved from the group's mean centroid.
+    assert places["r0"] == places["r1"] == places["r2"] == "Place@0.5,0.5"
+    assert places["b"] == "Place@10.5,10.5"
+
+
+def test_bake_places_by_site_separates_distant_passes_of_one_task(tmp_path):
+    """A task whose footprints are far apart is still geocoded per location."""
+    geo, calls = _counting_geocoder()
+    # _A and _C share the task "SiteA" but sit ~5 degrees apart.
+    with _index(tmp_path, items=(_A, _C)) as idx:
+        assert idx.bake_places(geocoder=geo, by_site=True) == 2
+        assert len(calls) == 2
+        places = {i.id: i.place for i in idx.search()}
+    assert places["a"] != places["c"]
+
+
+def test_bake_places_by_site_groups_only_within_a_task(tmp_path):
+    """Two sites that happen to share a cell keep their own labels."""
+    neighbours = [
+        _make_item(
+            "SiteX", "2024-06-01-00-00-00_UMBRA-04", "x", "2024-06-01T00:00:00Z", (0, 0, 1, 1)
+        ),
+        _make_item(
+            "SiteY", "2024-06-02-00-00-00_UMBRA-04", "y", "2024-06-02T00:00:00Z", (0, 0, 1, 1)
+        ),
+    ]
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path, items=neighbours) as idx:
+        assert idx.bake_places(geocoder=geo, by_site=True) == 2
+        assert len(calls) == 2
+
+
+def test_bake_places_by_site_limit_caps_lookups(tmp_path):
+    """--limit bounds the geocode calls, not the items each call labels."""
+    # "SiteAlpha" sorts before "SiteB", so it is the group the cap keeps
+    # (grouping follows the href order the rows are read in).
+    passes = _site_passes("SiteAlpha", [(0, 0, 1, 1), (0.01, 0.01, 1.01, 1.01)], "r")
+    geo, calls = _counting_geocoder()
+    with _index(tmp_path, items=(*passes, _B)) as idx:
+        # One lookup, but it labels both passes of that site.
+        assert idx.bake_places(geocoder=geo, by_site=True, limit=1) == 2
+        assert len(calls) == 1
+        # The remaining site is picked up on a later run.
+        assert idx.bake_places(geocoder=geo, by_site=True) == 1
+
+
 def test_bake_places_skips_items_without_bbox(tmp_path):
     """An item with no footprint can't be geocoded and is left unlabelled."""
     no_bbox = _make_item(
@@ -1312,6 +1385,31 @@ def test_cli_index_bake(tmp_path, monkeypatch):
 
     info = CliRunner().invoke(cli_mod.cli, ["index", "info", "--db", str(db)])
     assert "places: 2 of 2 labelled" in info.output
+
+
+def test_cli_index_bake_by_site(tmp_path, monkeypatch):
+    """`umbra index bake --by-site` makes one lookup for a site's passes."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        for it in _site_passes("SiteRepeat", [(0, 0, 1, 1), (0.01, 0.01, 1.01, 1.01)], "r"):
+            idx.add(it)
+
+    calls: list[tuple[float, float]] = []
+
+    def geocode(lat, lon, **kw):
+        calls.append((lat, lon))
+        return "Testville"
+
+    monkeypatch.setattr("umbra_py.viz._reverse_geocode", geocode)
+
+    result = CliRunner().invoke(cli_mod.cli, ["index", "bake", "--db", str(db), "--by-site"])
+    assert result.exit_code == 0, result.output
+    assert "Baked 2 new place label(s)" in result.output
+    assert len(calls) == 1
 
 
 def test_cli_index_bake_missing_index_errors(tmp_path):

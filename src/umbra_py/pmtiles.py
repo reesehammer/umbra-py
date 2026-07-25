@@ -587,7 +587,11 @@ def _item_properties(item: UmbraItem, cog_asset: str | None = None) -> dict[str,
     dt = item.datetime
     props: dict[str, Any] = {
         "id": item.id,
-        "place": item.task,
+        # The baked reverse-geocoded label when the index carries one (see
+        # CatalogIndex.bake_places), else the task codename -- the same
+        # preference umbra demo and the stac-geoparquet export make, so a
+        # `umbra tiles --local` over a baked index shows real place names.
+        "place": item.place or item.task,
         "product": item.product_type,
         "date": dt.date().isoformat() if dt else None,
         "platform": item.platform,

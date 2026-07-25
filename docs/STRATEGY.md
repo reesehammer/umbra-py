@@ -282,8 +282,16 @@ from:
   whole-archive explorer streams the radar picture on click like the slice one.
   The two modes now differ only in the two fields vector tiles do not encode
   (polarizations and the per-product asset list). See the CHANGELOG.
-- Bake per-item thumbnails / place labels into the *published* weekly snapshot
-  (gated on egress).
+- ~~Bake place labels into the *published* weekly snapshot.~~ **shipped** —
+  `umbra index bake --by-site` geocodes once per site rather than once per
+  acquisition (a task's passes share their ground), which brings a whole-catalog
+  bake inside Nominatim's ~1 req/s policy, and `publish-index.yml` now runs it
+  (bounded, non-blocking) before the derived artifacts, so the fetched
+  `catalog.db`, the parquet export and `catalog.pmtiles` all arrive pre-labelled.
+  `umbra tiles` was also taught to tile the baked label rather than the task
+  codename. See the CHANGELOG. Still open: baking per-item **thumbnails** into
+  the published snapshot, which is gated on egress (a COG overview streamed per
+  acquisition) rather than a rate limit.
 
 **SAR-processing depth (was workstream 5.5)**
 
