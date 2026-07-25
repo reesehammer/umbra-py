@@ -773,6 +773,26 @@ def test_an_absolute_asset_href_is_kept_whole():
     )
 
 
+def test_a_product_nested_under_the_sidecar_stays_absolute():
+    """Only a *direct* sibling collapses to a basename. A product one directory
+    deeper would be rebuilt at the wrong URL, so it keeps the full href."""
+    item = _imaged_item()
+    nested = item.href.rsplit("/", 1)[0] + "/products/a1_GEC.tif"
+    item.assets = {"a1_MM.tif": {"href": nested}}
+
+    assert pmtiles._item_properties(item, "GEC")["cog"] == nested
+
+
+def test_an_item_with_no_bbox_has_no_placement_bounds():
+    """The overlay is stretched to the footprint bbox, so without one there is
+    nowhere to put it."""
+    item = _imaged_item()
+    item.bbox = None
+
+    assert pmtiles._cog_bounds(item) is None
+    assert "cog" not in pmtiles._item_properties(item, "GEC")
+
+
 def test_an_item_with_no_gec_asset_tiles_no_cog_at_all():
     """A viewer keys its button on these properties, so a scene whose image
     cannot be resolved must carry neither -- a half-populated feature would
