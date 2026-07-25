@@ -435,13 +435,16 @@ def _manifest_option(func):
     )(func)
 
 
-def _emit_render_manifest(out_path, items, parameters, sidecars=None) -> None:
+def _emit_render_manifest(out_path, items, parameters, sidecars=None, stats=None) -> None:
     """Print a render command's success manifest as JSON to stdout.
 
     ``items`` are the acquisitions the artifact was built from (their ids become
-    ``items_used``); ``parameters`` is the command-specific settings dict; and
+    ``items_used``); ``parameters`` is the command-specific settings dict;
     ``sidecars`` maps a name to any auxiliary file the command also wrote (e.g. a
-    change narration JSON). Matches ``docs/schemas/render-manifest.schema.json``.
+    change narration JSON); and ``stats`` is any measurement of the artifact the
+    command also computed (``umbra stack --stats``), carried inline rather than
+    as a second document so stdout stays one object. Matches
+    ``docs/schemas/render-manifest.schema.json``.
     """
     manifest: dict = {
         "output": str(out_path),
@@ -450,6 +453,8 @@ def _emit_render_manifest(out_path, items, parameters, sidecars=None) -> None:
     }
     if sidecars:
         manifest["sidecars"] = {name: str(path) for name, path in sidecars.items()}
+    if stats is not None:
+        manifest["stats"] = stats
     click.echo(json.dumps(manifest, indent=2))
 
 
@@ -1449,8 +1454,25 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
 @click.option(
     "--out",
     "out_path",
-    required=True,
-    help="Output multi-band GeoTIFF path (one band per acquisition, oldest first).",
+    default=None,
+    help="Output multi-band GeoTIFF path (one band per acquisition, oldest "
+    "first). Required unless --stats asks for the statistics alone.",
+)
+@click.option(
+    "--stats",
+    is_flag=True,
+    help="Also print the cube's time-series statistics as JSON: per-pass "
+    "distribution, the decibel change between consecutive passes, and the net "
+    "first-to-last change (with the changed area in km2 under --crs utm). Pass "
+    "it without --out to measure without writing a file.",
+)
+@click.option(
+    "--change-threshold-db",
+    type=float,
+    default=3.0,
+    show_default=True,
+    help="With --stats: how many decibels a cell must move between two passes "
+    "to count as changed (3 dB is a doubling of backscatter power).",
 )
 @click.option(
     "--area",
@@ -1539,6 +1561,8 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
 def stack(
     item_urls,
     out_path,
+    stats,
+    change_threshold_db,
     area,
     fuzzy,
     bbox,
@@ -1579,6 +1603,12 @@ def stack(
     returns the same cube as an xarray DataArray with a real ``time``
     dimension (``cube.mean("time")``, ``cube.diff("time")``, ...).
 
+    --stats reduces the cube to a JSON summary instead of making you open it:
+    each pass's distribution, the signed decibel change against the pass
+    before it, and the net first-to-last change -- including how much ground
+    moved, in km2, when --crs makes the cells equal-area. Give it without
+    --out to measure a site without writing the file.
+
     Two ways to choose what to stack:
 
     \b
@@ -1591,9 +1621,13 @@ def stack(
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the load extra (``pip install "umbra-py[load]"``).
     """
-    from .load import stack_to_geotiff  # noqa: PLC0415
+    # The private writer, not stack_to_geotiff: --stats needs the cube itself,
+    # and stacking a series twice would double the bytes streamed.
+    from .load import _write_stack_geotiff, stack_stats, to_stack  # noqa: PLC0415
 
     _check_token_not_local(token, local, db_path)
+    if not (out_path or stats):
+        raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
     search_mode = any(v for v in (area, bbox, place, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -1642,12 +1676,12 @@ def stack(
             )
         if not as_json:
             span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
-            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).")
+            # To stderr when --stats will print JSON, so stdout stays one object.
+            click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).", err=stats)
 
     with OrbitSpinner(f"Stacking {len(items)} acquisitions"):
-        path = stack_to_geotiff(
+        cube = to_stack(
             items,
-            out_path,
             asset=asset,
             bbox=_parse_bbox(clip_bbox),
             max_size=max_size,
@@ -1655,7 +1689,10 @@ def stack(
             extent=extent,
             crs=crs,
         )
-    if as_json:
+        path = _write_stack_geotiff(cube, out_path) if out_path else None
+        summary = stack_stats(cube, change_threshold_db=change_threshold_db) if stats else None
+
+    if path and as_json:
         _emit_render_manifest(
             path,
             items,
@@ -1669,9 +1706,15 @@ def stack(
                     polarizations, min_incidence, max_incidence, max_resolution
                 ),
             },
+            stats=summary,
         )
-    else:
-        click.echo(f"Wrote {len(items)}-band datacube to {path}")
+        return
+    if path:
+        # When the statistics follow, the note goes to stderr so stdout carries
+        # the JSON object alone and pipes into jq.
+        click.echo(f"Wrote {len(items)}-band datacube to {path}", err=summary is not None)
+    if summary is not None:
+        click.echo(json.dumps(summary, indent=2))
 
 
 @cli.command()

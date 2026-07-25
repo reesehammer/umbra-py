@@ -174,7 +174,8 @@ self-checking and guarded offline by `tests/test_examples.py`.
 ML dataset prep (`umbra chips`), time-series datacubes (`umbra_py.to_stack` /
 `stack_to_geotiff` / `umbra stack` — the co-registered `(time, y, x)` xarray
 cube or multi-band GeoTIFF that `stackstac`/`odc-stac` can't produce here, see
-§2) and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
+§2 — reduced to a JSON answer by `stack_stats` / `umbra stack --stats` / the
+`stack_stats` agent tool) and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
 orthorectification, geoid handling, and three RTC flattening models:
 `cosine`/`area`/`gamma`) all ship. **Open:** the *fully
 calibrated* remainder of RTC — full gamma-nought illuminated-area facet

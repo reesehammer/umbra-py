@@ -475,6 +475,62 @@ def timescan(
     return [Image(data=_png_bytes(image), format="png"), caption]
 
 
+def stack_stats(
+    urls: list[str],
+    asset: str = "GEC",
+    bbox: list[float] | None = None,
+    max_size: int = 512,
+    extent: str = "intersection",
+    crs: str = "utm",
+    change_threshold_db: float = 3.0,
+) -> dict[str, Any]:
+    """Measure how much a site changed across its passes, as numbers.
+
+    The quantitative counterpart to ``change_composite`` / ``timescan``: those
+    return a picture of *where* change is, this returns the *how much*. Pass the
+    STAC URLs of a site's passes (2 or more, any order); they are co-registered
+    onto one shared grid and reduced to a per-pass statistics series plus a net
+    baseline-to-latest record — mean/median/spread of each pass, the signed
+    decibel change against the pass before it, the fraction of ground that moved
+    past ``change_threshold_db``, and that fraction as an **area in km²**.
+
+    Change is always reported in decibels (a ratio of backscatter is a difference
+    on the log scale). The default ``crs="utm"`` puts the grid in the site's UTM
+    zone so every cell covers the same ground and the area figures mean
+    something; pass ``crs="EPSG:4326"`` for a lon/lat grid, and the areas come
+    back ``None`` rather than wrong. ``extent="intersection"`` (the default)
+    compares only ground every pass covers; ``"union"`` keeps all of it and
+    compares per cell where two passes overlap. ``bbox`` (lon/lat
+    ``[min_lon, min_lat, max_lon, max_lat]``) narrows the measurement to a
+    sub-area, e.g. one facility inside the scene.
+
+    Refuses to mix polarizations (HH and VV are not comparable). **No model is
+    called** — this is arithmetic over streamed COG overviews, so the numbers are
+    reproducible and safe to quote. Read the ``caveats`` before interpreting
+    them: Umbra's open products are not radiometrically calibrated, so a decibel
+    value is relative to the same ground on another date, and look geometry moves
+    backscatter too.
+    """
+    from .load import stack_stats as _stack_stats
+    from .load import to_stack
+
+    items = [_fetch_item(u) for u in urls]
+    if len(items) < 2:
+        raise ValueError("stack_stats needs at least two item URLs.")
+    _require_same_polarization(items)
+    resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
+    cube = to_stack(
+        items,
+        asset=asset,
+        bbox=resolved_bbox,
+        max_size=max_size,
+        db=True,
+        extent=extent,
+        crs=crs,
+    )
+    return _stack_stats(cube, change_threshold_db=change_threshold_db)
+
+
 def download_asset(
     url: str, asset: str = "GEC", dest_dir: str = ".", confirm: bool = False
 ) -> dict[str, Any]:
@@ -836,7 +892,9 @@ def build_server() -> FastMCP:
             "the 'umbra://context' resource for product-type and search "
             "semantics. Use search_catalog to find acquisitions (compact cards), "
             "get_item for one item's full metadata, and quicklook / "
-            "change_composite / timescan to see the radar imagery. describe_scene "
+            "change_composite / timescan to see the radar imagery. stack_stats "
+            "answers the same change question in numbers (per-pass decibel "
+            "statistics and how much ground moved, in km²). describe_scene "
             "returns a SAR-literate model reading of a scene, and narrate_change "
             "reads what changed between passes grounded in a per-block decibel grid "
             "(the two tools that consult a model, and only when an [ai] key is "
@@ -853,6 +911,7 @@ def build_server() -> FastMCP:
         quicklook,
         change_composite,
         timescan,
+        stack_stats,
         download_asset,
         watch_site,
         find_similar,
@@ -920,6 +979,31 @@ def build_server() -> FastMCP:
             "on their stac_href URLs.\n"
             "4. Describe what the green/magenta regions imply about activity since the "
             "last check, citing the acquisition dates and keeping the attribution line."
+        )
+
+    @server.prompt(
+        name="quantify-change",
+        description="Workflow: measure how much a site changed, in decibels and km².",
+    )
+    def quantify_change(place: str, start: str | None = None, end: str | None = None) -> str:
+        window = f" between {start} and {end}" if start or end else ""
+        return (
+            f"Quantify how much '{place}' changed{window} using the umbra tools:\n"
+            f"1. search_catalog(place='{place}'"
+            f"{f', start={start!r}' if start else ''}"
+            f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
+            "2. Keep the passes of a single polarization (see each card's "
+            "polarization_caveat) — a polarization difference would read as change.\n"
+            "3. stack_stats(urls=[...]) on their stac_href URLs — it co-registers the "
+            "series and returns per-pass decibel statistics, the signed change between "
+            "consecutive passes, and net_change from the first pass to the last, "
+            "including how much ground moved as changed_area_km2.\n"
+            "4. timescan(urls=[...]) on the same URLs so you can also see *where* the "
+            "activity sits.\n"
+            "5. Report the trend with its numbers: name the pass-to-pass deltas that "
+            "stand out, the net change and the changed area, then read the caveats "
+            "aloud — the products are not radiometrically calibrated, so the decibels "
+            "are relative to the same ground on another date. Keep the attribution line."
         )
 
     @server.prompt(

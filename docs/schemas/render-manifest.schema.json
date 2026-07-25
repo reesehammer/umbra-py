@@ -30,6 +30,11 @@
         "type": "string"
       },
       "examples": [{ "narration": "change.narration.json" }]
+    },
+    "stats": {
+      "type": "object",
+      "description": "A measurement of the artifact the command also computed, carried inline so stdout stays a single object. Present only for 'umbra stack --stats --json', where it is the umbra_py.stack_stats summary: per-pass distribution statistics, the signed decibel change between consecutive passes, and the net first-to-last change.",
+      "additionalProperties": true
     }
   }
 }

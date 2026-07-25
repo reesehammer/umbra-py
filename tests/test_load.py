@@ -675,3 +675,273 @@ def test_cli_stack_json_manifest(tmp_path, monkeypatch):
     assert manifest["items_used"] == ["one", "two"]
     assert manifest["parameters"]["extent"] == "union"
     assert manifest["parameters"]["max_size"] == 16
+
+
+# --- Time-series statistics (``stack_stats`` / ``umbra stack --stats``) ---
+#
+# The fixtures are constant-valued scenes with fills 2/4/8, so every doubling is
+# exactly 20*log10(2) = 6.0206 dB of brightening -- the deltas are checkable by
+# hand rather than by golden value.
+
+
+_DOUBLING_DB = 6.0206
+
+
+def test_stack_stats_measures_each_pass_and_the_net_change(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32))
+
+    assert stats["count"] == 3
+    assert stats["units"] == "amplitude"
+    assert stats["change_threshold_db"] == 3.0
+    assert [p["item_id"] for p in stats["passes"]] == ["acq-1", "acq-2", "acq-3"]
+    assert stats["passes"][0]["datetime"] == "2024-01-08T12:00:00Z"
+    # Constant scenes: the distribution is the fill value with no spread.
+    assert stats["passes"][1]["mean"] == pytest.approx(4.0)
+    assert stats["passes"][1]["median"] == pytest.approx(4.0)
+    assert stats["passes"][1]["std"] == pytest.approx(0.0)
+    assert stats["passes"][0]["valid_fraction"] == 1.0
+    # The first pass has nothing to compare against; each later one doubled.
+    assert stats["passes"][0]["change_vs_previous"] is None
+    for record in stats["passes"][1:]:
+        change = record["change_vs_previous"]
+        assert change["mean_delta_db"] == pytest.approx(_DOUBLING_DB, abs=0.01)
+        assert change["brightened_fraction"] == 1.0
+        assert change["dimmed_fraction"] == 0.0
+        assert change["changed_fraction"] == 1.0
+    # Net change is first-to-last: two doublings, i.e. 2 -> 8.
+    assert stats["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+    assert stats["license"] == "CC-BY-4.0"
+    assert any("not radiometrically calibrated" in c for c in stats["caveats"])
+
+
+def test_stack_stats_reports_change_in_db_from_a_db_cube_too(tmp_path):
+    """The deltas are scale-invariant; only the per-pass distribution changes."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = _three_scenes(tmp_path)
+    linear = stack_stats(to_stack(items, max_size=32))
+    decibel = stack_stats(to_stack(items, max_size=32, db=True))
+
+    assert decibel["units"] == "dB"
+    assert decibel["passes"][1]["mean"] == pytest.approx(_DOUBLING_DB * 2, abs=0.01)  # 4.0 in dB
+    for a, b in zip(linear["passes"][1:], decibel["passes"][1:], strict=True):
+        assert a["change_vs_previous"]["mean_delta_db"] == pytest.approx(
+            b["change_vs_previous"]["mean_delta_db"], abs=0.01
+        )
+
+
+def test_stack_stats_omits_area_on_a_geographic_grid(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32))
+
+    assert stats["grid"]["crs"] == "EPSG:4326"
+    assert stats["grid"]["cell_area_m2"] is None
+    assert stats["net_change"]["changed_area_km2"] is None
+    assert any("equal-area" in c and "crs='utm'" in c for c in stats["caveats"])
+
+
+def test_stack_stats_measures_area_on_a_projected_grid(tmp_path):
+    """`crs="utm"` makes cells equal-area, so a changed-cell count is an area."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32, crs="utm"))
+
+    grid = stats["grid"]
+    assert grid["crs"] == "EPSG:32633"
+    xres, yres = grid["cell_size"]
+    assert grid["cell_area_m2"] == pytest.approx(xres * yres)
+    # Every cell changed, so the changed area is the whole 400 m x 400 m scene.
+    change = stats["net_change"]
+    assert change["changed_fraction"] == 1.0
+    assert change["changed_area_km2"] == pytest.approx(
+        grid["width"] * grid["height"] * grid["cell_area_m2"] / 1e6, rel=1e-6
+    )
+    assert change["changed_area_km2"] == pytest.approx(0.16, rel=0.02)
+    assert not any("equal-area" in c for c in stats["caveats"])
+
+
+def test_stack_stats_threshold_gates_what_counts_as_changed(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32)
+    # One doubling is ~6 dB and two are ~12, so a 10 dB threshold counts no
+    # pass-to-pass change but still counts the cumulative one -- and the mean
+    # delta is unchanged either way: the threshold gates counting, not measuring.
+    strict = stack_stats(cube, change_threshold_db=10.0)
+
+    assert strict["change_threshold_db"] == 10.0
+    step = strict["passes"][1]["change_vs_previous"]
+    assert step["changed_fraction"] == 0.0
+    assert step["mean_delta_db"] == pytest.approx(_DOUBLING_DB, abs=0.01)
+    assert strict["net_change"]["changed_fraction"] == 1.0
+    assert strict["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+
+
+def test_stack_stats_compares_only_ground_both_passes_cover(tmp_path):
+    """Under `extent="union"` the NaN padding must not read as change."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    stats = stack_stats(to_stack(items, max_size=32, extent="union"))
+
+    grid_cells = stats["grid"]["width"] * stats["grid"]["height"]
+    # Each pass covers about two thirds of the union; the overlap is smaller still.
+    assert stats["passes"][0]["valid_fraction"] < 1.0
+    assert 0 < stats["net_change"]["compared_cells"] < grid_cells
+    assert stats["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+
+
+def test_stack_stats_rejects_a_non_cube(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32)
+    with pytest.raises(ValueError, match=r"\(time, y, x\) cube"):
+        stack_stats(cube.isel(time=0))
+
+
+def _stack_cli_env(tmp_path, monkeypatch, values=(2.0, 8.0)):
+    """Two STAC URLs resolving to local constant-valued scenes, for CLI tests."""
+    from umbra_py import cli as cli_mod
+
+    names = ("one", "two")
+    paths = {
+        name: _stack_scene(tmp_path / f"{name}.tif", value=value)
+        for name, value in zip(names, values, strict=True)
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(names, start=1)
+    }
+    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+    return list(stac)
+
+
+def test_cli_stack_stats_measures_without_writing_a_file(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    result = CliRunner().invoke(
+        cli_mod.cli, ["stack", *urls, "--stats", "--max-size", "16", "--crs", "utm"]
+    )
+
+    assert result.exit_code == 0, result.output
+    # No --out: stdout carries the statistics object alone.
+    stats = json.loads(result.stdout)
+    assert stats["count"] == 2
+    assert stats["grid"]["crs"] == "EPSG:32633"
+    assert stats["net_change"]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+    assert stats["net_change"]["changed_area_km2"] is not None
+    assert not list(tmp_path.glob("*cube*"))
+
+
+def test_cli_stack_stats_alongside_the_file_and_in_the_manifest(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    out = tmp_path / "cube.tif"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.cli, ["stack", *urls, "--out", str(out), "--stats", "--max-size", "16"]
+    )
+
+    assert result.exit_code == 0, result.output
+    # The file is still written -- and the human note moves to stderr so the
+    # statistics stay a single parseable object on stdout.
+    with rasterio.open(out) as ds:
+        assert ds.count == 2
+    assert "2-band datacube" in result.stderr
+    assert json.loads(result.stdout)["count"] == 2
+
+    # Under --json the statistics ride inside the render manifest instead, so
+    # stdout is one object either way.
+    out2 = tmp_path / "cube2.tif"
+    manifest = json.loads(
+        runner.invoke(
+            cli_mod.cli,
+            ["stack", *urls, "--out", str(out2), "--stats", "--max-size", "16", "--json"],
+        ).stdout
+    )
+    assert manifest["output"] == str(out2)
+    assert manifest["stats"]["count"] == 2
+    assert manifest["stats"]["passes"][1]["change_vs_previous"]["mean_delta_db"] == pytest.approx(
+        2 * _DOUBLING_DB, abs=0.01
+    )
+
+
+def test_cli_stack_needs_an_output_or_stats(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    result = CliRunner().invoke(cli_mod.cli, ["stack", *urls])
+    assert result.exit_code != 0
+    assert "--out to write the datacube, --stats to measure it" in result.output
+
+
+def test_cli_stack_stats_keeps_stdout_json_in_search_mode(tmp_path, monkeypatch):
+    """The search-mode "Selected N of M" note must not precede the JSON."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif", value=2.0),
+        "two": _stack_scene(tmp_path / "two.tif", value=8.0),
+    }
+    found = [
+        UmbraItem(id=name, properties={"datetime": f"2024-0{n}-08T12:00:00Z"})
+        for n, name in enumerate(paths, start=1)
+    ]
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+    monkeypatch.setattr(cli_mod, "_gather_items", lambda **kwargs: found)
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["stack", "--area", "SiteA", "--stats", "--max-size", "16"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Selected 2 of 2" in result.stderr
+    assert json.loads(result.stdout)["count"] == 2
