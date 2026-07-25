@@ -3913,9 +3913,17 @@ def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None
     "--limit",
     type=int,
     default=None,
-    help="Cap how many acquisitions to geocode this run (default: no cap). "
+    help="Cap how many geocode lookups to make this run (default: no cap). "
     "Reverse geocoding is throttled to ~1/sec, so use this to bake a large "
     "catalog in bounded batches -- re-run to continue where it left off.",
+)
+@click.option(
+    "--by-site",
+    is_flag=True,
+    help="Geocode once per site instead of once per acquisition: passes sharing "
+    "a task and a ~11 km cell take one label resolved from their mean centroid. "
+    "Cuts the throttled lookups by the average passes-per-site, which is what "
+    "makes labelling a whole catalog practical.",
 )
 @click.option(
     "--zoom",
@@ -3925,7 +3933,7 @@ def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None
     help="Nominatim address granularity: 3 = country, 8 = county, 10 = city, "
     "14 = suburb, 18 = building.",
 )
-def index_bake(db_path, limit, zoom) -> None:
+def index_bake(db_path, limit, by_site, zoom) -> None:
     """Reverse-geocode indexed acquisitions and cache their place labels.
 
     Turns each acquisition's footprint into a human place name ("Reykjavik,
@@ -3933,6 +3941,11 @@ def index_bake(db_path, limit, zoom) -> None:
     galleries built with --local show real place labels instantly instead of
     re-geocoding at render time (OpenStreetMap Nominatim caps traffic at ~1
     request/sec, so labelling thousands of items live is impractical).
+
+    Umbra files every pass over a site under one task, so --by-site resolves a
+    site once and labels all of its passes -- the mode to use for a whole
+    catalog, where most acquisitions are repeat passes over ground already
+    geocoded.
 
     Idempotent: only items without a label yet are geocoded, so re-running
     labels just what was added since. Bootstrap the index first with 'umbra
@@ -3946,10 +3959,10 @@ def index_bake(db_path, limit, zoom) -> None:
     with OrbitSpinner("Baking place labels") as spinner:
 
         def tally(n: int) -> None:
-            spinner.label = f"Baking place labels ({n} processed)"
+            spinner.label = f"Baking place labels ({n} lookup(s))"
 
         with CatalogIndex(path) as idx:
-            labelled = idx.bake_places(limit=limit, zoom=zoom, progress=tally)
+            labelled = idx.bake_places(limit=limit, zoom=zoom, by_site=by_site, progress=tally)
             s = idx.stats()
     click.echo(
         f"Baked {labelled} new place label(s); {s['labeled']} of {s['items']} "

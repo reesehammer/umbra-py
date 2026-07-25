@@ -9,7 +9,9 @@ name: Publish catalog index
 #                              in seconds by DuckDB / geopandas / pyarrow /
 #                              rustac, no umbra-py install required
 #   - catalog.db               the SQLite index, ready for
-#                              `umbra search --local --db catalog.db`
+#                              `umbra search --local --db catalog.db`, with
+#                              place labels already baked in (one reverse
+#                              geocode per site, see the bake step below)
 #   - catalog.pmtiles          a single-file whole-catalog vector-tile basemap
 #                              (`umbra tiles --fetch`): drop straight onto a
 #                              static host, or read by range request from a
@@ -53,6 +55,21 @@ jobs:
       - name: Build full catalog index
         run: umbra index build --db catalog.db
 
+      # Reverse-geocode the crawl into human place names before the downstream
+      # artifacts are derived, so a fetched catalog.db, the parquet export and
+      # the vector basemap all arrive pre-labelled ("Reykjavík, Iceland" rather
+      # than a task codename) with no render-time geocoding.
+      #
+      # --by-site is what makes this affordable: Nominatim's usage policy caps
+      # traffic at ~1 request/sec, so labelling every acquisition would take
+      # hours, while one lookup per site (a task's passes share their ground)
+      # is a fraction of that. Bounded by --limit and non-blocking, so a slow
+      # or unavailable geocoder costs the run some labels, never the publish.
+      - name: Bake place labels (non-blocking)
+        continue-on-error: true
+        timeout-minutes: 25
+        run: umbra index bake --db catalog.db --by-site --limit 1200
+
       - name: Export stac-geoparquet
         run: umbra index export --db catalog.db --out umbra-open-data.parquet
 
@@ -75,7 +92,7 @@ jobs:
           (rebuilt weekly; last rebuilt $(date -u +%Y-%m-%d)).
 
           - \`umbra-open-data.parquet\` — [stac-geoparquet](https://stac-geoparquet.org/): query it directly with DuckDB, geopandas, pyarrow or rustac.
-          - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`.
+          - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`, with reverse-geocoded place labels baked in, so maps, galleries and \`umbra demo\` show real place names with no render-time geocoding.
           - \`catalog.pmtiles\` — single-file whole-catalog vector basemap for \`umbra tiles --fetch\`; drop onto any static host or read by range request from a MapLibre page. Carries an \`acquisitions\` centroid layer at every zoom and a \`footprints\` polygon layer from zoom 6 up.
           - \`catalog.html\` — a ready-to-open MapLibre GL viewer over the published \`catalog.pmtiles\`.
 

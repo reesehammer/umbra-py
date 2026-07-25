@@ -90,10 +90,23 @@ Follow-ons that build on it, none a blocker:
 - **A precomputed centroid column.** The centroid is derived from the stored bbox
   today (cheap), so a `centroid` column is only worth adding if a consumer needs
   to query/sort on it in SQL rather than compute it per row.
-- **Bake in the published snapshot.** The weekly `publish-index.yml` build could
-  run `umbra index bake` after the crawl so the fetched `catalog.db` arrives
-  pre-labelled — gated on the Nominatim rate limit (bake in bounded `--limit`
-  batches, or only the one-pin-per-site overview).
+- ~~**Bake in the published snapshot.**~~ ✅ **Done** for place labels
+  (`CatalogIndex.bake_places(by_site=True)` / `umbra index bake --by-site`, and
+  the `Bake place labels` step in `publish-index.yml`). The blocker was the
+  Nominatim rate limit (~1 request/sec), which made one geocode per acquisition
+  an overnight job; the "one pin per site" option named here is what shipped.
+  Acquisitions sharing a task *and* a ~11 km cell (`_SITE_CELL_DEGREES`) are
+  resolved together from their mean centroid and all take that one label — Umbra
+  files every pass over a site under one task, so a repeat-imaged archive
+  collapses to roughly one lookup per site. Grouping is a pure, deterministic
+  function (`index._site_groups`), insertion-ordered so a `--limit`ed batch is
+  reproducible and resumable; `--limit` now caps *lookups* rather than items. The
+  weekly build bakes (bounded, `continue-on-error`) **before** the derived
+  artifacts, so `catalog.db`, the parquet export and `catalog.pmtiles` all
+  publish pre-labelled. Offline-tested in `tests/test_index.py`. Remaining under
+  this heading: baking **thumbnails** into the published snapshot, which is a
+  different cost (a COG overview streamed per acquisition, i.e. egress) rather
+  than a rate limit, so it stays open.
 
 ---
 

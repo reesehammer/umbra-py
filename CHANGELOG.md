@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-site place-label baking (`umbra index bake --by-site`) and a pre-labelled
+  published snapshot (`STRATEGY.md` §8 demo/hosting — "bake place labels into the
+  published weekly snapshot").** `CatalogIndex.bake_places` resolved one
+  reverse-geocode per *acquisition*, and OpenStreetMap Nominatim's usage policy
+  caps traffic at ~1 request/sec — so labelling a whole catalog was an overnight
+  job, and the weekly `catalog.db` everyone fetches shipped with no labels at all.
+  Every `--local` map, gallery and `umbra demo` therefore fell back to the task
+  codename ("Beet Piler - ND") unless the user ran a bake themselves.
+  `bake_places(by_site=True)` geocodes **once per site** instead: Umbra files
+  every pass over a site under one task directory, so acquisitions sharing a task
+  *and* a ~11 km cell (`_SITE_CELL_DEGREES`) are resolved together from their mean
+  centroid and all take that one label. A repeat-imaged archive is mostly repeat
+  passes, so the throttled call count drops by roughly the average
+  passes-per-site — the difference between "a whole catalog is impractical" and "a
+  bounded step in the weekly build". The grouping is a pure, deterministic
+  function (`index._site_groups`, insertion-ordered so a `--limit`ed batch is
+  reproducible and resumable), and the label is a coarse place name for a
+  footprint a few km across, so one per site is the same answer per-item
+  geocoding converges on. A task whose passes straddle a cell boundary just costs
+  an extra lookup — the failure direction is a redundant call, never a
+  mislabelled item — and passes of one task that are genuinely far apart still get
+  their own labels. `--limit` now caps *lookups* rather than items (the rate limit
+  is what it exists to bound); the default per-item mode and everything else about
+  the bake — idempotent, only `NULL` labels touched, an unresolved item retried
+  next run — is unchanged. The weekly `publish-index.yml` gained a bounded,
+  non-blocking `umbra index bake --by-site --limit 1200` step *before* the
+  derived artifacts, so the fetched `catalog.db`, the stac-geoparquet export and
+  the `catalog.pmtiles` basemap all arrive pre-labelled; a slow or unavailable
+  geocoder costs the run some labels, never the publish. Needs no extra (the
+  Nominatim call goes through the core `requests` session), no model call, and is
+  offline-tested in `tests/test_index.py` with a counting stand-in geocoder
+  (one-lookup-per-site, distant passes of one task kept apart, two sites sharing a
+  cell kept apart, the `--limit` semantics, and the CLI flag).
+
 - **Timescan and swipe views for the showcase's featured gallery — the last open
   R4 item (`DEMO_APP_GAPS.md` R4 / `STRATEGY.md` §8 demo polish).** The featured
   gallery precomputed exactly one thing: a two-or-three-date change composite per
@@ -436,6 +470,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **`umbra tiles` now tiles the baked place label, not just the task codename.**
+  `pmtiles._item_properties` set each tiled feature's `place` from `item.task`,
+  so a `umbra tiles --local` over a baked index — including the published
+  `catalog.pmtiles` — showed codenames in the whole-archive explorer while the
+  same index rendered real place names everywhere else. It now prefers
+  `item.place` and falls back to the task, matching what `umbra demo` and the
+  stac-geoparquet export already did.
 - **`umbra index export` (stac-geoparquet) no longer crashes on catalog
   drift in the `providers` property (issue #102).** Most Umbra acquisitions
   encode the STAC `providers` property as a list of provider objects

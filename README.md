@@ -320,6 +320,13 @@ with CatalogIndex.from_release() as index:   # download the weekly snapshot, the
 `umbra index info` reports the snapshot's build date and age, so you know how
 fresh it is; re-run the fetch any time to refresh.
 
+The published snapshot also arrives **pre-labelled**: each acquisition carries a
+reverse-geocoded place name (`item.place`), so maps, galleries and `umbra demo`
+show "Reykjavík, Iceland" instead of a task codename with no geocoding at render
+time. On an index you built yourself, `umbra index bake --by-site` does the same
+— one lookup per site rather than per acquisition, which is what keeps labelling
+a whole catalog within OpenStreetMap Nominatim's ~1 request/sec policy.
+
 The same release also ships a **whole-catalog `catalog.pmtiles` basemap** built
 from that snapshot, so you get a fast, zoom-anywhere map of the *entire* archive
 without tiling it yourself. `umbra tiles --fetch` (or

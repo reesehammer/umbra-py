@@ -28,7 +28,7 @@ import heapq
 import json
 import os
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -104,6 +104,47 @@ CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
 CREATE INDEX IF NOT EXISTS idx_items_id ON items(id);
 CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
 """
+
+
+#: Grid cell, in degrees, used to group one *site's* acquisitions when baking
+#: place labels with ``by_site=True``. Umbra files every pass over a site under
+#: a single task directory and a pass's footprint is a few km across, so a
+#: site's passes land in the same ~11 km cell and are geocoded once. A task
+#: whose passes straddle a cell boundary simply costs an extra geocode call --
+#: the failure direction is a redundant lookup, never a mislabelled item.
+_SITE_CELL_DEGREES = 0.1
+
+
+def _site_groups(
+    rows: Iterable[tuple[str, str | None, float, float, float, float]],
+    by_site: bool,
+) -> list[tuple[tuple[float, float], list[str]]]:
+    """Group unlabelled index rows into the geocode calls a bake will make.
+
+    Each returned entry is ``((lat, lon), hrefs)``: the centroid to reverse
+    geocode, and the acquisitions that take the resulting label. With
+    ``by_site`` false every acquisition is its own group (one call per item,
+    the original behaviour); with it true, acquisitions sharing a task *and* a
+    :data:`_SITE_CELL_DEGREES` cell collapse into one group whose centroid is
+    the mean of its members'. Insertion order follows the row order, so the
+    grouping -- and therefore a ``limit``-ed batch -- is deterministic.
+    """
+    groups: dict[object, list[tuple[float, float, str]]] = {}
+    for href, task, min_lon, min_lat, max_lon, max_lat in rows:
+        lat = (min_lat + max_lat) / 2.0
+        lon = (min_lon + max_lon) / 2.0
+        key: object = (
+            (task, round(lat / _SITE_CELL_DEGREES), round(lon / _SITE_CELL_DEGREES))
+            if by_site
+            else href
+        )
+        groups.setdefault(key, []).append((lat, lon, href))
+    out = []
+    for members in groups.values():
+        lat = sum(m[0] for m in members) / len(members)
+        lon = sum(m[1] for m in members) / len(members)
+        out.append(((lat, lon), [m[2] for m in members]))
+    return out
 
 
 @dataclass(frozen=True)
@@ -493,6 +534,7 @@ class CatalogIndex:
         *,
         zoom: int = 10,
         limit: int | None = None,
+        by_site: bool = False,
         progress: Callable[[int], None] | None = None,
     ) -> int:
         """Reverse-geocode each item's footprint once and cache the place label.
@@ -510,10 +552,22 @@ class CatalogIndex:
         It is **idempotent**: only items whose ``place`` is still ``NULL`` are
         geocoded, so a re-run labels just what was added since (and an item whose
         geocode returns nothing is retried on the next run rather than marked).
-        ``limit`` caps how many items are geocoded this call (to bake a large
+        ``limit`` caps how many *geocode calls* this run makes (to bake a large
         catalog in bounded batches); ``zoom`` is the Nominatim address
         granularity (3 = country ... 10 = city ... 18 = building). ``progress``,
-        if given, is called with the running count of items processed.
+        if given, is called with the running count of calls made.
+
+        With ``by_site`` the bake geocodes **once per site** rather than once per
+        acquisition: Umbra files every pass over a site under one task, so the
+        passes sharing a task and a :data:`_SITE_CELL_DEGREES` cell are resolved
+        together from their mean centroid and all take that one label (see
+        :func:`_site_groups`). A repeat-imaged catalog is mostly repeat passes,
+        so this collapses the throttled ~1 req/s call count by roughly the
+        average passes-per-site -- which is what makes labelling a *whole*
+        catalog (and shipping it pre-labelled in the published snapshot) practical
+        rather than an overnight job. The label is a coarse place name for a
+        footprint a few km across, so one per site is the same answer per-item
+        geocoding would converge on; the default stays per-item.
 
         ``geocoder`` is an injectable ``(lat, lon) -> label | None`` callable; the
         default wraps :func:`umbra_py.viz._reverse_geocode`, which self-throttles
@@ -527,23 +581,27 @@ class CatalogIndex:
                 return _reverse_geocode(lat, lon, zoom=zoom)
 
         rows = self._conn.execute(
-            "SELECT href, min_lon, min_lat, max_lon, max_lat FROM items "
+            "SELECT href, task, min_lon, min_lat, max_lon, max_lat FROM items "
             "WHERE place IS NULL AND min_lon IS NOT NULL AND min_lat IS NOT NULL "
             "ORDER BY href"
         ).fetchall()
+        groups = _site_groups(rows, by_site)
         if limit is not None:
-            rows = rows[:limit]
+            groups = groups[:limit]
 
         labelled = 0
-        for processed, (href, min_lon, min_lat, max_lon, max_lat) in enumerate(rows, 1):
-            lat = (min_lat + max_lat) / 2.0
-            lon = (min_lon + max_lon) / 2.0
+        uncommitted = 0
+        for processed, ((lat, lon), hrefs) in enumerate(groups, 1):
             label = geocoder(lat, lon)
             if label:
-                self._conn.execute("UPDATE items SET place = ? WHERE href = ?", (label, href))
-                labelled += 1
-                if labelled % 50 == 0:
+                self._conn.executemany(
+                    "UPDATE items SET place = ? WHERE href = ?", [(label, h) for h in hrefs]
+                )
+                labelled += len(hrefs)
+                uncommitted += len(hrefs)
+                if uncommitted >= 50:
                     self._conn.commit()
+                    uncommitted = 0
             if progress is not None:
                 progress(processed)
         self._conn.commit()
