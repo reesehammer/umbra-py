@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/render-manifest.schema.json",
   "title": "umbra-py render manifest",
-  "description": "The JSON object umbra-py prints to stdout when a render command (change, timescan, swipe, gallery, map) is run with --json. It records exactly what artifact was produced, from which acquisitions, and with which settings -- the success-side counterpart to the machine-readable error contract. Human progress and warnings go to stderr, so stdout carries this object alone. Stable within a minor version.",
+  "description": "The JSON object umbra-py prints to stdout when a render command (change, timescan, swipe, gallery, map) or `umbra stack` is run with --json. It records exactly what artifact was produced, from which acquisitions, and with which settings -- the success-side counterpart to the machine-readable error contract. Human progress and warnings go to stderr, so stdout carries this object alone. Stable within a minor version.",
   "type": "object",
   "required": ["output", "items_used", "parameters"],
   "additionalProperties": false,

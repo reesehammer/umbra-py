@@ -248,6 +248,41 @@ from umbra_py import to_geotiff
 to_geotiff(item, "aoi.tif", bbox=(-68.05, 10.45, -68.00, 10.50), max_size=4096)
 ```
 
+### Stack a time series into a datacube
+
+Multi-date analysis needs the passes *co-registered*: the same output pixel has
+to mean the same patch of ground on every date, or a `diff` measures
+misalignment instead of change. That is real work against Umbra, because
+successive passes over a site arrive in whatever UTM zone and extent each
+acquisition used — which is why `stackstac` / `odc-stac` can't be pointed at
+them. `to_stack` does it, turning a search result into a labelled
+`(time, y, x)` cube (requires the `load` extra):
+
+```python
+from umbra_py import UmbraCatalog, to_stack
+
+passes = list(UmbraCatalog().search(area="Centerfield", polarizations=["VV"], limit=12))
+
+cube = to_stack(passes, max_size=1024, db=True)   # (time, y, x), EPSG:4326, NaN-masked
+print(cube.sizes, cube["item_id"].values)
+
+baseline = cube.isel(time=slice(0, 3)).mean("time")   # pre-event average
+delta = cube.isel(time=-1) - baseline                 # dB change vs. that baseline
+activity = cube.std("time")                           # where the scene keeps changing
+```
+
+Slices are ordered oldest-first, each keeps its `item_id`, and nodata is `NaN`
+so cross-date statistics aren't poisoned by fill. By default the cube covers
+only the ground *every* pass saw (`extent="intersection"`), so no cell has a
+gap; `extent="union"` keeps all of it and pads each slice with `NaN` instead.
+Stack **one polarization** — mixing VV and VH puts a polarization difference on
+the time axis where you'll read it as change.
+
+`stack_to_geotiff` (and `umbra stack`, below) writes the same cube as a
+multi-band GeoTIFF — one band per acquisition, each described by its timestamp —
+for QGIS, GDAL, or anything that isn't Python. Where `umbra change` and
+`umbra timescan` render this comparison as a *picture*, this is the *numbers*.
+
 ### Fast, repeatable search with a local index
 
 Umbra publishes no STAC API, so every search re-walks the public S3 bucket —
@@ -494,6 +529,10 @@ umbra gallery --area "Centerfield" --out gallery.html --db
 # Load an analysis-ready GeoTIFF -- clip to an area and/or decimate, no full
 # download. Streams only the requested window of the cloud-optimized GeoTIFF.
 umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-size 4096
+
+# Co-register a site's whole series into one analysis-ready datacube: a
+# multi-band GeoTIFF, one pixel-aligned band per acquisition, oldest first.
+umbra stack --area "Centerfield" --pol VV --db --out centerfield.tif
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html

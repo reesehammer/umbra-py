@@ -59,7 +59,11 @@ API**, which breaks the standard tooling that makes other missions feel easy.
   *API*. Against a static catalog you're reduced to crawling thousands of
   nested `catalog.json` files with plain `pystac` and filtering client-side.
   The QGIS STAC plugin and leafmap search hit the same wall. (This is the wall
-  `umbra serve`'s read-only STAC API façade removes — see §5.2.)
+  `umbra serve`'s read-only STAC API façade removes — see §5.2.) The *load*
+  half of that stack fails for a second, independent reason: `stackstac` /
+  `odc-stac` want a common projected grid, and successive Umbra passes over one
+  site arrive in whatever UTM zone and extent each acquisition used. That is
+  what `to_stack` / `umbra stack` do themselves — see §5.5.
 - **Google Earth Engine.** The
   [community catalog](https://gee-community-catalog.org/projects/umbra_opendata/)
   mirrors GEC products as an ImageCollection — genuinely elegant if you live
@@ -167,9 +171,12 @@ self-checking and guarded offline by `tests/test_examples.py`.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 
-ML dataset prep (`umbra chips`) and SICD → geocoded COG (`umbra convert`,
-including DEM/`--dem auto` orthorectification, geoid handling, and three RTC
-flattening models: `cosine`/`area`/`gamma`) all ship. **Open:** the *fully
+ML dataset prep (`umbra chips`), time-series datacubes (`umbra_py.to_stack` /
+`stack_to_geotiff` / `umbra stack` — the co-registered `(time, y, x)` xarray
+cube or multi-band GeoTIFF that `stackstac`/`odc-stac` can't produce here, see
+§2) and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
+orthorectification, geoid handling, and three RTC flattening models:
+`cosine`/`area`/`gamma`) all ship. **Open:** the *fully
 calibrated* remainder of RTC — full gamma-nought illuminated-area facet
 integration in image space (vs. the shipped per-pixel `gamma` approximation)
 — and MultiRTC interop. This is a heavier, calibration-oriented job (Umbra's

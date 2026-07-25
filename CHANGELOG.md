@@ -7,6 +7,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Time-series datacubes: `umbra_py.to_stack` / `stack_to_geotiff` / `umbra
+  stack` (`STRATEGY.md` §2–§3 — the `stackstac`/`odc-stac` parity gap).** The
+  library could load *one* scene into a labelled array (`to_xarray`) and could
+  render a *picture* of several (`umbra change`, `umbra timescan`), but there
+  was no way to get the multi-date **numbers** — the primitive every multi-date
+  SAR analysis actually starts from. Elsewhere in the STAC ecosystem that step
+  is `stackstac` / `odc-stac`; neither can be pointed at Umbra, because both
+  assume a STAC *API* and a common projected grid, and successive passes over
+  one site are delivered in whatever UTM zone and at whatever extent each
+  acquisition happened to use. So the co-registration has to be done here.
+  `to_stack(items)` warps every acquisition onto one shared EPSG:4326 grid and
+  returns an `xarray.DataArray` with dims `("time", "y", "x")` — slices ordered
+  oldest-first, each carrying its `item_id` on the time axis, nodata and
+  non-positive pixels always `NaN` so `cube.mean("time")` / `.std("time")` /
+  `.diff("time")` are honest per-ground-cell statistics rather than per-scene
+  ones. `extent="intersection"` (the default) keeps only the ground *every*
+  pass saw, so no cell has a gap, and says so plainly when the footprints don't
+  all overlap; `extent="union"` (`STACK_EXTENTS`) keeps all ground *any* pass
+  saw and pads each slice with `NaN` outside its own footprint. `bbox` clips,
+  `max_size` caps the shared grid, `db` stacks the decibel scale (where a
+  backscatter ratio becomes a subtraction). Kept honest about the geometry: the
+  lon/lat grid stretches with latitude — the same quick-look approximation
+  `umbra change` / `umbra timescan` make, fine for comparing a cell to *itself*
+  across dates — and the docstring says to reproject before measuring area.
+  Efficient by construction: each source is opened as a full-resolution
+  `WarpedVRT` and then read *decimated* through a window, so GDAL serves the
+  matching cloud-optimized GeoTIFF overview instead of every full-res tile (the
+  same hard-won pattern `viz._coregister_bands` uses — reading a coarse VRT
+  whole would force a full-res source read and thousands of range requests).
+  `stack_to_geotiff` writes the cube as a multi-band float32 GeoTIFF — one band
+  per acquisition, oldest first, each band described by its timestamp and item
+  id, with the ids/datetimes and the CC-BY attribution in the file tags — so
+  the time axis survives into QGIS, GDAL or anything that isn't Python. The
+  `umbra stack` CLI mirrors `umbra timescan`'s search-vs-URLs interface (the
+  shared `--local` / `--index-db`, `--token`, `--fuzzy`, `--json` and
+  acquisition-filter option groups) and warns, like the render commands do,
+  when a selection mixes polarizations — a polarization difference on the time
+  axis reads as change. Deterministic, no model call, no new dependency (the
+  existing `[load]` extra), and fully offline-tested in `tests/test_load.py`
+  against real on-disk GeoTIFFs: time ordering and provenance, intersection vs
+  union (including the `NaN` padding), a step-edge test that two scenes on
+  *different* source resolutions land their edge on the same output column
+  (pixel alignment is the whole promise), the dB scale, the undated/empty/bad-
+  extent/no-overlap errors, the multi-band round-trip and the CLI.
+
 - **Per-site place-label baking (`umbra index bake --by-site`) and a pre-labelled
   published snapshot (`STRATEGY.md` §8 demo/hosting — "bake place labels into the
   published weekly snapshot").** `CatalogIndex.bake_places` resolved one
