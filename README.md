@@ -1092,8 +1092,34 @@ browser page on another origin can call it. Use `umbra serve --no-artifacts` to
 expose only the read-only STAC surface (e.g. for a public instance that wants to
 bound COG-streaming egress).
 
+**And the same change question answered in numbers.** Every other artifact is a
+picture, which a person reads and a program can't. `POST /artifacts/stats` takes
+the same request shape and returns the `umbra stack --stats` reduction as JSON —
+per-pass decibel statistics, the signed change against the previous pass, how
+much ground moved past `change_threshold_db` **in km²**, and with `"blocks": N`
+which part of the site moved and between which two passes:
+
+```bash
+curl -X POST http://127.0.0.1:8000/artifacts/stats \
+  -H 'content-type: application/json' \
+  -d '{"bbox": [-112.1, 39.0, -111.9, 39.2], "datetime": "2024-01-01/2024-06-01",
+       "blocks": 6}'
+# -> {"count": 5, "units": "dB", "passes": [...], "net_change": {...},
+#     "spatial": {"peak_block": {...}, "blocks": [...], "grid_text": "..."}}
+```
+
+The grid defaults to the site's UTM zone (`"crs"`) and the decibel scale, so
+areas are equal-area measurements rather than counts of geographic cells — pass
+`"crs": null` for a lon/lat grid and the areas come back `null` rather than
+wrong. `"clip_bbox"` narrows the measurement to a sub-area inside the scenes
+(distinct from `"bbox"`, which chooses *which* acquisitions are measured). Unlike
+the picture endpoints it refuses to mix polarizations: an HH-vs-VV difference
+would land on the time axis and read as change. It needs the `load` extra on the
+*server* (`pip install "umbra-py[serve,load]"`), so a client measures a site with
+nothing installed locally.
+
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
-request: add `"async": true` to a composite request body to get a `202 Accepted`
+request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
 and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished
 artifact from `GET /jobs/{id}/result` (the disk cache is the result store, so an
 already-cached render comes straight back `succeeded`):

@@ -977,9 +977,9 @@ def mcp() -> None:
     "--artifacts/--no-artifacts",
     default=True,
     show_default=True,
-    help="Mount the on-demand render endpoints (/artifacts/quicklook, /change, "
-    "/timescan). Use --no-artifacts for a public instance that wants to bound "
-    "COG-streaming egress.",
+    help="Mount the on-demand artifact endpoints (/artifacts/quicklook, /change, "
+    "/timescan, /swipe, /stats). Use --no-artifacts for a public instance that "
+    "wants to bound COG-streaming egress.",
 )
 @click.option(
     "--cache-dir",
@@ -998,8 +998,11 @@ def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
     It also renders artifacts on demand over any site: a quicklook
     (``GET /artifacts/quicklook/{id}.png``), a change composite
     (``POST /artifacts/change``) or a timescan (``POST /artifacts/timescan``),
-    each cached to disk by its inputs. Requires the ``serve`` extra
-    (``pip install 'umbra-py[serve]'``).
+    each cached to disk by its inputs -- and answers the same change question in
+    *numbers* at ``POST /artifacts/stats``, the ``umbra stack --stats``
+    reduction (per-pass decibel statistics, changed area in km², and with
+    ``"blocks": N`` which part of the site moved) over HTTP. Requires the
+    ``serve`` extra (``pip install 'umbra-py[serve]'``).
     """
     from .exceptions import MissingDependencyError
     from .serve import serve as run_stac_server

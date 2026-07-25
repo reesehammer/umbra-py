@@ -583,22 +583,25 @@ def test_run_search_offset_paging_is_stable(index_path):
 # treat render output as opaque bytes, so this never needs to be a real image.
 FAKE_PNG = b"\x89PNG\r\n\x1a\nFAKE"
 
+#: The stats endpoint's artifact is JSON, not an image, so its fake differs.
+FAKE_STATS = b'{"count":2,"units":"dB"}'
+
 
 class RecordingRenderers:
-    """Fake :class:`serve.Renderers` that records calls and returns FAKE_PNG.
+    """Fake :class:`serve.Renderers` that records calls and returns fixed bytes.
 
-    Lets the artifact routes be exercised with zero network and no ``viz``
-    extra -- the whole point of the renderers being injectable.
+    Lets the artifact routes be exercised with zero network and no ``viz`` /
+    ``load`` extra -- the whole point of the renderers being injectable.
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str], dict]] = []
 
-    def _make(self, kind):
+    def _make(self, kind, payload: bytes = FAKE_PNG):
         def render(items, opts):
             ids = [items.id] if hasattr(items, "id") else [it.id for it in items]
             self.calls.append((kind, ids, dict(opts)))
-            return FAKE_PNG
+            return payload
 
         return render
 
@@ -608,6 +611,7 @@ class RecordingRenderers:
             change=self._make("change"),
             timescan=self._make("timescan"),
             swipe=self._make("swipe"),
+            stats=self._make("stats", payload=FAKE_STATS),
         )
 
 
@@ -808,9 +812,188 @@ def test_swipe_endpoint_needs_two_acquisitions(art_client):
     assert "at least 2" in resp.json()["detail"]
 
 
+# ---- the numeric artifact (POST /artifacts/stats) ------------------------
+
+
+def test_stats_options_defaults_to_a_utm_decibel_grid():
+    """The stats defaults mirror the ``stack_stats`` agent tool, not the
+    composites: an equal-area grid and the radiometric scale."""
+    opts = serve.stats_options({})
+    assert opts["crs"] == "utm" and opts["db"] is True
+    assert opts["extent"] == "intersection"
+    assert opts["blocks"] == 0 and opts["change_threshold_db"] == 3.0
+    assert opts["clip_bbox"] is None
+
+
+def test_stats_options_reads_the_stacking_parameters():
+    opts = serve.stats_options(
+        {
+            "asset": "CSI",
+            "db": False,
+            "extent": "Union",
+            "crs": "EPSG:32633",
+            "clip_bbox": [-69, 10, -67, 11],
+            "blocks": 6,
+            "change_threshold_db": 1.5,
+            "max_size": 256,
+        }
+    )
+    assert opts == {
+        "asset": "CSI",
+        "max_size": 256,
+        "db": False,
+        "extent": "union",
+        "crs": "EPSG:32633",
+        "clip_bbox": [-69.0, 10.0, -67.0, 11.0],
+        "blocks": 6,
+        "change_threshold_db": 1.5,
+    }
+    # An explicit null CRS is the opt-in to the lon/lat grid.
+    assert serve.stats_options({"crs": None})["crs"] is None
+    # Blocks are bounded so one request cannot ask for an unbounded payload.
+    assert serve.stats_options({"blocks": 999})["blocks"] == serve.STATS_MAX_BLOCKS
+
+
+def test_stats_options_rejects_bad_extent_and_threshold():
+    with pytest.raises(ValueError):
+        serve.stats_options({"extent": "everything"})
+    with pytest.raises(ValueError):
+        serve.stats_options({"change_threshold_db": -1})
+
+
+def test_stats_frames_requires_two_and_caps(index_path):
+    with CatalogIndex(index_path) as source:
+        items = list(source.search(limit=None))
+    assert len(serve.stats_frames(items)) == 3
+    with pytest.raises(ValueError):
+        serve.stats_frames(items[:1])
+    many = items * 40  # stand-in for a long series; the helper only counts
+    assert len(serve.stats_frames(many)) == serve.ARTIFACT_MAX_FRAMES
+
+
+def test_stats_frames_refuses_mixed_polarizations(sample_item_dict):
+    """A mixed-polarization *number* is wrong, not merely confusing: the HH/VV
+    difference lands on the time axis and reads as change."""
+    items = []
+    for i, pols in enumerate((["VV"], ["HH"])):
+        doc = copy.deepcopy(sample_item_dict)
+        doc["id"] = f"pol-{i}"
+        doc["properties"]["sar:polarizations"] = pols
+        items.append(UmbraItem.from_dict(doc, href=_href(i)))
+    with pytest.raises(ValueError, match="mixed polarizations"):
+        serve.stats_frames(items)
+
+
+def test_stats_endpoint_returns_json_and_caches(art_client, recorder):
+    resp = art_client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/json"
+    assert resp.headers["x-umbra-cache"] == "miss"
+    assert resp.json() == {"count": 2, "units": "dB"}
+    kind, ids, opts = recorder.calls[0]
+    assert kind == "stats"
+    assert ids == ["item-0", "item-1"]
+    # The reduction gets the equal-area, decibel defaults without being asked.
+    assert opts["crs"] == "utm" and opts["db"] is True
+
+    again = art_client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]})
+    assert again.status_code == 200
+    assert again.headers["x-umbra-cache"] == "hit"
+    assert again.json() == {"count": 2, "units": "dB"}
+    assert len(recorder.calls) == 1
+
+
+def test_stats_endpoint_resolves_a_bbox_query(art_client, recorder):
+    resp = art_client.post("/artifacts/stats", json={"bbox": [-69, 10, -67, 11]})
+    assert resp.status_code == 200
+    assert recorder.calls[0][1] == ["item-0", "item-1", "item-2"]
+
+
+def test_stats_blocks_is_a_distinct_artifact(art_client, recorder):
+    """The spatial breakdown is a different answer, so it is a different cache
+    entry -- asking for blocks after a scene-wide run must re-run the reduction."""
+    body = {"ids": ["item-0", "item-1"]}
+    art_client.post("/artifacts/stats", json=body)
+    art_client.post("/artifacts/stats", json={**body, "blocks": 6})
+    assert [c[2]["blocks"] for c in recorder.calls] == [0, 6]
+
+
+def test_stats_endpoint_needs_two_acquisitions(art_client):
+    resp = art_client.post("/artifacts/stats", json={"ids": ["item-0"]})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+
+
+def test_stats_endpoint_rejects_bad_options(art_client):
+    resp = art_client.post(
+        "/artifacts/stats", json={"ids": ["item-0", "item-1"], "extent": "everything"}
+    )
+    assert resp.status_code == 400
+    assert "extent" in resp.json()["detail"]
+
+
+def test_stats_endpoint_runs_async(inline_client, recorder):
+    resp = inline_client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"], "async": True})
+    assert resp.status_code == 200
+    job = resp.json()
+    assert job["kind"] == "stats" and job["status"] == "succeeded"
+    result = inline_client.get(f"/jobs/{job['id']}/result")
+    assert result.status_code == 200
+    assert result.headers["content-type"] == "application/json"
+    assert result.json() == {"count": 2, "units": "dB"}
+    assert len(recorder.calls) == 1
+
+
+def test_stats_missing_load_extra_maps_to_501(index_path, tmp_path, recorder):
+    from umbra_py.exceptions import MissingDependencyError
+
+    def boom(items, opts):
+        raise MissingDependencyError("needs the 'load' extra")
+
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom, stats=boom)
+    app = serve.build_app(index_path, renderers=renderers, cache_dir=tmp_path / "art")
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 501
+    assert "load" in resp.json()["detail"]
+
+
+def test_default_renderers_stats_reduces_a_stack(monkeypatch):
+    """The production stats renderer threads its options into ``to_stack`` /
+    ``stack_stats`` and serialises the reduction as JSON bytes."""
+    from umbra_py import load
+
+    seen: dict = {}
+
+    def fake_to_stack(items, **kwargs):
+        seen["to_stack"] = ([it.id for it in items], kwargs)
+        return "CUBE"
+
+    def fake_stack_stats(cube, **kwargs):
+        seen["stack_stats"] = (cube, kwargs)
+        return {"count": 2, "units": "dB"}
+
+    monkeypatch.setattr(load, "to_stack", fake_to_stack)
+    monkeypatch.setattr(load, "stack_stats", fake_stack_stats)
+
+    class _Item:
+        def __init__(self, id_):
+            self.id = id_
+
+    opts = serve.stats_options({"blocks": 4, "clip_bbox": [-69, 10, -67, 11]})
+    payload = serve.default_renderers().stats([_Item("a"), _Item("b")], opts)
+    assert json.loads(payload) == {"count": 2, "units": "dB"}
+    ids, kwargs = seen["to_stack"]
+    assert ids == ["a", "b"]
+    assert kwargs["crs"] == "utm" and kwargs["db"] is True
+    assert kwargs["extent"] == "intersection"
+    assert kwargs["bbox"] == (-69.0, 10.0, -67.0, 11.0)
+    assert seen["stack_stats"] == ("CUBE", {"change_threshold_db": 3.0, "blocks": 4})
+
+
 def test_landing_advertises_artifacts_when_enabled(art_client):
     rels = {link["rel"] for link in art_client.get("/").json()["links"]}
-    assert {"quicklook", "change", "timescan", "swipe"} <= rels
+    assert {"quicklook", "change", "timescan", "swipe", "stats"} <= rels
 
 
 def test_cors_headers_allow_cross_origin_calls(art_client):
@@ -824,8 +1007,9 @@ def test_artifacts_can_be_disabled(index_path, tmp_path):
     assert client.get("/artifacts/quicklook/item-0.png").status_code == 404
     assert client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]}).status_code == 404
     assert client.post("/artifacts/swipe", json={"ids": ["item-0", "item-1"]}).status_code == 404
+    assert client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]}).status_code == 404
     rels = {link["rel"] for link in client.get("/").json()["links"]}
-    assert not ({"quicklook", "change", "timescan", "swipe"} & rels)
+    assert not ({"quicklook", "change", "timescan", "swipe", "stats"} & rels)
 
 
 def test_missing_render_extra_maps_to_501(index_path, tmp_path):
@@ -834,7 +1018,7 @@ def test_missing_render_extra_maps_to_501(index_path, tmp_path):
     def boom(item, opts):
         raise MissingDependencyError("needs the 'viz' extra")
 
-    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom)
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom, stats=boom)
     app = serve.build_app(index_path, renderers=renderers, cache_dir=tmp_path / "art")
     client = TestClient(app, raise_server_exceptions=False)
     resp = client.get("/artifacts/quicklook/item-0.png")
@@ -1022,7 +1206,7 @@ def test_async_failed_render_reports_error_status(index_path, tmp_path):
     def boom(items, opts):
         raise MissingDependencyError("needs the 'viz' extra")
 
-    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom)
+    renderers = serve.Renderers(quicklook=boom, change=boom, timescan=boom, swipe=boom, stats=boom)
     app = serve.build_app(
         index_path,
         renderers=renderers,

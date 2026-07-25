@@ -491,9 +491,10 @@ blocker:
 The read-only STAC API is shipped (landing / conformance / collections / items /
 `GET`+`POST /search` with bbox, datetime, ids and token pagination), and now
 renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`, `POST
-/artifacts/change`, `POST /artifacts/timescan`, `POST /artifacts/swipe`), each
-disk-cached by its inputs and wrapping the existing `viz` functions behind
-injectable renderers. `GET /artifacts/thumbnail/{id}.png` serves the baked
+/artifacts/change`, `POST /artifacts/timescan`, `POST /artifacts/swipe`, and the
+one that is numbers rather than a picture, `POST /artifacts/stats`), each
+disk-cached by its inputs and wrapping the existing `viz` / `load` functions
+behind injectable renderers. `GET /artifacts/thumbnail/{id}.png` serves the baked
 quicklook thumbnail (`umbra index bake-thumbnails`) straight from the index with
 no render. The `umbra demo` front end now calls these endpoints (see
 the Done log), closing the self-serve R4 loop. **Async job semantics for long
@@ -814,12 +815,34 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   `None`, not zero. `--blocks` implies `--stats` and rides in the render
   manifest's `stats` field; the agent default is `0` so the payload only grows
   when a model asks *where*. Offline-tested in `tests/test_load.py` and
-  `tests/test_mcp_server.py`. Still open under this heading: `umbra serve` has
-  no `/stats` endpoint over the same reduction (the spatial breakdown would be a
-  natural query parameter on it), and the block series is reported per block
-  rather than as a per-block *time series* — each block's full pass-to-pass
-  sequence is computed and then reduced to its peak, so surfacing all of it is a
-  payload decision, not new arithmetic.
+  `tests/test_mcp_server.py`. Still open under this heading: the block series is
+  reported per block rather than as a per-block *time series* — each block's full
+  pass-to-pass sequence is computed and then reduced to its peak, so surfacing
+  all of it is a payload decision, not new arithmetic.
+- ~~**The same reduction on `umbra serve`.**~~ ✅ **Done** (`POST
+  /artifacts/stats`). The STAC API façade served four artifacts and every one was
+  a picture; this one answers the same change question in JSON. It reuses the
+  composite endpoints' whole shape — `ids` or a `bbox`/`datetime` query, the
+  content-addressed disk cache, the `"async": true` job flow — with its own
+  option normaliser (`stats_options`: `extent` / `crs` / `clip_bbox` / `blocks` /
+  `change_threshold_db`, defaulting to a UTM grid and the decibel scale like the
+  agent tool rather than to the compositors' defaults) and its own frame picker
+  (`stats_frames`), which additionally refuses a mixed-polarization selection
+  because the HH/VV difference would land on the time axis and read as change.
+  `Renderers` gained a `stats` member, so the route is offline-testable with no
+  `load` extra installed. Offline-tested in `tests/test_serve.py`. Follow-ons,
+  neither a blocker:
+  - **A "Quantify" button in the `umbra demo` analyze panel.** With
+    `--server-url` the explorer offers Change / Timescan / Swipe — all three
+    pictures. The numeric endpoint is the missing fourth: render `net_change`
+    plus the `grid_text` heat-grid for the currently-filtered acquisitions and
+    the self-serve loop can *measure*, not just look. (`src/umbra_py/demo.py`.)
+  - **A client mistake that reads as a server error.** A `to_stack` failure that
+    is really bad input — footprints that don't all overlap under
+    `extent="intersection"` — surfaces as a `500` (or a failed job) rather than a
+    `400`, since `_serve_artifact` only maps `MissingDependencyError`. The
+    composite endpoints behave the same way for render failures, so the fix is a
+    shared one: map `ValueError` from a render to a `400` for all of them.
 
 ---
 

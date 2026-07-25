@@ -28,15 +28,29 @@ site straight from HTTP, not just a curated set baked at build time
   served straight from the index with no render (``umbra index bake-thumbnails``);
 - ``POST /artifacts/change``   -- a 2--3 date change composite over a query;
 - ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series;
-- ``POST /artifacts/swipe``    -- an interactive before/after swipe map (HTML).
+- ``POST /artifacts/swipe``    -- an interactive before/after swipe map (HTML);
+- ``POST /artifacts/stats``    -- the same change question answered in *numbers*.
 
-These wrap the existing :mod:`umbra_py.viz` functions unchanged and cache every
-result to disk keyed by its inputs, so a repeat request is a file read (closing
-the "no artifact caching" gap for these endpoints). Two properties keep them in
-the package's grain: the renderers are **injectable** (``build_app(...,
-renderers=...)``), so the routes are unit-testable in the core install with no
-network and no ``viz`` extra; and they are opt-out (``--no-artifacts``) for a
-public instance that wants to bound COG-streaming egress.
+The last one is the odd one out on purpose. Every other artifact is a picture,
+which a human reads and a program cannot; ``/artifacts/stats`` runs the
+:func:`~umbra_py.load.to_stack` + :func:`~umbra_py.load.stack_stats` reduction
+behind the same request shape and returns JSON -- per-pass decibel statistics,
+the signed change against the previous pass, how much ground moved past a
+threshold (in km², because the grid defaults to the site's UTM zone), and with
+``"blocks": N`` which part of the site moved and between which two passes. It is
+the reduction the CLI (``umbra stack --stats``) and the agent front doors
+(``stack_stats`` on MCP / LangChain / LlamaIndex) already expose, finally
+reachable over HTTP -- so a QGIS user, a browser front end or an OpenAPI-driven
+agent can *measure* a site without installing the ``load`` extra locally.
+
+These wrap the existing :mod:`umbra_py.viz` and :mod:`umbra_py.load` functions
+unchanged and cache every result to disk keyed by its inputs, so a repeat
+request is a file read (closing the "no artifact caching" gap for these
+endpoints). Two properties keep them in the package's grain: the renderers are
+**injectable** (``build_app(..., renderers=...)``), so the routes are
+unit-testable in the core install with no network and no ``viz``/``load``
+extra; and they are opt-out (``--no-artifacts``) for a public instance that
+wants to bound COG-streaming egress.
 
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
@@ -90,6 +104,7 @@ from .constants import (
 )
 from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
+from .load import STACK_AUTO_CRS, STACK_EXTENTS
 from .models import BBox, UmbraItem
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -473,6 +488,13 @@ def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
                 method="POST",
                 title="On-demand before/after swipe map (interactive HTML)",
             ),
+            _link(
+                "stats",
+                f"{base}/artifacts/stats",
+                type="application/json",
+                method="POST",
+                title="On-demand change statistics over a site's passes (JSON)",
+            ),
         ]
     return {
         "type": "Catalog",
@@ -770,14 +792,15 @@ def default_artifact_cache_dir() -> Path:
 
 @dataclass(frozen=True)
 class Renderers:
-    """The three render functions the artifact endpoints call, as PNG bytes.
+    """The render functions the artifact endpoints call, as opaque bytes.
 
     Injecting this (rather than importing :mod:`umbra_py.viz` directly in the
     routes) is what keeps the endpoints unit-testable in the core install: a
-    test passes fakes that return a fixed PNG with no network and no ``viz``
-    extra, while :func:`default_renderers` wires the real, lazily-imported
-    compositors. Each callable takes the resolved items and a normalised
-    options mapping (``asset`` / ``max_size`` / ``db``) and returns PNG bytes.
+    test passes fakes that return fixed bytes with no network and no ``viz`` /
+    ``load`` extra, while :func:`default_renderers` wires the real,
+    lazily-imported implementations. Each callable takes the resolved items and
+    a normalised options mapping (``asset`` / ``max_size`` / ``db``, plus the
+    stacking options for ``stats``) and returns the artifact's bytes.
     """
 
     quicklook: Callable[[UmbraItem, Mapping[str, Any]], bytes]
@@ -786,6 +809,9 @@ class Renderers:
     #: Unlike the three PNG compositors, ``swipe`` returns a self-contained HTML
     #: page (:func:`viz.swipe_map`), so its bytes are UTF-8 HTML, not a PNG.
     swipe: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
+    #: The one artifact that is not an image: the datacube reduction
+    #: (:func:`~umbra_py.load.stack_stats`) serialised as UTF-8 JSON.
+    stats: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
 
 
 def _png_bytes(image: Any) -> bytes:
@@ -835,7 +861,31 @@ def default_renderers() -> Renderers:
         )
         return m.get_root().render().encode("utf-8")
 
-    return Renderers(quicklook=quicklook, change=change, timescan=timescan, swipe=swipe)
+    def stats(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        # The one renderer behind the ``load`` extra rather than ``viz``: it
+        # co-registers the passes into a datacube and reduces it to numbers.
+        from .load import stack_stats, to_stack
+
+        clip: BBox | None = tuple(opts["clip_bbox"]) if opts["clip_bbox"] else None
+        cube = to_stack(
+            list(items),
+            asset=opts["asset"],
+            bbox=clip,
+            max_size=opts["max_size"],
+            db=opts["db"],
+            extent=opts["extent"],
+            crs=opts["crs"],
+        )
+        payload = stack_stats(
+            cube,
+            change_threshold_db=opts["change_threshold_db"],
+            blocks=opts["blocks"],
+        )
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    return Renderers(
+        quicklook=quicklook, change=change, timescan=timescan, swipe=swipe, stats=stats
+    )
 
 
 def artifact_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -851,6 +901,54 @@ def artifact_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
         "max_size": max(64, min(int(body.get("max_size") or ARTIFACT_MAX_SIZE), 8192)),
         "db": bool(body.get("db", False)),
     }
+
+
+#: Ceiling on the ``blocks`` grid a stats request may ask for. A breakdown is a
+#: payload per block (N x N of them), so this bounds the response, not the maths.
+STATS_MAX_BLOCKS = 16
+
+
+def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalise the options a ``POST /artifacts/stats`` request carries.
+
+    Extends :func:`artifact_options` with what the datacube reduction needs on
+    top of a render (``extent`` / ``crs`` / ``clip_bbox`` / ``blocks`` /
+    ``change_threshold_db``). Two defaults deliberately differ from the picture
+    endpoints, matching the ``stack_stats`` agent tool: the shared grid is the
+    site's **UTM zone**, so a cell count is an area and ``changed_area_km2``
+    means something, and values are **decibels**, the scale on which a ratio of
+    backscatter is a difference. Pass ``"crs": null`` for a lon/lat grid (and
+    accept ``None`` areas rather than wrong ones).
+
+    Raises ``ValueError`` for an unknown ``extent`` or a non-positive threshold,
+    which the route maps to a ``400``.
+    """
+    body = body or {}
+    # ``db`` defaults to True here (radiometric scale), unlike the composites.
+    options = artifact_options({**body, "db": body.get("db", True)})
+
+    extent = str(body.get("extent") or "intersection").lower()
+    if extent not in STACK_EXTENTS:
+        raise ValueError(f"extent must be one of {list(STACK_EXTENTS)}, got {extent!r}.")
+
+    # ``crs`` is absent -> the UTM default; explicitly null -> the lon/lat grid.
+    crs = body["crs"] if "crs" in body else STACK_AUTO_CRS
+    threshold = float(body.get("change_threshold_db") or 3.0)
+    if threshold <= 0:
+        raise ValueError(f"change_threshold_db must be > 0, got {threshold}.")
+
+    # Distinct from the request's ``bbox``, which selects *which* acquisitions
+    # are stacked; this one clips the cube to a sub-area inside them.
+    clip = parse_bbox(body.get("clip_bbox"))
+
+    options.update(
+        extent=extent,
+        crs=str(crs) if crs else None,
+        clip_bbox=list(clip) if clip else None,
+        blocks=max(0, min(int(body.get("blocks") or 0), STATS_MAX_BLOCKS)),
+        change_threshold_db=threshold,
+    )
+    return options
 
 
 def artifact_cache_key(kind: str, item_ids: Sequence[str], options: Mapping[str, Any]) -> str:
@@ -947,6 +1045,36 @@ def swipe_frames(items: list[UmbraItem]) -> list[UmbraItem]:
             "Widen the date range or pass two explicit ids."
         )
     return [items[0], items[-1]]
+
+
+def stats_frames(items: list[UmbraItem]) -> list[UmbraItem]:
+    """Pick (and vet) the passes the stats reduction measures.
+
+    Needs at least two acquisitions -- change is a comparison -- and caps a long
+    series at :data:`ARTIFACT_MAX_FRAMES` (evenly spaced, keeping the temporal
+    endpoints, so the net baseline-to-latest record still spans the request).
+
+    It also refuses to mix polarizations, which the *picture* endpoints tolerate.
+    A composite with mixed polarizations is merely confusing to look at; a
+    mixed-polarization *number* is wrong, because the difference between HH and
+    VV lands on the time axis and reads as change. This is the same refusal the
+    ``stack_stats`` agent tool makes.
+    """
+    if len(items) < 2:
+        raise ValueError(
+            f"A stats reduction needs at least 2 acquisitions, resolved {len(items)}. "
+            "Widen the date range or pass explicit ids."
+        )
+    combos = {tuple(it.polarizations) for it in items if it.polarizations}
+    if len(combos) > 1:
+        listed = ", ".join(sorted("+".join(c) for c in combos))
+        raise ValueError(
+            f"Refusing to measure change across mixed polarizations ({listed}): the "
+            "difference between them would land on the time axis and read as change. "
+            "Filter the selection to one polarization (e.g. the 'polarizations' "
+            "search parameter) or pass explicit ids."
+        )
+    return _evenly_spaced(items, ARTIFACT_MAX_FRAMES)
 
 
 # --------------------------------------------------------------------------
@@ -1137,13 +1265,14 @@ def build_app(
     walk instead. A fresh backend is opened and closed per request so the app
     is safe under FastAPI's thread pool.
 
-    When ``artifacts`` is true (the default) the on-demand render endpoints
+    When ``artifacts`` is true (the default) the on-demand artifact endpoints
     (``/artifacts/quicklook/{id}.png``, ``POST /artifacts/change``,
-    ``POST /artifacts/timescan``, ``POST /artifacts/swipe``) are mounted, along
-    with the async job endpoints (``GET /jobs/{id}``, ``GET /jobs/{id}/result``)
-    the composite renders use when a request opts in to ``"async": true``.
-    ``renderers`` overrides the render functions (defaults to
-    :func:`default_renderers`, which needs the ``viz`` extra at request time);
+    ``POST /artifacts/timescan``, ``POST /artifacts/swipe``, ``POST
+    /artifacts/stats``) are mounted, along with the async job endpoints
+    (``GET /jobs/{id}``, ``GET /jobs/{id}/result``) they use when a request opts
+    in to ``"async": true``. ``renderers`` overrides the render functions
+    (defaults to :func:`default_renderers`, which needs the ``viz`` extra -- and
+    for stats the ``load`` extra -- at request time);
     ``cache_dir`` overrides where rendered PNGs are cached (defaults to
     :func:`default_artifact_cache_dir`). ``job_executor`` overrides the
     background runner for async jobs (anything with ``submit(fn)`` / ``shutdown``,
@@ -1718,6 +1847,7 @@ def build_app(
             *,
             media_type: str = "image/png",
             suffix: str = "png",
+            make_options: Callable[[Mapping[str, Any]], dict[str, Any]] = artifact_options,
         ) -> Response:
             """Resolve frames for a composite and render it sync or async.
 
@@ -1726,13 +1856,17 @@ def build_app(
             never becomes a doomed background job. Only the render itself is
             deferred, and only when the request opts in to ``"async": true`` --
             in which case the caller gets a job document instead of the artifact.
+
+            ``make_options`` normalises the request's render options (and is part
+            of the cache key); the stats endpoint passes its own, which carries
+            the stacking parameters the picture endpoints have no use for.
             """
             items = _resolve_for_composite(body)
             try:
                 frames = pick_frames(items)
+                options = make_options(body)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            options = artifact_options(body)
 
             def render() -> bytes:
                 return render_one(frames, options)
@@ -1763,6 +1897,31 @@ def build_app(
                 renderers.swipe,
                 media_type="text/html; charset=utf-8",
                 suffix="html",
+            )
+
+        @app.post("/artifacts/stats", tags=["Artifacts"])
+        def post_stats(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
+            """Measure how much a site changed across its passes, as JSON.
+
+            The numeric sibling of ``/artifacts/change``: same request shape
+            (``ids`` or a ``bbox``/``datetime`` query, ``async`` opt-in, the same
+            content-addressed cache), but the answer is
+            :func:`~umbra_py.load.stack_stats`' reduction rather than a picture --
+            per-pass decibel statistics, the signed change against the previous
+            pass, how much ground moved past ``change_threshold_db`` (in km²,
+            since the grid defaults to the site's UTM zone), and with
+            ``"blocks": N`` an N x N breakdown saying *which part* of the site
+            moved and between which two passes.
+            """
+            return _composite(
+                request,
+                body,
+                "stats",
+                stats_frames,
+                renderers.stats,
+                media_type="application/json",
+                suffix="json",
+                make_options=stats_options,
             )
 
         @app.get("/jobs/{job_id}", tags=["Artifacts"])
