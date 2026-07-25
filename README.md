@@ -315,6 +315,30 @@ because counting geographic cells measures nothing. `umbra stack --stats` prints
 the same object, and the `stack_stats` agent tool returns it over MCP /
 LangChain / LlamaIndex.
 
+A scene-wide mean hides a change confined to one corner, so `blocks=N` cuts the
+cube into an N×N grid and answers *where* and *when* together:
+
+```python
+spatial = stack_stats(cube, blocks=6)["spatial"]
+spatial["peak_block"]["compass"]                    # 'northeast'
+spatial["peak_block"]["center_lonlat"]              # [-115.81, 37.24]  (map it)
+spatial["peak_block"]["peak_interval"]["to_datetime"]  # when it moved
+print(spatial["grid_text"])                         # north-up dB heat-grid
+```
+
+```text
+ +0.1  +0.2  +0.1  +0.0  +1.1 +11.8
+ +0.1  +0.0  -0.1  +0.3  +2.4  +9.6
+   .   +0.1  +0.0  +0.1  +0.2  +0.4
+```
+
+Every block carries its own `net_change` (same fields as the scene-wide one),
+its bounds in the cube's CRS, a lon/lat centre to map or geocode it by, and the
+consecutive pair of passes it moved most between — so "the site changed 1.4 dB"
+becomes "the northeast brightened 12 dB, between the February and March passes".
+`.` marks ground no two passes both observed. `umbra stack --blocks 6` prints it
+(and implies `--stats`), and the agent tools take the same `blocks` argument.
+
 ### Fast, repeatable search with a local index
 
 Umbra publishes no STAC API, so every search re-walks the public S3 bucket —
@@ -899,7 +923,8 @@ Register it with an MCP client (Claude Desktop shown):
 The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `stack_stats` (the same change
 question in numbers: per-pass decibel statistics and how much ground moved, in
-km²), `download_asset`, `watch_site`
+km² — and with `blocks=N`, which part of the site moved and between which two
+passes), `download_asset`, `watch_site`
 (report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
 index), `describe_scene` (a SAR-literate model reading of one scene) and

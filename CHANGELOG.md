@@ -7,6 +7,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Where *and* when a site changed: `stack_stats(blocks=N)` / `umbra stack
+  --blocks` / the agent tools' `blocks` argument (third follow-on of the
+  datacube PR, `TODO.md`; `STRATEGY.md` §5.5).** The library had two change
+  reductions and each answered half the question: `narrate.compute_change_stats`
+  cuts *two* passes into a coarse grid to say **where** change sits, and
+  `stack_stats` walks the whole series to say **when** it happened and how much
+  ground moved. Neither could answer both, and the gap mattered because a
+  scene-wide mean *dilutes* a localized change — a corner that brightens 12 dB
+  reads as 0.75 dB across a 16-block scene, small enough to dismiss. `blocks=N`
+  now cuts every pass into the same N×N grid and reports each block separately,
+  so the answer is spatial and temporal at once: a `spatial` key with one record
+  per block carrying its `row`/`col`, the plain-language `compass` label
+  `narrate` already uses (the two reductions share `_compass_label` and
+  `_split_slices`, so a block means the same thing in both), `bounds` in the
+  cube's own CRS, a `center_lonlat` to map or reverse-geocode it by, its own
+  `net_change` (identical fields to the scene-wide one, from the same
+  `_pair_change`) and its `peak_interval` — the consecutive pair of passes that
+  block moved most between, named by item id and timestamp. Alongside them
+  `peak_block` names the block that moved most overall so nothing has to scan
+  the grid, and `grid_text` renders the net signed change as a north-up ASCII
+  heat-grid (`.` for ground no two passes both observed) — the same shape
+  `umbra change --narrate` grounds its narration on, so a model reading both
+  sees one spatial vocabulary. Unobserved blocks report `None` rather than a
+  change of zero, so `extent="union"` padding still can never read as change,
+  and `changed_area_km2` per block obeys the same projected-grid rule as
+  everywhere else. `umbra stack --blocks N` prints it and implies `--stats` (so
+  `--blocks 6` alone measures a site spatially without writing a file), and it
+  rides inside the render manifest's `stats` field under `--json` (see
+  `docs/schemas/render-manifest.schema.json`). The same argument is on the
+  `stack_stats` tool across all three agent front doors (MCP, LangChain,
+  LlamaIndex), defaulting to `0` so the payload stays small until a model asks
+  *where*, and the packaged `quantify-change` MCP prompt now asks for `blocks=6`
+  and tells the model to locate change by the peak block's compass label and
+  centre rather than by eye. No model call anywhere in the path; offline-tested
+  in `tests/test_load.py` (a corner that brightens on the last pass only, so both
+  axes are hand-checkable: +12.04 dB in the northeast block, 0.0 elsewhere, and
+  the last interval named as the one that moved; block geometry, the lon/lat
+  centre, and unobserved blocks under `extent="union"`) and
+  `tests/test_mcp_server.py`.
+
 - **The datacube as an answer, not an array: `stack_stats` / `umbra stack
   --stats` / the `stack_stats` agent tool (second follow-on of the datacube PR,
   `TODO.md`; `STRATEGY.md` §7.5).** `to_stack` produced the co-registered cube

@@ -483,6 +483,7 @@ def stack_stats(
     extent: str = "intersection",
     crs: str = "utm",
     change_threshold_db: float = 3.0,
+    blocks: int = 0,
 ) -> dict[str, Any]:
     """Measure how much a site changed across its passes, as numbers.
 
@@ -503,6 +504,16 @@ def stack_stats(
     compares per cell where two passes overlap. ``bbox`` (lon/lat
     ``[min_lon, min_lat, max_lon, max_lat]``) narrows the measurement to a
     sub-area, e.g. one facility inside the scene.
+
+    ``blocks=N`` adds the *where* to the *how much*: the scene is cut into an
+    N x N grid (6 is a good default; 0, the default, skips it) and the extra
+    ``spatial`` key reports each block's own net change, a compass label and
+    lon/lat centre to locate it by, and the consecutive pair of passes that
+    block moved most between — plus ``peak_block`` and an ASCII ``grid_text``
+    heat-map of the net change. Ask for it whenever the question is *where on
+    this site* something happened, or when a scene-wide mean looks small but the
+    picture from ``change_composite`` shows an obvious hot spot: a change
+    confined to one corner is averaged away scene-wide and stands out per block.
 
     Refuses to mix polarizations (HH and VV are not comparable). **No model is
     called** — this is arithmetic over streamed COG overviews, so the numbers are
@@ -528,7 +539,7 @@ def stack_stats(
         extent=extent,
         crs=crs,
     )
-    return _stack_stats(cube, change_threshold_db=change_threshold_db)
+    return _stack_stats(cube, change_threshold_db=change_threshold_db, blocks=blocks)
 
 
 def download_asset(
@@ -894,7 +905,8 @@ def build_server() -> FastMCP:
             "get_item for one item's full metadata, and quicklook / "
             "change_composite / timescan to see the radar imagery. stack_stats "
             "answers the same change question in numbers (per-pass decibel "
-            "statistics and how much ground moved, in km²). describe_scene "
+            "statistics and how much ground moved, in km²; with blocks=N it "
+            "also says which part of the site moved and when). describe_scene "
             "returns a SAR-literate model reading of a scene, and narrate_change "
             "reads what changed between passes grounded in a per-block decibel grid "
             "(the two tools that consult a model, and only when an [ai] key is "
@@ -994,16 +1006,21 @@ def build_server() -> FastMCP:
             f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
             "2. Keep the passes of a single polarization (see each card's "
             "polarization_caveat) — a polarization difference would read as change.\n"
-            "3. stack_stats(urls=[...]) on their stac_href URLs — it co-registers the "
-            "series and returns per-pass decibel statistics, the signed change between "
-            "consecutive passes, and net_change from the first pass to the last, "
-            "including how much ground moved as changed_area_km2.\n"
+            "3. stack_stats(urls=[...], blocks=6) on their stac_href URLs — it "
+            "co-registers the series and returns per-pass decibel statistics, the "
+            "signed change between consecutive passes, and net_change from the first "
+            "pass to the last, including how much ground moved as changed_area_km2. "
+            "blocks=6 adds the spatial breakdown: which part of the site moved, and "
+            "which pair of passes it moved between (spatial.peak_block, and "
+            "spatial.grid_text as a north-up map of the net change).\n"
             "4. timescan(urls=[...]) on the same URLs so you can also see *where* the "
-            "activity sits.\n"
+            "activity sits, and check the picture agrees with the block grid.\n"
             "5. Report the trend with its numbers: name the pass-to-pass deltas that "
-            "stand out, the net change and the changed area, then read the caveats "
-            "aloud — the products are not radiometrically calibrated, so the decibels "
-            "are relative to the same ground on another date. Keep the attribution line."
+            "stand out, the net change and the changed area, and locate the change by "
+            "the peak block's compass label and center_lonlat rather than by eye. Then "
+            "read the caveats aloud — the products are not radiometrically calibrated, "
+            "so the decibels are relative to the same ground on another date. Keep the "
+            "attribution line."
         )
 
     @server.prompt(

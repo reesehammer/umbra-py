@@ -679,7 +679,178 @@ def _pair_change(
     }
 
 
-def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict[str, Any]:
+def _block_lonlat(crs_name: str, centers: list[tuple[float, float]]) -> list[list[float] | None]:
+    """Lon/lat of each block centre, so a block is locatable on the ground.
+
+    The block bounds are in the cube's own CRS (metres under ``crs="utm"``),
+    which is exact but unreadable; a lon/lat centre is what a consumer needs to
+    put the block on a map or reverse-geocode it.
+    """
+    rasterio = _require("rasterio")
+
+    if not centers:
+        return []
+    crs = rasterio.crs.CRS.from_user_input(crs_name)
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+    if crs.is_geographic:
+        lons, lats = xs, ys
+    else:
+        from rasterio.warp import transform as warp_transform  # noqa: PLC0415
+
+        lons, lats = warp_transform(crs, "EPSG:4326", xs, ys)
+    return [
+        [round(float(lon), 6), round(float(lat), 6)] for lon, lat in zip(lons, lats, strict=True)
+    ]
+
+
+def _grid_text(rows: int, cols: int, deltas: dict[tuple[int, int], float | None]) -> str:
+    """North-up ASCII heat-grid of signed dB change, one cell per block.
+
+    The same shape ``umbra change --narrate`` grounds its narration on
+    (:meth:`umbra_py.narrate.ChangeStats.to_grid_text`), so a model reading both
+    reductions sees one spatial vocabulary. ``.`` marks a block never observed on
+    both of the compared passes.
+    """
+    lines = []
+    for r in range(rows):
+        cells = []
+        for c in range(cols):
+            value = deltas.get((r, c))
+            cells.append("   . " if value is None else f"{value:+5.1f}")
+        lines.append(" ".join(cells))
+    return "\n".join(lines)
+
+
+def _spatial_breakdown(
+    np: Any,
+    db_view: Any,
+    *,
+    ids: list[str],
+    stamps: list[str],
+    blocks: int,
+    transform: tuple[float, ...],
+    crs_name: str,
+    threshold_db: float,
+    cell_area_m2: float | None,
+) -> dict[str, Any]:
+    """Per-block change over the whole series — *where* it happened, and *when*.
+
+    The merge of the library's two change reductions:
+    :func:`~umbra_py.narrate.compute_change_stats` cuts *two* passes into a
+    coarse grid to say where change sits, and :func:`stack_stats` walks the whole
+    series to say when it happened. This cuts *every* pass into that same grid,
+    so each block reports its net first-to-last change **and** the consecutive
+    interval it moved most in.
+
+    Block geometry comes from ``narrate``'s helpers, so a block's ``compass``
+    label means the same thing in both reductions.
+    """
+    from .narrate import _compass_label, _split_slices  # noqa: PLC0415
+
+    if blocks < 1:
+        raise ValueError(f"blocks must be >= 1, got {blocks}.")
+
+    xres, _, xoff, _, yres, yoff = transform
+    row_slices = _split_slices(db_view.shape[1], blocks)
+    col_slices = _split_slices(db_view.shape[2], blocks)
+
+    records: list[dict[str, Any]] = []
+    centers: list[tuple[float, float]] = []
+    deltas: dict[tuple[int, int], float | None] = {}
+    for r, rsl in enumerate(row_slices):
+        for c, csl in enumerate(col_slices):
+            window = db_view[:, rsl, csl]
+            net = (
+                _pair_change(
+                    np,
+                    window[0],
+                    window[-1],
+                    threshold_db=threshold_db,
+                    cell_area_m2=cell_area_m2,
+                )
+                if window.shape[0] > 1
+                else None
+            )
+            # When the block moved most: the consecutive pair with the largest
+            # magnitude of mean change, which is the block's "when" answer.
+            peak_interval = None
+            for i in range(1, window.shape[0]):
+                step = _pair_change(
+                    np,
+                    window[i - 1],
+                    window[i],
+                    threshold_db=threshold_db,
+                    cell_area_m2=cell_area_m2,
+                )
+                if step is None:
+                    continue
+                if peak_interval is None or abs(step["mean_delta_db"]) > abs(
+                    peak_interval["mean_delta_db"]
+                ):
+                    peak_interval = {
+                        "from_item_id": ids[i - 1],
+                        "from_datetime": stamps[i - 1],
+                        "to_item_id": ids[i],
+                        "to_datetime": stamps[i],
+                        "mean_delta_db": step["mean_delta_db"],
+                        "changed_fraction": step["changed_fraction"],
+                        "changed_area_km2": step["changed_area_km2"],
+                    }
+
+            xs = (xoff + csl.start * xres, xoff + csl.stop * xres)
+            ys = (yoff + rsl.start * yres, yoff + rsl.stop * yres)
+            centers.append((sum(xs) / 2.0, sum(ys) / 2.0))
+            deltas[(r, c)] = net["mean_delta_db"] if net else None
+            records.append(
+                {
+                    "row": r,
+                    "col": c,
+                    "compass": _compass_label(r, c, blocks, blocks),
+                    "bounds": [
+                        float(min(xs)),
+                        float(min(ys)),
+                        float(max(xs)),
+                        float(max(ys)),
+                    ],
+                    # Filled in below, in one transform for the whole grid.
+                    "center_lonlat": None,
+                    "cells": int(window.shape[1] * window.shape[2]),
+                    "net_change": net,
+                    "peak_interval": peak_interval,
+                }
+            )
+
+    for record, center in zip(records, _block_lonlat(crs_name, centers), strict=True):
+        record["center_lonlat"] = center
+
+    moved = [r for r in records if r["net_change"] is not None]
+    peak = max(moved, key=lambda r: abs(r["net_change"]["mean_delta_db"]), default=None)
+    return {
+        "grid_rows": blocks,
+        "grid_cols": blocks,
+        "bounds_crs": crs_name,
+        "peak_block": (
+            {
+                "row": peak["row"],
+                "col": peak["col"],
+                "compass": peak["compass"],
+                "center_lonlat": peak["center_lonlat"],
+                "mean_delta_db": peak["net_change"]["mean_delta_db"],
+                "direction": ("brighter" if peak["net_change"]["mean_delta_db"] >= 0 else "dimmer"),
+                "peak_interval": peak["peak_interval"],
+            }
+            if peak is not None
+            else None
+        ),
+        "grid_text": _grid_text(blocks, blocks, deltas),
+        "blocks": records,
+    }
+
+
+def stack_stats(
+    cube: xr.DataArray, *, change_threshold_db: float = 3.0, blocks: int = 0
+) -> dict[str, Any]:
     """Summarize a datacube's *time* axis as a JSON-ready statistics series.
 
     The reporting companion to :func:`to_stack`: the cube itself is an array, but
@@ -692,7 +863,9 @@ def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict
 
     Complementary to :func:`~umbra_py.narrate.compute_change_stats`, which cuts
     *two* passes into spatial blocks to say **where** change sits. This walks the
-    whole series to say **when** it happened and **how much** ground moved.
+    whole series to say **when** it happened and **how much** ground moved — and
+    with ``blocks=N`` it does both at once, cutting every pass into the same
+    coarse grid so each block answers where *and* when.
 
     Parameters
     ----------
@@ -704,6 +877,12 @@ def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict
         How many decibels a cell has to move between two passes to count as
         changed. 3 dB (a doubling of backscatter power) is the same default
         ``umbra change --narrate`` grounds its narration on.
+    blocks:
+        Cut the cube into a ``blocks`` × ``blocks`` grid and report each block
+        separately (0, the default, skips the breakdown entirely). A scene-wide
+        mean hides a change that moved one corner hard, so this is what turns
+        "the site changed 1.4 dB" into "the northeast corner brightened 9 dB,
+        between the March and April passes".
 
     Returns
     -------
@@ -714,6 +893,15 @@ def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict
         distribution of that pass (``mean``/``median``/``std``/``p5``/``p95``, in
         the cube's own ``units``), plus ``change_vs_previous`` (``None`` for the
         first pass). ``net_change`` compares the first pass to the last.
+
+        With ``blocks``, an extra ``spatial`` key carries the grid: one record
+        per block with its ``row``/``col``, a plain-language ``compass`` label,
+        ``bounds`` in the cube's CRS, a ``center_lonlat`` to map or geocode it
+        by, its ``net_change`` (first → last, same fields as the top-level one)
+        and its ``peak_interval`` — the consecutive pair of passes that block
+        moved most between, named by item id and timestamp. Alongside them,
+        ``peak_block`` names the block that moved most overall and ``grid_text``
+        renders the net signed change as a north-up ASCII heat-grid.
 
         Change is **always** reported in decibels — a ratio of backscatter is a
         difference on the log scale — whether the cube holds dB or linear
@@ -789,7 +977,7 @@ def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict
             f"crs={STACK_AUTO_CRS!r} (or a projected CRS) to measure area."
         )
 
-    return {
+    summary: dict[str, Any] = {
         "count": len(passes),
         "units": units,
         "product_type": cube.attrs.get("product_type"),
@@ -819,6 +1007,19 @@ def stack_stats(cube: xr.DataArray, *, change_threshold_db: float = 3.0) -> dict
         "attribution": ATTRIBUTION,
         "caveats": caveats,
     }
+    if blocks:
+        summary["spatial"] = _spatial_breakdown(
+            np,
+            db_view,
+            ids=ids,
+            stamps=stamps,
+            blocks=blocks,
+            transform=tuple(cube.attrs["transform"]),
+            crs_name=crs_name,
+            threshold_db=change_threshold_db,
+            cell_area_m2=area,
+        )
+    return summary
 
 
 def stack_to_geotiff(

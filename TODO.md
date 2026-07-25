@@ -799,10 +799,27 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   to `crs="utm"` and the dB scale so the numbers are equal-area and radiometric
   without the model choosing; the CLI reuses the same callable, with `--out` now
   optional so `--stats` alone measures without writing. Offline-tested in
-  `tests/test_load.py` and `tests/test_mcp_server.py`. Follow-ons: nothing
-  reports a *spatial* breakdown over the whole series (`narrate.compute_change_stats`
-  blocks two passes; a per-block series would be the merge of the two), and
-  `umbra serve` has no `/stats` endpoint over the same reduction.
+  `tests/test_load.py` and `tests/test_mcp_server.py`.
+- ~~**A spatial breakdown over the whole series.**~~ ✅ **Done**
+  (`stack_stats(cube, blocks=N)` / `umbra stack --blocks N` / the `blocks`
+  argument on the `stack_stats` tool across MCP, LangChain and LlamaIndex). The
+  merge named here: every pass is cut into the same N×N grid
+  `narrate.compute_change_stats` uses for two passes (the two share
+  `_compass_label` / `_split_slices`, so a block's compass label means one
+  thing), and each block reports its own `net_change`, `bounds`, a
+  `center_lonlat` to map or geocode it by, and the `peak_interval` it moved most
+  between — plus a `peak_block` headline and a north-up ASCII `grid_text`. It
+  exists because a scene-wide mean dilutes a localized change (a corner that
+  brightens 12 dB reads as 0.75 dB over 16 blocks). Unobserved blocks answer
+  `None`, not zero. `--blocks` implies `--stats` and rides in the render
+  manifest's `stats` field; the agent default is `0` so the payload only grows
+  when a model asks *where*. Offline-tested in `tests/test_load.py` and
+  `tests/test_mcp_server.py`. Still open under this heading: `umbra serve` has
+  no `/stats` endpoint over the same reduction (the spatial breakdown would be a
+  natural query parameter on it), and the block series is reported per block
+  rather than as a per-block *time series* — each block's full pass-to-pass
+  sequence is computed and then reduced to its peak, so surfacing all of it is a
+  payload decision, not new arithmetic.
 
 ---
 

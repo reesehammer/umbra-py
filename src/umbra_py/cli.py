@@ -1467,6 +1467,14 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "it without --out to measure without writing a file.",
 )
 @click.option(
+    "--blocks",
+    type=int,
+    default=0,
+    help="Break the statistics down over a N x N grid of the scene: each block "
+    "reports its own net change and the pair of passes it moved most between. "
+    "Implies --stats; 6 is a good starting grid.",
+)
+@click.option(
     "--change-threshold-db",
     type=float,
     default=3.0,
@@ -1562,6 +1570,7 @@ def stack(
     item_urls,
     out_path,
     stats,
+    blocks,
     change_threshold_db,
     area,
     fuzzy,
@@ -1609,6 +1618,12 @@ def stack(
     moved, in km2, when --crs makes the cells equal-area. Give it without
     --out to measure a site without writing the file.
 
+    --blocks N adds the spatial half of that answer: the scene is cut into an
+    N x N grid and each block reports its own net change, a compass label and
+    lon/lat centre to find it by, and the consecutive pair of passes it moved
+    most between -- so a change confined to one corner, which a scene-wide
+    mean hides, reads as "the northeast brightened, between these two passes".
+
     Two ways to choose what to stack:
 
     \b
@@ -1626,6 +1641,9 @@ def stack(
     from .load import _write_stack_geotiff, stack_stats, to_stack  # noqa: PLC0415
 
     _check_token_not_local(token, local, db_path)
+    if blocks < 0:
+        raise click.BadParameter("--blocks must be 0 (off) or a positive grid size.")
+    stats = stats or bool(blocks)
     if not (out_path or stats):
         raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
     search_mode = any(v for v in (area, bbox, place, start, end))
@@ -1690,7 +1708,11 @@ def stack(
             crs=crs,
         )
         path = _write_stack_geotiff(cube, out_path) if out_path else None
-        summary = stack_stats(cube, change_threshold_db=change_threshold_db) if stats else None
+        summary = (
+            stack_stats(cube, change_threshold_db=change_threshold_db, blocks=blocks)
+            if stats
+            else None
+        )
 
     if path and as_json:
         _emit_render_manifest(
