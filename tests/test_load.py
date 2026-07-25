@@ -926,6 +926,77 @@ def test_stack_stats_blocks_carry_locatable_geometry(tmp_path):
     assert "+12.0" not in lines[-1]
 
 
+def test_stack_stats_block_series_keeps_every_interval_the_peak_was_picked_from(tmp_path):
+    """A peak says how hard a block moved; the series says what its history looked like."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_corner_series(tmp_path), max_size=32, crs="utm")
+    spatial = stack_stats(cube, blocks=4, block_series=True)["spatial"]
+    northeast = _block(spatial, 0, 3)
+
+    # Three passes -> two consecutive intervals, oldest first, chained end to end.
+    series = northeast["series"]
+    assert [(s["from_item_id"], s["to_item_id"]) for s in series] == [
+        ("acq-1", "acq-2"),
+        ("acq-2", "acq-3"),
+    ]
+    assert [s["from_datetime"] for s in series] == [
+        "2024-01-08T12:00:00Z",
+        "2024-02-08T12:00:00Z",
+    ]
+
+    # This corner jumped once and held, so the shape is flat-then-step -- the
+    # distinction a single peak interval throws away.
+    assert series[0]["mean_delta_db"] == pytest.approx(0.0, abs=0.01)
+    assert series[1]["mean_delta_db"] == pytest.approx(2 * _DOUBLING_DB, abs=0.01)
+
+    # The peak is a member of the series, not a separately-computed number.
+    assert northeast["peak_interval"] == max(series, key=lambda s: abs(s["mean_delta_db"]))
+
+    # Every block carries its own series, and a quiet one is flat throughout.
+    assert all("series" in b for b in spatial["blocks"])
+    assert all(
+        s["mean_delta_db"] == pytest.approx(0.0, abs=0.01) for s in _block(spatial, 3, 0)["series"]
+    )
+
+
+def test_stack_stats_block_series_is_opt_in_and_needs_a_grid(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_corner_series(tmp_path), max_size=32, crs="utm")
+
+    # Off by default: the breakdown is unchanged for callers that didn't ask.
+    assert all("series" not in b for b in stack_stats(cube, blocks=4)["spatial"]["blocks"])
+
+    # The series hangs on a block, so asking without one is refused, not dropped.
+    with pytest.raises(ValueError, match="block_series needs a blocks grid"):
+        stack_stats(cube, block_series=True)
+
+
+def test_stack_stats_block_series_reports_no_intervals_for_unobserved_ground(tmp_path):
+    """A block with nothing to compare gets an empty series, not a fake zero."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=300.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    spatial = stack_stats(
+        to_stack(items, max_size=32, extent="union"), blocks=4, block_series=True
+    )["spatial"]
+
+    unobserved = [b for b in spatial["blocks"] if b["net_change"] is None]
+    assert unobserved
+    assert all(b["series"] == [] for b in unobserved)
+
+
 def test_stack_stats_skips_the_breakdown_by_default(tmp_path):
     pytest.importorskip("xarray")
     from umbra_py import stack_stats, to_stack
@@ -1038,6 +1109,32 @@ def test_cli_stack_blocks_implies_stats_and_adds_the_breakdown(tmp_path, monkeyp
     bad = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--blocks", "-1"])
     assert bad.exit_code != 0
     assert "--blocks must be 0" in bad.output
+
+
+def test_cli_stack_block_series_adds_the_sequence_and_needs_a_grid(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["stack", *urls, "--blocks", "2", "--block-series", "--max-size", "16", "--crs", "utm"],
+    )
+
+    assert result.exit_code == 0, result.output
+    blocks = json.loads(result.stdout)["spatial"]["blocks"]
+    # Two passes -> one interval per block, and it is the one the peak names.
+    assert all(len(b["series"]) == 1 for b in blocks)
+    assert all(b["series"][0] == b["peak_interval"] for b in blocks)
+
+    bad = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--block-series", "--max-size", "16"])
+    assert bad.exit_code != 0
+    assert "--block-series needs --blocks" in bad.output
 
 
 def test_cli_stack_stats_alongside_the_file_and_in_the_manifest(tmp_path, monkeypatch):

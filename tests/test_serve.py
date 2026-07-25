@@ -822,6 +822,7 @@ def test_stats_options_defaults_to_a_utm_decibel_grid():
     assert opts["crs"] == "utm" and opts["db"] is True
     assert opts["extent"] == "intersection"
     assert opts["blocks"] == 0 and opts["change_threshold_db"] == 3.0
+    assert opts["block_series"] is False
     assert opts["clip_bbox"] is None
 
 
@@ -834,6 +835,7 @@ def test_stats_options_reads_the_stacking_parameters():
             "crs": "EPSG:32633",
             "clip_bbox": [-69, 10, -67, 11],
             "blocks": 6,
+            "block_series": True,
             "change_threshold_db": 1.5,
             "max_size": 256,
         }
@@ -846,6 +848,7 @@ def test_stats_options_reads_the_stacking_parameters():
         "crs": "EPSG:32633",
         "clip_bbox": [-69.0, 10.0, -67.0, 11.0],
         "blocks": 6,
+        "block_series": True,
         "change_threshold_db": 1.5,
     }
     # An explicit null CRS is the opt-in to the lon/lat grid.
@@ -859,6 +862,10 @@ def test_stats_options_rejects_bad_extent_and_threshold():
         serve.stats_options({"extent": "everything"})
     with pytest.raises(ValueError):
         serve.stats_options({"change_threshold_db": -1})
+    # The per-block series hangs on a grid, so one without the other is refused
+    # rather than silently ignored.
+    with pytest.raises(ValueError, match="block_series needs a blocks grid"):
+        serve.stats_options({"block_series": True})
 
 
 def test_stats_frames_requires_two_and_caps(index_path):
@@ -916,6 +923,20 @@ def test_stats_blocks_is_a_distinct_artifact(art_client, recorder):
     art_client.post("/artifacts/stats", json=body)
     art_client.post("/artifacts/stats", json={**body, "blocks": 6})
     assert [c[2]["blocks"] for c in recorder.calls] == [0, 6]
+
+
+def test_stats_block_series_is_a_distinct_artifact_and_needs_blocks(art_client, recorder):
+    """The series is a bigger answer to the same question, so it caches apart."""
+    body = {"ids": ["item-0", "item-1"], "blocks": 4}
+    art_client.post("/artifacts/stats", json=body)
+    art_client.post("/artifacts/stats", json={**body, "block_series": True})
+    assert [c[2]["block_series"] for c in recorder.calls] == [False, True]
+
+    bad = art_client.post(
+        "/artifacts/stats", json={"ids": ["item-0", "item-1"], "block_series": True}
+    )
+    assert bad.status_code == 400
+    assert "blocks" in bad.json()["detail"]
 
 
 def test_stats_endpoint_needs_two_acquisitions(art_client):
@@ -988,7 +1009,10 @@ def test_default_renderers_stats_reduces_a_stack(monkeypatch):
     assert kwargs["crs"] == "utm" and kwargs["db"] is True
     assert kwargs["extent"] == "intersection"
     assert kwargs["bbox"] == (-69.0, 10.0, -67.0, 11.0)
-    assert seen["stack_stats"] == ("CUBE", {"change_threshold_db": 3.0, "blocks": 4})
+    assert seen["stack_stats"] == (
+        "CUBE",
+        {"change_threshold_db": 3.0, "blocks": 4, "block_series": False},
+    )
 
 
 def test_landing_advertises_artifacts_when_enabled(art_client):

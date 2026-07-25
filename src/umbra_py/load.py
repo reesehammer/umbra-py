@@ -733,6 +733,7 @@ def _spatial_breakdown(
     crs_name: str,
     threshold_db: float,
     cell_area_m2: float | None,
+    block_series: bool = False,
 ) -> dict[str, Any]:
     """Per-block change over the whole series — *where* it happened, and *when*.
 
@@ -742,6 +743,9 @@ def _spatial_breakdown(
     series to say when it happened. This cuts *every* pass into that same grid,
     so each block reports its net first-to-last change **and** the consecutive
     interval it moved most in.
+
+    With ``block_series`` each block also keeps the *whole* consecutive sequence
+    it was reduced from, not only its peak — the same records, none discarded.
 
     Block geometry comes from ``narrate``'s helpers, so a block's ``compass``
     label means the same thing in both reductions.
@@ -772,9 +776,9 @@ def _spatial_breakdown(
                 if window.shape[0] > 1
                 else None
             )
-            # When the block moved most: the consecutive pair with the largest
-            # magnitude of mean change, which is the block's "when" answer.
-            peak_interval = None
+            # The block's consecutive pass-to-pass sequence. The peak interval —
+            # the block's "when" answer — is the largest-magnitude step in it.
+            steps: list[dict[str, Any]] = []
             for i in range(1, window.shape[0]):
                 step = _pair_change(
                     np,
@@ -785,10 +789,8 @@ def _spatial_breakdown(
                 )
                 if step is None:
                     continue
-                if peak_interval is None or abs(step["mean_delta_db"]) > abs(
-                    peak_interval["mean_delta_db"]
-                ):
-                    peak_interval = {
+                steps.append(
+                    {
                         "from_item_id": ids[i - 1],
                         "from_datetime": stamps[i - 1],
                         "to_item_id": ids[i],
@@ -797,6 +799,8 @@ def _spatial_breakdown(
                         "changed_fraction": step["changed_fraction"],
                         "changed_area_km2": step["changed_area_km2"],
                     }
+                )
+            peak_interval = max(steps, key=lambda s: abs(s["mean_delta_db"]), default=None)
 
             xs = (xoff + csl.start * xres, xoff + csl.stop * xres)
             ys = (yoff + rsl.start * yres, yoff + rsl.stop * yres)
@@ -818,6 +822,9 @@ def _spatial_breakdown(
                     "cells": int(window.shape[1] * window.shape[2]),
                     "net_change": net,
                     "peak_interval": peak_interval,
+                    # Only when asked: N x N blocks x (passes - 1) steps is the
+                    # largest thing this reduction can emit.
+                    **({"series": steps} if block_series else {}),
                 }
             )
 
@@ -849,7 +856,11 @@ def _spatial_breakdown(
 
 
 def stack_stats(
-    cube: xr.DataArray, *, change_threshold_db: float = 3.0, blocks: int = 0
+    cube: xr.DataArray,
+    *,
+    change_threshold_db: float = 3.0,
+    blocks: int = 0,
+    block_series: bool = False,
 ) -> dict[str, Any]:
     """Summarize a datacube's *time* axis as a JSON-ready statistics series.
 
@@ -883,6 +894,14 @@ def stack_stats(
         mean hides a change that moved one corner hard, so this is what turns
         "the site changed 1.4 dB" into "the northeast corner brightened 9 dB,
         between the March and April passes".
+    block_series:
+        Keep each block's **whole** pass-to-pass sequence, not just the interval
+        it moved most in. The steps are computed either way — this only decides
+        whether they are reported — so it costs payload, not arithmetic:
+        ``blocks`` × ``blocks`` × (``count`` − 1) records at most. Requires
+        ``blocks``. Ask for it when the question is the *shape* of a block's
+        history — did it move once and stay, or drift every pass? — which a
+        single peak interval cannot answer.
 
     Returns
     -------
@@ -901,7 +920,10 @@ def stack_stats(
         and its ``peak_interval`` — the consecutive pair of passes that block
         moved most between, named by item id and timestamp. Alongside them,
         ``peak_block`` names the block that moved most overall and ``grid_text``
-        renders the net signed change as a north-up ASCII heat-grid.
+        renders the net signed change as a north-up ASCII heat-grid. With
+        ``block_series`` each block additionally carries the ``series`` those
+        peaks were picked from — every consecutive step, oldest first, in the
+        same shape as ``peak_interval``.
 
         Change is **always** reported in decibels — a ratio of backscatter is a
         difference on the log scale — whether the cube holds dB or linear
@@ -915,6 +937,11 @@ def stack_stats(
     values = np.asarray(cube.values, dtype="float64")
     if values.ndim != 3:
         raise ValueError(f"stack_stats needs a (time, y, x) cube; got {values.ndim}D.")
+    if block_series and not blocks:
+        # The series lives on a block, so asking for one without the other is a
+        # request that can't be answered — say so before doing any of the work,
+        # rather than silently dropping the flag.
+        raise ValueError("block_series needs a blocks grid; pass blocks=N as well.")
 
     units = str(cube.attrs.get("units", "amplitude"))
     if units == "dB":
@@ -1018,6 +1045,7 @@ def stack_stats(
             crs_name=crs_name,
             threshold_db=change_threshold_db,
             cell_area_m2=area,
+            block_series=block_series,
         )
     return summary
 

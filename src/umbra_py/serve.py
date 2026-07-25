@@ -37,7 +37,8 @@ which a human reads and a program cannot; ``/artifacts/stats`` runs the
 behind the same request shape and returns JSON -- per-pass decibel statistics,
 the signed change against the previous pass, how much ground moved past a
 threshold (in km², because the grid defaults to the site's UTM zone), and with
-``"blocks": N`` which part of the site moved and between which two passes. It is
+``"blocks": N`` which part of the site moved and between which two passes (and
+with ``"block_series": true``, each block's whole pass-to-pass sequence). It is
 the reduction the CLI (``umbra stack --stats``) and the agent front doors
 (``stack_stats`` on MCP / LangChain / LlamaIndex) already expose, finally
 reachable over HTTP -- so a QGIS user, a browser front end or an OpenAPI-driven
@@ -880,6 +881,7 @@ def default_renderers() -> Renderers:
             cube,
             change_threshold_db=opts["change_threshold_db"],
             blocks=opts["blocks"],
+            block_series=opts["block_series"],
         )
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
@@ -913,15 +915,16 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Extends :func:`artifact_options` with what the datacube reduction needs on
     top of a render (``extent`` / ``crs`` / ``clip_bbox`` / ``blocks`` /
-    ``change_threshold_db``). Two defaults deliberately differ from the picture
+    ``block_series`` / ``change_threshold_db``). Two defaults deliberately differ from the picture
     endpoints, matching the ``stack_stats`` agent tool: the shared grid is the
     site's **UTM zone**, so a cell count is an area and ``changed_area_km2``
     means something, and values are **decibels**, the scale on which a ratio of
     backscatter is a difference. Pass ``"crs": null`` for a lon/lat grid (and
     accept ``None`` areas rather than wrong ones).
 
-    Raises ``ValueError`` for an unknown ``extent`` or a non-positive threshold,
-    which the route maps to a ``400``.
+    Raises ``ValueError`` for an unknown ``extent``, a non-positive threshold, or
+    a ``block_series`` asked for without a ``blocks`` grid to hang it on — each
+    of which the route maps to a ``400``.
     """
     body = body or {}
     # ``db`` defaults to True here (radiometric scale), unlike the composites.
@@ -946,8 +949,11 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
         crs=str(crs) if crs else None,
         clip_bbox=list(clip) if clip else None,
         blocks=max(0, min(int(body.get("blocks") or 0), STATS_MAX_BLOCKS)),
+        block_series=bool(body.get("block_series", False)),
         change_threshold_db=threshold,
     )
+    if options["block_series"] and not options["blocks"]:
+        raise ValueError("block_series needs a blocks grid; send blocks: N as well.")
     return options
 
 
@@ -1923,7 +1929,9 @@ def build_app(
             pass, how much ground moved past ``change_threshold_db`` (in km²,
             since the grid defaults to the site's UTM zone), and with
             ``"blocks": N`` an N x N breakdown saying *which part* of the site
-            moved and between which two passes.
+            moved and between which two passes -- plus, with
+            ``"block_series": true``, the whole pass-to-pass sequence each of
+            those peaks was picked from.
             """
             return _composite(
                 request,

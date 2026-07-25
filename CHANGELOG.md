@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Each block's whole history, not just its loudest moment —
+  `stack_stats(blocks=N, block_series=True)` (the last open follow-on of the
+  `stack_stats(blocks=N)` PR, `TODO.md`).** The spatial breakdown answers *where*
+  a site moved and *when*, but the "when" it reports is a single number per
+  block: the consecutive interval that block moved most in. That reduction
+  throws away the distinction between two genuinely different histories — a
+  corner that drifted a couple of decibels every pass and one that jumped twelve
+  once and held both come back as one `peak_interval` — and the steps it was
+  picked from were already computed and discarded. `block_series=True` keeps
+  them: every block gains a `series` array of every consecutive pass-to-pass
+  record, oldest first, in exactly the same shape as `peak_interval`, so a
+  block's trend is plottable rather than inferred and the peak is visibly a
+  member of the sequence rather than a separately-derived number. It is payload,
+  not arithmetic — the loop that found the peak now collects instead of
+  comparing, and `peak_interval` is a `max()` over what it collected — so the
+  cost is the response size alone, which is why it is opt-in and why it needs a
+  `blocks` grid to hang on (asking for a series with no grid is a hard error
+  before any work is done, not a silently dropped flag). A block with nothing to
+  compare — ground only one pass observed — reports an empty series, the same
+  honesty as its `None` net change.
+
+  Reachable from every front door the reduction already had, with the same
+  argument name and the same default (off, so every existing payload is
+  byte-identical): `umbra stack --blocks 6 --block-series` on the CLI (which
+  refuses `--block-series` without `--blocks`), `block_series=True` on the
+  `stack_stats` tool across MCP / LangChain / LlamaIndex (the wrappers infer it
+  from the one shared callable, so the three surfaces cannot drift), and
+  `"block_series": true` on `POST /artifacts/stats`, where it normalises through
+  `stats_options` — so it is part of the content-addressed cache key and a series
+  request never collides with the plain breakdown, and a series without blocks is
+  a `400` carrying the explanation rather than a `500`. The tool description
+  tells an agent to ask for it only when the *shape* of a block's history is the
+  question, since it is the largest thing this reduction emits. No model call, no
+  new dependency; offline-tested in `tests/test_load.py` (the sequence and its
+  chaining, peak-is-a-member, opt-in and the missing-grid refusal, empty series
+  over unobserved ground, and the two CLI paths), `tests/test_serve.py` (option
+  normalisation, distinct cache entry, the `400`) and `tests/test_mcp_server.py`.
 - **A "Quantify" button in the `umbra demo` analyze panel — the self-serve
   explorer can now *measure*, not only look (the first open follow-on of the
   `POST /artifacts/stats` PR, `TODO.md`; `DEMO_APP_GAPS.md` R4).** With

@@ -484,6 +484,7 @@ def stack_stats(
     crs: str = "utm",
     change_threshold_db: float = 3.0,
     blocks: int = 0,
+    block_series: bool = False,
 ) -> dict[str, Any]:
     """Measure how much a site changed across its passes, as numbers.
 
@@ -515,6 +516,13 @@ def stack_stats(
     picture from ``change_composite`` shows an obvious hot spot: a change
     confined to one corner is averaged away scene-wide and stands out per block.
 
+    ``block_series=True`` (which needs ``blocks``) keeps each block's *whole*
+    pass-to-pass sequence rather than only its peak interval, so a block that
+    drifted a little every pass reads differently from one that jumped once and
+    held. It is the largest payload this tool emits — ``blocks`` × ``blocks`` ×
+    (passes − 1) records — so ask for it only when the *shape* of the history is
+    the question, not the size of the change.
+
     Refuses to mix polarizations (HH and VV are not comparable). **No model is
     called** — this is arithmetic over streamed COG overviews, so the numbers are
     reproducible and safe to quote. Read the ``caveats`` before interpreting
@@ -539,7 +547,12 @@ def stack_stats(
         extent=extent,
         crs=crs,
     )
-    return _stack_stats(cube, change_threshold_db=change_threshold_db, blocks=blocks)
+    return _stack_stats(
+        cube,
+        change_threshold_db=change_threshold_db,
+        blocks=blocks,
+        block_series=block_series,
+    )
 
 
 def download_asset(
@@ -1012,7 +1025,10 @@ def build_server() -> FastMCP:
             "pass to the last, including how much ground moved as changed_area_km2. "
             "blocks=6 adds the spatial breakdown: which part of the site moved, and "
             "which pair of passes it moved between (spatial.peak_block, and "
-            "spatial.grid_text as a north-up map of the net change).\n"
+            "spatial.grid_text as a north-up map of the net change). Add "
+            "block_series=True only if the question is the shape of a block's "
+            "history — a steady drift versus one step — since it returns every "
+            "pass-to-pass record rather than just each block's peak.\n"
             "4. timescan(urls=[...]) on the same URLs so you can also see *where* the "
             "activity sits, and check the picture agrees with the block grid.\n"
             "5. Report the trend with its numbers: name the pass-to-pass deltas that "
