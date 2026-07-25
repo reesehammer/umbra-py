@@ -55,6 +55,10 @@ BBox = tuple[float, float, float, float]
 #: with ``NaN``.
 STACK_EXTENTS = ("intersection", "union")
 
+#: The value of :func:`to_stack`'s ``crs=`` that asks for the UTM zone the
+#: stacked ground falls in, rather than a CRS named outright.
+STACK_AUTO_CRS = "utm"
+
 
 def _require(module: str):
     try:
@@ -312,13 +316,70 @@ def _stack_items(items: Iterable[UmbraItem]) -> list[UmbraItem]:
     return sorted(ordered, key=lambda i: i.datetime)  # type: ignore[arg-type,return-value]
 
 
+def _utm_epsg(lon: float, lat: float) -> str:
+    """EPSG code of the standard UTM zone containing ``(lon, lat)``.
+
+    Zones are 6 degrees wide starting at -180; north and south share a zone
+    number and differ only in the EPSG bank (``326xx`` / ``327xx``). The
+    Norway/Svalbard exceptions are deliberately not modelled -- they widen a
+    neighbouring zone, and the cube is metric either way; name the CRS outright
+    if you need the local convention.
+    """
+    zone = int((lon + 180.0) // 6.0) % 60 + 1
+    return f"EPSG:{(32600 if lat >= 0 else 32700) + zone}"
+
+
+def _resolve_stack_crs(crs: str | None, datasets: list[Any]) -> str:
+    """CRS the datacube's shared grid is built in.
+
+    ``None`` keeps the lon/lat default; :data:`STACK_AUTO_CRS` picks the UTM
+    zone containing the centre of the ground the sources cover (so the caller
+    doesn't have to know which zone a site is in); anything else is a CRS name
+    passed through ``rasterio`` for validation, so a typo fails here rather than
+    silently producing an empty warp.
+    """
+    if crs is None:
+        return "EPSG:4326"
+    if str(crs).strip().lower() == STACK_AUTO_CRS:
+        from rasterio.warp import transform_bounds  # noqa: PLC0415
+
+        lons: list[float] = []
+        lats: list[float] = []
+        for ds in datasets:
+            if ds.crs is None:
+                raise ValueError(
+                    f'crs="{STACK_AUTO_CRS}" needs each source to be georeferenced, but a '
+                    "scene has no CRS. Name the output CRS outright instead."
+                )
+            left, bottom, right, top = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
+            lons += [left, right]
+            lats += [bottom, top]
+        return _utm_epsg((min(lons) + max(lons)) / 2.0, (min(lats) + max(lats)) / 2.0)
+
+    from rasterio.crs import CRS  # noqa: PLC0415
+    from rasterio.errors import CRSError  # noqa: PLC0415
+
+    try:
+        return CRS.from_user_input(crs).to_string()
+    # A malformed CRS surfaces either as rasterio's CRSError or, for something
+    # like "EPSG:not-a-code", as the ValueError/TypeError of parsing it.
+    except (CRSError, ValueError, TypeError) as exc:
+        raise ValueError(
+            f"crs={crs!r} is not a CRS rasterio recognizes. Pass an EPSG code "
+            f'("EPSG:32633"), a PROJ/WKT string, or "{STACK_AUTO_CRS}" to pick '
+            "the site's UTM zone automatically."
+        ) from exc
+
+
 def _stack_bounds(
-    vrt_bounds: list[Any], extent: str, bbox: BBox | None
+    vrt_bounds: list[Any], extent: str, bbox: BBox | None, crs: str = "EPSG:4326"
 ) -> tuple[float, float, float, float]:
-    """Geographic window the datacube covers, in EPSG:4326.
+    """Window the datacube covers, in the units of the cube's own ``crs``.
 
     ``extent`` picks intersection (every cell has a full series) or union (no
-    ground is dropped); ``bbox``, when given, clips whichever was chosen.
+    ground is dropped); ``bbox``, when given, clips whichever was chosen. The
+    public API takes ``bbox`` in lon/lat whatever the cube's CRS, so it is
+    transformed here -- and reported in the caller's own units if it misses.
     """
     if extent not in STACK_EXTENTS:
         raise ValueError(f"extent must be one of {STACK_EXTENTS}, got {extent!r}.")
@@ -341,8 +402,13 @@ def _stack_bounds(
         top = max(b.top for b in vrt_bounds)
 
     if bbox is not None:
-        left, bottom = max(left, bbox[0]), max(bottom, bbox[1])
-        right, top = min(right, bbox[2]), min(top, bbox[3])
+        window = bbox
+        if crs != "EPSG:4326":
+            from rasterio.warp import transform_bounds  # noqa: PLC0415
+
+            window = transform_bounds("EPSG:4326", crs, *bbox)
+        left, bottom = max(left, window[0]), max(bottom, window[1])
+        right, top = min(right, window[2]), min(top, window[3])
         if left >= right or bottom >= top:
             raise ValueError(f"bbox {bbox} does not overlap the stacked acquisitions.")
     return left, bottom, right, top
@@ -373,6 +439,7 @@ def to_stack(
     max_size: int = 1024,
     db: bool = False,
     extent: str = "intersection",
+    crs: str | None = None,
 ) -> xr.DataArray:
     """Co-register several acquisitions into one ``(time, y, x)`` datacube.
 
@@ -384,9 +451,10 @@ def to_stack(
 
     Alignment is real work, not a reshape: Umbra's passes over a site are
     delivered in whatever UTM zone each acquisition used and at whatever extent
-    it happened to cover, so every scene is warped to a shared **EPSG:4326**
-    (lon/lat) grid derived from the requested ``extent``. Only decimated
-    overviews are streamed via HTTP range requests -- no full download.
+    it happened to cover, so every scene is warped to one shared grid derived
+    from the requested ``extent`` -- **EPSG:4326** (lon/lat) by default, or the
+    projected CRS ``crs`` names when the cells have to be equal-area. Only
+    decimated overviews are streamed via HTTP range requests -- no full download.
 
     Parameters
     ----------
@@ -414,24 +482,34 @@ def to_stack(
         if the footprints don't all overlap. ``"union"`` keeps all ground *any*
         acquisition covers and fills each slice outside its own footprint with
         ``NaN``.
+    crs:
+        CRS of the shared output grid. ``None`` (default) builds it in lon/lat
+        (EPSG:4326), whose cells are *not* equal-area -- see the note below.
+        :data:`STACK_AUTO_CRS` (``"utm"``) picks the UTM zone containing the
+        stacked ground, giving square metre-sized cells without your having to
+        know the zone; any other value is a CRS name (``"EPSG:32633"``, a PROJ
+        or WKT string) warped to as given. ``bbox`` stays lon/lat either way.
 
     Returns
     -------
     xarray.DataArray
         Dimensions ``("time", "y", "x")``: ascending ``time``, descending ``y``
-        (north-up) and ascending ``x`` cell-center coordinates in degrees, plus
-        an ``item_id`` coordinate along ``time`` so every slice keeps its
-        provenance. Nodata and non-positive pixels are ``NaN`` and the dtype is
-        always ``float32``. ``attrs`` mirror :func:`to_xarray`'s (``crs``,
-        ``transform``, ``bounds``, ``units``, ``license``, ``attribution``).
+        (north-up) and ascending ``x`` cell-center coordinates in the cube's CRS
+        (degrees by default, projected units under ``crs``), plus an ``item_id``
+        coordinate along ``time`` so every slice keeps its provenance. Nodata and
+        non-positive pixels are ``NaN`` and the dtype is always ``float32``.
+        ``attrs`` mirror :func:`to_xarray`'s (``crs``, ``transform``,
+        ``bounds``, ``units``, ``license``, ``attribution``).
 
     Notes
     -----
-    The lon/lat grid stretches with latitude (cells are not equal-area), the
-    same quick-look approximation ``umbra change`` / ``umbra timescan`` make.
-    It is fine at scene scale and for comparing a cell to *itself* across dates,
-    which is what a time series does; reproject the result (e.g. with
-    ``rioxarray``) before measuring areas or distances.
+    The default lon/lat grid stretches with latitude (cells are not equal-area),
+    the same quick-look approximation ``umbra change`` / ``umbra timescan`` make.
+    That is fine at scene scale and for comparing a cell to *itself* across
+    dates, which is what a time series does -- but it makes a cell count a poor
+    proxy for an area, and it distorts distances. Pass ``crs="utm"`` (or a
+    projected CRS of your own) when the answer is "how many hectares changed":
+    every cell then covers the same ground, so counting them is measuring.
     """
     rasterio = _require("rasterio")
     np = _require("numpy")
@@ -453,24 +531,32 @@ def to_stack(
                 )
             ds = rasterio.open(_open_path(url))
             datasets.append(ds)
-            # Full-resolution warp to lon/lat: cheap to construct, and nothing
-            # is read until the *decimated* windowed reads below, which let
-            # GDAL serve the matching cloud-optimized GeoTIFF overview instead
-            # of every full-res tile (reading a coarse VRT whole would force a
-            # full-res source read -- thousands of range requests).
-            vrts.append(WarpedVRT(ds, crs="EPSG:4326", resampling=Resampling.average))
 
-        left, bottom, right, top = _stack_bounds([v.bounds for v in vrts], extent=extent, bbox=bbox)
+        # Resolved once every source is open: "utm" reads the zone off the
+        # ground they cover, so it needs their footprints.
+        target_crs = _resolve_stack_crs(crs, datasets)
+        for ds in datasets:
+            # Full-resolution warp to the shared CRS: cheap to construct, and
+            # nothing is read until the *decimated* windowed reads below, which
+            # let GDAL serve the matching cloud-optimized GeoTIFF overview
+            # instead of every full-res tile (reading a coarse VRT whole would
+            # force a full-res source read -- thousands of range requests).
+            vrts.append(WarpedVRT(ds, crs=target_crs, resampling=Resampling.average))
 
-        # Output grid: max_size on the longer side, aspect from the lon/lat extent.
-        w_deg, h_deg = right - left, top - bottom
-        if w_deg >= h_deg:
+        left, bottom, right, top = _stack_bounds(
+            [v.bounds for v in vrts], extent=extent, bbox=bbox, crs=target_crs
+        )
+
+        # Output grid: max_size on the longer side, aspect from that extent, so
+        # every cell is the same size in the target CRS's own units.
+        width, height = right - left, top - bottom
+        if width >= height:
             out_w = max(int(max_size), 1)
-            out_h = max(round(out_w * h_deg / w_deg), 1)
+            out_h = max(round(out_w * height / width), 1)
         else:
             out_h = max(int(max_size), 1)
-            out_w = max(round(out_h * w_deg / h_deg), 1)
-        xres, yres = w_deg / out_w, h_deg / out_h
+            out_w = max(round(out_h * width / height), 1)
+        xres, yres = width / out_w, height / out_h
 
         slices = []
         for vrt in vrts:
@@ -530,7 +616,7 @@ def to_stack(
         },
         name="backscatter_db" if db else "amplitude",
         attrs={
-            "crs": "EPSG:4326",
+            "crs": target_crs,
             "transform": tuple(transform)[:6],
             "bounds": (left, bottom, right, top),
             "extent": extent,
@@ -552,21 +638,23 @@ def stack_to_geotiff(
     max_size: int = 1024,
     db: bool = False,
     extent: str = "intersection",
+    crs: str | None = None,
 ) -> Path:
     """Co-register several acquisitions and write the cube to a GeoTIFF.
 
     The file-producing companion to :func:`to_stack`, mirroring what
     :func:`to_geotiff` is to :func:`to_xarray`. The output is a multi-band
-    ``float32`` GeoTIFF in EPSG:4326 -- **one band per acquisition, oldest
-    first** -- with each band described by its acquisition timestamp and the
-    item ids carried in the file tags, so the time axis survives the trip into
-    QGIS, GDAL or any GIS. Nodata is ``NaN``; deflate-compressed and tiled.
+    ``float32`` GeoTIFF in the cube's CRS (EPSG:4326 unless ``crs`` names
+    another, e.g. ``"utm"`` for equal-area cells) -- **one band per acquisition,
+    oldest first** -- with each band described by its acquisition timestamp and
+    the item ids carried in the file tags, so the time axis survives the trip
+    into QGIS, GDAL or any GIS. Nodata is ``NaN``; deflate-compressed and tiled.
     """
     rasterio = _require("rasterio")
     _require("numpy")
     from affine import Affine  # noqa: PLC0415
 
-    cube = to_stack(items, asset=asset, bbox=bbox, max_size=max_size, db=db, extent=extent)
+    cube = to_stack(items, asset=asset, bbox=bbox, max_size=max_size, db=db, extent=extent, crs=crs)
     data = cube.values
     stamps = [str(t)[:19] for t in cube["time"].values]
     ids = [str(v) for v in cube["item_id"].values]
@@ -593,6 +681,8 @@ def stack_to_geotiff(
             item_ids=",".join(ids),
             datetimes=",".join(stamps),
             extent=extent,
+            # The resolved CRS, so a file built with crs="utm" says which zone.
+            crs=cube.attrs["crs"],
             units=cube.attrs["units"],
             license=DATA_LICENSE,
             attribution=ATTRIBUTION,

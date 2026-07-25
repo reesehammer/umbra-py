@@ -370,6 +370,84 @@ def test_to_stack_db_scale(tmp_path):
     assert cube.values[0] == pytest.approx(20.0 * math.log10(2.0), abs=1e-4)
 
 
+def test_to_stack_utm_grid_has_uniform_metre_cells(tmp_path):
+    """crs="utm" resolves the site's zone and lays down equal-area cells."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32, crs="utm")
+
+    # The fixtures sit at 500000E/4000000N in EPSG:32633, i.e. zone 33 north.
+    assert cube.attrs["crs"] == "EPSG:32633"
+    # Coordinates are metres in that zone, not degrees...
+    assert cube["x"].values[0] == pytest.approx(500_000.0, abs=100.0)
+    assert cube["y"].values[0] == pytest.approx(4_000_000.0, abs=100.0)
+    # ...and every cell covers the same ground, which is the point: uniform
+    # spacing on both axes, and near-square cells (the aspect is derived from
+    # the extent, so x and y resolution agree to within a rounding step).
+    dx, dy = np.diff(cube["x"].values), np.diff(cube["y"].values)
+    assert dx == pytest.approx(dx[0])
+    assert dy == pytest.approx(dy[0])
+    assert dx[0] == pytest.approx(-dy[0], rel=0.05)
+    # The values themselves survive the different warp.
+    for i, value in enumerate((2.0, 4.0, 8.0)):
+        assert np.nanmax(cube.values[i]) == pytest.approx(value)
+
+
+def test_to_stack_accepts_an_explicit_crs(tmp_path):
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    cube = to_stack(_three_scenes(tmp_path), max_size=32, crs="EPSG:3857")
+
+    assert cube.attrs["crs"] == "EPSG:3857"
+    assert cube["y"].values[0] > cube["y"].values[-1]
+    assert np.nanmax(cube.values[0]) == pytest.approx(2.0)
+
+
+def test_to_stack_rejects_an_unknown_crs(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    with pytest.raises(ValueError, match="not a CRS"):
+        to_stack(_three_scenes(tmp_path), max_size=32, crs="EPSG:not-a-code")
+
+
+def test_to_stack_clip_bbox_stays_lonlat_under_a_projected_crs(tmp_path):
+    """--clip-bbox / bbox= is lon/lat whatever CRS the cube is built in."""
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.warp import transform_bounds
+
+    from umbra_py import to_stack
+
+    items = _three_scenes(tmp_path)
+    with rasterio.open(str(tmp_path / "s1.tif")) as ds:
+        left, bottom, right, top = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
+
+    full = to_stack(items, max_size=32, crs="utm")
+    west = to_stack(items, max_size=32, crs="utm", bbox=(left, bottom, (left + right) / 2, top))
+
+    assert west.attrs["crs"] == "EPSG:32633"
+    fl, _, fr, _ = full.attrs["bounds"]
+    wl, _, wr, _ = west.attrs["bounds"]
+    assert (wr - wl) < (fr - fl) / 1.5  # clipped to roughly the western half
+    # A lon/lat window that misses the site is still reported in lon/lat.
+    with pytest.raises(ValueError, match=r"bbox \(0.0, 0.0"):
+        to_stack(items, max_size=32, crs="utm", bbox=(0.0, 0.0, 0.001, 0.001))
+
+
+def test_utm_epsg_picks_the_zone_and_hemisphere():
+    from umbra_py.load import _utm_epsg
+
+    assert _utm_epsg(15.0, 36.1) == "EPSG:32633"  # zone 33 north
+    assert _utm_epsg(15.0, -36.1) == "EPSG:32733"  # same zone, south
+    assert _utm_epsg(-122.4, 37.8) == "EPSG:32610"  # San Francisco, zone 10
+    assert _utm_epsg(180.0, 0.0) == "EPSG:32601"  # the wrap lands back in zone 1
+
+
 def test_stack_to_geotiff_writes_a_band_per_date(tmp_path):
     pytest.importorskip("xarray")
     rasterio = pytest.importorskip("rasterio")
@@ -437,6 +515,54 @@ def test_cli_stack_writes_datacube(tmp_path, monkeypatch):
         assert max(ds.width, ds.height) <= 16
         assert ds.read([1])[0] == pytest.approx(2.0)
         assert ds.read([2])[0] == pytest.approx(8.0)
+
+
+def test_cli_stack_crs_writes_a_projected_cube(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif", value=2.0),
+        "two": _stack_scene(tmp_path / "two.tif", value=8.0),
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+
+    out = tmp_path / "cube.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "stack",
+            "http://example.com/one.json",
+            "http://example.com/two.json",
+            "--out",
+            str(out),
+            "--max-size",
+            "16",
+            "--crs",
+            "utm",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 32633
+        # The tag records the resolved zone, so the file says what "utm" meant.
+        assert ds.tags()["crs"] == "EPSG:32633"
+        assert ds.read([1])[0] == pytest.approx(2.0)
 
 
 def test_cli_stack_needs_two_urls(tmp_path):

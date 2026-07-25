@@ -756,14 +756,15 @@ returns a `(time, y, x)` `xarray.DataArray`; `stack_to_geotiff` / `umbra stack`
 write the same cube as a multi-band GeoTIFF. Deterministic, no model call,
 behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
 
-- **A projected (equal-area) output grid.** The cube is built on a lon/lat grid,
-  the same quick-look approximation `viz._coregister_bands` makes, so cells are
-  not equal-area and the stretch grows with latitude. It is the right default
-  (one grid works anywhere, and comparing a cell to *itself* across dates is
-  unaffected), but an opt-in `crs=` that warps to the scene's native UTM zone —
-  or to a caller-supplied CRS — would make area/distance measurements correct
-  without a reprojection step. The `WarpedVRT` call already takes a `crs`, so
-  this is a parameter and a grid-derivation branch, not a rewrite.
+- ~~**A projected (equal-area) output grid.**~~ ✅ **Done** (`to_stack(crs=…)` /
+  `stack_to_geotiff(crs=…)` / `umbra stack --crs`). `crs="utm"`
+  (`STACK_AUTO_CRS`) resolves the UTM zone containing the stacked ground from
+  the sources' own footprints and warps the shared grid there, so cells are
+  metre-sized and equal-area and a cell count is an area; any other value is a
+  CRS name validated through `rasterio` (a typo raises rather than warping to
+  nothing). `bbox` / `--clip-bbox` stays lon/lat either way, the written GeoTIFF
+  records the resolved CRS in its tags, and `crs=None` keeps the lon/lat default
+  unchanged. Offline-tested in `tests/test_load.py`.
 - **Lazy / chunked reads.** Every slice is read eagerly into memory, so the cube
   is bounded by `max_size` × the number of acquisitions. Yielding a dask-backed
   array (one chunk per acquisition) would let a long series stack at higher

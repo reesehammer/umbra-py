@@ -278,7 +278,19 @@ gap; `extent="union"` keeps all of it and pads each slice with `NaN` instead.
 Stack **one polarization** — mixing VV and VH puts a polarization difference on
 the time axis where you'll read it as change.
 
-`stack_to_geotiff` (and `umbra stack`, below) writes the same cube as a
+The default grid is lon/lat, whose cells stretch with latitude — fine for
+comparing a cell to *itself* across dates, but degrees are not a unit of ground,
+so a count of changed cells isn't an area. Pass `crs="utm"` (or any CRS) to
+build the shared grid in metres instead, and counting cells becomes measuring:
+
+```python
+cube = to_stack(passes, max_size=1024, db=True, crs="utm")  # equal-area cells
+changed = (cube.isel(time=-1) - cube.isel(time=0)) < -3     # 3 dB darker
+xres, yres = cube.attrs["transform"][0], cube.attrs["transform"][4]
+hectares = float(changed.sum()) * abs(xres * yres) / 10_000
+```
+
+`stack_to_geotiff` (and `umbra stack --crs`, below) writes the same cube as a
 multi-band GeoTIFF — one band per acquisition, each described by its timestamp —
 for QGIS, GDAL, or anything that isn't Python. Where `umbra change` and
 `umbra timescan` render this comparison as a *picture*, this is the *numbers*.
@@ -533,6 +545,8 @@ umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-si
 # Co-register a site's whole series into one analysis-ready datacube: a
 # multi-band GeoTIFF, one pixel-aligned band per acquisition, oldest first.
 umbra stack --area "Centerfield" --pol VV --db --out centerfield.tif
+# ...on a metric, equal-area grid instead of lon/lat (for area measurements).
+umbra stack --area "Centerfield" --pol VV --db --crs utm --out centerfield_utm.tif
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html
