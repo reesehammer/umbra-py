@@ -175,8 +175,9 @@ ML dataset prep (`umbra chips`), time-series datacubes (`umbra_py.to_stack` /
 `stack_to_geotiff` / `umbra stack` — the co-registered `(time, y, x)` xarray
 cube or multi-band GeoTIFF that `stackstac`/`odc-stac` can't produce here, see
 §2 — reduced to a JSON answer by `stack_stats` / `umbra stack --stats` / the
-`stack_stats` agent tool, and to a *located* answer by its `blocks=N` spatial
-breakdown, which says which part of a site moved and between which two passes)
+`stack_stats` agent tool / `POST /artifacts/stats` on `umbra serve`, and to a
+*located* answer by its `blocks=N` spatial breakdown, which says which part of a
+site moved and between which two passes)
 and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
 orthorectification, geoid handling, and three RTC flattening models:
 `cosine`/`area`/`gamma`) all ship. **Open:** the *fully

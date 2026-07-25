@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Measure a site over HTTP: `POST /artifacts/stats` on `umbra serve` (the last
+  open follow-on of the datacube PR, `TODO.md`; `STRATEGY.md` §5.5 / §7.2).**
+  The STAC API façade could already *show* change over any site on demand — a
+  quicklook, a change composite, a timescan, a swipe map — but every artifact it
+  served was a picture, which a person reads and a program cannot. The reduction
+  that turns those pictures into numbers (`to_stack` → `stack_stats`) was
+  reachable from the CLI (`umbra stack --stats`) and from the agent front doors
+  (`stack_stats` on MCP / LangChain / LlamaIndex), and from HTTP not at all.
+  `POST /artifacts/stats` closes that: the same request shape as the composite
+  endpoints (`ids`, or a `bbox` + `datetime` query; the same content-addressed
+  disk cache; the same `"async": true` opt-in to a `202` + `GET /jobs/{id}`
+  poll), answering with the reduction as JSON instead of an image — per-pass
+  decibel statistics, the signed change against the previous pass, how much
+  ground moved past `change_threshold_db` **in km²**, and with `"blocks": N` the
+  spatial breakdown naming which part of the site moved and between which two
+  passes. Two defaults deliberately differ from the picture endpoints, matching
+  the `stack_stats` agent tool rather than the compositors: the shared grid is
+  the site's **UTM zone** (so a cell count is an area and `changed_area_km2`
+  means something — `"crs": null` opts back into lon/lat, where areas come back
+  `null` rather than wrong) and values are **decibels**, the scale on which a
+  ratio of backscatter is a difference. `"clip_bbox"` narrows the measurement to
+  a sub-area inside the scenes, distinct from `"bbox"`, which chooses *which*
+  acquisitions are measured. Unlike the composites it **refuses to mix
+  polarizations** (a `400`, the same refusal the agent tool makes): a
+  mixed-polarization composite is merely confusing to look at, but a
+  mixed-polarization *number* is wrong, because the HH-vs-VV difference lands on
+  the time axis and reads as change. The renderer stays injectable like its
+  siblings — `Renderers` gained a `stats` member — so the route is fully
+  offline-testable in the core install, and the real one imports `load` lazily,
+  surfacing a missing extra as the usual `501`. Advertised as a `stats` link on
+  the landing page and covered by `--no-artifacts`. Offline-tested in
+  `tests/test_serve.py` (option defaults and validation, the polarization
+  refusal, JSON round-trip + cache hit/miss, `blocks` as a distinct cache entry,
+  the async job flow, and the production renderer threading its options into
+  `to_stack` / `stack_stats`).
+
 - **Where *and* when a site changed: `stack_stats(blocks=N)` / `umbra stack
   --blocks` / the agent tools' `blocks` argument (third follow-on of the
   datacube PR, `TODO.md`; `STRATEGY.md` §5.5).** The library had two change

@@ -81,6 +81,11 @@ or set `UMBRA_EXTRAS: serve,viz` under the compose `build.args`. For a public
 instance that wants to bound COG-streaming egress, keep the lean image or set
 `UMBRA_SERVE_ARGS="--no-artifacts"`.
 
+`POST /artifacts/stats` — the one artifact that answers in numbers rather than a
+picture — needs the `load` extra instead of `viz` (it co-registers the passes
+into a datacube and reduces it), so build with `serve,viz,load` for the full
+artifact surface.
+
 ## Behind a reverse proxy
 
 The server sends a permissive read-only CORS policy, so a browser front end on
