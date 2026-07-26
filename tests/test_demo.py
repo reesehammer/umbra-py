@@ -126,7 +126,7 @@ def test_analyze_panel_quantify_button_measures_the_view(sample_item_dict):
     # breakdown (a scene-wide mean dilutes a change that moved one corner).
     assert '<button id="umbra-btn-stats"' in html
     assert "kind: 'stats'" in html
-    assert "body: { blocks: 3 }" in html
+    assert "body: { blocks: 3, block_series: true }" in html
     # A JSON answer is parsed, not turned into an object URL like the PNG/HTML
     # products, and rendered by the readout.
     assert "return spec.json ? r.json() : r.blob();" in html
@@ -146,6 +146,53 @@ def test_analyze_panel_quantify_button_measures_the_view(sample_item_dict):
     # License propagation survives the trip to the browser (design principle 4).
     assert "doc.attribution" in html
     assert "doc.caveats" in html
+
+
+def test_analyze_panel_quantify_sparklines_the_series(sample_item_dict):
+    """The readout plots the *series*, not only its endpoints: one bar per
+    consecutive pass-to-pass step for the site as a whole and for the block that
+    moved most -- the first client of ``stack_stats(block_series=True)``, and the
+    only thing that separates a steady drift from a single jump."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+
+    # The request asks for the per-block sequences the peak sparkline needs;
+    # without them the block breakdown carries a peak interval and nothing else.
+    assert "block_series: true" in html
+    # Scene-wide bars come from each pass's change against the one before it --
+    # the field the readout previously fetched and never showed.
+    assert "function sceneSteps(passes)" in html
+    assert "passes[i].change_vs_previous" in html
+    assert "sparkSection(box, sceneSteps(passes), 'Site mean, pass to pass')" in html
+    # The peak block is looked up in the breakdown by the row/col the server
+    # named, and its own history is drawn beneath the "moved most" line.
+    assert "function blockAt(spatial, row, col)" in html
+    assert "blockAt(spatial, pb.row, pb.col)" in html
+    assert "pbRecord.series" in html
+    # Signed, zero-baselined SVG bars built as elements (never innerHTML), each
+    # carrying its own dated tooltip, plus an aria-label for the whole figure.
+    assert "createElementNS(SVG_NS, 'rect')" in html
+    assert "'spark-up' : 'spark-down'" in html
+    assert "spark-axis" in html
+    assert "svg.setAttribute('aria-label'" in html
+    # A bar chart with no stated scale is decoration: the caption names the step
+    # the bars are scaled to, and that decibel figure is the server's own.
+    assert "each bar scaled to the largest, " in html
+    assert ".umbra-spark" in html
+
+
+def test_analyze_panel_sparkline_styles_ship(sample_item_dict):
+    """The sparkline's colours mean what the readout's prose means: a bar above
+    the baseline is the ``.brighter`` amber, one below it the ``.dimmer`` blue,
+    so the picture and the sentence cannot say different things."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+
+    assert ".umbra-stats .umbra-spark .spark-up { fill: #b45309; }" in html
+    assert ".umbra-stats .umbra-spark .spark-down { fill: #2b6cb0; }" in html
+    # The same two colours the .brighter / .dimmer prose classes already use.
+    assert ".umbra-stats .brighter { color: #b45309; }" in html
+    assert ".umbra-stats .dimmer { color: #2b6cb0; }" in html
 
 
 def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):

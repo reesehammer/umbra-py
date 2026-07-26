@@ -1160,7 +1160,10 @@ view to `/artifacts/stats` and reads out the answer: how many decibels the site
 moved between its first and last pass, how much ground crossed the change
 threshold (in km², since the endpoint stacks on the site's UTM grid), which
 block moved most and between which two passes, and the north-up heat-grid of
-signed change. Without `--server-url` the page stays a fully static single file.
+signed change — plus two sparklines of the pass-to-pass sequence behind those
+headlines, one for the site and one for the block that moved most, which is what
+separates a steady drift from a single step. Without `--server-url` the page
+stays a fully static single file.
 
 ### Self-host it with Docker
 
