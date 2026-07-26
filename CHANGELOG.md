@@ -7,6 +7,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra map --area` / `--fuzzy`: the last gather command that could not name
+  a site can.** Umbra files every pass of a site under one named task directory,
+  so `--area "Centerfield"` lists just that directory instead of scanning the
+  archive — the cheapest filter the catalog has. Every gather command exposed it
+  except `umbra map`, which meant the one verb whose entire job is *showing you
+  where the archive has imagery* was also the one that made you find a site's
+  bounding box before you could ask about it. It now takes `--area` and its
+  typo-tolerant `--fuzzy` widener like its siblings, threaded into the same
+  `_gather_items` call, so `umbra map --area "Centerfield" --out coverage.html`
+  draws one site's coverage directly.
+
+  `umbra index build` / `umbra index update` gained the matching `--fuzzy` too:
+  they already took `--area` but not the flag that widens it, so an index could
+  not be scoped by the same spelling the search commands accept.
+
+  This closes the task-name half of the `CODEBASE_ANALYSIS.md` P3 #18 shared-
+  option extraction, and it closes it the way the geography half was closed —
+  by removing the thing that caused the gap rather than only the gap. `--area`
+  was written out by hand on thirteen commands, and writing an option out per
+  command is exactly what lets a command miss it (the same drift had already
+  cost the polygon filter thirteen commands and `--place` three). It is now one
+  shared `_area_option` definition beside `_fuzzy_option`, and both groups are
+  checked against **one roster** of gather commands (`conftest.GATHER_COMMANDS`,
+  which `tests/test_geometry.py` now shares): `tests/test_cli_option_groups.py`
+  asserts every command on it exposes `--area`/`--fuzzy` *and* forwards them to
+  the search backend, so adding a gather command without the group fails a test
+  instead of quietly shipping a front door with fewer filters than its siblings.
+  Commands whose help text says something specific about what the name scopes
+  keep their own wording — the same convention `_place_option` documents.
 - **`umbra convert --rtc --rtc-model facet`: the terrain correction that
   measures layover, because it integrates in the radar's geometry instead of
   correcting pixel by pixel.** The three shipped RTC models all answer the same
