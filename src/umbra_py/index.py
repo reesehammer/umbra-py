@@ -106,6 +106,22 @@ CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
 """
 
 
+#: Schema of the *thumbnail sidecar* -- the transportable half of the baked
+#: previews (see :meth:`CatalogIndex.export_thumbnails`). It is a separate file
+#: rather than a column of the published ``catalog.db`` on purpose: a PNG per
+#: acquisition dwarfs the metadata it hangs off, and every ``umbra index fetch``
+#: would then pay for pixels most callers never look at. Keyed by ``href`` (the
+#: index's own primary key, so a merge back is exact) and carrying the STAC
+#: ``id`` beside it, so the file is also readable on its own.
+_THUMBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS thumbnails (
+    href TEXT PRIMARY KEY,
+    id   TEXT NOT NULL,
+    png  BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_thumbnails_id ON thumbnails(id);
+"""
+
 #: Grid cell, in degrees, used to group one *site's* acquisitions when baking
 #: place labels with ``by_site=True``. Umbra files every pass over a site under
 #: a single task directory and a pass's footprint is a few km across, so a
@@ -176,6 +192,48 @@ def default_index_path() -> Path:
         return Path(override)
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(Path.home(), ".cache")
     return Path(base) / "umbra-py" / "catalog.db"
+
+
+def default_thumbs_path(index_path: str | os.PathLike | None = None) -> Path:
+    """Where the baked-thumbnail sidecar lives by default.
+
+    It sits *beside* the index (``catalog.db`` -> ``catalog.thumbs.db``) so the
+    two travel together while staying separate files: the pixels are opt-in and
+    an order of magnitude larger than the metadata, so keeping them out of
+    ``catalog.db`` is what lets the published index stay small (the same split
+    :func:`umbra_py.embed.default_scene_embed_path` makes for vectors). Pass
+    ``index_path`` to derive the sibling name from a non-default index location.
+    """
+    base = Path(index_path) if index_path is not None else default_index_path()
+    return base.with_name(f"{base.stem}.thumbs.db")
+
+
+def fetch_prebuilt_thumbnails(
+    dest: str | os.PathLike | None = None,
+    *,
+    url: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> Path:
+    """Download the published baked-thumbnail sidecar.
+
+    The weekly index workflow bakes a quicklook per acquisition and ships it as
+    ``catalog.thumbs.db`` on the rolling ``catalog-index`` release beside
+    ``catalog.db`` / ``catalog.pmtiles``, so a fresh install gets scene previews
+    without streaming a cloud-optimized GeoTIFF overview per acquisition -- the
+    thumbnail sibling of :meth:`CatalogIndex.from_release` and
+    :func:`umbra_py.pmtiles.fetch_prebuilt_pmtiles`. This fetches the sidecar to
+    ``dest`` (default: :func:`default_thumbs_path`) and returns its path;
+    :meth:`CatalogIndex.import_thumbnails` merges it into a local index. Re-run
+    any time to refresh; the download is resume-safe and always overwrites the
+    existing file. ``url`` overrides the release asset location (e.g. a fork).
+    """
+    from .constants import CATALOG_INDEX_THUMBS_URL  # noqa: PLC0415
+    from .download import download_url  # local dependency; keep the import cheap  # noqa: PLC0415
+
+    target = Path(dest) if dest is not None else default_thumbs_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    download_url(url or CATALOG_INDEX_THUMBS_URL, target, overwrite=True, progress=progress)
+    return target
 
 
 def _index_acq_date(item: UmbraItem) -> date | None:
@@ -614,6 +672,7 @@ class CatalogIndex:
         asset: str = "GEC",
         max_size: int = 256,
         limit: int | None = None,
+        newest_first: bool = False,
         progress: Callable[[int], None] | None = None,
     ) -> int:
         """Render a small SAR quicklook per acquisition once and cache it.
@@ -637,6 +696,15 @@ class CatalogIndex:
         stays ``NULL`` so a later run retries it -- and one bad scene never
         aborts the batch, mirroring the gallery contact sheet.
 
+        ``newest_first`` chooses *which* acquisitions a capped run spends its
+        budget on: by default the batch is taken in ``href`` order, which is
+        arbitrary with respect to time, so a bounded bake over a whole catalog
+        leaves the freshest scenes -- the ones a demo or a monitoring view opens
+        on -- unbaked the longest. With ``newest_first=True`` the most recently
+        acquired are rendered first, which is what makes a per-run cap a
+        *priority* rather than a lottery. Items with no acquisition date sort
+        last, as they carry no claim to being recent.
+
         ``renderer`` is an injectable ``(UmbraItem) -> bytes | None`` callable
         returning PNG bytes (or ``None`` to skip); the default wraps
         :func:`umbra_py.viz._thumbnail_png`, which streams only the overview for
@@ -655,11 +723,14 @@ class CatalogIndex:
                     # it stays NULL and is retried on the next run.
                     return None
 
+        # A NULL acq_date must not outrank a real one under newest-first, so it
+        # is ordered last explicitly (SQLite sorts NULLs first on DESC).
+        order = "acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
         rows = self._conn.execute(
             "SELECT href, doc, place FROM items "
             "WHERE thumbnail IS NULL AND href IN "
             "(SELECT href FROM item_assets WHERE asset = ?) "
-            "ORDER BY href",
+            f"ORDER BY {order}",
             (asset.upper(),),
         ).fetchall()
         if limit is not None:
@@ -701,6 +772,84 @@ class CatalogIndex:
         if row is None or row[0] is None:
             return None
         return bytes(row[0])
+
+    def export_thumbnails(self, dest: str | os.PathLike) -> int:
+        """Write every baked thumbnail to a transportable sidecar database.
+
+        Baking a quicklook costs a cloud-optimized GeoTIFF overview streamed
+        from S3 per acquisition, so it is the one derived artifact nobody should
+        recompute: this writes the bytes already baked into ``dest``
+        (:data:`_THUMBS_SCHEMA` -- ``href``, ``id``, ``png``) so they can be
+        published beside ``catalog.db`` and merged into any other index with
+        :meth:`import_thumbnails`. That is what makes the weekly publish
+        *incremental*: each run re-imports the previous sidecar first and then
+        bakes only the acquisitions added since, instead of re-streaming the
+        whole archive every Monday.
+
+        The sidecar is deliberately separate from the index (rather than a
+        published ``catalog.db`` carrying its ``thumbnail`` column) because the
+        pixels are far larger than the metadata and not every caller wants them.
+        Writing is an upsert into an existing file, so exporting twice is safe.
+        Returns the number of thumbnails written.
+        """
+        target = Path(dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        out = sqlite3.connect(str(target))
+        try:
+            out.executescript(_THUMBS_SCHEMA)
+            rows = self._conn.execute(
+                "SELECT href, id, thumbnail FROM items WHERE thumbnail IS NOT NULL ORDER BY href"
+            )
+            written = 0
+            for href, item_id, png in rows:
+                out.execute(
+                    "INSERT INTO thumbnails (href, id, png) VALUES (?, ?, ?) "
+                    "ON CONFLICT(href) DO UPDATE SET id = excluded.id, png = excluded.png",
+                    (href, item_id, sqlite3.Binary(png)),
+                )
+                written += 1
+            out.commit()
+        finally:
+            out.close()
+        return written
+
+    def import_thumbnails(self, src: str | os.PathLike, *, overwrite: bool = False) -> int:
+        """Merge a thumbnail sidecar (:meth:`export_thumbnails`) into this index.
+
+        The consume side of the published ``catalog.thumbs.db``: it fills the
+        ``thumbnail`` column for the acquisitions the sidecar covers, so
+        ``umbra serve``'s ``GET /artifacts/thumbnail/{id}.png``, the ``umbra
+        demo`` preview and a ``--local`` gallery all read local bytes without a
+        single COG range read. Rows the index does not hold are ignored (a
+        sidecar built from a newer crawl is not an error), and by default a
+        thumbnail already baked here is kept -- pass ``overwrite=True`` to
+        replace it, e.g. after re-baking at a different size. Returns the number
+        of thumbnails applied.
+        """
+        source = Path(src)
+        if not source.exists():
+            raise FileNotFoundError(f"No thumbnail sidecar at {source}")
+        conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        try:
+            try:
+                rows = conn.execute("SELECT href, png FROM thumbnails")
+            except sqlite3.DatabaseError as exc:  # not a sidecar, or unreadable
+                raise IndexSchemaError(
+                    f"{source} is not an umbra-py thumbnail sidecar "
+                    f"(no readable 'thumbnails' table): {exc}"
+                ) from exc
+            clause = "" if overwrite else " AND thumbnail IS NULL"
+            applied = 0
+            for href, png in rows:
+                cur = self._conn.execute(
+                    f"UPDATE items SET thumbnail = ? WHERE href = ?{clause}",
+                    (sqlite3.Binary(png), href),
+                )
+                applied += cur.rowcount
+        finally:
+            conn.close()
+        self._conn.commit()
+        return applied
 
     # -- querying --------------------------------------------------------------
 

@@ -93,9 +93,22 @@ Follow-ons that build on it, none a blocker:
   stream the usual way, and a plain live `umbra gallery` is unchanged.
   Offline-tested in `tests/test_viz.py` (baked-only needs no viz extra; baked +
   streamed mix) and `tests/test_index.py` (`umbra gallery --local` over a
-  bake-thumbnailed index streams nothing). Remaining optional polish under G6:
-  baking thumbnails into the published weekly snapshot (gated on egress, like the
-  place-label bake below).
+  bake-thumbnailed index streams nothing).
+  ~~Remaining optional polish under G6: baking thumbnails into the published
+  weekly snapshot (gated on egress, like the place-label bake below).~~ ✅
+  **Done**, and **G6 is closed** (`umbra index fetch-thumbnails` /
+  `export-thumbnails`, `CatalogIndex.import_thumbnails` / `export_thumbnails`,
+  `fetch_prebuilt_thumbnails`, and the two thumbnail steps in
+  `publish-index.yml`). The pictures are published as a *separate*
+  `catalog.thumbs.db` sidecar rather than a column of the released `catalog.db`,
+  because a PNG per acquisition dwarfs the metadata and every `umbra index
+  fetch` would otherwise pay for previews most callers never open — the same
+  split `catalog.embed.db` makes. The egress gate is answered by making the bake
+  incremental: the workflow re-imports the previous sidecar before baking, so a
+  run streams only what the crawl added, bounded by `--limit` and spent
+  newest-first (`bake_thumbnails(newest_first=True)` — the default `href` order
+  is arbitrary with respect to time, so a capped run would starve the freshest
+  passes). Offline-tested in `tests/test_index.py`.
 - **A precomputed centroid column.** The centroid is derived from the stored bbox
   today (cheap), so a `centroid` column is only worth adding if a consumer needs
   to query/sort on it in SQL rather than compute it per row.
@@ -112,10 +125,31 @@ Follow-ons that build on it, none a blocker:
   reproducible and resumable; `--limit` now caps *lookups* rather than items. The
   weekly build bakes (bounded, `continue-on-error`) **before** the derived
   artifacts, so `catalog.db`, the parquet export and `catalog.pmtiles` all
-  publish pre-labelled. Offline-tested in `tests/test_index.py`. Remaining under
-  this heading: baking **thumbnails** into the published snapshot, which is a
-  different cost (a COG overview streamed per acquisition, i.e. egress) rather
-  than a rate limit, so it stays open.
+  publish pre-labelled. Offline-tested in `tests/test_index.py`. ~~Remaining
+  under this heading: baking **thumbnails** into the published snapshot, which is
+  a different cost (a COG overview streamed per acquisition, i.e. egress) rather
+  than a rate limit, so it stays open.~~ ✅ **Done too** — see the G6 entry
+  above; the egress cost is paid once and then topped up incrementally from the
+  previously published sidecar, rather than re-streamed weekly.
+
+Follow-ons from the published thumbnail sidecar itself, none a blocker:
+
+- **The sidecar has no total cap.** Each weekly run adds up to `--limit` (1500)
+  previews and never drops any, so `catalog.thumbs.db` grows monotonically
+  toward whole-catalog coverage at ~10–20 KB per 128 px scene. That is the
+  intended trajectory (and the download is opt-in), but if the asset gets
+  unwieldy the smallest fix is an export-side bound —
+  `export_thumbnails(limit=…, newest_first=True)`, mirroring the bake — so the
+  published file keeps the most recent N rather than everything ever baked.
+- **`newest_first` is opt-in, not the default.** `bake_thumbnails` still orders
+  by `href` unless asked, to keep an existing caller's batching stable. If no
+  caller depends on that order, making newest-first the default would be one
+  fewer flag to remember on the path where a cap actually matters.
+- **The published thumbnails are 128 px; `bake-thumbnails` defaults to 256.** A
+  local bake and the fetched sidecar therefore differ in size, and a merge keeps
+  whichever arrived first (`--overwrite` replaces). Recording the bake size in
+  the sidecar would let a merge prefer the larger preview rather than the
+  earlier one.
 
 ---
 

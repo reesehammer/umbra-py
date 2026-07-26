@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from umbra_py.index import CatalogIndex, default_index_path
 from umbra_py.models import UmbraItem
 
@@ -1327,6 +1329,237 @@ def test_thumbnail_column_migration_from_v2(tmp_path):
 
     version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
     assert version == _SCHEMA_VERSION
+
+
+def test_bake_thumbnails_newest_first_spends_a_capped_run_on_fresh_scenes(tmp_path):
+    """A capped bake takes the most recent acquisitions, not catalog order.
+
+    Default order is by ``href``, which is arbitrary with respect to time; the
+    fixture's newest pass (``b``, 2024-02-10) sorts *after* the oldest (``c``,
+    2023-06-01) under it, so a limit of one would leave the freshest scene
+    unbaked. ``newest_first`` is what makes the cap a priority.
+    """
+    with _index(tmp_path) as idx:
+        render, rendered = _counting_renderer()
+        assert idx.bake_thumbnails(render, limit=1, newest_first=True) == 1
+        assert rendered == ["b"]  # 2024-02-10, the newest pass
+        rendered.clear()
+        assert idx.bake_thumbnails(render, limit=1, newest_first=True) == 1
+        assert rendered == ["a"]  # 2024-01-15, the next newest
+
+
+def test_bake_thumbnails_newest_first_orders_undated_last(tmp_path):
+    """An item with no acquisition date has no claim to being recent."""
+    undated = _make_item("SiteZ", "no-date-here", "z", None, (2, 2, 3, 3))
+    with _index(tmp_path, items=(_C, undated)) as idx:
+        render, rendered = _counting_renderer()
+        idx.bake_thumbnails(render, newest_first=True)
+        assert rendered == ["c", "z"]
+
+
+# -- the thumbnail sidecar (export_thumbnails / import_thumbnails) -----------
+
+
+def test_export_thumbnails_round_trips_into_another_index(tmp_path):
+    """Baked pixels move between indexes without re-streaming a single COG."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    with _index(src_dir) as src:
+        src.bake_thumbnails(lambda item: b"png-" + item.id.encode())
+        assert src.export_thumbnails(tmp_path / "catalog.thumbs.db") == 3
+
+    dst_dir = tmp_path / "dst"
+    dst_dir.mkdir()
+    with _index(dst_dir) as dst:
+        assert dst.stats()["thumbnailed"] == 0
+        assert dst.import_thumbnails(tmp_path / "catalog.thumbs.db") == 3
+        assert dst.get_thumbnail("a") == b"png-a"
+        assert dst.stats()["thumbnailed"] == 3
+
+
+def test_import_thumbnails_keeps_local_bakes_unless_overwriting(tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    with _index(src_dir) as src:
+        src.bake_thumbnails(lambda item: b"published")
+        src.export_thumbnails(tmp_path / "catalog.thumbs.db")
+
+    dst_dir = tmp_path / "dst"
+    dst_dir.mkdir()
+    with _index(dst_dir) as dst:
+        dst.bake_thumbnails(lambda item: b"local" if item.id == "a" else None)
+        # The locally baked one is left alone; only the two gaps are filled.
+        assert dst.import_thumbnails(tmp_path / "catalog.thumbs.db") == 2
+        assert dst.get_thumbnail("a") == b"local"
+        # ...until asked to replace it (e.g. after a re-bake at another size).
+        assert dst.import_thumbnails(tmp_path / "catalog.thumbs.db", overwrite=True) == 3
+        assert dst.get_thumbnail("a") == b"published"
+
+
+def test_import_thumbnails_ignores_rows_the_index_does_not_hold(tmp_path):
+    """A sidecar from a newer crawl is not an error -- the extras are skipped."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    with _index(src_dir) as src:
+        src.bake_thumbnails(lambda item: b"png")
+        src.export_thumbnails(tmp_path / "catalog.thumbs.db")
+
+    dst_dir = tmp_path / "dst"
+    dst_dir.mkdir()
+    with _index(dst_dir, items=(_A,)) as dst:
+        assert dst.import_thumbnails(tmp_path / "catalog.thumbs.db") == 1
+        assert dst.stats()["thumbnailed"] == 1
+
+
+def test_export_thumbnails_is_an_upsert(tmp_path):
+    """Exporting twice into the same sidecar refreshes rather than duplicates."""
+    import sqlite3
+
+    out = tmp_path / "catalog.thumbs.db"
+    with _index(tmp_path) as idx:
+        idx.bake_thumbnails(lambda item: b"first")
+        assert idx.export_thumbnails(out) == 3
+        idx.bake_thumbnails(lambda item: b"second", limit=1)  # already baked: no-op
+        assert idx.export_thumbnails(out) == 3
+    conn = sqlite3.connect(str(out))
+    counts = conn.execute("SELECT COUNT(*), COUNT(DISTINCT href) FROM thumbnails").fetchone()
+    assert counts == (3, 3)
+
+
+def test_import_thumbnails_rejects_a_file_that_is_not_a_sidecar(tmp_path):
+    from umbra_py.exceptions import IndexSchemaError
+
+    bogus = tmp_path / "not-a-sidecar.db"
+    bogus.write_bytes(b"definitely not sqlite")
+    with _index(tmp_path) as idx:
+        try:
+            idx.import_thumbnails(bogus)
+        except IndexSchemaError as exc:
+            assert "thumbnail sidecar" in str(exc)
+        else:  # pragma: no cover - the assertion below reports the failure
+            raise AssertionError("expected IndexSchemaError")
+
+        try:
+            idx.import_thumbnails(tmp_path / "absent.db")
+        except FileNotFoundError as exc:
+            assert "absent.db" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("expected FileNotFoundError")
+
+
+def test_default_thumbs_path_sits_beside_the_index(tmp_path):
+    from umbra_py.index import default_thumbs_path
+
+    assert default_thumbs_path(tmp_path / "catalog.db") == tmp_path / "catalog.thumbs.db"
+    assert default_thumbs_path().name == "catalog.thumbs.db"
+
+
+def test_fetch_prebuilt_thumbnails_downloads_the_release_asset(tmp_path, monkeypatch):
+    """The fetch helper targets the published sidecar and overwrites in place."""
+    from umbra_py import index as index_mod
+    from umbra_py.constants import CATALOG_INDEX_THUMBS_URL
+
+    seen = {}
+
+    def fake_download(url, dest, **kw):
+        seen["url"] = url
+        seen["overwrite"] = kw.get("overwrite")
+        Path(dest).write_bytes(b"sidecar")
+        return dest
+
+    monkeypatch.setattr("umbra_py.download.download_url", fake_download)
+    out = index_mod.fetch_prebuilt_thumbnails(tmp_path / "sub" / "catalog.thumbs.db")
+    assert out.read_bytes() == b"sidecar"
+    assert seen == {"url": CATALOG_INDEX_THUMBS_URL, "overwrite": True}
+
+
+def test_cli_index_thumbnail_sidecar_round_trip(tmp_path, monkeypatch):
+    """`export-thumbnails` then `fetch-thumbnails --from` moves the bake."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "src.db"
+    with CatalogIndex(src) as idx:
+        idx.add(_A)
+        idx.add(_B)
+    monkeypatch.setattr("umbra_py.viz._thumbnail_png", lambda item, **kw: b"png")
+    runner = CliRunner()
+    assert runner.invoke(cli_mod.cli, ["index", "bake-thumbnails", "--db", str(src)]).exit_code == 0
+
+    sidecar = tmp_path / "catalog.thumbs.db"
+    out = runner.invoke(
+        cli_mod.cli, ["index", "export-thumbnails", "--db", str(src), "--out", str(sidecar)]
+    )
+    assert out.exit_code == 0, out.output
+    assert "Exported 2 thumbnail(s)" in out.output
+
+    dst = tmp_path / "dst.db"
+    with CatalogIndex(dst) as idx:
+        idx.add(_A)
+        idx.add(_B)
+    merged = runner.invoke(
+        cli_mod.cli, ["index", "fetch-thumbnails", "--db", str(dst), "--from", str(sidecar)]
+    )
+    assert merged.exit_code == 0, merged.output
+    assert "Merged 2 thumbnail(s)" in merged.output
+    assert "2 of 2" in merged.output
+
+
+def test_cli_index_export_thumbnails_defaults_beside_the_index(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_A)
+    monkeypatch.setattr("umbra_py.viz._thumbnail_png", lambda item, **kw: b"png")
+    runner = CliRunner()
+    runner.invoke(cli_mod.cli, ["index", "bake-thumbnails", "--db", str(db)])
+    result = runner.invoke(cli_mod.cli, ["index", "export-thumbnails", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "catalog.thumbs.db").exists()
+
+
+def test_cli_index_fetch_thumbnails_downloads_when_no_source_given(tmp_path, monkeypatch):
+    """Without --from, the CLI pulls the published sidecar, then merges it."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "src.db"
+    with CatalogIndex(src) as idx:
+        idx.add(_A)
+        idx.bake_thumbnails(lambda item: b"published")
+        idx.export_thumbnails(tmp_path / "release.thumbs.db")
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_A)
+
+    def fake_fetch(dest, *, url=None, progress=None):
+        Path(dest).write_bytes((tmp_path / "release.thumbs.db").read_bytes())
+        return Path(dest)
+
+    monkeypatch.setattr(cli_mod, "fetch_prebuilt_thumbnails", fake_fetch)
+    result = CliRunner().invoke(cli_mod.cli, ["index", "fetch-thumbnails", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert "Merged 1 thumbnail(s)" in result.output
+    with CatalogIndex(db) as idx:
+        assert idx.get_thumbnail("a") == b"published"
+
+
+def test_cli_index_fetch_thumbnails_missing_index_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["index", "fetch-thumbnails", "--db", str(tmp_path / "missing.db")]
+    )
+    assert result.exit_code != 0
+    assert "No index at" in result.output
 
 
 def test_cli_index_bake_thumbnails(tmp_path, monkeypatch):

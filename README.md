@@ -445,6 +445,23 @@ ready-to-open MapLibre GL page — the visual sibling of `umbra index fetch`.
 umbra tiles --fetch --viewer catalog.html   # whole-archive map, no crawl, no index
 ```
 
+And it ships the **baked SAR previews** as a separate `catalog.thumbs.db`
+sidecar. A quicklook otherwise costs a cloud-optimized GeoTIFF overview streamed
+per scene at render time, so the workflow bakes them once and
+`umbra index fetch-thumbnails` merges them into your index — after which `umbra
+serve`'s `/artifacts/thumbnail/{id}.png`, the `umbra demo` preview and a
+`--local` gallery all read local bytes with no range read at all. The pixels are
+a separate, opt-in file precisely so `umbra index fetch` stays small:
+
+```bash
+umbra index fetch                    # metadata only (small)
+umbra index fetch-thumbnails         # + the baked previews (opt-in)
+```
+
+On an index you baked yourself, `umbra index export-thumbnails` writes the same
+sidecar to share — the bake is the one derived artifact worth moving rather than
+recomputing.
+
 Once you have an index, `umbra index update` freshens it *cheaply* instead of
 re-fetching or re-crawling the whole bucket: it reads the newest acquisition date
 already indexed and re-walks only from there (minus `--overlap-days`, default 1,
