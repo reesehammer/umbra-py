@@ -2039,3 +2039,215 @@ def test_cli_convert_calibrate_unavailable_is_a_clean_error(tmp_path, monkeypatc
     assert result.exit_code != 0
     assert "Radiometric" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+# --------------------------------------------------------------------------- #
+# Conversion provenance (what the pixel values mean, recorded in the raster).
+# --------------------------------------------------------------------------- #
+
+
+def test_conversion_tags_record_every_processing_choice():
+    tags = convert.conversion_tags(
+        source="/home/analyst/scenes/scene_SICD.nitf",
+        geocoded=True,
+        decibels=True,
+        calibration="gamma0",
+        rtc_model="facet",
+        rtc_reference_deg=31.25,
+        projection_type="HAE",
+        dem="/cache/glo30_mosaic.tif",
+        geoid="/cache/us_nga_egm96_15.tif",
+        resampling="bilinear",
+    )
+
+    assert tags["UMBRA_CALIBRATION"] == "gamma0"
+    assert tags["UMBRA_RTC_MODEL"] == "facet"
+    # The *resolved* reference angle, not the request (None means "scene angle").
+    assert tags["UMBRA_RTC_REFERENCE_DEG"] == "31.25"
+    assert tags["UMBRA_SCALE"] == "decibels"
+    assert tags["UMBRA_UNITS"] == "dB (gamma0)"
+    assert tags["UMBRA_CONVERSION"] == "geocoded"
+    assert tags["UMBRA_PROJECTION"] == "DEM"  # a DEM supersedes projection_type
+    assert tags["UMBRA_DEM"] == "glo30_mosaic.tif"
+    assert tags["UMBRA_GEOID"] == "us_nga_egm96_15.tif"
+    assert tags["UMBRA_RESAMPLING"] == "bilinear"
+    # Only the file name: the local directory is not provenance, and travels.
+    assert tags["UMBRA_SOURCE"] == "scene_SICD.nitf"
+    assert "analyst" not in "".join(tags.values())
+    # The licence survives this transformation like every other one.
+    assert tags["UMBRA_LICENSE"] == "CC-BY-4.0"
+    assert "CC BY 4.0" in tags["UMBRA_ATTRIBUTION"]
+    assert all(key.startswith("UMBRA_") for key in tags)
+    assert all(isinstance(value, str) for value in tags.values())
+
+
+def test_conversion_tags_report_the_steps_that_did_not_run():
+    tags = convert.conversion_tags(source="scene.nitf", geocoded=True, resampling="cubic")
+
+    # "none" rather than a missing key, so an absent tag never has to be read
+    # as "unknown" *or* "not applied".
+    assert tags["UMBRA_CALIBRATION"] == "none"
+    assert tags["UMBRA_RTC_MODEL"] == "none"
+    assert tags["UMBRA_DEM"] == "none"
+    assert tags["UMBRA_GEOID"] == "none"
+    assert tags["UMBRA_PROJECTION"] == "HAE"  # the flat-earth default
+    assert tags["UMBRA_UNITS"] == "dB (relative amplitude)"
+    # No flattening ran, so there is no reference angle to record.
+    assert "UMBRA_RTC_REFERENCE_DEG" not in tags
+
+
+def test_conversion_tags_omit_geocoding_keys_for_the_slant_plane():
+    tags = convert.conversion_tags(
+        source="scene.nitf", geocoded=False, decibels=False, calibration="sigma0"
+    )
+
+    assert tags["UMBRA_CONVERSION"] == "slant-plane"
+    assert tags["UMBRA_SCALE"] == "linear"
+    # Linear + calibrated is the amplitude whose *square* is the coefficient.
+    assert tags["UMBRA_UNITS"] == "amplitude (sqrt sigma0)"
+    for key in ("UMBRA_PROJECTION", "UMBRA_DEM", "UMBRA_GEOID", "UMBRA_RESAMPLING"):
+        assert key not in tags
+
+
+def test_warp_gcps_to_cog_carries_tags_through_the_cog_copy(tmp_path):
+    pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+
+    rows, cols = 12, 16
+    amp = np.ones((rows, cols), dtype="float32")
+    tags = convert.conversion_tags(source="scene.nitf", geocoded=True, calibration="beta0")
+
+    out = convert._warp_gcps_to_cog(
+        amp,
+        _hand_gcps(rows, cols),
+        tmp_path / "geo.tif",
+        resolution=0.01,
+        resampling="nearest",
+        nodata=float("nan"),
+        tags=tags,
+    )
+
+    # The COG driver copies the dataset through a MemoryFile, so the tags have
+    # to survive that copy to reach the file a user actually gets.
+    assert convert.read_conversion_tags(out)["calibration"] == "beta0"
+
+
+def test_sicd_to_geocoded_cog_records_how_it_was_made(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    dem = _write_dem(tmp_path / "flat_dem.tif", kind="const", const=100.0)
+    sicd = _FakeSicd(radiometric=_radiometric(GammaZeroSFPoly=[[0.01]]), incidence=37.5)
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), sicd))
+
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "scene_SICD.nitf",
+        tmp_path / "geo.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_model="gamma",
+        calibration="gamma0",
+    )
+
+    recorded = convert.read_conversion_tags(out)
+    assert recorded["source"] == "scene_SICD.nitf"
+    assert recorded["calibration"] == "gamma0"
+    assert recorded["rtc_model"] == "gamma"
+    # No reference angle was asked for, so the scene incidence is what ran.
+    assert recorded["rtc_reference_deg"] == "37.5"
+    assert recorded["dem"] == "flat_dem.tif"
+    assert recorded["projection"] == "DEM"
+    assert recorded["units"] == "dB (gamma0)"
+    assert recorded["software"].startswith("umbra-py ")
+
+
+def test_sicd_to_amplitude_geotiff_records_the_slant_plane_conversion(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 10), _FakeSicd()))
+    out = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "scene_SICD.nitf", tmp_path / "amp.tif", decibels=False
+    )
+
+    recorded = convert.read_conversion_tags(out)
+    assert recorded["conversion"] == "slant-plane"
+    assert recorded["scale"] == "linear"
+    assert recorded["calibration"] == "none"
+    assert "projection" not in recorded
+
+
+def test_read_conversion_tags_is_empty_for_a_foreign_raster(tmp_path):
+    pytest.importorskip("rasterio")
+
+    dem = _write_dem(tmp_path / "dem.tif", kind="const")
+    assert convert.read_conversion_tags(dem) == {}
+
+
+def test_cli_convert_provenance_prints_json(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 10), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    runner = CliRunner()
+    assert runner.invoke(cli_mod.cli, ["convert", str(src), str(out)]).exit_code == 0
+
+    result = runner.invoke(cli_mod.cli, ["convert", str(out), "--provenance"])
+
+    assert result.exit_code == 0, result.output
+    recorded = json.loads(result.output)
+    assert recorded["conversion"] == "geocoded"
+    assert recorded["calibration"] == "none"
+    assert recorded["license"] == "CC-BY-4.0"
+
+
+def test_cli_convert_provenance_rejects_a_destination(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.tif"
+    src.write_bytes(b"not-a-real-tif")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "out.tif"), "--provenance"]
+    )
+
+    assert result.exit_code != 0
+    assert "writes nothing" in result.output
+
+
+def test_cli_convert_provenance_on_an_unconverted_raster_errors(tmp_path):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    dem = _write_dem(tmp_path / "dem.tif", kind="const")
+    result = CliRunner().invoke(cli_mod.cli, ["convert", str(dem), "--provenance"])
+
+    assert result.exit_code != 0
+    assert "no umbra-py conversion provenance" in result.output
+
+
+def test_cli_convert_without_a_destination_errors(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(cli_mod.cli, ["convert", str(src)])
+
+    assert result.exit_code != 0
+    assert "DST" in result.output

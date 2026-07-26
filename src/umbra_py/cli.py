@@ -1904,7 +1904,15 @@ def stack(
 
 @cli.command()
 @click.argument("src", type=click.Path(exists=True, dir_okay=False))
-@click.argument("dst", type=click.Path(dir_okay=False))
+@click.argument("dst", type=click.Path(dir_okay=False), required=False)
+@click.option(
+    "--provenance",
+    is_flag=True,
+    help="Don't convert: read the conversion provenance umbra-py recorded in "
+    "SRC (an already-converted raster) and print it as JSON -- which "
+    "calibration, terrain-flattening model, DEM and scale produced those pixel "
+    "values. Takes no DST.",
+)
 @click.option(
     "--slant-plane",
     is_flag=True,
@@ -2020,6 +2028,7 @@ def stack(
 def convert(
     src,
     dst,
+    provenance,
     slant_plane,
     linear,
     gcp_grid,
@@ -2055,11 +2064,37 @@ def convert(
     cross-section, so the decibels mean the same thing across scenes and dates.
     It only works where the product supplies those scale factors.
 
+    Every raster written here records how it was made -- the calibration, the
+    terrain model and its reference angle, the DEM/geoid, the projection and the
+    scale -- in the file's own metadata, so a converted scene can say what its
+    pixel values mean. Read it back with --provenance (or gdalinfo).
+
     SICD/CPHD are the complex products; the ``GEC`` asset is already a geocoded
     COG and needs no conversion. Requires the convert extra
     (``pip install "umbra-py[convert]"``).
     """
-    from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog  # noqa: PLC0415
+    from .convert import (  # noqa: PLC0415
+        read_conversion_tags,
+        sicd_to_amplitude_geotiff,
+        sicd_to_geocoded_cog,
+    )
+
+    if provenance:
+        if dst is not None:
+            raise click.BadParameter(
+                "--provenance reads SRC and writes nothing; drop the DST argument.",
+                param_hint="DST",
+            )
+        tags = read_conversion_tags(src)
+        if not tags:
+            raise click.ClickException(
+                f"{Path(src).name} carries no umbra-py conversion provenance "
+                "(it was not written by 'umbra convert')."
+            )
+        click.echo(json.dumps(tags, indent=2))
+        return
+    if dst is None:
+        raise click.BadParameter("Missing argument 'DST'.", param_hint="DST")
 
     decibels = not linear
     calibration = calibrate.lower() if calibrate else None
