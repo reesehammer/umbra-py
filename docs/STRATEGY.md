@@ -263,8 +263,17 @@ from:
   **Open:** the date / task-name / limit options are still per-command (their
   help text is genuinely command-specific), and `umbra map` still lacks `--area`
   — see `TODO.md`.
-- Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
-  gallery) with re-exports preserved (was P3 #19).
+- ~~Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
+  gallery) with re-exports preserved (was P3 #19).~~ **shipped** — the
+  2 023-line module is now `geojson.py` / `raster.py` / `composites.py` /
+  `contact_sheet.py` (the gallery, renamed so the submodule is not shadowed by
+  the `gallery` function beside it) / `maps.py`, plus `_deps.py` for the single
+  `viz`-extra gate. `viz/__init__.py` re-exports every name the module had —
+  public functions *and* the private helpers other package modules import from
+  `umbra_py.viz` — and every definition is AST-identical to its pre-split form
+  bar six relative-import levels, so no caller changed. The one behavioural
+  difference is the test seam: an internal helper is now patched on the module
+  that *calls* it. See the CHANGELOG.
 - ~~Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).~~ **shipped** —
   the `test-all-extras` job (the one job where every module actually runs)
   measures branch coverage behind a `--cov-fail-under` floor and uploads to

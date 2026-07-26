@@ -974,6 +974,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controls; Folium's own vendored CDN assets remain out of scope.
 
 ### Changed
+- **`viz.py` is now a `viz/` package — the last named piece of structural debt
+  on the critical path (`CODEBASE_ANALYSIS.md` P3 #19 / `STRATEGY.md` §8).** At
+  2 023 lines it was the second-largest module and the one every visual surface
+  imports: GeoJSON conversion, reverse geocoding, Folium maps, streaming COG
+  reads, stretches, quicklooks, thumbnails, co-registration, change/timescan
+  composites, animations and the HTML contact sheet all shared one namespace, so
+  reading it meant scrolling past four unrelated concerns to reach the fifth and
+  every change touched the same file. It is now six modules along the seams the
+  code already had: `geojson.py` (items → GeoJSON, no dependencies),
+  `raster.py` (range-request COG reads, stretches, quicklooks, thumbnails),
+  `composites.py` (co-registration, change / timescan / animation),
+  `contact_sheet.py` (the standalone HTML gallery), `maps.py` (Folium footprint
+  / timeline / swipe maps, and the rate-limited Nominatim geocoder), and
+  `_deps.py` (`_require`, the single `viz`-extra gate).
+
+  **Nothing moved as far as a caller is concerned.** `viz/__init__.py`
+  re-exports every name the old module had — the public functions *and* the
+  private helpers that `models.py`, `index.py`, `demo.py`, `narrate.py`,
+  `describe.py` and `viewer.py` import from `umbra_py.viz` — so
+  `from umbra_py.viz import quicklook`, `viz.change_composite(...)` and
+  `monkeypatch.setattr("umbra_py.viz.save_change_composite", …)` all behave
+  exactly as before. The move is verifiable rather than asserted: every
+  definition is AST-identical to its pre-split form except for six relative
+  imports whose level went from `.` to `..`. The one deliberate rename is the
+  gallery module (`contact_sheet.py`), because a submodule named `gallery`
+  would be shadowed by the `gallery` function re-exported beside it.
+
+  The one thing that *is* different is where an internal helper is patched. A
+  submodule binds what it calls at import time (`from .raster import
+  _stretch_to_rgba`), so stubbing a private now means naming the module that
+  calls it — `umbra_py.viz.maps._stretch_to_rgba`, not the package — which is
+  what the ~50 retargeted `monkeypatch` sites in `tests/test_viz.py`,
+  `test_index.py`, `test_geocode.py` and `test_describe.py` now do. Patching a
+  *public* function on the package still reaches every caller outside `viz`,
+  because they resolve it through that namespace at call time. No behaviour
+  change, no new dependency, no test removed: the same 1 214 offline tests pass.
 - **Consolidated the planning docs so status lives in one place.** The four
   `docs/*.md` planning/analysis documents had become living status logs whose
   ✅-shipped narration duplicated the CHANGELOG and whose open items overlapped

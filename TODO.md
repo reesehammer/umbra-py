@@ -33,7 +33,7 @@ commands. It runs synchronously. Follow-ons that build on it, none a blocker:
 - **`mypy` disagrees between the hook's environment and CI's.** Surfaced by the
   `stack_stats` PR. CI's `type-check` job installs only `[dev]`, so Pillow is
   absent and `[tool.mypy]`'s import-ignore covers it; the hook installs every
-  extra, so Pillow's stubs *are* checked and `viz.py:1706`'s `Image.ADAPTIVE`
+  extra, so Pillow's stubs *are* checked and `viz/composites.py`'s `Image.ADAPTIVE`
   reads as `[attr-defined]`. CI is green and the code is correct (`ADAPTIVE` is a
   real Pillow constant the stubs place elsewhere), but every remote agent session
   starts with one failing `mypy` line. Smallest fix: `cast` the constant or
@@ -989,6 +989,43 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
   `/embeddings` endpoint; a SAR-specific encoder (once one is broadly available)
   would sharpen recall for radar-specific scene types. The `model` label already
   guards against silently mixing encoders in one index.
+
+---
+
+## `viz/` package-split follow-ons (`viz.py` → `viz/` shipped)
+
+- **Surfaced in:** the `viz` package-split PR (`CODEBASE_ANALYSIS.md` P3 #19 /
+  `STRATEGY.md` §8 structural debt).
+- **Code:** `src/umbra_py/viz/` (`__init__.py`, `geojson.py`, `raster.py`,
+  `composites.py`, `contact_sheet.py`, `maps.py`, `_deps.py`), the
+  `per-file-ignores` entry in `pyproject.toml`, the `viz/__init__.py` row in
+  `llms_txt._MODULE_GUIDE`.
+
+The 2 023-line module is now six modules along the seams the code already had,
+with `viz/__init__.py` re-exporting every name it ever exported (public *and*
+private), so no caller changed. Follow-ons that build on it, none a blocker:
+
+- **The private re-exports are a compatibility layer, not a design.**
+  `viz/__init__.py` re-exports ~30 underscore-prefixed helpers because six other
+  package modules (`models`, `index`, `demo`, `narrate`, `describe`, `viewer`)
+  import them from `umbra_py.viz`. Pointing each of those imports at the module
+  that actually defines the helper (`from .viz.raster import _thumbnail_png`)
+  would let the façade shrink to the public surface and drop the `F401`
+  per-file-ignore. Deliberately not done here: it would put churn in six
+  unrelated modules in a change whose whole claim is that nothing outside `viz`
+  moved.
+- **`maps.py` is still 800 lines.** It carries three renderers (footprint,
+  timeline, swipe) plus the popup/legend/attribution/lazy-imagery HTML and the
+  Nominatim geocoder. The geocoder in particular is not a map — it is a
+  rate-limited network client with module-level state that `index.bake_places`
+  also drives. A `geocode.py` split is the natural next seam if the file grows
+  again; it was left alone here because moving it would relocate the one piece
+  of mutable module state (`_LAST_GEOCODE_AT`, `_GEOCODE_CACHE`) that the split
+  deliberately did *not* re-export.
+- **`cli.py` is now the outlier at 5 282 lines.** With `viz` split, it is by far
+  the largest module and the only one still mixing several concerns; the
+  remaining half of P3 #18 (the per-command date / task-name / limit option
+  groups) is the tracked slice of that, in the geography-option entry below.
 
 ---
 

@@ -185,7 +185,7 @@ def test_cli_gallery_place_resolves_and_labels_page(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     captured: dict = {}
 

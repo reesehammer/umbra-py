@@ -117,7 +117,7 @@ Download Umbra data assets over anonymous HTTPS, with resume support.
 
 Analysis-ready loading of Umbra SAR imagery into ``xarray`` (the *load* step).
 
-### `umbra_py/viz.py` (quicklook / maps / change / timescan / gallery)
+### `umbra_py/viz/__init__.py` (quicklook / maps / change / timescan / gallery)
 
 Visualization helpers for Umbra search results.
 

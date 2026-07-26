@@ -14,10 +14,10 @@
 > - **What shipped** → [`CHANGELOG.md`](../CHANGELOG.md) (authoritative history).
 > - **What's still open** → [`STRATEGY.md` §8](STRATEGY.md#8-current-status--remaining-critical-path)
 >   (the remaining critical path) and [`TODO.md`](../TODO.md) (per-PR
->   follow-ons). The still-open structural items from this review — the
->   `cli.py` shared-gathering extraction (P3 #18), the `viz.py` package split
->   (P3 #19), `pytest --cov` + Codecov (P2 #16), and the R\*Tree upgrade — are
->   listed there.
+>   follow-ons). Of this review's structural items, the `viz.py` package split
+>   (P3 #19) and `pytest --cov` + Codecov (P2 #16) have since **shipped**; what
+>   is still open — the remainder of the `cli.py` shared-option extraction
+>   (P3 #18) and the R\*Tree upgrade — is listed there.
 >
 > The original item IDs (`P0`–`P3`, `§3.1`–`§3.5`, `§4.1`–`§4.6`) are still
 > cited from source docstrings and commit messages; the detail behind each is

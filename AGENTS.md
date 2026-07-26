@@ -43,6 +43,13 @@ src/umbra_py/
   constants.py       # bucket, STAC root URL, canonical product types
   convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG (behind [convert] extra)
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call)
+  viz/               # rendering package; every name re-exported from `umbra_py.viz` (see its __init__ docstring)
+    geojson.py       #   items -> GeoJSON features / FeatureCollections (no dependencies)
+    raster.py        #   range-request COG reads, amplitude stretches, quicklooks, thumbnails ([viz])
+    composites.py    #   co-registration + change / timescan composites and animations ([viz])
+    contact_sheet.py #   `umbra gallery`: many acquisitions as one standalone HTML page ([viz])
+    maps.py          #   Folium footprint / timeline / swipe maps + the rate-limited Nominatim geocoder ([viz])
+    _deps.py         #   _require(): the single optional-dependency gate for the whole package
   viewer.py          # local XYZ tile server + Leaflet page for `umbra view` (full-res scene explorer, [viz])
   demo.py            # umbra demo: one self-contained interactive catalog explorer (Leaflet + markercluster, client-side facets, lazy SAR overlays); stdlib-only generator
   _lazy_imagery.py   # browser-side geotiff.js COG-fetch driver shared by `umbra map --lazy-imagery` and `umbra demo`
@@ -249,6 +256,13 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 - **Mock HTTP with `responses`.** See `tests/test_download.py` for the pattern.
 - **For catalog tests:** monkey-patch `UmbraCatalog._get` with an in-memory
   tree (`tests/test_catalog.py` has the canonical example).
+- **For `viz` tests, patch the module that *calls* the helper.** `viz` is a
+  package whose submodules bind what they call at import time (`from .raster
+  import _stretch_to_rgba`), so stubbing a private means naming its caller —
+  `from umbra_py.viz import maps as viz_mod` then `monkeypatch.setattr(viz_mod,
+  "_stretch_to_rgba", …)`, not the `umbra_py.viz` package. Patching a *public*
+  function on the package still works everywhere, because callers outside `viz`
+  resolve it through that namespace at call time.
 - **Live tests** belong in `test_live.py` (or any file) under
   `pytestmark = pytest.mark.network`. They only run on `pytest -m network`.
 - **Every new behavior gets a test.** Every bug fix gets a regression test

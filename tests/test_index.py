@@ -525,7 +525,7 @@ def test_cli_gallery_local_reads_index(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     with _index(tmp_path, items=(_A, _B)):
         pass
@@ -551,7 +551,7 @@ def test_cli_gallery_local_uses_baked_thumbnails(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     # Build an index and bake fake PNG bytes with an injectable renderer (no
     # rasterio, no network) -- the same primitive umbra index bake-thumbnails uses.

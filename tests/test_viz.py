@@ -158,7 +158,7 @@ def test_quicklook_returns_pil_image(monkeypatch):
     RGBA PIL image without touching the network."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import raster as viz_mod
 
     data = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
     monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
@@ -172,7 +172,7 @@ def test_quicklook_returns_pil_image(monkeypatch):
 def test_save_quicklook_writes_png(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import raster as viz_mod
 
     data = np.arange(1, 17, dtype="float32").reshape(4, 4)
     monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
@@ -188,7 +188,7 @@ def test_save_quicklook_jpeg_flattens_alpha(monkeypatch, tmp_path):
     RGB rather than raising."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import raster as viz_mod
 
     # Include an invalid (<=0) pixel so the RGBA image actually has alpha.
     data = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")
@@ -207,7 +207,7 @@ def test_cli_quicklook_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import raster as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
     data = np.arange(1, 65, dtype="float32").reshape(8, 8)
@@ -253,7 +253,7 @@ def test_gallery_embeds_streamed_thumbnails(monkeypatch, sample_item_dict):
     The thumbnail fetch and the viz-extra check are both mocked so the test
     stays offline.
     """
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -275,7 +275,7 @@ def test_gallery_embeds_streamed_thumbnails(monkeypatch, sample_item_dict):
 def test_gallery_thumbnail_failure_falls_back_to_footprint(monkeypatch, sample_item_dict):
     """A thumbnail that can't be fetched must not sink the sheet -- the tile
     drops back to its footprint sketch."""
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
 
@@ -292,7 +292,7 @@ def test_gallery_thumbnail_failure_falls_back_to_footprint(monkeypatch, sample_i
 
 
 def test_save_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
@@ -306,8 +306,8 @@ def test_save_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
 def test_gallery_requires_viz_extra(monkeypatch, sample_item_dict):
     """Without rasterio, gallery() should fail fast with a clear message rather
     than quietly producing an all-footprint page."""
-    from umbra_py import viz as viz_mod
     from umbra_py.exceptions import MissingDependencyError
+    from umbra_py.viz import contact_sheet as viz_mod
 
     def no_rasterio(module):
         if module == "rasterio":
@@ -321,7 +321,7 @@ def test_gallery_requires_viz_extra(monkeypatch, sample_item_dict):
 def test_gallery_baked_thumbnail_embedded_without_streaming(monkeypatch, sample_item_dict):
     """An item whose id is in ``baked`` is embedded straight from those PNG bytes
     -- the S3 streaming path (``_thumbnail_data_uri``) is never called."""
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
 
@@ -340,8 +340,8 @@ def test_gallery_baked_thumbnail_embedded_without_streaming(monkeypatch, sample_
 def test_gallery_all_baked_needs_no_rasterio(monkeypatch, sample_item_dict):
     """A fully-baked gallery is pure standard library -- it must not require the
     viz extra, so a core install can render it offline."""
-    from umbra_py import viz as viz_mod
     from umbra_py.exceptions import MissingDependencyError
+    from umbra_py.viz import contact_sheet as viz_mod
 
     def no_rasterio(module):
         if module == "rasterio":
@@ -359,7 +359,7 @@ def test_gallery_all_baked_needs_no_rasterio(monkeypatch, sample_item_dict):
 def test_gallery_mixes_baked_and_streamed(monkeypatch, sample_item_dict):
     """With one item baked and one not, the baked tile comes from its bytes and
     the other is streamed the usual way -- both land on the sheet."""
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -381,7 +381,7 @@ def test_cli_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import contact_sheet as viz_mod
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
@@ -511,7 +511,7 @@ def test_change_composite_returns_pil_image(monkeypatch):
     PIL image without touching the network."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
     t2 = t1[::-1].copy()
@@ -526,7 +526,7 @@ def test_change_composite_returns_pil_image(monkeypatch):
 
 def test_change_composite_rejects_wrong_item_count(monkeypatch):
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     # Guard against the network: the count check must fire first.
     monkeypatch.setattr(
@@ -542,7 +542,7 @@ def test_change_composite_rejects_wrong_item_count(monkeypatch):
 def test_save_change_composite_writes_png(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
     monkeypatch.setattr(
@@ -560,7 +560,7 @@ def test_save_change_composite_jpeg_flattens_alpha(monkeypatch, tmp_path):
     """JPEG can't carry transparency; the save flattens rather than raising."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     t1 = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")  # has an invalid pixel
     monkeypatch.setattr(
@@ -581,7 +581,7 @@ def test_cli_change_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
@@ -712,7 +712,7 @@ def test_change_animation_returns_ordered_frames(monkeypatch):
     acquisition, oldest-first."""
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     later = _dated_item("late", "2024-03-01T00:00:00Z")
     early = _dated_item("early", "2024-01-01T00:00:00Z")
@@ -733,7 +733,7 @@ def test_change_animation_returns_ordered_frames(monkeypatch):
 
 def test_change_animation_requires_two(monkeypatch):
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     monkeypatch.setattr(
         viz_mod, "_coregister_bands", lambda *a, **k: pytest.fail("should not co-register")
@@ -745,7 +745,7 @@ def test_change_animation_requires_two(monkeypatch):
 def test_save_change_animation_writes_animated_gif(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     PIL = pytest.importorskip("PIL")  # noqa: N806
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     # Distinct spatial patterns per frame (a rolled bright ramp) so the
     # stretched frames really differ -- identical frames get optimized away.
@@ -769,7 +769,7 @@ def test_cli_change_gif_animates_search_results(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     found = [_dated_item(str(k), f"2024-{k:02d}-01T00:00:00Z") for k in range(1, 6)]
     monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
@@ -792,7 +792,7 @@ def test_cli_change_gif_allows_many_explicit_urls(monkeypatch, tmp_path, sample_
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
     bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(4)]
@@ -846,7 +846,7 @@ def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     found = [
         _dated_item("old", "2024-01-01T00:00:00Z"),
@@ -929,7 +929,7 @@ def test_centroid_returns_none_without_bbox():
 
 def test_footprint_map_includes_centroid_marker_and_legend(sample_item_dict):
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     item = UmbraItem.from_dict(sample_item_dict)
     html = viz_mod.footprint_map([item]).get_root().render()
@@ -943,7 +943,7 @@ def test_footprint_map_includes_centroid_marker_and_legend(sample_item_dict):
 
 def test_footprint_map_legend_distinguishes_imagery_when_enabled(monkeypatch, sample_item_dict):
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     def fake_overlay(item, **_kwargs):
         if item.id == "bad":
@@ -972,7 +972,7 @@ def test_footprint_map_imagery_skips_unreachable_items(monkeypatch, sample_item_
     """When imagery=True hits a 404 / network error for one item, the map
     should still render the rest -- not crash the whole call."""
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     seen: list[str] = []
 
@@ -1005,8 +1005,8 @@ def test_image_overlay_raises_clear_error_on_empty_url(monkeypatch):
     empty string to rasterio -- raise something the caller can act on."""
     pytest.importorskip("folium")
     pytest.importorskip("rasterio")
-    from umbra_py import viz as viz_mod
     from umbra_py.exceptions import AssetNotFoundError
+    from umbra_py.viz import raster as viz_mod
 
     item = UmbraItem(
         id="x",
@@ -1041,14 +1041,14 @@ def test_footprint_map_without_extra_raises(monkeypatch, sample_item_dict):
 
 
 def _reset_geocode_state():
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     viz_mod._GEOCODE_CACHE.clear()
     viz_mod._LAST_GEOCODE_AT = 0.0
 
 
 def test_reverse_geocode_returns_display_name(monkeypatch):
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
     calls: list[dict] = []
@@ -1082,7 +1082,7 @@ def test_reverse_geocode_returns_display_name(monkeypatch):
 def test_reverse_geocode_swallows_network_errors(monkeypatch):
     import requests
 
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
 
@@ -1099,7 +1099,7 @@ def test_reverse_geocode_swallows_network_errors(monkeypatch):
 
 def test_footprint_map_geocode_adds_location_row(monkeypatch, sample_item_dict):
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
     monkeypatch.setattr(
@@ -1121,7 +1121,7 @@ def test_footprint_map_prefers_baked_place(monkeypatch, sample_item_dict):
     uses it directly and never reaches for the network geocoder — a fully-baked
     render stays offline even with geocode=True."""
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
 
@@ -1146,7 +1146,7 @@ def test_footprint_map_default_does_not_geocode(monkeypatch, sample_item_dict):
     """The library default is opt-in; library callers don't pay for a
     surprise network call when they just want a footprint map."""
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     def _boom(*_a, **_k):
         raise AssertionError("_reverse_geocode must not be called by default")
@@ -1244,7 +1244,7 @@ def test_timeline_map_geocode_threads_label_into_popup(monkeypatch, sample_item_
     to be in place at generation time."""
     pytest.importorskip("folium")
     from umbra_py import timeline_map
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
     monkeypatch.setattr(
@@ -1265,7 +1265,7 @@ def test_timeline_map_prefers_baked_place(monkeypatch, sample_item_dict):
     geocode, matching footprint_map."""
     pytest.importorskip("folium")
     from umbra_py import timeline_map
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
 
@@ -1291,7 +1291,7 @@ def test_timeline_map_default_does_not_geocode(monkeypatch, sample_item_dict):
     geocode=True must not hit the network."""
     pytest.importorskip("folium")
     from umbra_py import timeline_map
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     def _boom(*_a, **_k):
         raise AssertionError("_reverse_geocode must not be called by default")
@@ -1308,7 +1308,7 @@ def test_cli_map_timeline_with_geocode_flows_through(monkeypatch, tmp_path, samp
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     _reset_geocode_state()
     # Stick to ASCII -- folium JSON-encodes popup properties with
@@ -1386,7 +1386,7 @@ def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
 
@@ -1409,7 +1409,7 @@ def test_swipe_map_db_reaches_stretch(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
     seen_db = []
@@ -1432,7 +1432,7 @@ def test_swipe_map_overlays_share_one_grid(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
     before, after = _swipe_items()
@@ -1446,7 +1446,7 @@ def test_save_swipe_map_writes_html(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
     before, after = _swipe_items()
@@ -1463,7 +1463,7 @@ def test_cli_swipe_writes_html(monkeypatch, tmp_path, sample_item_dict):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
@@ -1591,7 +1591,7 @@ def test_compose_timescan_rgba_db_keeps_steady_pixel_dark():
 def test_timescan_composite_returns_pil_image(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
     t2 = t1[::-1].copy()
@@ -1606,7 +1606,7 @@ def test_timescan_composite_returns_pil_image(monkeypatch):
 
 def test_timescan_composite_rejects_too_few_items(monkeypatch):
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     monkeypatch.setattr(
         viz_mod,
@@ -1621,7 +1621,7 @@ def test_timescan_composite_rejects_too_few_items(monkeypatch):
 def test_save_timescan_composite_writes_png(monkeypatch, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
     monkeypatch.setattr(
@@ -1643,7 +1643,7 @@ def test_cli_timescan_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from click.testing import CliRunner
 
     from umbra_py import cli as cli_mod
-    from umbra_py import viz as viz_mod
+    from umbra_py.viz import composites as viz_mod
 
     monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
@@ -1778,8 +1778,8 @@ def test_popup_html_keeps_and_escapes_http_href():
 
 def test_footprint_map_carries_ccby_attribution(sample_item_dict):
     pytest.importorskip("folium")
-    from umbra_py import viz as viz_mod
     from umbra_py.constants import ATTRIBUTION
+    from umbra_py.viz import maps as viz_mod
 
     item = UmbraItem.from_dict(sample_item_dict)
     html = viz_mod.footprint_map([item]).get_root().render()
@@ -1804,8 +1804,8 @@ def test_swipe_map_carries_ccby_attribution(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("folium")
     pytest.importorskip("PIL")
-    from umbra_py import viz as viz_mod
     from umbra_py.constants import ATTRIBUTION
+    from umbra_py.viz import maps as viz_mod
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
 
