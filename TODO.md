@@ -989,6 +989,48 @@ sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
 
 ---
 
+## Shared geography option-group follow-ons (`--intersects` everywhere shipped)
+
+- **Surfaced in:** the shared geography-option PR (`CODEBASE_ANALYSIS.md` P3 #18
+  / `STRATEGY.md` §8 structural debt).
+- **Code:** `src/umbra_py/cli.py` (`_geometry_option`, `_place_option`,
+  `_resolve_geography`), `src/umbra_py/watch.py` (`watch_key`),
+  `src/umbra_py/context.py` (`_SEARCH_PARAMETERS`).
+
+`--bbox` / `--place` / `--intersects` are one shared group applied to all
+fourteen gather commands, resolved by one helper that also enforces the
+polygon-vs-rectangle exclusion. This closed the geography half of P3 #18's
+"common Click option groups" extraction and gave every front door the polygon
+filter. What is still open:
+
+- **`umbra map` has no `--area` (or `--fuzzy`).** Every other gather command can
+  name an Umbra task directly — `umbra map` is the one that cannot, so mapping
+  one site's coverage means finding its bbox first. Not touched here because it
+  is a *different* option group (`--area`/`--fuzzy`, the task-name filter) and
+  adding it changes what `umbra map` searches rather than how it is spelled.
+  Smallest fix: give the command the `--area` option and `@_fuzzy_option`, and
+  thread `area=` / `fuzzy=` into its `_gather_items` call like `gallery` does.
+- **The rest of P3 #18.** `--start` / `--end` / `--area` / `--limit` /
+  `--max-search` are still written out per command. Their help text is genuinely
+  command-specific ("Search mode: cap how many acquisitions the search pulls into
+  the stack" vs "Max results to plot"), so folding them into one decorator would
+  either flatten the wording or need a prefix/override mechanism — worth doing
+  only alongside a decision about which of those two costs is acceptable. The
+  *gathering* half (`_gather_items` / `_search_source`) is already shared.
+- **`umbra ask` cannot plan a polygon.** The planner's `SearchPlan` carries
+  `bbox` / `place` / `area` but not `intersects`, so a sentence naming a real
+  AOI ("scenes over this watershed") can only resolve to a rectangle. Adding it
+  means a schema field plus validation at the determinism boundary
+  (`planner.parse_plan` would have to run the geometry through
+  `_geometry.parse_geometry` before it becomes a filter, exactly as
+  `serve.parse_intersects` does), and a decision about whether a model should be
+  emitting polygon coordinates at all — a hallucinated ring is a silently wrong
+  search area, unlike a hallucinated date. The safer shape is probably a *named*
+  AOI (a path to a file the user already has) rather than model-authored
+  coordinates.
+
+---
+
 ## Done
 
 - **Branch-coverage gate + Codecov badge in CI (`CODEBASE_ANALYSIS.md` P2 #16 /

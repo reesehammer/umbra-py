@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`--intersects` on every command that gathers acquisitions, not just `umbra
+  search` — an area of interest is a polygon, and now every front door accepts
+  one (`CODEBASE_ANALYSIS.md` P3 #18, the shared-option-group extraction).** The
+  library, the local index and the `umbra serve` STAC API have filtered by
+  polygon since the geometry search shipped, but only one of fourteen CLI
+  commands exposed it. Everything else — `map`, `gallery`, `change`, `timescan`,
+  `swipe`, `demo`, `tiles`, `showcase`, `stack`, `chips`, `embed build`, `index
+  build`, `index update`, `watch` — was rectangle-only, so a coastline, a border,
+  a catchment or a port had to be over-approximated by its bounding box and the
+  surplus scenes culled by hand afterwards. That is the culling the polygon test
+  already does exactly: `umbra change --intersects aoi.geojson` now composites
+  the passes that actually cover the AOI, and `umbra index build --intersects
+  country.geojson` builds a country-shaped index in one flag.
+
+  The drift was the point. `--bbox`, `--place` and `--intersects` were written
+  out per command, so they had diverged: `--intersects` existed on one command,
+  and `change` / `swipe` / `chips` had no `--place` at all. They are one group
+  now — two shared decorators (`_geometry_option`, `_place_option`) and one
+  shared resolver (`_resolve_geography`) that also enforces the
+  polygon-vs-rectangle exclusion, so all fourteen commands reject the
+  combination with the same message and cannot disagree with `umbra search`
+  about what a geometry means. `--place` therefore lands on `change`, `swipe`
+  and `chips` in the same change, and `umbra showcase` stopped geocoding (and
+  echoing) the same `--place` twice, since its explorer gather and its marquee
+  gather now share one resolution.
+
+  `watch_key` gained an `intersects` parameter so two different AOIs are two
+  different watches; an unset filter is dropped before hashing, so a scheduled
+  watch keeps the name — and therefore the stored state — it had before the
+  option existed. The agent-facing context card (`umbra context` /
+  `llms-full.txt`) documents `intersects` beside `bbox`, which it had been
+  missing. No library change: `UmbraCatalog.search`, `CatalogIndex.search`,
+  `build` and `update` already took the kwarg. Offline-tested in
+  `tests/test_geometry.py` (every command exposes the flag, forwards the parsed
+  polygon, and rejects it beside a rectangle; an end-to-end `umbra map --local
+  --intersects` over a real index; the watch key's stability).
 - **Filter the archive by the facet that decides whether an answer is valid —
   polarization chips in both `umbra demo` modes, and the two list-valued fields
   the vector tiles withheld (`docs/DEMO_APP_GAPS.md` Path A, the last structural

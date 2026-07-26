@@ -565,9 +565,21 @@ umbra index build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 umbra search --bbox -68.1,10.4,-67.9,10.6 --start 2024-01-01 --end 2024-01-31 --product GEC
 
 # Or search by place name -- geocoded to a bounding box via OpenStreetMap.
-# Works on `search`, `map`, `gallery`, and `timescan`; mutually exclusive
-# with --bbox.
+# Mutually exclusive with --bbox.
 umbra search --place "California" --start 2024-01-01 --end 2024-12-31
+
+# Or by a real area of interest: a GeoJSON polygon (file or inline string),
+# which keeps only footprints that actually overlap the shape rather than its
+# bounding rectangle.
+umbra search --intersects aoi.geojson --start 2024-01-01
+
+# --bbox / --place / --intersects are one group, and every command that
+# gathers acquisitions by search takes all three -- the renders (`map`,
+# `gallery`, `change`, `timescan`, `swipe`, `demo`, `tiles`, `showcase`), the
+# analysis commands (`stack`, `chips`, `embed build`), the index builds
+# (`index build` / `index update`) and `watch`. So an AOI polygon narrows a
+# change composite exactly as it narrows a search:
+umbra change --intersects aoi.geojson --start 2024-01-01 --out change.png
 
 # Inspect a single item by its STAC JSON URL.
 umbra info <item-json-url>

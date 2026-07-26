@@ -249,6 +249,16 @@ from:
 
 - Extract the shared search-vs-URLs gathering + common Click option groups out
   of the CLI commands that still duplicate them (was `CODEBASE_ANALYSIS` P3 #18).
+  **Partly shipped:** the gathering half (`_gather_items` / `_search_source`) and
+  now the *geography* option group — `--bbox` / `--place` / `--intersects` are one
+  shared pair of decorators plus one shared resolver across all fourteen gather
+  commands. That extraction was worth doing because of what the duplication had
+  cost: the options had drifted, so the polygon filter the library, the index and
+  the STAC API all support reached exactly one command (`umbra search`) and
+  `--place` was missing from three more. Every front door now takes an area of
+  interest as a shape rather than a bounding rectangle. **Open:** the date /
+  task-name / limit options are still per-command (their help text is genuinely
+  command-specific), and `umbra map` still lacks `--area` — see `TODO.md`.
 - Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
   gallery) with re-exports preserved (was P3 #19).
 - ~~Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).~~ **shipped** —

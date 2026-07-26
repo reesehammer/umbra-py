@@ -23,6 +23,7 @@ Polarization caveat: Polarizations are not interchangeable: an HH scene and a VV
 Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogIndex.search`. Build a valid query in one shot:
 
 - **bbox** — Footprint filter as (min_lon, min_lat, max_lon, max_lat) in WGS84 degrees. Items whose footprint overlaps the box are returned.
+- **intersects** — GeoJSON polygon filter (Polygon / MultiPolygon, or a Feature / FeatureCollection wrapping one). Items whose footprint overlaps the polygon are returned -- a tighter spatial filter than the rectangular bbox, and the one to use for an area of interest that isn't a rectangle (a coastline, a border, a catchment). Mutually exclusive with bbox/place.
 - **place** — Free-text place name (e.g. 'Port of Long Beach'). Geocoded to a bbox via Nominatim; resolve it yourself with geocode_place if you want to inspect the box first. Mutually informative with bbox, not required.
 - **area** — Substring match against the Umbra task (AOI campaign) name, e.g. 'Centerfield, Utah'. Tasks group every pass of one site over time. Set fuzzy=True to match it loosely instead (see 'fuzzy').
 - **fuzzy** — When true, widen 'area' from a literal substring to a deterministic token-wise match: word-order- and punctuation-independent and tolerant of a small typo, so 'utah centerfield' or 'centrfield' still reach 'Centerfield, Utah'. No model call, and a strict superset of the substring match (it never drops a result). Semantic aliasing ('grain storage north dakota' -> 'Beet Piler - ND') is out of scope.

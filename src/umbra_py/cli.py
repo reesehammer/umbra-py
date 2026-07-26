@@ -103,6 +103,24 @@ def _resolve_intersects(value: str | None):
         raise click.BadParameter(f"--intersects: {exc}") from exc
 
 
+def _resolve_geography(bbox: str | None, place: str | None, intersects: str | None):
+    """Resolve the shared geography trio into ``(bbox, geometry)`` search kwargs.
+
+    ``--bbox`` / ``--place`` collapse to one rectangle (see
+    :func:`_resolve_search_bbox`) and ``--intersects`` to a polygon (see
+    :func:`_resolve_intersects`); a rectangle and a polygon are mutually
+    exclusive, since two spatial filters at once is almost always a mistake
+    rather than an intersection the user meant.
+
+    Every command that gathers acquisitions by search resolves geography here,
+    so ``umbra change --intersects aoi.geojson`` and ``umbra search --intersects
+    aoi.geojson`` cannot disagree about what the polygon means.
+    """
+    if intersects is not None and (bbox or place):
+        raise click.UsageError("Pass --intersects or --bbox/--place, not both.")
+    return _resolve_search_bbox(bbox, place), _resolve_intersects(intersects)
+
+
 def _index_path(db_path: str | None) -> Path:
     """Resolve the index database path from an explicit ``--db`` or the default."""
     return Path(db_path) if db_path else default_index_path()
@@ -286,6 +304,46 @@ def _local_index_options(func):
         "fast path for repeat renders. Only uses acquisitions already indexed.",
     )(func)
     return func
+
+
+def _place_option(func):
+    """Attach the shared ``--place`` option that geocodes a place name into the
+    search bounding box (the OpenStreetMap-Nominatim sibling of ``--bbox``).
+
+    Commands whose help text says something more specific about the scope it
+    sets (``umbra map``, ``umbra index build``, ...) keep their own wording; this
+    is the generic form, so a command that gathers acquisitions never has to go
+    without the option just because nobody wrote bespoke help for it.
+    """
+    return click.option(
+        "--place",
+        default=None,
+        help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding "
+        "box and gather within it, via OpenStreetMap Nominatim. Mutually "
+        "exclusive with --bbox; the match is rectangular, so it can include "
+        "nearby areas outside the named place.",
+    )(func)
+
+
+def _geometry_option(func):
+    """Attach the shared ``--intersects`` polygon filter.
+
+    The library, the local index and the ``umbra serve`` STAC API have all
+    filtered by polygon since the geometry search shipped, but only ``umbra
+    search`` exposed it -- so every render, analysis and index command was
+    rectangle-only, and an area of interest that isn't a rectangle (a coastline,
+    a border, a catchment) had to be over-approximated by its bounding box and
+    the surplus scenes thrown away by hand. This is the one definition; see
+    :func:`_resolve_geography` for the shared resolution.
+    """
+    return click.option(
+        "--intersects",
+        default=None,
+        help="Keep only items whose footprint intersects this GeoJSON polygon -- a "
+        "path to a .geojson file or an inline GeoJSON string (Polygon / "
+        "MultiPolygon, or a Feature / FeatureCollection wrapping one). A tighter "
+        "spatial filter than the rectangular --bbox; the two are mutually exclusive.",
+    )(func)
 
 
 def _fuzzy_option(func):
@@ -496,14 +554,7 @@ def cli() -> None:
     "with --bbox; the match is rectangular, so it can include nearby areas "
     "outside the named place.",
 )
-@click.option(
-    "--intersects",
-    default=None,
-    help="Keep only items whose footprint intersects this GeoJSON polygon -- a "
-    "path to a .geojson file or an inline GeoJSON string (Polygon / "
-    "MultiPolygon, or a Feature / FeatureCollection wrapping one). A tighter "
-    "spatial filter than the rectangular --bbox; the two are mutually exclusive.",
-)
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
@@ -619,10 +670,7 @@ def search(
             "--live reads through a local index to the bucket; it only applies "
             "with --local / --db. (A plain search already walks S3 live.)"
         )
-    if intersects is not None and (bbox or place):
-        raise click.UsageError("Pass --intersects or --bbox/--place, not both.")
-    search_bbox = _resolve_search_bbox(bbox, place)
-    search_geometry = _resolve_intersects(intersects)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     source, index = _search_source(local, db_path, token)
     search_kwargs = dict(
         bbox=search_bbox,
@@ -705,6 +753,7 @@ def _print_watch_result(result) -> None:
     default=None,
     help="Geocode a place name to a bounding box to watch (mutually exclusive with --bbox).",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date (YYYY-MM-DD, a year/month, or a relative "
@@ -778,6 +827,7 @@ def _print_watch_result(result) -> None:
 def watch_cmd(
     bbox,
     place,
+    intersects,
     start,
     end,
     products,
@@ -807,12 +857,13 @@ def watch_cmd(
     """
     from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     product_types = list(products) or None
     watch_name = name or watch_key(
         area=area,
         place=place,
         bbox=search_bbox,
+        intersects=search_geometry,
         product_types=product_types,
         start=start,
         end=end,
@@ -836,6 +887,7 @@ def watch_cmd(
                 store=store,
                 reset=reset,
                 bbox=search_bbox,
+                intersects=search_geometry,
                 start=start,
                 end=end,
                 product_types=product_types,
@@ -1508,6 +1560,7 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "exclusive with --bbox; the match is rectangular, so it can include nearby "
     "areas outside the named place.",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
@@ -1587,6 +1640,7 @@ def stack(
     fuzzy,
     bbox,
     place,
+    intersects,
     start,
     end,
     max_search,
@@ -1661,10 +1715,11 @@ def stack(
     stats = stats or bool(blocks)
     if not (out_path or stats):
         raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
-    search_mode = any(v for v in (area, bbox, place, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
@@ -1672,17 +1727,18 @@ def stack(
             raise click.BadParameter("a stack needs 2 or more item URLs of the same site.")
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox or place):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area, --bbox or --place (optionally with --start/--end) to "
-                "search, or pass item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
             )
-        search_bbox = _resolve_search_bbox(bbox, place)
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         found = _gather_items(
             local=local,
             db_path=db_path,
             token=token,
             bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -2012,6 +2068,8 @@ def convert(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
 )
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@_place_option
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date (YYYY-MM-DD or a relative expression).",
@@ -2041,6 +2099,8 @@ def chips(
     manifest,
     area,
     bbox,
+    place,
+    intersects,
     start,
     end,
     max_search,
@@ -2066,8 +2126,9 @@ def chips(
 
     \b
     - Pass STAC JSON URLs directly.
-    - Or search: give --area (or --bbox) with --start/--end and the command
-      gathers a site's acquisitions automatically.
+    - Or search: give --area (or --bbox / --place / --intersects) with
+      --start/--end and the command gathers a site's acquisitions
+      automatically.
 
     Only the bytes for each tile are streamed via HTTP range requests -- no full
     download, and memory stays bounded to one chip. Requires the load extra
@@ -2076,25 +2137,28 @@ def chips(
     from .chips import write_chips
 
     _check_token_not_local(token, local, db_path)
-    search_mode = any(v for v in (area, bbox, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area or --bbox (optionally with --start/--end) to search, "
-                "or pass item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
             )
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         items = _gather_items(
             local=local,
             db_path=db_path,
             token=token,
-            bbox=_parse_bbox(bbox),
+            bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -2157,6 +2221,8 @@ def chips(
     "bound the time range.",
 )
 @click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@_place_option
+@_geometry_option
 @click.option(
     "--start",
     help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
@@ -2250,6 +2316,8 @@ def change(
     area,
     fuzzy,
     bbox,
+    place,
+    intersects,
     start,
     end,
     frames,
@@ -2287,9 +2355,9 @@ def change(
     \b
     - Pass STAC JSON URLs directly, in chronological order (2-3 for a
       composite, 2+ for a .gif).
-    - Or search: give --area (or --bbox) with --start/--end and the command
-      gathers a site's acquisitions automatically (preferring a single
-      polarization).
+    - Or search: give --area (or --bbox / --place / --intersects) with
+      --start/--end and the command gathers a site's acquisitions
+      automatically (preferring a single polarization).
 
     Add --narrate (composite output only) to have a vision model describe *what*
     changed, grounded in a per-block decibel-change grid written alongside the
@@ -2309,10 +2377,11 @@ def change(
         raise click.UsageError("--model only applies together with --narrate.")
 
     _check_token_not_local(token, local, db_path)
-    search_mode = any(v for v in (area, bbox, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
@@ -2323,16 +2392,18 @@ def change(
             raise click.BadParameter("a composite needs 2 or 3 item URLs, in chronological order.")
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area or --bbox (optionally with --start/--end) to search, "
-                "or pass item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
             )
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         found = _gather_items(
             local=local,
             db_path=db_path,
             token=token,
-            bbox=_parse_bbox(bbox),
+            bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -2477,6 +2548,7 @@ def change(
     "Mutually exclusive with --bbox; the match is rectangular, so it can "
     "include nearby areas outside the named place.",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
@@ -2534,6 +2606,7 @@ def timescan(
     fuzzy,
     bbox,
     place,
+    intersects,
     start,
     end,
     max_search,
@@ -2577,10 +2650,11 @@ def timescan(
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
     _check_token_not_local(token, local, db_path)
-    search_mode = any(v for v in (area, bbox, place, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
@@ -2588,17 +2662,18 @@ def timescan(
             raise click.BadParameter("a timescan needs 3 or more item URLs of the same site.")
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox or place):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area, --bbox or --place (optionally with --start/--end) to "
-                "search, or pass item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
             )
-        search_bbox = _resolve_search_bbox(bbox, place)
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         found = _gather_items(
             local=local,
             db_path=db_path,
             token=token,
             bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -2669,6 +2744,8 @@ def timescan(
     "bound the time range; the earliest and latest passes are compared.",
 )
 @click.option("--bbox", help="Search mode: footprint filter 'min_lon,min_lat,max_lon,max_lat'.")
+@_place_option
+@_geometry_option
 @click.option(
     "--start",
     help="Search mode: earliest acquisition date. YYYY-MM-DD, a year/month "
@@ -2726,6 +2803,8 @@ def swipe(
     area,
     fuzzy,
     bbox,
+    place,
+    intersects,
     start,
     end,
     max_search,
@@ -2754,18 +2833,20 @@ def swipe(
 
     \b
     - Pass exactly two STAC JSON URLs, in chronological order (before after).
-    - Or search: give --area (or --bbox) with --start/--end and the command
-      gathers a site's acquisitions and compares the earliest with the latest
-      (preferring a single polarization).
+    - Or search: give --area (or --bbox / --place / --intersects) with
+      --start/--end and the command gathers a site's acquisitions and
+      compares the earliest with the latest (preferring a single
+      polarization).
 
     Only downsampled overviews are streamed via HTTP range requests -- no full
     download. Requires the viz extra (``pip install "umbra-py[viz]"``).
     """
     _check_token_not_local(token, local, db_path)
-    search_mode = any(v for v in (area, bbox, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass two item URLs OR search criteria (--area/--bbox/--start/--end), not both."
+            "Pass two item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
@@ -2773,16 +2854,18 @@ def swipe(
             raise click.BadParameter("swipe needs exactly 2 item URLs (before after).")
         before, after = (UmbraItem.from_dict(get_json(url), href=url) for url in item_urls)
     else:
-        if not (area or bbox):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area or --bbox (optionally with --start/--end) to search, "
-                "or pass two item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass two item URLs directly."
             )
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         found = _gather_items(
             local=local,
             db_path=db_path,
             token=token,
-            bbox=_parse_bbox(bbox),
+            bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -2860,6 +2943,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     "and gather tiles within it, via OpenStreetMap Nominatim. Mutually "
     "exclusive with --bbox.",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
@@ -2947,6 +3031,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
 def gallery(
     bbox,
     place,
+    intersects,
     start,
     end,
     area,
@@ -2988,12 +3073,13 @@ def gallery(
         raise click.ClickException("Gallery output must be an .html file.")
 
     _check_token_not_local(token, local, db_path)
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     items = _gather_items(
         local=local,
         db_path=db_path,
         token=token,
         bbox=search_bbox,
+        intersects=search_geometry,
         start=start,
         end=end,
         area=area,
@@ -3061,6 +3147,7 @@ def gallery(
     "and gather items within it, via OpenStreetMap Nominatim. Mutually "
     "exclusive with --bbox.",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
@@ -3146,6 +3233,7 @@ def gallery(
 def demo(
     bbox,
     place,
+    intersects,
     start,
     end,
     area,
@@ -3199,6 +3287,7 @@ def demo(
         ignored = {
             "--bbox": bbox,
             "--place": place,
+            "--intersects": intersects,
             "--start": start,
             "--end": end,
             "--area": area,
@@ -3226,11 +3315,12 @@ def demo(
         click.echo(f"Wrote whole-archive explorer over {pmtiles_url} to {path}")
         return
 
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     items = _gather_items(
         local=local,
         db_path=db_path,
         bbox=search_bbox,
+        intersects=search_geometry,
         start=start,
         end=end,
         area=area,
@@ -3288,6 +3378,7 @@ def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_p
     help="Geocode a place name to a bounding box and tile items within it, via "
     "OpenStreetMap Nominatim. Mutually exclusive with --bbox.",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date (YYYY-MM-DD, a year/month, or a relative "
@@ -3406,6 +3497,7 @@ def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_p
 def tiles(
     bbox,
     place,
+    intersects,
     start,
     end,
     area,
@@ -3470,11 +3562,12 @@ def tiles(
     if not out_path.lower().endswith(".pmtiles"):
         raise click.ClickException("Tiles output must be a .pmtiles file.")
 
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     items = _gather_items(
         local=local,
         db_path=db_path,
         bbox=search_bbox,
+        intersects=search_geometry,
         start=start,
         end=end,
         area=area,
@@ -3512,6 +3605,7 @@ def tiles(
     help="Geocode a place name to a bounding box and gather the explorer's "
     "items within it, via OpenStreetMap Nominatim. Mutually exclusive with --bbox.",
 )
+@_geometry_option
 @click.option("--start", help="Earliest acquisition date for the explorer (see 'umbra demo').")
 @click.option("--end", help="Latest acquisition date for the explorer (see 'umbra demo').")
 @click.option(
@@ -3644,6 +3738,7 @@ def tiles(
 def showcase(
     bbox,
     place,
+    intersects,
     start,
     end,
     area,
@@ -3745,13 +3840,18 @@ def showcase(
 
     # Gather the explorer's items unless a map-only showcase was requested, or
     # --unified made the tiled archive itself the explorer's data source.
+    # Resolved once and shared by both gathers below: the explorer's slice and
+    # the marquee selection search the same ground, and a --place would
+    # otherwise be geocoded (and echoed) twice.
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
+
     items: list[UmbraItem] = []
     if explore and not unified:
-        search_bbox = _resolve_search_bbox(bbox, place)
         items = _gather_items(
             local=local,
             db_path=db_path,
             bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,
@@ -3775,7 +3875,8 @@ def showcase(
         local=local,
         db_path=db_path,
         search_kwargs={
-            "bbox": _resolve_search_bbox(bbox, place),
+            "bbox": search_bbox,
+            "intersects": search_geometry,
             "start": start,
             "end": end,
             "fuzzy": fuzzy,
@@ -3843,6 +3944,7 @@ def showcase(
     "with --bbox. (Distinct from --geocode, which labels each plotted "
     "footprint with its place name.)",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
@@ -3938,6 +4040,7 @@ def showcase(
 def map_cmd(
     bbox,
     place,
+    intersects,
     start,
     end,
     products,
@@ -3961,7 +4064,7 @@ def map_cmd(
 ) -> None:
     """Render search results as an interactive map or GeoJSON file."""
     _check_token_not_local(token, local, db_path)
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     imagery_kwargs: dict | None = None
     if imagery_max_size is not None:
         imagery_kwargs = {"max_size": imagery_max_size}
@@ -3971,6 +4074,7 @@ def map_cmd(
         db_path=db_path,
         token=token,
         bbox=search_bbox,
+        intersects=search_geometry,
         start=start,
         end=end,
         product_types=list(products) or None,
@@ -4088,6 +4192,7 @@ def index() -> None:
     default=None,
     help="Scope the build to a geocoded place name (mutually exclusive with --bbox).",
 )
+@_geometry_option
 @click.option(
     "--start",
     help="Scope to acquisitions on/after this date. YYYY-MM-DD, a year/month, "
@@ -4110,16 +4215,17 @@ def index() -> None:
     help="Cap how many acquisitions to index this run (default: no cap -- index "
     "everything in scope).",
 )
-def index_build(db_path, bbox, place, start, end, area, limit) -> None:
+def index_build(db_path, bbox, place, intersects, start, end, area, limit) -> None:
     """Walk Umbra's archive and persist matching acquisitions into the index.
 
     With no scope flags this indexes the whole bucket, which lists every task
-    and takes a while; pass --area/--bbox/--place/--start/--end to index just
-    the slice you care about.
+    and takes a while; pass --area/--bbox/--place/--intersects/--start/--end to
+    index just the slice you care about.
     """
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     path = _index_path(db_path)
-    scope = "Umbra archive" if not any((search_bbox, start, end, area)) else "matching acquisitions"
+    in_scope = any((search_bbox, search_geometry, start, end, area))
+    scope = "matching acquisitions" if in_scope else "Umbra archive"
     with OrbitSpinner(f"Indexing {scope}") as spinner:
         # A full-bucket build runs for a while, so show a live tally instead of
         # an inscrutable spinner. The spinner repaints its label each frame.
@@ -4130,6 +4236,7 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
             written = idx.build(
                 progress=tally,
                 bbox=search_bbox,
+                intersects=search_geometry,
                 start=start,
                 end=end,
                 area=area,
@@ -4172,6 +4279,7 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
     default=None,
     help="Scope the refresh to a geocoded place name (mutually exclusive with --bbox).",
 )
+@_geometry_option
 @click.option(
     "--area",
     default=None,
@@ -4183,7 +4291,7 @@ def index_build(db_path, bbox, place, start, end, area, limit) -> None:
     default=None,
     help="Cap how many acquisitions to add this run (default: no cap).",
 )
-def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None:
+def index_update(db_path, overlap_days, since, bbox, place, intersects, area, limit) -> None:
     """Cheaply refresh an existing index by re-walking only recent acquisitions.
 
     'umbra index build' fetches a sidecar for every acquisition in scope; on a
@@ -4193,7 +4301,7 @@ def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None
     the new passes. Bootstrap the index first with 'umbra index fetch' or
     'umbra index build'.
     """
-    search_bbox = _resolve_search_bbox(bbox, place)
+    search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
     path = _index_path(db_path)
     if not path.exists():
         raise click.ClickException(
@@ -4210,6 +4318,7 @@ def index_update(db_path, overlap_days, since, bbox, place, area, limit) -> None
                 since=since,
                 progress=tally,
                 bbox=search_bbox,
+                intersects=search_geometry,
                 area=area,
                 limit=limit,
             )
@@ -4744,6 +4853,7 @@ def _embed_path(embed_db: str | None, db_path: str | None):
     default=None,
     help="Search mode: geocode a place name to a bounding box (mutually exclusive with --bbox).",
 )
+@_geometry_option
 @click.option("--start", help="Search mode: earliest acquisition date (YYYY-MM-DD or relative).")
 @click.option("--end", help="Search mode: latest acquisition date (same formats as --start).")
 @click.option(
@@ -4781,6 +4891,7 @@ def embed_build(
     area,
     bbox,
     place,
+    intersects,
     start,
     end,
     limit,
@@ -4808,25 +4919,27 @@ def embed_build(
     from . import embed as emb
     from .exceptions import MissingDependencyError
 
-    search_mode = any(v for v in (area, bbox, place, start, end))
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
-            "Pass item URLs OR search criteria (--area/--bbox/--place/--start/--end), not both."
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
         )
 
     if item_urls:
         items = [UmbraItem.from_dict(get_json(url), href=url) for url in item_urls]
     else:
-        if not (area or bbox or place):
+        if not (area or bbox or place or intersects):
             raise click.UsageError(
-                "Give --area, --bbox or --place (optionally with --start/--end) to "
-                "search, or pass item URLs directly."
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
             )
-        search_bbox = _resolve_search_bbox(bbox, place)
+        search_bbox, search_geometry = _resolve_geography(bbox, place, intersects)
         items = _gather_items(
             local=local,
             db_path=db_path,
             bbox=search_bbox,
+            intersects=search_geometry,
             start=start,
             end=end,
             area=area,

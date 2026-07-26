@@ -151,6 +151,7 @@ def watch_key(
     area: str | None = None,
     place: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
+    intersects: Any = None,
     product_types: list[str] | None = None,
     start: str | None = None,
     end: str | None = None,
@@ -163,12 +164,20 @@ def watch_key(
     two different queries essentially never collide. The name is a human-legible
     slug of the area/place plus a short hash of the full normalized query, e.g.
     ``centerfield-utah-3f9a1c2e``.
+
+    ``intersects`` is the parsed polygon (the exterior-ring form), not the file
+    path or JSON text it came from, so the same area of interest keys to the same
+    watch however it was spelled on the command line. Unset filters are dropped
+    before hashing, so a watch that names no polygon keeps the name it had
+    before this parameter existed -- a scheduled watch never loses its state to
+    a new option.
     """
     params = _clean_query(
         {
             "area": area,
             "place": place,
             "bbox": bbox,
+            "intersects": intersects,
             "product_types": sorted(product_types) if product_types else None,
             "start": start,
             "end": end,
@@ -177,7 +186,7 @@ def watch_key(
     )
     canonical = json.dumps(params, sort_keys=True, default=str)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
-    label = area or place or ("bbox" if bbox else "all")
+    label = area or place or ("bbox" if bbox else "aoi" if intersects else "all")
     slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or "watch"
     return f"{slug}-{digest}"
 
