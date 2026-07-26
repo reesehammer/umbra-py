@@ -1384,6 +1384,252 @@ def test_cli_convert_rtc_gamma(tmp_path, monkeypatch):
         assert ds.crs.to_epsg() == 4326
 
 
+# --------------------------------------------------------------------------- #
+# The image-space illuminated-area RTC model (rtc_model="facet"). Unlike the
+# three per-pixel models above it integrates: every facet is projected into the
+# radar's own (slant range, azimuth) geometry and its illuminated area binned
+# there, so terrain folded into one radar cell (layover) is normalised by the
+# summed area of all of it. Over a planar slope it must reduce to the product of
+# the area and gamma factors, which is what pins the arithmetic down here.
+# --------------------------------------------------------------------------- #
+
+
+def _range_ramp(slope: float, shape=(60, 60)):
+    """A west-to-east elevation ramp rising ``slope`` metres per 1 m of ground."""
+    import numpy as np
+
+    h, w = shape
+    return np.broadcast_to(np.arange(w, dtype="float64") * slope, (h, w)).copy()
+
+
+def _facet_factor(dem, *, incidence_deg=40.0, azimuth_deg=90.0, reference_deg=None):
+    normals = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    return convert._image_space_area_factor(
+        dem,
+        normals,
+        x_res_deg=_DEG,
+        y_res_deg=_DEG,
+        top_lat=0.0,
+        incidence_deg=incidence_deg,
+        azimuth_deg=azimuth_deg,
+        reference_deg=incidence_deg if reference_deg is None else reference_deg,
+    )
+
+
+def test_radar_coordinates_place_relief_toward_the_sensor():
+    np = pytest.importorskip("numpy")
+    # Radar to the east (azimuth 90): eastward ground is closer, so its slant
+    # coordinate decreases along the row, and the azimuth coordinate is constant
+    # along the range direction.
+    flat = np.zeros((4, 6), dtype="float64")
+    slant, along = convert._radar_coordinates(
+        flat, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0, incidence_deg=40.0, azimuth_deg=90.0
+    )
+    assert np.all(np.diff(slant, axis=1) < 0)
+    assert np.allclose(along - along[:, :1], 0.0)
+    # A hill leans toward the sensor: same ground position, shorter slant range.
+    hill = flat.copy()
+    hill[2, 3] = 100.0
+    raised, _ = convert._radar_coordinates(
+        hill, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0, incidence_deg=40.0, azimuth_deg=90.0
+    )
+    assert raised[2, 3] < slant[2, 3]
+    assert raised[2, 3] == pytest.approx(slant[2, 3] - 100.0 * math.cos(math.radians(40.0)))
+
+
+def test_accumulate_radar_area_folds_coincident_facets():
+    np = pytest.importorskip("numpy")
+    # Two facets imaging into the same radar cell each read back the *sum* of
+    # both areas -- the layover accumulation no per-pixel model can express --
+    # while a facet on its own reads back only its own.
+    slant = np.array([0.0, 0.0, 50.0])
+    along = np.array([0.0, 0.0, 0.0])
+    area = np.array([2.0, 3.0, 7.0])
+    total = convert._accumulate_radar_area(slant, along, area, slant_bin=1.0, along_bin=1.0)
+    assert total[0] == pytest.approx(5.0)
+    assert total[1] == pytest.approx(5.0)
+    assert total[2] == pytest.approx(7.0)
+
+
+def test_accumulate_radar_area_coarsens_rather_than_exploding():
+    np = pytest.importorskip("numpy")
+    # Extreme relief stretches the slant-range axis, so bins sized for the ground
+    # spacing would need far more cells than there are pixels. The bins coarsen
+    # to stay inside the budget; two facets a million metres apart still land in
+    # different cells, so each reads back its own area rather than the sum.
+    slant = np.array([0.0, 1e6])
+    along = np.array([0.0, 0.0])
+    area = np.array([2.0, 3.0])
+    total = convert._accumulate_radar_area(slant, along, area, slant_bin=1.0, along_bin=1.0)
+    assert total[0] == pytest.approx(2.0, rel=0.05)
+    assert total[1] == pytest.approx(3.0, rel=0.05)
+
+
+def test_image_space_area_factor_flat_terrain_is_unchanged():
+    np = pytest.importorskip("numpy")
+    # The reference is the same integration over flat ground in the same
+    # geometry, so the binning (and the scene edges) cancel exactly: flat terrain
+    # at the scene incidence comes back at exactly one.
+    factor = _facet_factor(np.zeros((40, 40), dtype="float64"))
+    assert np.allclose(factor, 1.0)
+
+
+def test_image_space_area_factor_ignores_azimuth_direction_slope():
+    np = pytest.importorskip("numpy")
+    # An east-west ramp seen from due north is a pure azimuth-direction slope: it
+    # shears the radar geometry without compressing it and its facet-area and
+    # projection terms cancel, so the integrated area per cell is unchanged.
+    factor = _facet_factor(_range_ramp(0.35), azimuth_deg=0.0)
+    inner = factor[12:-12, 12:-12]
+    assert np.allclose(inner, 1.0, atol=1e-3)
+
+
+@pytest.mark.parametrize("slope", [-0.35, -0.1, 0.1, 0.35])
+def test_image_space_area_factor_planar_slope_is_area_times_gamma(slope):
+    pytest.importorskip("numpy")
+    # Over a planar range slope there is no folding, and the integration must
+    # reduce to the closed form the two per-pixel models carry between them: the
+    # range-compression factor (area) times the facet-area factor (gamma).
+    inc, az = 40.0, 90.0
+    dem = _range_ramp(slope)
+    normals = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    theta = convert._range_local_incidence(normals, incidence_deg=inc, azimuth_deg=az)
+    area = convert._foreshortening_factor(theta, sin_ref=math.sin(math.radians(inc)))
+    cos_lia = convert._cos_local_incidence(normals, convert._look_unit_vector(inc, az))
+    gamma = convert._facet_area_factor(cos_lia, normals[2], cos_ref=math.cos(math.radians(inc)))
+
+    inner = (slice(12, -12), slice(12, -12))
+    facet = _facet_factor(dem, incidence_deg=inc, azimuth_deg=az)[inner]
+    assert facet.mean() == pytest.approx((area * gamma)[inner].mean(), rel=0.1)
+    # An east-rising ramp leans away from an eastern radar (a back-slope), so it
+    # is stretched over more radar cells and brightened; the sign must follow the
+    # slope rather than be an artefact of the binning.
+    assert bool(facet.mean() > 1.0) is (slope > 0)
+
+
+def test_image_space_area_factor_suppresses_layover_the_per_pixel_models_miss():
+    np = pytest.importorskip("numpy")
+    # A steep radar-facing face whose returns fold onto the flat ground behind
+    # it. The flat ground has no slope of its own, so every per-pixel model
+    # leaves it alone; the integration sees the face's area land in the same
+    # radar cells and suppresses both together.
+    inc, az = 40.0, 90.0
+    profile = np.zeros(60, dtype="float64")
+    face = np.arange(10, dtype="float64")
+    profile[20:30] = (9.0 - face) * 2.0  # descends eastward: faces the sensor
+    dem = np.broadcast_to(profile, (60, 60)).copy()
+
+    factor = _facet_factor(dem, incidence_deg=inc, azimuth_deg=az)
+    normals = convert._terrain_normals(dem, x_res_deg=_DEG, y_res_deg=_DEG, top_lat=0.0)
+    cos_lia = convert._cos_local_incidence(normals, convert._look_unit_vector(inc, az))
+    gamma = convert._facet_area_factor(cos_lia, normals[2], cos_ref=math.cos(math.radians(inc)))
+
+    behind = (slice(20, 40), slice(32, 42))  # flat ground east of the face
+    assert np.allclose(gamma[behind], 1.0)  # per-pixel: nothing to correct
+    assert factor[behind].max() < 0.9  # integrated: shared with the folded face
+
+
+def test_image_space_area_factor_reference_angle_offsets_a_flat_scene():
+    np = pytest.importorskip("numpy")
+    # Like the other models, a reference angle other than the scene incidence
+    # re-references flat terrain by a constant -- here tan(scene)/tan(reference),
+    # the composition of the two per-pixel models' reference ratios.
+    factor = _facet_factor(
+        np.zeros((30, 30), dtype="float64"), incidence_deg=40.0, reference_deg=30.0
+    )
+    expected = math.tan(math.radians(40.0)) / math.tan(math.radians(30.0))
+    assert np.allclose(factor, expected)
+
+
+def test_sicd_to_geocoded_cog_rtc_facet_flat_dem_leaves_values_unchanged(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_dem(tmp_path / "flat_dem.tif", kind="const", const=100.0)
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest", dem=str(dem)
+    )
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    flattened = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_model="facet",
+    )
+    with rasterio.open(plain) as a, rasterio.open(flattened) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        assert both.any()
+        assert np.allclose(va[both], vb[both], atol=1e-3)
+
+
+def test_sicd_to_geocoded_cog_rtc_facet_differs_from_the_per_pixel_models(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(12, 24)
+    dem = _write_steep_ramp_dem(tmp_path / "steep_dem.tif")
+
+    outs = {}
+    for model in ("cosine", "area", "gamma", "facet"):
+        _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+        outs[model] = convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf",
+            tmp_path / f"{model}.tif",
+            gcp_grid=6,
+            resampling="nearest",
+            dem=str(dem),
+            rtc=True,
+            rtc_model=model,
+        )
+
+    with (
+        rasterio.open(outs["cosine"]) as c,
+        rasterio.open(outs["area"]) as a,
+        rasterio.open(outs["gamma"]) as g,
+        rasterio.open(outs["facet"]) as f,
+    ):
+        vc, va, vg, vf = c.read(1), a.read(1), g.read(1), f.read(1)
+        both = np.isfinite(vc) & np.isfinite(va) & np.isfinite(vg) & np.isfinite(vf)
+        assert both.any()
+        # The integration is a different measurement from all three per-pixel
+        # models, not a rescaling of any of them.
+        for other in (vc, va, vg):
+            assert not np.allclose(vf[both], other[both], atol=1e-3)
+
+
+def test_cli_convert_rtc_facet(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    dem = _write_dem(tmp_path / "dem.tif")
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(out), "--dem", str(dem), "--rtc", "--rtc-model", "facet"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "terrain-flattened" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
 def test_cli_convert_rtc_area(tmp_path, monkeypatch):
     rasterio = pytest.importorskip("rasterio")
     pytest.importorskip("sarpy")

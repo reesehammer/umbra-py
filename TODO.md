@@ -398,17 +398,31 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   new dependency, offline-tested in `tests/test_convert.py` (flat unchanged, the
   exact `nz`-scaling vs the cosine factor, DEM-gap safety, shadow/clamp floor,
   end-to-end differ-from-cosine-and-area + CLI).
-- **MultiRTC interop / full calibrated gamma-nought RTC.** The three `--rtc` models
-  (`cosine`, `area`, `gamma`) are honest *geometric* first-order corrections (cosine
-  of the 3-D local incidence; the range-plane foreshortening area factor; the
-  per-pixel facet-area gamma-nought normalisation). The *fully calibrated* remainder
-  — full gamma-nought illuminated-area **facet integration in image space**
-  (integrating the projected local illuminated area per pixel over the DEM in
-  slant/azimuth image space *with layover accumulation*, rather than the per-pixel
-  facet-area approximation `gamma` ships) and interop with
-  [MultiRTC](https://github.com/MultiSAR/MultiRTC) — is a heavier,
-  calibration-oriented job (Umbra's open products are not radiometrically
-  calibrated), and remains open under 5.5.
+- ~~**Illuminated-area facet integration in image space.**~~ ✅ **Done**
+  (`umbra convert --rtc --rtc-model facet` / `sicd_to_geocoded_cog(rtc_model="facet")`).
+  The other three models correct a pixel from its own slope, which makes layover
+  structurally invisible to them: where terrain is steeper than the look direction
+  several ground facets image into one radar cell and their returns *sum* there, so
+  the flat ground a ridge folds onto has no slope of its own to correct and comes
+  back untouched. `facet` integrates in the radar's own geometry instead — every
+  facet is projected into the scene's `(slant_range, azimuth)` frame
+  (`_radar_coordinates`), its illuminated area (the true tilted area `cell / nz`
+  projected perpendicular to the look direction) is accumulated into the cell it
+  images into (`_accumulate_radar_area`, bilinear so the accumulation is a smooth
+  partition), and each pixel is normalised by the **total** in its cell, so
+  everything folded together is suppressed together. The reference is the same
+  integration over flat ground in the same geometry, so the binning and the scene
+  edges cancel exactly and flat terrain is unchanged; over a planar range slope,
+  where nothing folds, it reduces to the `area` × `gamma` product, which is what the
+  tests pin the arithmetic to. Fourth value in `RTC_MODELS`; `rtc_model` still
+  defaults to `"cosine"`. Pure-numpy core, no model call, no new dependency,
+  offline-tested in `tests/test_convert.py`.
+- **MultiRTC interop / radiometric calibration.** What stays open under 5.5 after
+  the facet integration above is calibration itself: Umbra's open products are not
+  radiometrically calibrated, so all four `--rtc` models normalise *detected
+  amplitude* rather than producing a calibrated gamma-nought product. That, and
+  interop with [MultiRTC](https://github.com/MultiSAR/MultiRTC), is a heavier
+  calibration-oriented job and remains deferred.
 - ~~**Auto-fetch a DEM for the scene footprint.**~~ ✅ **Done** (`umbra_py.dem` /
   `umbra convert --dem auto`). `dem="auto"` / `--dem auto` resolves the 1°×1°
   Copernicus GLO-30 tiles covering the scene's projected footprint, pulls them

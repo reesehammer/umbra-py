@@ -1965,8 +1965,12 @@ def stack(
     "foreshortening correction in the range plane, which targets range "
     "foreshortening and layover; 'gamma' scales by cos(reference)*nz/"
     "cos(local_incidence), the per-pixel facet-area (gamma-nought) normalisation "
-    "that adds the true tilted-facet-area term the other two omit. All are "
-    "first-order steps toward gamma-nought normalisation, not a calibrated product.",
+    "that adds the true tilted-facet-area term the other two omit; 'facet' "
+    "integrates the illuminated area in the radar's own (slant range, azimuth) "
+    "geometry and normalises each pixel by the total accumulated in its cell -- "
+    "the only model that measures LAYOVER, where terrain folds several facets "
+    "into one cell and their returns sum. All normalise detected amplitude; none "
+    "is a calibrated product.",
 )
 def convert(
     src,
