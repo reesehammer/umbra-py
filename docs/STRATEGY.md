@@ -256,9 +256,13 @@ from:
   cost: the options had drifted, so the polygon filter the library, the index and
   the STAC API all support reached exactly one command (`umbra search`) and
   `--place` was missing from three more. Every front door now takes an area of
-  interest as a shape rather than a bounding rectangle. **Open:** the date /
-  task-name / limit options are still per-command (their help text is genuinely
-  command-specific), and `umbra map` still lacks `--area` — see `TODO.md`.
+  interest as a shape rather than a bounding rectangle — including the
+  natural-language one: `umbra ask --aoi` lets the planner *select* one of the
+  polygons the user supplied, by name, rather than authoring coordinates a
+  hallucination could silently move (the §7.1 boundary applied to geometry).
+  **Open:** the date / task-name / limit options are still per-command (their
+  help text is genuinely command-specific), and `umbra map` still lacks `--area`
+  — see `TODO.md`.
 - Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
   gallery) with re-exports preserved (was P3 #19).
 - ~~Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).~~ **shipped** —

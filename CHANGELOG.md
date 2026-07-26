@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra ask --aoi`: the planner can finally mean a *shape*, because it now
+  chooses one instead of drawing it.** `--intersects` reached every other front
+  door in the previous change, but a plan still carried only `bbox`/`place`, so
+  the one interface people reach for in plain language — *"scenes over this
+  watershed since March"* — was the one that silently degraded a polygon to the
+  rectangle around it. The gap was never an oversight. A hallucinated date is
+  caught by `parse_date_bound`; a hallucinated ring is a perfectly plausible
+  polygon over the wrong ground, and no layer downstream can tell. Letting a
+  model emit coordinates would have been the first place in the package where a
+  model output *became* a coordinate — the exact thing the determinism boundary
+  (`AI_INTEGRATION_IDEAS.md` §A4) exists to forbid.
+
+  So the model never writes a polygon; it picks one. You supply the areas you
+  already have — `umbra ask "what changed over the delta this spring?" --aoi
+  delta.geojson --aoi levees.geojson` (repeatable, `NAME=PATH` to name one
+  explicitly, otherwise the file stem) — and each is parsed by the deterministic
+  layer *before* the model sees anything. The prompt then lists them by name,
+  part count and bounds, gains a single `aoi` key, and states the rule plainly:
+  there is no way to write coordinates, and a name that is not on the list is
+  rejected. `parse_plan` enforces exactly that — an unknown name is a
+  self-describing `AskError` listing the valid ones, a name with *no* areas
+  supplied is an error rather than a quietly unfiltered whole-world search (the
+  one failure a polygon filter exists to prevent), and `aoi` beside `place` or
+  `bbox` is refused like every other pair of spatial filters.
+
+  A selected area flows through `SearchPlan.to_search_kwargs()` as `intersects`
+  — the same exterior rings, the same `UmbraItem.intersects_polygon` test every
+  other surface shares — and renders into the audited command as `umbra search
+  --intersects delta.geojson`, pointing back at the user's own file rather than
+  inlining a ring dump. `--json` reports the choice as `{"name", "source",
+  "bbox"}`, which is what makes a plan auditable without the coordinates. With
+  no `--aoi` supplied the prompt is byte-identical to before, so a model is never
+  offered a filter the caller cannot honour. New public `AreaOfInterest`; no new
+  dependency, no second model call. Offline-tested in `tests/test_planner.py`
+  (prompt listing, name resolution incl. case, all four rejections, command and
+  JSON rendering, and the CLI end-to-end sending the parsed rings to the search
+  backend).
 - **`--intersects` on every command that gathers acquisitions, not just `umbra
   search` — an area of interest is a polygon, and now every front door accepts
   one (`CODEBASE_ANALYSIS.md` P3 #18, the shared-option-group extraction).** The

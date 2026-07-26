@@ -84,7 +84,7 @@ from .narrate import (
     narrate,
     parse_narration,
 )
-from .planner import AskError, SearchPlan, ask, parse_plan
+from .planner import AreaOfInterest, AskError, SearchPlan, ask, parse_plan
 from .pmtiles import (
     build_pmtiles,
     build_viewer,
@@ -183,6 +183,7 @@ __all__ = [
     "ask",
     "parse_plan",
     "SearchPlan",
+    "AreaOfInterest",
     "AskError",
     "describe",
     "parse_description",

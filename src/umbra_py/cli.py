@@ -77,7 +77,7 @@ def _resolve_search_bbox(
     return _parse_bbox(bbox)
 
 
-def _resolve_intersects(value: str | None):
+def _resolve_intersects(value: str | None, *, label: str = "--intersects"):
     """Parse ``--intersects`` into a polygon geometry (or None).
 
     The value is a path to a ``.geojson``/``.json`` file or an inline GeoJSON
@@ -100,7 +100,47 @@ def _resolve_intersects(value: str | None):
     try:
         return parse_geometry(text)
     except ValueError as exc:
-        raise click.BadParameter(f"--intersects: {exc}") from exc
+        raise click.BadParameter(f"{label}: {exc}") from exc
+
+
+def _resolve_aois(values: tuple[str, ...]):
+    """Resolve repeated ``--aoi`` values into named :class:`AreaOfInterest`s.
+
+    Each value is ``NAME=SPELLING`` or just a ``SPELLING`` that
+    :func:`_resolve_intersects` already understands (a ``.geojson`` path or
+    inline GeoJSON). A bare path takes its file stem as the name -- ``--aoi
+    watershed.geojson`` is the area called ``watershed`` -- because the name is
+    what a model sees and picks by, so it should read like the thing it is.
+    Inline GeoJSON has no stem, so it falls back to a positional ``aoi1``.
+
+    Names are unique: a repeated name is a hard error rather than a silent
+    shadow, since the plan selects by name and two areas answering to one label
+    would make the audited command ambiguous.
+    """
+    from .planner import AreaOfInterest
+
+    areas: list[AreaOfInterest] = []
+    seen: set[str] = set()
+    for position, value in enumerate(values, start=1):
+        # Inline GeoJSON is taken whole: it has no stem to name it by, and an
+        # '=' inside a property value must not be read as a NAME= prefix.
+        inline = value.lstrip().startswith("{")
+        name, _, spelling = ("", "", value) if inline else value.partition("=")
+        if not spelling:
+            name, spelling = "", value
+        stem = "" if inline else Path(spelling).stem
+        name = (name or stem or f"aoi{position}").strip()
+        if name.lower() in seen:
+            raise click.UsageError(
+                f"--aoi name {name!r} is used twice; give one of them an explicit "
+                "NAME=PATH so the plan can tell them apart."
+            )
+        seen.add(name.lower())
+        geometry = _resolve_intersects(spelling, label=f"--aoi {name}")
+        if geometry is None:  # pragma: no cover - _resolve_intersects raises first
+            raise click.UsageError(f"--aoi {value!r} did not resolve to a polygon.")
+        areas.append(AreaOfInterest(name=name, geometry=geometry, source=spelling))
+    return areas
 
 
 def _resolve_geography(bbox: str | None, place: str | None, intersects: str | None):
@@ -1095,6 +1135,16 @@ def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
     default=None,
     help="Cap results, overriding whatever limit the model chose (only affects --run).",
 )
+@click.option(
+    "--aoi",
+    "aois",
+    multiple=True,
+    help="Offer the planner an area of interest you already have, as "
+    "'[NAME=]PATH' — a .geojson file (or inline GeoJSON); repeat for several. "
+    "The model may only *select* one by name; it can never write coordinates, "
+    "so the polygon searched is always your file. Without a name, the file stem "
+    "is used. A selected area becomes 'umbra search --intersects PATH'.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the resolved plan as JSON.")
 @click.option(
     "--local",
@@ -1109,7 +1159,7 @@ def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
     help="Index database for --run --local (default: $UMBRA_INDEX_DB or "
     "~/.cache/umbra-py/catalog.db). Implies --local.",
 )
-def ask(question, run, model, limit, as_json, local, db_path) -> None:
+def ask(question, run, model, limit, aois, as_json, local, db_path) -> None:
     """Plan a catalog search from a plain-language question with a model.
 
     A configured model reads your sentence plus the library's domain context
@@ -1119,18 +1169,24 @@ def ask(question, run, model, limit, as_json, local, db_path) -> None:
     library executes, and you audit the command before it runs — nothing the
     model says becomes a filter without passing the deterministic layer.
 
+    Pass --aoi to let it plan a *polygon* search too: the areas you name are
+    listed in the prompt and the model may only pick one of them by name, so the
+    shape searched is always your own file — it has no way to write coordinates.
+
     By default it only prints the plan; pass --run to execute it. Requires the
     ``ai`` extra (``pip install 'umbra-py[ai]'``) and a model API key: set
     ANTHROPIC_API_KEY, or OPENAI_API_KEY (optionally with OPENAI_BASE_URL for a
     compatible endpoint). Example::
 
         umbra ask "what did Umbra image at Centerfield, Utah last spring?"
+        umbra ask "scenes over the delta since March" --aoi delta.geojson
     """
     from .planner import AskError
     from .planner import ask as plan_search
 
+    areas = _resolve_aois(aois)
     try:
-        plan = plan_search(question, model=model)
+        plan = plan_search(question, model=model, aois=areas)
     except (AskError, UmbraError) as exc:
         raise click.ClickException(str(exc)) from exc
 

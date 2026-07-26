@@ -22,6 +22,8 @@ called at the edge; every result is re-validated or provenance-stamped.
 
 ::: umbra_py.SearchPlan
 
+::: umbra_py.AreaOfInterest
+
 ## Semantic task-name search
 
 ::: umbra_py.SemanticTaskIndex

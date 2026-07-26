@@ -738,10 +738,13 @@ the `CatalogIndex` `meta` table), returns only the new ones, and remembers them,
 so cron / a GitHub Action / an agent loop can supply the schedule. No model is
 called. The remaining C3 pieces build on it:
 
-- **MCP `watch_site` tool / prompt.** The `watch()` function is a plain,
-  deterministic callable; wrapping it as an MCP tool (returning the same JSON
-  delta) would let an MCP client run the standing check conversationally, reusing
-  the state store unchanged.
+- ~~**MCP `watch_site` tool / prompt.**~~ ✅ **Done** (stale entry — it shipped
+  with the MCP server's tool inventory). `watch_site` wraps the deterministic
+  `watch()` callable unchanged, derives the watch name from the query via
+  `watch_key` when none is given, persists state in the same `CatalogIndex`
+  `meta` table (`MetaWatchStore`) so a watch survives across sessions, and is
+  registered on the LangChain and LlamaIndex surfaces from the same callable.
+  A `watch-site` prompt ships beside it.
 - ~~**A packaged monitoring recipe/notebook.**~~ ✅ **Done**
   (`examples/06_site_monitoring.ipynb`). The standing-analyst notebook wires
   `umbra watch` → `select_change_frames` → `save_change_composite` into one
@@ -1017,17 +1020,28 @@ filter. What is still open:
   either flatten the wording or need a prefix/override mechanism — worth doing
   only alongside a decision about which of those two costs is acceptable. The
   *gathering* half (`_gather_items` / `_search_source`) is already shared.
-- **`umbra ask` cannot plan a polygon.** The planner's `SearchPlan` carries
-  `bbox` / `place` / `area` but not `intersects`, so a sentence naming a real
-  AOI ("scenes over this watershed") can only resolve to a rectangle. Adding it
-  means a schema field plus validation at the determinism boundary
-  (`planner.parse_plan` would have to run the geometry through
-  `_geometry.parse_geometry` before it becomes a filter, exactly as
-  `serve.parse_intersects` does), and a decision about whether a model should be
-  emitting polygon coordinates at all — a hallucinated ring is a silently wrong
-  search area, unlike a hallucinated date. The safer shape is probably a *named*
-  AOI (a path to a file the user already has) rather than model-authored
-  coordinates.
+- ~~**`umbra ask` cannot plan a polygon.**~~ ✅ **Done** (`umbra ask --aoi` /
+  `planner.AreaOfInterest` / `ask(aois=…)` / `parse_plan(aois=…)`). The decision
+  this entry left open — whether a model should emit polygon coordinates at all —
+  resolved the way it hinted: it should not, so it cannot. The caller supplies the
+  areas it already has (`--aoi delta.geojson`, repeatable, `NAME=PATH` to name one,
+  otherwise the file stem); each is parsed by `_resolve_intersects` *before* the
+  model is involved, the prompt lists them by name/part-count/bounds and gains a
+  single `aoi` key, and `parse_plan` resolves that name against the closed set at
+  the determinism boundary. An unknown name is a self-describing `AskError` listing
+  the valid ones; a name when no areas were supplied is an error rather than a
+  quietly unfiltered whole-world search; `aoi` beside `place`/`bbox` is refused
+  like every other pair of spatial filters. The choice flows through
+  `SearchPlan.to_search_kwargs()` as `intersects` (the same rings, the same
+  `UmbraItem.intersects_polygon` test every surface shares) and renders as `umbra
+  search --intersects delta.geojson`, pointing back at the user's file rather than
+  inlining the ring dump; `--json` reports `{"name", "source", "bbox"}`. With no
+  `--aoi` the prompt is byte-identical to before. Offline-tested in
+  `tests/test_planner.py`. Follow-on, not a blocker: the *other* model-planned
+  surface, the MCP `search_catalog` tool, takes `bbox` only — the same
+  supply-then-select shape would fit it (an operator-configured AOI directory
+  rather than a CLI flag), but an MCP client has no equivalent of `--aoi` to pass
+  files through, so it needs a server-side convention first.
 
 ---
 
