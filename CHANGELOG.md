@@ -7,6 +7,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Draw the history, not just its endpoints — pass-to-pass sparklines in the
+  `umbra demo` Quantify readout (the last open follow-on of the `stack_stats`
+  demo wiring, and the first client of `block_series`, `TODO.md`).** The
+  explorer's numeric readout led with two figures — a net first-to-last change
+  and the block that moved most, "mostly between" two dates — and neither can
+  tell two genuinely different histories apart: a corner that drifted a decibel
+  every pass and one that jumped twelve once and held come back as the same
+  `net_change` and the same `peak_interval`. The sequence that separates them was
+  already in the document and unplotted: each pass carries its
+  `change_vs_previous`, and, since the previous release note, each block carries
+  its whole `series`. The readout now draws both — one signed, zero-baselined SVG
+  bar per consecutive pass-to-pass step, for the site as a whole and for the
+  block the server named as the peak, so the shape of the change is visible
+  beside its size.
+
+  A bar chart with no stated scale is decoration, so each sparkline is scaled to
+  the largest step *in that series* and captioned with it (count, span, and that
+  step's decibels and dates), every bar carries a dated `<title>` tooltip, and
+  the figure gets an `aria-label` naming its largest step. The bars are built as
+  DOM elements through `createElementNS` — never `innerHTML`, so a remote string
+  still cannot parse as markup — and take the two colours the readout's
+  `.brighter` / `.dimmer` prose already uses, so the picture and the sentence
+  cannot say different things. The panel still formats and computes nothing: the
+  only arithmetic is the pixel scale, and every decibel printed is the server's.
+  The Quantify request accordingly sends `block_series: true` beside its existing
+  `blocks: 3` (the one cost is response size — 9 blocks × (passes − 1) steps, of
+  which the page plots one block's), and because it lives in the analyze panel
+  both explorers share, the embedded-slice and whole-archive PMTiles pages gained
+  it together. A series with nothing to compare — a single pass, or ground no two
+  passes both saw — draws nothing rather than an empty frame, and a server that
+  answers without the per-block series simply shows the scene-wide sparkline.
+  Offline-tested in `tests/test_demo.py`; the generated JavaScript was also
+  exercised outside pytest against a synthetic `/artifacts/stats` document (a
+  five-pass series with a single-step corner, and the degenerate
+  no-comparable-pair case).
 - **Each block's whole history, not just its loudest moment —
   `stack_stats(blocks=N, block_series=True)` (the last open follow-on of the
   `stack_stats(blocks=N)` PR, `TODO.md`).** The spatial breakdown answers *where*

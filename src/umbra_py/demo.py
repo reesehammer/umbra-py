@@ -40,6 +40,14 @@ Design, deliberately in the repo's grain:
   *measure*, not only look. The panel formats the server's numbers and computes
   none of its own, so the page and ``umbra stack --stats`` cannot disagree.
 
+  Two **sparklines** carry the part a headline number cannot: one bar per
+  consecutive pass-to-pass step, signed and zero-baselined, for the site as a
+  whole (each pass's ``change_vs_previous``) and for the block that moved most
+  (its ``series``, which is why the request asks for ``block_series``). A net
+  first-to-last figure and a peak interval read identically for a corner that
+  drifted a decibel every pass and one that jumped twelve once and held; the
+  sequence is what tells them apart.
+
 * **Instant thumbnail preview when server-backed (G6).** With ``server_url``
   set, clicking a scene *leads* its detail panel with a small SAR picture pulled
   from ``GET /artifacts/thumbnail/{id}.png`` — the baked quicklook thumbnail
@@ -242,7 +250,8 @@ def build_demo(
         endpoints and show the returned artifact — the R4 "run this analysis
         here" affordance (``DEMO_APP_GAPS.md``). Three of them render a picture;
         "Quantify" (``/artifacts/stats``) reads out the numeric measurement
-        instead. It also turns on the instant
+        instead, sparklining the site's and its peak block's pass-to-pass
+        history beside the headline figures. It also turns on the instant
         thumbnail preview in the detail panel (served from the endpoint's
         ``/artifacts/thumbnail/{id}.png`` baked thumbnail, ``DEMO_APP_GAPS.md``
         G6). When ``None`` (default) the page stays fully static and
@@ -494,6 +503,13 @@ html, body { margin: 0; height: 100%; }
   overflow-x: auto;
 }
 .umbra-stats .note { color: #666; }
+.umbra-stats .umbra-spark {
+  display: block; width: 100%; height: 42px; margin: 2px 0 4px;
+  background: #fbfbfb; border: 1px solid #eee; border-radius: 3px;
+}
+.umbra-stats .umbra-spark .spark-up { fill: #b45309; }
+.umbra-stats .umbra-spark .spark-down { fill: #2b6cb0; }
+.umbra-stats .umbra-spark .spark-axis { stroke: #bbb; stroke-width: 1; }
 """
 
 # Pieces both explorer modes use verbatim: the detail-panel row builder, the
@@ -578,8 +594,11 @@ window.umbraAnalyzePanel = function (base, collect) {
       label: 'measurement', verb: 'Measuring change', min: 2, json: true,
       // A scene-wide mean dilutes a change that moved one corner hard, so the
       // page always asks for the spatial breakdown too -- it is what turns
-      // "the site changed" into "the northeast corner brightened".
-      body: { blocks: 3 } }
+      // "the site changed" into "the northeast corner brightened". And with
+      // `block_series` each block carries its whole pass-to-pass sequence, which
+      // is what the sparklines below plot: the peak block's own history is how a
+      // steady drift is told apart from a single step.
+      body: { blocks: 3, block_series: true } }
   ];
   analyzeBox.style.display = '';
   var CAP = 120;
@@ -626,6 +645,101 @@ window.umbraAnalyzePanel = function (base, collect) {
     return p;
   }
 
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var SPARK_W = 240, SPARK_H = 42;
+
+  // One bar per consecutive pass-to-pass step, signed and zero-baselined. A net
+  // figure and a peak interval cannot separate two genuinely different
+  // histories -- a corner drifting a decibel every pass and one that jumped
+  // twelve once and held read the same in both -- and the sequence that tells
+  // them apart is exactly what `block_series` (and, scene-wide, each pass's
+  // `change_vs_previous`) puts in the document. Every decibel drawn is the
+  // server's; the only arithmetic here is the pixel scale.
+  function sparkline(steps) {
+    var n = steps.length;
+    if (!n) return null;
+    var scale = 0, i;
+    for (i = 0; i < n; i++) scale = Math.max(scale, Math.abs(steps[i].mean_delta_db));
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'umbra-spark');
+    svg.setAttribute('viewBox', '0 0 ' + SPARK_W + ' ' + SPARK_H);
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('role', 'img');
+    var mid = SPARK_H / 2;
+    var slot = SPARK_W / n;
+    var width = Math.max(1, slot - (n > 1 ? 2 : 0));
+    for (i = 0; i < n; i++) {
+      var v = steps[i].mean_delta_db;
+      // A bar that rounds to nothing would read as "no data" rather than "no
+      // change", so every observed step keeps a visible sliver.
+      var h = Math.max(scale ? Math.abs(v) / scale * (mid - 1) : 0, 0.75);
+      var bar = document.createElementNS(SVG_NS, 'rect');
+      bar.setAttribute('x', String(i * slot + (slot - width) / 2));
+      bar.setAttribute('y', String(v >= 0 ? mid - h : mid));
+      bar.setAttribute('width', String(width));
+      bar.setAttribute('height', String(h));
+      bar.setAttribute('class', v >= 0 ? 'spark-up' : 'spark-down');
+      var tip = document.createElementNS(SVG_NS, 'title');
+      tip.textContent = day(steps[i].from_datetime) + ' \\u2192 ' +
+        day(steps[i].to_datetime) + ': ' + signedDb(v);
+      bar.appendChild(tip);
+      svg.appendChild(bar);
+    }
+    var axis = document.createElementNS(SVG_NS, 'line');
+    axis.setAttribute('x1', '0'); axis.setAttribute('x2', String(SPARK_W));
+    axis.setAttribute('y1', String(mid)); axis.setAttribute('y2', String(mid));
+    axis.setAttribute('class', 'spark-axis');
+    svg.appendChild(axis);
+    return svg;
+  }
+
+  // The sparkline plus the caption that makes it readable: bars with no stated
+  // scale are decoration. The largest step is picked to scale the drawing (and
+  // named so the reader knows what full height means) -- the decibel figure
+  // printed is the server's own, not a recomputation.
+  function sparkSection(box, steps, lead) {
+    var svg = sparkline(steps);
+    if (!svg) return;
+    var top = steps[0];
+    for (var i = 1; i < steps.length; i++) {
+      if (Math.abs(steps[i].mean_delta_db) > Math.abs(top.mean_delta_db)) top = steps[i];
+    }
+    var span = day(top.from_datetime) + ' \\u2192 ' + day(top.to_datetime);
+    svg.setAttribute('aria-label', lead + ': ' + steps.length +
+      ' pass-to-pass steps, largest ' + signedDb(top.mean_delta_db) + ' (' + span + ').');
+    box.appendChild(svg);
+    statsLine(box, lead + ', oldest first \\u2014 ' + steps.length + ' steps, ' +
+      'each bar scaled to the largest, ' + signedDb(top.mean_delta_db) + ' (' + span +
+      '). Up is brighter.', 'note');
+  }
+
+  // Each pass's change against the one before it -- the scene-wide sibling of a
+  // block's `series`, and until now the part of the document the readout
+  // fetched and never showed. Reshaped to the block series' fields so one
+  // sparkline builder draws both; a pass with nothing to compare against (the
+  // first, or ground the previous pass never saw) has no step.
+  function sceneSteps(passes) {
+    var steps = [];
+    for (var i = 1; i < passes.length; i++) {
+      var ch = passes[i].change_vs_previous;
+      if (!ch) continue;
+      steps.push({
+        from_datetime: passes[i - 1].datetime,
+        to_datetime: passes[i].datetime,
+        mean_delta_db: ch.mean_delta_db
+      });
+    }
+    return steps;
+  }
+
+  function blockAt(spatial, row, col) {
+    var blocks = (spatial && spatial.blocks) || [];
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].row === row && blocks[i].col === col) return blocks[i];
+    }
+    return null;
+  }
+
   // The measurement, read out of the /artifacts/stats document: how much the
   // site moved first-to-last, where it moved most, and the north-up heat-grid
   // of signed change. Built with textContent, so remote strings never parse as
@@ -652,6 +766,8 @@ window.umbraAnalyzePanel = function (base, collect) {
         ? moved + ' (no area \\u2014 the measurement grid is geographic).'
         : moved + ' (' + net.changed_area_km2 + ' km\\u00b2).');
     }
+    // First-to-last is one number for a whole series; this is the series.
+    sparkSection(box, sceneSteps(passes), 'Site mean, pass to pass');
     var spatial = doc.spatial;
     if (spatial && spatial.peak_block) {
       var pb = spatial.peak_block;
@@ -661,6 +777,12 @@ window.umbraAnalyzePanel = function (base, collect) {
         : '';
       statsLine(box, 'Moved most in the ' + pb.compass + ': ' +
         signedDb(pb.mean_delta_db) + ' (' + pb.direction + ')' + when + '.');
+      // And that block's own history, which is what says whether "mostly
+      // between" was the only thing that happened there or the loudest of many.
+      var pbRecord = blockAt(spatial, pb.row, pb.col);
+      if (pbRecord && pbRecord.series) {
+        sparkSection(box, pbRecord.series, 'The ' + pb.compass + ' block, pass to pass');
+      }
     }
     if (spatial && spatial.grid_text) {
       var pre = document.createElement('pre');

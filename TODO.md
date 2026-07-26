@@ -833,10 +833,11 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   not a silently dropped flag. An unobserved block reports an empty series,
   matching its `None` net change, and the default is off so every existing
   payload is byte-identical. Offline-tested in `tests/test_load.py`,
-  `tests/test_serve.py` and `tests/test_mcp_server.py`. Follow-on, not a blocker:
+  `tests/test_serve.py` and `tests/test_mcp_server.py`. ~~Follow-on, not a blocker:
   nothing *renders* the series yet — the `umbra demo` Quantify readout is the
   natural first client (see the sparkline follow-on below, which the per-block
-  series now also feeds).
+  series now also feeds).~~ ✅ **Done** — the Quantify readout sparklines both
+  series (see the entry below), so `block_series` has its first client.
 - ~~**The same reduction on `umbra serve`.**~~ ✅ **Done** (`POST
   /artifacts/stats`). The STAC API façade served four artifacts and every one was
   a picture; this one answers the same change question in JSON. It reuses the
@@ -864,12 +865,36 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
     cannot disagree), carries the document's CC-BY attribution and calibration
     caveat into the browser, and is the panel both explorers share, so the
     embedded-slice and PMTiles pages gained the button together. Offline-tested
-    in `tests/test_demo.py`. Follow-on, not a blocker: the readout prints the
+    in `tests/test_demo.py`. ~~Follow-on, not a blocker: the readout prints the
     net first→last record and the peak block, but the per-pass series
     (`doc.passes`) is fetched and unused — a sparkline of pass-to-pass change
     would use it, and is a presentation decision, not new data. The endpoint now
     also takes `"block_series": true`, so the same sparkline could be drawn *per
-    block* (the peak block's own history) rather than only scene-wide.
+    block* (the peak block's own history) rather than only scene-wide.~~ ✅
+    **Done** — both sparklines ship, and they are the first client of
+    `stack_stats(block_series=True)`. The readout led with two numbers that
+    cannot tell two different histories apart: a corner drifting a decibel every
+    pass and one that jumped twelve once and held come back as the same
+    `net_change` plus `peak_interval`. It now draws the *sequence* underneath
+    each — one signed, zero-baselined SVG bar per consecutive pass-to-pass step,
+    scaled to the largest step in that series and captioned with it (a bar chart
+    with no stated scale is decoration) — for the site as a whole (from each
+    pass's `change_vs_previous`, the field that was fetched and unused) and for
+    the block the server named as the peak (from its `series`, which is why the
+    request now sends `block_series: true` beside `blocks: 3`). Built as DOM
+    elements via `createElementNS` with a per-bar `<title>` tooltip — never
+    `innerHTML`, so a remote string still cannot parse as markup — and an
+    `aria-label` naming the largest step; the bar colours are the two the
+    readout's `.brighter` / `.dimmer` prose already uses, so the picture and the
+    sentence cannot disagree. Both explorers gained it together (it lives in the
+    shared analyze panel), the panel still formats and never computes (the only
+    arithmetic is the pixel scale), and a series with nothing to compare draws
+    nothing rather than an empty frame. The one cost is response size:
+    `blocks: 3` with `block_series` is 9 blocks × (passes − 1) steps, of which
+    the page plots one block's. Offline-tested in `tests/test_demo.py`; the
+    generated JS was additionally exercised outside pytest against a synthetic
+    stats document (a five-pass series with a single-step corner, and the
+    degenerate no-comparable-pair case).
   - ~~**A client mistake that reads as a server error.**~~ ✅ **Done.** A
     render's `ValueError` — footprints that don't all overlap under
     `extent="intersection"` being the common one, and the one the Quantify
