@@ -127,6 +127,14 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
 
+[tool.ruff.lint.per-file-ignores]
+# `viz/__init__.py` is a pure re-export façade: splitting the old 2 000-line
+# viz.py into submodules must not move a single name, so it re-exports the
+# private helpers other package modules and tests import from `umbra_py.viz`
+# too. Those cannot go in `__all__` (that is the public `import *` surface),
+# so F401 is expected for every one of them.
+"src/umbra_py/viz/__init__.py" = ["F401"]
+
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency/parameter markers are called in argument defaults by
 # design (Query(...), Body(...)); that is the framework idiom, not a B008 bug.

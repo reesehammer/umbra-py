@@ -61,7 +61,7 @@ _MODULE_GUIDE: tuple[tuple[str, str], ...] = (
     ("models.py", "UmbraItem"),
     ("download.py", "download_asset"),
     ("load.py", "to_xarray / to_stack / to_geotiff"),
-    ("viz.py", "quicklook / maps / change / timescan / gallery"),
+    ("viz/__init__.py", "quicklook / maps / change / timescan / gallery"),
     ("context.py", "llm_context"),
     ("mcp_server.py", "umbra-mcp"),
     ("serve.py", "umbra serve"),
@@ -73,9 +73,11 @@ def _module_docstring(filename: str) -> str | None:
 
     The file is parsed with :mod:`ast`, never imported, so a module that pulls a
     heavy extra at import time (``serve``, ``mcp_server``) still contributes its
-    docstring in a core-only environment.
+    docstring in a core-only environment. ``filename`` is package-relative, so a
+    module that has grown into a package (``viz/__init__.py``) is named the same
+    way a reader would find it.
     """
-    path = Path(__file__).with_name(filename)
+    path = Path(__file__).parent / filename
     try:
         source = path.read_text(encoding="utf-8")
     except OSError:
