@@ -193,10 +193,19 @@ illuminated-area facet integration (Small 2011): it projects every terrain facet
 into the scene's own `(slant_range, azimuth)` geometry, accumulates the
 illuminated area landing in each radar cell, and normalises by that total — so
 it is the only one of the four that measures **layover**, where several ground
-facets image into one cell and their returns sum. **Open:** calibration itself —
-Umbra's open products are not radiometrically calibrated, so all four models
-normalise *detected amplitude* rather than producing a calibrated gamma-nought
-product — and MultiRTC interop. Both stay deferred.
+facets image into one cell and their returns sum. ~~**Open:** calibration
+itself~~ **shipped** — `umbra convert --calibrate {sigma0,beta0,gamma0,rcs}` /
+`sicd_to_geocoded_cog(calibration=…)` scales pixel power by the SICD's own
+`Radiometric` scale-factor polynomial, in image space where those polynomials
+are defined, so the output is a physical backscatter coefficient rather than
+relative amplitude. It composes with the flattening (both are power-domain
+factors), which makes `--rtc-model facet --calibrate gamma0` a terrain-flattened
+**gamma-nought** product. The caveat did not disappear so much as become
+*detected*: Umbra's open products generally carry no `Radiometric` block, and
+asking for a calibration one cannot support is a self-describing error naming
+what it does carry (`sicd_calibration_types` answers the same question ahead of
+time) rather than a calibrated-looking number. **Open:** MultiRTC interop, which
+stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
 
@@ -377,10 +386,19 @@ from:
   illuminated area into the radar cell it images into and normalises by that
   total, so folded ground (layover) is suppressed together rather than corrected
   pixel-by-pixel; flat terrain is unchanged and a planar slope reduces to the
-  `area` × `gamma` closed form. See the CHANGELOG. **Still open:** radiometric
-  *calibration* (Umbra's open products are not calibrated, so every model
-  normalises detected amplitude) and MultiRTC interop — heavy,
-  research-oriented, deferred.
+  `area` × `gamma` closed form. See the CHANGELOG.
+- ~~Radiometric *calibration* (every RTC model normalises detected amplitude, so
+  the output was a relative image).~~ **shipped** — `umbra convert --calibrate
+  {sigma0,beta0,gamma0,rcs}` applies the SICD's own `Radiometric` scale-factor
+  polynomial to pixel power, in image space where the polynomial is defined
+  (metres from the SCP, chip origin included), so the result is a physical
+  backscatter coefficient — and because it is a power-domain factor like the
+  flattening, the two compose into a terrain-flattened gamma-nought product.
+  Where the metadata cannot support it — Umbra's open products generally carry no
+  `Radiometric` block — the refusal is explicit and names what the product does
+  carry, and `sicd_calibration_types` reports it without trying. See the
+  CHANGELOG. **Still open:** MultiRTC interop — heavy, research-oriented,
+  deferred. **This closes the SAR-processing-depth group bar that interop.**
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

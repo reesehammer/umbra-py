@@ -24,7 +24,11 @@ from .chips import (
 )
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
-from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog
+from .convert import (
+    sicd_calibration_types,
+    sicd_to_amplitude_geotiff,
+    sicd_to_geocoded_cog,
+)
 from .dates import parse_date_bound
 from .dem import (
     DemUnavailableError,
@@ -165,6 +169,7 @@ __all__ = [
     "STACK_EXTENTS",
     "sicd_to_amplitude_geotiff",
     "sicd_to_geocoded_cog",
+    "sicd_calibration_types",
     "fetch_dem_for_bbox",
     "copernicus_tile_id",
     "tile_ids_for_bbox",
