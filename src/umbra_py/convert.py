@@ -174,9 +174,10 @@ def _calibration_coefficients(sicd: Any, kind: str):
     when the product cannot support the requested calibration — the whole point
     of the feature is that an uncalibrated product says so rather than emitting
     a number that looks calibrated.
-    """
-    np = _require("numpy")
 
+    Every metadata check here runs before ``numpy`` is required, so "this
+    product cannot be calibrated" is answerable without the ``convert`` extra.
+    """
     if kind not in CALIBRATION_TYPES:
         raise ValueError(
             f"Unknown calibration {kind!r}; choose one of {', '.join(CALIBRATION_TYPES)}."
@@ -199,6 +200,7 @@ def _calibration_coefficients(sicd: Any, kind: str):
             f"{kind} calibration is unavailable for this product "
             f"(available: {offer})."
         )
+    np = _require("numpy")
     coefs = np.atleast_2d(np.asarray(getattr(poly, "Coefs", poly), dtype="float64"))
     if coefs.size == 0:
         raise ValueError(

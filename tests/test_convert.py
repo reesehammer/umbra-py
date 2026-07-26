@@ -1734,10 +1734,13 @@ def test_calibration_coefficients_missing_poly_names_what_is_available():
         convert._calibration_coefficients(sicd, "gamma0")
 
 
-def test_calibration_coefficients_rejects_unknown_kind_and_empty_poly():
+def test_calibration_coefficients_rejects_an_unknown_kind():
     with pytest.raises(ValueError, match="Unknown calibration"):
         convert._calibration_coefficients(_FakeSicd(), "sigma_nought")
 
+
+def test_calibration_coefficients_rejects_an_empty_poly():
+    pytest.importorskip("numpy")
     sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[]))
     with pytest.raises(ValueError, match="no coefficients"):
         convert._calibration_coefficients(sicd, "sigma0")
@@ -1810,6 +1813,7 @@ def test_calibration_scale_offsets_a_chipped_image_by_its_origin():
 
 
 def test_calibration_scale_rejects_a_non_positive_scale_factor():
+    pytest.importorskip("numpy")
     # A scale factor is a positive power ratio by construction; a polynomial
     # that goes non-positive over the image is broken metadata, and repairing it
     # silently would hand back a calibrated-looking number.
@@ -1951,6 +1955,8 @@ def test_sicd_to_geocoded_cog_uncalibrated_product_raises(tmp_path, monkeypatch)
 
 
 def test_sicd_to_geocoded_cog_rejects_an_unknown_calibration_before_reading(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
     # Validated ahead of the file read, like the rtc_model check beside it.
     with pytest.raises(ValueError, match="Unknown calibration"):
         convert.sicd_to_geocoded_cog(
