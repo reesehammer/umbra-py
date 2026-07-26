@@ -204,8 +204,13 @@ factors), which makes `--rtc-model facet --calibrate gamma0` a terrain-flattened
 *detected*: Umbra's open products generally carry no `Radiometric` block, and
 asking for a calibration one cannot support is a self-describing error naming
 what it does carry (`sicd_calibration_types` answers the same question ahead of
-time) rather than a calibrated-looking number. **Open:** MultiRTC interop, which
-stays deferred.
+time) rather than a calibrated-looking number. And a calibrated product now
+*says so*: every raster `umbra convert` writes carries `UMBRA_*` GeoTIFF
+metadata naming the calibration, the RTC model and its resolved reference angle,
+the DEM/geoid, the projection, the scale and the CC-BY licence
+(`read_conversion_tags` / `umbra convert --provenance` / `gdalinfo`), because a
+physical measurement nobody can attribute to a calibration is not one.
+**Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
 
@@ -397,6 +402,17 @@ from:
   Where the metadata cannot support it — Umbra's open products generally carry no
   `Radiometric` block — the refusal is explicit and names what the product does
   carry, and `sicd_calibration_types` reports it without trying. See the
+  CHANGELOG.
+- ~~Record what a converted raster *is* (every setting above left no trace in the
+  file, so two scenes converted differently were indistinguishable after the
+  fact).~~ **shipped** — `conversion_tags` writes namespaced `UMBRA_*` GeoTIFF
+  metadata into every raster the module emits: the calibration, the RTC model and
+  the reference incidence angle it resolved to, the DEM/geoid used, the
+  projection, the resampling kernel, the amplitude scale, what a pixel value is,
+  the umbra-py version, and the CC-BY licence + attribution (design principle 4
+  applied to a derivative). Steps that did not run report `"none"` rather than
+  vanishing, and only the source *file name* is recorded. Read it with
+  `read_conversion_tags`, `umbra convert --provenance`, or `gdalinfo`. See the
   CHANGELOG. **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
 

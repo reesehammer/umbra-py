@@ -482,12 +482,29 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
     than floor-limited. Left out because it needs the `NoisePoly` /
     `NoiseLevelType` handling (absolute vs. relative) that no Umbra product
     currently exercises.
-  - **Nothing downstream records the calibration.** The output GeoTIFF carries the
-    calibrated values but no tag saying which coefficient they are, so scenes
-    converted with different `--calibrate` settings are indistinguishable after
-    the fact. Writing the calibration (and the RTC model) into the COG tags would
-    make a converted scene self-describing — the same "provenance travels with the
-    artifact" rule the render manifests already follow.
+  - ~~**Nothing downstream records the calibration.**~~ ✅ **Done**
+    (`convert.conversion_tags` / `read_conversion_tags` / `umbra convert
+    --provenance`). Every raster the module writes now carries namespaced
+    `UMBRA_*` GeoTIFF metadata naming the calibration, the RTC model **and the
+    reference incidence angle it resolved to** (the scene angle when none was
+    asked for, so the tag records what ran rather than what was requested), the
+    DEM/geoid actually used, the projection, the resampling kernel, the amplitude
+    scale, a one-line `UMBRA_UNITS` statement of what a pixel value *is*, the
+    umbra-py version, and the CC-BY licence + attribution — design principle 4
+    applied to a derivative product. Steps that did **not** run report `"none"`
+    rather than a missing key, so an absent tag never has to be read as either
+    "not applied" or "not recorded", and only the source's *file name* is
+    recorded (a local directory is not provenance and should not travel). Read
+    back with `read_conversion_tags` (prefix stripped, lower-cased), `umbra
+    convert --provenance FILE` (JSON, takes no `DST`), or plain `gdalinfo` —
+    they are ordinary tags, so the whole ecosystem can read them. The geocoded
+    path stamps the in-memory dataset before the COG driver copies it out, so
+    the tags reach the emitted file. Pure-stdlib tag construction, no new
+    dependency, no model call; offline-tested in `tests/test_convert.py`.
+    Follow-on, not a blocker: nothing *consumes* the tags yet — `to_xarray` /
+    `to_stack` could refuse to stack rasters whose `UMBRA_CALIBRATION` or
+    `UMBRA_SCALE` disagree, the same "a mixed selection is not a measurement"
+    check `POST /artifacts/stats` makes for polarization.
 - **MultiRTC interop.** Interop with
   [MultiRTC](https://github.com/MultiSAR/MultiRTC) is a heavier,
   research-oriented job and remains deferred.

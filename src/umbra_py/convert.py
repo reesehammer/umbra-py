@@ -76,6 +76,14 @@ calibration a product cannot support raises rather than returning a
 plausible-looking number. :func:`sicd_calibration_types` reports what a given
 file supports before you ask for it.
 
+Every raster written here records *how* it was made — the calibration, the
+terrain-flattening model and its reference angle, the DEM/geoid, the projection,
+the scale, and the data licence — as namespaced GeoTIFF metadata
+(:func:`conversion_tags`, read back with :func:`read_conversion_tags`, ``umbra
+convert --provenance``, or plain ``gdalinfo``). Without it two scenes converted
+with different settings are pixel-for-pixel indistinguishable after the fact,
+and a physical measurement nobody can attribute to a calibration is not one.
+
 Install with: ``pip install "umbra-py[convert]"``
 """
 
@@ -85,6 +93,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import __version__
+from .constants import ATTRIBUTION, DATA_LICENSE
 from .exceptions import MissingDependencyError
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
@@ -332,6 +342,124 @@ def sicd_calibration_types(src: str | os.PathLike) -> tuple[str, ...]:
     return _available_calibrations(reader.get_sicds_as_tuple()[0])
 
 
+# --------------------------------------------------------------------------- #
+# Conversion provenance (what the pixel values mean, recorded in the raster).
+# --------------------------------------------------------------------------- #
+
+#: Prefix on the GeoTIFF metadata keys this module writes into every raster it
+#: converts (see :func:`conversion_tags`). Namespaced so umbra-py's provenance
+#: never collides with the product's own tags, and so
+#: :func:`read_conversion_tags` can pick it back out of a mixed tag set.
+PROVENANCE_TAG_PREFIX = "UMBRA_"
+
+
+def _pixel_units(*, calibration: str | None, decibels: bool) -> str:
+    """A one-line statement of what a pixel value *is*, for the units tag.
+
+    Uncalibrated output is relative brightness in the product's own arbitrary
+    units; a calibrated one is a physical quantity, and in the linear scale it
+    is the *amplitude* whose square is that quantity (see ``calibration=`` on
+    :func:`sicd_to_geocoded_cog`).
+    """
+    if calibration is None:
+        return "dB (relative amplitude)" if decibels else "relative amplitude"
+    if decibels:
+        return f"dB ({calibration})"
+    return f"amplitude (sqrt {calibration})"
+
+
+def conversion_tags(
+    *,
+    source: str | os.PathLike,
+    geocoded: bool,
+    decibels: bool = True,
+    calibration: str | None = None,
+    rtc_model: str | None = None,
+    rtc_reference_deg: float | None = None,
+    projection_type: str | None = None,
+    dem: str | os.PathLike | None = None,
+    geoid: str | os.PathLike | None = None,
+    resampling: str | None = None,
+) -> dict[str, str]:
+    """The provenance tags describing one conversion, as GeoTIFF metadata.
+
+    A converted raster carries no trace of *how* it was made unless one is
+    written into it: two scenes converted with different ``calibration=`` or
+    ``rtc_model=`` settings are pixel-for-pixel indistinguishable after the
+    fact, and a calibrated scene whose calibration is unrecorded is a physical
+    measurement nobody can quote. These tags are the same "provenance travels
+    with the artifact" rule the render manifests follow, applied to the file
+    itself, so ``gdalinfo`` (or :func:`read_conversion_tags`) answers the
+    question that would otherwise need the shell history.
+
+    Every processing step is reported, including the ones that did *not* run —
+    ``"none"`` rather than a missing key — so a tag's absence never has to be
+    interpreted. Values are strings because GeoTIFF metadata is.
+
+    Parameters
+    ----------
+    source:
+        The input product. Only its file *name* is recorded: the local
+        directory it happened to sit in is not provenance, and travels with the
+        artifact to places it does not belong.
+    geocoded:
+        Whether the output is the map-ready geocoded raster
+        (:func:`sicd_to_geocoded_cog`) or the ungeoreferenced slant-plane
+        amplitude (:func:`sicd_to_amplitude_geotiff`). The geocoding parameters
+        below are recorded only for the former.
+    rtc_reference_deg:
+        The *resolved* reference incidence angle the flattening normalised to
+        (the scene incidence angle when the caller passed none), so the tag
+        records the number actually used rather than the request.
+    """
+    tags = {
+        "SOFTWARE": f"umbra-py {__version__}",
+        "SOURCE": Path(source).name,
+        "CONVERSION": "geocoded" if geocoded else "slant-plane",
+        "SCALE": "decibels" if decibels else "linear",
+        "UNITS": _pixel_units(calibration=calibration, decibels=decibels),
+        "CALIBRATION": calibration or "none",
+        "RTC_MODEL": rtc_model or "none",
+    }
+    if rtc_model is not None and rtc_reference_deg is not None:
+        tags["RTC_REFERENCE_DEG"] = f"{float(rtc_reference_deg):.6g}"
+    if geocoded:
+        tags["PROJECTION"] = "DEM" if dem is not None else (projection_type or "HAE")
+        tags["DEM"] = Path(dem).name if dem is not None else "none"
+        tags["GEOID"] = Path(geoid).name if geoid is not None else "none"
+        if resampling is not None:
+            tags["RESAMPLING"] = resampling
+    # The data licence survives every transformation, including this one.
+    tags["LICENSE"] = DATA_LICENSE
+    tags["ATTRIBUTION"] = ATTRIBUTION
+    return {f"{PROVENANCE_TAG_PREFIX}{key}": value for key, value in tags.items()}
+
+
+def read_conversion_tags(src: str | os.PathLike) -> dict[str, str]:
+    """Read back the conversion provenance recorded in a converted raster.
+
+    Returns the :func:`conversion_tags` entries with the
+    :data:`PROVENANCE_TAG_PREFIX` stripped and lower-cased, so
+    ``read_conversion_tags(path)["calibration"]`` answers "what do these pixel
+    values mean?" — and an empty dict for a raster umbra-py did not convert.
+
+    Parameters
+    ----------
+    src:
+        Path to a raster (any format rasterio can open).
+    """
+    _require("rasterio")
+    import rasterio  # noqa: PLC0415
+
+    with rasterio.open(str(src)) as ds:
+        tags = ds.tags()
+    return {
+        key[len(PROVENANCE_TAG_PREFIX) :].lower(): value
+        for key, value in tags.items()
+        if key.startswith(PROVENANCE_TAG_PREFIX)
+    }
+
+
 def sicd_to_amplitude_geotiff(
     src: str | os.PathLike,
     dst: str | os.PathLike,
@@ -398,6 +526,14 @@ def sicd_to_amplitude_geotiff(
     }
     with rasterio.open(dst, "w", **profile) as out:
         out.write(amplitude, 1)
+        out.update_tags(
+            **conversion_tags(
+                source=src,
+                geocoded=False,
+                decibels=decibels,
+                calibration=calibration,
+            )
+        )
     return dst
 
 
@@ -1257,6 +1393,7 @@ def _warp_gcps_to_cog(
     resampling: str,
     nodata: float,
     post_warp: Any = None,
+    tags: dict[str, str] | None = None,
 ) -> Path:
     """Warp a GCP-tagged amplitude array onto a north-up EPSG:4326 COG.
 
@@ -1270,6 +1407,10 @@ def _warp_gcps_to_cog(
     ``(warped, dst_transform, width, height) -> warped`` applied to the geocoded
     array before it is written — the hook radiometric terrain flattening uses to
     adjust pixel values in the output geometry, kept out of the sarpy-free core.
+
+    ``tags``, if given, are written as dataset metadata (see
+    :func:`conversion_tags`) before the COG copy, so the provenance is carried
+    by the emitted file rather than only by the caller.
     """
     np = _require("numpy")
     from rasterio.crs import CRS  # noqa: PLC0415
@@ -1335,6 +1476,8 @@ def _warp_gcps_to_cog(
     with MemoryFile() as mem:
         with mem.open(**profile) as tmp:
             tmp.write(warped, 1)
+            if tags:
+                tmp.update_tags(**tags)
             rio_copy(
                 tmp,
                 str(dst),
@@ -1554,6 +1697,7 @@ def sicd_to_geocoded_cog(
         gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
 
     post_warp = None
+    reference_deg = None
     if rtc:
         incidence_deg, azimuth_deg = _scene_look_geometry(sicd)
         reference_deg = incidence_deg if rtc_reference_deg is None else float(rtc_reference_deg)
@@ -1580,4 +1724,16 @@ def sicd_to_geocoded_cog(
         resampling=resampling,
         nodata=float(np.nan),
         post_warp=post_warp,
+        tags=conversion_tags(
+            source=src,
+            geocoded=True,
+            decibels=decibels,
+            calibration=calibration,
+            rtc_model=rtc_model if rtc else None,
+            rtc_reference_deg=reference_deg,
+            projection_type=projection_type,
+            dem=dem,
+            geoid=geoid,
+            resampling=resampling,
+        ),
     )

@@ -721,6 +721,12 @@ umbra convert scene_SICD.nitf scene_ortho.tif --dem copernicus_dem.tif
 # product. Needs a product that carries the scale factors; it says so if not.
 umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet --calibrate gamma0
 
+# Every converted raster records how it was made -- calibration, terrain model
+# and reference angle, DEM/geoid, projection, scale, licence -- in its own
+# GeoTIFF tags, so a scene can say what its pixel values mean. Read it back
+# (also visible to plain gdalinfo, or umbra_py.read_conversion_tags).
+umbra convert scene_g0.tif --provenance
+
 # Visual similarity: embed a site's quicklooks, then find scenes that look alike.
 umbra embed build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 umbra embed similar <item-json-url>

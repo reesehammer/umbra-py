@@ -7,6 +7,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A converted scene now says what it is: conversion provenance in the raster's
+  own metadata.** The conversion chain can place a SICD on the map (`--dem` /
+  `--geoid`), take the terrain out of its brightness (`--rtc`, four models), and
+  make the remaining number physical (`--calibrate`) — but the GeoTIFF it wrote
+  carried no trace of any of it. Two scenes converted with different settings
+  were pixel-for-pixel indistinguishable after the fact: a raster of `gamma0` in
+  dB and a raster of relative amplitude look identical, and the only record of
+  which one you were holding was your shell history. A physical measurement
+  nobody can attribute to a calibration is not a measurement.
+
+  `conversion_tags()` fixes that at the only place it survives — inside the
+  file. Every raster `umbra_py.convert` writes now carries namespaced GeoTIFF
+  metadata (`UMBRA_*`) recording the calibration, the terrain-flattening model
+  **and the reference incidence angle it resolved to**, the DEM and geoid
+  actually used, the projection, the resampling kernel, the amplitude scale, a
+  one-line statement of what a pixel value *is* (`UMBRA_UNITS`: `dB (gamma0)`,
+  `amplitude (sqrt sigma0)`, `dB (relative amplitude)`), the umbra-py version
+  that produced it, and the CC-BY licence and attribution — which is design
+  principle 4 (license propagation) applied to a derivative product, not just to
+  the data it came from.
+
+  Two details are deliberate. Every processing step is reported *including the
+  ones that did not run* — `"none"`, never a missing key — so a reader never has
+  to decide whether an absent tag means "not applied" or "not recorded". And the
+  source is recorded by **file name only**: the local directory a product
+  happened to sit in is not provenance, and it would travel with the artifact to
+  places it does not belong.
+
+  Read it back with `read_conversion_tags(path)` (prefix stripped and
+  lower-cased, so `read_conversion_tags(p)["calibration"]` is the question you
+  actually have), with `umbra convert --provenance FILE` (the same dict as JSON;
+  the flag reads and writes nothing, so it takes no `DST`), or with plain
+  `gdalinfo` — the tags are ordinary GeoTIFF metadata, so every reader in the
+  ecosystem can see them without knowing umbra-py exists. A raster umbra-py did
+  not convert answers `{}` rather than guessing.
+
+  The geocoded path writes its tags into the in-memory dataset *before* the COG
+  driver copies it out, so they survive the copy into the file a user actually
+  gets — the one thing worth a test of its own. Pure-stdlib tag construction (no
+  rasterio needed to build or assert on the dict), no new dependency, no model
+  call; offline-tested in `tests/test_convert.py` (the full tag set, the
+  did-not-run values, the slant-plane subset, the path-not-leaked rule, the COG
+  round-trip, both writers end-to-end, and the CLI read path). This closes the
+  "nothing downstream records the calibration" follow-on in `TODO.md`.
 - **`umbra convert --calibrate`: pixel values that mean something outside their
   own scene.** The conversion chain could place a SICD on the map
   (`--dem`/`--geoid`) and take the terrain out of its brightness (`--rtc`, four
