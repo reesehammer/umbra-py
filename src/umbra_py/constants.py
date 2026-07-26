@@ -73,6 +73,14 @@ PRODUCT_TYPE_EXPLANATIONS: dict[str, str] = {
     ),
 }
 
+#: Canonical SAR polarization codes, transmit-then-receive. Umbra's open
+#: products are single-polarization per acquisition, so an item usually exposes
+#: exactly one of these on ``sar:polarizations``. Like :data:`PRODUCT_ASSETS`
+#: this is a *closed, known* set, which is what lets a whole-archive surface
+#: (the ``umbra demo --pmtiles`` explorer) offer the full facet without first
+#: scanning a sample of the catalog and risking a missing chip.
+POLARIZATIONS = ("VV", "VH", "HH", "HV")
+
 #: The caveat that must travel with an item's polarizations whenever a model
 #: might reason about change detection. Two acquisitions in different
 #: polarizations image different scattering physics and must not be differenced.

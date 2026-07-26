@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Filter the archive by the facet that decides whether an answer is valid —
+  polarization chips in both `umbra demo` modes, and the two list-valued fields
+  the vector tiles withheld (`docs/DEMO_APP_GAPS.md` Path A, the last structural
+  difference between the two explorers).** The explorer could filter by place,
+  date and product type — three facets about *what you get*. The one it could
+  not filter by is the one that decides whether an analysis is meaningful at
+  all: HH and VV image different scattering, so differencing a VV pass against an
+  HH one puts a physics difference on the time axis and reads it as change.
+  `POST /artifacts/stats` already refuses such a selection outright and tells the
+  caller to "filter the selection to one polarization" — advice the page had no
+  control to follow, which made the Quantify button dead-endable from an
+  ordinary filtered view. A **Polarization** chip row now sits under the product
+  chips in both modes, with the same "on unless explicitly toggled off" rule, so
+  an untouched sidebar still hides nothing.
+
+  Making it work over the *whole archive* meant the tiles had to carry the field.
+  `umbra tiles` now writes two more properties per feature — `pol` and `assets`,
+  the item's polarizations and its available products — comma-joined, because a
+  vector-tile property is a scalar. The embedded-slice app tests the list it
+  already holds; the whole-archive app compiles the chips to a MapLibre
+  `index-of` test evaluated inside the tiles, which is exact rather than
+  approximate since no two-letter polarization code can match across a
+  separator. An item with no `sar:polarizations` tiles no `pol` key at all and
+  stays visible — the same "never hidden by a facet it has no value for" rule the
+  missing-date guard applies. Those same two fields were the *only* thing the
+  embedded-slice detail panel still showed that the whole-archive one could not,
+  so the whole-archive explorer — what `umbra showcase --unified` deploys to
+  GitHub Pages — is now a strict **superset** of the slice explorer, and Path A
+  closes. Four chip rows across two apps read one rule, so they are built by one
+  shared `window.umbraChipRow` helper rather than four copies that could drift.
+  Offline-tested in `tests/test_pmtiles.py` and `tests/test_demo.py`.
 - **An on-ramp for the datacube — `examples/08_time_series_datacube.ipynb` (the
   last open follow-on of the `to_stack` PR, `TODO.md`).** The stacking chain grew
   a lot in this release — a co-registered cube, a projected grid, a JSON

@@ -623,8 +623,8 @@ umbra map --start 2024-01-01 --end 2024-06-30 --product GEC --max-per-task 1 \
     --timeline --timeline-period P7D --lazy-imagery --out coverage.html
 
 # Self-serve interactive explorer: ONE HTML page over a whole slice of the
-# catalog with client-side filters (search box, date range, product-type
-# chips), clustered markers that scale past a plain map, and click-to-quicklook
+# catalog with client-side filters (search box, date range, product-type and
+# polarization chips), clustered markers that scale past a plain map, and click-to-quicklook
 # SAR overlays. Reads a prebuilt index with --local for a near-instant build.
 umbra demo --local --max-per-task 1 --out explorer.html
 

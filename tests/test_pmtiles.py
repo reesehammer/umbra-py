@@ -26,7 +26,13 @@ from umbra_py.models import UmbraItem
 _HREF = "https://x.s3.amazonaws.com/sar-data/tasks/{task}/t1/a1/item.stac.v2.json"
 
 
-def _item(item_id: str, lon: float, lat: float, task: str = "Site A") -> UmbraItem:
+def _item(
+    item_id: str,
+    lon: float,
+    lat: float,
+    task: str = "Site A",
+    polarizations: tuple[str, ...] = ("VV",),
+) -> UmbraItem:
     """A minimal item with a footprint centered on ``(lon, lat)``."""
     d = 0.02
     doc = {
@@ -50,7 +56,7 @@ def _item(item_id: str, lon: float, lat: float, task: str = "Site A") -> UmbraIt
             "datetime": "2024-05-04T00:00:00Z",
             "platform": "Umbra-08",
             "sar:product_type": "GEC",
-            "sar:polarizations": ["VV"],
+            "sar:polarizations": list(polarizations),
         },
         "assets": {},
     }
@@ -345,7 +351,14 @@ def test_metadata_advertises_the_vector_layer():
     doc = json.loads(meta)
     assert doc["vector_layers"][0]["id"] == "acquisitions"
     assert "CC BY 4.0" in doc["attribution"]
-    assert set(doc["vector_layers"][0]["fields"]) >= {"id", "place", "product", "date"}
+    assert set(doc["vector_layers"][0]["fields"]) >= {
+        "id",
+        "place",
+        "product",
+        "date",
+        "pol",
+        "assets",
+    }
 
 
 def test_features_and_properties_survive_the_round_trip():
@@ -747,6 +760,39 @@ def test_features_prefer_the_baked_place_label_over_the_task_codename():
 
     item.place = "San Francisco, California"
     assert pmtiles._item_properties(item)["place"] == "San Francisco, California"
+
+
+def test_features_carry_the_list_valued_fields_comma_joined():
+    """A tile property is a scalar, so the two list-valued facets ride along
+    comma-joined -- which is what the explorer's polarization filter tests with
+    an ``index-of`` expression and what its detail panel reads back."""
+    item = _imaged_item()
+    item.properties["sar:polarizations"] = ["VV", "VH"]
+    props = pmtiles._item_properties(item, "GEC")
+
+    assert props["pol"] == "VV,VH"
+    assert props["assets"] == "GEC"
+    # No two-letter code can match across the separator, so the substring test
+    # the page compiles is exact rather than merely approximate.
+    assert "HH" not in props["pol"] and "VV,V" in props["pol"]
+
+
+def test_an_item_without_the_metadata_tiles_no_facet_field():
+    """The client rule is "a scene is never hidden by a facet it has no value
+    for", which keys off the property being *absent* rather than empty."""
+    item = _item("bare", 0.0, 0.0, polarizations=())
+    props = pmtiles._item_properties(item)
+
+    assert "pol" not in props
+    assert "assets" not in props  # this minimal item publishes no products
+
+
+def test_the_facet_fields_survive_the_tile_round_trip():
+    archive = pmtiles.build_pmtiles([_item("scene-1", 0.0, 0.0)], min_zoom=0, max_zoom=1)
+    header = _parse_header(archive)
+    props = _decode_mvt_points(_tile_bytes(archive, header, pmtiles.zxy_to_tileid(0, 0, 0)))
+
+    assert props[0]["pol"] == "VV"
 
 
 def test_features_reference_the_cog_as_a_sidecar_relative_basename():
