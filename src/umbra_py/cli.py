@@ -19,7 +19,7 @@ from .catalog import UmbraCatalog
 from .chips import CHIPPABLE_ASSETS
 from .constants import CANOPY_TOKEN_ENV, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
-from .convert import RESAMPLING_METHODS, RTC_MODELS
+from .convert import CALIBRATION_TYPES, RESAMPLING_METHODS, RTC_MODELS
 from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
@@ -2000,8 +2000,22 @@ def stack(
     "integrates the illuminated area in the radar's own (slant range, azimuth) "
     "geometry and normalises each pixel by the total accumulated in its cell -- "
     "the only model that measures LAYOVER, where terrain folds several facets "
-    "into one cell and their returns sum. All normalise detected amplitude; none "
-    "is a calibrated product.",
+    "into one cell and their returns sum. On their own all four normalise "
+    "detected amplitude; pair one with --calibrate to get a physical product.",
+)
+@click.option(
+    "--calibrate",
+    type=click.Choice(list(CALIBRATION_TYPES), case_sensitive=False),
+    default=None,
+    help="Radiometrically calibrate the output using the SICD's own Radiometric "
+    "scale factors, so pixel values are a physical quantity instead of relative "
+    "brightness: 'sigma0'/'beta0'/'gamma0' are the backscatter coefficients "
+    "referenced to unit ground, slant-plane and perpendicular-to-look area; "
+    "'rcs' is the absolute radar cross-section in m2. In the default decibel "
+    "scale the output is that coefficient in dB. Composes with --rtc "
+    "(--rtc-model facet --calibrate gamma0 is terrain-flattened gamma-nought). "
+    "Fails clearly when the product carries no such scale factor -- Umbra's open "
+    "products usually don't.",
 )
 def convert(
     src,
@@ -2017,6 +2031,7 @@ def convert(
     rtc,
     rtc_ref_angle,
     rtc_model,
+    calibrate,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
@@ -2033,6 +2048,13 @@ def convert(
     swings that slopes cause. Pass --slant-plane for a quick, ungeoreferenced
     amplitude image instead.
 
+    Geocoding and flattening both leave the pixel values *relative* -- an image
+    comparable with itself and nothing else. Add --calibrate to make them
+    physical: the SICD's own radiometric scale factors turn detected power into
+    a backscatter coefficient (sigma0 / beta0 / gamma0) or an absolute radar
+    cross-section, so the decibels mean the same thing across scenes and dates.
+    It only works where the product supplies those scale factors.
+
     SICD/CPHD are the complex products; the ``GEC`` asset is already a geocoded
     COG and needs no conversion. Requires the convert extra
     (``pip install "umbra-py[convert]"``).
@@ -2040,10 +2062,17 @@ def convert(
     from .convert import sicd_to_amplitude_geotiff, sicd_to_geocoded_cog  # noqa: PLC0415
 
     decibels = not linear
+    calibration = calibrate.lower() if calibrate else None
     if slant_plane:
         with OrbitSpinner(f"Reading amplitude from {Path(src).name}"):
-            path = sicd_to_amplitude_geotiff(src, dst, decibels=decibels)
-        click.echo(f"Wrote slant-plane amplitude GeoTIFF to {path}")
+            try:
+                path = sicd_to_amplitude_geotiff(
+                    src, dst, decibels=decibels, calibration=calibration
+                )
+            except ValueError as exc:  # e.g. the product carries no scale factor
+                raise click.ClickException(str(exc)) from exc
+        label = f"{calibration}-calibrated " if calibration else ""
+        click.echo(f"Wrote slant-plane {label}amplitude GeoTIFF to {path}")
         return
 
     auto_dem = bool(dem) and dem.lower() == "auto"
@@ -2067,26 +2096,32 @@ def convert(
 
     label = "Terrain-geocoding" if dem else "Geocoding"
     with OrbitSpinner(f"{label} {Path(src).name}"):
-        path = sicd_to_geocoded_cog(
-            src,
-            dst,
-            decibels=decibels,
-            gcp_grid=gcp_grid,
-            resolution=resolution,
-            resampling=resampling.lower(),
-            projection_type=projection.upper(),
-            dem=dem,
-            geoid=geoid,
-            rtc=rtc,
-            rtc_reference_deg=rtc_ref_angle,
-            rtc_model=rtc_model.lower(),
-        )
+        try:
+            path = sicd_to_geocoded_cog(
+                src,
+                dst,
+                decibels=decibels,
+                gcp_grid=gcp_grid,
+                resolution=resolution,
+                resampling=resampling.lower(),
+                projection_type=projection.upper(),
+                dem=dem,
+                geoid=geoid,
+                rtc=rtc,
+                rtc_reference_deg=rtc_ref_angle,
+                rtc_model=rtc_model.lower(),
+                calibration=calibration,
+            )
+        except ValueError as exc:  # e.g. the product carries no scale factor
+            raise click.ClickException(str(exc)) from exc
     if rtc:
         kind = "radiometrically terrain-flattened COG"
     elif dem:
         kind = "terrain-orthorectified COG"
     else:
         kind = "geocoded COG"
+    if calibration:
+        kind = f"{calibration}-calibrated {kind}"
     click.echo(f"Wrote {kind} to {path}")
 
 

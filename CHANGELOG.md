@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra convert --calibrate`: pixel values that mean something outside their
+  own scene.** The conversion chain could place a SICD on the map
+  (`--dem`/`--geoid`) and take the terrain out of its brightness (`--rtc`, four
+  models up to the layover-measuring `facet` integration), but the number left in
+  each pixel was still *relative* — detected amplitude in whatever arbitrary units
+  the product's pixels carry, comparable within one image and with nothing else.
+  Two scenes of the same ground could not be differenced in physical terms, and no
+  measurement made from them could be quoted. `--calibrate` /
+  `sicd_to_geocoded_cog(calibration=…)` closes that: it scales pixel **power** by
+  the scale-factor polynomial in the SICD's own `Radiometric` metadata, so the
+  output is a physical quantity — `sigma0`, `beta0` and `gamma0`, the backscatter
+  coefficients referenced to unit ground, slant-plane and perpendicular-to-look
+  area, or `rcs`, the absolute radar cross-section in m² (`CALIBRATION_TYPES`).
+
+  It is applied **in image space**, before the warp, because that is where the
+  polynomials are defined: they are functions of image coordinates measured in
+  metres from the scene centre point, so `_calibration_scale` evaluates them over
+  `(row + FirstRow − SCPPixel.Row) × Grid.Row.SS` and the column equivalent —
+  which means a constant polynomial (the common case) gives a flat scale, a
+  higher-order one tracks the across-swath variation the product describes, and a
+  chip is offset by its own origin rather than silently tilted.
+
+  Calibration and `--rtc` **compose**, which is the point: both are power-domain
+  factors on the same raster, so they share one application path
+  (`_apply_calibration` → `_apply_terrain_flattening`) and applying both simply
+  multiplies them. `--rtc-model facet --calibrate gamma0` is therefore a
+  terrain-flattened **gamma-nought** product — the thing every RTC entry in this
+  changelog has said it was *not* — whose decibels mean the same thing across
+  scenes, dates and sensors. In the default decibel scale the output is that
+  coefficient in dB directly; in linear it is calibrated amplitude, whose square
+  is the coefficient.
+
+  The honest half matters as much as the arithmetic: a calibration is only ever as
+  real as the metadata behind it. Umbra's open products generally ship *without* a
+  `Radiometric` block, so asking for one that isn't there raises a self-describing
+  error naming what the product does carry (and the CLI reports it as a message,
+  not a traceback) instead of emitting a calibrated-looking number.
+  `sicd_calibration_types(path)` answers the same question ahead of time — useful
+  when deciding whether a scene can enter a calibrated stack. A scale factor is a
+  positive power ratio by construction, so a polynomial that evaluates
+  non-positive or non-finite anywhere on the image grid is rejected rather than
+  clamped: a silently repaired calibration is worse than none.
+
+  Pure-numpy core, no model call, no new dependency; offline-tested in
+  `tests/test_convert.py` (the SCP-relative evaluation, the chip origin, constant
+  and higher-order polynomials, the non-positive rejection, the dB/linear
+  equivalence, end-to-end slant-plane and geocoded scaling, exact composition with
+  `--rtc`, the uncalibrated-product refusal, and the CLI surface). This closes
+  radiometric calibration in `STRATEGY.md` 5.5; MultiRTC interop remains deferred.
 - **`umbra index fetch-thumbnails`: the published snapshot now carries the SAR
   pictures, not just the metadata.** `umbra index bake-thumbnails` has been able
   to render a quicklook per acquisition into the index for a while, and every

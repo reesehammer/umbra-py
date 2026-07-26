@@ -56,12 +56,25 @@ projects every terrain facet into the radar's own ``(slant_range, azimuth)``
 geometry, accumulates the illuminated area landing in each radar cell, and
 normalises each pixel by that total. The first three correct a pixel from its own
 slope, so none of them can see terrain *folding*; the fourth is the one that
-measures layover, because several facets imaging into one cell sum there. All
-four are a normalisation of *detected amplitude*, not a calibrated gamma-nought
-RTC product (Umbra's open products are not radiometrically calibrated, and
-MultiRTC interop remains deferred); the pure-numpy core (terrain normals, look
-vector, radar coordinates, area accumulation, correction factors) is exercised
-offline with hand-built arrays.
+measures layover, because several facets imaging into one cell sum there. The
+pure-numpy core (terrain normals, look vector, radar coordinates, area
+accumulation, correction factors) is exercised offline with hand-built arrays.
+
+Flattening removes the terrain's *geometric* brightness swings but leaves the
+result in whatever arbitrary units the product's pixels carry — a relative
+image, comparable within itself and with nothing else. ``calibration=`` closes
+that last gap: it scales pixel power by the SICD's own ``Radiometric``
+scale-factor polynomial, so the output is a physical quantity — the ``sigma0`` /
+``beta0`` / ``gamma0`` backscatter coefficients (referenced to unit ground,
+slant-plane and perpendicular-to-look area) or ``rcs``, the absolute radar cross
+section in m². Both are power-domain factors, so they compose:
+``rtc_model="facet"`` with ``calibration="gamma0"`` is a terrain-flattened
+gamma-nought product whose decibels mean the same thing across scenes and dates.
+The calibration is only ever as real as the metadata behind it — Umbra's open
+products generally ship *without* a ``Radiometric`` block, and asking for a
+calibration a product cannot support raises rather than returning a
+plausible-looking number. :func:`sicd_calibration_types` reports what a given
+file supports before you ask for it.
 
 Install with: ``pip install "umbra-py[convert]"``
 """
@@ -90,6 +103,25 @@ RESAMPLING_METHODS = ("nearest", "bilinear", "cubic", "average", "lanczos")
 #: accumulates several terrain facets into one radar cell (layover).
 RTC_MODELS = ("cosine", "area", "gamma", "facet")
 
+#: Radiometric calibrations accepted by :func:`sicd_to_geocoded_cog` and
+#: :func:`sicd_to_amplitude_geotiff` (``calibration=``). Each names a SICD
+#: ``Radiometric`` scale-factor polynomial that converts detected *power* into a
+#: physical quantity: the three backscatter coefficients ``sigma0`` (per unit
+#: **ground** area), ``beta0`` (per unit **slant-plane** area) and ``gamma0``
+#: (per unit area **perpendicular to the look direction**), plus ``rcs``, the
+#: absolute radar cross-section in m² rather than a per-area coefficient.
+CALIBRATION_TYPES = ("sigma0", "beta0", "gamma0", "rcs")
+
+#: Maps each :data:`CALIBRATION_TYPES` member to the SICD ``Radiometric``
+#: polynomial that defines it. A product only supports the calibrations whose
+#: polynomial its own metadata carries.
+_CALIBRATION_POLYS = {
+    "sigma0": "SigmaZeroSFPoly",
+    "beta0": "BetaZeroSFPoly",
+    "gamma0": "GammaZeroSFPoly",
+    "rcs": "RCSSFPoly",
+}
+
 
 def _require(module: str):
     try:
@@ -111,11 +143,201 @@ def _amplitude(complex_data: Any, *, decibels: bool):
     return amplitude
 
 
+# --------------------------------------------------------------------------- #
+# Radiometric calibration (SICD ``Radiometric`` scale-factor polynomials).
+# --------------------------------------------------------------------------- #
+
+
+def _available_calibrations(sicd: Any) -> tuple[str, ...]:
+    """Which :data:`CALIBRATION_TYPES` this SICD's own metadata supports.
+
+    Empty when the product carries no ``Radiometric`` block at all — which is
+    the honest answer for an uncalibrated product, and the one that says the
+    scale factors are missing rather than assumed.
+    """
+    radiometric = getattr(sicd, "Radiometric", None)
+    if radiometric is None:
+        return ()
+    return tuple(
+        kind
+        for kind in CALIBRATION_TYPES
+        if getattr(radiometric, _CALIBRATION_POLYS[kind], None) is not None
+    )
+
+
+def _calibration_coefficients(sicd: Any, kind: str):
+    """The 2-D scale-factor polynomial coefficients for ``kind``, off a SICD.
+
+    Reads ``Radiometric.<Kind>SFPoly`` and returns its coefficient array (the
+    ``Coefs`` of a sarpy ``Poly2DType``, or a bare array/scalar so the pure core
+    is testable without sarpy). Raises a self-describing :class:`ValueError`
+    when the product cannot support the requested calibration — the whole point
+    of the feature is that an uncalibrated product says so rather than emitting
+    a number that looks calibrated.
+
+    Every metadata check here runs before ``numpy`` is required, so "this
+    product cannot be calibrated" is answerable without the ``convert`` extra.
+    """
+    if kind not in CALIBRATION_TYPES:
+        raise ValueError(
+            f"Unknown calibration {kind!r}; choose one of {', '.join(CALIBRATION_TYPES)}."
+        )
+    radiometric = getattr(sicd, "Radiometric", None)
+    if radiometric is None:
+        raise ValueError(
+            "SICD carries no Radiometric metadata, so it cannot be radiometrically "
+            "calibrated: the scale factors that turn detected power into a "
+            "backscatter coefficient have to come from the product. Umbra's open "
+            "products are typically uncalibrated -- convert without calibration for "
+            "the usual (relative) amplitude image."
+        )
+    poly = getattr(radiometric, _CALIBRATION_POLYS[kind], None)
+    if poly is None:
+        available = _available_calibrations(sicd)
+        offer = ", ".join(available) if available else "none"
+        raise ValueError(
+            f"SICD Radiometric metadata carries no {_CALIBRATION_POLYS[kind]}, so "
+            f"{kind} calibration is unavailable for this product "
+            f"(available: {offer})."
+        )
+    np = _require("numpy")
+    coefs = np.atleast_2d(np.asarray(getattr(poly, "Coefs", poly), dtype="float64"))
+    if coefs.size == 0:
+        raise ValueError(
+            f"SICD {_CALIBRATION_POLYS[kind]} has no coefficients, so the "
+            f"{kind} scale factor is undefined."
+        )
+    return coefs
+
+
+def _image_grid_geometry(sicd: Any) -> dict[str, float]:
+    """The SICD image-grid geometry the radiometric polynomials are written in.
+
+    The scale-factor polynomials are functions of image coordinates measured in
+    **metres from the scene centre point** (SCP), so evaluating one needs the
+    per-axis pixel spacings (``Grid.Row.SS`` / ``Grid.Col.SS``) and the SCP's
+    pixel address (``ImageData.SCPPixel``). ``ImageData.FirstRow`` /
+    ``FirstCol`` place a chipped image inside the full grid the SCP is quoted
+    against and are ``0`` for a full product.
+    """
+    grid = getattr(sicd, "Grid", None)
+    image_data = getattr(sicd, "ImageData", None)
+    row_ss = getattr(getattr(grid, "Row", None), "SS", None)
+    col_ss = getattr(getattr(grid, "Col", None), "SS", None)
+    scp = getattr(image_data, "SCPPixel", None)
+    scp_row = getattr(scp, "Row", None)
+    scp_col = getattr(scp, "Col", None)
+    if row_ss is None or col_ss is None or scp_row is None or scp_col is None:
+        raise ValueError(
+            "SICD is missing Grid.Row.SS / Grid.Col.SS / ImageData.SCPPixel, which "
+            "radiometric calibration needs: the scale-factor polynomials are "
+            "functions of image coordinates in metres from the scene centre point."
+        )
+    return {
+        "row_ss": float(row_ss),
+        "col_ss": float(col_ss),
+        "scp_row": float(scp_row),
+        "scp_col": float(scp_col),
+        "first_row": float(getattr(image_data, "FirstRow", 0) or 0),
+        "first_col": float(getattr(image_data, "FirstCol", 0) or 0),
+    }
+
+
+def _calibration_scale(
+    coefs,
+    shape: tuple[int, int],
+    *,
+    row_ss: float,
+    col_ss: float,
+    scp_row: float,
+    scp_col: float,
+    first_row: float = 0.0,
+    first_col: float = 0.0,
+):
+    """Per-pixel power-domain scale factor from a SICD SF polynomial.
+
+    Evaluates the 2-D polynomial over the image grid in SICD's own coordinates
+    — pixel ``(row, col)`` sits at ``((row + first_row - scp_row) * row_ss,
+    (col + first_col - scp_col) * col_ss)`` metres from the SCP — so a constant
+    polynomial (the common case) gives a flat scale and a higher-order one
+    tracks the across-swath variation the product describes.
+
+    A scale factor is a positive power ratio by construction; a non-positive or
+    non-finite value means the metadata cannot be evaluated on this grid, which
+    is raised rather than clamped, because a silently repaired calibration is
+    worse than none.
+    """
+    np = _require("numpy")
+    from numpy.polynomial import polynomial as npoly  # noqa: PLC0415
+
+    rows, cols = shape
+    x = (np.arange(rows, dtype="float64") + first_row - scp_row) * row_ss
+    y = (np.arange(cols, dtype="float64") + first_col - scp_col) * col_ss
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    scale = np.asarray(
+        npoly.polyval2d(xx, yy, np.atleast_2d(np.asarray(coefs, dtype="float64"))),
+        dtype="float64",
+    )
+    bad = ~np.isfinite(scale) | (scale <= 0.0)
+    if bool(bad.any()):
+        raise ValueError(
+            f"The SICD radiometric scale factor is non-positive or non-finite over "
+            f"{int(bad.sum())} of {bad.size} pixels, so the calibration polynomial "
+            "cannot be evaluated on this image grid. The product's Radiometric "
+            "metadata is inconsistent with its image geometry."
+        )
+    return scale
+
+
+def _apply_calibration(amplitude: np.ndarray, scale, *, decibels: bool):
+    """Apply a radiometric scale factor to a detected-amplitude raster.
+
+    SICD's scale factors multiply *power* (``|z|**2``), which is exactly the
+    convention the terrain-flattening factors already use, so this is the same
+    power-domain scaling of the same raster: in decibels it adds
+    ``10*log10(scale)``, giving the calibrated coefficient in dB directly; in
+    linear magnitude it multiplies by ``sqrt(scale)``, giving *calibrated
+    amplitude* (square it for the linear coefficient). Sharing one
+    implementation is what keeps calibration and ``--rtc`` composable: applied
+    together the factors simply multiply in the power domain.
+    """
+    return _apply_terrain_flattening(amplitude, scale, decibels=decibels)
+
+
+def _calibrate_amplitude(sicd: Any, amplitude: np.ndarray, *, kind: str, decibels: bool):
+    """Calibrate a detected-amplitude raster against the SICD's own metadata."""
+    coefs = _calibration_coefficients(sicd, kind)
+    scale = _calibration_scale(coefs, amplitude.shape, **_image_grid_geometry(sicd))
+    return _apply_calibration(amplitude, scale, decibels=decibels)
+
+
+def sicd_calibration_types(src: str | os.PathLike) -> tuple[str, ...]:
+    """Which radiometric calibrations a SICD product's metadata supports.
+
+    Returns the subset of :data:`CALIBRATION_TYPES` whose scale-factor
+    polynomial the file's ``Radiometric`` metadata actually carries — empty for
+    an uncalibrated product. Ask this before passing ``calibration=`` to
+    :func:`sicd_to_geocoded_cog` when you want to *check* rather than handle the
+    error, e.g. when deciding whether a scene can enter a calibrated stack.
+
+    Parameters
+    ----------
+    src:
+        Path to a SICD NITF file.
+    """
+    _require("sarpy")
+    from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
+
+    reader = open_complex(str(src))
+    return _available_calibrations(reader.get_sicds_as_tuple()[0])
+
+
 def sicd_to_amplitude_geotiff(
     src: str | os.PathLike,
     dst: str | os.PathLike,
     *,
     decibels: bool = True,
+    calibration: str | None = None,
 ) -> Path:
     """Read a SICD (complex) image and write its detected amplitude as a GeoTIFF.
 
@@ -131,6 +353,13 @@ def sicd_to_amplitude_geotiff(
         Output GeoTIFF path.
     decibels:
         If true, scale amplitude to dB (``20*log10``); otherwise raw magnitude.
+    calibration:
+        Optional radiometric calibration, one of :data:`CALIBRATION_TYPES`,
+        applied from the SICD's own ``Radiometric`` scale-factor polynomial (see
+        :func:`sicd_to_geocoded_cog` for what the calibrated values mean).
+        ``None`` writes the uncalibrated amplitude. Raises when the product
+        carries no scale factor for the requested calibration — ask
+        :func:`sicd_calibration_types` first to check.
     """
     _require("sarpy")
     _require("rasterio")
@@ -138,8 +367,20 @@ def sicd_to_amplitude_geotiff(
     from rasterio.transform import from_origin  # noqa: PLC0415
     from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
 
+    if calibration is not None and calibration not in CALIBRATION_TYPES:
+        raise ValueError(
+            f"Unknown calibration {calibration!r}; choose one of {', '.join(CALIBRATION_TYPES)}."
+        )
+
     reader = open_complex(str(src))
     amplitude = _amplitude(reader[:, :], decibels=decibels)
+    if calibration is not None:
+        amplitude = _calibrate_amplitude(
+            reader.get_sicds_as_tuple()[0],
+            amplitude,
+            kind=calibration,
+            decibels=decibels,
+        )
 
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1118,6 +1359,7 @@ def sicd_to_geocoded_cog(
     rtc: bool = False,
     rtc_reference_deg: float | None = None,
     rtc_model: str = "cosine",
+    calibration: str | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -1224,9 +1466,33 @@ def sicd_to_geocoded_cog(
           together. Over a planar slope it reduces to the product of the
           ``"area"`` and ``"gamma"`` factors.
 
-        All four are a normalisation of detected amplitude, not a calibrated
-        gamma-nought product (Umbra's open products are not radiometrically
-        calibrated); MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
+        On their own all four are a normalisation of *detected amplitude*, in
+        whatever arbitrary units the product's pixels carry. Pair them with
+        ``calibration=`` to make the result a physical backscatter coefficient:
+        ``calibration="gamma0"`` with ``rtc_model="facet"`` is the terrain-
+        flattened gamma-nought product.
+    calibration:
+        Optional radiometric calibration, one of :data:`CALIBRATION_TYPES`,
+        applied to the detected amplitude **before** geocoding — the SICD scale
+        factors are polynomials in image coordinates, so image space is where
+        they are defined. It multiplies pixel *power* by the scale factor the
+        product's own ``Radiometric`` metadata supplies, which is what turns a
+        relative brightness into a physical quantity: ``"sigma0"`` /
+        ``"beta0"`` / ``"gamma0"`` are the backscatter coefficients referenced
+        to unit ground, slant-plane and perpendicular-to-look area respectively,
+        and ``"rcs"`` is the absolute radar cross-section in m². With
+        ``decibels=True`` the output is that coefficient in dB directly
+        (``10*log10``); in linear magnitude it is the *calibrated amplitude*,
+        whose square is the coefficient. Composes with ``rtc``: both are
+        power-domain factors, so a calibrated *and* terrain-flattened scene is
+        the two applied together.
+
+        ``None`` (the default) leaves the output uncalibrated, which is what
+        Umbra's open products generally require — they usually ship without a
+        ``Radiometric`` block, and asking for a calibration the metadata cannot
+        support is a self-describing error rather than a plausible-looking
+        number. :func:`sicd_calibration_types` reports what a given file
+        supports. MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
     """
     np = _require("numpy")
     _require("rasterio")
@@ -1241,10 +1507,18 @@ def sicd_to_geocoded_cog(
         )
     if rtc and rtc_model not in RTC_MODELS:
         raise ValueError(f"Unknown rtc_model {rtc_model!r}; choose one of {', '.join(RTC_MODELS)}.")
+    if calibration is not None and calibration not in CALIBRATION_TYPES:
+        raise ValueError(
+            f"Unknown calibration {calibration!r}; choose one of {', '.join(CALIBRATION_TYPES)}."
+        )
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
     amplitude = _amplitude(reader[:, :], decibels=decibels)
+    if calibration is not None:
+        # In image space: the SF polynomials are functions of image coordinates,
+        # so calibrate before the warp resamples the grid away.
+        amplitude = _calibrate_amplitude(sicd, amplitude, kind=calibration, decibels=decibels)
     if isinstance(dem, str) and dem.lower() == "auto":
         from . import dem as dem_mod  # noqa: PLC0415
 

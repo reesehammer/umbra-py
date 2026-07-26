@@ -714,6 +714,13 @@ umbra convert scene_SICD.nitf scene_geocoded.tif
 # single flat height plane. --dem supersedes the flat-earth projection.
 umbra convert scene_SICD.nitf scene_ortho.tif --dem copernicus_dem.tif
 
+# Make the pixel values physical, not just relative: --calibrate applies the
+# SICD's own radiometric scale factors, so the decibels are a backscatter
+# coefficient (sigma0/beta0/gamma0) or an absolute RCS in m2 -- comparable
+# across scenes and dates. With --rtc it's a terrain-flattened gamma-nought
+# product. Needs a product that carries the scale factors; it says so if not.
+umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet --calibrate gamma0
+
 # Visual similarity: embed a site's quicklooks, then find scenes that look alike.
 umbra embed build --area "Centerfield" --start 2024-01-01 --end 2024-12-31
 umbra embed similar <item-json-url>

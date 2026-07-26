@@ -451,12 +451,46 @@ geometric half of 5.5's remaining geocoding gap. Follow-ons, none a blocker:
   tests pin the arithmetic to. Fourth value in `RTC_MODELS`; `rtc_model` still
   defaults to `"cosine"`. Pure-numpy core, no model call, no new dependency,
   offline-tested in `tests/test_convert.py`.
-- **MultiRTC interop / radiometric calibration.** What stays open under 5.5 after
-  the facet integration above is calibration itself: Umbra's open products are not
-  radiometrically calibrated, so all four `--rtc` models normalise *detected
-  amplitude* rather than producing a calibrated gamma-nought product. That, and
-  interop with [MultiRTC](https://github.com/MultiSAR/MultiRTC), is a heavier
-  calibration-oriented job and remains deferred.
+- ~~**Radiometric calibration.**~~ ✅ **Done** (`umbra convert --calibrate
+  {sigma0,beta0,gamma0,rcs}` / `sicd_to_geocoded_cog(calibration=…)` /
+  `sicd_to_amplitude_geotiff(calibration=…)` / `CALIBRATION_TYPES` /
+  `sicd_calibration_types`). Every `--rtc` model normalised *detected amplitude*,
+  so the output was a relative image: correct within itself and incomparable with
+  any other scene. Calibration scales pixel **power** by the scale-factor
+  polynomial in the SICD's own `Radiometric` metadata, so the value becomes a
+  physical quantity — the `sigma0` / `beta0` / `gamma0` backscatter coefficients
+  (unit ground / slant-plane / perpendicular-to-look area) or `rcs`, the absolute
+  radar cross-section in m². Applied **in image space**, before the warp, because
+  that is where the polynomials are defined: they are functions of image
+  coordinates in metres from the SCP, so `_calibration_scale` evaluates them over
+  `(row + FirstRow − SCPPixel.Row) × Grid.Row.SS` (and the column equivalent),
+  which keeps a constant polynomial flat, lets a higher-order one track the
+  across-swath variation, and offsets a chip by its own origin rather than tilting
+  it. It **composes with `--rtc`**: both are power-domain factors on the same
+  raster and share one application path, so `--rtc-model facet --calibrate gamma0`
+  is the terrain-flattened gamma-nought product every RTC entry above said it was
+  not. The metadata caveat became a *check* rather than a footnote — a product
+  with no `Radiometric` block (which is most of Umbra's open data) raises a
+  self-describing error naming what it does carry, the CLI reports it as a message
+  rather than a traceback, and `sicd_calibration_types` answers the question
+  without trying; a scale factor that evaluates non-positive or non-finite
+  anywhere is rejected rather than clamped. Pure-numpy core, no new dependency,
+  offline-tested in `tests/test_convert.py`. Follow-ons, neither a blocker:
+  - **Noise-level subtraction.** SICD's `Radiometric.NoiseLevel` describes the
+    noise-equivalent floor; subtracting it in the power domain before the scale
+    factor would make low-backscatter surfaces (calm water, shadow) honest rather
+    than floor-limited. Left out because it needs the `NoisePoly` /
+    `NoiseLevelType` handling (absolute vs. relative) that no Umbra product
+    currently exercises.
+  - **Nothing downstream records the calibration.** The output GeoTIFF carries the
+    calibrated values but no tag saying which coefficient they are, so scenes
+    converted with different `--calibrate` settings are indistinguishable after
+    the fact. Writing the calibration (and the RTC model) into the COG tags would
+    make a converted scene self-describing — the same "provenance travels with the
+    artifact" rule the render manifests already follow.
+- **MultiRTC interop.** Interop with
+  [MultiRTC](https://github.com/MultiSAR/MultiRTC) is a heavier,
+  research-oriented job and remains deferred.
 - ~~**Auto-fetch a DEM for the scene footprint.**~~ ✅ **Done** (`umbra_py.dem` /
   `umbra convert --dem auto`). `dem="auto"` / `--dem auto` resolves the 1°×1°
   Copernicus GLO-30 tiles covering the scene's projected footprint, pulls them

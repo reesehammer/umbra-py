@@ -59,6 +59,26 @@ class _FakeSicd:
             self.IncidenceAng = incidence
             self.AzimAng = azimuth
 
+    class _Grid:
+        class _Axis:
+            def __init__(self, ss):
+                self.SS = ss
+
+        def __init__(self, row_ss, col_ss):
+            self.Row = self._Axis(row_ss)
+            self.Col = self._Axis(col_ss)
+
+    class _ImageData:
+        class _Pixel:
+            def __init__(self, row, col):
+                self.Row = row
+                self.Col = col
+
+        def __init__(self, scp_row, scp_col, first_row, first_col):
+            self.SCPPixel = self._Pixel(scp_row, scp_col)
+            self.FirstRow = first_row
+            self.FirstCol = first_col
+
     def __init__(
         self,
         lon0=-100.0,
@@ -69,11 +89,23 @@ class _FakeSicd:
         hae_shift=0.0,
         incidence=30.0,
         azimuth=100.0,
+        radiometric=None,
+        row_ss=0.5,
+        col_ss=0.25,
+        scp_row=5.0,
+        scp_col=10.0,
+        first_row=0,
+        first_col=0,
     ):
         self.lon0, self.lat0, self.dlon, self.dlat, self.skew = lon0, lat0, dlon, dlat, skew
         self.hae_shift = hae_shift
         self.calls: list[tuple] = []
         self.SCPCOA = self._SCPCOA(incidence, azimuth)
+        self.Grid = self._Grid(row_ss, col_ss)
+        self.ImageData = self._ImageData(scp_row, scp_col, first_row, first_col)
+        # Umbra's open products generally ship *without* a Radiometric block, so
+        # "no calibration available" is the default a fake scene stands for.
+        self.Radiometric = radiometric
 
     def project_image_to_ground_geo(
         self, im_points, ordering="latlong", projection_type="HAE", hae0=None
@@ -1652,3 +1684,358 @@ def test_cli_convert_rtc_area(tmp_path, monkeypatch):
     assert "terrain-flattened" in result.output
     with rasterio.open(out) as ds:
         assert ds.crs.to_epsg() == 4326
+
+
+# --------------------------------------------------------------------------- #
+# Radiometric calibration (SICD ``Radiometric`` scale-factor polynomials).
+#
+# Terrain flattening removes the geometry from a pixel's brightness but leaves
+# it in the product's own arbitrary units. Calibration is what makes the number
+# physical, and it is only ever as real as the metadata behind it -- so the
+# tests pin both halves: the arithmetic (a power-domain scale evaluated in
+# SICD's image coordinates, composing with RTC) and the refusal (a product with
+# no scale factor says so instead of emitting a calibrated-looking number).
+# --------------------------------------------------------------------------- #
+
+
+class _FakePoly:
+    """Stand-in for a sarpy ``Poly2DType``: just its coefficient array."""
+
+    def __init__(self, coefs):
+        self.Coefs = coefs
+
+
+def _radiometric(**polys):
+    """A SICD ``Radiometric`` block carrying only the named SF polynomials."""
+
+    block = type("_FakeRadiometric", (), {})()
+    for name, coefs in polys.items():
+        setattr(block, name, _FakePoly(coefs))
+    return block
+
+
+def test_available_calibrations_reports_only_what_the_metadata_carries():
+    # The default fake scene has no Radiometric block at all -- the uncalibrated
+    # case Umbra's open products are in.
+    assert convert._available_calibrations(_FakeSicd()) == ()
+
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[2.0]], RCSSFPoly=[[3.0]]))
+    assert convert._available_calibrations(sicd) == ("sigma0", "rcs")
+
+
+def test_calibration_coefficients_missing_block_raises_and_says_why():
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        convert._calibration_coefficients(_FakeSicd(), "sigma0")
+
+
+def test_calibration_coefficients_missing_poly_names_what_is_available():
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[2.0]]))
+    with pytest.raises(ValueError, match="available: sigma0"):
+        convert._calibration_coefficients(sicd, "gamma0")
+
+
+def test_calibration_coefficients_rejects_an_unknown_kind():
+    with pytest.raises(ValueError, match="Unknown calibration"):
+        convert._calibration_coefficients(_FakeSicd(), "sigma_nought")
+
+
+def test_calibration_coefficients_rejects_an_empty_poly():
+    pytest.importorskip("numpy")
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[]))
+    with pytest.raises(ValueError, match="no coefficients"):
+        convert._calibration_coefficients(sicd, "sigma0")
+
+
+def test_calibration_coefficients_accepts_a_bare_array_or_scalar():
+    np = pytest.importorskip("numpy")
+    # sarpy hands back a Poly2DType, but a bare array (or scalar) is enough for
+    # the pure core, which is what keeps it testable without sarpy.
+    sicd = _FakeSicd(radiometric=type("_R", (), {"BetaZeroSFPoly": 7.0})())
+    coefs = convert._calibration_coefficients(sicd, "beta0")
+    assert coefs.shape == (1, 1)
+    assert np.allclose(coefs, 7.0)
+
+
+def test_image_grid_geometry_reads_spacings_scp_and_chip_origin():
+    sicd = _FakeSicd(row_ss=0.5, col_ss=0.25, scp_row=5.0, scp_col=10.0, first_row=3, first_col=4)
+    assert convert._image_grid_geometry(sicd) == {
+        "row_ss": 0.5,
+        "col_ss": 0.25,
+        "scp_row": 5.0,
+        "scp_col": 10.0,
+        "first_row": 3.0,
+        "first_col": 4.0,
+    }
+
+
+def test_image_grid_geometry_raises_without_the_grid_the_polys_live_in():
+    sicd = _FakeSicd()
+    sicd.Grid = None
+    with pytest.raises(ValueError, match="Grid.Row.SS"):
+        convert._image_grid_geometry(sicd)
+
+
+def test_calibration_scale_constant_poly_is_a_flat_scale():
+    np = pytest.importorskip("numpy")
+    scale = convert._calibration_scale(
+        [[4.0]], (3, 5), row_ss=0.5, col_ss=0.25, scp_row=1.0, scp_col=2.0
+    )
+    assert scale.shape == (3, 5)
+    assert np.allclose(scale, 4.0)
+
+
+def test_calibration_scale_is_evaluated_in_metres_from_the_scp():
+    np = pytest.importorskip("numpy")
+    # sf(x, y) = 4 + 2*x + 1*y, with x/y the row/col offsets from the SCP in
+    # metres -- so the coefficient matrix is [[4, 1], [2, 0]].
+    coefs = [[4.0, 1.0], [2.0, 0.0]]
+    scale = convert._calibration_scale(
+        coefs, (3, 4), row_ss=0.5, col_ss=0.25, scp_row=1.0, scp_col=2.0
+    )
+    rows = (np.arange(3) - 1.0) * 0.5
+    cols = (np.arange(4) - 2.0) * 0.25
+    expected = 4.0 + 2.0 * rows[:, None] + 1.0 * cols[None, :]
+    assert np.allclose(scale, expected)
+
+
+def test_calibration_scale_offsets_a_chipped_image_by_its_origin():
+    np = pytest.importorskip("numpy")
+    # A chip's SCP is quoted against the *full* grid, so FirstRow/FirstCol move
+    # the whole evaluation -- getting this wrong tilts the calibration.
+    coefs = [[1.0, 0.0], [2.0, 0.0]]
+    full = convert._calibration_scale(
+        coefs, (6, 2), row_ss=1.0, col_ss=1.0, scp_row=0.0, scp_col=0.0
+    )
+    chip = convert._calibration_scale(
+        coefs, (3, 2), row_ss=1.0, col_ss=1.0, scp_row=0.0, scp_col=0.0, first_row=3
+    )
+    assert np.allclose(chip, full[3:])
+
+
+def test_calibration_scale_rejects_a_non_positive_scale_factor():
+    pytest.importorskip("numpy")
+    # A scale factor is a positive power ratio by construction; a polynomial
+    # that goes non-positive over the image is broken metadata, and repairing it
+    # silently would hand back a calibrated-looking number.
+    coefs = [[1.0, 0.0], [1.0, 0.0]]  # sf = 1 + x, negative for x < -1
+    with pytest.raises(ValueError, match="non-positive or non-finite"):
+        convert._calibration_scale(coefs, (10, 2), row_ss=1.0, col_ss=1.0, scp_row=9.0, scp_col=0.0)
+
+
+def test_apply_calibration_matches_the_power_domain_convention():
+    np = pytest.importorskip("numpy")
+    scale = np.array([[100.0, 100.0]], dtype="float64")
+
+    db = np.array([[10.0, np.nan]], dtype="float32")
+    out_db = convert._apply_calibration(db, scale, decibels=True)
+    assert out_db[0, 0] == pytest.approx(10.0 + 20.0, rel=1e-5)  # 10*log10(100)
+    assert np.isnan(out_db[0, 1])
+
+    lin = np.array([[3.0, np.nan]], dtype="float32")
+    out_lin = convert._apply_calibration(lin, scale, decibels=False)
+    # Linear output is calibrated *amplitude*: square it for the coefficient.
+    assert out_lin[0, 0] == pytest.approx(3.0 * 10.0, rel=1e-5)
+    assert np.isnan(out_lin[0, 1])
+
+    # The two paths are the same measurement in different units: calibrating a
+    # linear raster and then taking its decibels gives what calibrating the
+    # decibel raster gave.
+    same_scene_db = np.array([[20.0 * math.log10(3.0)]], dtype="float32")
+    assert 20.0 * math.log10(float(out_lin[0, 0])) == pytest.approx(
+        float(convert._apply_calibration(same_scene_db, scale[:, :1], decibels=True)[0, 0]),
+        rel=1e-5,
+    )
+
+
+def test_sicd_to_amplitude_geotiff_calibration_scales_the_slant_plane(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(6, 8)
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_amplitude_geotiff(tmp_path / "in.ntf", tmp_path / "plain.tif")
+
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[100.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    calibrated = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "in.ntf", tmp_path / "cal.tif", calibration="sigma0"
+    )
+
+    with rasterio.open(plain) as a, rasterio.open(calibrated) as b:
+        assert np.allclose(b.read(1), a.read(1) + 20.0, atol=1e-4)
+
+
+def test_sicd_to_amplitude_geotiff_rejects_an_unknown_calibration(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(4, 4), _FakeSicd()))
+    with pytest.raises(ValueError, match="Unknown calibration"):
+        convert.sicd_to_amplitude_geotiff(
+            tmp_path / "in.ntf", tmp_path / "out.tif", calibration="sigma"
+        )
+
+
+def test_sicd_to_geocoded_cog_calibration_offsets_the_scene(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(10, 12)
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest"
+    )
+
+    sicd = _FakeSicd(radiometric=_radiometric(GammaZeroSFPoly=[[0.01]]))
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    calibrated = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "cal.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        calibration="gamma0",
+    )
+
+    with rasterio.open(plain) as a, rasterio.open(calibrated) as b:
+        va, vb = a.read(1), b.read(1)
+        both = np.isfinite(va) & np.isfinite(vb)
+        assert both.any()
+        # 10*log10(0.01) == -20 dB, applied before the warp.
+        assert np.allclose(vb[both], va[both] - 20.0, atol=1e-4)
+
+
+def test_sicd_to_geocoded_cog_calibration_composes_with_rtc(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(10, 12)
+    dem = _write_dem(tmp_path / "dem.tif")
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    flattened = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_model="facet",
+    )
+
+    sicd = _FakeSicd(radiometric=_radiometric(GammaZeroSFPoly=[[1000.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    both_ways = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "rtc_cal.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        dem=str(dem),
+        rtc=True,
+        rtc_model="facet",
+        calibration="gamma0",
+    )
+
+    with rasterio.open(flattened) as a, rasterio.open(both_ways) as b:
+        va, vb = a.read(1), b.read(1)
+        finite = np.isfinite(va) & np.isfinite(vb)
+        assert finite.any()
+        # Both are power-domain factors, so terrain-flattened gamma-nought is
+        # exactly the flattened scene plus the calibration offset (30 dB).
+        assert np.allclose(vb[finite], va[finite] + 30.0, atol=1e-4)
+
+
+def test_sicd_to_geocoded_cog_uncalibrated_product_raises(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 6), _FakeSicd()))
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf", tmp_path / "out.tif", gcp_grid=4, calibration="sigma0"
+        )
+
+
+def test_sicd_to_geocoded_cog_rejects_an_unknown_calibration_before_reading(tmp_path):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    # Validated ahead of the file read, like the rtc_model check beside it.
+    with pytest.raises(ValueError, match="Unknown calibration"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "missing.ntf", tmp_path / "out.tif", calibration="gamma"
+        )
+
+
+def test_sicd_calibration_types_reports_the_products_own_metadata(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(4, 4), _FakeSicd()))
+    assert convert.sicd_calibration_types(tmp_path / "in.ntf") == ()
+
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[1.0]], GammaZeroSFPoly=[[1.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(4, 4), sicd))
+    assert convert.sicd_calibration_types(tmp_path / "in.ntf") == ("sigma0", "gamma0")
+
+
+def test_cli_convert_calibrate(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[10.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), sicd))
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(out), "--calibrate", "sigma0"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "sigma0-calibrated" in result.output
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_cli_convert_calibrate_slant_plane(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    sicd = _FakeSicd(radiometric=_radiometric(RCSSFPoly=[[10.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 6), sicd))
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(tmp_path / "amp.tif"), "--slant-plane", "--calibrate", "rcs"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rcs-calibrated" in result.output
+
+
+def test_cli_convert_calibrate_unavailable_is_a_clean_error(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    # The default fake scene carries no Radiometric block -- the shape of an
+    # Umbra open product -- so the CLI must explain, not traceback.
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), _FakeSicd()))
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "geo.tif"), "--calibrate", "sigma0"]
+    )
+
+    assert result.exit_code != 0
+    assert "Radiometric" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
