@@ -6,9 +6,9 @@ the date range or the product filter and you re-run the CLI and open a new file.
 This module produces the missing piece the demo-gap analysis
 (:doc:`DEMO_APP_GAPS`) calls the frontier — a **self-serve explorer**: one HTML
 page over a whole slice of the catalog with *interactive* client-side filters
-(date range, product type, free-text site search), marker **clustering** so it
-scales past a Folium map's few-hundred-polygon ceiling, and click-to-quicklook
-SAR imagery streamed on demand.
+(date range, product type, polarization, free-text site search), marker
+**clustering** so it scales past a Folium map's few-hundred-polygon ceiling, and
+click-to-quicklook SAR imagery streamed on demand.
 
 Design, deliberately in the repo's grain:
 
@@ -68,22 +68,33 @@ Design, deliberately in the repo's grain:
   ``umbra tiles`` writes and ``publish-index.yml`` publishes): the browser
   range-reads only the tiles for the current view, so the *entire* archive is
   explorable from a page that stays a few kilobytes, and the same sidebar
-  filters (free-text, date range, product chips) run as MapLibre filter
-  expressions evaluated inside the tiles. This is the ``DEMO_APP_GAPS.md`` Path A
-  follow-on that collapses the showcase's separate whole-catalog *map* and
-  interactive *explorer* into one page (``umbra showcase --unified``). The
-  archive carries each acquisition twice — a centroid at every zoom and its
-  clipped **footprint polygon** at the deeper ones — so the page draws coverage
-  shape as you zoom in, filtered by the same expression as the markers and
-  clickable to the same detail panel. The **on-click "Get SAR image" overlay
-  works here too** — the last thing the embedded-slice mode had over the
-  whole-archive one: the archive's features carry a reference to each
+  filters (free-text, date range, product and polarization chips) run as
+  MapLibre filter expressions evaluated inside the tiles. This is the
+  ``DEMO_APP_GAPS.md`` Path A follow-on that collapses the showcase's separate
+  whole-catalog *map* and interactive *explorer* into one page (``umbra showcase
+  --unified``). The archive carries each acquisition twice — a centroid at every
+  zoom and its clipped **footprint polygon** at the deeper ones — so the page
+  draws coverage shape as you zoom in, filtered by the same expression as the
+  markers and clickable to the same detail panel. The **on-click "Get SAR image"
+  overlay works here too** — the last thing the embedded-slice mode had over
+  the whole-archive one: the archive's features carry a reference to each
   acquisition's GEC COG and the bounds to place it (kept lean as a filename
-  resolved against the ``stac_href`` the tiles already carry), and the page
-  ships a MapLibre-placing build of the *same* geotiff.js driver, so any scene
-  in the archive is one click from its actual radar picture. So the whole-archive
-  explorer is now a superset of the slice one on every axis but the two fields
-  tiles do not encode (polarizations and the per-product asset list).
+  resolved against the ``stac_href`` the tiles already carry), and the page ships
+  a MapLibre-placing build of the *same* geotiff.js driver, so any scene
+  in the archive is one click from its actual radar picture. The last two fields
+  the tiles withheld — polarizations and the per-product asset list — now ride
+  along comma-joined, so the whole-archive explorer is a **superset** of the
+  slice one: same detail panel, same facets, every acquisition.
+
+* **Filterable by polarization (both modes).** The one facet the sidebar lacked
+  was the one that decides whether an analysis is *valid* rather than merely
+  what it shows: HH and VV image different scattering, so a change measurement
+  across mixed polarizations reads a physics difference as change. ``POST
+  /artifacts/stats`` refuses such a selection outright and tells the caller to
+  narrow it — which, before this, the explorer had no control to do. A
+  polarization chip row sits under the product chips in both modes, filtering
+  the embedded slice in JavaScript and the whole archive as a MapLibre
+  ``index-of`` test evaluated inside the tiles.
 
 * **Reads the fast index.** Like the other visual commands it routes through the
   shared ``_gather_items`` helper, so ``--local`` answers from a prebuilt index
@@ -121,7 +132,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from .constants import ATTRIBUTION, PRODUCT_ASSETS
+from .constants import ATTRIBUTION, POLARIZATIONS, PRODUCT_ASSETS
 from .models import UmbraItem
 
 # Pinned CDN assets. Bumped deliberately -- an unpinned CDN can regress a
@@ -297,6 +308,11 @@ def build_demo(
     features = [f for f in (_demo_feature(i, lazy) for i in items) if f is not None]
 
     products = sorted({f["properties"]["product"] for f in features if f["properties"]["product"]})
+    # Chips for the polarizations this slice actually contains, in the canonical
+    # order rather than alphabetically, so the row reads the same on every page.
+    present = {p for f in features for p in f["properties"]["polarizations"]}
+    polarizations = [p for p in POLARIZATIONS if p in present]
+    polarizations += sorted(present - set(POLARIZATIONS))
     dates = [f["properties"]["date"] for f in features if f["properties"]["date"]]
     date_min = min(dates) if dates else None
     date_max = max(dates) if dates else None
@@ -307,6 +323,7 @@ def build_demo(
         "attribution": ATTRIBUTION,
         "features": features,
         "products": products,
+        "polarizations": polarizations,
         "dateMin": date_min,
         "dateMax": date_max,
         "lazyImagery": bool(lazy),
@@ -354,12 +371,14 @@ def _build_pmtiles_demo(
     the generated HTML is the same handful of kilobytes for a catalog of any
     size.
 
-    The product chips come from :data:`umbra_py.constants.PRODUCT_ASSETS` rather
-    than from a scanned slice — the product set is closed and known, and deriving
-    it from a *sample* of a catalog the page does not otherwise read would let a
-    chip go missing for the whole archive. For the same reason the date inputs
-    start empty (unbounded) instead of framing a sample's extent, which would
-    silently hide most of the archive behind a default filter.
+    The product and polarization chips come from
+    :data:`umbra_py.constants.PRODUCT_ASSETS` /
+    :data:`umbra_py.constants.POLARIZATIONS` rather than from a scanned slice —
+    both sets are closed and known, and deriving them from a *sample* of a
+    catalog the page does not otherwise read would let a chip go missing for the
+    whole archive. For the same reason the date inputs start empty (unbounded)
+    instead of framing a sample's extent, which would silently hide most of the
+    archive behind a default filter.
 
     The on-click "Get SAR image" overlay works here too: the archive's features
     carry a ``cog`` reference and its ``bounds`` (see
@@ -381,6 +400,7 @@ def _build_pmtiles_demo(
         "subtitle": subtitle,
         "attribution": ATTRIBUTION,
         "products": list(PRODUCT_ASSETS),
+        "polarizations": list(POLARIZATIONS),
         "serverUrl": server_url or None,
         "pmtilesUrl": pmtiles_url,
         "pmtilesLayer": layer,
@@ -528,6 +548,26 @@ window.umbraRow = function (label, value) {
   var td = document.createElement('td'); td.textContent = (value == null ? '\\u2014' : value);
   tr.appendChild(th); tr.appendChild(td);
   return tr;
+};
+
+// A row of toggle chips for one facet, wired to `onToggle(value, active)`.
+// Both facets both apps offer -- product type and polarization -- read the same
+// way: a chip starts active and a value is "on" unless explicitly toggled off,
+// so an untouched sidebar hides nothing. Returns the container so a Reset can
+// re-activate every chip in it.
+window.umbraChipRow = function (containerId, values, onToggle) {
+  var box = document.getElementById(containerId);
+  if (!box) return [];
+  (values || []).forEach(function (value) {
+    var chip = document.createElement('span');
+    chip.className = 'umbra-chip active';
+    chip.textContent = value;
+    chip.addEventListener('click', function () {
+      onToggle(value, chip.classList.toggle('active'));
+    });
+    box.appendChild(chip);
+  });
+  return box;
 };
 
 // An instant SAR picture of the selected scene, or null when the page was
@@ -890,13 +930,27 @@ _APP_JS = """
   var shownFeatures = [];
 
   // --- filter state ---
-  var state = { text: '', start: CFG.dateMin || '', end: CFG.dateMax || '', products: {} };
+  var state = {
+    text: '', start: CFG.dateMin || '', end: CFG.dateMax || '', products: {}, pols: {}
+  };
   (CFG.products || []).forEach(function (p) { state.products[p] = true; });
+  (CFG.polarizations || []).forEach(function (p) { state.pols[p] = true; });
 
   function passesFilter(props) {
     if (state.products && Object.keys(state.products).length) {
       // A product is "on" unless explicitly toggled off.
       if (props.product && state.products[props.product] === false) return false;
+    }
+    // Same "on unless toggled off" rule, but a scene can carry several
+    // polarizations, so it survives if *any* of them is still on -- and a scene
+    // with none listed is never filtered out by a facet it has no value for.
+    var pols = props.polarizations || [];
+    if (pols.length) {
+      var keep = false;
+      for (var pi = 0; pi < pols.length; pi++) {
+        if (state.pols[pols[pi]] !== false) { keep = true; break; }
+      }
+      if (!keep) return false;
     }
     if (state.start && props.date && props.date < state.start) return false;
     if (state.end && props.date && props.date > state.end) return false;
@@ -997,17 +1051,11 @@ _APP_JS = """
   startInput.addEventListener('change', function () { state.start = startInput.value; render(); });
   endInput.addEventListener('change', function () { state.end = endInput.value; render(); });
 
-  var chipBox = document.getElementById('umbra-products');
-  (CFG.products || []).forEach(function (prod) {
-    var chip = document.createElement('span');
-    chip.className = 'umbra-chip active';
-    chip.textContent = prod;
-    chip.addEventListener('click', function () {
-      var on = chip.classList.toggle('active');
-      state.products[prod] = on;
-      render();
-    });
-    chipBox.appendChild(chip);
+  var chipBox = window.umbraChipRow('umbra-products', CFG.products, function (prod, on) {
+    state.products[prod] = on; render();
+  });
+  var polBox = window.umbraChipRow('umbra-polarizations', CFG.polarizations, function (pol, on) {
+    state.pols[pol] = on; render();
   });
 
   document.getElementById('umbra-reset').addEventListener('click', function () {
@@ -1015,7 +1063,10 @@ _APP_JS = """
     state.start = CFG.dateMin || ''; startInput.value = CFG.dateMin || '';
     state.end = CFG.dateMax || ''; endInput.value = CFG.dateMax || '';
     (CFG.products || []).forEach(function (p) { state.products[p] = true; });
-    Array.prototype.forEach.call(chipBox.children, function (c) { c.classList.add('active'); });
+    (CFG.polarizations || []).forEach(function (p) { state.pols[p] = true; });
+    [chipBox, polBox].forEach(function (box) {
+      Array.prototype.forEach.call(box.children || [], function (c) { c.classList.add('active'); });
+    });
     render();
   });
 
@@ -1137,8 +1188,9 @@ _PMTILES_APP_JS = """
   var serverBase = CFG.serverUrl ? String(CFG.serverUrl).replace(/\\/+$/, '') : null;
   // The acquisitions currently drawn -- the "view" the analysis buttons act on.
   var shownFeatures = [];
-  var state = { text: '', start: '', end: '', products: {} };
+  var state = { text: '', start: '', end: '', products: {}, pols: {} };
   (CFG.products || []).forEach(function (p) { state.products[p] = true; });
+  (CFG.polarizations || []).forEach(function (p) { state.pols[p] = true; });
 
   // --- filters, as MapLibre expressions evaluated inside the vector tiles ---
   // The equivalent of the embedded-slice app's passesFilter(), except the
@@ -1150,6 +1202,23 @@ _PMTILES_APP_JS = """
       // app), so only the off ones become exclusions.
       if (state.products[p] === false) clauses.push(['!=', ['get', 'product'], p]);
     });
+    // Polarization is the one facet a tiled value holds as a *list* -- comma
+    // joined, since a tile property is a scalar -- so "keep the scenes still
+    // offering an on polarization" is an `any` over substring tests rather than
+    // an equality. No two-letter code can match across the comma, so index-of is
+    // exact. The clause is only added once something is off (an all-on facet
+    // filters nothing), and a scene with no `pol` at all stays visible, the same
+    // rule the missing-date guard applies.
+    var onPols = (CFG.polarizations || []).filter(function (p) {
+      return state.pols[p] !== false;
+    });
+    if (onPols.length !== (CFG.polarizations || []).length) {
+      var any = ['any', ['!', ['has', 'pol']]];
+      onPols.forEach(function (p) {
+        any.push(['>=', ['index-of', p, ['get', 'pol']], 0]);
+      });
+      clauses.push(any);
+    }
     // `any` short-circuits, so the guard both keeps a date-less feature out of a
     // string comparison against null *and* keeps it visible -- the same "a
     // missing date never fails a date filter" rule passesFilter() applies in the
@@ -1212,9 +1281,14 @@ _PMTILES_APP_JS = """
   }
 
   // --- detail panel ---
-  // Vector tiles carry the acquisition's geometry and its lean metadata, so this
-  // panel is the slice app's minus the fields tiles do not encode
-  // (polarizations, the per-product asset list).
+  // Vector tiles carry the acquisition's geometry and its lean metadata, which
+  // is now every field the slice app's panel shows. The two list-valued ones
+  // arrive comma-joined (a tile property is a scalar), so they are re-spaced for
+  // reading rather than reformatted.
+  function commas(value) {
+    return value ? String(value).split(',').join(', ') : null;
+  }
+
   function showDetail(p) {
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
@@ -1229,6 +1303,8 @@ _PMTILES_APP_JS = """
     table.appendChild(row('Acquired', p.date));
     table.appendChild(row('Platform', p.platform));
     table.appendChild(row('Product', p.product));
+    table.appendChild(row('Polarizations', commas(p.pol)));
+    table.appendChild(row('Assets', commas(p.assets)));
     panel.appendChild(table);
 
     // The STAC href comes from remote metadata; only http(s) may reach an
@@ -1274,16 +1350,11 @@ _PMTILES_APP_JS = """
     state.end = endInput.value; applyFilter();
   });
 
-  var chipBox = document.getElementById('umbra-products');
-  (CFG.products || []).forEach(function (prod) {
-    var chip = document.createElement('span');
-    chip.className = 'umbra-chip active';
-    chip.textContent = prod;
-    chip.addEventListener('click', function () {
-      state.products[prod] = chip.classList.toggle('active');
-      applyFilter();
-    });
-    chipBox.appendChild(chip);
+  var chipBox = window.umbraChipRow('umbra-products', CFG.products, function (prod, on) {
+    state.products[prod] = on; applyFilter();
+  });
+  var polBox = window.umbraChipRow('umbra-polarizations', CFG.polarizations, function (pol, on) {
+    state.pols[pol] = on; applyFilter();
   });
 
   document.getElementById('umbra-reset').addEventListener('click', function () {
@@ -1291,7 +1362,10 @@ _PMTILES_APP_JS = """
     state.start = ''; startInput.value = '';
     state.end = ''; endInput.value = '';
     (CFG.products || []).forEach(function (p) { state.products[p] = true; });
-    Array.prototype.forEach.call(chipBox.children, function (c) { c.classList.add('active'); });
+    (CFG.polarizations || []).forEach(function (p) { state.pols[p] = true; });
+    [chipBox, polBox].forEach(function (box) {
+      Array.prototype.forEach.call(box.children || [], function (c) { c.classList.add('active'); });
+    });
     applyFilter();
   });
 
@@ -1344,6 +1418,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="umbra-filter">
       <label>Product type</label>
       <div class="umbra-chips" id="umbra-products"></div>
+    </div>
+    <div class="umbra-filter">
+      <label title="HH and VV image different scattering">Polarization</label>
+      <div class="umbra-chips" id="umbra-polarizations"></div>
     </div>
     <div id="umbra-count"></div>
     <button id="umbra-reset" type="button">Reset filters</button>

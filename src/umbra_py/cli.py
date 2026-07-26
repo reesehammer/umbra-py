@@ -3167,7 +3167,7 @@ def demo(
     Unlike the one-shot artifacts the other visual commands emit, this is an
     *application*: a single self-contained page over the whole gathered slice of
     the catalog with client-side filters (search box, date range, product-type
-    chips), clustered markers that scale past a plain map's polygon ceiling, and
+    and polarization chips), clustered markers that scale past a plain map's polygon ceiling, and
     a click-to-quicklook SAR overlay streamed on demand. Reads a prebuilt index
     with --local for a near-instant, offline build. Needs no extra: the page is
     pure HTML, and Leaflet + the on-click COG decode run browser-side from

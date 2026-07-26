@@ -60,6 +60,35 @@ def test_build_demo_derives_product_and_date_facets(sample_item_dict):
     assert cfg["dateMax"] == "2024-01-01"
 
 
+def test_build_demo_derives_the_polarization_facet(sample_item_dict):
+    """The polarization chips are the ones this slice actually contains, listed
+    in the canonical transmit/receive order rather than alphabetically."""
+    vv = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    hh_doc = json.loads(json.dumps(sample_item_dict))
+    hh_doc["id"] = "hh-scene"
+    hh_doc["properties"]["sar:polarizations"] = ["HH"]
+    hh = UmbraItem.from_dict(hh_doc, href=_HREF)
+
+    html = demo.build_demo([vv, hh])
+    cfg = _config(html)
+    # POLARIZATIONS orders VV before HH, so a sorted() facet would flip these.
+    assert cfg["polarizations"] == ["VV", "HH"]
+    assert 'id="umbra-polarizations"' in html
+    # A scene keeps its own list, so the client can test membership per feature.
+    props = {f["properties"]["id"]: f["properties"] for f in cfg["features"]}
+    assert props["hh-scene"]["polarizations"] == ["HH"]
+
+
+def test_build_demo_polarization_facet_is_empty_without_the_metadata(sample_item_dict):
+    """An item with no ``sar:polarizations`` contributes no chip -- and the
+    client rule is that it is never hidden by a facet it has no value for."""
+    doc = json.loads(json.dumps(sample_item_dict))
+    doc["properties"].pop("sar:polarizations")
+    cfg = _config(demo.build_demo([UmbraItem.from_dict(doc, href=_HREF)]))
+    assert cfg["polarizations"] == []
+    assert cfg["features"][0]["properties"]["polarizations"] == []
+
+
 def test_build_demo_lazy_imagery_wires_the_shared_driver(sample_item_dict):
     """With lazy imagery on, the page must ship the geotiff.js driver and each
     feature must carry the COG URL + placement bounds the button needs."""
@@ -437,6 +466,37 @@ def test_build_demo_pmtiles_mode_offers_the_closed_product_set():
     cfg = _config(demo.build_demo([], pmtiles_url="catalog.pmtiles"))
     assert cfg["products"] == list(PRODUCT_ASSETS)
     assert "dateMin" not in cfg and "dateMax" not in cfg
+
+
+def test_build_demo_pmtiles_mode_offers_the_closed_polarization_set():
+    """Same reasoning as the product chips: the polarization set is closed, so
+    the whole-archive page offers all of it rather than a sample's subset."""
+    from umbra_py.constants import POLARIZATIONS
+
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert _config(html)["polarizations"] == list(POLARIZATIONS)
+    assert 'id="umbra-polarizations"' in html
+    # The filter is a substring test over the comma-joined `pol` property the
+    # tiles carry, guarded so a scene without the field stays visible.
+    assert "['index-of', p, ['get', 'pol']]" in html
+    assert "['!', ['has', 'pol']]" in html
+
+
+def test_build_demo_pmtiles_mode_shows_the_list_valued_fields():
+    """The two fields the tiles used to withhold now reach the detail panel,
+    re-spaced from the comma-joined form a scalar tile property forces."""
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    assert "row('Polarizations', commas(p.pol))" in html
+    assert "row('Assets', commas(p.assets))" in html
+
+
+def test_both_modes_share_one_chip_row_builder(sample_item_dict):
+    """Two facets x two apps is four chip rows; they read the same 'on unless
+    toggled off' rule, so they are built by one shared helper."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    for page in (demo.build_demo([item]), demo.build_demo([], pmtiles_url="c.pmtiles")):
+        assert "window.umbraChipRow" in page
+        assert page.count("window.umbraChipRow('umbra-") == 2
 
 
 def test_build_demo_pmtiles_mode_wires_the_server_panels():

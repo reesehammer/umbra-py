@@ -50,9 +50,9 @@ polygon in the ``footprints`` layer, so zooming in shows *coverage shape*
 rather than a dot. The polygon layer starts partway down the pyramid on
 purpose: at world zooms a 5–25 km footprint is smaller than a pixel, and the
 low-zoom tiles are the ones every visitor loads first. Both layers carry the
-same lean set of string properties (id, place, product, date, platform) —
-enough to style, label and click a feature; the full metadata still lives one
-STAC link away.
+same lean set of string properties (id, place, product, date, platform, the
+comma-joined ``pol`` and ``assets``) — enough to style, label, filter and click
+a feature; the full metadata still lives one STAC link away.
 
 They also carry a **reference to the acquisition's GEC cloud-optimized GeoTIFF**
 (``cog``, plus the ``bounds`` to place it), which is what lets a viewer over the
@@ -577,6 +577,19 @@ def _cog_bounds(item: UmbraItem) -> str | None:
 def _item_properties(item: UmbraItem, cog_asset: str | None = None) -> dict[str, Any]:
     """The lean string properties each tiled point carries (id, place, ...).
 
+    Two of them are *lists* in the item and comma-joined strings here — ``pol``
+    (:attr:`~umbra_py.models.UmbraItem.polarizations`) and ``assets``
+    (:attr:`~umbra_py.models.UmbraItem.available_assets`) — because a vector
+    tile's property values are scalars. Comma-joined is enough for both readers:
+    the explorer's polarization filter is a substring test compiled to a
+    MapLibre ``index-of`` expression, and no two-letter polarization code can
+    match across a separator. ``pol`` is the facet that matters most for
+    correctness rather than display: differencing an HH pass against a VV one
+    puts a scattering difference on the time axis where it reads as change (see
+    :data:`~umbra_py.constants.POLARIZATION_CAVEAT`), and ``POST
+    /artifacts/stats`` refuses such a selection outright, so the whole-archive
+    explorer needs the field in the tiles to be able to narrow to one.
+
     With ``cog_asset`` set, two more ride along — ``cog`` (the asset's COG,
     basename-relative to ``stac_href`` where it is a sibling) and ``bounds``
     (its footprint as ``"S,W,N,E"``) — which is what lets the whole-archive
@@ -595,6 +608,11 @@ def _item_properties(item: UmbraItem, cog_asset: str | None = None) -> dict[str,
         "product": item.product_type,
         "date": dt.date().isoformat() if dt else None,
         "platform": item.platform,
+        # Empty joins fall out below with the other Nones, so an item with no
+        # polarization metadata (or no products) carries no key at all rather
+        # than an empty string -- the filter's "has" guard keys off exactly that.
+        "pol": ",".join(item.polarizations) or None,
+        "assets": ",".join(item.available_assets) or None,
         "stac_href": item.href,
     }
     if cog_asset:
@@ -732,6 +750,8 @@ def build_pmtiles(
         "product": "String",
         "date": "String",
         "platform": "String",
+        "pol": "String",
+        "assets": "String",
         "stac_href": "String",
     }
     if cog_asset:
@@ -970,7 +990,7 @@ map.on("click", (e) => {
   const p = f.properties || {};
   const div = document.createElement("div");
   div.className = "umbra-popup";
-  const order = ["place", "product", "date", "platform", "id"];
+  const order = ["place", "product", "pol", "date", "platform", "id"];
   for (const key of order) {
     if (p[key] == null) continue;
     const row = document.createElement("div");

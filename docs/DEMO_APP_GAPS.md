@@ -42,10 +42,16 @@
 >   references its GEC cloud-optimized GeoTIFF (a bare filename resolved against
 >   the `stac_href` the tiles already carry) plus the bounds to place it, and the
 >   shared geotiff.js driver grew a MapLibre placement beside its Leaflet one, so
->   any acquisition in the archive is one click from its radar picture. Path A's
->   front end is now a superset of the slice explorer on every axis but the two
->   fields vector tiles do not encode (polarizations and the per-product asset
->   list).
+>   any acquisition in the archive is one click from its radar picture. **And the
+>   last two fields are tiled now too** — `pol` and `assets`, comma-joined since a
+>   vector-tile property is a scalar — which closed the difference *and* bought a
+>   facet neither explorer had: a **polarization filter** (chips in both modes; a
+>   MapLibre `index-of` test inside the tiles for the whole-archive one). That is
+>   the facet deciding whether a change measurement is *valid* rather than merely
+>   what it shows — `POST /artifacts/stats` refuses a mixed-polarization
+>   selection, advice the page previously had no control to follow. **Path A is
+>   closed**: the whole-archive front end is a strict superset of the
+>   embedded-slice one.
 >
 > The original item IDs (`G1`–`G8`, `R1`–`R7`, Path A/B step numbers) are still
 > cited from source docstrings; the detail behind each is in this file's git

@@ -279,6 +279,36 @@ none a blocker:
   run, so the hosted showcase shows no button until then; and the overlay is a
   bbox-stretched quick look (the same approximation the slice explorer makes),
   not a reprojection.
+- ~~**Tile the two list-valued fields (polarizations, the per-product asset
+  list).**~~ ✅ **Done** (the `pol` + `assets` properties, and the polarization
+  chip row both `umbra demo` modes now carry). These were the last two fields the
+  embedded-slice detail panel showed and the whole-archive one could not, so
+  tiling them makes the whole-archive explorer a strict **superset** of the slice
+  explorer and closes `DEMO_APP_GAPS.md` Path A. Both are comma-joined, because a
+  vector-tile property is a scalar; an item with neither tiles no key at all
+  rather than an empty string. The larger point is the filter they enabled: the
+  sidebar could narrow by place, date and product — three facets about *what you
+  get* — but not by the one that decides whether an analysis is meaningful, since
+  differencing a VV pass against an HH one puts a scattering difference on the
+  time axis and reads it as change. `POST /artifacts/stats` refuses such a
+  selection and tells the caller to narrow to one polarization, which is advice
+  the explorer's Quantify button could not act on. The slice app tests the list
+  it already holds; the whole-archive app compiles the chips to a MapLibre
+  `index-of` test evaluated inside the tiles (exact, since no two-letter code
+  matches across the separator), and a scene with no `pol` stays visible like one
+  with no date. Offline-tested in `tests/test_pmtiles.py` and
+  `tests/test_demo.py`. Follow-ons, neither a blocker:
+  - **The published archive gains the fields on its next rebuild.** Like the COG
+    references above, `catalog.pmtiles` only carries `pol`/`assets` after the next
+    `publish-index.yml` run, so until then the hosted showcase's polarization
+    chips filter nothing out (every feature lacks the key, and the "never hidden
+    by a facet it has no value for" rule keeps them all visible — the honest
+    failure mode, but a silent one).
+  - **The facet chips are the only place the two modes still differ.** The slice
+    app derives its chips from the slice it holds; the whole-archive app offers
+    the closed `POLARIZATIONS` set, so a chip can name a polarization the archive
+    has none of. Deriving it instead would need a facet summary in the archive
+    metadata — worth doing only if the same question comes up for another field.
 
 ---
 

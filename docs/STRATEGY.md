@@ -299,8 +299,16 @@ from:
   bounds to place it, and the shared geotiff.js driver gained a MapLibre
   `image`-source placement beside its Leaflet `imageOverlay` one, so the
   whole-archive explorer streams the radar picture on click like the slice one.
-  The two modes now differ only in the two fields vector tiles do not encode
-  (polarizations and the per-product asset list). See the CHANGELOG.
+  ~~The two modes now differ only in the two fields vector tiles do not encode
+  (polarizations and the per-product asset list).~~ **Shipped, and Path A is
+  closed** — those two fields (`pol`, `assets`) are tiled comma-joined, which
+  both finished the detail panel and bought a facet *neither* explorer had: a
+  **polarization filter**, the one that decides whether a change measurement is
+  valid rather than what it shows (`POST /artifacts/stats` refuses a
+  mixed-polarization selection; the page had no control to narrow one). Chips in
+  both modes, compiled to a MapLibre `index-of` test inside the tiles for the
+  whole-archive one. The whole-archive front end is now a strict superset of the
+  embedded-slice one. See the CHANGELOG.
 - ~~Bake place labels into the *published* weekly snapshot.~~ **shipped** —
   `umbra index bake --by-site` geocodes once per site rather than once per
   acquisition (a task's passes share their ground), which brings a whole-catalog
