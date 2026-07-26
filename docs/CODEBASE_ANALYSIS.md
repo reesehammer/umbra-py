@@ -15,9 +15,13 @@
 > - **What's still open** → [`STRATEGY.md` §8](STRATEGY.md#8-current-status--remaining-critical-path)
 >   (the remaining critical path) and [`TODO.md`](../TODO.md) (per-PR
 >   follow-ons). Of this review's structural items, the `viz.py` package split
->   (P3 #19) and `pytest --cov` + Codecov (P2 #16) have since **shipped**; what
->   is still open — the remainder of the `cli.py` shared-option extraction
->   (P3 #18) and the R\*Tree upgrade — is listed there.
+>   (P3 #19) and `pytest --cov` + Codecov (P2 #16) have since **shipped**, as has
+>   the `cli.py` shared-option extraction (P3 #18) — its geography group first,
+>   then its task-name group (`--area` / `--fuzzy`, which gave `umbra map` the
+>   site filter it was the only gather command to lack) plus the parity suite that
+>   keeps a new gather command from missing either. What is still open — the date
+>   and limit options, deliberately left per-command, and the R\*Tree upgrade — is
+>   listed there.
 >
 > The original item IDs (`P0`–`P3`, `§3.1`–`§3.5`, `§4.1`–`§4.6`) are still
 > cited from source docstrings and commit messages; the detail behind each is

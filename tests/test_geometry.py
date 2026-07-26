@@ -31,6 +31,8 @@ from umbra_py.catalog import UmbraCatalog
 from umbra_py.index import CatalogIndex
 from umbra_py.models import UmbraItem
 
+from .conftest import GATHER_COMMANDS, command_argv
+
 _BUCKET = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog"
 
 
@@ -508,32 +510,13 @@ def test_mcp_search_catalog_intersects_conflicts(built_index):
 # Every gather command takes the polygon, not just `umbra search`
 # --------------------------------------------------------------------------- #
 
-# Every subcommand that gathers acquisitions by search, with the minimum extra
-# arguments each needs to reach its gather. Kept as one list so a new gather
-# command is a one-line addition rather than a silently missing filter.
-_GATHER_COMMANDS = [
-    ["change", "--out", "c.png"],
-    ["timescan", "--out", "t.png"],
-    ["swipe", "--out", "s.html"],
-    ["stack", "--stats"],
-    ["gallery", "--out", "g.html"],
-    ["map", "--out", "m.geojson"],
-    ["demo", "--out", "d.html"],
-    ["tiles", "--out", "t.pmtiles"],
-    ["chips", "--out", "chips_out"],
-    ["showcase", "--out", "site"],
-    ["watch"],
-    ["index", "build"],
-    ["index", "update"],
-    ["embed", "build"],
-]
+# The gather-command roster lives in conftest so every shared-option parity
+# suite walks the same list (see `tests/conftest.py`).
+_GATHER_COMMANDS = GATHER_COMMANDS
 
 _AOI = _poly((0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8))
 
-
-def _command_argv(spec):
-    """The subcommand path of a `_GATHER_COMMANDS` entry (e.g. ``['index', 'build']``)."""
-    return [a for a in spec if not a.startswith("-")][: 2 if spec[0] in ("index", "embed") else 1]
+_command_argv = command_argv
 
 
 @pytest.mark.parametrize("spec", _GATHER_COMMANDS, ids=lambda s: "-".join(_command_argv(s)))

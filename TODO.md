@@ -1057,20 +1057,35 @@ polygon-vs-rectangle exclusion. This closed the geography half of P3 #18's
 "common Click option groups" extraction and gave every front door the polygon
 filter. What is still open:
 
-- **`umbra map` has no `--area` (or `--fuzzy`).** Every other gather command can
-  name an Umbra task directly — `umbra map` is the one that cannot, so mapping
-  one site's coverage means finding its bbox first. Not touched here because it
-  is a *different* option group (`--area`/`--fuzzy`, the task-name filter) and
-  adding it changes what `umbra map` searches rather than how it is spelled.
-  Smallest fix: give the command the `--area` option and `@_fuzzy_option`, and
-  thread `area=` / `fuzzy=` into its `_gather_items` call like `gallery` does.
-- **The rest of P3 #18.** `--start` / `--end` / `--area` / `--limit` /
-  `--max-search` are still written out per command. Their help text is genuinely
-  command-specific ("Search mode: cap how many acquisitions the search pulls into
-  the stack" vs "Max results to plot"), so folding them into one decorator would
-  either flatten the wording or need a prefix/override mechanism — worth doing
-  only alongside a decision about which of those two costs is acceptable. The
-  *gathering* half (`_gather_items` / `_search_source`) is already shared.
+- ~~**`umbra map` has no `--area` (or `--fuzzy`).**~~ ✅ **Done**, together with
+  the task-name half of P3 #18 (`cli._area_option`, `tests/conftest.py`'s
+  `GATHER_COMMANDS`, `tests/test_cli_option_groups.py`). `umbra map` takes
+  `--area` / `--fuzzy` threaded into its `_gather_items` call, so the verb whose
+  job is showing where the archive has imagery no longer needs a bbox looked up
+  first; `umbra index build` / `update` gained the matching `--fuzzy` beside the
+  `--area` they already had. But the fix this entry described would have left the
+  cause in place, so it was closed the way the geography half was: `--area` is one
+  shared `_area_option` (generic help, bespoke wording kept per command exactly as
+  `_place_option` documents), and the gather-command roster moved to
+  `tests/conftest.py` so **both** shared groups are checked against the same list —
+  every command on it must expose the group *and* forward it to the backend. A new
+  gather command that forgets either now fails a test instead of shipping a front
+  door with fewer filters than its siblings, which is the failure that produced
+  this entry.
+- **The rest of P3 #18: the date and limit options.** `--start` / `--end` /
+  `--limit` / `--max-search` are still written out per command, and the decision
+  this entry used to leave open is now made: **don't extract them.** The
+  task-name and geography groups were worth sharing because their *semantics* are
+  identical everywhere and only the wording varied — an override mechanism
+  (or the "keep bespoke help inline" convention) buys real drift-prevention. The
+  date and limit options are not that: `--limit`'s default is command-specific
+  (20 / 24 / 100 / 500 / 2000) as well as its help text ("Max results to plot" vs
+  "Max tiles" vs "Max acquisitions to load"), so a shared decorator would have to
+  parameterize both and would leave one line per command anyway — indirection with
+  no invariant behind it. Revisit only if a command ships with a *missing*
+  `--start`/`--limit` (the parity suite would be the place to catch it), which is
+  the evidence that would change the call. The *gathering* half (`_gather_items` /
+  `_search_source`) is already shared.
 - ~~**`umbra ask` cannot plan a polygon.**~~ ✅ **Done** (`umbra ask --aoi` /
   `planner.AreaOfInterest` / `ask(aois=…)` / `parse_plan(aois=…)`). The decision
   this entry left open — whether a model should emit polygon coordinates at all —

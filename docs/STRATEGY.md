@@ -264,9 +264,24 @@ from:
   natural-language one: `umbra ask --aoi` lets the planner *select* one of the
   polygons the user supplied, by name, rather than authoring coordinates a
   hallucination could silently move (the §7.1 boundary applied to geometry).
-  **Open:** the date / task-name / limit options are still per-command (their
-  help text is genuinely command-specific), and `umbra map` still lacks `--area`
-  — see `TODO.md`.
+  ~~**Open:** the date / task-name / limit options are still per-command (their
+  help text is genuinely command-specific), and `umbra map` still lacks
+  `--area`.~~ The **task-name group is shipped too**, and with it the gap it had
+  left: `umbra map` now takes `--area` / `--fuzzy` like every sibling, so the one
+  verb whose job is showing where the archive has imagery no longer makes you
+  find a site's bounding box first (`umbra index build` / `update` gained the
+  matching `--fuzzy`). `--area` is one shared `_area_option` beside
+  `_fuzzy_option`, and — the part that outlasts this PR — **both** shared groups
+  are now checked against one roster of gather commands
+  (`conftest.GATHER_COMMANDS`): `tests/test_cli_option_groups.py` asserts every
+  command on it exposes the group *and* forwards it to the search backend, so the
+  drift that cost the polygon filter thirteen commands, `--place` three and
+  `--area` one now fails a test rather than shipping. See the CHANGELOG.
+  **Open:** the date / limit options are still per-command, and deliberately so —
+  unlike geography and task name, `--limit`'s *default* is command-specific
+  (20 / 24 / 100 / 500 / 2000) as well as its wording, so a shared decorator would
+  have to override both and would buy nothing but indirection. Extract them only
+  if that stops being true — see `TODO.md`.
 - ~~Split `viz.py` into a `viz/` package (geojson / maps / raster / composites /
   gallery) with re-exports preserved (was P3 #19).~~ **shipped** — the
   2 023-line module is now `geojson.py` / `raster.py` / `composites.py` /

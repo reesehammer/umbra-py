@@ -386,6 +386,32 @@ def _geometry_option(func):
     )(func)
 
 
+def _area_option(func):
+    """Attach the shared ``--area`` task/site-name filter.
+
+    Umbra files every pass of a site under one named task directory, so naming
+    the site lists just that directory instead of scanning the archive -- the
+    cheapest filter the catalog has, and the one that gathers the co-located
+    passes the change/timescan/stack verbs need.
+
+    Like :func:`_place_option`, this is the generic form: commands whose help
+    text says something more specific about what the name scopes (``umbra
+    search``, ``umbra stack``, ``umbra index build``, ...) keep their own
+    wording. It exists so a command that gathers acquisitions never goes without
+    the option just because nobody wrote bespoke help for it -- which is exactly
+    how ``umbra map`` ended up the one gather command that could not name a site.
+
+    Pair it with :func:`_fuzzy_option`; ``--fuzzy`` without ``--area`` is inert.
+    """
+    return click.option(
+        "--area",
+        default=None,
+        help="Case-insensitive name of an Umbra task/site to gather (e.g. "
+        "'Centerfield'). Faster than a broad scan -- it lists just that area's "
+        "directory.",
+    )(func)
+
+
 def _fuzzy_option(func):
     """Attach the shared ``--fuzzy`` flag that widens ``--area`` from a literal
     substring to the deterministic token-wise match in :mod:`umbra_py.fuzzy`
@@ -3015,13 +3041,7 @@ def _search_subtitle(area, bbox, start, end) -> str | None:
     help="Latest acquisition date (same formats as --start; a bare year, month "
     "or period like 'last month' snaps to that span's last day).",
 )
-@click.option(
-    "--area",
-    default=None,
-    help="Case-insensitive name of an Umbra task/site to gather (e.g. "
-    "'Centerfield'). Faster than a broad scan -- it lists just that area's "
-    "directory.",
-)
+@_area_option
 @click.option(
     "--product",
     "products",
@@ -3219,13 +3239,7 @@ def gallery(
     help="Latest acquisition date (same formats as --start; a bare year, month "
     "or period like 'last month' snaps to that span's last day).",
 )
-@click.option(
-    "--area",
-    default=None,
-    help="Case-insensitive name of an Umbra task/site to gather (e.g. "
-    "'Centerfield'). Faster than a broad scan -- it lists just that area's "
-    "directory.",
-)
+@_area_option
 @click.option(
     "--product",
     "products",
@@ -4016,6 +4030,7 @@ def showcase(
     help="Latest acquisition date (same formats as --start; a bare year, month "
     "or period like 'last month' snaps to that span's last day).",
 )
+@_area_option
 @click.option(
     "--product",
     "products",
@@ -4097,12 +4112,15 @@ def showcase(
 @_token_option
 @_manifest_option
 @_acquisition_filter_options
+@_fuzzy_option
 def map_cmd(
     bbox,
     place,
     intersects,
     start,
     end,
+    area,
+    fuzzy,
     products,
     limit,
     out_path,
@@ -4137,6 +4155,8 @@ def map_cmd(
         intersects=search_geometry,
         start=start,
         end=end,
+        area=area,
+        fuzzy=fuzzy,
         product_types=list(products) or None,
         limit=limit,
         max_per_task=max_per_task,
@@ -4275,7 +4295,8 @@ def index() -> None:
     help="Cap how many acquisitions to index this run (default: no cap -- index "
     "everything in scope).",
 )
-def index_build(db_path, bbox, place, intersects, start, end, area, limit) -> None:
+@_fuzzy_option
+def index_build(db_path, bbox, place, intersects, start, end, area, fuzzy, limit) -> None:
     """Walk Umbra's archive and persist matching acquisitions into the index.
 
     With no scope flags this indexes the whole bucket, which lists every task
@@ -4300,6 +4321,7 @@ def index_build(db_path, bbox, place, intersects, start, end, area, limit) -> No
                 start=start,
                 end=end,
                 area=area,
+                fuzzy=fuzzy,
                 limit=limit,
             )
             total = len(idx)
@@ -4351,7 +4373,8 @@ def index_build(db_path, bbox, place, intersects, start, end, area, limit) -> No
     default=None,
     help="Cap how many acquisitions to add this run (default: no cap).",
 )
-def index_update(db_path, overlap_days, since, bbox, place, intersects, area, limit) -> None:
+@_fuzzy_option
+def index_update(db_path, overlap_days, since, bbox, place, intersects, area, fuzzy, limit) -> None:
     """Cheaply refresh an existing index by re-walking only recent acquisitions.
 
     'umbra index build' fetches a sidecar for every acquisition in scope; on a
@@ -4380,6 +4403,7 @@ def index_update(db_path, overlap_days, since, bbox, place, intersects, area, li
                 bbox=search_bbox,
                 intersects=search_geometry,
                 area=area,
+                fuzzy=fuzzy,
                 limit=limit,
             )
             total = len(idx)

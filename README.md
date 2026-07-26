@@ -625,6 +625,10 @@ umbra stack --area "Centerfield" --pol VV --db --crs utm --out centerfield_utm.t
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.geojson
 
+# Map one site's coverage by name -- no bounding box to look up first.
+# --fuzzy accepts 'utah centerfield' or 'centrfield' too.
+umbra map --area "Centerfield" --out centerfield_coverage.html
+
 # Same, but overlay the actual SAR imagery on the basemap.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --imagery --out sar_map.html
 
