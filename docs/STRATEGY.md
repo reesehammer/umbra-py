@@ -164,10 +164,13 @@ Zenodo DOI on the first release.
 
 ### 5.4 Demo notebooks that create SAR converts — **shipped**
 
-The full `examples/` notebook gallery (`01`–`07`: hello → download/open GEC →
+The full `examples/` notebook gallery (`01`–`08`: hello → download/open GEC →
 change detection → amplitude time series → detection chips → site monitoring →
-SICD amplitude) exists and doubles as a live eval — each notebook is
-self-checking and guarded offline by `tests/test_examples.py`.
+SICD amplitude → time-series datacube) exists and doubles as a live eval — each
+notebook is self-checking and guarded offline by `tests/test_examples.py`. `08`
+is the on-ramp for the stacking chain of workstream 5.5: `to_stack` onto a
+shared equal-area grid, then `stack_stats` (net change, `blocks`, `block_series`)
+reducing the cube to a measured answer.
 
 ### 5.5 Close the format gaps that generate support burden — **partial**
 

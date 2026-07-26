@@ -39,6 +39,12 @@ They stream from Umbra's public bucket, so run them with network access.
   SICD's own image-projection model), and confirm it lands on the acquisition's
   catalog footprint — the one-call answer to "my SICD won't open on a map"
   (`convert` extra).
+- [`08_time_series_datacube.ipynb`](08_time_series_datacube.ipynb) — the
+  measured version of `04`: co-register a site's passes onto one equal-area grid
+  with `to_stack` (the shared grid `stackstac`/`odc-stac` can't build here), then
+  reduce the cube to an answer with `stack_stats` — how much the site moved, in
+  km², *where* it moved, and whether it drifted or stepped — and map the
+  baseline-to-latest dB delta (`load` extra; matplotlib optional for the map).
 
 The committed notebooks ship with **cleared outputs**. `tests/test_examples.py`
 validates them offline on every CI run (well-formed, code cells parse, every

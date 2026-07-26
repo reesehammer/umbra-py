@@ -787,9 +787,24 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   masking (`viz` keeps raw values for its own stretch), so they were left
   separate rather than forced into one function; if a third caller appears,
   extract the shared VRT/grid step.
-- **A notebook in the gallery.** `examples/` has no stacking notebook; the
-  natural one is "search a site → `to_stack` → baseline vs. latest → map the dB
-  delta", self-checking like the rest and guarded by `tests/test_examples.py`.
+- ~~**A notebook in the gallery.**~~ ✅ **Done**
+  (`examples/08_time_series_datacube.ipynb`). Exactly the flow named here —
+  search a repeat-imaged task → one polarization → `to_stack` → the baseline vs.
+  latest dB delta as a map — plus the reductions that shipped after this entry
+  was written: `stack_stats` for the per-pass series and the net first→last
+  record, `blocks=3` for the peak block and the ASCII heat-grid, and
+  `block_series=True` for that block's whole pass-to-pass sequence. The cube is
+  built with `crs=STACK_AUTO_CRS`, since `changed_area_km2` is the answer only a
+  projected grid can give, and the notebook opens on why `04`'s per-scene means
+  are not the same measurement. Self-checking like the rest (the asserts include
+  that the peak interval is a member of the series it was picked from), guarded
+  offline by `tests/test_examples.py` and executed by it under
+  `pytest -m network`; it falls back to `extent="union"` when a task's footprints
+  don't all overlap and caps at six passes because the cube is in memory.
+  Follow-on, not a blocker: it fetches its own site from a live search, so the
+  notebook cannot pick a site with a *known* story — a curated task id (or an
+  `--area` the showcase already features) would make the printed numbers
+  reproducible and give the narrative something specific to point at.
 - ~~**Surface it on the agent front doors.**~~ ✅ **Done** (`umbra_py.stack_stats`
   / `umbra stack --stats` / the `stack_stats` tool on MCP, LangChain and
   LlamaIndex, plus the `quantify-change` MCP prompt). The raw array was never the
