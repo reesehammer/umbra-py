@@ -18,6 +18,10 @@ name: Publish catalog index
 #                              MapLibre page — a whole-archive map, no crawl
 #   - catalog.html             a ready-to-open MapLibre GL viewer that reads the
 #                              published catalog.pmtiles by range request
+#   - catalog.thumbs.db        baked SAR quicklook PNGs, one per acquisition
+#                              (`umbra index fetch-thumbnails`): a separate,
+#                              opt-in sidecar so catalog.db stays small, topped
+#                              up incrementally rather than re-baked weekly
 #
 # Weekly is deliberate: frequent enough to pick up new acquisitions, polite
 # to Umbra's open-data bucket.
@@ -109,6 +113,60 @@ jobs:
           fi
           gh release upload catalog-index \
             catalog.db umbra-open-data.parquet catalog.pmtiles catalog.html --clobber
+
+      # A quicklook per acquisition, baked once here so no viewer has to stream
+      # a cloud-optimized GeoTIFF overview at render time. Two things make this
+      # affordable to publish weekly:
+      #
+      #   - It is *incremental*. The crawl above rebuilds catalog.db from
+      #     scratch, so every thumbnail column starts NULL; re-importing last
+      #     week's published sidecar first means this run streams only the
+      #     acquisitions added since, not the whole archive every Monday. (On
+      #     the first run there is no sidecar to fetch — hence `|| true`.)
+      #   - It is *bounded*. --limit caps the scenes streamed per run and
+      #     --newest-first spends that budget on the freshest passes, which are
+      #     what a demo or a monitoring view opens on; the rest are picked up
+      #     over subsequent runs. --size 128 keeps a preview a preview: the
+      #     sidecar is a separate, opt-in asset precisely because pixels dwarf
+      #     the metadata every `umbra index fetch` already pays for.
+      #
+      # Non-blocking, and split from the upload below so a run that times out
+      # mid-bake still publishes what it (and every earlier run) baked.
+      - name: Bake SAR thumbnails (incremental, non-blocking)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          pip install -e ".[viz]"
+          umbra index fetch-thumbnails --db catalog.db || true
+          umbra index bake-thumbnails --db catalog.db \
+            --size 128 --newest-first --limit 1500
+
+      - name: Publish the thumbnail sidecar (non-blocking)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exported="$(umbra index export-thumbnails --db catalog.db \
+            --out catalog.thumbs.db | grep -oE '^Exported [0-9]+' | cut -d' ' -f2)"
+          # Never clobber the accumulated published sidecar with an empty one.
+          if [ "${exported:-0}" -eq 0 ]; then
+            echo "No baked thumbnails to publish; leaving the released sidecar alone."
+            exit 0
+          fi
+          gh release upload catalog-index catalog.thumbs.db --clobber
+          echo "Published ${exported} baked thumbnail(s)."
+          # The deterministic publish step above rewrites the notes every run,
+          # so describe the sidecar once, only when that rewrite dropped it.
+          body="$(gh release view catalog-index --json body -q .body)"
+          case "$body" in
+            *catalog.thumbs.db*) ;;
+            *)
+              gh release edit catalog-index --notes "$body
+
+          - \`catalog.thumbs.db\` — baked SAR quicklook PNGs (128 px) for \`umbra index fetch-thumbnails\`: merge them into a local \`catalog.db\` and every preview reads local bytes instead of streaming a COG overview per scene. Baked newest-first and topped up weekly, so the most recent passes are covered first."
+              ;;
+          esac
 
       # Scene embeddings are model-derived and model-specific, so — unlike the
       # deterministic artifacts above — publishing them is opt-in: it needs a

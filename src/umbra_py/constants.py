@@ -109,6 +109,12 @@ CATALOG_DB_ASSET = "catalog.db"
 #: install gets a whole-catalog map with no local tiling step).
 CATALOG_PMTILES_ASSET = "catalog.pmtiles"
 
+#: Name of the prebuilt thumbnail sidecar asset on the same release (the baked
+#: per-acquisition quicklook PNGs ``umbra index bake-thumbnails`` renders --
+#: published as a *separate* file rather than inside ``catalog.db`` so the index
+#: every ``--local`` search fetches stays small, and the pixels are opt-in.
+CATALOG_THUMBS_ASSET = "catalog.thumbs.db"
+
 #: Name of the prebuilt scene-embedding sidecar asset on the same release (the
 #: per-acquisition quicklook vectors ``umbra embed build`` produces -- published
 #: so a fresh install gets visual similarity search over the archive with no
@@ -129,6 +135,13 @@ CATALOG_INDEX_DB_URL = (
 CATALOG_INDEX_PMTILES_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/"
     f"{CATALOG_INDEX_RELEASE}/{CATALOG_PMTILES_ASSET}"
+)
+
+#: Stable download URL for the prebuilt thumbnail sidecar (same rolling-release
+#: redirect discipline as :data:`CATALOG_INDEX_DB_URL`).
+CATALOG_INDEX_THUMBS_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/"
+    f"{CATALOG_INDEX_RELEASE}/{CATALOG_THUMBS_ASSET}"
 )
 
 #: Stable download URL for the prebuilt scene-embedding sidecar (same

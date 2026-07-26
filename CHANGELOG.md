@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra index fetch-thumbnails`: the published snapshot now carries the SAR
+  pictures, not just the metadata.** `umbra index bake-thumbnails` has been able
+  to render a quicklook per acquisition into the index for a while, and every
+  consumer reads it — `umbra serve`'s `GET /artifacts/thumbnail/{id}.png`, the
+  `umbra demo` detail panel, a `--local` gallery. But nobody had those bytes
+  without baking them, and baking them means streaming a cloud-optimized GeoTIFF
+  overview *per scene*: the one derived artifact in this project that is worth
+  moving rather than recomputing. The weekly `publish-index.yml` workflow now
+  bakes them centrally and publishes `catalog.thumbs.db` on the rolling
+  `catalog-index` release, so `umbra index fetch-thumbnails` fills a local
+  index's previews with a single download and no range read at all.
+
+  It ships as a **separate sidecar** rather than a `thumbnail` column inside the
+  published `catalog.db`, for the same reason `catalog.embed.db` is separate: a
+  PNG per acquisition dwarfs the metadata it hangs off, and folding it in would
+  make every `umbra index fetch` — the command whose entire promise is *instant
+  local search, no crawl* — pay for pixels most callers never open. So the
+  metadata download stays small and the pixels are one opt-in command
+  (`CatalogIndex.export_thumbnails` / `import_thumbnails`,
+  `fetch_prebuilt_thumbnails`, `default_thumbs_path`). Merging is additive and
+  non-destructive: rows the index doesn't hold are ignored (a sidecar from a
+  newer crawl is not an error) and a thumbnail already baked locally is kept
+  unless you pass `--overwrite`.
+
+  That same sidecar is what makes the weekly bake **incremental**, which is what
+  makes publishing it polite at all. The workflow rebuilds `catalog.db` from
+  scratch every Monday, so every thumbnail column starts `NULL`; re-importing
+  last week's published sidecar before baking means a run streams only the
+  acquisitions added since, instead of re-streaming the whole archive weekly
+  against Umbra's bucket (the §6 "keep the crawl polite" guardrail applied to
+  egress rather than listings). The bake is `--limit`-bounded per run, and
+  `umbra index bake-thumbnails --newest-first` — new here — is what makes that
+  cap a *priority* rather than a lottery: the default `href` ordering is
+  arbitrary with respect to time, so a capped run would leave the freshest
+  passes, the ones a demo or a monitoring view opens on, unbaked the longest.
+  Undated items sort last, having no claim to being recent. The publish step is
+  split from the bake step and refuses to clobber the accumulated release asset
+  with an empty export, so a run that times out mid-bake still publishes what it
+  and every earlier run baked.
+
+  This closes the last **demo / hosting polish** item on `STRATEGY.md` §8 (the
+  `DEMO_APP_GAPS.md` G6 thumbnail denormalization, whose remaining half was
+  "bake them into the *published* snapshot"). Offline-tested end to end in
+  `tests/test_index.py` — round-trip between two indexes, the keep-vs-overwrite
+  merge policy, unknown rows ignored, export-as-upsert, a non-sidecar file
+  rejected as `IndexSchemaError`, the newest-first ordering, and the three CLI
+  paths (`export-thumbnails`, `fetch-thumbnails --from`, and the download path
+  with the fetch helper stubbed).
 - **`umbra map --area` / `--fuzzy`: the last gather command that could not name
   a site can.** Umbra files every pass of a site under one named task directory,
   so `--area "Centerfield"` lists just that directory instead of scanning the

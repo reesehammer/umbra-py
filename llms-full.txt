@@ -65,7 +65,9 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra index bake-thumbnails` — Render a small SAR quicklook per acquisition and cache it in the index.
 - `umbra index build` — Walk Umbra's archive and persist matching acquisitions into the index.
 - `umbra index export` — Export a local index to stac-geoparquet for serverless catalog search.
+- `umbra index export-thumbnails` — Write the index's baked thumbnails to a shareable sidecar database.
 - `umbra index fetch` — Download the published prebuilt catalog index for instant local search.
+- `umbra index fetch-thumbnails` — Download the published SAR thumbnails and merge them into the index.
 - `umbra index info` — Show what a local index holds: item count, date span and task count.
 - `umbra index update` — Cheaply refresh an existing index by re-walking only recent acquisitions.
 - `umbra info` — Show a summary of a STAC item.

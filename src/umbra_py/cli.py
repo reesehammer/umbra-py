@@ -24,7 +24,12 @@ from .download import download_item
 from .exceptions import GeocodeError, UmbraError
 from .export import export_geoparquet
 from .geocode import geocode_place
-from .index import CatalogIndex, default_index_path
+from .index import (
+    CatalogIndex,
+    default_index_path,
+    default_thumbs_path,
+    fetch_prebuilt_thumbnails,
+)
 from .load import STACK_EXTENTS
 from .models import UmbraItem
 from .pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
@@ -4512,7 +4517,14 @@ def index_bake(db_path, limit, by_site, zoom) -> None:
     show_default=True,
     help="Which asset to render the preview from (the geocoded GEC by default).",
 )
-def index_bake_thumbnails(db_path, limit, size, asset) -> None:
+@click.option(
+    "--newest-first",
+    is_flag=True,
+    help="Bake the most recently acquired scenes first instead of in catalog "
+    "order, so a --limit run spends its budget on the freshest passes -- the "
+    "ones a demo or a monitoring view opens on.",
+)
+def index_bake_thumbnails(db_path, limit, size, asset, newest_first) -> None:
     """Render a small SAR quicklook per acquisition and cache it in the index.
 
     Bakes a downsampled PNG preview for every indexed acquisition once, so
@@ -4525,6 +4537,11 @@ def index_bake_thumbnails(db_path, limit, size, asset) -> None:
     skipped and retried next run. Needs the viz extra
     (``pip install "umbra-py[viz]"``); bootstrap the index first with 'umbra
     index fetch' or 'umbra index build'.
+
+    Baking is the one derived artifact worth moving rather than recomputing (it
+    costs an overview stream per scene), so 'umbra index fetch-thumbnails' pulls
+    the published bake instead and 'umbra index export-thumbnails' writes yours
+    out to share.
     """
     path = _index_path(db_path)
     if not path.exists():
@@ -4537,11 +4554,119 @@ def index_bake_thumbnails(db_path, limit, size, asset) -> None:
             spinner.label = f"Baking thumbnails ({n} processed)"
 
         with CatalogIndex(path) as idx:
-            baked = idx.bake_thumbnails(asset=asset, max_size=size, limit=limit, progress=tally)
+            baked = idx.bake_thumbnails(
+                asset=asset,
+                max_size=size,
+                limit=limit,
+                newest_first=newest_first,
+                progress=tally,
+            )
             s = idx.stats()
     click.echo(
         f"Baked {baked} new thumbnail(s); {s['thumbnailed']} of {s['items']} "
         f"acquisition(s) now have one. ({path})"
+    )
+
+
+@index.command("export-thumbnails")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to export from (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Sidecar file to write (default: catalog.thumbs.db beside the index).",
+)
+def index_export_thumbnails(db_path, out_path) -> None:
+    """Write the index's baked thumbnails to a shareable sidecar database.
+
+    A baked quicklook costs a cloud-optimized GeoTIFF overview streamed per
+    scene, so it is the one derived artifact worth moving rather than
+    recomputing. This writes the PNGs already baked ('umbra index
+    bake-thumbnails') to a standalone catalog.thumbs.db that any other index can
+    merge with 'umbra index fetch-thumbnails --from'.
+
+    The sidecar is a separate file rather than a column of the published
+    catalog.db on purpose: the pixels dwarf the metadata, so every 'umbra index
+    fetch' would otherwise pay for previews most callers never open.
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
+    dest = Path(out_path) if out_path else default_thumbs_path(path)
+    with CatalogIndex(path) as idx:
+        with OrbitSpinner("Exporting baked thumbnails"):
+            written = idx.export_thumbnails(dest)
+    size_mb = dest.stat().st_size / 1e6
+    click.echo(f"Exported {written} thumbnail(s) to {dest} ({size_mb:.1f} MB).")
+
+
+@index.command("fetch-thumbnails")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to merge the thumbnails into (default: $UMBRA_INDEX_DB or "
+    "~/.cache/umbra-py/catalog.db). Must already exist.",
+)
+@click.option(
+    "--from",
+    "src_path",
+    default=None,
+    help="Merge a local sidecar file instead of downloading the published one.",
+)
+@click.option(
+    "--url",
+    default=None,
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace thumbnails already baked locally (default: keep them).",
+)
+def index_fetch_thumbnails(db_path, src_path, url, overwrite) -> None:
+    """Download the published SAR thumbnails and merge them into the index.
+
+    Every preview otherwise streams a scene's cloud-optimized GeoTIFF overview
+    from S3 at render time. The weekly workflow bakes them once and publishes
+    catalog.thumbs.db on the rolling catalog-index release; this fetches that
+    sidecar and fills the index's thumbnail column, so 'umbra serve's
+    GET /artifacts/thumbnail/{id}.png, the 'umbra demo' preview and a --local
+    gallery all read local bytes with no range read at all.
+
+    Bootstrap the index first with 'umbra index fetch' or 'umbra index build'.
+    Acquisitions the sidecar doesn't cover are left alone, so re-run after an
+    'umbra index update' to pick up newly published previews.
+    """
+    path = _index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
+        )
+    if src_path:
+        source = Path(src_path)
+    else:
+        with OrbitSpinner("Fetching baked thumbnails") as spinner:
+
+            def tally(done: int, total: int | None) -> None:
+                if total:
+                    spinner.label = f"Fetching baked thumbnails ({done / total:.0%})"
+                else:
+                    spinner.label = f"Fetching baked thumbnails ({done / 1e6:.0f} MB)"
+
+            source = fetch_prebuilt_thumbnails(default_thumbs_path(path), url=url, progress=tally)
+    with CatalogIndex(path) as idx:
+        with OrbitSpinner("Merging thumbnails into the index"):
+            applied = idx.import_thumbnails(source, overwrite=overwrite)
+        s = idx.stats()
+    click.echo(
+        f"Merged {applied} thumbnail(s) from {source}; {s['thumbnailed']} of "
+        f"{s['items']} acquisition(s) now have one. ({path})"
     )
 
 

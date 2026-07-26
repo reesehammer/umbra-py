@@ -20,7 +20,11 @@
 >   deploy of the static `umbra demo` / `catalog.pmtiles` showcase** (`umbra
 >   showcase` composes the whole-catalog map + interactive explorer + a landing
 >   page, and the `docs.yml` Pages job publishes `site/showcase/` beside the
->   docs). The **R4 precomputed-artifact polish is shipped too**, for the change
+>   docs). **G6 is now fully closed too**: the baked per-item thumbnails are
+>   *published*, as a separate opt-in `catalog.thumbs.db` sidecar (`umbra index
+>   fetch-thumbnails`) so `catalog.db` stays small, topped up incrementally each
+>   week rather than re-streamed from the bucket. The **R4 precomputed-artifact
+>   polish is shipped too**, for the change
 >   view: `umbra showcase --featured N` renders a change composite per marquee
 >   site into `featured/` and shows them as a captioned gallery on the landing
 >   page (the Pages job passes `--featured 6`). And **Path A's last structural

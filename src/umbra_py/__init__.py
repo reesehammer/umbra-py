@@ -64,7 +64,13 @@ from .geoid import (
     fetch_geoid_grid,
     geoid_grid_url,
 )
-from .index import CatalogIndex, UpdateResult, default_index_path
+from .index import (
+    CatalogIndex,
+    UpdateResult,
+    default_index_path,
+    default_thumbs_path,
+    fetch_prebuilt_thumbnails,
+)
 from .llms_txt import llms_full_txt, llms_txt
 from .load import (
     STACK_AUTO_CRS,
@@ -145,6 +151,8 @@ __all__ = [
     "CatalogIndex",
     "UpdateResult",
     "default_index_path",
+    "default_thumbs_path",
+    "fetch_prebuilt_thumbnails",
     "export_geoparquet",
     "UmbraItem",
     "ItemCollection",

@@ -358,9 +358,17 @@ from:
   (bounded, non-blocking) before the derived artifacts, so the fetched
   `catalog.db`, the parquet export and `catalog.pmtiles` all arrive pre-labelled.
   `umbra tiles` was also taught to tile the baked label rather than the task
-  codename. See the CHANGELOG. Still open: baking per-item **thumbnails** into
+  codename. See the CHANGELOG. ~~Still open: baking per-item **thumbnails** into
   the published snapshot, which is gated on egress (a COG overview streamed per
-  acquisition) rather than a rate limit.
+  acquisition) rather than a rate limit.~~ **shipped** — the pictures are
+  published as a separate `catalog.thumbs.db` sidecar (`umbra index
+  fetch-thumbnails` / `export-thumbnails`), not as a column of `catalog.db`, so
+  the metadata download that promises "instant local search, no crawl" stays
+  small and the pixels are opt-in. The egress gate is answered by making the
+  bake *incremental* — the weekly run re-imports the previous sidecar and then
+  streams only the acquisitions added since, bounded by `--limit` and spent
+  newest-first — so the archive is re-listed weekly but never re-streamed. See
+  the CHANGELOG. **This closes the demo / hosting polish group.**
 
 **SAR-processing depth (was workstream 5.5)**
 
