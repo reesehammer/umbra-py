@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **An on-ramp for the datacube — `examples/08_time_series_datacube.ipynb` (the
+  last open follow-on of the `to_stack` PR, `TODO.md`).** The stacking chain grew
+  a lot in this release — a co-registered cube, a projected grid, a JSON
+  reduction, a spatial breakdown, per-block histories, an HTTP endpoint and a
+  button in the explorer — and none of it had a runnable example. The gallery's
+  nearest notebook, `04`, is the thing this capability exists to correct: it
+  averages each pass over *its own* grid, so two passes' means describe
+  different ground and a moved footprint reads as change. Notebook `08` runs the
+  honest version end to end — search a repeat-imaged task, collapse it to one
+  polarization, `to_stack(crs="utm")` onto a shared equal-area grid,
+  `stack_stats` for the per-pass series and the net first→last record (with a
+  real `changed_area_km2`, which only a projected grid can report), `blocks=3`
+  for the peak block and the north-up ASCII heat-grid, `block_series=True` for
+  that block's whole pass-to-pass sequence, and finally the baseline-to-latest dB
+  delta as a map, since the picture and the numbers come out of the same cube.
+
+  It follows the gallery's discipline: a small deterministic search, `assert`s at
+  the end of the code cells (including that the peak interval is a *member* of
+  the series it was picked from), cleared outputs, CC-BY attribution in the
+  narrative, and the calibration caveat the reduction itself carries. It falls
+  back from `extent="intersection"` to `"union"` when a task's footprints don't
+  all overlap, and caps the series at six passes because a cube is held in
+  memory. `tests/test_examples.py` picks it up automatically (well-formed, code
+  parses, only public `umbra_py` names, attribution present) and executes it
+  under `pytest -m network`; it was additionally run end-to-end against the live
+  bucket while being written. `examples/README.md` and the docs site's notebook
+  index list it.
 - **Draw the history, not just its endpoints — pass-to-pass sparklines in the
   `umbra demo` Quantify readout (the last open follow-on of the `stack_stats`
   demo wiring, and the first client of `block_series`, `TODO.md`).** The
