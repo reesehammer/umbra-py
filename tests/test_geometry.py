@@ -6,6 +6,11 @@ through every search surface: the live :class:`UmbraCatalog` walk, the SQLite
 :class:`CatalogIndex`, the ``umbra search --intersects`` CLI, the STAC API
 ``/search`` endpoint, and the ``search_catalog`` MCP tool. The serve/MCP
 sections importorskip their extras, so the core CI job still runs the rest.
+
+The last section covers the *other* CLI front doors: every subcommand that
+gathers acquisitions by search takes the same polygon (and the same ``--place``),
+resolved by one shared helper, so a render, an index build or a watch cannot
+disagree with ``umbra search`` about what an area of interest means.
 """
 
 from __future__ import annotations
@@ -497,3 +502,225 @@ def test_mcp_search_catalog_intersects_conflicts(built_index):
 
     with pytest.raises(ValueError):
         ms.search_catalog(intersects=_poly((0, 0), (1, 0), (1, 1), (0, 1)), bbox=[0, 0, 1, 1])
+
+
+# --------------------------------------------------------------------------- #
+# Every gather command takes the polygon, not just `umbra search`
+# --------------------------------------------------------------------------- #
+
+# Every subcommand that gathers acquisitions by search, with the minimum extra
+# arguments each needs to reach its gather. Kept as one list so a new gather
+# command is a one-line addition rather than a silently missing filter.
+_GATHER_COMMANDS = [
+    ["change", "--out", "c.png"],
+    ["timescan", "--out", "t.png"],
+    ["swipe", "--out", "s.html"],
+    ["stack", "--stats"],
+    ["gallery", "--out", "g.html"],
+    ["map", "--out", "m.geojson"],
+    ["demo", "--out", "d.html"],
+    ["tiles", "--out", "t.pmtiles"],
+    ["chips", "--out", "chips_out"],
+    ["showcase", "--out", "site"],
+    ["watch"],
+    ["index", "build"],
+    ["index", "update"],
+    ["embed", "build"],
+]
+
+_AOI = _poly((0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8))
+
+
+def _command_argv(spec):
+    """The subcommand path of a `_GATHER_COMMANDS` entry (e.g. ``['index', 'build']``)."""
+    return [a for a in spec if not a.startswith("-")][: 2 if spec[0] in ("index", "embed") else 1]
+
+
+@pytest.mark.parametrize("spec", _GATHER_COMMANDS, ids=lambda s: "-".join(_command_argv(s)))
+def test_every_gather_command_exposes_intersects(spec):
+    """The polygon filter is not a `umbra search` privilege: every command that
+    gathers acquisitions offers it, so an area of interest that isn't a rectangle
+    never has to be over-approximated by its bounding box."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(cli_mod.cli, [*_command_argv(spec), "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--intersects" in result.output
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [s for s in _GATHER_COMMANDS if s[0] not in ("watch", "index")],
+    ids=lambda s: "-".join(_command_argv(s)),
+)
+def test_gather_commands_forward_intersects(spec, monkeypatch, tmp_path):
+    """Each command threads the parsed polygon down to the search backend as the
+    ``intersects`` kwarg. The fake gather records the kwargs and returns nothing,
+    so every command bails cleanly right after -- no render, no extra, no network.
+    """
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def _fake_gather(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(cli_mod.cli, [*spec, "--local", "--intersects", json.dumps(_AOI)])
+
+    assert captured, f"{spec[0]} did not call _gather_items"
+    assert captured["intersects"] == parse_geometry(_AOI)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [s for s in _GATHER_COMMANDS if s[0] not in ("watch", "index")],
+    ids=lambda s: "-".join(_command_argv(s)),
+)
+def test_gather_commands_reject_polygon_with_rectangle(spec, monkeypatch, tmp_path):
+    """A rectangle and a polygon at once is a mistake, not an intersection, and
+    every command says so with the same message `umbra search` uses."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_gather_items", lambda **kw: [])
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(
+            cli_mod.cli,
+            [*spec, "--local", "--intersects", json.dumps(_AOI), "--bbox", "0,0,1,1"],
+        )
+    assert result.exit_code != 0
+    assert "not both" in result.output
+
+
+def test_index_build_and_update_forward_intersects(monkeypatch, built_index):
+    """The index walk is scoped by the polygon too, so a country-shaped index is
+    one flag rather than a bbox build plus a manual cull."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py.index import CatalogIndex as _Index
+    from umbra_py.index import UpdateResult
+
+    captured: dict = {}
+
+    def _fake_build(self, catalog=None, *, progress=None, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    def _fake_update(self, catalog=None, *, progress=None, **kwargs):
+        captured.update(kwargs)
+        return UpdateResult(added=0, refreshed=0, scanned=0, start=None)
+
+    monkeypatch.setattr(_Index, "build", _fake_build)
+    monkeypatch.setattr(_Index, "update", _fake_update)
+    runner = CliRunner()
+    for sub in ("build", "update"):
+        captured.clear()
+        result = runner.invoke(
+            cli_mod.cli,
+            ["index", sub, "--db", str(built_index), "--intersects", json.dumps(_AOI)],
+        )
+        assert result.exit_code == 0, result.output
+        assert captured["intersects"] == parse_geometry(_AOI), sub
+
+
+def test_map_local_intersects_end_to_end(built_index, tmp_path):
+    """End to end over a real index: the polygon keeps the item it covers and
+    drops the one it does not, exactly as `umbra search --intersects` would."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    out = tmp_path / "m.geojson"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "map",
+            "--local",
+            "--index-db",
+            str(built_index),
+            "--intersects",
+            json.dumps(_AOI),
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    ids = [f["properties"]["id"] for f in json.loads(out.read_text())["features"]]
+    assert ids == ["a"]
+
+
+def test_watch_forwards_intersects_and_keys_on_it(monkeypatch, built_index):
+    """`umbra watch --intersects` monitors the polygon, and the derived watch
+    name follows the AOI (two different polygons are two different watches)."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py.watch import watch_key
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.cli,
+        [
+            "watch",
+            "--local",
+            "--index-db",
+            str(built_index),
+            "--state-db",
+            str(built_index),
+            "--intersects",
+            json.dumps(_AOI),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [i["id"] for i in payload["new_items"]] == ["a"]
+    assert payload["watch"] == watch_key(intersects=parse_geometry(_AOI))
+
+
+def test_watch_key_unchanged_when_no_polygon():
+    """Adding the parameter must not rename existing watches -- an unset filter is
+    dropped before hashing, so a scheduled watch keeps its stored state."""
+    from umbra_py.watch import watch_key
+
+    assert watch_key(area="Centerfield") == watch_key(area="Centerfield", intersects=None)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [["change", "--out", "c.png"], ["swipe", "--out", "s.html"], ["chips", "--out", "chips_out"]],
+    ids=["change", "swipe", "chips"],
+)
+def test_change_swipe_chips_gained_place(spec, monkeypatch, tmp_path):
+    """`--place` was on most gather commands but not these three. It is one group
+    now, so the geocoded box reaches the same search kwarg everywhere."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    captured: dict = {}
+
+    def _fake_gather(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    monkeypatch.setattr(cli_mod, "geocode_place", lambda q: ((0.0, 0.0, 1.0, 1.0), "Nowhere"))
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(cli_mod.cli, [*spec, "--local", "--place", "Nowhere"])
+
+    assert captured["bbox"] == (0.0, 0.0, 1.0, 1.0)

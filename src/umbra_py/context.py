@@ -35,6 +35,14 @@ _SEARCH_PARAMETERS: dict[str, str] = {
         "Footprint filter as (min_lon, min_lat, max_lon, max_lat) in WGS84 "
         "degrees. Items whose footprint overlaps the box are returned."
     ),
+    "intersects": (
+        "GeoJSON polygon filter (Polygon / MultiPolygon, or a Feature / "
+        "FeatureCollection wrapping one). Items whose footprint overlaps the "
+        "polygon are returned -- a tighter spatial filter than the rectangular "
+        "bbox, and the one to use for an area of interest that isn't a "
+        "rectangle (a coastline, a border, a catchment). Mutually exclusive "
+        "with bbox/place."
+    ),
     "place": (
         "Free-text place name (e.g. 'Port of Long Beach'). Geocoded to a bbox "
         "via Nominatim; resolve it yourself with geocode_place if you want to "
