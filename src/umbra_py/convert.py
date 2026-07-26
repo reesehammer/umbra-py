@@ -42,20 +42,26 @@ angle, so on relief a slope tilted toward the radar looks bright and one tilted
 away looks dark from geometry alone. Pass ``rtc=True`` (with a ``dem=``) to
 **radiometrically terrain-flatten** the geocoded output, derived from the DEM
 slope and the scene look geometry so those geometric brightness swings are
-removed. Three models are available (``rtc_model=``): the default ``"cosine"``
+removed. Four models are available (``rtc_model=``): the default ``"cosine"``
 geometric correction ``cos(reference) / cos(local_incidence)`` using the full 3-D
 local incidence angle; ``"area"``, the projected-area / foreshortening correction
 ``sin(local_range_incidence) / sin(reference)`` that works in the range–vertical
 plane so it targets the range-direction foreshortening and layover which dominate
-radiometric terrain distortion; and ``"gamma"``, the per-pixel facet-area
+radiometric terrain distortion; ``"gamma"``, the per-pixel facet-area
 (gamma-nought) normalisation ``cos(reference) * nz / cos(local_incidence)``, which
 adds the true tilted-facet-area term ``nz`` — the ground-referenced cosine and
-range-plane area models both omit it — using the full 3-D facet normal. All three
-are a normalisation of *detected amplitude*, not a calibrated gamma-nought RTC
-product (the full image-space illuminated-area facet integration with layover
-accumulation, and MultiRTC interop, remain deferred); the pure-numpy core (terrain
-normals, look vector, correction factors) is exercised offline with hand-built
-arrays.
+range-plane area models both omit it — using the full 3-D facet normal; and
+``"facet"``, the **image-space illuminated-area integration** (Small 2011), which
+projects every terrain facet into the radar's own ``(slant_range, azimuth)``
+geometry, accumulates the illuminated area landing in each radar cell, and
+normalises each pixel by that total. The first three correct a pixel from its own
+slope, so none of them can see terrain *folding*; the fourth is the one that
+measures layover, because several facets imaging into one cell sum there. All
+four are a normalisation of *detected amplitude*, not a calibrated gamma-nought
+RTC product (Umbra's open products are not radiometrically calibrated, and
+MultiRTC interop remains deferred); the pure-numpy core (terrain normals, look
+vector, radar coordinates, area accumulation, correction factors) is exercised
+offline with hand-built arrays.
 
 Install with: ``pip install "umbra-py[convert]"``
 """
@@ -79,8 +85,10 @@ RESAMPLING_METHODS = ("nearest", "bilinear", "cubic", "average", "lanczos")
 #: Radiometric terrain-flattening models accepted by
 #: :func:`sicd_to_geocoded_cog` (``rtc_model=``). ``"cosine"`` is the geometric
 #: cosine correction; ``"area"`` is the projected-area / foreshortening model;
-#: ``"gamma"`` is the per-pixel facet-area (gamma-nought) normalisation.
-RTC_MODELS = ("cosine", "area", "gamma")
+#: ``"gamma"`` is the per-pixel facet-area (gamma-nought) normalisation;
+#: ``"facet"`` is the image-space illuminated-area integration, the only one that
+#: accumulates several terrain facets into one radar cell (layover).
+RTC_MODELS = ("cosine", "area", "gamma", "facet")
 
 
 def _require(module: str):
@@ -621,6 +629,207 @@ def _facet_area_factor(cos_lia, nz, *, cos_ref: float):
     return np.clip(factor, _RTC_FACTOR_MIN, _RTC_FACTOR_MAX)
 
 
+#: Cap on the radar accumulation grid, as a multiple of the output pixel count.
+#: The grid is sized from the pixel spacing, so it tracks the image; extreme
+#: relief stretches the slant-range axis, and past this the bins are coarsened
+#: rather than the allocation growing without bound.
+_RTC_MAX_RADAR_CELLS = 64
+
+
+def _radar_coordinates(
+    dem: np.ndarray,
+    *,
+    x_res_deg: float,
+    y_res_deg: float,
+    top_lat: float,
+    incidence_deg: float,
+    azimuth_deg: float,
+):
+    """Per-pixel ``(slant_range, azimuth)`` radar coordinates, in metres.
+
+    Maps each cell of a north-up EPSG:4326 DEM grid into the radar's own
+    geometry: the slant-range coordinate is the position projected onto the
+    ground-to-sensor look direction (so a hill leans *toward* the sensor and
+    lands at a shorter range than the ground beneath it — the shift that causes
+    foreshortening and layover), and the azimuth coordinate is the position
+    along the horizontal direction perpendicular to it.
+
+    A scene-constant look vector is the same plane-wave approximation
+    :func:`_scene_look_geometry` makes for the other models; over a single scene
+    the range/azimuth axes do not rotate meaningfully. Both coordinates are
+    origin-free (only differences matter to the caller), and DEM gaps take the
+    scene mean height so a gap reads as locally flat rather than displacing the
+    pixel to an arbitrary range.
+    """
+    np = _require("numpy")
+
+    dem = np.asarray(dem, dtype="float64")
+    finite = np.isfinite(dem)
+    fill = float(np.mean(dem[finite])) if finite.any() else 0.0
+    up = np.where(finite, dem, fill)
+
+    h, w = dem.shape
+    rows = np.arange(h, dtype="float64")[:, None]
+    cols = np.arange(w, dtype="float64")[None, :]
+    lat = np.clip(top_lat - rows * y_res_deg, -89.9, 89.9)
+    east = cols * x_res_deg * _M_PER_DEG_LON * np.cos(np.radians(lat))
+    north = -rows * y_res_deg * _M_PER_DEG_LAT  # north-up: row -> south
+
+    lx, ly, lz = _look_unit_vector(incidence_deg, azimuth_deg)
+    slant = -(east * lx + north * ly + up * lz)
+    az = np.radians(float(azimuth_deg))
+    # Along-track: the horizontal unit vector perpendicular to the ground-range
+    # direction (sin(az), cos(az)).
+    along = east * np.cos(az) - north * np.sin(az)
+    return slant, np.broadcast_to(along, dem.shape).copy()
+
+
+def _accumulate_radar_area(slant, along, area, *, slant_bin: float, along_bin: float):
+    """Bin per-pixel illuminated areas into radar cells, and read the total back.
+
+    ``area`` is each ground facet's illuminated area projected into the plane
+    perpendicular to the look direction; ``slant`` / ``along`` are its radar
+    coordinates. Each facet's area is spread bilinearly over the four radar cells
+    it falls between (so the accumulation is a smooth partition of the total
+    rather than a nearest-cell histogram), and every pixel then reads back the
+    **total** area accumulated in the cell it landed in.
+
+    That read-back is the whole point of working in image space: where terrain
+    folds several ground facets into one radar cell — layover — each of them
+    reads the *summed* area of all of them, which is exactly the over-brightening
+    a per-pixel correction cannot see. Returns an array shaped like ``area``.
+    """
+    np = _require("numpy")
+
+    slant = np.asarray(slant, dtype="float64")
+    along = np.asarray(along, dtype="float64")
+    area = np.asarray(area, dtype="float64")
+
+    span_s = float(np.ptp(slant))
+    span_a = float(np.ptp(along))
+    cells = ((span_s / slant_bin) + 2.0) * ((span_a / along_bin) + 2.0)
+    budget = _RTC_MAX_RADAR_CELLS * area.size
+    if cells > budget:
+        coarsen = float(np.sqrt(cells / budget))
+        slant_bin *= coarsen
+        along_bin *= coarsen
+
+    si = (slant - slant.min()) / slant_bin
+    ai = (along - along.min()) / along_bin
+    ns = int(si.max()) + 2
+    na = int(ai.max()) + 2
+
+    s0 = np.floor(si).astype("int64")
+    a0 = np.floor(ai).astype("int64")
+    fs = si - s0
+    fa = ai - a0
+
+    grid = np.zeros((ns + 1, na + 1), dtype="float64")
+    for ds, ws in ((0, 1.0 - fs), (1, fs)):
+        for da, wa in ((0, 1.0 - fa), (1, fa)):
+            np.add.at(grid, (s0 + ds, a0 + da), area * ws * wa)
+
+    total = np.zeros_like(area)
+    for ds, ws in ((0, 1.0 - fs), (1, fs)):
+        for da, wa in ((0, 1.0 - fa), (1, fa)):
+            total += grid[s0 + ds, a0 + da] * ws * wa
+    return total
+
+
+def _image_space_area_factor(
+    dem: np.ndarray,
+    normals,
+    *,
+    x_res_deg: float,
+    y_res_deg: float,
+    top_lat: float,
+    incidence_deg: float,
+    azimuth_deg: float,
+    reference_deg: float,
+):
+    """Gamma-nought correction from an image-space illuminated-area integration.
+
+    The other three models correct each pixel from its own slope alone, so none
+    of them can see terrain *folding*: where a slope is steeper than the look
+    direction, several ground facets backscatter into one radar cell and their
+    returns sum, which is why layover is bright well beyond what any per-pixel
+    cosine or area term predicts. This model integrates instead (Small 2011): it
+    projects every facet into the radar's ``(slant_range, azimuth)`` geometry via
+    :func:`_radar_coordinates`, accumulates each facet's illuminated area —
+    its true tilted area ``cell / nz`` projected onto the look-perpendicular
+    plane, ``* cos(local_incidence)`` — into radar cells, and normalises each
+    pixel's power by the **total** area accumulated in its cell.
+
+    The reference is the same integration run over *flat* ground in the same
+    geometry, so the discretisation (and the scene edges, where a cell has fewer
+    contributing facets) cancels exactly and flat terrain comes back unchanged.
+    ``reference_deg`` re-references that flat value from the scene incidence by
+    ``tan(scene) / tan(reference)`` — the composition of the range-compression
+    and facet-area reference ratios the ``"area"`` and ``"gamma"`` models each
+    apply on their own, which is what this integration reduces to over a planar
+    slope.
+
+    Gap- and shadow-safe like the other models: a facet tilted away from the
+    radar (``cos_lia <= 0``, shadow) contributes no area, an empty cell is
+    floored before dividing, and the factor is clamped to
+    :data:`_RTC_FACTOR_MIN` .. :data:`_RTC_FACTOR_MAX`. Still a normalisation of
+    *detected* amplitude — Umbra's open products are not radiometrically
+    calibrated — but it is the area-integrating form rather than a per-pixel
+    approximation of it.
+    """
+    np = _require("numpy")
+
+    dem = np.asarray(dem, dtype="float64")
+    h, _w = dem.shape
+    rows = np.arange(h, dtype="float64")[:, None]
+    lat = np.clip(top_lat - rows * y_res_deg, -89.9, 89.9)
+    dy = y_res_deg * _M_PER_DEG_LAT
+    dx = np.maximum(x_res_deg * _M_PER_DEG_LON * np.cos(np.radians(lat)), 1e-6)
+    cell_area = np.broadcast_to(dx * dy, dem.shape)
+
+    look = _look_unit_vector(incidence_deg, azimuth_deg)
+    cos_lia = _cos_local_incidence(normals, look)
+    nz = np.clip(np.asarray(normals[2], dtype="float64"), 1e-3, None)
+    # Illuminated area of the tilted facet, projected perpendicular to the look
+    # direction. A facet turned away from the radar (negative cosine) is in
+    # shadow and contributes nothing.
+    projected = cell_area / nz * np.clip(cos_lia, 0.0, None)
+
+    spacing = float(np.sqrt(np.mean(cell_area)))
+    sin_ref = max(float(np.sin(np.radians(reference_deg))), 1e-3)
+    # One ground cell per radar cell on flat reference terrain: the ground->radar
+    # map compresses area by sin(incidence), independent of the look azimuth.
+    bins = {"slant_bin": spacing * sin_ref, "along_bin": spacing}
+
+    slant, along = _radar_coordinates(
+        dem,
+        x_res_deg=x_res_deg,
+        y_res_deg=y_res_deg,
+        top_lat=top_lat,
+        incidence_deg=incidence_deg,
+        azimuth_deg=azimuth_deg,
+    )
+    accumulated = _accumulate_radar_area(slant, along, projected, **bins)
+
+    flat = np.zeros_like(dem)
+    flat_slant, flat_along = _radar_coordinates(
+        flat,
+        x_res_deg=x_res_deg,
+        y_res_deg=y_res_deg,
+        top_lat=top_lat,
+        incidence_deg=incidence_deg,
+        azimuth_deg=azimuth_deg,
+    )
+    flat_area = cell_area * float(np.cos(np.radians(incidence_deg)))
+    reference = _accumulate_radar_area(flat_slant, flat_along, flat_area, **bins)
+
+    tan_scene = np.tan(np.radians(incidence_deg))
+    tan_ref = max(float(np.tan(np.radians(reference_deg))), 1e-6)
+    factor = (reference / np.clip(accumulated, 1e-9, None)) * (tan_scene / tan_ref)
+    factor = np.where(np.isfinite(factor), factor, 1.0)
+    return np.clip(factor, _RTC_FACTOR_MIN, _RTC_FACTOR_MAX)
+
+
 def _scene_look_geometry(sicd: Any) -> tuple[float, float]:
     """``(incidence_deg, azimuth_deg)`` at the scene centre from SICD ``SCPCOA``.
 
@@ -672,6 +881,10 @@ def _terrain_flatten_on_grid(
     * ``"gamma"`` — the per-pixel facet-area (gamma-nought) normalisation
       ``cos(reference) * nz / cos(local_incidence)``, using the full 3-D facet
       normal and the true-facet-area term ``nz`` the other two omit.
+    * ``"facet"`` — the image-space illuminated-area integration: every facet's
+      area is accumulated into the radar cell it images into, so terrain folded
+      into one cell (layover) is normalised by the *summed* area of all of it,
+      which no per-pixel model can see.
 
     The DEM resample is the only rasterio touch; the physics is the pure-numpy
     core above. Over DEM gaps the factor is one, so those pixels pass through
@@ -715,6 +928,19 @@ def _terrain_flatten_on_grid(
         cos_lia = np.where(covered, cos_lia, cos_ref)
         nz = np.where(covered, nz, 1.0)
         factor = _facet_area_factor(cos_lia, nz, cos_ref=cos_ref)
+    elif model == "facet":
+        factor = _image_space_area_factor(
+            dem_on_grid,
+            normals,
+            x_res_deg=x_res,
+            y_res_deg=y_res,
+            top_lat=top_lat,
+            incidence_deg=incidence_deg,
+            azimuth_deg=azimuth_deg,
+            reference_deg=reference_deg,
+        )
+        # A pixel the DEM did not cover has no measured facet, so it passes through.
+        factor = np.where(covered, factor, 1.0)
     else:
         look = _look_unit_vector(incidence_deg, azimuth_deg)
         cos_ref = float(np.cos(np.radians(reference_deg)))
@@ -986,10 +1212,21 @@ def sicd_to_geocoded_cog(
           true tilted-facet-area term ``nz`` (cosine of the slope from horizontal)
           that the ground-referenced ``"cosine"`` and range-plane ``"area"``
           models both omit.
+        * ``"facet"`` normalises each pixel by the illuminated area accumulated
+          in the radar cell it images into — the image-space illuminated-area
+          integration (Small 2011). Every facet is projected into the scene's
+          ``(slant_range, azimuth)`` geometry and its true tilted area,
+          projected perpendicular to the look direction, is binned there; a
+          pixel's factor is the flat-terrain reference over the **total** area
+          in its cell. The other three correct each pixel from its own slope, so
+          only this one measures **layover** — where terrain folds several
+          facets into one cell, their areas sum and all of them are suppressed
+          together. Over a planar slope it reduces to the product of the
+          ``"area"`` and ``"gamma"`` factors.
 
-        All three are honest first slices, not the full image-space
-        illuminated-area facet integration (Small 2011, with layover accumulation)
-        or MultiRTC interop, which remain deferred (`STRATEGY.md` 5.5).
+        All four are a normalisation of detected amplitude, not a calibrated
+        gamma-nought product (Umbra's open products are not radiometrically
+        calibrated); MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
     """
     np = _require("numpy")
     _require("rasterio")

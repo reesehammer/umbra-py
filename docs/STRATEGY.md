@@ -187,12 +187,16 @@ in, which is what tells a steady drift apart from a single step, now *drawn* as
 sparklines of the site's and its peak block's history in the explorer's Quantify
 readout)
 and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
-orthorectification, geoid handling, and three RTC flattening models:
-`cosine`/`area`/`gamma`) all ship. **Open:** the *fully
-calibrated* remainder of RTC — full gamma-nought illuminated-area facet
-integration in image space (vs. the shipped per-pixel `gamma` approximation)
-— and MultiRTC interop. This is a heavier, calibration-oriented job (Umbra's
-open products are not radiometrically calibrated) and stays deferred.
+orthorectification, geoid handling, and four RTC flattening models:
+`cosine`/`area`/`gamma`/`facet`) all ship. The fourth is the image-space
+illuminated-area facet integration (Small 2011): it projects every terrain facet
+into the scene's own `(slant_range, azimuth)` geometry, accumulates the
+illuminated area landing in each radar cell, and normalises by that total — so
+it is the only one of the four that measures **layover**, where several ground
+facets image into one cell and their returns sum. **Open:** calibration itself —
+Umbra's open products are not radiometrically calibrated, so all four models
+normalise *detected amplitude* rather than producing a calibrated gamma-nought
+product — and MultiRTC interop. Both stay deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
 
@@ -345,8 +349,15 @@ from:
 
 **SAR-processing depth (was workstream 5.5)**
 
-- Fully calibrated gamma-nought RTC (facet integration in image space) and
-  MultiRTC interop — heavy, research-oriented, deferred.
+- ~~Gamma-nought RTC by facet integration in image space.~~ **shipped** —
+  `umbra convert --rtc --rtc-model facet` accumulates each terrain facet's
+  illuminated area into the radar cell it images into and normalises by that
+  total, so folded ground (layover) is suppressed together rather than corrected
+  pixel-by-pixel; flat terrain is unchanged and a planar slope reduces to the
+  `area` × `gamma` closed form. See the CHANGELOG. **Still open:** radiometric
+  *calibration* (Umbra's open products are not calibrated, so every model
+  normalises detected amplitude) and MultiRTC interop — heavy,
+  research-oriented, deferred.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

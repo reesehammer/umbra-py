@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra convert --rtc --rtc-model facet`: the terrain correction that
+  measures layover, because it integrates in the radar's geometry instead of
+  correcting pixel by pixel.** The three shipped RTC models all answer the same
+  question — *given this pixel's own slope, how much brighter is it than flat
+  ground would be?* — with three increasingly complete per-pixel terms: the
+  cosine of the 3-D local incidence angle, the range-plane foreshortening area,
+  and the tilted facet's true area (`gamma`). What none of them can express is
+  the failure that dominates a mountain scene: where terrain is steeper than the
+  look direction, *several* patches of ground backscatter into one radar cell
+  and their returns sum there. Layover is not a pixel being mis-scaled; it is
+  several pixels sharing one measurement. A model that only ever looks at one
+  slope at a time is structurally unable to see it — and so the flat valley
+  floor a ridge folds onto comes back "corrected" to exactly 1.0, its own slope
+  being zero.
+
+  `facet` integrates instead (Small 2011, *Flattening Gamma*). Every terrain
+  facet is projected into the scene's own `(slant_range, azimuth)` geometry
+  (`_radar_coordinates`, the same plane-wave look vector the other models use),
+  its illuminated area — the true tilted area `cell / nz`, projected onto the
+  plane perpendicular to the look direction — is accumulated into the radar cell
+  it images into (`_accumulate_radar_area`, bilinear so the accumulation is a
+  smooth partition rather than a nearest-cell histogram), and every pixel is then
+  normalised by the **total** area in its cell. Folded ground reads the summed
+  area of everything folded with it, and all of it is suppressed together, which
+  is the correction the per-pixel models cannot make.
+
+  Two properties keep it honest rather than merely different. The reference is
+  the *same integration* run over flat ground in the same geometry, so the
+  binning and the scene edges cancel exactly and flat terrain comes back at
+  exactly one — the invariant every other model holds. And over a planar range
+  slope, where nothing folds, the integration reduces to the product of the
+  `area` and `gamma` factors, the closed form those two carry between them; the
+  tests assert that composition across four slopes, so the arithmetic is pinned
+  to something independently derivable instead of to its own output.
+
+  Fourth value in `RTC_MODELS`, selected by `--rtc-model facet` /
+  `sicd_to_geocoded_cog(rtc_model="facet")`; `rtc_model` still defaults to
+  `"cosine"`, so every existing call is byte-identical. Shadowed facets
+  contribute no area, DEM gaps pass through untouched, and the radar grid is
+  sized from the pixel spacing and coarsened rather than grown without bound
+  under extreme relief. Pure-numpy core, no model call, no new dependency,
+  offline-tested in `tests/test_convert.py` (radar coordinates, coincident-facet
+  accumulation, flat-unchanged, azimuth-slope-unchanged, the planar
+  area×gamma composition, layover suppression the `gamma` model misses, the
+  reference-angle offset, end-to-end differ-from-all-three + CLI). This closes
+  the image-space facet integration named in `STRATEGY.md` 5.5; what stays open
+  there is calibration itself (Umbra's open products are not radiometrically
+  calibrated) and MultiRTC interop.
 - **`umbra ask --aoi`: the planner can finally mean a *shape*, because it now
   chooses one instead of drawing it.** `--intersects` reached every other front
   door in the previous change, but a plan still carried only `bbox`/`place`, so
