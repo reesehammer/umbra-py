@@ -37,6 +37,19 @@ Range keywords with hemisphere-dependent meaning (``"last winter"``) that the
 deterministic :func:`umbra_py.parse_date_bound` intentionally rejects belong
 here: the model resolves the season to concrete dates, which the deterministic
 layer then validates like any other date.
+
+**Areas of interest are chosen, never authored.** Every other search surface can
+filter by a polygon (``search(intersects=…)``, ``umbra search --intersects``,
+``POST /search``), but a plan had only ``bbox``/``place`` -- so "scenes over this
+watershed" could only ever resolve to the rectangle around it. The gap was not an
+oversight: a hallucinated date is caught by :func:`umbra_py.parse_date_bound`,
+whereas a hallucinated ring is a *plausible* polygon over the wrong ground, and
+nothing downstream can tell. So the model never emits coordinates. The caller
+supplies the areas of interest it already has (``umbra ask --aoi coast.geojson``,
+:class:`AreaOfInterest`), the prompt lists them **by name**, and the plan's
+``aoi`` field is validated against that closed set -- an unknown name is an
+:class:`AskError`, exactly like an unknown product type. The model picks which
+shape the sentence meant; the shape itself is the user's file.
 """
 
 from __future__ import annotations
@@ -44,17 +57,19 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from ._geometry import Geometry, geometry_bbox, to_geojson
 from .constants import PRODUCT_ASSETS
 from .context import llm_context
 from .dates import parse_date_bound
 from .exceptions import MissingDependencyError, UmbraError
 
 __all__ = [
+    "AreaOfInterest",
     "AskError",
     "SearchPlan",
     "Planner",
@@ -80,6 +95,57 @@ class AskError(UmbraError):
     """
 
 
+@dataclass(frozen=True)
+class AreaOfInterest:
+    """A named polygon the *caller* supplied, which a plan may select by name.
+
+    The unit of the "chosen, never authored" rule described in the module
+    docstring: ``geometry`` is already-parsed exterior rings (whatever
+    :func:`umbra_py._geometry.parse_geometry` accepted), so the coordinates come
+    from the user's own file and the model contributes only the ``name``.
+
+    ``source`` is how the user spelled it on the command line (a path, or inline
+    GeoJSON), kept so the audited ``umbra search --intersects …`` line is the
+    command they would have typed rather than an inlined ring dump.
+    """
+
+    name: str
+    geometry: Geometry
+    source: str | None = None
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float] | None:
+        """The area's bounding box -- what the prompt shows the model, and what
+        makes an ``--json`` plan auditable without the full ring list."""
+        return geometry_bbox(self.geometry)
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON view for ``--json``: the name, the spelling, and the bounds.
+
+        The rings themselves are deliberately omitted -- they are the user's
+        input, unchanged, and can be arbitrarily large; ``source`` says where to
+        find them.
+        """
+        bbox = self.bbox
+        return {
+            "name": self.name,
+            "source": self.source,
+            "bbox": list(bbox) if bbox else None,
+        }
+
+
+def _aoi_index(aois: Sequence[AreaOfInterest]) -> dict[str, AreaOfInterest]:
+    """Case-insensitive name -> area lookup, for validating a model's choice.
+
+    Names are matched loosely (case and surrounding space) because the model is
+    copying a label out of the prompt, not producing data: "Coast" for ``coast``
+    is a transcription difference, not a different area. Names are expected to be
+    distinct (``umbra ask`` refuses a repeated ``--aoi`` name for this reason);
+    a caller that duplicates one anyway gets the last of them.
+    """
+    return {aoi.name.strip().lower(): aoi for aoi in aois}
+
+
 @dataclass
 class SearchPlan:
     """A validated, deterministic search the model's plan maps to.
@@ -87,9 +153,10 @@ class SearchPlan:
     Every field has already passed through :func:`parse_plan` -- dates are ISO
     ``YYYY-MM-DD`` strings, ``product_types`` are canonical
     :data:`umbra_py.PRODUCT_ASSETS` names, ``bbox`` is a 4-tuple of floats.
-    ``place`` (a free-text name geocoded at execution time) and ``bbox`` are
-    mutually exclusive. ``rationale`` is the model's one-line explanation, kept
-    only to show the user; it never becomes a filter.
+    ``place`` (a free-text name geocoded at execution time), ``bbox`` and
+    ``aoi`` are mutually exclusive -- one spatial filter, however it was spelled.
+    ``rationale`` is the model's one-line explanation, kept only to show the
+    user; it never becomes a filter.
     """
 
     question: str
@@ -97,6 +164,7 @@ class SearchPlan:
     fuzzy: bool = False
     place: str | None = None
     bbox: tuple[float, float, float, float] | None = None
+    aoi: AreaOfInterest | None = None
     start: str | None = None
     end: str | None = None
     product_types: list[str] = field(default_factory=list)
@@ -113,13 +181,16 @@ class SearchPlan:
 
         Omits ``place``/``bbox`` -- the caller resolves those into a single
         ``bbox`` (geocoding ``place``) in the deterministic execution layer,
-        exactly as the ``umbra search`` command does. The SAR acquisition-property
-        filters (``polarizations`` / ``min_incidence`` / ``max_incidence`` /
-        ``max_resolution``) push straight through to the same
+        exactly as the ``umbra search`` command does. A selected ``aoi`` needs no
+        such resolution (its rings were parsed before the model ever saw its
+        name), so it passes straight through as ``intersects``. The SAR
+        acquisition-property filters (``polarizations`` / ``min_incidence`` /
+        ``max_incidence`` / ``max_resolution``) push through to the same
         :meth:`~umbra_py.models.UmbraItem.matches_filters` predicate every other
         surface shares.
         """
         return {
+            "intersects": self.aoi.geometry if self.aoi else None,
             "start": self.start,
             "end": self.end,
             "product_types": self.product_types or None,
@@ -145,6 +216,7 @@ class SearchPlan:
             "fuzzy": self.fuzzy,
             "place": self.place,
             "bbox": list(self.bbox) if self.bbox else None,
+            "aoi": self.aoi.to_dict() if self.aoi else None,
             "start": self.start,
             "end": self.end,
             "product_types": self.product_types,
@@ -163,6 +235,9 @@ class SearchPlan:
 
 #: The exact JSON shape the model must return. Documented in the prompt so the
 #: model fills a stable schema; :func:`parse_plan` validates whatever comes back.
+#: ``aoi`` is deliberately absent: it is offered only when the caller supplies
+#: areas of interest (see :data:`_AOI_PROMPT`), so a model with nothing to choose
+#: between is never shown the key.
 _PLAN_KEYS = (
     "area",
     "fuzzy",
@@ -231,17 +306,64 @@ these keys (use null / [] / false when a filter does not apply):
 Only choose product types and parameter names that appear in the context.
 """
 
+#: Appended to the system prompt only when the caller supplied areas of
+#: interest. It adds one key to the schema -- and states the rule that makes the
+#: key safe: the model selects a name from the list, it never writes coordinates.
+_AOI_PROMPT = """\
+The user supplied these areas of interest. Each is a polygon they already have;
+you may select ONE of them by name:
 
-def build_messages(question: str) -> dict[str, str]:
+{listing}
+
+  aoi           string | null   -- the exact name of one area of interest from
+                                    the list above, when the request refers to a
+                                    shape rather than a rectangle ("over this
+                                    watershed", "inside the AOI", "along the
+                                    coastline I gave you"). Use `aoi` OR `place`
+                                    OR `bbox` -- never more than one. Use null
+                                    when the request does not point at one of
+                                    them.
+
+You cannot describe an area of interest yourself: there is no way to write
+coordinates for one, and a name that is not in the list above is rejected. If
+none of them fits the request, leave `aoi` null and use `place`/`bbox`/`area`.
+"""
+
+
+def _aoi_listing(aois: Sequence[AreaOfInterest]) -> str:
+    """Render the supplied areas as prompt lines: name, part count, bounds.
+
+    The bounds are what let the model tell two supplied areas apart when their
+    names are uninformative (``aoi1``/``aoi2``), and they are safe to show --
+    they are derived from the user's own file, not something the model can
+    edit into the plan.
+    """
+    lines = []
+    for aoi in aois:
+        bbox = aoi.bbox
+        where = " covering lon/lat " + ", ".join(f"{v:g}" for v in bbox) if bbox else " (empty)"
+        parts = f"{len(aoi.geometry)} polygon{'s' if len(aoi.geometry) != 1 else ''}"
+        lines.append(f'  - "{aoi.name}" -- {parts},{where}')
+    return "\n".join(lines)
+
+
+def build_messages(question: str, aois: Sequence[AreaOfInterest] = ()) -> dict[str, str]:
     """Build the ``{"system", "user"}`` prompt for a planning model.
 
     Deterministic and offline: the system prompt embeds the
     :func:`umbra_py.llm_context` domain document and the required JSON schema;
     the user message is the question. This is what an injectable
     :data:`Planner` receives.
+
+    ``aois`` are the caller's own areas of interest (see :class:`AreaOfInterest`).
+    When any are supplied, the prompt gains a block listing them by name and the
+    ``aoi`` key that selects one; with none supplied the prompt is unchanged, so
+    a model is never offered a filter the caller cannot honour.
     """
     context = json.dumps(llm_context(), indent=2)
     system = f"{_SYSTEM_PROMPT}\n\nContext document:\n{context}"
+    if aois:
+        system += "\n\n" + _AOI_PROMPT.format(listing=_aoi_listing(aois))
     return {"system": system, "user": question.strip()}
 
 
@@ -363,6 +485,33 @@ def _coerce_positive_float(value: Any, field_name: str) -> float | None:
     return n
 
 
+def _coerce_aoi(value: Any, aois: Sequence[AreaOfInterest]) -> AreaOfInterest | None:
+    """Resolve a model-chosen ``aoi`` name to one of the caller's own areas.
+
+    The whole determinism argument for polygon planning lives in these few
+    lines: the return value is an object built from the *user's* file, selected
+    by name, so no coordinate the model produced can reach a search. A name that
+    is not on the list -- including any name at all when the caller supplied no
+    areas -- is a self-describing :class:`AskError` rather than a dropped filter,
+    because silently searching the whole world for "over this watershed" is the
+    one failure mode a polygon filter exists to prevent.
+    """
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise AskError(f"aoi must be the name of a supplied area of interest, got {value!r}.")
+    if not aois:
+        raise AskError(
+            f"The plan selected the area of interest {value!r}, but none were supplied. "
+            "Pass one with --aoi (a .geojson path), or plan a place/bbox instead."
+        )
+    chosen = _aoi_index(aois).get(value.strip().lower())
+    if chosen is None:
+        names = ", ".join(repr(a.name) for a in aois)
+        raise AskError(f"Unknown area of interest {value!r}. Supplied areas: {names}.")
+    return chosen
+
+
 def _coerce_positive_int(value: Any, field_name: str) -> int | None:
     if value in (None, ""):
         return None
@@ -389,16 +538,26 @@ def _coerce_date_field(value: Any, *, is_end: bool, today: date | None) -> str |
     return resolved.isoformat() if resolved else None
 
 
-def parse_plan(raw: dict[str, Any], question: str, *, today: date | None = None) -> SearchPlan:
+def parse_plan(
+    raw: dict[str, Any],
+    question: str,
+    *,
+    today: date | None = None,
+    aois: Sequence[AreaOfInterest] = (),
+) -> SearchPlan:
     """Validate a model's raw plan dict into a :class:`SearchPlan`.
 
     **This is the determinism boundary.** Every field the model produced is
     re-checked here before it can become a filter: dates are resolved by
     :func:`umbra_py.parse_date_bound` (so a season or a bad date is caught),
     product types must be canonical :data:`umbra_py.PRODUCT_ASSETS`, the bbox is
-    range-checked, and ``place``/``bbox`` are enforced mutually exclusive.
-    Unknown keys are ignored. Raises :class:`AskError` with a self-describing
-    message on any invalid field.
+    range-checked, and ``place``/``bbox``/``aoi`` are enforced mutually
+    exclusive. Unknown keys are ignored. Raises :class:`AskError` with a
+    self-describing message on any invalid field.
+
+    ``aois`` are the caller's areas of interest; a plan's ``aoi`` must name one
+    of them (see :func:`_coerce_aoi`), so the polygon a search runs against is
+    always the user's own geometry.
 
     ``today`` anchors relative dates for deterministic tests, mirroring
     :func:`umbra_py.parse_date_bound`.
@@ -418,6 +577,10 @@ def parse_plan(raw: dict[str, Any], question: str, *, today: date | None = None)
     if place and bbox:
         raise AskError("A plan may set place or bbox, not both.")
 
+    aoi = _coerce_aoi(raw.get("aoi"), aois)
+    if aoi and (place or bbox):
+        raise AskError("A plan may set aoi, place or bbox -- not more than one.")
+
     min_incidence = _coerce_positive_float(raw.get("min_incidence"), "min_incidence")
     max_incidence = _coerce_positive_float(raw.get("max_incidence"), "max_incidence")
     if min_incidence is not None and max_incidence is not None and min_incidence > max_incidence:
@@ -431,6 +594,7 @@ def parse_plan(raw: dict[str, Any], question: str, *, today: date | None = None)
         fuzzy=bool(raw.get("fuzzy", False)),
         place=place.strip() if place else None,
         bbox=bbox,
+        aoi=aoi,
         start=_coerce_date_field(raw.get("start"), is_end=False, today=today),
         end=_coerce_date_field(raw.get("end"), is_end=True, today=today),
         product_types=_coerce_products(raw.get("product_types")),
@@ -465,6 +629,11 @@ def plan_to_argv(plan: SearchPlan) -> list[str]:
         argv += ["--place", plan.place]
     if plan.bbox:
         argv += ["--bbox", ",".join(f"{v:g}" for v in plan.bbox)]
+    if plan.aoi:
+        # Prefer the spelling the user gave (a path), so the audit line is the
+        # command they would have typed; fall back to inline GeoJSON for an area
+        # constructed in code, which keeps the rendered command runnable.
+        argv += ["--intersects", plan.aoi.source or json.dumps(to_geojson(plan.aoi.geometry))]
     if plan.start:
         argv += ["--start", plan.start]
     if plan.end:
@@ -599,6 +768,7 @@ def ask(
     planner: Planner | None = None,
     model: str | None = None,
     today: date | None = None,
+    aois: Sequence[AreaOfInterest] = (),
 ) -> SearchPlan:
     """Turn a natural-language ``question`` into a validated :class:`SearchPlan`.
 
@@ -608,10 +778,14 @@ def ask(
     returned plan is safe to execute: every filter has passed the determinism
     boundary. The model is *only* consulted to produce the raw plan; inject a
     ``planner`` in tests to avoid any network call.
+
+    ``aois`` offers the model the caller's own areas of interest to choose
+    between (``umbra ask --aoi coast.geojson``). The same sequence goes into the
+    prompt and into the validation, so a plan can only ever select one of them.
     """
     if not question or not question.strip():
         raise AskError('Ask a question, e.g. "what changed at Centerfield this spring?"')
     plan_fn = planner or default_planner(model=model)
-    reply = plan_fn(build_messages(question))
+    reply = plan_fn(build_messages(question, aois))
     raw = _extract_json_object(reply)
-    return parse_plan(raw, question, today=today)
+    return parse_plan(raw, question, today=today, aois=aois)

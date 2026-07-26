@@ -16,10 +16,12 @@ from click.testing import CliRunner
 
 import umbra_py.planner as planner_mod
 from umbra_py import ask
+from umbra_py._geometry import parse_geometry
 from umbra_py.cli import cli
 from umbra_py.exceptions import MissingDependencyError
 from umbra_py.models import UmbraItem
 from umbra_py.planner import (
+    AreaOfInterest,
     AskError,
     SearchPlan,
     build_messages,
@@ -445,3 +447,216 @@ def test_cli_ask_reports_a_bad_plan_cleanly(monkeypatch):
     result = CliRunner().invoke(cli, ["ask", "q"])
     assert result.exit_code != 0
     assert "Unknown product type" in result.output
+
+
+# --- Areas of interest: chosen by name, never authored ----------------------
+
+_DELTA_GEOJSON = {
+    "type": "Polygon",
+    "coordinates": [[[-90.5, 29.0], [-89.5, 29.0], [-89.5, 29.8], [-90.5, 29.8], [-90.5, 29.0]]],
+}
+_RIDGE_GEOJSON = {
+    "type": "Polygon",
+    "coordinates": [[[11.0, 46.0], [11.5, 46.0], [11.5, 46.4], [11.0, 46.4], [11.0, 46.0]]],
+}
+
+
+def _aoi(name="delta", geojson=None, source=None):
+    """An :class:`AreaOfInterest` built the way the CLI builds one: geometry
+    parsed by the deterministic layer *before* the model is involved."""
+    return AreaOfInterest(
+        name=name,
+        geometry=parse_geometry(geojson or _DELTA_GEOJSON),
+        source=source,
+    )
+
+
+def test_build_messages_omits_the_aoi_key_when_none_are_supplied():
+    """A model is never offered a filter the caller cannot honour: with no areas
+    supplied the prompt is exactly what it was before the feature existed."""
+    assert "aoi" not in build_messages("q")["system"]
+
+
+def test_build_messages_lists_supplied_areas_by_name_and_bounds():
+    system = build_messages("scenes over the delta", [_aoi(), _aoi("ridge", _RIDGE_GEOJSON)])[
+        "system"
+    ]
+    assert '"delta"' in system and '"ridge"' in system
+    # The bounds distinguish two areas whose names don't; they come from the
+    # user's file, so showing them costs nothing.
+    assert "-90.5, 29, -89.5, 29.8" in system
+    assert "1 polygon," in system
+    # And the rule that makes the key safe is stated to the model.
+    assert "cannot describe an area of interest yourself" in system
+
+
+def test_parse_plan_resolves_a_named_area_to_the_callers_geometry():
+    delta = _aoi(source="delta.geojson")
+    plan = parse_plan({"aoi": "delta", "start": "2024-03-01"}, "q", today=TODAY, aois=[delta])
+    assert plan.aoi is delta
+    # The rings that reach the search are the caller's, not the model's.
+    assert plan.to_search_kwargs()["intersects"] == delta.geometry
+
+
+def test_parse_plan_matches_an_area_name_case_insensitively():
+    plan = parse_plan({"aoi": " Delta "}, "q", aois=[_aoi()])
+    assert plan.aoi is not None and plan.aoi.name == "delta"
+
+
+def test_parse_plan_rejects_an_unknown_area_name():
+    with pytest.raises(AskError, match="Unknown area of interest"):
+        parse_plan({"aoi": "amazon"}, "q", aois=[_aoi()])
+
+
+def test_parse_plan_rejects_an_area_when_none_were_supplied():
+    """The failure mode a polygon filter exists to prevent is a silently
+    unfiltered search, so a name with nothing to match is an error, not a drop."""
+    with pytest.raises(AskError, match="none were supplied"):
+        parse_plan({"aoi": "delta"}, "q")
+
+
+def test_parse_plan_rejects_a_non_string_area():
+    with pytest.raises(AskError, match="aoi must be the name"):
+        parse_plan({"aoi": _DELTA_GEOJSON}, "q", aois=[_aoi()])
+
+
+@pytest.mark.parametrize("extra", [{"place": "New Orleans"}, {"bbox": [-91.0, 28.0, -89.0, 30.0]}])
+def test_parse_plan_rejects_an_area_combined_with_a_rectangle(extra):
+    with pytest.raises(AskError, match="not more than one"):
+        parse_plan({"aoi": "delta", **extra}, "q", aois=[_aoi()])
+
+
+def test_parse_plan_without_an_area_leaves_intersects_unset():
+    plan = parse_plan({"area": "Centerfield, Utah"}, "q", aois=[_aoi()])
+    assert plan.aoi is None
+    assert plan.to_search_kwargs()["intersects"] is None
+
+
+def test_plan_to_command_renders_the_area_as_the_users_own_path():
+    plan = SearchPlan(question="q", aoi=_aoi(source="aois/delta.geojson"))
+    assert "--intersects aois/delta.geojson" in plan.to_command()
+
+
+def test_plan_to_command_inlines_geojson_for_an_area_with_no_source():
+    """An area built in code has no path to point at, so the audit line carries
+    the geometry itself -- the printed command stays runnable either way."""
+    cmd = SearchPlan(question="q", aoi=_aoi()).to_command()
+    assert "--intersects" in cmd and '"Polygon"' in cmd
+
+
+def test_plan_to_dict_summarises_the_area_without_the_rings():
+    plan = SearchPlan(question="q", aoi=_aoi(source="delta.geojson"))
+    data = json.loads(json.dumps(plan.to_dict()))  # must be JSON-serialisable
+    assert data["aoi"] == {
+        "name": "delta",
+        "source": "delta.geojson",
+        "bbox": [-90.5, 29.0, -89.5, 29.8],
+    }
+
+
+def test_ask_offers_the_areas_to_the_planner_and_validates_the_choice():
+    seen = {}
+
+    def planner(messages):
+        seen["system"] = messages["system"]
+        return json.dumps({"aoi": "delta", "rationale": "the supplied delta outline"})
+
+    delta = _aoi(source="delta.geojson")
+    plan = ask("scenes over the delta", planner=planner, today=TODAY, aois=[delta])
+    assert '"delta"' in seen["system"]
+    assert plan.aoi is delta
+
+
+# --- CLI: umbra ask --aoi ---------------------------------------------------
+
+
+@pytest.fixture
+def delta_file(tmp_path):
+    path = tmp_path / "delta.geojson"
+    path.write_text(json.dumps(_DELTA_GEOJSON))
+    return path
+
+
+@pytest.fixture
+def aoi_plan(monkeypatch):
+    """A planner that always selects the area of interest named ``delta``."""
+    reply = json.dumps({"aoi": "delta", "start": "2024-03-01", "rationale": "the delta outline"})
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda m: reply)
+    return reply
+
+
+def test_cli_ask_aoi_renders_an_intersects_command(aoi_plan, delta_file):
+    result = CliRunner().invoke(cli, ["ask", "scenes over the delta", "--aoi", str(delta_file)])
+    assert result.exit_code == 0, result.output
+    # The file stem names the area, and the audited command points back at the file.
+    assert f"--intersects {delta_file}" in result.output
+
+
+def test_cli_ask_aoi_run_sends_the_polygon_to_the_backend(
+    aoi_plan, delta_file, monkeypatch, sample_item_dict
+):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+
+    class FakeSource:
+        def __init__(self):
+            self.kwargs = None
+
+        def search(self, **kwargs):
+            self.kwargs = kwargs
+            return iter([item])
+
+        def close(self):
+            pass
+
+    fake = FakeSource()
+    monkeypatch.setattr(
+        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+    )
+    result = CliRunner().invoke(
+        cli, ["ask", "scenes over the delta", "--run", "--aoi", str(delta_file)]
+    )
+    assert result.exit_code == 0, result.output
+    # The exterior rings the search filters on are the ones parsed from the file.
+    assert fake.kwargs["intersects"] == parse_geometry(_DELTA_GEOJSON)
+    assert fake.kwargs["bbox"] is None
+
+
+def test_cli_ask_aoi_accepts_an_explicit_name(monkeypatch, delta_file):
+    reply = json.dumps({"aoi": "wetland"})
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda m: reply)
+    result = CliRunner().invoke(cli, ["ask", "q", "--aoi", f"wetland={delta_file}"])
+    assert result.exit_code == 0, result.output
+    assert f"--intersects {delta_file}" in result.output
+
+
+def test_cli_ask_aoi_refuses_two_areas_with_the_same_name(aoi_plan, delta_file, tmp_path):
+    other = tmp_path / "nested" / "delta.geojson"
+    other.parent.mkdir()
+    other.write_text(json.dumps(_RIDGE_GEOJSON))
+    result = CliRunner().invoke(cli, ["ask", "q", "--aoi", str(delta_file), "--aoi", str(other)])
+    assert result.exit_code != 0
+    assert "used twice" in result.output
+
+
+def test_cli_ask_aoi_reports_a_bad_polygon_cleanly(aoi_plan, tmp_path):
+    bad = tmp_path / "delta.geojson"
+    bad.write_text('{"type": "Point", "coordinates": [0, 0]}')
+    result = CliRunner().invoke(cli, ["ask", "q", "--aoi", str(bad)])
+    assert result.exit_code != 0
+    assert "--aoi delta" in result.output
+
+
+def test_cli_ask_reports_an_unknown_planned_area_cleanly(delta_file, monkeypatch):
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda m: '{"aoi": "amazon"}')
+    result = CliRunner().invoke(cli, ["ask", "q", "--aoi", str(delta_file)])
+    assert result.exit_code != 0
+    assert "Unknown area of interest" in result.output
+
+
+def test_cli_ask_aoi_accepts_inline_geojson_named_by_position(monkeypatch):
+    """Inline GeoJSON has no file stem to name it by, so it answers to 'aoi1' --
+    and is taken whole, so an '=' inside it is never read as a NAME= prefix."""
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda m: '{"aoi": "aoi1"}')
+    result = CliRunner().invoke(cli, ["ask", "q", "--aoi", json.dumps(_DELTA_GEOJSON)])
+    assert result.exit_code == 0, result.output
+    assert "--intersects" in result.output and "Polygon" in result.output

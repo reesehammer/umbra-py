@@ -731,6 +731,30 @@ model. It's the one place a model is called — opt-in behind `[ai]`, never
 implicit — so seasons and other phrasing the deterministic core rejects
 (`"last winter"`) get resolved to concrete dates the deterministic layer checks.
 
+**Areas of interest are chosen, never drawn.** A question can also mean a shape
+— *"scenes over this watershed"* — so pass the areas you already have and the
+model may select one **by name**:
+
+```bash
+umbra ask "what changed over the delta this spring?" --aoi delta.geojson
+```
+
+```text
+Plan: the supplied delta outline over the spring window
+umbra search --intersects delta.geojson --start 2024-03-01 --end 2024-05-31
+```
+
+Repeat `--aoi` for several (each takes its file stem as its name, or spell it
+`NAME=PATH`). Every file is parsed by the deterministic layer *before* the model
+sees anything; the prompt then lists the areas by name and bounds, and the plan
+may only name one of them. There is deliberately no way for a model to write
+coordinates: a hallucinated date is caught by the date resolver, but a
+hallucinated ring is a plausible polygon over the wrong ground that nothing
+downstream could catch. A name that isn't on the list — or any name when you
+supplied no areas — is an error, not a silently unfiltered search. The polygon
+that reaches the search is always your file, and the audited command points back
+at it.
+
 ### Find a site you can describe but can't name (`umbra semantic`)
 
 `--fuzzy` matches by the *words* in a task label. Some queries share no word
