@@ -77,16 +77,15 @@ jobs:
       - name: Export stac-geoparquet
         run: umbra index export --db catalog.db --out umbra-open-data.parquet
 
-      # Tile the whole catalog into a single-file vector basemap from the index
-      # just built (--local, no second crawl), plus a MapLibre viewer pointed at
-      # the *published* pmtiles URL so catalog.html works standalone once both
-      # land on the release.
-      - name: Tile whole-catalog PMTiles basemap
-        run: |
-          umbra tiles --local --db catalog.db --out catalog.pmtiles
-          python -c "import umbra_py.pmtiles as p, umbra_py.constants as c; \
-          p.save_viewer(c.CATALOG_INDEX_PMTILES_URL, 'catalog.html')"
-
+      # Publish the crawl BEFORE deriving anything further from it. The order
+      # matters: the first two runs of this workflow both died in the tiling
+      # step below, and because that step ran first, a completed crawl, 2 725
+      # baked place labels and a good parquet export were discarded with it --
+      # so the release was never created at all and `umbra index fetch` 404'd
+      # for the project's entire existence. The index is the promise; the
+      # basemap is derived from it. A failure deriving the basemap should cost
+      # the basemap, not the snapshot, so the upload of each artifact now sits
+      # with the step that builds it.
       - name: Publish to the rolling catalog-index release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -112,7 +111,29 @@ jobs:
               --title "Umbra open-data catalog index" --notes "$notes"
           fi
           gh release upload catalog-index \
-            catalog.db umbra-open-data.parquet catalog.pmtiles catalog.html --clobber
+            catalog.db umbra-open-data.parquet --clobber
+
+      # Tile the whole catalog into a single-file vector basemap from the index
+      # just built (--local, no second crawl), plus a MapLibre viewer pointed at
+      # the *published* pmtiles URL so catalog.html works standalone once both
+      # land on the release.
+      #
+      # --index-db, not --db: on a render command --db means the decibel
+      # stretch, so the gather commands spell the index path --index-db. Getting
+      # that wrong is what killed the first two runs; `tests/test_workflows.py`
+      # now parses every invocation in this file against the real CLI, so the
+      # same drift fails a pull request instead of a Monday morning.
+      - name: Tile whole-catalog PMTiles basemap
+        run: |
+          umbra tiles --local --index-db catalog.db --out catalog.pmtiles
+          python -c "import umbra_py.pmtiles as p, umbra_py.constants as c; \
+          p.save_viewer(c.CATALOG_INDEX_PMTILES_URL, 'catalog.html')"
+
+      - name: Publish the whole-catalog basemap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload catalog-index catalog.pmtiles catalog.html --clobber
 
       # A quicklook per acquisition, baked once here so no viewer has to stream
       # a cloud-optimized GeoTIFF overview at render time. Two things make this

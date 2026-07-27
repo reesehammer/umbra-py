@@ -85,6 +85,11 @@ dev = [
     "pytest-cov>=4.1",
     "responses>=0.23",
     "httpx>=0.27",
+    # `tests/test_workflows.py` reads .github/workflows/*.yml to check every
+    # `umbra ...` invocation against the real CLI. PyYAML already arrives via
+    # responses; declared here because the suite imports it directly, and a
+    # transitive dependency is not a promise.
+    "pyyaml>=6",
     # Capped below 0.16: ruff 0.16.0 began formatting fenced code blocks inside
     # Markdown, which reformats the snippets in `examples/*.md` (and other .md)
     # that were written against earlier ruff, turning `ruff format --check .`

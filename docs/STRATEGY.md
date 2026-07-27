@@ -510,8 +510,32 @@ from:
   Gated on `$CLAUDE_CODE_REMOTE`, idempotent, synchronous, dev-tooling only (no
   runtime code, nothing on the published package). See the CHANGELOG.
 
+**Getting the published artifacts to actually exist**
+
+- ~~The rolling `catalog-index` release had never been produced, so every
+  artifact this project publishes was a 404.~~ **Fixed** — the weekly
+  `publish-index` workflow had died in the same step on both of the only two
+  runs it has ever had: `umbra tiles --local --db catalog.db`, where the gather
+  commands spell that option `--index-db` (`--db` is the decibel stretch on the
+  render commands). Because the tiling step ran *before* the release step, a
+  completed crawl, 2 725 baked place labels and a good parquet export went with
+  it and the release was never created — so `umbra index fetch`, the parquet,
+  `catalog.pmtiles`, the thumbnail sidecar and the Pages showcase built from
+  them were all dark. The invocation is corrected, each artifact is now uploaded
+  by the step that builds it (the crawl publishes before anything is derived
+  from it, so a failure deriving the basemap costs the basemap and not the
+  snapshot), and `tests/test_workflows.py` parses every `umbra …` invocation in
+  `.github/workflows/*.yml` against the real Click command tree so the same
+  drift fails a pull request rather than a Monday morning. See the CHANGELOG.
+  **Open, and operational rather than code:** the workflow is weekly +
+  `workflow_dispatch`, so the first good snapshot needs a maintainer to dispatch
+  a run (or to wait for the Monday cron); until one lands, the artifacts stay
+  absent and the docs job keeps emitting its "showcase not built" warning.
+
 **Maintainer / relationship actions (no code)**
 
+- Dispatch `Publish catalog index` once so the rolling `catalog-index` release
+  exists (see the group above; the code side is fixed).
 - Register the PyPI Trusted Publisher and cut the `v0.1.0` GitHub Release to
   claim the name (release plumbing already ships).
 - The ecosystem-visibility actions in §5.3, the "offer it upstream" move in

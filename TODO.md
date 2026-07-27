@@ -9,6 +9,49 @@ the bottom if the history is useful).
 
 ---
 
+## Workflow-CLI drift follow-ons (`tests/test_workflows.py` shipped)
+
+- **Surfaced in:** the publish-workflow fix (`STRATEGY.md` §8, "getting the
+  published artifacts to actually exist").
+- **Code:** `tests/test_workflows.py`, `.github/workflows/publish-index.yml`.
+
+Both of the only two `Publish catalog index` runs died on `umbra tiles --local
+--db catalog.db` (the option is `--index-db`), and because the tiling step ran
+before the release step the whole crawl went with it, so the `catalog-index`
+release was never created. The invocation is fixed, the uploads now sit with the
+steps that build them, and `tests/test_workflows.py` parses every `umbra …`
+invocation in `.github/workflows/*.yml` against the real Click command tree.
+Follow-ons, none a blocker:
+
+- **The first good snapshot still needs a human.** The workflow is weekly +
+  `workflow_dispatch`, so until a maintainer dispatches a run (or Monday's cron
+  fires), the release stays absent and `umbra index fetch` keeps 404ing. Nothing
+  in this repo can create it. Smallest close-out: dispatch the workflow once and
+  confirm `catalog.db`, `umbra-open-data.parquet`, `catalog.pmtiles` and
+  `catalog.html` land on the release, then confirm the Docs job's `workflow_run`
+  trigger (added in the showcase-404 fix) rebuilds the showcase off it.
+- **The check is a parse, not a run.** It catches renamed, dropped and
+  misspelled options — the drift that actually happened — but not an option
+  whose *meaning* changed, nor a value that is wrong (`--limit 1200` being too
+  small, a bad `--out` path). Running the commands would need a bucket crawl and
+  credentials, which is why the cheap check is the one that exists. If a
+  semantic break ever ships, the place to catch it is the live canary
+  (`live-canary.yml`), not here.
+- **Only `umbra` invocations are checked.** The workflows also call `gh`,
+  `python -c` and `pip` with arguments that can drift (the `python -c` in the
+  tiling step imports `umbra_py.pmtiles.save_viewer` and
+  `constants.CATALOG_INDEX_PMTILES_URL` by name, so a rename there breaks the
+  same run and no test would notice). Extending the scan to `python -c` bodies
+  is a small addition — compile them, or import the names — if that ever bites.
+- **The scan is textual, so a genuinely dynamic invocation would be missed.**
+  Nothing builds an `umbra` command line from a shell variable today; if
+  something ever does, the extractor will silently skip it. The self-check
+  (`test_the_scan_actually_found_the_published_commands`) pins the publish
+  pipeline's commands specifically for this reason, but it is a roster to keep
+  current, not a general guarantee.
+
+---
+
 ## SessionStart hook follow-ons (`.claude/hooks/session-start.sh` shipped)
 
 - **Surfaced in:** the agent-session-hardening PR (`STRATEGY.md` §8).

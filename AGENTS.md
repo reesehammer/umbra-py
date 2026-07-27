@@ -80,6 +80,7 @@ tests/
   test_models.py     # parsing/accessor tests against tests/data/sample_item.json
   test_download.py   # uses `responses` to mock HTTP
   test_live.py       # marked `network`, skipped by default
+  test_workflows.py  # every `umbra ...` call in .github/workflows/ must parse
   data/sample_item.json
 examples/            # planned notebooks (v0.2); see examples/README.md
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
@@ -300,6 +301,13 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 2. Wire it through to the library function (don't put business logic in the
    CLI). → verify: `umbra <cmd> --help` shows it; add a click runner test if
    the behavior is non-trivial.
+3. **Renaming or removing one? The workflows call the CLI too.**
+   `.github/workflows/publish-index.yml` and `docs.yml` are the only callers
+   nothing else exercises (weekly, and `main`-only), so drift there surfaces a
+   week later on a run that has already thrown its crawl away — which is
+   exactly how the `catalog-index` release came not to exist. →
+   verify: `pytest tests/test_workflows.py`, which parses every workflow
+   invocation against the real command tree.
 
 ### Add a new optional dependency
 1. Put it under the right extra in `pyproject.toml`
