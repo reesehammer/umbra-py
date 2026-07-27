@@ -1139,6 +1139,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   canary also now skips, rather than errors, when the `catalog-index` release
   asset isn't published yet, since that availability gap is not the catalog
   drift the canary exists to catch. Covered by `tests/test_export.py`.
+- **The hosted showcase no longer 404s indefinitely after a missed index
+  publish.** Same root cause as the entry above, one layer further out. With no
+  `catalog-index` release to fetch, the docs workflow's showcase step died on
+  `umbra index fetch` before `umbra showcase` ever ran, so `site/showcase/` was
+  simply absent from the deployed site and
+  `https://reesehammer.github.io/umbra-py/showcase/` — a link both `docs_src/index.md`
+  and `docs_src/deploy.md` advertise — returned a 404. Two things kept it that
+  way. The step was `continue-on-error: true`, which reports a *failed* step as
+  having succeeded: the Docs run went green, so nothing anywhere said the
+  showcase had been dropped. And the docs only rebuild on a push to `main`,
+  while the showcase's content comes from the release rather than the repo — so
+  even once an index was finally published, the site kept serving the
+  showcase-less build until some unrelated commit happened along.
+
+  The step now swallows the failure explicitly instead, emitting a warning
+  annotation and a job-summary note naming the likely cause, so the deploy still
+  goes out (it must — the docs are not hostage to the catalog snapshot) but the
+  run that dropped the showcase says so. It also verifies `site/showcase/index.html`
+  exists rather than trusting the exit status, and removes a partially written
+  directory, since half a showcase deploys worse than none. Separately, Docs now
+  also runs on `workflow_run` completion of **Publish catalog index**, so a newly
+  published snapshot refreshes the showcase — and a first one makes it appear —
+  without waiting for the next unrelated push.
 - **CC-BY data attribution now shown on the interactive maps
   (`DEMO_APP_GAPS.md` G8).** Umbra open data is CC-BY-4.0, which requires the
   data credit be displayed wherever the data is used. The Folium maps
