@@ -1711,6 +1711,15 @@ def load_cmd(item_url, out_path, asset, bbox, max_size, db) -> None:
     "meaningful scale for differencing, where a backscatter ratio becomes a "
     "subtraction.",
 )
+@click.option(
+    "--lazy",
+    is_flag=True,
+    help="Read each pass on demand (one dask chunk per acquisition) instead of "
+    "holding the whole cube in memory, and write/measure it a slice at a time. "
+    "Same output; peak memory is set by --max-size rather than by how many "
+    "acquisitions the series has, so a long series can be stacked sharp. "
+    'Needs the dask extra: pip install "umbra-py[dask]".',
+)
 @_local_index_options
 @_token_option
 @_fuzzy_option
@@ -1737,6 +1746,7 @@ def stack(
     extent,
     crs,
     db,
+    lazy,
     polarizations,
     min_incidence,
     max_incidence,
@@ -1777,6 +1787,12 @@ def stack(
     mean hides, reads as "the northeast brightened, between these two passes".
     --block-series keeps each block's whole sequence rather than just that
     peak, which is what distinguishes a steady drift from a single step.
+
+    --lazy lifts the ceiling on how much series fits: passes are read on
+    demand (one dask chunk each) and written or measured a slice at a time, so
+    peak memory follows --max-size instead of the number of acquisitions. Reach
+    for it when a long series would otherwise have to be stacked coarse; the
+    cube and the statistics are the same either way.
 
     Two ways to choose what to stack:
 
@@ -1864,6 +1880,7 @@ def stack(
             db=db,
             extent=extent,
             crs=crs,
+            lazy=lazy,
         )
         path = _write_stack_geotiff(cube, out_path) if out_path else None
         summary = (

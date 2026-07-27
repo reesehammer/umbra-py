@@ -40,7 +40,7 @@ jobs:
       # Audit the package's own resolved dependency tree, including every
       # optional extra, so a CVE in any shipped code path is surfaced.
       - name: Install package with all extras
-        run: uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"
+        run: uv pip install --system -e ".[dev,all,dask,mcp,serve,ai,langchain,llamaindex]"
 
       - name: Install pip-audit
         run: uv pip install --system pip-audit

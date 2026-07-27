@@ -185,7 +185,11 @@ site moved and between which two passes — and, with `block_series=True`, each
 block's whole pass-to-pass sequence rather than only the interval it moved most
 in, which is what tells a steady drift apart from a single step, now *drawn* as
 sparklines of the site's and its peak block's history in the explorer's Quantify
-readout)
+readout — and, since the cube used to cost `max_size²` × the number of passes in
+memory, `to_stack(lazy=True)` / `umbra stack --lazy` now defer each pass into one
+`dask` chunk and have both consumers, `stack_to_geotiff` and `stack_stats`, walk
+the series a slice at a time, so how much archive can be stacked sharp is no
+longer set by the analyst's RAM)
 and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
 orthorectification, geoid handling, and four RTC flattening models:
 `cosine`/`area`/`gamma`/`facet`) all ship. The fourth is the image-space
@@ -415,6 +419,16 @@ from:
   `read_conversion_tags`, `umbra convert --provenance`, or `gdalinfo`. See the
   CHANGELOG. **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
+- ~~The datacube's memory ceiling (every pass read eagerly, so a long series had
+  to be traded against resolution).~~ **shipped** — `to_stack(lazy=True)` /
+  `umbra stack --lazy` (the new `[dask]` extra) make each acquisition one chunk
+  fetched on demand, while the shared grid stays eagerly resolved so an
+  impossible stack still fails at the call. `stack_to_geotiff` writes band by
+  band and `stack_stats` streams the series (first / previous / current pass
+  resident), so the whole chain's memory follows the grid rather than the number
+  of passes — the numbers are identical either way. See the CHANGELOG.
+  **Open (not blockers, in `TODO.md`):** chunking *within* a slice, and letting
+  `umbra serve`'s `POST /artifacts/stats` opt into the lazy path.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

@@ -7,6 +7,7 @@ only what you need.
 ```bash
 pip install umbra-py              # core: search + download + metadata
 pip install "umbra-py[load]"      # + analysis-ready xarray loading (xarray, rasterio)
+pip install "umbra-py[dask]"      # + lazy, chunked datacubes (dask): `to_stack(lazy=True)`
 pip install "umbra-py[convert]"   # + SICD → geocoded COG (sarpy, rasterio, numpy)
 pip install "umbra-py[viz]"       # + plotting / footprint / map helpers
 pip install "umbra-py[export]"    # + stac-geoparquet catalog export
@@ -26,6 +27,7 @@ Requires **Python 3.10+**.
 | -------------------------------------------- | ---------------------- |
 | Search and download open data                | `umbra-py` (core)      |
 | Open a scene as an array                      | `umbra-py[load]`       |
+| Stack a long series without filling RAM       | `umbra-py[dask]`       |
 | Geocode a SICD into a GeoTIFF                 | `umbra-py[convert]`    |
 | Make maps, galleries, quicklooks             | `umbra-py[viz]`        |
 | Export the catalog to GeoParquet             | `umbra-py[export]`     |

@@ -25,6 +25,14 @@ prints the same breakdown. Adding `block_series=True` (`umbra stack
 only the interval it moved most in, which is what distinguishes a steady drift
 from a single step.
 
+A cube costs `max_size²` × the number of passes in memory, which is what
+caps how much series can be stacked sharp. `to_stack(lazy=True)` (`umbra
+stack --lazy`, the `[dask]` extra) defers each pass's read into one `dask`
+chunk, and the consumers that reduce a cube — `stack_stats` and
+`stack_to_geotiff` — walk it a slice at a time, so peak memory follows the
+grid rather than the length of the series. The numbers are identical; only
+what is resident differs.
+
 ::: umbra_py.to_xarray
 
 ::: umbra_py.to_stack

@@ -26,7 +26,14 @@ becomes a labelled cube you can take ``.mean("time")``, ``.diff("time")`` or
 and the one thing the library previously only produced as a *picture*
 (``umbra change`` / ``umbra timescan``) rather than as numbers.
 
-Install with: ``pip install "umbra-py[load]"``
+A cube's size is ``max_size²`` × the number of passes, so a long series used to
+have to be stacked coarse to fit in memory. ``to_stack(lazy=True)`` removes that
+trade: each pass becomes one ``dask`` task (and one chunk), fetched only when
+something asks for its values, and the reductions that consume a cube --
+:func:`stack_stats`, :func:`stack_to_geotiff` -- walk it a slice at a time. The
+numbers are identical; only the peak memory differs.
+
+Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ from __future__ import annotations
 import os
 from datetime import timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .constants import ATTRIBUTION, DATA_LICENSE
 from .exceptions import AssetNotFoundError, MissingDependencyError
@@ -69,6 +76,26 @@ def _require(module: str):
             'Install the extra with: pip install "umbra-py[load]"',
             hint='pip install "umbra-py[load]"',
         ) from exc
+
+
+def _require_dask():
+    """``(dask, dask.array)`` for the lazy stacking path, or a pointed error.
+
+    Its own gate rather than :func:`_require`'s: ``dask`` is a *separate*,
+    heavier extra from ``[load]`` (it brings a task scheduler), so a missing
+    install here means "you asked for the chunked cube", not "loading is not
+    installed", and the hint has to name the extra that fixes it.
+    """
+    try:
+        import dask  # noqa: PLC0415
+        import dask.array as dask_array  # noqa: PLC0415
+    except ImportError as exc:
+        raise MissingDependencyError(
+            "'dask' is required for lazy (chunked) stacking. "
+            'Install the extra with: pip install "umbra-py[dask]"',
+            hint='pip install "umbra-py[dask]"',
+        ) from exc
+    return dask, dask_array
 
 
 def _open_path(url: str) -> str:
@@ -431,6 +458,102 @@ def _mask_slice(np: Any, data: Any, nodata: float | None, *, db: bool) -> Any:
     return np.where(invalid, np.nan, data).astype("float32")
 
 
+class _StackGrid(NamedTuple):
+    """The shared output grid every slice of a datacube is warped onto.
+
+    Resolved once from the sources' footprints, then enough on its own to read
+    any one scene onto it -- which is what lets a lazy cube defer a slice's read
+    without keeping its dataset (or the rest of the series) open.
+    """
+
+    crs: str
+    left: float
+    bottom: float
+    right: float
+    top: float
+    width: int
+    height: int
+    xres: float
+    yres: float
+
+
+def _stack_grid(
+    vrt_bounds: list[Any], *, extent: str, bbox: BBox | None, crs: str, max_size: int
+) -> _StackGrid:
+    """Shared grid for a stack: ``max_size`` on the longer side of its extent."""
+    left, bottom, right, top = _stack_bounds(vrt_bounds, extent=extent, bbox=bbox, crs=crs)
+
+    # Output grid: max_size on the longer side, aspect from that extent, so
+    # every cell is the same size in the target CRS's own units.
+    width, height = right - left, top - bottom
+    if width >= height:
+        out_w = max(int(max_size), 1)
+        out_h = max(round(out_w * height / width), 1)
+    else:
+        out_h = max(int(max_size), 1)
+        out_w = max(round(out_h * width / height), 1)
+    return _StackGrid(crs, left, bottom, right, top, out_w, out_h, width / out_w, height / out_h)
+
+
+def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool) -> Any:
+    """One scene, read onto the shared grid: the unit of work a stack is made of.
+
+    Ground the scene doesn't cover stays ``NaN``, so a ``"union"`` cube's
+    padding reads as "no observation" rather than as a value.
+    """
+    from rasterio.enums import Resampling  # noqa: PLC0415
+
+    left, top, xres, yres = grid.left, grid.top, grid.xres, grid.yres
+    slab = np.full((grid.height, grid.width), np.nan, dtype="float32")
+    # The part of the output grid this scene actually covers. Under
+    # "intersection" that is the whole grid, so every read targets the
+    # identical window and shape and the slices are exactly aligned.
+    ol, ob = max(left, vrt.bounds.left), max(grid.bottom, vrt.bounds.bottom)
+    orr, ot = min(grid.right, vrt.bounds.right), min(top, vrt.bounds.top)
+    if ol < orr and ob < ot:
+        col0 = max(round((ol - left) / xres), 0)
+        col1 = min(round((orr - left) / xres), grid.width)
+        row0 = max(round((top - ot) / yres), 0)
+        row1 = min(round((top - ob) / yres), grid.height)
+        if col1 > col0 and row1 > row0:
+            # Snap back to those pixel edges so the read is grid-aligned,
+            # clamped inside the VRT so the window is always readable.
+            win = vrt.window(
+                max(left + col0 * xres, vrt.bounds.left),
+                max(top - row1 * yres, vrt.bounds.bottom),
+                min(left + col1 * xres, vrt.bounds.right),
+                min(top - row0 * yres, vrt.bounds.top),
+            )
+            # List index + 3-D out_shape, dropping the band axis here:
+            # rasterio's scalar-index path squeezes in place with an
+            # ndarray.shape assignment, deprecated in NumPy 2.5.
+            data = vrt.read(
+                [1],
+                window=win,
+                out_shape=(1, row1 - row0, col1 - col0),
+                resampling=Resampling.average,
+            )[0].astype("float32")
+            slab[row0:row1, col0:col1] = _mask_slice(np, data, vrt.nodata, db=db)
+    return slab
+
+
+def _open_slab(url: str, grid: _StackGrid, *, db: bool) -> Any:
+    """Open one source and read its slab -- the deferred task of a lazy cube.
+
+    Self-contained on purpose: a dask task runs long after :func:`to_stack`
+    returned and closed the datasets it resolved the grid from, so this re-opens
+    (metadata only, over range requests) rather than capturing an open handle.
+    """
+    rasterio = _require("rasterio")
+    np = _require("numpy")
+    from rasterio.enums import Resampling  # noqa: PLC0415
+    from rasterio.vrt import WarpedVRT  # noqa: PLC0415
+
+    with rasterio.open(_open_path(url)) as ds:
+        with WarpedVRT(ds, crs=grid.crs, resampling=Resampling.average) as vrt:
+            return _read_slab(np, vrt, grid, db=db)
+
+
 def to_stack(
     items: Iterable[UmbraItem],
     *,
@@ -440,6 +563,7 @@ def to_stack(
     db: bool = False,
     extent: str = "intersection",
     crs: str | None = None,
+    lazy: bool = False,
 ) -> xr.DataArray:
     """Co-register several acquisitions into one ``(time, y, x)`` datacube.
 
@@ -489,6 +613,19 @@ def to_stack(
         stacked ground, giving square metre-sized cells without your having to
         know the zone; any other value is a CRS name (``"EPSG:32633"``, a PROJ
         or WKT string) warped to as given. ``bbox`` stays lon/lat either way.
+    lazy:
+        Defer each pass's read into a ``dask`` task instead of streaming the
+        whole series up front -- **one chunk per acquisition**. The grid is still
+        resolved eagerly (the sources' footprints decide it, and a bad ``extent``
+        or ``bbox`` still raises here rather than at compute time), but no pixels
+        are fetched until something asks for them, and a reduction that walks the
+        cube one slice at a time -- ``cube.mean("time")``,
+        :func:`stack_stats`, :func:`stack_to_geotiff` -- never holds more than a
+        few slices at once. That is what lifts the ceiling this function
+        otherwise has: an eager cube costs ``max_size²`` × the number of
+        acquisitions in RAM, so a long series has to be stacked coarse. The
+        values are identical either way. Requires the ``dask`` extra
+        (``pip install "umbra-py[dask]"``).
 
     Returns
     -------
@@ -499,7 +636,9 @@ def to_stack(
         coordinate along ``time`` so every slice keeps its provenance. Nodata and
         non-positive pixels are ``NaN`` and the dtype is always ``float32``.
         ``attrs`` mirror :func:`to_xarray`'s (``crs``, ``transform``,
-        ``bounds``, ``units``, ``license``, ``attribution``).
+        ``bounds``, ``units``, ``license``, ``attribution``). Backed by NumPy,
+        or -- with ``lazy=True`` -- by a ``dask`` array chunked one slice per
+        acquisition, which ``.compute()`` / ``.load()`` turn into the former.
 
     Notes
     -----
@@ -519,7 +658,11 @@ def to_stack(
     from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
     ordered = _stack_items(items)
+    if lazy:
+        # Fail on the missing extra before any bytes are streamed, not after.
+        dask, dask_array = _require_dask()
 
+    urls: list[str] = []
     datasets: list[Any] = []
     vrts: list[Any] = []
     try:
@@ -529,6 +672,7 @@ def to_stack(
                 raise AssetNotFoundError(
                     f"Item {item.id!r} has no resolvable URL for asset {asset!r}."
                 )
+            urls.append(url)
             ds = rasterio.open(_open_path(url))
             datasets.append(ds)
 
@@ -543,70 +687,48 @@ def to_stack(
             # force a full-res source read -- thousands of range requests).
             vrts.append(WarpedVRT(ds, crs=target_crs, resampling=Resampling.average))
 
-        left, bottom, right, top = _stack_bounds(
-            [v.bounds for v in vrts], extent=extent, bbox=bbox, crs=target_crs
+        grid = _stack_grid(
+            [v.bounds for v in vrts],
+            extent=extent,
+            bbox=bbox,
+            crs=target_crs,
+            max_size=max_size,
         )
-
-        # Output grid: max_size on the longer side, aspect from that extent, so
-        # every cell is the same size in the target CRS's own units.
-        width, height = right - left, top - bottom
-        if width >= height:
-            out_w = max(int(max_size), 1)
-            out_h = max(round(out_w * height / width), 1)
-        else:
-            out_h = max(int(max_size), 1)
-            out_w = max(round(out_h * width / height), 1)
-        xres, yres = width / out_w, height / out_h
-
-        slices = []
-        for vrt in vrts:
-            slab = np.full((out_h, out_w), np.nan, dtype="float32")
-            # The part of the output grid this scene actually covers. Under
-            # "intersection" that is the whole grid, so every read targets the
-            # identical window and shape and the slices are exactly aligned.
-            ol, ob = max(left, vrt.bounds.left), max(bottom, vrt.bounds.bottom)
-            orr, ot = min(right, vrt.bounds.right), min(top, vrt.bounds.top)
-            if ol < orr and ob < ot:
-                col0 = max(round((ol - left) / xres), 0)
-                col1 = min(round((orr - left) / xres), out_w)
-                row0 = max(round((top - ot) / yres), 0)
-                row1 = min(round((top - ob) / yres), out_h)
-                if col1 > col0 and row1 > row0:
-                    # Snap back to those pixel edges so the read is grid-aligned,
-                    # clamped inside the VRT so the window is always readable.
-                    win = vrt.window(
-                        max(left + col0 * xres, vrt.bounds.left),
-                        max(top - row1 * yres, vrt.bounds.bottom),
-                        min(left + col1 * xres, vrt.bounds.right),
-                        min(top - row0 * yres, vrt.bounds.top),
+        # The grid is resolved either way -- it is what makes the slices
+        # comparable, and it needs every footprint. Only the *pixels* are
+        # deferred: one dask task (and so one chunk) per acquisition, each
+        # re-opening its own source when something finally asks for values.
+        data = (
+            dask_array.stack(
+                [
+                    dask_array.from_delayed(
+                        dask.delayed(_open_slab)(url, grid, db=db),
+                        shape=(grid.height, grid.width),
+                        dtype="float32",
                     )
-                    # List index + 3-D out_shape, dropping the band axis here:
-                    # rasterio's scalar-index path squeezes in place with an
-                    # ndarray.shape assignment, deprecated in NumPy 2.5.
-                    data = vrt.read(
-                        [1],
-                        window=win,
-                        out_shape=(1, row1 - row0, col1 - col0),
-                        resampling=Resampling.average,
-                    )[0].astype("float32")
-                    slab[row0:row1, col0:col1] = _mask_slice(np, data, vrt.nodata, db=db)
-            slices.append(slab)
+                    for url in urls
+                ]
+            )
+            if lazy
+            else np.stack([_read_slab(np, vrt, grid, db=db) for vrt in vrts])
+        )
     finally:
         for v in vrts:
             v.close()
         for ds in datasets:
             ds.close()
 
+    left, top, xres, yres = grid.left, grid.top, grid.xres, grid.yres
     transform = Affine(xres, 0.0, left, 0.0, -yres, top)
-    xs = left + xres * (np.arange(out_w) + 0.5)
-    ys = top - yres * (np.arange(out_h) + 0.5)
+    xs = left + xres * (np.arange(grid.width) + 0.5)
+    ys = top - yres * (np.arange(grid.height) + 0.5)
     times = np.array(
         [i.datetime.astimezone(timezone.utc).replace(tzinfo=None) for i in ordered],  # type: ignore[union-attr]
         dtype="datetime64[ns]",
     )
 
     return xr.DataArray(
-        np.stack(slices),
+        data,
         dims=("time", "y", "x"),
         coords={
             "time": times,
@@ -618,7 +740,7 @@ def to_stack(
         attrs={
             "crs": target_crs,
             "transform": tuple(transform)[:6],
-            "bounds": (left, bottom, right, top),
+            "bounds": (grid.left, grid.bottom, grid.right, grid.top),
             "extent": extent,
             "units": "dB" if db else "amplitude",
             "long_name": "SAR backscatter (dB)" if db else "SAR amplitude",
@@ -722,17 +844,89 @@ def _grid_text(rows: int, cols: int, deltas: dict[tuple[int, int], float | None]
     return "\n".join(lines)
 
 
+class _BlockChanges:
+    """Per-block change accumulated one *pass* at a time, not one block at a time.
+
+    The same reduction :func:`_spatial_breakdown` reports, turned inside out: it
+    is fed consecutive pairs of passes as they arrive, so the cube it measures
+    never has to exist all at once. Every :func:`_pair_change` call is
+    independent of every other, so the records are identical to walking each
+    block's whole history in turn — only the loop order changed.
+
+    Block geometry comes from ``narrate``'s helpers, so a block's ``compass``
+    label means the same thing in both of the library's change reductions.
+    """
+
+    def __init__(
+        self,
+        np: Any,
+        *,
+        shape: tuple[int, int],
+        blocks: int,
+        ids: list[str],
+        stamps: list[str],
+        threshold_db: float,
+        cell_area_m2: float | None,
+    ) -> None:
+        from .narrate import _split_slices  # noqa: PLC0415
+
+        if blocks < 1:
+            raise ValueError(f"blocks must be >= 1, got {blocks}.")
+        self._np = np
+        self._ids = ids
+        self._stamps = stamps
+        self._threshold_db = threshold_db
+        self._cell_area_m2 = cell_area_m2
+        self.blocks = blocks
+        self.row_slices = _split_slices(shape[0], blocks)
+        self.col_slices = _split_slices(shape[1], blocks)
+        self.steps: dict[tuple[int, int], list[dict[str, Any]]] = {
+            (r, c): [] for r in range(len(self.row_slices)) for c in range(len(self.col_slices))
+        }
+        self.net: dict[tuple[int, int], dict[str, Any] | None] = dict.fromkeys(self.steps)
+
+    def _per_block(self, earlier_db: Any, later_db: Any) -> Any:
+        for r, rsl in enumerate(self.row_slices):
+            for c, csl in enumerate(self.col_slices):
+                yield (
+                    (r, c),
+                    _pair_change(
+                        self._np,
+                        earlier_db[rsl, csl],
+                        later_db[rsl, csl],
+                        threshold_db=self._threshold_db,
+                        cell_area_m2=self._cell_area_m2,
+                    ),
+                )
+
+    def add_step(self, index: int, earlier_db: Any, later_db: Any) -> None:
+        """Record every block's move from pass ``index - 1`` to pass ``index``."""
+        for key, step in self._per_block(earlier_db, later_db):
+            if step is None:
+                continue
+            self.steps[key].append(
+                {
+                    "from_item_id": self._ids[index - 1],
+                    "from_datetime": self._stamps[index - 1],
+                    "to_item_id": self._ids[index],
+                    "to_datetime": self._stamps[index],
+                    "mean_delta_db": step["mean_delta_db"],
+                    "changed_fraction": step["changed_fraction"],
+                    "changed_area_km2": step["changed_area_km2"],
+                }
+            )
+
+    def add_net(self, first_db: Any, last_db: Any) -> None:
+        """Record every block's net first → last change."""
+        for key, net in self._per_block(first_db, last_db):
+            self.net[key] = net
+
+
 def _spatial_breakdown(
-    np: Any,
-    db_view: Any,
+    changes: _BlockChanges,
     *,
-    ids: list[str],
-    stamps: list[str],
-    blocks: int,
     transform: tuple[float, ...],
     crs_name: str,
-    threshold_db: float,
-    cell_area_m2: float | None,
     block_series: bool = False,
 ) -> dict[str, Any]:
     """Per-block change over the whole series — *where* it happened, and *when*.
@@ -746,60 +940,21 @@ def _spatial_breakdown(
 
     With ``block_series`` each block also keeps the *whole* consecutive sequence
     it was reduced from, not only its peak — the same records, none discarded.
-
-    Block geometry comes from ``narrate``'s helpers, so a block's ``compass``
-    label means the same thing in both reductions.
     """
-    from .narrate import _compass_label, _split_slices  # noqa: PLC0415
+    from .narrate import _compass_label  # noqa: PLC0415
 
-    if blocks < 1:
-        raise ValueError(f"blocks must be >= 1, got {blocks}.")
-
+    blocks = changes.blocks
     xres, _, xoff, _, yres, yoff = transform
-    row_slices = _split_slices(db_view.shape[1], blocks)
-    col_slices = _split_slices(db_view.shape[2], blocks)
 
     records: list[dict[str, Any]] = []
     centers: list[tuple[float, float]] = []
     deltas: dict[tuple[int, int], float | None] = {}
-    for r, rsl in enumerate(row_slices):
-        for c, csl in enumerate(col_slices):
-            window = db_view[:, rsl, csl]
-            net = (
-                _pair_change(
-                    np,
-                    window[0],
-                    window[-1],
-                    threshold_db=threshold_db,
-                    cell_area_m2=cell_area_m2,
-                )
-                if window.shape[0] > 1
-                else None
-            )
+    for r, rsl in enumerate(changes.row_slices):
+        for c, csl in enumerate(changes.col_slices):
+            net = changes.net[(r, c)]
             # The block's consecutive pass-to-pass sequence. The peak interval —
             # the block's "when" answer — is the largest-magnitude step in it.
-            steps: list[dict[str, Any]] = []
-            for i in range(1, window.shape[0]):
-                step = _pair_change(
-                    np,
-                    window[i - 1],
-                    window[i],
-                    threshold_db=threshold_db,
-                    cell_area_m2=cell_area_m2,
-                )
-                if step is None:
-                    continue
-                steps.append(
-                    {
-                        "from_item_id": ids[i - 1],
-                        "from_datetime": stamps[i - 1],
-                        "to_item_id": ids[i],
-                        "to_datetime": stamps[i],
-                        "mean_delta_db": step["mean_delta_db"],
-                        "changed_fraction": step["changed_fraction"],
-                        "changed_area_km2": step["changed_area_km2"],
-                    }
-                )
+            steps = changes.steps[(r, c)]
             peak_interval = max(steps, key=lambda s: abs(s["mean_delta_db"]), default=None)
 
             xs = (xoff + csl.start * xres, xoff + csl.stop * xres)
@@ -819,7 +974,7 @@ def _spatial_breakdown(
                     ],
                     # Filled in below, in one transform for the whole grid.
                     "center_lonlat": None,
-                    "cells": int(window.shape[1] * window.shape[2]),
+                    "cells": int((rsl.stop - rsl.start) * (csl.stop - csl.start)),
                     "net_change": net,
                     "peak_interval": peak_interval,
                     # Only when asked: N x N blocks x (passes - 1) steps is the
@@ -853,6 +1008,22 @@ def _spatial_breakdown(
         "grid_text": _grid_text(blocks, blocks, deltas),
         "blocks": records,
     }
+
+
+def _pass_slabs(np: Any, cube: xr.DataArray, index: int, *, units: str) -> tuple[Any, Any]:
+    """One pass of a cube as ``(values, dB view)``, read a single slice at a time.
+
+    The slice is what is materialised — for a lazy cube that computes exactly
+    one chunk, and for an eager one it copies a single slab instead of the whole
+    series. Change is a ratio of backscatter, i.e. a difference on the log
+    scale, so a linear cube gets the dB view it should be compared on; a dB cube
+    is already there and the two are the same array.
+    """
+    slab = np.asarray(cube.isel(time=index).values, dtype="float64")
+    if units == "dB":
+        return slab, slab
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return slab, np.where(slab > 0, 20.0 * np.log10(slab), np.nan)
 
 
 def stack_stats(
@@ -934,9 +1105,8 @@ def stack_stats(
     """
     np = _require("numpy")
 
-    values = np.asarray(cube.values, dtype="float64")
-    if values.ndim != 3:
-        raise ValueError(f"stack_stats needs a (time, y, x) cube; got {values.ndim}D.")
+    if cube.ndim != 3:
+        raise ValueError(f"stack_stats needs a (time, y, x) cube; got {cube.ndim}D.")
     if block_series and not blocks:
         # The series lives on a block, so asking for one without the other is a
         # request that can't be answered — say so before doing any of the work,
@@ -944,25 +1114,39 @@ def stack_stats(
         raise ValueError("block_series needs a blocks grid; pass blocks=N as well.")
 
     units = str(cube.attrs.get("units", "amplitude"))
-    if units == "dB":
-        db_view = values
-    else:
-        # Change is a ratio of backscatter, i.e. a difference in dB, so a linear
-        # cube is compared on the log scale it should be compared on.
-        with np.errstate(divide="ignore", invalid="ignore"):
-            db_view = np.where(values > 0, 20.0 * np.log10(values), np.nan)
 
     xres, _, _, _, yres, _ = cube.attrs["transform"]
     crs_name = str(cube.attrs["crs"])
     area = _cell_area_m2(crs_name, xres, yres)
-    cells = values.shape[1] * values.shape[2]
+    height, width = int(cube.shape[1]), int(cube.shape[2])
+    cells = height * width
 
     stamps = [f"{str(t)[:19]}Z" for t in cube["time"].values]
     ids = [str(v) for v in cube["item_id"].values]
 
+    changes = (
+        _BlockChanges(
+            np,
+            shape=(height, width),
+            blocks=blocks,
+            ids=ids,
+            stamps=stamps,
+            threshold_db=change_threshold_db,
+            cell_area_m2=area,
+        )
+        if blocks
+        else None
+    )
+
+    # One pass at a time, holding at most the first, the previous and the
+    # current slice — so the reduction's memory is set by the *grid*, not by the
+    # length of the series, and a lazy (dask-backed) cube is measured by
+    # computing one chunk per step instead of materialising the whole thing.
     passes: list[dict[str, Any]] = []
+    first_db: Any = None
+    previous_db: Any = None
     for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True)):
-        slab = values[i]
+        slab, db_slab = _pass_slabs(np, cube, i, units=units)
         finite = np.isfinite(slab)
         n_valid = int(finite.sum())
         observed = slab[finite]
@@ -979,8 +1163,8 @@ def stack_stats(
             "change_vs_previous": (
                 _pair_change(
                     np,
-                    db_view[i - 1],
-                    db_view[i],
+                    previous_db,
+                    db_slab,
                     threshold_db=change_threshold_db,
                     cell_area_m2=area,
                 )
@@ -989,6 +1173,12 @@ def stack_stats(
             ),
         }
         passes.append(record)
+        if i:
+            if changes is not None:
+                changes.add_step(i, previous_db, db_slab)
+        else:
+            first_db = db_slab
+        previous_db = db_slab
 
     caveats = [
         "Umbra's open products are not radiometrically calibrated, so decibel "
@@ -1011,8 +1201,8 @@ def stack_stats(
         "change_threshold_db": change_threshold_db,
         "grid": {
             "crs": crs_name,
-            "width": values.shape[2],
-            "height": values.shape[1],
+            "width": width,
+            "height": height,
             "cell_size": [abs(float(xres)), abs(float(yres))],
             "cell_area_m2": round(area, 4) if area is not None else None,
             "bounds": [float(v) for v in cube.attrs["bounds"]],
@@ -1022,8 +1212,8 @@ def stack_stats(
         "net_change": (
             _pair_change(
                 np,
-                db_view[0],
-                db_view[-1],
+                first_db,
+                previous_db,
                 threshold_db=change_threshold_db,
                 cell_area_m2=area,
             )
@@ -1034,17 +1224,13 @@ def stack_stats(
         "attribution": ATTRIBUTION,
         "caveats": caveats,
     }
-    if blocks:
+    if changes is not None:
+        if len(passes) > 1:
+            changes.add_net(first_db, previous_db)
         summary["spatial"] = _spatial_breakdown(
-            np,
-            db_view,
-            ids=ids,
-            stamps=stamps,
-            blocks=blocks,
+            changes,
             transform=tuple(cube.attrs["transform"]),
             crs_name=crs_name,
-            threshold_db=change_threshold_db,
-            cell_area_m2=area,
             block_series=block_series,
         )
     return summary
@@ -1060,6 +1246,7 @@ def stack_to_geotiff(
     db: bool = False,
     extent: str = "intersection",
     crs: str | None = None,
+    lazy: bool = False,
 ) -> Path:
     """Co-register several acquisitions and write the cube to a GeoTIFF.
 
@@ -1070,8 +1257,22 @@ def stack_to_geotiff(
     oldest first** -- with each band described by its acquisition timestamp and
     the item ids carried in the file tags, so the time axis survives the trip
     into QGIS, GDAL or any GIS. Nodata is ``NaN``; deflate-compressed and tiled.
+
+    ``lazy`` (see :func:`to_stack`) makes this the memory-bounded path to a big
+    file: bands are written one at a time, so a series long enough to blow up an
+    in-memory cube still writes, at the resolution it deserves. The file is
+    byte-identical either way.
     """
-    cube = to_stack(items, asset=asset, bbox=bbox, max_size=max_size, db=db, extent=extent, crs=crs)
+    cube = to_stack(
+        items,
+        asset=asset,
+        bbox=bbox,
+        max_size=max_size,
+        db=db,
+        extent=extent,
+        crs=crs,
+        lazy=lazy,
+    )
     return _write_stack_geotiff(cube, dest)
 
 
@@ -1081,12 +1282,14 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
     Split from :func:`stack_to_geotiff` so a caller that already holds the cube
     (``umbra stack --stats``, which also measures it) writes the file without
     stacking the series a second time.
+
+    Bands are read and written one at a time, so a lazy cube streams to disk a
+    slice at a time rather than being materialised whole to be copied out.
     """
     rasterio = _require("rasterio")
-    _require("numpy")
+    np = _require("numpy")
     from affine import Affine  # noqa: PLC0415
 
-    data = cube.values
     stamps = [str(t)[:19] for t in cube["time"].values]
     ids = [str(v) for v in cube["item_id"].values]
 
@@ -1094,9 +1297,9 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     profile = {
         "driver": "GTiff",
-        "height": data.shape[1],
-        "width": data.shape[2],
-        "count": data.shape[0],
+        "height": cube.shape[1],
+        "width": cube.shape[2],
+        "count": cube.shape[0],
         "dtype": "float32",
         "crs": cube.attrs["crs"],
         "transform": Affine(*cube.attrs["transform"]),
@@ -1106,7 +1309,7 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
     }
     with rasterio.open(dest, "w", **profile) as dst:
         for band, (stamp, item_id) in enumerate(zip(stamps, ids, strict=True), start=1):
-            dst.write(data[band - 1], band)
+            dst.write(np.asarray(cube.isel(time=band - 1).values, dtype="float32"), band)
             dst.set_band_description(band, f"{stamp} {item_id}")
         dst.update_tags(
             item_ids=",".join(ids),

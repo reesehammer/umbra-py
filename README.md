@@ -41,6 +41,7 @@ approachable as working with Sentinel-1 or Landsat.
 ```bash
 pip install umbra-py            # core: search + download + metadata
 pip install "umbra-py[load]"    # + analysis-ready xarray loading (xarray, rasterio)
+pip install "umbra-py[dask]"    # + lazy, chunked datacubes: to_stack(lazy=True) / umbra stack --lazy
 pip install "umbra-py[convert]" # + SICD amplitude extraction (sarpy, rasterio)
 pip install "umbra-py[viz]"     # + plotting/footprint helpers
 pip install "umbra-py[export]"  # + stac-geoparquet catalog export
@@ -294,6 +295,24 @@ hectares = float(changed.sum()) * abs(xres * yres) / 10_000
 multi-band GeoTIFF — one band per acquisition, each described by its timestamp —
 for QGIS, GDAL, or anything that isn't Python. Where `umbra change` and
 `umbra timescan` render this comparison as a *picture*, this is the *numbers*.
+
+A cube costs `max_size²` × the number of passes in memory, so a long series used
+to have to be stacked coarse. `lazy=True` removes that trade-off — each pass
+becomes one `dask` chunk, fetched only when something asks for its values
+(requires the `dask` extra):
+
+```python
+cube = to_stack(passes, max_size=4096, db=True, crs="utm", lazy=True)
+cube.chunks[0]                      # (1, 1, 1, ...) — one chunk per acquisition
+cube.isel(time=-1).load()           # only that pass is fetched
+stack_stats(cube)                   # walks the series a slice at a time
+```
+
+Nothing is read until you ask (the grid is still resolved up front, so a
+non-overlapping series still fails immediately), and the consumers that reduce a
+cube — `stack_stats` and `stack_to_geotiff` / `umbra stack --lazy` — walk it one
+slice at a time, so peak memory follows `max_size` rather than the length of the
+series. The values are identical either way; only what is resident differs.
 
 And when the answer you want *is* a number, `stack_stats` reduces the cube for
 you — no array handling at all:

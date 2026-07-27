@@ -1218,3 +1218,183 @@ def test_cli_stack_stats_keeps_stdout_json_in_search_mode(tmp_path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "Selected 2 of 2" in result.stderr
     assert json.loads(result.stdout)["count"] == 2
+
+
+# --- Lazy (dask-backed) stacking (``to_stack(lazy=True)`` / ``umbra stack --lazy``) ---
+#
+# The claim under test is an equivalence plus a deferral: a lazy cube holds the
+# identical numbers, and holds none of them until something asks.
+
+
+def _dask_cube(items, **kwargs):
+    """A lazy cube, skipping the test when the optional dask extra is absent."""
+    pytest.importorskip("dask.array")
+    from umbra_py import to_stack
+
+    return to_stack(items, lazy=True, **kwargs)
+
+
+def test_to_stack_lazy_defers_every_read_until_compute(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import load as load_mod
+
+    reads = []
+    original = load_mod._open_slab
+    monkeypatch.setattr(
+        load_mod,
+        "_open_slab",
+        lambda url, grid, **kw: (reads.append(url), original(url, grid, **kw))[1],
+    )
+
+    cube = _dask_cube(_three_scenes(tmp_path), max_size=32)
+
+    # The grid is resolved eagerly (it needs every footprint), the pixels are not.
+    assert cube.shape[0] == 3
+    assert reads == []
+    # One chunk per acquisition: the unit a reduction can walk one at a time.
+    assert cube.chunks[0] == (1, 1, 1)
+
+    loaded = cube.compute()
+
+    # Each source read exactly once, by the task that owns its chunk.
+    assert len(reads) == len(set(reads)) == 3
+    assert float(loaded.isel(time=1).mean()) == pytest.approx(4.0)
+
+
+def test_to_stack_lazy_matches_the_eager_cube(tmp_path):
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    for extent in ("intersection", "union"):
+        eager = to_stack(items, max_size=24, extent=extent, db=True)
+        lazy = _dask_cube(items, max_size=24, extent=extent, db=True)
+
+        assert lazy.dims == eager.dims
+        assert lazy.attrs == eager.attrs
+        assert list(lazy["item_id"].values) == list(eager["item_id"].values)
+        # Identical, NaN padding included -- the deferral changes when the bytes
+        # are fetched, never what they are.
+        np.testing.assert_array_equal(np.asarray(lazy.compute().values), np.asarray(eager.values))
+
+
+def test_to_stack_lazy_still_validates_the_grid_eagerly(tmp_path):
+    """A grid that cannot exist is an error now, not a surprise at compute time."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif"), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=200_000.0), "b", "2024-02-01T00:00:00Z"
+        ),
+    ]
+    with pytest.raises(ValueError, match="do not all overlap"):
+        _dask_cube(items, max_size=16)
+
+
+def test_to_stack_lazy_without_dask_names_the_extra(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    import sys
+
+    from umbra_py import to_stack
+    from umbra_py.exceptions import MissingDependencyError
+
+    # Absent for the duration of the call, however it is installed here.
+    monkeypatch.setitem(sys.modules, "dask", None)
+
+    with pytest.raises(MissingDependencyError) as excinfo:
+        to_stack(_three_scenes(tmp_path), max_size=16, lazy=True)
+
+    assert "umbra-py[dask]" in str(excinfo.value)
+
+
+def test_stack_stats_measures_a_lazy_cube_identically(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_stats, to_stack
+
+    items = _three_scenes(tmp_path)
+    kwargs = {"max_size": 24, "crs": "utm"}
+    stats_kwargs = {"blocks": 2, "block_series": True}
+
+    eager = stack_stats(to_stack(items, **kwargs), **stats_kwargs)
+    lazy = stack_stats(_dask_cube(items, **kwargs), **stats_kwargs)
+
+    # Every number, down to the per-block series and the ASCII heat-grid.
+    assert lazy == eager
+    assert lazy["spatial"]["blocks"][0]["series"]
+
+
+def test_stack_stats_reads_one_pass_at_a_time(tmp_path, monkeypatch):
+    """Peak memory follows the grid, not the length of the series."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import load as load_mod
+    from umbra_py import stack_stats
+
+    computed = []
+    original = load_mod._pass_slabs
+    monkeypatch.setattr(
+        load_mod,
+        "_pass_slabs",
+        lambda np, cube, index, **kw: (computed.append(index), original(np, cube, index, **kw))[1],
+    )
+
+    stack_stats(_dask_cube(_three_scenes(tmp_path), max_size=24), blocks=2)
+
+    # One materialised slice per pass -- never the whole cube at once.
+    assert computed == [0, 1, 2]
+
+
+def test_stack_to_geotiff_lazy_writes_the_same_file(tmp_path):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("dask.array")
+    np = pytest.importorskip("numpy")
+    from umbra_py import stack_to_geotiff
+
+    items = _three_scenes(tmp_path)
+    eager = stack_to_geotiff(items, tmp_path / "eager.tif", max_size=24)
+    lazy = stack_to_geotiff(items, tmp_path / "lazy.tif", max_size=24, lazy=True)
+
+    with rasterio.open(eager) as a, rasterio.open(lazy) as b:
+        assert a.count == b.count == 3
+        assert a.descriptions == b.descriptions
+        assert a.tags()["item_ids"] == b.tags()["item_ids"]
+        np.testing.assert_array_equal(a.read(), b.read())
+
+
+def test_cli_stack_lazy_writes_the_datacube(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("dask.array")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    out = tmp_path / "cube.tif"
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["stack", *urls, "--out", str(out), "--lazy", "--stats", "--max-size", "16", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["stats"]["count"] == 2
+    with rasterio.open(out) as ds:
+        assert ds.count == 2
+        assert ds.read([2])[0] == pytest.approx(8.0)
