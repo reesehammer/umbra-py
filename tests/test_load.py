@@ -1377,6 +1377,181 @@ def test_stack_to_geotiff_lazy_writes_the_same_file(tmp_path):
         np.testing.assert_array_equal(a.read(), b.read())
 
 
+# --- Windowed chunking within a pass (``to_stack(chunk_size=...)``) ---
+#
+# One chunk per acquisition makes a whole slice the smallest unit of work; these
+# pin the claim that windowing changes only *what is resident*, never the values.
+
+
+def _ramp_scene(path, *, width=40, height=40):
+    """A scene whose every pixel differs, so a seam at a window edge would show."""
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write((np.arange(width * height, dtype="float32") + 1.0).reshape(height, width), 1)
+    return path
+
+
+def _ramp_scenes(tmp_path):
+    return [
+        _stack_item(_ramp_scene(tmp_path / f"r{n}.tif"), f"acq-{n}", f"2024-0{n}-08T12:00:00Z")
+        for n in (1, 2)
+    ]
+
+
+def test_to_stack_chunk_size_windows_each_pass(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    cube = _dask_cube(_three_scenes(tmp_path), max_size=32, chunk_size=16)
+
+    # Same cube, cut differently: one chunk per pass, and windows inside it.
+    assert cube.shape == to_stack(_three_scenes(tmp_path), max_size=32).shape
+    assert cube.chunks[0] == (1, 1, 1)
+    assert max(cube.chunks[1]) <= 16 and max(cube.chunks[2]) <= 16
+    assert sum(cube.chunks[1]) == cube.shape[1]
+    assert sum(cube.chunks[2]) == cube.shape[2] == 32
+
+
+def test_to_stack_chunk_size_matches_the_unchunked_cube(tmp_path):
+    """A window edge is not a seam: the numbers are the whole-slab read's."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+
+    items = _ramp_scenes(tmp_path)
+    whole = _dask_cube(items, max_size=24, db=True)
+    # 24 is not a multiple of 10, so the last window is a partial one.
+    windowed = _dask_cube(items, max_size=24, db=True, chunk_size=10)
+
+    assert windowed.attrs == whole.attrs
+    # The grid is 24 columns wide, so the last window of a row is a partial one.
+    assert windowed.chunks[2] == (10, 10, 4)
+    np.testing.assert_array_equal(
+        np.asarray(windowed.compute().values), np.asarray(whole.compute().values)
+    )
+
+
+def test_to_stack_chunk_size_reads_one_window_at_a_time(tmp_path):
+    """The unit of work is the window, and only the windows asked for are read."""
+    pytest.importorskip("xarray")
+    from umbra_py import load as load_mod
+
+    shapes = []
+    original = load_mod._open_slab
+
+    def record(url, grid, **kw):
+        shapes.append((grid.width, grid.height))
+        return original(url, grid, **kw)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(load_mod, "_open_slab", record)
+        cube = _dask_cube(_three_scenes(tmp_path), max_size=32, chunk_size=16)
+        assert shapes == []
+        # One pass, one window of it -- one task out of the cube's several.
+        chunk = cube.data.blocks[0, 0, 0].compute()
+
+    assert chunk.shape[1:] == (16, 16)
+    # Only the window that was asked for was opened and read.
+    assert shapes == [(16, 16)]
+
+
+def test_to_stack_chunk_size_needs_lazy(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_stack
+
+    with pytest.raises(ValueError, match="chunk_size needs lazy=True"):
+        to_stack(_three_scenes(tmp_path), max_size=16, chunk_size=8)
+
+
+def test_to_stack_rejects_a_nonpositive_chunk_size(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import to_stack
+
+    with pytest.raises(ValueError, match="positive pixel count"):
+        to_stack(_three_scenes(tmp_path), max_size=16, lazy=True, chunk_size=0)
+
+
+def test_stack_to_geotiff_chunked_writes_window_by_window(tmp_path):
+    """The file is the same one; the writer just never holds a whole band."""
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_to_geotiff
+
+    items = _ramp_scenes(tmp_path)
+    whole = stack_to_geotiff(items, tmp_path / "whole.tif", max_size=24, lazy=True)
+    windowed = stack_to_geotiff(
+        items, tmp_path / "windowed.tif", max_size=24, lazy=True, chunk_size=10
+    )
+
+    with rasterio.open(whole) as a, rasterio.open(windowed) as b:
+        assert a.count == b.count == 2
+        assert a.descriptions == b.descriptions
+        np.testing.assert_array_equal(a.read(), b.read())
+
+
+def test_write_windows_covers_the_grid_exactly(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import load as load_mod
+
+    cube = _dask_cube(_three_scenes(tmp_path), max_size=24, chunk_size=10)
+    windows = load_mod._write_windows(cube)
+
+    assert windows[0] == ((0, 10), (0, 10))
+    # The grid is 24 columns wide, so a row ends on a 4-wide partial window.
+    assert windows[-1] == ((10, 20), (20, 24))
+    covered = sum((r1 - r0) * (c1 - c0) for (r0, r1), (c0, c1) in windows)
+    assert covered == cube.shape[1] * cube.shape[2]
+    # An eager cube has no chunks, so it keeps the single whole-band write.
+    from umbra_py import to_stack
+
+    eager = to_stack(_three_scenes(tmp_path), max_size=24)
+    assert load_mod._write_windows(eager) == [((0, eager.shape[1]), (0, eager.shape[2]))]
+
+
+def test_cli_stack_chunk_size_writes_the_datacube(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("dask.array")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    urls = _stack_cli_env(tmp_path, monkeypatch)
+    out = tmp_path / "cube.tif"
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["stack", *urls, "--out", str(out), "--lazy", "--chunk-size", "8", "--max-size", "16"],
+    )
+
+    assert result.exit_code == 0, result.output
+    with rasterio.open(out) as ds:
+        assert ds.count == 2
+        assert ds.read([2])[0] == pytest.approx(8.0)
+
+    # Without --lazy the window size would bound nothing, so it is refused.
+    refused = CliRunner().invoke(
+        cli_mod.cli,
+        ["stack", *urls, "--out", str(out), "--chunk-size", "8", "--max-size", "16"],
+    )
+    assert refused.exit_code != 0
+    assert "--chunk-size needs --lazy" in refused.output
+
+
 def test_cli_stack_lazy_writes_the_datacube(tmp_path, monkeypatch):
     pytest.importorskip("xarray")
     rasterio = pytest.importorskip("rasterio")

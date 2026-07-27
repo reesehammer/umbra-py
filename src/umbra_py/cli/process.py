@@ -154,6 +154,15 @@ from ._root import cli
     "acquisitions the series has, so a long series can be stacked sharp. "
     'Needs the dask extra: pip install "umbra-py[dask]".',
 )
+@click.option(
+    "--chunk-size",
+    type=int,
+    default=None,
+    help="With --lazy, cut each pass into CHUNK_SIZE-square windows read (and "
+    "written) independently, so a single pass no longer has to fit in memory "
+    "either. Costs one read per window instead of one per pass, so keep it a "
+    "decent fraction of --max-size (e.g. 1024). Same output.",
+)
 @_shared._local_index_options
 @_shared._token_option
 @_shared._fuzzy_option
@@ -181,6 +190,7 @@ def stack(
     crs,
     db,
     lazy,
+    chunk_size,
     polarizations,
     min_incidence,
     max_incidence,
@@ -226,7 +236,10 @@ def stack(
     demand (one dask chunk each) and written or measured a slice at a time, so
     peak memory follows --max-size instead of the number of acquisitions. Reach
     for it when a long series would otherwise have to be stacked coarse; the
-    cube and the statistics are the same either way.
+    cube and the statistics are the same either way. --chunk-size N lifts what
+    is left of that ceiling: each pass is cut into N-square windows read and
+    written independently, so --max-size stops being bounded by how much of
+    one scene fits in memory (at one read per window rather than per pass).
 
     Two ways to choose what to stack:
 
@@ -249,6 +262,13 @@ def stack(
         raise click.BadParameter("--blocks must be 0 (off) or a positive grid size.")
     if block_series and not blocks:
         raise click.UsageError("--block-series needs --blocks N (the series lives on a block).")
+    if chunk_size is not None:
+        if not lazy:
+            raise click.UsageError(
+                "--chunk-size needs --lazy (an eager cube is read a slab at a time)."
+            )
+        if chunk_size < 1:
+            raise click.BadParameter("--chunk-size must be a positive pixel count.")
     stats = stats or bool(blocks)
     if not (out_path or stats):
         raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
@@ -315,6 +335,7 @@ def stack(
             extent=extent,
             crs=crs,
             lazy=lazy,
+            chunk_size=chunk_size,
         )
         path = _write_stack_geotiff(cube, out_path) if out_path else None
         summary = (
