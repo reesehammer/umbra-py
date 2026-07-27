@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The last of the datacube's memory ceiling, on the side that *measures* it:
+  `stack_stats(windowed=True)` / `umbra stack --stats-windowed`.** `lazy=True`
+  and then `chunk_size=N` took the ceiling off building and *writing* a cube —
+  a series is fetched a pass at a time, and a pass a window at a time, so
+  neither the number of acquisitions nor the size of one scene sets how much
+  archive can be stacked sharp. The reduction that *reads* the cube did not
+  move with them: `stack_stats` calls `cube.isel(time=i).values`, so measuring
+  materialised a whole `max_size²` slice per pass. A cube could be stacked
+  sharper than you could measure it, which is the wrong way round — the
+  measurement is the answer, the file is the intermediate.
+
+  `windowed=True` turns the walk inside out: the outer loop is one window of the
+  shared grid — the cube's own chunks — and the series is walked *inside* it, so
+  what is resident is three windows rather than three slices. Peak memory
+  follows `chunk_size`, and a cube too big to hold a slice of is now measurable
+  and not only writable.
+
+  **The trade is named rather than hidden**, because this is the one place in
+  the chain where streaming cannot be free. Every count, mean, standard
+  deviation and change number is still **exact**: they are counts and sums, so a
+  window folds into an accumulator (`_PairAccum`, which `_pair_change` and the
+  per-block breakdown now both go through, and `_DistAccum`, which merges spread
+  with Chan's parallel-variance update rather than recomputing it). A
+  *percentile* is the exception — it needs the whole distribution, which is
+  exactly what a window-by-window walk never has — so each pass's `median` /
+  `p5` / `p95` become estimates from a mergeable 0.05 dB histogram
+  (`_QuantileSketch`), good to about one bin. The axis is decibels whatever the
+  cube holds, because a fixed-width dB bin is a fixed *ratio* of amplitude and
+  quantiles survive the monotone transform, so the estimate is equally good at
+  the dark and bright ends. And the summary **says which numbers those are**:
+  `quantile_method` / `quantile_bin_db` plus a caveat sentence, so an estimate
+  can never be mistaken for a measurement. A default (non-windowed) summary is
+  byte-identical to the one this mode did not exist for — the keys appear only
+  when they mean something.
+
+  Blocks are cut from the shared grid, not from a window, so a window edge is
+  not a block edge: `_BlockChanges` accumulates each block's *overlap* with each
+  window, which is what keeps the breakdown identical when the two grids are
+  deliberately misaligned. The windows themselves come from the helper the
+  writer already used, renamed `_write_windows` → `_cube_windows` now that
+  reading shares it. `umbra stack --stats-windowed` implies `--stats` and
+  pairs with `--lazy --chunk-size N` (an unchunked cube is one window, i.e. the
+  read this replaced with estimated percentiles). Offline-tested in
+  `tests/test_load.py`: a windowed summary is compared field for field against
+  the whole-slice walk's — counts, means, spreads, every change record, the
+  per-block series and the ASCII heat-grid — including across `extent="union"`
+  ground only one pass covers, with the percentiles pinned to within a bin
+  separately, and the resident-window claim pinned by recording every slab the
+  walk materialises.
 - **The hosted instance gets the datacube's memory ceiling lifted too:
   `umbra serve --stack-lazy`.** `to_stack(lazy=True)` / `chunk_size=` (below)
   took the ceiling off a *local* cube, but `POST /artifacts/stats` — the one

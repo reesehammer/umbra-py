@@ -350,6 +350,23 @@ because counting geographic cells measures nothing. `umbra stack --stats` prints
 the same object, and the `stack_stats` agent tool returns it over MCP /
 LangChain / LlamaIndex.
 
+Measuring reads a whole slice per pass, so a cube `chunk_size` let you *write*
+sharper than memory was still capped at what you could *measure*.
+`windowed=True` walks the same windows the cube is chunked into:
+
+```python
+cube = to_stack(passes, max_size=8192, crs="utm", lazy=True, chunk_size=1024)
+stats = stack_stats(cube, windowed=True)     # three windows resident, not three slices
+stats["quantile_method"]                     # "histogram" — see below
+```
+
+Every count, mean, standard deviation and change number stays exact (each is a
+sum, so a window folds in). The one number that cannot be: a percentile needs the
+whole pass at once, so `median` / `p5` / `p95` become histogram estimates good to
+about 0.05 dB — and the summary says so (`quantile_method`, `quantile_bin_db` and
+a caveat) rather than letting an estimate pass for a measurement.
+`umbra stack --stats-windowed` is the same switch on the CLI.
+
 A scene-wide mean hides a change confined to one corner, so `blocks=N` cuts the
 cube into an N×N grid and answers *where* and *when* together:
 
