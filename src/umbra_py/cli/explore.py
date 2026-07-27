@@ -17,6 +17,7 @@ from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
 from ..models import UmbraItem
 from ..pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
+from ..serve import STACK_SCHEDULERS
 from ..showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
 from . import _shared
 from ._root import cli
@@ -65,11 +66,45 @@ def mcp() -> None:
     "wants to bound COG-streaming egress.",
 )
 @click.option(
+    "--stack-lazy",
+    is_flag=True,
+    help="Build POST /artifacts/stats' datacube lazily (one dask task per pass) "
+    "so a long series is measured a slice at a time instead of held whole. "
+    "Needs the 'dask' extra on the server; the numbers are identical either way.",
+)
+@click.option(
+    "--stack-chunk-size",
+    type=int,
+    default=None,
+    help="With --stack-lazy, also cut each pass into N-square windows read "
+    "independently, so one scene need not fit in memory either. Costs one range "
+    "read per window instead of one per pass.",
+)
+@click.option(
+    "--stack-scheduler",
+    type=click.Choice(STACK_SCHEDULERS),
+    default="synchronous",
+    show_default=True,
+    help="With --stack-lazy, which dask scheduler evaluates the chunks: "
+    "'synchronous' on the request's own worker, or 'threads' for dask's thread "
+    "pool (faster per request, multiplies under concurrent ones).",
+)
+@click.option(
     "--cache-dir",
     default=None,
     help="Directory for cached render artifacts (default: alongside the index).",
 )
-def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
+def serve(
+    host,
+    port,
+    index_path,
+    live,
+    artifacts,
+    stack_lazy,
+    stack_chunk_size,
+    stack_scheduler,
+    cache_dir,
+) -> None:
     """Run a read-only STAC API over the catalog index (HTTP server).
 
     Umbra publishes a static STAC catalog and no search API, so the standard
@@ -84,13 +119,27 @@ def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
     each cached to disk by its inputs -- and answers the same change question in
     *numbers* at ``POST /artifacts/stats``, the ``umbra stack --stats``
     reduction (per-pass decibel statistics, changed area in km², and with
-    ``"blocks": N`` which part of the site moved) over HTTP. Requires the
+    ``"blocks": N`` which part of the site moved) over HTTP. That last one is
+    the only endpoint whose cost grows with the *number* of acquisitions, so
+    ``--stack-lazy`` (plus ``--stack-chunk-size``) gives it the same memory
+    ceiling-lift ``umbra stack --lazy`` has -- an instance-wide setting, since
+    it needs the ``dask`` extra here on the server. Requires the
     ``serve`` extra (``pip install 'umbra-py[serve]'``).
     """
     from ..exceptions import MissingDependencyError
+    from ..serve import StackExecution
     from ..serve import serve as run_stac_server
 
+    try:
+        execution = StackExecution(
+            lazy=stack_lazy, chunk_size=stack_chunk_size, scheduler=stack_scheduler
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--stack-chunk-size") from exc
+
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
+    if artifacts:
+        click.echo(f"  /artifacts/stats datacube: {execution.describe()}")
     try:
         run_stac_server(
             host=host,
@@ -98,6 +147,7 @@ def serve(host, port, index_path, live, artifacts, cache_dir) -> None:
             index_path=index_path,
             live=live,
             artifacts=artifacts,
+            stack_execution=execution,
             cache_dir=cache_dir,
         )
     except MissingDependencyError as exc:

@@ -86,6 +86,34 @@ picture — needs the `load` extra instead of `viz` (it co-registers the passes
 into a datacube and reduces it), so build with `serve,viz,load` for the full
 artifact surface.
 
+### Bounding the stats endpoint's memory
+
+`/artifacts/stats` is also the only endpoint whose cost grows with the *number*
+of acquisitions rather than with one render: it stacks the whole series. To
+measure a long series a slice at a time instead, add the `dask` extra and turn
+the lazy path on for the instance:
+
+```bash
+docker build --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
+docker run --rm -p 8000:8000 -v umbra-data:/data \
+  -e UMBRA_SERVE_ARGS="--stack-lazy --stack-chunk-size 1024" umbra-py:full
+```
+
+`--stack-lazy` makes each pass one deferred chunk; `--stack-chunk-size N` also
+cuts each pass into `N`-square windows read independently, so one *scene* need
+not fit either (at one range read per window instead of one per pass).
+`--stack-scheduler` picks who evaluates the chunks: `synchronous` (the default)
+uses the request's own worker, so the container's thread count stays whatever
+its ASGI server was configured with; `threads` gives a single render dask's
+thread pool, which is faster alone and multiplies under concurrent requests.
+
+This is an operator setting, never a request field — it needs the extra
+installed here and a decision about threads. A lazy cube's numbers are identical
+to an eager one's (only the peak memory differs), so it is not part of the
+artifact cache key: turn it on or off without invalidating anything. Without the
+`dask` extra a stats request answers `501` naming it, exactly like a missing
+`load`.
+
 ## Behind a reverse proxy
 
 The server sends a permissive read-only CORS policy, so a browser front end on

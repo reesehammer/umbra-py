@@ -24,6 +24,8 @@ services:
       # UMBRA_SERVE_LIVE: "1"
       # UMBRA_INDEX_URL: "https://.../catalog.db"   # a fork/mirror snapshot
       # UMBRA_SERVE_ARGS: "--no-artifacts"          # bound COG-streaming egress
+      # UMBRA_SERVE_ARGS: "--stack-lazy"            # measure long series a slice
+      #                                             # at a time (needs `dask`)
     volumes:
       # Persist the fetched index + render cache across restarts.
       - umbra-data:/data

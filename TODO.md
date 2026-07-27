@@ -948,11 +948,35 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
     ceiling writing one no longer has. Streaming it would mean approximate
     quantiles (a t-digest or a two-pass histogram), i.e. changing the numbers,
     which is a bigger decision than a chunk size.
-  - **`umbra serve`'s `POST /artifacts/stats` still stacks eagerly.** The server
-    builds its cube with `to_stack(...)` and `[serve]` does not pull `dask`, so a
-    hosted instance keeps the old ceiling. Wiring `lazy=` through the render
-    request would need the extra installed *and* a decision about scheduler
-    threads inside a request handler — deliberately left to the operator.
+  - ~~**`umbra serve`'s `POST /artifacts/stats` still stacks eagerly.**~~ ✅
+    **Done** (`umbra serve --stack-lazy` / `--stack-chunk-size N` /
+    `--stack-scheduler {synchronous,threads}`, i.e. `serve.StackExecution`
+    threaded through `build_app(stack_execution=…)` into `default_renderers`).
+    Exactly the shape this entry named: it *is* left to the operator, but as a
+    supported instance-wide setting rather than as a gap. Both conditions it
+    listed are answered in place — the extra is the server's to install (without
+    it a stats request answers `501` naming `umbra-py[dask]`, like a missing
+    `load`), and the scheduler is an explicit choice defaulting to
+    `synchronous`, so a render runs on the request's own worker and the
+    container's thread count stays whatever its ASGI server was configured with;
+    `threads` opts into dask's pool. `processes` is deliberately not offered
+    (the chunks stream COG bytes through GDAL handles that do not fork cleanly).
+    `dask.config.set` is entered as a context manager around the one render so
+    the choice cannot leak into another thread or a caller's process, and the
+    eager default never imports `dask`. The policy is *not* in
+    `artifact_cache_key`: a lazy cube's numbers are identical to an eager one's,
+    so flipping it invalidates nothing — pinned by rendering one request under
+    all four policies and comparing the JSON bytes. Offline-tested in
+    `tests/test_serve.py`. Follow-ons, neither a blocker:
+    - **The async job path shares the policy.** A `"async": true` stats request
+      runs the same renderer on the job executor's thread, so `--stack-scheduler
+      threads` there means dask's pool *inside* a pool thread. `synchronous`
+      (the default) is the safe pairing; a per-path policy would only be worth
+      it if an operator wanted sync requests bounded and jobs fast.
+    - **Nothing reports the policy over HTTP.** The CLI echoes it at startup,
+      but a client cannot tell a lazy instance from an eager one — correct, since
+      the answers are identical, though an operator debugging memory has to read
+      the process's own logs.
   - **The eager path still opens every source up front.** Both paths open all
     the datasets to resolve the grid (metadata only, but N handles at once). A
     two-pass resolve — footprints first, then reads — would drop that to one at a
