@@ -302,8 +302,12 @@ def test_cli_chips_from_url(tmp_path, monkeypatch):
     from umbra_py import cli as cli_mod
 
     tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: {"id": "cli-acq", "assets": {}})
-    monkeypatch.setattr(cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(tif))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(tif)
+    )
 
     out = tmp_path / "ds"
     result = CliRunner().invoke(

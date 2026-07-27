@@ -333,7 +333,7 @@ def fixed_narration(monkeypatch, sample_item_dict):
     pytest.importorskip("PIL")
     import umbra_py.viz as viz_mod
 
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     earlier = np.ones((16, 16), dtype="float32")
     later = np.ones((16, 16), dtype="float32")
     later[0:8, 8:16] = 8.0
@@ -377,7 +377,7 @@ def test_cli_change_narrate_writes_image_sidecar_and_prints(fixed_narration, tmp
 
 
 def test_cli_change_narrate_rejects_gif(monkeypatch, sample_item_dict, tmp_path):
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli,
         [
@@ -394,7 +394,7 @@ def test_cli_change_narrate_rejects_gif(monkeypatch, sample_item_dict, tmp_path)
 
 
 def test_cli_change_model_requires_narrate(monkeypatch, sample_item_dict, tmp_path):
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli,
         [
@@ -416,7 +416,7 @@ def test_cli_change_narrate_reports_missing_key_cleanly(monkeypatch, sample_item
     pytest.importorskip("PIL")
     import umbra_py.viz as viz_mod
 
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     earlier = np.ones((8, 8), dtype="float32")
     monkeypatch.setattr(
         viz_mod, "_coregister_bands", lambda *a, **k: ([earlier, earlier.copy()], (0, 0, 1, 1))

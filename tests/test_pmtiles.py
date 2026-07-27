@@ -608,7 +608,7 @@ def test_build_viewer_draws_the_footprint_layer():
 # --- CLI ------------------------------------------------------------------
 def test_cli_tiles_writes_archive_and_viewer(tmp_path, monkeypatch):
     items = [_item("a", -122.4, 37.8), _item("b", 2.35, 48.85)]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: items)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: items)
 
     out = tmp_path / "catalog.pmtiles"
     viewer = tmp_path / "viewer.html"
@@ -625,7 +625,7 @@ def test_cli_tiles_writes_archive_and_viewer(tmp_path, monkeypatch):
 
 def test_cli_tiles_no_footprints_writes_a_centroids_only_archive(tmp_path, monkeypatch):
     items = [_item("a", -122.4, 37.8)]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: items)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: items)
 
     def run(*extra: str) -> bytes:
         out = tmp_path / f"c{len(extra)}.pmtiles"
@@ -642,14 +642,18 @@ def test_cli_tiles_no_footprints_writes_a_centroids_only_archive(tmp_path, monke
 
 
 def test_cli_tiles_rejects_bad_extension(tmp_path, monkeypatch):
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)]
+    )
     result = CliRunner().invoke(cli, ["tiles", "--local", "--out", str(tmp_path / "x.mbtiles")])
     assert result.exit_code != 0
     assert "must be a .pmtiles file" in result.output
 
 
 def test_cli_tiles_requires_out_without_fetch(monkeypatch):
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)]
+    )
     result = CliRunner().invoke(cli, ["tiles", "--local"])
     assert result.exit_code != 0
     assert "--out is required unless --fetch is given" in result.output
@@ -729,7 +733,9 @@ def test_cli_tiles_fetch_writes_archive_and_viewer(tmp_path):
 
 
 def test_cli_tiles_url_without_fetch_is_rejected(monkeypatch):
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items", lambda **kwargs: [_item("a", 0.0, 0.0)]
+    )
     result = CliRunner().invoke(
         cli, ["tiles", "--local", "--out", "catalog.pmtiles", "--url", "https://x/y.pmtiles"]
     )
@@ -907,7 +913,7 @@ def test_metadata_advertises_the_cog_fields():
 
 
 def test_cli_tiles_no_cog_writes_a_leaner_archive(monkeypatch, tmp_path):
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_imaged_item()])
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: [_imaged_item()])
 
     default = tmp_path / "with.pmtiles"
     lean = tmp_path / "without.pmtiles"

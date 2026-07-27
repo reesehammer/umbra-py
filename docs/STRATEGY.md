@@ -311,6 +311,21 @@ from:
   bar six relative-import levels, so no caller changed. The one behavioural
   difference is the test seam: an internal helper is now patched on the module
   that *calls* it. See the CHANGELOG.
+- ~~Split `cli.py` — the outlier the `viz` split left behind — the same way.~~
+  **shipped** — the 5 522-line module is now a `cli/` package of nine modules
+  grouped by what the verb does: `_root.py` (the Click group, the JSON error
+  envelope, `main()`), `_shared.py` (the option groups and how a command obtains
+  its items), then `discover` / `scenes` / `process` / `composites` / `atlas` /
+  `explore` / `indexes`. The claim is checked rather than asserted: the whole
+  `--help` surface (group, 28 commands, 3 sub-groups, every option and help
+  string) is byte-identical to the pre-split output, and all 74 definitions are
+  AST-identical bar three mechanical rewrites — import depth, the shared helpers
+  qualified as `_shared.<name>` (one patch target, which is what lets the
+  option-group parity suite keep iterating over all fourteen gather commands),
+  and thirteen copies of one item-fetch expression collapsed into
+  `_shared._item_from_url`. See the CHANGELOG. **With this the structural-debt
+  group is closed bar the conditional R\*Tree upgrade below**; the date/limit
+  option groups stay deliberately per-command (see above).
 - ~~Wire `pytest --cov` + a Codecov badge into CI (was P2 #16).~~ **shipped** —
   the `test-all-extras` job (the one job where every module actually runs)
   measures branch coverage behind a `--cov-fail-under` floor and uploads to

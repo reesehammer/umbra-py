@@ -15,7 +15,9 @@
 > - **What's still open** → [`STRATEGY.md` §8](STRATEGY.md#8-current-status--remaining-critical-path)
 >   (the remaining critical path) and [`TODO.md`](../TODO.md) (per-PR
 >   follow-ons). Of this review's structural items, the `viz.py` package split
->   (P3 #19) and `pytest --cov` + Codecov (P2 #16) have since **shipped**, as has
+>   (P3 #19) — and now the `cli.py` split that followed it, into a nine-module
+>   `cli/` package with a byte-identical `--help` surface — and `pytest --cov` +
+>   Codecov (P2 #16) have since **shipped**, as has
 >   the `cli.py` shared-option extraction (P3 #18) — its geography group first,
 >   then its task-name group (`--area` / `--fuzzy`, which gave `umbra map` the
 >   site filter it was the only gather command to lack) plus the parity suite that

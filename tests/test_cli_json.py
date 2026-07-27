@@ -74,7 +74,7 @@ def _index(tmp_path, items):
 
 def test_download_json_emits_records(tmp_path, monkeypatch):
     item = _A
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: item.raw)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: item.raw)
 
     body = b"sar-bytes" * 10
 
@@ -84,7 +84,7 @@ def test_download_json_emits_records(tmp_path, monkeypatch):
         path.write_bytes(body)
         return [path]
 
-    monkeypatch.setattr(cli_mod, "download_item", fake_download_item)
+    monkeypatch.setattr("umbra_py.cli.scenes.download_item", fake_download_item)
 
     runner = _runner()
     result = runner.invoke(
@@ -105,7 +105,7 @@ def test_download_json_emits_records(tmp_path, monkeypatch):
 
 def test_download_without_json_stays_human(tmp_path, monkeypatch):
     item = _A
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: item.raw)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: item.raw)
 
     def fake_download_item(it, dest, assets, overwrite, progress):
         (name,) = assets
@@ -113,7 +113,7 @@ def test_download_without_json_stays_human(tmp_path, monkeypatch):
         path.write_bytes(b"x")
         return [path]
 
-    monkeypatch.setattr(cli_mod, "download_item", fake_download_item)
+    monkeypatch.setattr("umbra_py.cli.scenes.download_item", fake_download_item)
 
     runner = _runner()
     result = runner.invoke(
@@ -170,7 +170,7 @@ def test_timescan_manifest(tmp_path, monkeypatch):
         Path(out_path).write_bytes(b"png")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "save_timescan_composite", fake_render)
+    monkeypatch.setattr("umbra_py.cli.composites.save_timescan_composite", fake_render)
 
     runner = _runner()
     result = runner.invoke(
@@ -205,7 +205,7 @@ def test_gallery_manifest(tmp_path, monkeypatch):
         Path(out_path).write_text("<html></html>")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "save_gallery", fake_gallery)
+    monkeypatch.setattr("umbra_py.cli.atlas.save_gallery", fake_gallery)
 
     runner = _runner()
     result = runner.invoke(
@@ -239,7 +239,7 @@ def test_swipe_manifest(tmp_path, monkeypatch):
         Path(out_path).write_text("<html></html>")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "save_swipe_map", fake_swipe)
+    monkeypatch.setattr("umbra_py.cli.composites.save_swipe_map", fake_swipe)
 
     runner = _runner()
     result = runner.invoke(
@@ -263,7 +263,7 @@ def test_change_composite_manifest(tmp_path, monkeypatch):
         Path(out_path).write_bytes(b"png")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "save_change_composite", fake_change)
+    monkeypatch.setattr("umbra_py.cli.composites.save_change_composite", fake_change)
 
     runner = _runner()
     result = runner.invoke(
@@ -300,7 +300,7 @@ def test_map_geojson_manifest(tmp_path, monkeypatch):
         Path(out_path).write_text("{}")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "write_geojson", fake_geojson)
+    monkeypatch.setattr("umbra_py.cli.atlas.write_geojson", fake_geojson)
 
     runner = _runner()
     result = runner.invoke(
@@ -331,7 +331,7 @@ def test_manifests_validate_against_schema(tmp_path, monkeypatch):
         Path(out_path).write_bytes(b"png")
         return Path(out_path)
 
-    monkeypatch.setattr(cli_mod, "save_timescan_composite", fake_render)
+    monkeypatch.setattr("umbra_py.cli.composites.save_timescan_composite", fake_render)
 
     runner = _runner()
     result = runner.invoke(

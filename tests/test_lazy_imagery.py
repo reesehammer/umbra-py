@@ -315,8 +315,7 @@ def test_cli_map_rejects_imagery_with_lazy_imagery(monkeypatch, tmp_path, sample
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 
@@ -340,8 +339,7 @@ def test_cli_map_timeline_lazy_imagery_writes_button(monkeypatch, tmp_path, samp
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 
@@ -370,8 +368,7 @@ def test_cli_map_lazy_imagery_only_html(monkeypatch, tmp_path, sample_item_dict)
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 

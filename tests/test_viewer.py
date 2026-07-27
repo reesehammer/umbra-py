@@ -190,8 +190,12 @@ def test_cli_view_boots_and_stops(tmp_path, monkeypatch):
     from umbra_py.viewer import _ViewerServer
 
     src_tif, _, _ = _make_geotiff(tmp_path / "scene.tif")
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: {"id": "cli-acq", "assets": {}})
-    monkeypatch.setattr(cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(src_tif))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(src_tif)
+    )
 
     opened = {}
     monkeypatch.setattr("webbrowser.open", lambda u: opened.setdefault("url", u))

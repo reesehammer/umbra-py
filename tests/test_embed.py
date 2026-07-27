@@ -395,7 +395,7 @@ def test_cli_build_then_similar(tmp_path, monkeypatch, _patched):
 
     urls = [i.href for i in _ITEMS]
     items_by_url = {i.href: i.raw for i in _ITEMS}
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda url: items_by_url[url])
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: items_by_url[url])
 
     built = runner.invoke(cli, ["embed", "build", *urls, "--embed-db", str(edb)])
     assert built.exit_code == 0, built.output
@@ -404,7 +404,7 @@ def test_cli_build_then_similar(tmp_path, monkeypatch, _patched):
 
     # A fresh flood scene should surface the indexed floods.
     query = _item("flood", 9)
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda url: query.raw)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: query.raw)
     sim = runner.invoke(cli, ["embed", "similar", query.href, "--embed-db", str(edb)])
     assert sim.exit_code == 0, sim.output
     assert "flood-1" in sim.output or "flood-2" in sim.output
@@ -416,7 +416,7 @@ def test_cli_similar_json_output(tmp_path, monkeypatch, _patched):
     edb = tmp_path / "e.db"
     _build(edb)
     query = _item("flood", 9)
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda url: query.raw)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: query.raw)
     result = CliRunner().invoke(
         cli, ["embed", "similar", query.href, "--embed-db", str(edb), "--json"]
     )

@@ -34,7 +34,9 @@ umbra --help                        # CLI
 
 `src/umbra_py/` is the package; `catalog.py` searches Umbra's static STAC
 tree, `models.py` is the `UmbraItem` dataclass, `download.py` handles
-resume-safe HTTPS downloads, `cli.py` exposes `umbra search|info|download`.
+resume-safe HTTPS downloads, the `cli/` package exposes `umbra
+search|info|download` (one module per family of verbs, shared options in
+`cli/_shared.py`).
 Heavy deps (`sarpy`, `rasterio`, `matplotlib`, `folium`) live behind extras
 and are imported lazily.
 

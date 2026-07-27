@@ -62,7 +62,7 @@ def test_gather_commands_forward_area_and_fuzzy(spec, monkeypatch, tmp_path):
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
 
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
