@@ -939,15 +939,43 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
     (⌈h/N⌉ × ⌈w/N⌉ reads per pass instead of one), which is why it is opt-in and
     why `chunk_size` without `lazy` is a hard error rather than a silent no-op.
     `_write_stack_geotiff` writes band-by-band **and window-by-window**, driven
-    by the cube's own chunks (`_write_windows`), so the file path never
+    by the cube's own chunks (`_cube_windows`), so the file path never
     re-materialises what the reader avoided; a cube with no windows takes the
     previous whole-band write and the file is byte-identical. Offline-tested in
-    `tests/test_load.py`. Follow-on, not a blocker: **`stack_stats` still holds
+    `tests/test_load.py`. ~~Follow-on, not a blocker: **`stack_stats` still holds
     one slice per pass** — its per-pass distribution reports medians and
     percentiles, which need the whole pass, so measuring a cube keeps the
     ceiling writing one no longer has. Streaming it would mean approximate
     quantiles (a t-digest or a two-pass histogram), i.e. changing the numbers,
-    which is a bigger decision than a chunk size.
+    which is a bigger decision than a chunk size.~~ ✅ **Done**
+    (`stack_stats(windowed=True)` / `umbra stack --stats-windowed`). The walk is
+    turned inside out — one window of the shared grid outside, the series inside
+    — so three *windows* are resident instead of three slices and the ceiling
+    writing no longer has is gone from measuring too. The decision this entry
+    deferred was taken the narrow way: everything that is a count or a sum stays
+    **exact** (`_PairAccum` for every change record, including the per-block
+    breakdown, and `_DistAccum` merging spread with Chan's parallel-variance
+    update), and only the percentiles are estimated, from a mergeable 0.05 dB
+    histogram on the decibel axis (`_QuantileSketch`, good to about a bin) rather
+    than a t-digest. What makes an approximation acceptable here is that it is
+    *labelled*: `quantile_method` / `quantile_bin_db` and a caveat sentence
+    appear exactly when the numbers are estimates, and a default summary is
+    byte-identical to before. Blocks are cut from the shared grid, not from a
+    window, so a misaligned window edge leaves the breakdown identical (pinned by
+    a 7-wide window against a 3-block grid on a 24-wide cube). Offline-tested in
+    `tests/test_load.py`. Follow-ons, neither a blocker:
+    - **The server and the agent tools don't expose it.** `POST /artifacts/stats`
+      takes `blocks` / `block_series` but not `windowed`, and neither do the MCP
+      / LangChain / LlamaIndex `stack_stats` tools. Unlike `--stack-lazy` — an
+      instance-wide policy deliberately kept *out* of `artifact_cache_key`
+      because it cannot move a number — this one *does* move the percentiles, so
+      it would have to enter the cache key (or be an instance policy that
+      invalidates it). Decide which before wiring it: a cached artifact whose
+      quantiles depend on an invisible server flag is the failure mode to avoid.
+    - **The histogram is a Python dict of bin → count.** Fine at the sizes this
+      sees (a few thousand occupied bins per pass), but a pass spanning hundreds
+      of decibels holds proportionally more. If that ever matters, cap the axis
+      or widen the bin rather than reaching for a t-digest.
   - ~~**`umbra serve`'s `POST /artifacts/stats` still stacks eagerly.**~~ ✅
     **Done** (`umbra serve --stack-lazy` / `--stack-chunk-size N` /
     `--stack-scheduler {synchronous,threads}`, i.e. `serve.StackExecution`

@@ -1503,12 +1503,12 @@ def test_stack_to_geotiff_chunked_writes_window_by_window(tmp_path):
         np.testing.assert_array_equal(a.read(), b.read())
 
 
-def test_write_windows_covers_the_grid_exactly(tmp_path):
+def test_cube_windows_covers_the_grid_exactly(tmp_path):
     pytest.importorskip("xarray")
     from umbra_py import load as load_mod
 
     cube = _dask_cube(_three_scenes(tmp_path), max_size=24, chunk_size=10)
-    windows = load_mod._write_windows(cube)
+    windows = load_mod._cube_windows(cube)
 
     assert windows[0] == ((0, 10), (0, 10))
     # The grid is 24 columns wide, so a row ends on a 4-wide partial window.
@@ -1519,7 +1519,256 @@ def test_write_windows_covers_the_grid_exactly(tmp_path):
     from umbra_py import to_stack
 
     eager = to_stack(_three_scenes(tmp_path), max_size=24)
-    assert load_mod._write_windows(eager) == [((0, eager.shape[1]), (0, eager.shape[2]))]
+    assert load_mod._cube_windows(eager) == [((0, eager.shape[1]), (0, eager.shape[2]))]
+
+
+# --- Measuring window by window (``stack_stats(windowed=True)``) ---
+#
+# The writer already streams a chunked cube; these pin the same claim for the
+# reduction: what is resident is a window, and the only number that moves is a
+# percentile (which needs the whole distribution and so is estimated).
+
+
+def _speckle_scene(path, *, scale=1.0, width=40, height=40):
+    """A scene with a SAR-like amplitude distribution, brightened by ``scale``.
+
+    Lognormal rather than a ramp because a percentile is what is being checked:
+    backscatter clusters within a dozen decibels, where a fixed-width dB bin
+    holds many cells, and a ramp spanning five *orders of magnitude* would put
+    neighbouring samples further apart than the bins themselves.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    values = np.random.default_rng(7).lognormal(2.0, 0.8, (height, width)) * scale
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(values.astype("float32"), 1)
+    return path
+
+
+def _spread_scenes(tmp_path, count=3):
+    """Passes that both *differ across the scene* and *change over time*.
+
+    A percentile means nothing on a constant scene and a change means nothing on
+    two identical ones, so the windowed walk needs a fixture with both: one
+    speckle pattern doubling each pass, i.e. a spread distribution moving
+    6.02 dB a step.
+    """
+    return [
+        _stack_item(
+            _speckle_scene(tmp_path / f"w{n}.tif", scale=2.0 ** (n - 1)),
+            f"acq-{n}",
+            f"2024-0{n}-08T12:00:00Z",
+        )
+        for n in range(1, count + 1)
+    ]
+
+
+def _without_quantiles(summary):
+    """A summary stripped of everything ``windowed=True`` reports approximately."""
+    import json
+
+    trimmed = json.loads(json.dumps(summary))
+    for record in trimmed["passes"]:
+        for key in ("median", "p5", "p95"):
+            record.pop(key)
+    trimmed.pop("quantile_method", None)
+    trimmed.pop("quantile_bin_db", None)
+    trimmed["caveats"] = [c for c in trimmed["caveats"] if "window by window" not in c]
+    return trimmed
+
+
+def test_stack_stats_windowed_matches_the_whole_slice_walk(tmp_path):
+    """Counts, means, spreads and every change number are sums, so they are exact."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_stats, to_stack
+
+    items = _spread_scenes(tmp_path)
+    kwargs = {"max_size": 24, "crs": "utm"}
+    # 24 / 3 blocks puts a block edge on column 8; a 7-wide window puts a window
+    # edge on 7 and 14 -- so no block is a whole number of windows.
+    whole = stack_stats(to_stack(items, **kwargs), blocks=3, block_series=True)
+    windowed = stack_stats(
+        to_stack(items, lazy=True, chunk_size=7, **kwargs),
+        blocks=3,
+        block_series=True,
+        windowed=True,
+    )
+
+    assert _without_quantiles(windowed) == _without_quantiles(whole)
+    # ...and the percentiles land about one histogram bin from the exact value
+    # (a bin, plus wherever the neighbouring cells sit inside it).
+    from umbra_py.load import _QUANTILE_BIN_DB
+
+    for estimate, exact in zip(windowed["passes"], whole["passes"], strict=True):
+        for key in ("median", "p5", "p95"):
+            offset_db = 20 * math.log10(estimate[key] / exact[key])
+            assert offset_db == pytest.approx(0.0, abs=2 * _QUANTILE_BIN_DB)
+
+
+def test_stack_stats_windowed_matches_across_unobserved_ground_too(tmp_path):
+    """A window edge is not a footprint edge: union padding still isn't change."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        _stack_item(_stack_scene(tmp_path / "a.tif", value=2.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(
+            _stack_scene(tmp_path / "b.tif", x_offset=300.0, value=8.0),
+            "b",
+            "2024-02-01T00:00:00Z",
+        ),
+    ]
+    kwargs = {"max_size": 32, "extent": "union"}
+    whole = stack_stats(to_stack(items, **kwargs), blocks=4)
+    windowed = stack_stats(
+        to_stack(items, lazy=True, chunk_size=6, **kwargs), blocks=4, windowed=True
+    )
+
+    assert _without_quantiles(windowed) == _without_quantiles(whole)
+    # The blocks only one pass covers stay gaps rather than becoming zeros.
+    assert any(b["net_change"] is None for b in windowed["spatial"]["blocks"])
+
+
+def test_stack_stats_windowed_reports_nothing_for_a_pass_with_no_valid_cell(tmp_path):
+    """No observation is not a distribution of zero, however the cube was walked."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        # Zero amplitude is masked as "no observation", so this pass is all NaN.
+        _stack_item(_stack_scene(tmp_path / "blank.tif", value=0.0), "a", "2024-01-01T00:00:00Z"),
+        _stack_item(_stack_scene(tmp_path / "seen.tif", value=4.0), "b", "2024-02-01T00:00:00Z"),
+    ]
+    windowed = stack_stats(to_stack(items, max_size=24, lazy=True, chunk_size=8), windowed=True)
+
+    blank = windowed["passes"][0]
+    assert blank["valid_cells"] == 0
+    assert all(blank[key] is None for key in ("mean", "median", "std", "p5", "p95"))
+    assert windowed["net_change"] is None
+    assert _without_quantiles(windowed) == _without_quantiles(
+        stack_stats(to_stack(items, max_size=24))
+    )
+
+
+def test_stack_stats_windowed_holds_one_window_not_one_slice(tmp_path):
+    """Peak memory follows the chunk size, not the grid."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import load as load_mod
+    from umbra_py import stack_stats
+
+    shapes = []
+    original = load_mod._pass_slabs
+
+    def record(np, cube, index, **kw):
+        slabs = original(np, cube, index, **kw)
+        shapes.append(slabs[0].shape)
+        return slabs
+
+    cube = _dask_cube(_spread_scenes(tmp_path), max_size=24, chunk_size=8)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(load_mod, "_pass_slabs", record)
+        stack_stats(cube, windowed=True)
+
+    # Every window of every pass, and never anything bigger than a window --
+    # the whole (height, 24) slice this walk replaced is never materialised.
+    windows = load_mod._cube_windows(cube)
+    assert len(shapes) == len(windows) * cube.shape[0]
+    assert max(max(shape) for shape in shapes) == 8
+
+
+def test_stack_stats_windowed_says_which_numbers_are_estimates(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py import stack_stats, to_stack
+    from umbra_py.load import _QUANTILE_BIN_DB
+
+    items = _spread_scenes(tmp_path)
+    windowed = stack_stats(to_stack(items, max_size=24, lazy=True, chunk_size=8), windowed=True)
+
+    assert windowed["quantile_method"] == "histogram"
+    assert windowed["quantile_bin_db"] == _QUANTILE_BIN_DB
+    assert any("histogram estimates" in c for c in windowed["caveats"])
+    # A summary whose numbers are all exact says nothing, and is byte-identical
+    # to the one this mode did not exist for.
+    exact = stack_stats(to_stack(items, max_size=24))
+    assert "quantile_method" not in exact
+    assert not any("histogram estimates" in c for c in exact["caveats"])
+
+
+def test_stack_stats_windowed_on_an_unchunked_cube_is_one_window(tmp_path):
+    """Nothing to stream: the walk degenerates to the whole-slice read."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_spread_scenes(tmp_path), max_size=24, crs="utm")
+    windowed = stack_stats(cube, windowed=True, blocks=2)
+
+    assert _without_quantiles(windowed) == _without_quantiles(stack_stats(cube, blocks=2))
+
+
+def test_cli_stack_stats_windowed_measures_a_chunked_cube(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        f"acq-{n}": _speckle_scene(tmp_path / f"c{n}.tif", scale=2.0 ** (n - 1)) for n in (1, 2)
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "stack",
+            "http://example.com/acq-1.json",
+            "http://example.com/acq-2.json",
+            "--stats-windowed",
+            "--lazy",
+            "--chunk-size",
+            "8",
+            "--max-size",
+            "24",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # --stats-windowed implies --stats, so the reduction is printed with no --out.
+    summary = json.loads(result.stdout)
+    assert summary["count"] == 2
+    assert summary["quantile_method"] == "histogram"
+    assert summary["passes"][1]["change_vs_previous"]["mean_delta_db"] == pytest.approx(
+        _DOUBLING_DB, abs=0.01
+    )
 
 
 def test_cli_stack_chunk_size_writes_the_datacube(tmp_path, monkeypatch):

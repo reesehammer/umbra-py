@@ -465,10 +465,28 @@ from:
   render (so it cannot leak), the eager default never imports `dask`, and
   because the numbers are identical either way the policy is deliberately *not*
   in the artifact cache key: an operator flips it without invalidating a cached
-  artifact. See the CHANGELOG. **Open (not a blocker, in `TODO.md`):**
-  `stack_stats` still materialises one slice per pass — its medians and
-  percentiles need the pass whole, so streaming it would mean approximate
-  quantiles, i.e. changing the numbers.
+  artifact. See the CHANGELOG.
+  ~~**Open (not a blocker, in `TODO.md`):** `stack_stats` still materialises one
+  slice per pass — its medians and percentiles need the pass whole, so streaming
+  it would mean approximate quantiles, i.e. changing the numbers.~~ **shipped** —
+  `stack_stats(windowed=True)` / `umbra stack --stats-windowed` walks the cube's
+  own windows instead of whole passes, so three windows are resident rather than
+  three slices and a cube stacked sharper than a slice you can hold is
+  *measurable* and not only writable. The decision this entry deferred was made
+  rather than dodged: every count, mean, standard deviation and change number is
+  still exact (each is a sum, so a window folds into an accumulator), and the
+  percentiles — the one statistic that needs the pass whole — become estimates
+  from a mergeable 0.05 dB histogram, good to about a bin. What makes that
+  acceptable is that the summary *says which numbers are which*
+  (`quantile_method` / `quantile_bin_db` + a caveat), and that a default summary
+  is byte-identical to before, so nobody gets an estimate they didn't ask for.
+  Blocks are cut from the shared grid, not from a window, so a misaligned window
+  edge leaves the spatial breakdown identical. **This closes the datacube's
+  memory ceiling end to end — build, write and measure.** See the CHANGELOG.
+  **Open (not a blocker, in `TODO.md`):** the mode is library + CLI only; `umbra
+  serve`'s `POST /artifacts/stats` and the agent tools do not expose it, because
+  there it would have to enter the artifact cache key (unlike `--stack-lazy`,
+  this one *does* move numbers).
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

@@ -34,7 +34,9 @@ something asks for its values, and the reductions that consume a cube --
 numbers are identical; only the peak memory differs. ``chunk_size=`` takes the
 same step within a pass: a slice is cut into windows read independently, so the
 unit of work stops being a whole ``max_size²`` slab and one scene no longer has
-to fit in memory either.
+to fit in memory either. ``stack_stats(windowed=True)`` finishes the chain by
+*measuring* those windows rather than whole passes, at the cost of the one
+statistic a window cannot carry exactly: a percentile.
 
 Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 """
@@ -68,6 +70,13 @@ STACK_EXTENTS = ("intersection", "union")
 #: The value of :func:`to_stack`'s ``crs=`` that asks for the UTM zone the
 #: stacked ground falls in, rather than a CRS named outright.
 STACK_AUTO_CRS = "utm"
+
+#: Bin width of the histogram :func:`stack_stats`'s ``windowed=True`` mode
+#: estimates medians and percentiles from, in decibels. Those are the only
+#: numbers that mode reports approximately, and this is the scale of the error:
+#: about a bin -- 0.05 dB, or 0.6 % of amplitude -- against a measurement the
+#: caveats already call relative rather than absolute.
+_QUANTILE_BIN_DB = 0.05
 
 
 def _require(module: str):
@@ -843,6 +852,59 @@ def _cell_area_m2(crs_name: str, xres: float, yres: float) -> float | None:
     return abs(xres * yres) * factor * factor
 
 
+class _PairAccum:
+    """Signed backscatter change between two dB slices, accumulated in pieces.
+
+    Every number a change record carries is a count or a sum over the cells the
+    two passes share, so the record can be built from windows of the pair as
+    easily as from the pair whole -- which is what lets :func:`stack_stats`
+    measure a cube it never holds a whole slice of. Fed a single window covering
+    everything (:func:`_pair_change`), the arithmetic reduces to the whole-slab
+    expressions it replaced, sum for sum.
+    """
+
+    def __init__(self, np: Any, *, threshold_db: float, cell_area_m2: float | None) -> None:
+        self._np = np
+        self._threshold_db = threshold_db
+        self._cell_area_m2 = cell_area_m2
+        self.compared = 0
+        self._sum_delta = 0.0
+        self._sum_abs_delta = 0.0
+        self._brightened = 0
+        self._dimmed = 0
+
+    def add(self, earlier_db: Any, later_db: Any) -> None:
+        """Fold one window of the pair in. Cells either pass missed are ignored."""
+        np = self._np
+        both = np.isfinite(earlier_db) & np.isfinite(later_db)
+        compared = int(both.sum())
+        if compared == 0:
+            return
+        delta = later_db[both] - earlier_db[both]
+        self.compared += compared
+        self._sum_delta += float(np.sum(delta))
+        self._sum_abs_delta += float(np.sum(np.abs(delta)))
+        self._brightened += int(np.count_nonzero(delta >= self._threshold_db))
+        self._dimmed += int(np.count_nonzero(delta <= -self._threshold_db))
+
+    def result(self) -> dict[str, Any] | None:
+        """The change record, or ``None`` when the two passes share no cell."""
+        compared = self.compared
+        if compared == 0:
+            return None
+        changed = self._brightened + self._dimmed
+        area = self._cell_area_m2
+        return {
+            "compared_cells": compared,
+            "mean_delta_db": round(self._sum_delta / compared, 3),
+            "mean_abs_delta_db": round(self._sum_abs_delta / compared, 3),
+            "brightened_fraction": round(self._brightened / compared, 4),
+            "dimmed_fraction": round(self._dimmed / compared, 4),
+            "changed_fraction": round(changed / compared, 4),
+            "changed_area_km2": (round(changed * area / 1e6, 4) if area is not None else None),
+        }
+
+
 def _pair_change(
     np: Any,
     earlier_db: Any,
@@ -856,25 +918,9 @@ def _pair_change(
     Only cells observed on *both* passes are compared, so ``extent="union"``
     padding never reads as change. ``None`` when the two passes share no cell.
     """
-    both = np.isfinite(earlier_db) & np.isfinite(later_db)
-    compared = int(both.sum())
-    if compared == 0:
-        return None
-    delta = later_db[both] - earlier_db[both]
-    brightened = int(np.count_nonzero(delta >= threshold_db))
-    dimmed = int(np.count_nonzero(delta <= -threshold_db))
-    changed = brightened + dimmed
-    return {
-        "compared_cells": compared,
-        "mean_delta_db": round(float(np.mean(delta)), 3),
-        "mean_abs_delta_db": round(float(np.mean(np.abs(delta))), 3),
-        "brightened_fraction": round(brightened / compared, 4),
-        "dimmed_fraction": round(dimmed / compared, 4),
-        "changed_fraction": round(changed / compared, 4),
-        "changed_area_km2": (
-            round(changed * cell_area_m2 / 1e6, 4) if cell_area_m2 is not None else None
-        ),
-    }
+    accum = _PairAccum(np, threshold_db=threshold_db, cell_area_m2=cell_area_m2)
+    accum.add(earlier_db, later_db)
+    return accum.result()
 
 
 def _block_lonlat(crs_name: str, centers: list[tuple[float, float]]) -> list[list[float] | None]:
@@ -921,13 +967,15 @@ def _grid_text(rows: int, cols: int, deltas: dict[tuple[int, int], float | None]
 
 
 class _BlockChanges:
-    """Per-block change accumulated one *pass* at a time, not one block at a time.
+    """Per-block change accumulated one *piece* at a time, not one block at a time.
 
     The same reduction :func:`_spatial_breakdown` reports, turned inside out: it
-    is fed consecutive pairs of passes as they arrive, so the cube it measures
-    never has to exist all at once. Every :func:`_pair_change` call is
-    independent of every other, so the records are identical to walking each
-    block's whole history in turn — only the loop order changed.
+    is fed consecutive pairs of passes as they arrive — and, when the cube is
+    measured window by window, one window of a pair at a time — so the cube it
+    measures never has to exist all at once. Each block's record is a
+    :class:`_PairAccum`, whose numbers are counts and sums over the cells the two
+    passes share, so the loop order (and how much of a pass is resident) cannot
+    move them.
 
     Block geometry comes from ``narrate``'s helpers, so a block's ``compass``
     label means the same thing in both of the library's change reductions.
@@ -953,49 +1001,92 @@ class _BlockChanges:
         self._stamps = stamps
         self._threshold_db = threshold_db
         self._cell_area_m2 = cell_area_m2
+        self._whole = ((0, shape[0]), (0, shape[1]))
         self.blocks = blocks
         self.row_slices = _split_slices(shape[0], blocks)
         self.col_slices = _split_slices(shape[1], blocks)
-        self.steps: dict[tuple[int, int], list[dict[str, Any]]] = {
-            (r, c): [] for r in range(len(self.row_slices)) for c in range(len(self.col_slices))
+        keys = [(r, c) for r in range(len(self.row_slices)) for c in range(len(self.col_slices))]
+        self._steps: dict[tuple[int, int], list[_PairAccum]] = {
+            key: [self._accum() for _ in range(max(len(ids) - 1, 0))] for key in keys
         }
-        self.net: dict[tuple[int, int], dict[str, Any] | None] = dict.fromkeys(self.steps)
+        self._net: dict[tuple[int, int], _PairAccum] = {key: self._accum() for key in keys}
 
-    def _per_block(self, earlier_db: Any, later_db: Any) -> Any:
+    def _accum(self) -> _PairAccum:
+        return _PairAccum(
+            self._np, threshold_db=self._threshold_db, cell_area_m2=self._cell_area_m2
+        )
+
+    def _parts(self, window: tuple[tuple[int, int], tuple[int, int]] | None) -> Any:
+        """Each block this window touches, as a slice pair in *window* coordinates.
+
+        A window is a rectangle of the shared grid and a block is another, so the
+        part of a block a window carries is their overlap — expressed relative to
+        the window, because that is the array the caller holds. A whole-grid
+        window yields every block in full, i.e. the block slices themselves.
+        """
+        (row0, row1), (col0, col1) = window if window is not None else self._whole
         for r, rsl in enumerate(self.row_slices):
-            for c, csl in enumerate(self.col_slices):
-                yield (
-                    (r, c),
-                    _pair_change(
-                        self._np,
-                        earlier_db[rsl, csl],
-                        later_db[rsl, csl],
-                        threshold_db=self._threshold_db,
-                        cell_area_m2=self._cell_area_m2,
-                    ),
-                )
-
-    def add_step(self, index: int, earlier_db: Any, later_db: Any) -> None:
-        """Record every block's move from pass ``index - 1`` to pass ``index``."""
-        for key, step in self._per_block(earlier_db, later_db):
-            if step is None:
+            top, bottom = max(rsl.start, row0), min(rsl.stop, row1)
+            if top >= bottom:
                 continue
-            self.steps[key].append(
-                {
-                    "from_item_id": self._ids[index - 1],
-                    "from_datetime": self._stamps[index - 1],
-                    "to_item_id": self._ids[index],
-                    "to_datetime": self._stamps[index],
-                    "mean_delta_db": step["mean_delta_db"],
-                    "changed_fraction": step["changed_fraction"],
-                    "changed_area_km2": step["changed_area_km2"],
-                }
-            )
+            rows = slice(top - row0, bottom - row0)
+            for c, csl in enumerate(self.col_slices):
+                left, right = max(csl.start, col0), min(csl.stop, col1)
+                if left >= right:
+                    continue
+                yield (r, c), rows, slice(left - col0, right - col0)
 
-    def add_net(self, first_db: Any, last_db: Any) -> None:
+    def add_step(
+        self,
+        index: int,
+        earlier_db: Any,
+        later_db: Any,
+        window: tuple[tuple[int, int], tuple[int, int]] | None = None,
+    ) -> None:
+        """Record every block's move from pass ``index - 1`` to pass ``index``."""
+        for key, rows, cols in self._parts(window):
+            self._steps[key][index - 1].add(earlier_db[rows, cols], later_db[rows, cols])
+
+    def add_net(
+        self,
+        first_db: Any,
+        last_db: Any,
+        window: tuple[tuple[int, int], tuple[int, int]] | None = None,
+    ) -> None:
         """Record every block's net first → last change."""
-        for key, net in self._per_block(first_db, last_db):
-            self.net[key] = net
+        for key, rows, cols in self._parts(window):
+            self._net[key].add(first_db[rows, cols], last_db[rows, cols])
+
+    def steps(self) -> dict[tuple[int, int], list[dict[str, Any]]]:
+        """Each block's consecutive pass-to-pass sequence, oldest first.
+
+        A step a block was never observed on both sides of is dropped rather than
+        reported as zero change.
+        """
+        out: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for key, accums in self._steps.items():
+            records = []
+            for index, accum in enumerate(accums, start=1):
+                step = accum.result()
+                if step is None:
+                    continue
+                records.append(
+                    {
+                        "from_item_id": self._ids[index - 1],
+                        "from_datetime": self._stamps[index - 1],
+                        "to_item_id": self._ids[index],
+                        "to_datetime": self._stamps[index],
+                        "mean_delta_db": step["mean_delta_db"],
+                        "changed_fraction": step["changed_fraction"],
+                        "changed_area_km2": step["changed_area_km2"],
+                    }
+                )
+            out[key] = records
+        return out
+
+    def net(self) -> dict[tuple[int, int], dict[str, Any] | None]:
+        """Each block's net first → last change (``None`` where never compared)."""
+        return {key: accum.result() for key, accum in self._net.items()}
 
 
 def _spatial_breakdown(
@@ -1021,16 +1112,18 @@ def _spatial_breakdown(
 
     blocks = changes.blocks
     xres, _, xoff, _, yres, yoff = transform
+    net_by_block = changes.net()
+    steps_by_block = changes.steps()
 
     records: list[dict[str, Any]] = []
     centers: list[tuple[float, float]] = []
     deltas: dict[tuple[int, int], float | None] = {}
     for r, rsl in enumerate(changes.row_slices):
         for c, csl in enumerate(changes.col_slices):
-            net = changes.net[(r, c)]
+            net = net_by_block[(r, c)]
             # The block's consecutive pass-to-pass sequence. The peak interval —
             # the block's "when" answer — is the largest-magnitude step in it.
-            steps = changes.steps[(r, c)]
+            steps = steps_by_block[(r, c)]
             peak_interval = max(steps, key=lambda s: abs(s["mean_delta_db"]), default=None)
 
             xs = (xoff + csl.start * xres, xoff + csl.stop * xres)
@@ -1086,20 +1179,268 @@ def _spatial_breakdown(
     }
 
 
-def _pass_slabs(np: Any, cube: xr.DataArray, index: int, *, units: str) -> tuple[Any, Any]:
+def _pass_slabs(
+    np: Any,
+    cube: xr.DataArray,
+    index: int,
+    *,
+    units: str,
+    window: tuple[tuple[int, int], tuple[int, int]] | None = None,
+) -> tuple[Any, Any]:
     """One pass of a cube as ``(values, dB view)``, read a single slice at a time.
 
     The slice is what is materialised — for a lazy cube that computes exactly
     one chunk, and for an eager one it copies a single slab instead of the whole
-    series. Change is a ratio of backscatter, i.e. a difference on the log
-    scale, so a linear cube gets the dB view it should be compared on; a dB cube
-    is already there and the two are the same array.
+    series. ``window`` narrows that further to one ``(rows, cols)`` rectangle of
+    the pass, so a chunked cube materialises a single window instead of a whole
+    slice. Change is a ratio of backscatter, i.e. a difference on the log scale,
+    so a linear cube gets the dB view it should be compared on; a dB cube is
+    already there and the two are the same array.
     """
-    slab = np.asarray(cube.isel(time=index).values, dtype="float64")
+    part = cube.isel(time=index)
+    if window is not None:
+        (row0, row1), (col0, col1) = window
+        part = part.isel(y=slice(row0, row1), x=slice(col0, col1))
+    slab = np.asarray(part.values, dtype="float64")
     if units == "dB":
         return slab, slab
     with np.errstate(divide="ignore", invalid="ignore"):
         return slab, np.where(slab > 0, 20.0 * np.log10(slab), np.nan)
+
+
+class _QuantileSketch:
+    """A mergeable fixed-width histogram of one pass, on the decibel axis.
+
+    The one part of the reduction that is *not* a count or a sum: a median or a
+    percentile needs the whole distribution, which is exactly what a cube
+    measured window by window never has in one place. This keeps the
+    distribution's *shape* instead of its values — one counter per
+    ``_QUANTILE_BIN_DB``-wide bin, merged as windows arrive — so the estimate
+    costs occupied bins rather than cells, and its error is bounded by the bin
+    width rather than by how the cube happened to be chunked.
+
+    Decibels are the axis whatever the cube holds, because backscatter spans
+    orders of magnitude: a fixed-width bin is a fixed *ratio* of amplitude, so
+    the estimate is equally good at the dark and bright ends. Quantiles survive
+    the monotone transform, so a linear cube's percentile is its dB percentile
+    read back as amplitude.
+    """
+
+    def __init__(self, np: Any) -> None:
+        self._np = np
+        self._bins: dict[int, int] = {}
+
+    def add(self, db_values: Any) -> None:
+        """Fold one window's finite dB values into the histogram."""
+        np = self._np
+        observed = db_values[np.isfinite(db_values)]
+        if observed.size == 0:
+            return
+        indices, counts = np.unique(
+            np.floor(observed / _QUANTILE_BIN_DB).astype("int64"), return_counts=True
+        )
+        bins = self._bins
+        for index, count in zip(indices.tolist(), counts.tolist(), strict=True):
+            bins[index] = bins.get(index, 0) + count
+
+    def quantile(self, q: float) -> float:
+        """The ``q``-quantile in decibels, of whatever has been added so far.
+
+        Within the bin that holds the answer the counted values are assumed
+        evenly spread, which is what keeps the estimate continuous as a
+        distribution shifts rather than stepping bin to bin.
+        """
+        total = sum(self._bins.values())
+        target = q * (total - 1)
+        seen = 0
+        for index in sorted(self._bins):
+            count = self._bins[index]
+            if seen + count > target:
+                offset = min(max((target - seen + 0.5) / count, 0.0), 1.0)
+                return (index + offset) * _QUANTILE_BIN_DB
+            seen += count
+        return (max(self._bins) + 1) * _QUANTILE_BIN_DB
+
+
+class _DistAccum:
+    """One pass's distribution, accumulated window by window.
+
+    Count and mean are sums; the spread is merged with Chan's parallel variance
+    update rather than recomputed, so neither depends on how the pass was cut up
+    (a one-window pass reproduces the whole-slab ``mean``/``std`` exactly). Only
+    the percentiles are estimated — see :class:`_QuantileSketch`.
+    """
+
+    def __init__(self, np: Any, *, units: str) -> None:
+        self._np = np
+        self._units = units
+        self._sketch = _QuantileSketch(np)
+        self.count = 0
+        self._mean = 0.0
+        self._m2 = 0.0
+
+    def add(self, values: Any, db_values: Any) -> None:
+        np = self._np
+        observed = values[np.isfinite(values)]
+        count = int(observed.size)
+        if count:
+            mean = float(np.mean(observed))
+            m2 = float(np.sum((observed - mean) ** 2))
+            total = self.count + count
+            delta = mean - self._mean
+            self._mean += delta * count / total
+            self._m2 += m2 + delta * delta * self.count * count / total
+            self.count = total
+        self._sketch.add(db_values)
+
+    def _percentile(self, q: float) -> float:
+        """A dB quantile back in the cube's own units (``10**(dB/20)`` if linear)."""
+        db = self._sketch.quantile(q)
+        return round(db if self._units == "dB" else 10.0 ** (db / 20.0), 3)
+
+    def result(self) -> dict[str, Any]:
+        """The pass's distribution, or all-``None`` when it observed nothing."""
+        if not self.count:
+            return dict.fromkeys(("mean", "median", "std", "p5", "p95"))
+        return {
+            "mean": round(self._mean, 3),
+            "median": self._percentile(0.5),
+            "std": round((self._m2 / self.count) ** 0.5, 3),
+            "p5": self._percentile(0.05),
+            "p95": self._percentile(0.95),
+        }
+
+
+def _measure_whole(
+    np: Any,
+    cube: xr.DataArray,
+    *,
+    units: str,
+    ids: list[str],
+    stamps: list[str],
+    cells: int,
+    threshold_db: float,
+    cell_area_m2: float | None,
+    changes: _BlockChanges | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Walk the series one whole slice at a time, exactly as read.
+
+    Holds at most the first, the previous and the current pass, so the
+    reduction's memory is set by the *grid* rather than by the length of the
+    series, and a lazy (dask-backed) cube is measured by computing one slice per
+    step instead of materialising the whole thing.
+    """
+    passes: list[dict[str, Any]] = []
+    first_db: Any = None
+    previous_db: Any = None
+    for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True)):
+        slab, db_slab = _pass_slabs(np, cube, i, units=units)
+        finite = np.isfinite(slab)
+        n_valid = int(finite.sum())
+        observed = slab[finite]
+        record: dict[str, Any] = {
+            "item_id": item_id,
+            "datetime": stamp,
+            "valid_cells": n_valid,
+            "valid_fraction": round(n_valid / cells, 4) if cells else 0.0,
+            "mean": round(float(np.mean(observed)), 3) if n_valid else None,
+            "median": round(float(np.median(observed)), 3) if n_valid else None,
+            "std": round(float(np.std(observed)), 3) if n_valid else None,
+            "p5": round(float(np.percentile(observed, 5)), 3) if n_valid else None,
+            "p95": round(float(np.percentile(observed, 95)), 3) if n_valid else None,
+            "change_vs_previous": (
+                _pair_change(
+                    np,
+                    previous_db,
+                    db_slab,
+                    threshold_db=threshold_db,
+                    cell_area_m2=cell_area_m2,
+                )
+                if i
+                else None
+            ),
+        }
+        passes.append(record)
+        if i:
+            if changes is not None:
+                changes.add_step(i, previous_db, db_slab)
+        else:
+            first_db = db_slab
+        previous_db = db_slab
+
+    if len(passes) < 2:
+        return passes, None
+    if changes is not None:
+        changes.add_net(first_db, previous_db)
+    return passes, _pair_change(
+        np, first_db, previous_db, threshold_db=threshold_db, cell_area_m2=cell_area_m2
+    )
+
+
+def _measure_windowed(
+    np: Any,
+    cube: xr.DataArray,
+    *,
+    units: str,
+    ids: list[str],
+    stamps: list[str],
+    cells: int,
+    threshold_db: float,
+    cell_area_m2: float | None,
+    changes: _BlockChanges | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Walk the *windows* of the series, so no whole slice is ever resident.
+
+    The loop is turned inside out relative to :func:`_measure_whole`: the outer
+    step is one window of the shared grid — the cube's own chunks
+    (:func:`to_stack`'s ``chunk_size``) — and the series is walked inside it, so
+    what is held is three windows rather than three slices. Every statistic
+    except the percentiles is a count or a sum and so folds in piece by piece;
+    the percentiles come from a histogram of the same pieces
+    (:class:`_QuantileSketch`).
+    """
+    count = len(ids)
+
+    def accum() -> _PairAccum:
+        return _PairAccum(np, threshold_db=threshold_db, cell_area_m2=cell_area_m2)
+
+    dists = [_DistAccum(np, units=units) for _ in range(count)]
+    # Indexed like the passes: ``steps[i]`` is pass ``i`` against pass ``i - 1``,
+    # so ``steps[0]`` stays empty and reports nothing, like the first pass's
+    # ``change_vs_previous``.
+    steps = [accum() for _ in range(count)]
+    net = accum()
+
+    for window in _cube_windows(cube):
+        first_db: Any = None
+        previous_db: Any = None
+        for i in range(count):
+            slab, db_slab = _pass_slabs(np, cube, i, units=units, window=window)
+            dists[i].add(slab, db_slab)
+            if i:
+                steps[i].add(previous_db, db_slab)
+                if changes is not None:
+                    changes.add_step(i, previous_db, db_slab, window)
+            else:
+                first_db = db_slab
+            previous_db = db_slab
+        if count > 1:
+            net.add(first_db, previous_db)
+            if changes is not None:
+                changes.add_net(first_db, previous_db, window)
+
+    passes = [
+        {
+            "item_id": item_id,
+            "datetime": stamp,
+            "valid_cells": dists[i].count,
+            "valid_fraction": round(dists[i].count / cells, 4) if cells else 0.0,
+            **dists[i].result(),
+            "change_vs_previous": steps[i].result() if i else None,
+        }
+        for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True))
+    ]
+    return passes, net.result() if count > 1 else None
 
 
 def stack_stats(
@@ -1108,6 +1449,7 @@ def stack_stats(
     change_threshold_db: float = 3.0,
     blocks: int = 0,
     block_series: bool = False,
+    windowed: bool = False,
 ) -> dict[str, Any]:
     """Summarize a datacube's *time* axis as a JSON-ready statistics series.
 
@@ -1149,6 +1491,23 @@ def stack_stats(
         ``blocks``. Ask for it when the question is the *shape* of a block's
         history — did it move once and stay, or drift every pass? — which a
         single peak interval cannot answer.
+    windowed:
+        Measure the cube one **window** at a time instead of one pass at a time,
+        following the cube's own chunks (:func:`to_stack`'s ``chunk_size``). The
+        default reads a whole slice per pass, so a cube stacked sharper than
+        memory can be *written* but not measured; this drops the resident
+        footprint to three windows and lifts that last ceiling.
+
+        The trade is stated rather than hidden: every count, mean, standard
+        deviation and change number is still exact (they are sums, so a window
+        folds in), but the per-pass ``median``/``p5``/``p95`` become histogram
+        estimates, good to about one ``_QUANTILE_BIN_DB`` bin — a quantile needs
+        the whole distribution, which is the one thing a window-by-window walk
+        never has.
+        The summary says so (``quantile_method`` / ``quantile_bin_db`` plus a
+        caveat), so a consumer can tell the two kinds of number apart. An
+        unchunked cube is one window, i.e. the default read with estimated
+        percentiles.
 
     Returns
     -------
@@ -1214,47 +1573,17 @@ def stack_stats(
         else None
     )
 
-    # One pass at a time, holding at most the first, the previous and the
-    # current slice — so the reduction's memory is set by the *grid*, not by the
-    # length of the series, and a lazy (dask-backed) cube is measured by
-    # computing one chunk per step instead of materialising the whole thing.
-    passes: list[dict[str, Any]] = []
-    first_db: Any = None
-    previous_db: Any = None
-    for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True)):
-        slab, db_slab = _pass_slabs(np, cube, i, units=units)
-        finite = np.isfinite(slab)
-        n_valid = int(finite.sum())
-        observed = slab[finite]
-        record: dict[str, Any] = {
-            "item_id": item_id,
-            "datetime": stamp,
-            "valid_cells": n_valid,
-            "valid_fraction": round(n_valid / cells, 4) if cells else 0.0,
-            "mean": round(float(np.mean(observed)), 3) if n_valid else None,
-            "median": round(float(np.median(observed)), 3) if n_valid else None,
-            "std": round(float(np.std(observed)), 3) if n_valid else None,
-            "p5": round(float(np.percentile(observed, 5)), 3) if n_valid else None,
-            "p95": round(float(np.percentile(observed, 95)), 3) if n_valid else None,
-            "change_vs_previous": (
-                _pair_change(
-                    np,
-                    previous_db,
-                    db_slab,
-                    threshold_db=change_threshold_db,
-                    cell_area_m2=area,
-                )
-                if i
-                else None
-            ),
-        }
-        passes.append(record)
-        if i:
-            if changes is not None:
-                changes.add_step(i, previous_db, db_slab)
-        else:
-            first_db = db_slab
-        previous_db = db_slab
+    passes, net_change = (_measure_windowed if windowed else _measure_whole)(
+        np,
+        cube,
+        units=units,
+        ids=ids,
+        stamps=stamps,
+        cells=cells,
+        threshold_db=change_threshold_db,
+        cell_area_m2=area,
+        changes=changes,
+    )
 
     caveats = [
         "Umbra's open products are not radiometrically calibrated, so decibel "
@@ -1269,12 +1598,26 @@ def stack_stats(
             "equal-area, so no changed area is reported. Rebuild the cube with "
             f"crs={STACK_AUTO_CRS!r} (or a projected CRS) to measure area."
         )
+    if windowed:
+        caveats.append(
+            "The cube was measured window by window, so each pass's median, p5 "
+            f"and p95 are histogram estimates, good to about the {_QUANTILE_BIN_DB} "
+            "dB bin they were counted in. Every count, mean, standard deviation "
+            "and change number is exact."
+        )
 
     summary: dict[str, Any] = {
         "count": len(passes),
         "units": units,
         "product_type": cube.attrs.get("product_type"),
         "change_threshold_db": change_threshold_db,
+        # Only when the percentiles are estimates: a summary that doesn't say
+        # this is one whose numbers are all exact.
+        **(
+            {"quantile_method": "histogram", "quantile_bin_db": _QUANTILE_BIN_DB}
+            if windowed
+            else {}
+        ),
         "grid": {
             "crs": crs_name,
             "width": width,
@@ -1285,24 +1628,12 @@ def stack_stats(
             "extent": cube.attrs.get("extent"),
         },
         "passes": passes,
-        "net_change": (
-            _pair_change(
-                np,
-                first_db,
-                previous_db,
-                threshold_db=change_threshold_db,
-                cell_area_m2=area,
-            )
-            if len(passes) > 1
-            else None
-        ),
+        "net_change": net_change,
         "license": DATA_LICENSE,
         "attribution": ATTRIBUTION,
         "caveats": caveats,
     }
     if changes is not None:
-        if len(passes) > 1:
-            changes.add_net(first_db, previous_db)
         summary["spatial"] = _spatial_breakdown(
             changes,
             transform=tuple(cube.attrs["transform"]),
@@ -1356,14 +1687,15 @@ def stack_to_geotiff(
     return _write_stack_geotiff(cube, dest)
 
 
-def _write_windows(cube: xr.DataArray) -> list[tuple[tuple[int, int], tuple[int, int]]]:
-    """The ``(rows, cols)`` spans a band is written in: the cube's own chunks.
+def _cube_windows(cube: xr.DataArray) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The ``(rows, cols)`` spans a slice is consumed in: the cube's own chunks.
 
     A cube chunked *within* a slice (:func:`to_stack`'s ``chunk_size``) is
-    written window by window, so the writer materialises a chunk rather than a
-    whole band. Anything else -- an eager cube, or a lazy one chunked only
-    across the series -- reports the single whole-band window, which is the
-    write this function replaced.
+    written -- and, under ``stack_stats(windowed=True)``, measured -- window by
+    window, so the consumer materialises a chunk rather than a whole band.
+    Anything else -- an eager cube, or a lazy one chunked only across the series
+    -- reports the single whole-band window, which is the read this function
+    replaced.
     """
     height, width = int(cube.shape[1]), int(cube.shape[2])
     chunks = getattr(getattr(cube, "data", None), "chunks", None)
@@ -1414,7 +1746,7 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
         "compress": "deflate",
         "tiled": True,
     }
-    windows = _write_windows(cube)
+    windows = _cube_windows(cube)
     with rasterio.open(dest, "w", **profile) as dst:
         for band, (stamp, item_id) in enumerate(zip(stamps, ids, strict=True), start=1):
             for (row0, row1), (col0, col1) in windows:

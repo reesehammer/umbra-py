@@ -31,7 +31,19 @@ stack --lazy`, the `[dask]` extra) defers each pass's read into one `dask`
 chunk, and the consumers that reduce a cube — `stack_stats` and
 `stack_to_geotiff` — walk it a slice at a time, so peak memory follows the
 grid rather than the length of the series. The numbers are identical; only
-what is resident differs.
+what is resident differs. `chunk_size=N` (`umbra stack --lazy --chunk-size N`)
+takes the same step *within* a pass: each slice is cut into N-square windows
+read and written independently, so `max_size` stops being bounded by how much of
+one scene fits in memory.
+
+`stack_stats(windowed=True)` (`umbra stack --stats-windowed`) measures those
+windows rather than whole passes, so a cube stacked sharper than a slice you can
+hold is measurable and not only writable. Every count, mean, standard deviation
+and change number stays exact — each is a sum, so a window folds in — while each
+pass's `median` / `p5` / `p95` become histogram estimates good to about 0.05 dB,
+because a percentile is the one statistic that needs the whole pass at once. The
+summary says which it is (`quantile_method` / `quantile_bin_db`, plus a caveat),
+so the two kinds of number are never confused.
 
 ::: umbra_py.to_xarray
 

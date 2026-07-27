@@ -58,6 +58,15 @@ from ._root import cli
     "reads differently from one that jumped once and held.",
 )
 @click.option(
+    "--stats-windowed",
+    is_flag=True,
+    help="Implies --stats: measure the cube one window at a time (the windows "
+    "--chunk-size cut it into) instead of one whole pass at a time, so a cube "
+    "too big to hold a slice of can still be measured. Every count, mean and "
+    "change number stays exact; each pass's median/p5/p95 become histogram "
+    "estimates, and the output says so.",
+)
+@click.option(
     "--change-threshold-db",
     type=float,
     default=3.0,
@@ -174,6 +183,7 @@ def stack(
     stats,
     blocks,
     block_series,
+    stats_windowed,
     change_threshold_db,
     area,
     fuzzy,
@@ -240,6 +250,12 @@ def stack(
     is left of that ceiling: each pass is cut into N-square windows read and
     written independently, so --max-size stops being bounded by how much of
     one scene fits in memory (at one read per window rather than per pass).
+    --stats-windowed gives the *measurement* the same lift: the reduction walks
+    those windows instead of whole passes, so a cube sharper than a slice you
+    can hold is measurable and not only writable. The trade is stated in the
+    output -- every count, mean and change number stays exact, while each
+    pass's median/p5/p95 become histogram estimates, since a percentile is the
+    one statistic that needs the whole pass at once.
 
     Two ways to choose what to stack:
 
@@ -269,7 +285,7 @@ def stack(
             )
         if chunk_size < 1:
             raise click.BadParameter("--chunk-size must be a positive pixel count.")
-    stats = stats or bool(blocks)
+    stats = stats or bool(blocks) or stats_windowed
     if not (out_path or stats):
         raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
@@ -344,6 +360,7 @@ def stack(
                 change_threshold_db=change_threshold_db,
                 blocks=blocks,
                 block_series=block_series,
+                windowed=stats_windowed,
             )
             if stats
             else None
