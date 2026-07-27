@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The windowed reduction reaches the hosted instance: `"windowed": true` on
+  `POST /artifacts/stats`.** `stack_stats(windowed=True)` (below) lifted the
+  measurement's memory ceiling for a local cube, and `umbra serve --stack-lazy
+  --stack-chunk-size N` (below) lifted the *build*'s for a hosted one — but the
+  server still reduced what it had carefully streamed a whole slice at a time,
+  so an instance chunked to hold a scene in pieces re-materialised each pass to
+  measure it. The callers that ceiling binds are the ones who installed nothing
+  locally, which is the reason the endpoint exists.
+
+  **The decision this had been waiting on is which side of the request boundary
+  it sits on, and it is the opposite side from `--stack-lazy`.** That one is an
+  instance policy deliberately kept *out* of `artifact_cache_key` because it
+  cannot move a figure. This one estimates the percentiles it no longer holds a
+  pass for — so it is a **request option** (`stats_options`), which puts it in
+  the cache key for free: two clients asking different questions of the same
+  passes get different cache entries, and no cached artifact's quantiles depend
+  on a server flag nobody can see. The failure mode named when this was deferred
+  is the one that decided it.
+
+  Everything that is a count or a sum stays exact — pinned end to end through
+  the endpoint's own renderer, not just the library: the per-pass means, spreads
+  and valid-cell counts, every change record and the whole `spatial` breakdown
+  are identical to the exact reduction's, and only `median` / `p5` / `p95` move,
+  by at most one 0.05 dB bin. `quantile_method` / `quantile_bin_db` and the
+  caveat travel with the JSON, so a client can tell the two kinds of number
+  apart without knowing how the server was started.
+
+  It needs windows to walk, so on an instance without `--stack-chunk-size` it is
+  **refused** (`400`, naming the flag) rather than silently answered with worse
+  percentiles and identical memory — the same "a flag that cannot do what it
+  says is an error, not a no-op" rule that makes `chunk_size` without `lazy` and
+  `block_series` without `blocks` hard errors. The refusal lands before the
+  `load` import, so it costs a status code and not an extra. `umbra serve` now
+  echoes the capability at startup when the instance is chunked, since the
+  policy became client-visible the moment it gated a request field. Offline-
+  tested in `tests/test_serve.py`.
 - **The last of the datacube's memory ceiling, on the side that *measures* it:
   `stack_stats(windowed=True)` / `umbra stack --stats-windowed`.** `lazy=True`
   and then `chunk_size=N` took the ceiling off building and *writing* a cube —

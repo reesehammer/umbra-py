@@ -1277,6 +1277,29 @@ policy is deliberately *not* part of the artifact cache key: flipping it on an
 instance neither invalidates a cached artifact nor moves a figure a client
 already fetched.
 
+The *measurement* half of that ceiling is the client's call, for the opposite
+reason. On an instance started with `--stack-chunk-size`, a request may add
+`"windowed": true` to be reduced window by window (`umbra stack
+--stats-windowed`) instead of a slice per pass, so nothing ever holds a whole
+pass:
+
+```bash
+curl -X POST http://127.0.0.1:8000/artifacts/stats \
+  -H 'content-type: application/json' \
+  -d '{"ids": [...], "blocks": 6, "windowed": true}'
+# -> {..., "quantile_method": "histogram", "quantile_bin_db": 0.05, ...}
+```
+
+It is a request field rather than a policy because it is the one stacking choice
+that **moves a number**: every count, mean, standard deviation and change figure
+stays exact, while each pass's `median` / `p5` / `p95` become histogram
+estimates good to about a bin. So it rides in the cache key — asking for it is
+asking for a different artifact — and the response says which numbers are which
+(`quantile_method` / `quantile_bin_db` appear only when they are estimates). On
+an instance without `--stack-chunk-size` there are no windows to walk, so it is
+refused with a `400` naming the flag rather than answered with worse
+percentiles for the same memory.
+
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
 and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished

@@ -964,14 +964,32 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
     window, so a misaligned window edge leaves the breakdown identical (pinned by
     a 7-wide window against a 3-block grid on a 24-wide cube). Offline-tested in
     `tests/test_load.py`. Follow-ons, neither a blocker:
-    - **The server and the agent tools don't expose it.** `POST /artifacts/stats`
-      takes `blocks` / `block_series` but not `windowed`, and neither do the MCP
-      / LangChain / LlamaIndex `stack_stats` tools. Unlike `--stack-lazy` — an
-      instance-wide policy deliberately kept *out* of `artifact_cache_key`
-      because it cannot move a number — this one *does* move the percentiles, so
-      it would have to enter the cache key (or be an instance policy that
-      invalidates it). Decide which before wiring it: a cached artifact whose
-      quantiles depend on an invisible server flag is the failure mode to avoid.
+    - ~~**The server and the agent tools don't expose it.**~~ ✅ **Done for the
+      server** (`"windowed": true` on `POST /artifacts/stats`). The decision this
+      entry demanded was taken the visible way: it is a **request option**
+      (`stats_options`), not an instance policy, so it enters
+      `artifact_cache_key` for free and the failure mode named here — a cached
+      artifact whose quantiles depend on a flag nobody can see — cannot arise.
+      The exact numbers are pinned identical through the endpoint's own renderer
+      (means, spreads, valid-cell counts, every change record, the whole
+      `spatial` breakdown) with only the percentiles moving, by at most a bin,
+      and the response carries `quantile_method` / `quantile_bin_db` so a client
+      can tell them apart. It needs the instance's cube to be chunked to lower
+      anything, so `--stack-chunk-size`-less instances refuse it with a `400`
+      naming the flag (before the `load` import), and `umbra serve` echoes the
+      capability at startup. Offline-tested in `tests/test_serve.py`.
+      Follow-ons, neither a blocker:
+      - **The agent tools still don't take it, deliberately.** The MCP /
+        LangChain / LlamaIndex `stack_stats` tools build an eager cube at
+        `max_size=512`, where there is no ceiling to lift — so `windowed` there
+        would be a model-facing knob whose only effect is making the percentiles
+        approximate. Wire it only if those tools ever grow the lazy/chunked build
+        that would make it mean something; the server was the front door with the
+        memory problem.
+      - **Only the refusal advertises the capability.** A client discovers that
+        an instance can measure in windows by asking and reading the `400`;
+        nothing in the landing page or `/healthz` says so up front. Cheapest fix
+        if it matters: a field on the landing page's `stats` link.
     - **The histogram is a Python dict of bin → count.** Fine at the sizes this
       sees (a few thousand occupied bins per pass), but a pass spanning hundreds
       of decibels holds proportionally more. If that ever matters, cap the axis

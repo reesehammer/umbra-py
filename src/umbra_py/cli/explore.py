@@ -78,7 +78,8 @@ def mcp() -> None:
     default=None,
     help="With --stack-lazy, also cut each pass into N-square windows read "
     "independently, so one scene need not fit in memory either. Costs one range "
-    "read per window instead of one per pass.",
+    "read per window instead of one per pass, and is what lets a stats request "
+    'ask for "windowed": true (measured window by window, estimated percentiles).',
 )
 @click.option(
     "--stack-scheduler",
@@ -123,8 +124,11 @@ def serve(
     the only endpoint whose cost grows with the *number* of acquisitions, so
     ``--stack-lazy`` (plus ``--stack-chunk-size``) gives it the same memory
     ceiling-lift ``umbra stack --lazy`` has -- an instance-wide setting, since
-    it needs the ``dask`` extra here on the server. Requires the
-    ``serve`` extra (``pip install 'umbra-py[serve]'``).
+    it needs the ``dask`` extra here on the server. On a chunked instance a
+    request may also send ``"windowed": true`` to be *measured* in those windows
+    (``umbra stack --stats-windowed``), which is a request field rather than a
+    policy because it estimates the percentiles it no longer holds a pass for.
+    Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``).
     """
     from ..exceptions import MissingDependencyError
     from ..serve import StackExecution
@@ -140,6 +144,10 @@ def serve(
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if artifacts:
         click.echo(f"  /artifacts/stats datacube: {execution.describe()}")
+        if execution.chunk_size:
+            # The one client-visible consequence of the policy: with windows to
+            # walk, a request may ask to be measured in them.
+            click.echo('    requests may send "windowed": true (estimated percentiles)')
     try:
         run_stac_server(
             host=host,

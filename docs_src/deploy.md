@@ -114,6 +114,26 @@ artifact cache key: turn it on or off without invalidating anything. Without the
 `dask` extra a stats request answers `501` naming it, exactly like a missing
 `load`.
 
+Building in windows only lowers what the *build* holds; the reduction still
+reads a slice per pass unless a request asks otherwise. On an instance started
+with `--stack-chunk-size`, a client may send `"windowed": true` to be measured
+in those windows too:
+
+```bash
+curl -X POST http://127.0.0.1:8000/artifacts/stats \
+  -H 'content-type: application/json' \
+  -d '{"ids": ["…", "…"], "windowed": true}'
+```
+
+That one *is* a request field, because unlike the policy above it moves a
+number: counts, means, spreads and every change figure stay exact, but each
+pass's `median` / `p5` / `p95` become histogram estimates (`quantile_method` /
+`quantile_bin_db` say so in the response), so it belongs in the cache key rather
+than in an invisible server flag a cached artifact would depend on. Sent to an
+instance with no `--stack-chunk-size`, it answers `400` naming the flag — there
+would be no windows to walk, so it could only estimate percentiles for the same
+memory.
+
 ## Behind a reverse proxy
 
 The server sends a permissive read-only CORS policy, so a browser front end on

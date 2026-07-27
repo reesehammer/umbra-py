@@ -64,6 +64,18 @@ because it needs the ``dask`` extra *on the server* and a decision about the
 threads one request may spend -- and because the numbers do not move, only the
 memory, it is not part of the artifact cache key.
 
+The *measurement* side of that ceiling is the request's call, for the opposite
+reason: ``"windowed": true`` reduces the cube window by window
+(``stack_stats(windowed=True)``) instead of a slice per pass, which is what
+stops a chunked build from being re-materialised a whole slice at a time -- but
+it turns each pass's median/p5/p95 into histogram estimates. A number that moves
+belongs in the cache key, so it is a request option rather than a policy: two
+clients asking different questions of the same passes get different cache
+entries, and no cached artifact's quantiles depend on an invisible server flag.
+It needs a chunked instance to lower anything, so on one without
+``--stack-chunk-size`` it is refused (``400``) rather than silently answered
+with worse percentiles and identical memory.
+
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
 to ``"async": true`` for a small job queue: it gets a ``202 Accepted`` + a job
@@ -841,7 +853,10 @@ class StackExecution:
         Cut each pass into ``chunk_size``-square windows read independently, so
         one *scene* no longer has to fit either. Costs one range read per window
         instead of one per pass, which is why it is opt-in, and it requires
-        ``lazy`` (an eager cube is read a slab at a time).
+        ``lazy`` (an eager cube is read a slab at a time). It is also what makes
+        a request's ``"windowed": true`` measurable: the windows a chunked cube
+        is built in are the windows the reduction walks, so an instance without
+        this refuses that option instead of estimating percentiles for nothing.
     scheduler:
         Which of :data:`STACK_SCHEDULERS` evaluates the chunks. Defaults to
         ``"synchronous"`` -- a request handler that quietly starts a thread pool
@@ -969,6 +984,18 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
         return m.get_root().render().encode("utf-8")
 
     def stats(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        # A window-by-window reduction walks the cube's own chunks, so on an
+        # instance that builds one chunk per pass (or none at all) it would
+        # estimate the percentiles without holding any less -- a strictly worse
+        # answer. Refused before the import, so it costs a ``400`` and not the
+        # ``load`` extra.
+        if opts["windowed"] and not execution.chunk_size:
+            raise ValueError(
+                "windowed measurement needs a chunked instance: this server stacks "
+                f"{execution.describe()}, so measuring window by window would only "
+                "estimate the percentiles without lowering the memory. Ask the operator "
+                "for 'umbra serve --stack-lazy --stack-chunk-size N', or drop 'windowed'."
+            )
         # The one renderer behind the ``load`` extra rather than ``viz``: it
         # co-registers the passes into a datacube and reduces it to numbers.
         from .load import stack_stats, to_stack
@@ -995,6 +1022,9 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
                 change_threshold_db=opts["change_threshold_db"],
                 blocks=opts["blocks"],
                 block_series=opts["block_series"],
+                # Unlike ``lazy``/``chunk_size`` this one *is* the client's, and
+                # is in the cache key: it moves the percentiles it estimates.
+                windowed=opts["windowed"],
             )
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
@@ -1028,16 +1058,26 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Extends :func:`artifact_options` with what the datacube reduction needs on
     top of a render (``extent`` / ``crs`` / ``clip_bbox`` / ``blocks`` /
-    ``block_series`` / ``change_threshold_db``). Two defaults deliberately differ from the picture
+    ``block_series`` / ``windowed`` / ``change_threshold_db``). Two defaults
+    deliberately differ from the picture
     endpoints, matching the ``stack_stats`` agent tool: the shared grid is the
     site's **UTM zone**, so a cell count is an area and ``changed_area_km2``
     means something, and values are **decibels**, the scale on which a ratio of
     backscatter is a difference. Pass ``"crs": null`` for a lon/lat grid (and
     accept ``None`` areas rather than wrong ones).
 
+    ``windowed`` is here — in the request options the cache key hashes — rather
+    than in the instance's :class:`StackExecution`, because it is the one
+    stacking choice that *moves a number*: it trades each pass's exact
+    median/p5/p95 for histogram estimates in exchange for never holding a whole
+    slice. A cached artifact whose quantiles depended on a server flag nobody
+    could see is the failure mode that decides this; asking for it is asking for
+    a different artifact.
+
     Raises ``ValueError`` for an unknown ``extent``, a non-positive threshold, or
     a ``block_series`` asked for without a ``blocks`` grid to hang it on — each
-    of which the route maps to a ``400``.
+    of which the route maps to a ``400``. (Whether the *instance* can honour
+    ``windowed`` is not knowable here, so that refusal lives in the renderer.)
     """
     body = body or {}
     # ``db`` defaults to True here (radiometric scale), unlike the composites.
@@ -1063,6 +1103,7 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
         clip_bbox=list(clip) if clip else None,
         blocks=max(0, min(int(body.get("blocks") or 0), STATS_MAX_BLOCKS)),
         block_series=bool(body.get("block_series", False)),
+        windowed=bool(body.get("windowed", False)),
         change_threshold_db=threshold,
     )
     if options["block_series"] and not options["blocks"]:
@@ -2049,6 +2090,17 @@ def build_app(
             moved and between which two passes -- plus, with
             ``"block_series": true``, the whole pass-to-pass sequence each of
             those peaks was picked from.
+
+            ``"windowed": true`` measures the cube window by window instead of a
+            slice per pass, so a long or sharp series never has a whole pass
+            resident. It needs an instance started with ``--stack-lazy
+            --stack-chunk-size N`` (otherwise a ``400`` naming the flag), and it
+            is the one option that changes an answer rather than the memory
+            spent on it: every count, mean, standard deviation and change figure
+            stays exact, while each pass's median/p5/p95 become histogram
+            estimates. The response says which is which -- ``quantile_method``
+            and ``quantile_bin_db`` appear exactly when they are estimates --
+            and it caches apart from the exact reduction.
             """
             return _composite(
                 request,
