@@ -1317,6 +1317,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **The weekly catalog publish now actually publishes: `umbra tiles --index-db`,
+  not `--db`.** Both of the only two `Publish catalog index` runs this project
+  has ever had died in the same place — `umbra tiles --local --db catalog.db`,
+  answered with `Error: No such option '--db'`. The gather commands spell the
+  index path `--index-db` precisely because `--db` already means the decibel
+  stretch on the render commands, and the workflow had the render spelling.
+
+  The blast radius was everything the project publishes, because the tiling step
+  ran *before* the release step: a completed bucket crawl, 2 725 freshly baked
+  place labels and a good stac-geoparquet export were thrown away with it, so the
+  rolling `catalog-index` release was **never created at all**. `umbra index
+  fetch` — the "instant local search, no crawl" the README leads with — 404'd for
+  the project's entire existence, and with it `umbra-open-data.parquet`,
+  `catalog.pmtiles`, the thumbnail sidecar and the GitHub Pages showcase built
+  from them. The two earlier entries below fixed layers of the *same* outage
+  (the export crash that broke the first run, and the docs job that then hid the
+  missing showcase); this is the one that was still keeping the release empty.
+
+  Two changes, because the typo and the damage it did are separate faults:
+
+  - **The invocation is corrected**, and the ordering with it. Each artifact is
+    now uploaded by the step that builds it, and the crawl is published *before*
+    anything is derived from it — the index is the promise, the basemap is
+    derived from the index, and a failure deriving the basemap should cost the
+    basemap and not the snapshot. The tiling step stays blocking, so the run
+    still goes red; it just no longer takes eight minutes of crawl down with it.
+  - **The drift fails a pull request instead of a Monday morning.** New
+    `tests/test_workflows.py` extracts every `umbra …` invocation from
+    `.github/workflows/*.yml` — including ones continued across backslashes and
+    ones nested in `$(…)` substitutions — and parses each against the real Click
+    command tree, so an option renamed in `src/` and not in the workflow fails on
+    the commit that renames it. This is the same shape as the gather-command
+    parity suite: the workflows are the only CLI callers that nothing else
+    exercises, since `publish-index.yml` runs weekly and `docs.yml`'s showcase
+    step only on `main`. The scan asserts what it found, so a matcher that
+    silently stops matching cannot pass quietly — the lesson of the
+    `continue-on-error` entry below, applied to the test itself.
 - **`umbra tiles` now tiles the baked place label, not just the task codename.**
   `pmtiles._item_properties` set each tiled feature's `place` from `item.task`,
   so a `umbra tiles --local` over a baked index — including the published
