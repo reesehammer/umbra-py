@@ -28,6 +28,6 @@ cd "${CLAUDE_PROJECT_DIR:-.}"
 
 # `--system` matches CI: install into the container's Python rather than a venv.
 # The extras list mirrors ci.yml's `test-all-extras` job so nothing import-skips.
-uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"
+uv pip install --system -e ".[dev,all,dask,mcp,serve,ai,langchain,llamaindex]"
 
 echo "umbra-py installed editable with all extras — ruff / mypy / pytest ready." >&2

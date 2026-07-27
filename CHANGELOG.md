@@ -7,6 +7,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Datacubes that outgrow memory: `to_stack(lazy=True)` / `umbra stack --lazy`.**
+  The time-series cube had a hard ceiling nobody could raise from the outside:
+  every pass was read eagerly, so a cube cost `max_size²` × the number of
+  acquisitions in RAM, and a long series had to be traded against resolution.
+  Twelve passes at 4096 px is ~800 MB before a single reduction runs — which is
+  why `examples/08` caps itself at six passes, and why the honest advice for a
+  two-year archive of a site was "stack it coarse". The primitive this library
+  exists to provide (see `docs/STRATEGY.md` §5.5: the *load* half `stackstac` /
+  `odc-stac` cannot do here) was bounded by the analyst's laptop.
+
+  `lazy=True` removes the trade rather than widening it. Each acquisition
+  becomes **one `dask` task and one chunk**, so nothing is fetched until
+  something asks for values, and the cube's cost stops scaling with the length
+  of the series. What is *not* deferred is deliberate: the shared grid is still
+  resolved eagerly from every source's footprint — that is what makes the slices
+  comparable — so a non-overlapping series or an off-target `bbox` still fails
+  immediately, at the call, rather than hours later inside a reduction.
+
+  Deferring the reads would buy little if the consumers then materialised the
+  cube anyway, so both were taught to walk it a slice at a time.
+  `stack_to_geotiff` / `_write_stack_geotiff` write **band by band**, so the
+  file-producing path is memory-bounded end to end. `stack_stats` was turned
+  inside out: it now streams the series, holding at most the first, the previous
+  and the current pass, which makes its memory a function of the *grid* rather
+  than of the series — and that is an improvement for eager cubes too, which
+  previously held the whole thing twice (float64 values plus a dB view). The
+  spatial breakdown (`blocks=N` / `--blocks`) moved with it: `_BlockChanges`
+  accumulates each block's pass-to-pass steps as the passes arrive instead of
+  slicing a block's whole history out of a resident cube. Every `_pair_change`
+  call was already independent of every other, so only the loop order changed —
+  the records, the peak intervals, the `--block-series` sequences and the ASCII
+  heat-grid are identical, which the tests assert by comparing a lazy cube's
+  statistics to an eager one's *as a whole object*.
+
+  `dask` is its own extra (`pip install "umbra-py[dask]"`), not a widening of
+  `[load]` and not part of `[all]`: it brings a task scheduler, an eager cube is
+  the right default at scene scale, and nothing else in the package needs it.
+  Asking for `lazy=True` without it raises before any bytes are streamed, naming
+  the extra that fixes it. The cube, the GeoTIFF and the statistics are
+  identical either way — only what is resident differs — so `--lazy` changes no
+  output and is absent from the render manifest by design. Offline-tested in
+  `tests/test_load.py` (nothing read until `.compute()`, one chunk per
+  acquisition, eager/lazy equality across `intersection` and `union` including
+  the NaN padding, eager grid validation, the missing-extra error, byte-equal
+  GeoTIFFs, one materialised slice per pass, and the CLI flag end to end). This
+  closes the "lazy / chunked reads" follow-on in `TODO.md`.
 - **A converted scene now says what it is: conversion provenance in the raster's
   own metadata.** The conversion chain can place a SICD on the map (`--dem` /
   `--geoid`), take the terrain out of its brightness (`--rtc`, four models), and

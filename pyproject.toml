@@ -43,6 +43,14 @@ dependencies = [
 [project.optional-dependencies]
 convert = ["sarpy>=1.3", "rasterio>=1.3", "numpy>=1.23"]
 load = ["xarray>=2023.1", "rasterio>=1.3", "numpy>=1.23"]
+# Lazy, chunked datacubes: `to_stack(lazy=True)` / `umbra stack --lazy` defer
+# each pass's read into a dask task (one chunk per acquisition) so a long series
+# stacks at a resolution that would not fit in memory all at once. Deliberately
+# separate from [load] rather than folded into it: dask brings a task scheduler,
+# an eager cube is the right default at scene scale, and nothing else in the
+# package needs it. Not part of [all] for the same reason -- ask for it when you
+# hit the ceiling.
+dask = ["umbra-py[load]", "dask[array]>=2023.5"]
 viz = ["folium>=0.14", "matplotlib>=3.6", "rasterio>=1.3", "numpy>=1.23"]
 export = ["stac-geoparquet>=0.6"]
 serve = ["fastapi>=0.110", "uvicorn>=0.27"]

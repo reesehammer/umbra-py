@@ -907,12 +907,36 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   nothing). `bbox` / `--clip-bbox` stays lon/lat either way, the written GeoTIFF
   records the resolved CRS in its tags, and `crs=None` keeps the lon/lat default
   unchanged. Offline-tested in `tests/test_load.py`.
-- **Lazy / chunked reads.** Every slice is read eagerly into memory, so the cube
-  is bounded by `max_size` × the number of acquisitions. Yielding a dask-backed
-  array (one chunk per acquisition) would let a long series stack at higher
-  resolution than fits in RAM. `xarray` is already a dependency of `[load]`;
-  `dask` would be a new optional one, so this is deliberately deferred until
-  someone hits the ceiling.
+- ~~**Lazy / chunked reads.**~~ ✅ **Done** (`to_stack(lazy=True)` /
+  `stack_to_geotiff(lazy=True)` / `umbra stack --lazy`, the new `[dask]` extra).
+  Each acquisition is one `dask` task and one chunk, so nothing is fetched until
+  something asks for values and the cube stops costing `max_size²` × the number
+  of passes. The grid is still resolved eagerly from every footprint — it is
+  what makes the slices comparable — so a non-overlapping series still fails at
+  the call rather than inside a later reduction. The consumers moved with it:
+  `_write_stack_geotiff` writes band by band, and `stack_stats` streams the
+  series (at most the first, previous and current pass resident), which made its
+  memory a function of the grid rather than of the series for eager cubes too.
+  The spatial breakdown became `_BlockChanges`, accumulating each block's
+  pass-to-pass steps as the passes arrive; every `_pair_change` was already
+  independent, so the numbers are unchanged (asserted by comparing a lazy cube's
+  whole statistics object to an eager one's). Offline-tested in
+  `tests/test_load.py`. Follow-ons, none a blocker:
+  - **Chunk *within* a slice, not just across the series.** One chunk per
+    acquisition means the unit of work is a whole slab, so a single pass at a
+    very large `max_size` is still read (and held) whole. Splitting a slab into
+    windowed sub-chunks would let one scene exceed memory too, but it multiplies
+    the range requests per pass and needs a windowed reader; the per-pass chunk
+    is the size the ceiling actually had.
+  - **`umbra serve`'s `POST /artifacts/stats` still stacks eagerly.** The server
+    builds its cube with `to_stack(...)` and `[serve]` does not pull `dask`, so a
+    hosted instance keeps the old ceiling. Wiring `lazy=` through the render
+    request would need the extra installed *and* a decision about scheduler
+    threads inside a request handler — deliberately left to the operator.
+  - **The eager path still opens every source up front.** Both paths open all
+    the datasets to resolve the grid (metadata only, but N handles at once). A
+    two-pass resolve — footprints first, then reads — would drop that to one at a
+    time; it saves handles, not bytes, so it was not worth the churn here.
 - **Share the co-registration with `viz`.** `viz._coregister_bands` does the
   same warp-and-decimate for the render commands and predates this. They now
   differ in what they return (bare arrays + bounds vs. a labelled cube) and in
@@ -932,7 +956,9 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   that the peak interval is a member of the series it was picked from), guarded
   offline by `tests/test_examples.py` and executed by it under
   `pytest -m network`; it falls back to `extent="union"` when a task's footprints
-  don't all overlap and caps at six passes because the cube is in memory.
+  don't all overlap and caps at six passes because the cube is in memory (a cap
+  `to_stack(lazy=True)` now lifts, though the notebook keeps it: its point is the
+  flow, and it should not need an extra beyond `[load]` to run).
   Follow-on, not a blocker: it fetches its own site from a live search, so the
   notebook cannot pick a site with a *known* story — a curated task id (or an
   `--area` the showcase already features) would make the printed numbers

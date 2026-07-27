@@ -91,7 +91,7 @@ jobs:
           cache-dependency-glob: pyproject.toml
 
       - name: Install package with all extras
-        run: uv pip install --system -e ".[dev,all,mcp,serve,ai,langchain,llamaindex]"
+        run: uv pip install --system -e ".[dev,all,dask,mcp,serve,ai,langchain,llamaindex]"
 
       # This is the one job where every module actually runs, so it is also
       # where coverage is meaningful. The floor guards against regressions; it
