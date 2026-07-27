@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The showcase is built from the `catalog-index` release, not from the repo,
+  # so a freshly published index changes what the site should show while the
+  # commit it deploys from stays identical. Without this the showcase only
+  # refreshes when something unrelated lands on main — and a *first* index
+  # publish leaves site/showcase/ missing (a 404 on a link the docs advertise)
+  # until the next push happens to come along. Rebuild when the index does.
+  workflow_run:
+    workflows: ["Publish catalog index"]
+    types: [completed]
 
 # Only one concurrent Pages deployment; a superseded build is dead feedback.
 concurrency:
@@ -17,6 +26,12 @@ jobs:
   # can import each module it documents.
   build:
     runs-on: ubuntu-latest
+    # A failed index publish has no new snapshot to show, so don't redeploy for
+    # it. (Push and pull_request runs carry no workflow_run context and always
+    # proceed.)
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v7
 
@@ -45,6 +60,14 @@ jobs:
       # docs deploy must still go out, so this step never fails the job
       # (DEMO_APP_GAPS.md G7 / R4, STRATEGY.md §8).
       #
+      # Non-blocking, but never *silent*. This was `continue-on-error`, which
+      # reports the step as having succeeded, so a run that shipped no showcase
+      # at all looked exactly like one that shipped a good one: the docs went
+      # green while the showcase link they advertise served a 404. The failure
+      # is swallowed here instead — deliberately, and with a warning annotation
+      # plus a job-summary note — so the deploy still goes out and the run that
+      # dropped the showcase says so.
+      #
       # --unified builds ONE explorer page reading catalog.pmtiles directly, so
       # the landing page leads to the whole catalog with the filters, rather than
       # to a click-only map and a separate explorer over a gathered slice. It
@@ -57,16 +80,38 @@ jobs:
       # index, hence the fetch below.
       - name: Build catalog showcase
         if: github.ref == 'refs/heads/main'
-        continue-on-error: true
         run: |
-          umbra index fetch
-          umbra showcase \
-            --unified \
-            --local \
-            --fetch-pmtiles \
-            --featured 6 \
-            --out site/showcase \
-            --updated "$(date -u +%Y-%m-%d)"
+          set +e
+          umbra index fetch &&
+            umbra showcase \
+              --unified \
+              --local \
+              --fetch-pmtiles \
+              --featured 6 \
+              --out site/showcase \
+              --updated "$(date -u +%Y-%m-%d)"
+          status=$?
+          set -e
+
+          # A half-written directory would deploy as a broken showcase, which is
+          # worse than none: check for the landing page the build promises, not
+          # just the exit status.
+          if [ "$status" -eq 0 ] && [ -f site/showcase/index.html ]; then
+            echo "Showcase built into site/showcase/."
+            exit 0
+          fi
+          rm -rf site/showcase
+          note="The docs deployed without site/showcase/, so \
+          https://reesehammer.github.io/umbra-py/showcase/ will 404 until a run \
+          rebuilds it. Usual cause: the rolling 'catalog-index' release has no \
+          catalog.db yet, so 'umbra index fetch' 404s — check the 'Publish \
+          catalog index' workflow."
+          echo "::warning title=Showcase not built::${note}"
+          {
+            echo "### :warning: Showcase not built"
+            echo
+            echo "${note}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main'
