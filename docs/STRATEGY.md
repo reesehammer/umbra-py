@@ -188,8 +188,10 @@ sparklines of the site's and its peak block's history in the explorer's Quantify
 readout — and, since the cube used to cost `max_size²` × the number of passes in
 memory, `to_stack(lazy=True)` / `umbra stack --lazy` now defer each pass into one
 `dask` chunk and have both consumers, `stack_to_geotiff` and `stack_stats`, walk
-the series a slice at a time, so how much archive can be stacked sharp is no
-longer set by the analyst's RAM)
+the series a slice at a time, and `chunk_size=N` / `--chunk-size N` takes the
+same step *within* a pass — windows read and written independently — so neither
+the length of the series nor the size of one scene sets how much archive can be
+stacked sharp)
 and SICD → geocoded COG (`umbra convert`, including DEM/`--dem auto`
 orthorectification, geoid handling, and four RTC flattening models:
 `cosine`/`area`/`gamma`/`facet`) all ship. The fourth is the image-space
@@ -442,7 +444,17 @@ from:
   band and `stack_stats` streams the series (first / previous / current pass
   resident), so the whole chain's memory follows the grid rather than the number
   of passes — the numbers are identical either way. See the CHANGELOG.
-  **Open (not blockers, in `TODO.md`):** chunking *within* a slice, and letting
+  ~~**Open:** chunking *within* a slice~~ **shipped** — `to_stack(chunk_size=N)`
+  / `umbra stack --lazy --chunk-size N` cuts each pass into `N`-square windows
+  read (and written) independently, so the unit of work stops being a whole
+  `max_size²` slab and the achievable sharpness stops depending on how much of
+  *one scene* fits in memory. A window is the shared grid restricted to its own
+  rows and columns, so it is pixel-identical to that region of the whole-slab
+  read; the cost is one range-read per window rather than per pass, which is why
+  it is opt-in. `_write_stack_geotiff` follows the cube's chunks, so the written
+  file is byte-identical however it was read. See the CHANGELOG.
+  **Open (not blockers, in `TODO.md`):** `stack_stats` still materialises one
+  slice per pass (its medians/percentiles need the pass whole), and letting
   `umbra serve`'s `POST /artifacts/stats` opt into the lazy path.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**

@@ -922,12 +922,32 @@ behind the existing `[load]` extra. Follow-ons that build on it, none a blocker:
   independent, so the numbers are unchanged (asserted by comparing a lazy cube's
   whole statistics object to an eager one's). Offline-tested in
   `tests/test_load.py`. Follow-ons, none a blocker:
-  - **Chunk *within* a slice, not just across the series.** One chunk per
-    acquisition means the unit of work is a whole slab, so a single pass at a
-    very large `max_size` is still read (and held) whole. Splitting a slab into
-    windowed sub-chunks would let one scene exceed memory too, but it multiplies
-    the range requests per pass and needs a windowed reader; the per-pass chunk
-    is the size the ceiling actually had.
+  - ~~**Chunk *within* a slice, not just across the series.**~~ ✅ **Done**
+    (`to_stack(chunk_size=N)` / `stack_to_geotiff(chunk_size=N)` / `umbra stack
+    --lazy --chunk-size N`). One chunk per acquisition made the unit of work a
+    whole slab, so a single pass at a large `max_size` was still read and held
+    whole — a floor of `max_size²` floats no amount of streaming lowered.
+    `chunk_size` cuts each pass into `N`-square windows read independently, so
+    the unit becomes `N²` and the achievable sharpness stops depending on how
+    much of one scene fits in memory. The windowed read needed no new reader:
+    `_sub_grid` restricts the shared `_StackGrid` to a window's rows/columns —
+    same CRS, same cell size, edges on the parent's cell boundaries — so
+    `_open_slab` reads it unchanged and a window is pixel-identical to that
+    region of the whole-slab read (pinned by stacking a per-pixel ramp both ways
+    and comparing exactly, partial edge windows included). The multiplied
+    request count this entry named is real and stated rather than hidden
+    (⌈h/N⌉ × ⌈w/N⌉ reads per pass instead of one), which is why it is opt-in and
+    why `chunk_size` without `lazy` is a hard error rather than a silent no-op.
+    `_write_stack_geotiff` writes band-by-band **and window-by-window**, driven
+    by the cube's own chunks (`_write_windows`), so the file path never
+    re-materialises what the reader avoided; a cube with no windows takes the
+    previous whole-band write and the file is byte-identical. Offline-tested in
+    `tests/test_load.py`. Follow-on, not a blocker: **`stack_stats` still holds
+    one slice per pass** — its per-pass distribution reports medians and
+    percentiles, which need the whole pass, so measuring a cube keeps the
+    ceiling writing one no longer has. Streaming it would mean approximate
+    quantiles (a t-digest or a two-pass histogram), i.e. changing the numbers,
+    which is a bigger decision than a chunk size.
   - **`umbra serve`'s `POST /artifacts/stats` still stacks eagerly.** The server
     builds its cube with `to_stack(...)` and `[serve]` does not pull `dask`, so a
     hosted instance keeps the old ceiling. Wiring `lazy=` through the render

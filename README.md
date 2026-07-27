@@ -314,6 +314,22 @@ cube — `stack_stats` and `stack_to_geotiff` / `umbra stack --lazy` — walk it
 slice at a time, so peak memory follows `max_size` rather than the length of the
 series. The values are identical either way; only what is resident differs.
 
+One chunk per pass still makes a whole slice the smallest unit of work, so a
+single pass at a big `max_size` is read and held whole (8192 px is 256 MB of
+`float32`). `chunk_size` cuts each pass into windows read — and written —
+independently, so how sharp a cube can be stacked stops depending on how much of
+*one scene* fits in memory:
+
+```python
+cube = to_stack(passes, max_size=8192, crs="utm", lazy=True, chunk_size=1024)
+cube.chunks[1]                      # (1024, 1024, ...) — windows within a pass
+stack_to_geotiff(passes, "cube.tif", max_size=8192, lazy=True, chunk_size=1024)
+```
+
+It costs range requests (one read per window instead of one per pass), so keep
+the window a decent fraction of the grid rather than a tile. The numbers — and
+the written file — are unchanged.
+
 And when the answer you want *is* a number, `stack_stats` reduces the cube for
 you — no array handling at all:
 

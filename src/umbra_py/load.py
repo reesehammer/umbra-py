@@ -31,7 +31,10 @@ have to be stacked coarse to fit in memory. ``to_stack(lazy=True)`` removes that
 trade: each pass becomes one ``dask`` task (and one chunk), fetched only when
 something asks for its values, and the reductions that consume a cube --
 :func:`stack_stats`, :func:`stack_to_geotiff` -- walk it a slice at a time. The
-numbers are identical; only the peak memory differs.
+numbers are identical; only the peak memory differs. ``chunk_size=`` takes the
+same step within a pass: a slice is cut into windows read independently, so the
+unit of work stops being a whole ``max_size²`` slab and one scene no longer has
+to fit in memory either.
 
 Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 """
@@ -537,6 +540,34 @@ def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool) -> Any:
     return slab
 
 
+def _chunk_spans(total: int, size: int) -> list[tuple[int, int]]:
+    """Contiguous ``(start, stop)`` spans covering ``total`` rows/columns."""
+    return [(start, min(start + size, total)) for start in range(0, total, size)]
+
+
+def _sub_grid(grid: _StackGrid, rows: tuple[int, int], cols: tuple[int, int]) -> _StackGrid:
+    """The part of a shared grid one window covers, as a grid in its own right.
+
+    Cell size and CRS are the parent's and the edges land on its cell
+    boundaries, so reading a window through this is pixel-identical to the same
+    region of the whole-grid read -- which is what lets a slab be assembled from
+    windows with no seam where they meet.
+    """
+    row0, row1 = rows
+    col0, col1 = cols
+    return _StackGrid(
+        grid.crs,
+        grid.left + col0 * grid.xres,
+        grid.top - row1 * grid.yres,
+        grid.left + col1 * grid.xres,
+        grid.top - row0 * grid.yres,
+        col1 - col0,
+        row1 - row0,
+        grid.xres,
+        grid.yres,
+    )
+
+
 def _open_slab(url: str, grid: _StackGrid, *, db: bool) -> Any:
     """Open one source and read its slab -- the deferred task of a lazy cube.
 
@@ -554,6 +585,33 @@ def _open_slab(url: str, grid: _StackGrid, *, db: bool) -> Any:
             return _read_slab(np, vrt, grid, db=db)
 
 
+def _lazy_slab(
+    dask: Any, dask_array: Any, url: str, grid: _StackGrid, *, db: bool, chunk_size: int | None
+) -> Any:
+    """One pass as a deferred dask array: the whole slab, or a grid of windows.
+
+    ``chunk_size`` is what decides whether a *single* scene has to fit in
+    memory. Without it a pass is one task, so the smallest thing anything can
+    compute is a whole ``max_size²`` slab; with it the pass is cut into
+    ``chunk_size``-square windows that are read (and held) independently. The
+    price is request count: each window opens the source and issues its own
+    range requests, so a pass costs one read per window instead of one in total.
+    """
+
+    def task(part: _StackGrid) -> Any:
+        return dask_array.from_delayed(
+            dask.delayed(_open_slab)(url, part, db=db),
+            shape=(part.height, part.width),
+            dtype="float32",
+        )
+
+    if chunk_size is None:
+        return task(grid)
+    rows = _chunk_spans(grid.height, chunk_size)
+    cols = _chunk_spans(grid.width, chunk_size)
+    return dask_array.block([[task(_sub_grid(grid, r, c)) for c in cols] for r in rows])
+
+
 def to_stack(
     items: Iterable[UmbraItem],
     *,
@@ -564,6 +622,7 @@ def to_stack(
     extent: str = "intersection",
     crs: str | None = None,
     lazy: bool = False,
+    chunk_size: int | None = None,
 ) -> xr.DataArray:
     """Co-register several acquisitions into one ``(time, y, x)`` datacube.
 
@@ -626,6 +685,18 @@ def to_stack(
         acquisitions in RAM, so a long series has to be stacked coarse. The
         values are identical either way. Requires the ``dask`` extra
         (``pip install "umbra-py[dask]"``).
+    chunk_size:
+        Cut each pass into ``chunk_size``-square windows instead of reading it
+        as one slab -- the *second* half of the ceiling ``lazy`` lifts. One
+        chunk per acquisition makes the unit of work a whole slice, so a single
+        pass at a large ``max_size`` is still read and held whole (a 8192-pixel
+        grid is 256 MB of ``float32`` per slice); windowing makes the unit
+        ``chunk_size²`` instead, so how sharp a cube can be stacked stops
+        depending on how much of one scene fits in memory. Requires ``lazy``.
+        It costs range requests -- each window opens the source and reads its
+        own bytes, so a pass costs ⌈h/c⌉ × ⌈w/c⌉ reads rather than one -- which
+        is why it is opt-in and why the window wants to be a decent fraction of
+        the grid (512–2048), not a tile. The values are unchanged.
 
     Returns
     -------
@@ -638,7 +709,8 @@ def to_stack(
         ``attrs`` mirror :func:`to_xarray`'s (``crs``, ``transform``,
         ``bounds``, ``units``, ``license``, ``attribution``). Backed by NumPy,
         or -- with ``lazy=True`` -- by a ``dask`` array chunked one slice per
-        acquisition, which ``.compute()`` / ``.load()`` turn into the former.
+        acquisition (or ``chunk_size``-square windows within each slice), which
+        ``.compute()`` / ``.load()`` turn into the former.
 
     Notes
     -----
@@ -658,6 +730,13 @@ def to_stack(
     from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
     ordered = _stack_items(items)
+    if chunk_size is not None:
+        if not lazy:
+            # An eager cube reads every pass whole by construction, so a window
+            # size would silently do nothing rather than bound anything.
+            raise ValueError("chunk_size needs lazy=True; an eager cube is read a slab at a time.")
+        if int(chunk_size) < 1:
+            raise ValueError(f"chunk_size must be a positive pixel count; got {chunk_size!r}.")
     if lazy:
         # Fail on the missing extra before any bytes are streamed, not after.
         dask, dask_array = _require_dask()
@@ -696,16 +775,13 @@ def to_stack(
         )
         # The grid is resolved either way -- it is what makes the slices
         # comparable, and it needs every footprint. Only the *pixels* are
-        # deferred: one dask task (and so one chunk) per acquisition, each
-        # re-opening its own source when something finally asks for values.
+        # deferred: one dask task (and so one chunk) per acquisition -- or per
+        # window of one, under chunk_size -- each re-opening its own source when
+        # something finally asks for values.
         data = (
             dask_array.stack(
                 [
-                    dask_array.from_delayed(
-                        dask.delayed(_open_slab)(url, grid, db=db),
-                        shape=(grid.height, grid.width),
-                        dtype="float32",
-                    )
+                    _lazy_slab(dask, dask_array, url, grid, db=db, chunk_size=chunk_size)
                     for url in urls
                 ]
             )
@@ -1247,6 +1323,7 @@ def stack_to_geotiff(
     extent: str = "intersection",
     crs: str | None = None,
     lazy: bool = False,
+    chunk_size: int | None = None,
 ) -> Path:
     """Co-register several acquisitions and write the cube to a GeoTIFF.
 
@@ -1260,8 +1337,10 @@ def stack_to_geotiff(
 
     ``lazy`` (see :func:`to_stack`) makes this the memory-bounded path to a big
     file: bands are written one at a time, so a series long enough to blow up an
-    in-memory cube still writes, at the resolution it deserves. The file is
-    byte-identical either way.
+    in-memory cube still writes, at the resolution it deserves. Add
+    ``chunk_size`` and a band is written one *window* at a time too, so a grid
+    too large for one slice to be resident still writes. The file is
+    byte-identical however it was read.
     """
     cube = to_stack(
         items,
@@ -1272,8 +1351,33 @@ def stack_to_geotiff(
         extent=extent,
         crs=crs,
         lazy=lazy,
+        chunk_size=chunk_size,
     )
     return _write_stack_geotiff(cube, dest)
+
+
+def _write_windows(cube: xr.DataArray) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The ``(rows, cols)`` spans a band is written in: the cube's own chunks.
+
+    A cube chunked *within* a slice (:func:`to_stack`'s ``chunk_size``) is
+    written window by window, so the writer materialises a chunk rather than a
+    whole band. Anything else -- an eager cube, or a lazy one chunked only
+    across the series -- reports the single whole-band window, which is the
+    write this function replaced.
+    """
+    height, width = int(cube.shape[1]), int(cube.shape[2])
+    chunks = getattr(getattr(cube, "data", None), "chunks", None)
+    if not chunks or len(chunks) != 3:
+        return [((0, height), (0, width))]
+
+    def spans(sizes: tuple[int, ...]) -> list[tuple[int, int]]:
+        out, start = [], 0
+        for size in sizes:
+            out.append((start, start + int(size)))
+            start += int(size)
+        return out
+
+    return [(rows, cols) for rows in spans(chunks[1]) for cols in spans(chunks[2])]
 
 
 def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
@@ -1283,12 +1387,15 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
     (``umbra stack --stats``, which also measures it) writes the file without
     stacking the series a second time.
 
-    Bands are read and written one at a time, so a lazy cube streams to disk a
-    slice at a time rather than being materialised whole to be copied out.
+    Bands are read and written one at a time -- and one *window* at a time when
+    the cube carries windows (:func:`to_stack`'s ``chunk_size``) -- so a lazy
+    cube streams to disk a chunk at a time rather than being materialised whole
+    to be copied out.
     """
     rasterio = _require("rasterio")
     np = _require("numpy")
     from affine import Affine  # noqa: PLC0415
+    from rasterio.windows import Window  # noqa: PLC0415
 
     stamps = [str(t)[:19] for t in cube["time"].values]
     ids = [str(v) for v in cube["item_id"].values]
@@ -1307,9 +1414,16 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
         "compress": "deflate",
         "tiled": True,
     }
+    windows = _write_windows(cube)
     with rasterio.open(dest, "w", **profile) as dst:
         for band, (stamp, item_id) in enumerate(zip(stamps, ids, strict=True), start=1):
-            dst.write(np.asarray(cube.isel(time=band - 1).values, dtype="float32"), band)
+            for (row0, row1), (col0, col1) in windows:
+                part = cube.isel(time=band - 1, y=slice(row0, row1), x=slice(col0, col1))
+                dst.write(
+                    np.asarray(part.values, dtype="float32"),
+                    band,
+                    window=Window(col0, row0, col1 - col0, row1 - row0),
+                )
             dst.set_band_description(band, f"{stamp} {item_id}")
         dst.update_tags(
             item_ids=",".join(ids),

@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The last of the datacube's memory ceiling: `to_stack(chunk_size=N)` /
+  `umbra stack --lazy --chunk-size N`.** `lazy=True` (below) made the cube stop
+  costing `max_size²` × the number of passes, but it left the other half of the
+  ceiling standing: with one chunk per acquisition the smallest unit of work is
+  a **whole slice**, so a single pass at a large grid is still read and held
+  whole. At 8192 px that is 256 MB of `float32` per pass, and it is a floor no
+  amount of streaming lowers — the sharpness a site could be stacked at was
+  still set by how much of *one scene* fits in memory.
+
+  `chunk_size=N` cuts each pass into `N`-square windows that are read
+  independently, so the unit of work becomes `N²` and `max_size` stops being
+  bounded by a single slice. The windowing is exact rather than approximate: a
+  window is the parent grid restricted to its own rows and columns
+  (`_sub_grid`), so its cell size, CRS and edges are the parent's and every
+  window read is pixel-identical to that region of the whole-slab read — there
+  is no seam where two windows meet, which the tests pin by stacking a
+  per-pixel ramp both ways and comparing the arrays exactly. The price is
+  request count, and it is stated rather than hidden: each window opens the
+  source and issues its own range requests, so a pass costs ⌈h/N⌉ × ⌈w/N⌉ reads
+  instead of one. That is why it is opt-in, why the window wants to be a decent
+  fraction of the grid (512–2048) rather than a tile, and why `chunk_size`
+  without `lazy` is a hard error — on an eager cube it would bound nothing while
+  looking like it did.
+
+  The writer moved with it, or the file path would have re-materialised what the
+  reader just avoided: `_write_stack_geotiff` now writes each band **window by
+  window**, driven by the cube's own chunks (`_write_windows`), so
+  `stack_to_geotiff` / `umbra stack --out` never holds a whole band. A cube with
+  no windows — eager, or lazy but chunked only across the series — reports one
+  whole-band window and takes exactly the write it took before, so the file is
+  byte-identical however it was read. `stack_stats` is unchanged and still
+  materialises one slice per pass: its distribution statistics are medians and
+  percentiles, which need the pass whole, so measuring a cube keeps the ceiling
+  that writing one no longer has (noted in `TODO.md`).
 - **Datacubes that outgrow memory: `to_stack(lazy=True)` / `umbra stack --lazy`.**
   The time-series cube had a hard ceiling nobody could raise from the outside:
   every pass was read eagerly, so a cube cost `max_size²` × the number of
