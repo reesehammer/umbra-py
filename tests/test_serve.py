@@ -1015,6 +1015,222 @@ def test_default_renderers_stats_reduces_a_stack(monkeypatch):
     )
 
 
+# ---- the instance-wide stacking policy (``umbra serve --stack-lazy``) -----
+
+
+class _StatsItem:
+    """A stand-in acquisition for the stats renderer, which only reads ``id``."""
+
+    def __init__(self, id_: str) -> None:
+        self.id = id_
+
+
+def _record_stack(monkeypatch) -> dict:
+    """Patch ``to_stack`` / ``stack_stats`` and return what the renderer passed."""
+    from umbra_py import load
+
+    seen: dict = {}
+
+    def fake_to_stack(items, **kwargs):
+        seen["to_stack"] = kwargs
+        return "CUBE"
+
+    def fake_stack_stats(cube, **kwargs):
+        import dask
+
+        seen["scheduler"] = dask.config.get("scheduler", None)
+        return {"count": 2, "units": "dB"}
+
+    monkeypatch.setattr(load, "to_stack", fake_to_stack)
+    monkeypatch.setattr(load, "stack_stats", fake_stack_stats)
+    return seen
+
+
+def test_stack_execution_defaults_to_the_eager_read():
+    execution = serve.StackExecution()
+    assert execution.lazy is False
+    assert execution.chunk_size is None
+    assert execution.describe() == "eager (whole series in memory)"
+
+
+def test_stack_execution_rejects_an_impossible_policy():
+    """The same rules ``to_stack`` enforces, caught when the server starts
+    rather than on the first stats request."""
+    with pytest.raises(ValueError, match="chunk_size needs lazy"):
+        serve.StackExecution(chunk_size=512)
+    with pytest.raises(ValueError, match="positive pixel count"):
+        serve.StackExecution(lazy=True, chunk_size=0)
+    with pytest.raises(ValueError, match="scheduler must be one of"):
+        serve.StackExecution(lazy=True, scheduler="processes")
+
+
+def test_stack_execution_describes_itself_for_the_operator():
+    assert serve.StackExecution(lazy=True).describe() == (
+        "lazy (one chunk per pass, synchronous scheduler)"
+    )
+    assert serve.StackExecution(lazy=True, chunk_size=512, scheduler="threads").describe() == (
+        "lazy (512px windows, threads scheduler)"
+    )
+
+
+def test_eager_stats_render_never_touches_dask(monkeypatch):
+    """The default policy computes nothing deferred, so it must not require --
+    or configure -- the dask extra."""
+    seen = _record_stack(monkeypatch)
+    monkeypatch.setattr(
+        "umbra_py.load._require_dask",
+        lambda: pytest.fail("the eager path must not import dask"),
+    )
+    serve.default_renderers().stats([_StatsItem("a"), _StatsItem("b")], serve.stats_options({}))
+    assert seen["to_stack"]["lazy"] is False
+    assert seen["to_stack"]["chunk_size"] is None
+
+
+def test_lazy_stats_render_threads_the_instance_policy(monkeypatch):
+    """``--stack-lazy --stack-chunk-size`` reach ``to_stack``, and the render
+    runs under the operator's chosen scheduler."""
+    pytest.importorskip("dask.array")
+    seen = _record_stack(monkeypatch)
+    execution = serve.StackExecution(lazy=True, chunk_size=256, scheduler="synchronous")
+    payload = serve.default_renderers(execution).stats(
+        [_StatsItem("a"), _StatsItem("b")], serve.stats_options({})
+    )
+    assert json.loads(payload) == {"count": 2, "units": "dB"}
+    assert seen["to_stack"]["lazy"] is True
+    assert seen["to_stack"]["chunk_size"] == 256
+    assert seen["scheduler"] == "synchronous"
+
+
+def test_lazy_scheduler_choice_is_scoped_to_the_render(monkeypatch):
+    """``dask.config.set`` is entered as a context manager, so an instance's
+    policy does not leak into the surrounding process."""
+    dask = pytest.importorskip("dask")
+    seen = _record_stack(monkeypatch)
+    before = dask.config.get("scheduler", None)
+    serve.default_renderers(serve.StackExecution(lazy=True, scheduler="threads")).stats(
+        [_StatsItem("a"), _StatsItem("b")], serve.stats_options({})
+    )
+    assert seen["scheduler"] == "threads"
+    assert dask.config.get("scheduler", None) == before
+
+
+def test_lazy_stats_without_dask_maps_to_501(index_path, tmp_path, monkeypatch):
+    """A server started with --stack-lazy but no dask extra answers the same
+    501 a missing ``load`` extra does, naming the extra to install."""
+    import sys
+
+    # Absent for the duration of the request, however it is installed here.
+    monkeypatch.setitem(sys.modules, "dask", None)
+    app = serve.build_app(
+        index_path,
+        stack_execution=serve.StackExecution(lazy=True),
+        cache_dir=tmp_path / "cache",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 501
+    assert "umbra-py[dask]" in resp.json()["detail"]
+
+
+def test_stacking_policy_is_not_part_of_the_cache_key():
+    """The policy changes the server's memory, not the answer, so an operator
+    can flip it without invalidating a single cached artifact -- which it can
+    only do by staying out of the request options the key hashes."""
+    options = serve.stats_options({"lazy": True, "chunk_size": 64, "scheduler": "threads"})
+    assert not {"lazy", "chunk_size", "scheduler"} & set(options)
+    assert serve.artifact_cache_key("stats", ["item-0", "item-1"], options) == (
+        serve.artifact_cache_key("stats", ["item-0", "item-1"], serve.stats_options({}))
+    )
+
+
+def _stats_scenes(tmp_path):
+    """Three same-footprint passes (fills 2/4/8) as items the renderer can read."""
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    profile = {
+        "driver": "GTiff",
+        "height": 40,
+        "width": 40,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    items = []
+    for n, value in ((1, 2.0), (2, 4.0), (3, 8.0)):
+        path = tmp_path / f"stats-{n}.tif"
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(np.full((40, 40), value, dtype="float32"), 1)
+        item = UmbraItem(id=f"acq-{n}", properties={"datetime": f"2024-0{n}-08T12:00:00Z"})
+        item.asset_href = lambda asset="GEC", _p=str(path): _p  # type: ignore[method-assign]
+        items.append(item)
+    return items
+
+
+def test_lazy_stats_render_answers_byte_identically(tmp_path):
+    """The whole justification for the policy: it moves where the memory goes,
+    not a single figure a client reads back."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    items = _stats_scenes(tmp_path)
+    options = serve.stats_options({"blocks": 2, "block_series": True, "max_size": 64})
+
+    eager = serve.default_renderers().stats(items, options)
+    for execution in (
+        serve.StackExecution(lazy=True),
+        serve.StackExecution(lazy=True, chunk_size=16),
+        serve.StackExecution(lazy=True, chunk_size=16, scheduler="threads"),
+    ):
+        assert serve.default_renderers(execution).stats(items, options) == eager, execution
+
+
+def test_build_app_hands_the_policy_to_the_default_renderers(index_path, tmp_path, monkeypatch):
+    seen: list = []
+
+    def spy(stack_execution=None):
+        seen.append(stack_execution)
+        return RecordingRenderers().as_renderers()
+
+    monkeypatch.setattr(serve, "default_renderers", spy)
+    execution = serve.StackExecution(lazy=True, chunk_size=64)
+    serve.build_app(index_path, stack_execution=execution, cache_dir=tmp_path / "cache")
+    assert seen == [execution]
+
+
+def test_serve_cli_forwards_the_stacking_flags(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    seen: dict = {}
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: seen.update(kwargs))
+
+    result = CliRunner().invoke(
+        cli,
+        ["serve", "--stack-lazy", "--stack-chunk-size", "512", "--stack-scheduler", "threads"],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["stack_execution"] == serve.StackExecution(
+        lazy=True, chunk_size=512, scheduler="threads"
+    )
+    # The policy is echoed at startup, so an operator can confirm it took.
+    assert "lazy (512px windows, threads scheduler)" in result.output
+
+
+def test_serve_cli_rejects_a_chunk_size_without_lazy(monkeypatch):
+    """An impossible policy fails at startup, not on the first stats request."""
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: pytest.fail("should not have started"))
+    result = CliRunner().invoke(cli, ["serve", "--stack-chunk-size", "512"])
+    assert result.exit_code == 2
+    assert "chunk_size needs lazy" in result.output
+
+
 def test_landing_advertises_artifacts_when_enabled(art_client):
     rels = {link["rel"] for link in art_client.get("/").json()["links"]}
     assert {"quicklook", "change", "timescan", "swipe", "stats"} <= rels

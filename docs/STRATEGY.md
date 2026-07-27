@@ -453,9 +453,22 @@ from:
   read; the cost is one range-read per window rather than per pass, which is why
   it is opt-in. `_write_stack_geotiff` follows the cube's chunks, so the written
   file is byte-identical however it was read. See the CHANGELOG.
-  **Open (not blockers, in `TODO.md`):** `stack_stats` still materialises one
-  slice per pass (its medians/percentiles need the pass whole), and letting
-  `umbra serve`'s `POST /artifacts/stats` opt into the lazy path.
+  ~~**Open:** letting `umbra serve`'s `POST /artifacts/stats` opt into the lazy
+  path.~~ **shipped** — `umbra serve --stack-lazy [--stack-chunk-size N]
+  [--stack-scheduler {synchronous,threads}]` gives the one endpoint whose cost
+  grows with the *number* of acquisitions the same ceiling-lift the CLI has.
+  It is an instance-wide policy (`serve.StackExecution`), not a request field,
+  because it needs the `dask` extra on the server and a decision about the
+  threads one request may spend — `synchronous` by default, since a request
+  handler that quietly starts a thread pool per render is a worse surprise than
+  a slower one. The scheduler is set as a context manager around the single
+  render (so it cannot leak), the eager default never imports `dask`, and
+  because the numbers are identical either way the policy is deliberately *not*
+  in the artifact cache key: an operator flips it without invalidating a cached
+  artifact. See the CHANGELOG. **Open (not a blocker, in `TODO.md`):**
+  `stack_stats` still materialises one slice per pass — its medians and
+  percentiles need the pass whole, so streaming it would mean approximate
+  quantiles, i.e. changing the numbers.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The hosted instance gets the datacube's memory ceiling lifted too:
+  `umbra serve --stack-lazy`.** `to_stack(lazy=True)` / `chunk_size=` (below)
+  took the ceiling off a *local* cube, but `POST /artifacts/stats` — the one
+  server endpoint that stacks a whole series — kept building its cube eagerly,
+  so a hosted instance still held every pass at once. That is the endpoint where
+  it matters most: it is the only route whose cost grows with the **number of
+  acquisitions** rather than with one render, and its callers are the ones who
+  installed nothing locally (a browser, an OpenAPI agent, a QGIS user), so the
+  ceiling they hit is one they cannot raise.
+
+  `umbra serve --stack-lazy [--stack-chunk-size N] [--stack-scheduler ...]`
+  hands the server the same two levers: one `dask` task per pass, and windows
+  within a pass. It is an **instance-wide policy** (`serve.StackExecution`,
+  threaded through `build_app(stack_execution=…)` to `default_renderers`) and
+  never a request field, for two reasons the endpoint cannot decide for a
+  client: it needs the `dask` extra installed *on the server*, and it needs a
+  decision about how many threads one request may spend. That second one is why
+  `--stack-scheduler` exists and why it defaults to `synchronous` — a request
+  handler that quietly starts a thread pool per render is a worse surprise than
+  a slower one; `threads` opts into dask's pool for a faster single render that
+  multiplies under concurrent ones. (`processes` is deliberately not offered:
+  the chunks stream COG bytes through GDAL handles that do not fork cleanly.)
+
+  The policy is scoped and inert by construction. `dask.config.set` is entered
+  as a context manager around the one render, so an instance's choice cannot
+  leak into another thread's render or a caller's process; the eager default
+  never imports `dask` at all. And because a lazy cube's numbers are *identical*
+  to an eager one's — only the peak memory differs — the policy is deliberately
+  **not** part of `artifact_cache_key`: an operator flips it without
+  invalidating a single cached artifact or moving a figure a client already
+  fetched, which the tests pin by rendering the same request under all four
+  policies and comparing the JSON bytes. An impossible policy (`--stack-chunk-size`
+  without `--stack-lazy`) fails when the server starts rather than on the first
+  stats request, and `--stack-lazy` without the extra installed answers `501`
+  naming it, exactly like a missing `load`. The CLI echoes the resolved policy at
+  startup so an operator can see it took. Offline-tested in `tests/test_serve.py`.
 - **The last of the datacube's memory ceiling: `to_stack(chunk_size=N)` /
   `umbra stack --lazy --chunk-size N`.** `lazy=True` (below) made the cube stop
   costing `max_size²` × the number of passes, but it left the other half of the

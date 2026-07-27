@@ -1240,6 +1240,26 @@ would land on the time axis and read as change. It needs the `load` extra on the
 *server* (`pip install "umbra-py[serve,load]"`), so a client measures a site with
 nothing installed locally.
 
+It is also the only endpoint whose cost grows with the *number* of acquisitions
+rather than with one render — so it gets the same ceiling-lift `umbra stack
+--lazy` has, as an **instance-wide** setting rather than a request field:
+
+```bash
+# Measure a long series a slice at a time instead of holding every pass.
+umbra serve --stack-lazy                       # one dask task per pass
+umbra serve --stack-lazy --stack-chunk-size 1024   # …and windows within a pass
+```
+
+Operator-configured because it needs the `dask` extra on the *server*
+(`pip install "umbra-py[serve,load,dask]"`; without it a stats request answers
+`501` naming the extra) and a decision about the threads one request may spend —
+`--stack-scheduler synchronous` (the default) runs the chunks on the request's
+own worker, `threads` gives one render dask's thread pool. Because a lazy cube's
+numbers are identical to an eager one's — only the peak memory differs — the
+policy is deliberately *not* part of the artifact cache key: flipping it on an
+instance neither invalidates a cached artifact nor moves a figure a client
+already fetched.
+
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
 and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished
@@ -1293,9 +1313,12 @@ Docker `HEALTHCHECK`), persists the fetched index and render cache to the
 it with environment variables — `UMBRA_SERVE_LIVE=1` walks S3 per request with
 no index, `UMBRA_FETCH_INDEX=0` skips the first-boot fetch, `UMBRA_INDEX_URL`
 points at a fork/mirror snapshot, and `UMBRA_SERVE_ARGS="--no-artifacts"` bounds
-COG-streaming egress for a public instance. Build with
+COG-streaming egress for a public instance (or
+`UMBRA_SERVE_ARGS="--stack-lazy"` to keep `/artifacts/stats` off the whole
+series at once). Build with
 `--build-arg UMBRA_EXTRAS=serve,viz` to also enable the on-demand
-`/artifacts/...` render endpoints. The image doubles as the CLI:
+`/artifacts/...` render endpoints (add `load,dask` for the numeric one and its
+lazy path). The image doubles as the CLI:
 `docker run --rm umbra-py search --area "Beet Piler" --limit 5`. See
 [`docs_src/deploy.md`](docs_src/deploy.md) for the full reference.
 

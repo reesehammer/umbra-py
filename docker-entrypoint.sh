@@ -13,7 +13,8 @@
 #                      ("1" enables; correct but slow, needs no index)
 #   UMBRA_INDEX_URL    Override the published-index asset URL (e.g. a fork/mirror)
 #   UMBRA_SERVE_ARGS   Extra flags passed through to `umbra serve`
-#                      (e.g. "--no-artifacts")
+#                      (e.g. "--no-artifacts", or "--stack-lazy" to measure a
+#                      long series a slice at a time -- needs the `dask` extra)
 #   UMBRA_INDEX_DB     Explicit index path (default: $XDG_CACHE_HOME/umbra-py/catalog.db)
 #
 # Any other command is run verbatim, so the image doubles as the full CLI:

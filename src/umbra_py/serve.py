@@ -53,6 +53,17 @@ unit-testable in the core install with no network and no ``viz``/``load``
 extra; and they are opt-out (``--no-artifacts``) for a public instance that
 wants to bound COG-streaming egress.
 
+``/artifacts/stats`` is also the only endpoint whose cost grows with the
+*number* of acquisitions rather than with one render, so how it builds its cube
+is an instance-wide setting rather than a request field: ``umbra serve
+--stack-lazy [--stack-chunk-size N] [--stack-scheduler ...]``
+(:class:`StackExecution`) hands the server the same ``to_stack(lazy=…)`` /
+``chunk_size=`` ceiling-lift the CLI has, so a hosted instance can measure a
+long series without holding every pass at once. It is operator-configured
+because it needs the ``dask`` extra *on the server* and a decision about the
+threads one request may spend -- and because the numbers do not move, only the
+memory, it is not part of the artifact cache key.
+
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
 to ``"async": true`` for a small job queue: it gets a ``202 Accepted`` + a job
@@ -90,7 +101,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -791,6 +802,77 @@ def default_artifact_cache_dir() -> Path:
     return default_index_path().parent / "artifacts"
 
 
+#: Dask schedulers ``POST /artifacts/stats`` may evaluate a lazy cube under.
+#: ``"synchronous"`` runs the chunks on the calling thread -- the request's own
+#: worker -- so a hosted instance's thread count stays whatever its ASGI server
+#: was configured with; ``"threads"`` gives one render dask's default thread
+#: pool, which is faster for a single request and multiplies under concurrent
+#: ones. Deliberately not ``"processes"``: the chunks stream COG bytes through
+#: GDAL handles that do not fork cleanly.
+STACK_SCHEDULERS = ("synchronous", "threads")
+
+
+@dataclass(frozen=True)
+class StackExecution:
+    """*How* ``POST /artifacts/stats`` builds its datacube -- an operator policy.
+
+    The stats endpoint is the only one that stacks a whole series into memory,
+    so it is the only one with a ceiling set by the number of passes rather than
+    by one render. :func:`~umbra_py.load.to_stack`'s ``lazy=`` / ``chunk_size=``
+    lift that ceiling, but turning them on inside a request handler is not the
+    client's call to make: it needs the ``dask`` extra installed on *the server*
+    and a decision about how many threads one request may spend. So it is
+    configured once, per instance (``umbra serve --stack-lazy``), and never read
+    off the request body.
+
+    Because a lazy cube's numbers are identical to an eager one's -- only the
+    peak memory differs -- this policy is deliberately **not** part of
+    :func:`artifact_cache_key`: flipping it on an instance neither invalidates
+    the artifact cache nor changes a single figure a client already fetched.
+
+    Attributes
+    ----------
+    lazy:
+        Defer each pass's read into a ``dask`` task, so the reduction walks the
+        series a slice at a time instead of holding every pass at once. Needs
+        the ``dask`` extra on the server; without it a stats request answers
+        ``501`` naming the extra, exactly like a missing ``load``.
+    chunk_size:
+        Cut each pass into ``chunk_size``-square windows read independently, so
+        one *scene* no longer has to fit either. Costs one range read per window
+        instead of one per pass, which is why it is opt-in, and it requires
+        ``lazy`` (an eager cube is read a slab at a time).
+    scheduler:
+        Which of :data:`STACK_SCHEDULERS` evaluates the chunks. Defaults to
+        ``"synchronous"`` -- a request handler that quietly starts a thread pool
+        per render is a worse surprise than a slower one.
+    """
+
+    lazy: bool = False
+    chunk_size: int | None = None
+    scheduler: str = "synchronous"
+
+    def __post_init__(self) -> None:
+        if self.chunk_size is not None:
+            if not self.lazy:
+                raise ValueError("chunk_size needs lazy=True; an eager cube is read a slab.")
+            if int(self.chunk_size) < 1:
+                raise ValueError(
+                    f"chunk_size must be a positive pixel count; got {self.chunk_size!r}."
+                )
+        if self.scheduler not in STACK_SCHEDULERS:
+            raise ValueError(
+                f"scheduler must be one of {list(STACK_SCHEDULERS)}, got {self.scheduler!r}."
+            )
+
+    def describe(self) -> str:
+        """One line an operator can read back at startup to confirm the policy."""
+        if not self.lazy:
+            return "eager (whole series in memory)"
+        window = f"{self.chunk_size}px windows" if self.chunk_size else "one chunk per pass"
+        return f"lazy ({window}, {self.scheduler} scheduler)"
+
+
 @dataclass(frozen=True)
 class Renderers:
     """The render functions the artifact endpoints call, as opaque bytes.
@@ -815,6 +897,25 @@ class Renderers:
     stats: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
 
 
+def _stack_scheduler(execution: StackExecution) -> Any:
+    """The dask-scheduler context a lazy stats render is evaluated inside.
+
+    An eager render computes nothing deferred, so it gets a no-op context and
+    never imports ``dask``. A lazy one pins the scheduler for the duration of
+    *this* render only (``dask.config.set`` is context-local), so one instance's
+    policy cannot leak into another thread's render or into a caller's process.
+    The import goes through :mod:`umbra_py.load`'s own gate, so a server started
+    with ``--stack-lazy`` but without the extra fails with the same
+    ``MissingDependencyError`` the route already maps to ``501``.
+    """
+    if not execution.lazy:
+        return nullcontext()
+    from .load import _require_dask
+
+    dask, _ = _require_dask()
+    return dask.config.set(scheduler=execution.scheduler)
+
+
 def _png_bytes(image: Any) -> bytes:
     """Encode a ``PIL.Image`` to PNG bytes."""
     buf = io.BytesIO()
@@ -822,14 +923,19 @@ def _png_bytes(image: Any) -> bytes:
     return buf.getvalue()
 
 
-def default_renderers() -> Renderers:
+def default_renderers(stack_execution: StackExecution | None = None) -> Renderers:
     """The production renderers, backed by :mod:`umbra_py.viz` (``viz`` extra).
 
     Imports are deferred to call time so building the app -- and importing this
     module -- never needs the heavy raster stack; only an actual render request
     pulls it in (and a missing extra surfaces as a clean error the route maps to
     HTTP 501).
+
+    ``stack_execution`` is the instance-wide policy for how the one non-picture
+    renderer builds its datacube (see :class:`StackExecution`); it defaults to
+    the eager read every hosted instance has had until now.
     """
+    execution = stack_execution or StackExecution()
 
     def quicklook(item: UmbraItem, opts: Mapping[str, Any]) -> bytes:
         from . import viz
@@ -868,21 +974,28 @@ def default_renderers() -> Renderers:
         from .load import stack_stats, to_stack
 
         clip: BBox | None = tuple(opts["clip_bbox"]) if opts["clip_bbox"] else None
-        cube = to_stack(
-            list(items),
-            asset=opts["asset"],
-            bbox=clip,
-            max_size=opts["max_size"],
-            db=opts["db"],
-            extent=opts["extent"],
-            crs=opts["crs"],
-        )
-        payload = stack_stats(
-            cube,
-            change_threshold_db=opts["change_threshold_db"],
-            blocks=opts["blocks"],
-            block_series=opts["block_series"],
-        )
+        # ``lazy``/``chunk_size`` come from the instance policy, never the body:
+        # they change the memory the render costs the *server*, not the answer.
+        # The whole build+reduce runs inside the chosen scheduler because it is
+        # ``stack_stats`` -- reading a slice at a time -- that computes chunks.
+        with _stack_scheduler(execution):
+            cube = to_stack(
+                list(items),
+                asset=opts["asset"],
+                bbox=clip,
+                max_size=opts["max_size"],
+                db=opts["db"],
+                extent=opts["extent"],
+                crs=opts["crs"],
+                lazy=execution.lazy,
+                chunk_size=execution.chunk_size,
+            )
+            payload = stack_stats(
+                cube,
+                change_threshold_db=opts["change_threshold_db"],
+                blocks=opts["blocks"],
+                block_series=opts["block_series"],
+            )
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
     return Renderers(
@@ -1261,6 +1374,7 @@ def build_app(
     live: bool = False,
     artifacts: bool = True,
     renderers: Renderers | None = None,
+    stack_execution: StackExecution | None = None,
     cache_dir: str | os.PathLike | None = None,
     job_executor: Any | None = None,
 ) -> FastAPI:
@@ -1278,7 +1392,10 @@ def build_app(
     (``GET /jobs/{id}``, ``GET /jobs/{id}/result``) they use when a request opts
     in to ``"async": true``. ``renderers`` overrides the render functions
     (defaults to :func:`default_renderers`, which needs the ``viz`` extra -- and
-    for stats the ``load`` extra -- at request time);
+    for stats the ``load`` extra -- at request time); ``stack_execution`` is the
+    instance-wide policy for how ``POST /artifacts/stats`` builds its datacube
+    (:class:`StackExecution`) and applies only to the default renderers, since
+    injected ones do their own stacking.
     ``cache_dir`` overrides where rendered PNGs are cached (defaults to
     :func:`default_artifact_cache_dir`). ``job_executor`` overrides the
     background runner for async jobs (anything with ``submit(fn)`` / ``shutdown``,
@@ -1299,7 +1416,7 @@ def build_app(
     globals().update(Request=Request, JSONResponse=JSONResponse, Response=Response)
 
     if renderers is None:
-        renderers = default_renderers()
+        renderers = default_renderers(stack_execution)
     cache_path = Path(cache_dir) if cache_dir is not None else default_artifact_cache_dir()
 
     # Async render jobs: an in-memory registry + a background runner. Both are
@@ -1986,6 +2103,7 @@ def serve(
     index_path: str | os.PathLike | None = None,
     live: bool = False,
     artifacts: bool = True,
+    stack_execution: StackExecution | None = None,
     cache_dir: str | os.PathLike | None = None,
     log_level: str = "info",
 ) -> None:
@@ -2000,5 +2118,11 @@ def serve(
             hint="pip install 'umbra-py[serve]'",
         ) from exc
 
-    app = build_app(index_path, live=live, artifacts=artifacts, cache_dir=cache_dir)
+    app = build_app(
+        index_path,
+        live=live,
+        artifacts=artifacts,
+        stack_execution=stack_execution,
+        cache_dir=cache_dir,
+    )
     uvicorn.run(app, host=host, port=port, log_level=log_level)
