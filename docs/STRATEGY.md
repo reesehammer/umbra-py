@@ -483,10 +483,21 @@ from:
   Blocks are cut from the shared grid, not from a window, so a misaligned window
   edge leaves the spatial breakdown identical. **This closes the datacube's
   memory ceiling end to end — build, write and measure.** See the CHANGELOG.
-  **Open (not a blocker, in `TODO.md`):** the mode is library + CLI only; `umbra
+  ~~**Open (not a blocker, in `TODO.md`):** the mode is library + CLI only; `umbra
   serve`'s `POST /artifacts/stats` and the agent tools do not expose it, because
   there it would have to enter the artifact cache key (unlike `--stack-lazy`,
-  this one *does* move numbers).
+  this one *does* move numbers).~~ **shipped for the server** — `"windowed":
+  true` on `POST /artifacts/stats`, and the cache-key question was answered by
+  making it a **request option** rather than an instance policy: because it
+  moves the percentiles it belongs in the key, and putting it in the request
+  body puts it there for free, so a cached artifact can never depend on an
+  invisible server flag. It is refused (`400`) on an instance without
+  `--stack-chunk-size`, where there are no windows to walk and it could only
+  estimate percentiles for the same memory. The exact numbers are pinned
+  identical through the endpoint's own renderer. The agent tools are left out on
+  purpose: they build an eager 512-pixel cube, so there is no ceiling there to
+  lift and `windowed` would only make a model's percentiles approximate. See the
+  CHANGELOG.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

@@ -823,6 +823,8 @@ def test_stats_options_defaults_to_a_utm_decibel_grid():
     assert opts["extent"] == "intersection"
     assert opts["blocks"] == 0 and opts["change_threshold_db"] == 3.0
     assert opts["block_series"] is False
+    # Exact percentiles unless a request asks to trade them for the memory.
+    assert opts["windowed"] is False
     assert opts["clip_bbox"] is None
 
 
@@ -836,6 +838,7 @@ def test_stats_options_reads_the_stacking_parameters():
             "clip_bbox": [-69, 10, -67, 11],
             "blocks": 6,
             "block_series": True,
+            "windowed": True,
             "change_threshold_db": 1.5,
             "max_size": 256,
         }
@@ -849,6 +852,7 @@ def test_stats_options_reads_the_stacking_parameters():
         "clip_bbox": [-69.0, 10.0, -67.0, 11.0],
         "blocks": 6,
         "block_series": True,
+        "windowed": True,
         "change_threshold_db": 1.5,
     }
     # An explicit null CRS is the opt-in to the lon/lat grid.
@@ -1011,7 +1015,7 @@ def test_default_renderers_stats_reduces_a_stack(monkeypatch):
     assert kwargs["bbox"] == (-69.0, 10.0, -67.0, 11.0)
     assert seen["stack_stats"] == (
         "CUBE",
-        {"change_threshold_db": 3.0, "blocks": 4, "block_series": False},
+        {"change_threshold_db": 3.0, "blocks": 4, "block_series": False, "windowed": False},
     )
 
 
@@ -1143,6 +1147,72 @@ def test_stacking_policy_is_not_part_of_the_cache_key():
     )
 
 
+# ---- the per-request measurement mode (``"windowed": true``) -------------
+
+
+def test_windowed_reaches_stack_stats_on_a_chunked_instance(monkeypatch):
+    """The request field the policy is not: it is the client's, so it rides in
+    the options rather than in ``StackExecution``."""
+    pytest.importorskip("dask")
+    seen = _record_stack(monkeypatch)
+    execution = serve.StackExecution(lazy=True, chunk_size=128)
+    captured: dict = {}
+
+    from umbra_py import load
+
+    def fake_stack_stats(cube, **kwargs):
+        captured.update(kwargs)
+        return {"count": 2, "units": "dB"}
+
+    monkeypatch.setattr(load, "stack_stats", fake_stack_stats)
+    serve.default_renderers(execution).stats(
+        [_StatsItem("a"), _StatsItem("b")], serve.stats_options({"windowed": True})
+    )
+    assert captured["windowed"] is True
+    assert seen["to_stack"]["chunk_size"] == 128
+
+
+def test_windowed_needs_a_chunked_instance(monkeypatch):
+    """Measuring window by window follows the cube's chunks, so on an instance
+    that builds whole slices it would estimate the percentiles and hold exactly
+    as much -- refused, not silently answered."""
+    monkeypatch.setattr(
+        "umbra_py.load._require_dask",
+        lambda: pytest.fail("the refusal must land before any stacking work"),
+    )
+    options = serve.stats_options({"windowed": True})
+    for execution in (None, serve.StackExecution(lazy=True)):
+        with pytest.raises(ValueError, match="--stack-chunk-size"):
+            serve.default_renderers(execution).stats([_StatsItem("a"), _StatsItem("b")], options)
+
+
+def test_windowed_on_an_unchunked_instance_maps_to_400(index_path, tmp_path):
+    """And the refusal is the client's mistake, not a 500 or a 501: the option
+    is well-formed, this instance just cannot honour it usefully."""
+    app = serve.build_app(index_path, cache_dir=tmp_path / "cache")
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"], "windowed": True})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "--stack-chunk-size" in detail and "eager" in detail
+
+
+def test_windowed_is_part_of_the_cache_key(art_client, recorder):
+    """The decision this option turns on: unlike the instance policy, it moves
+    the percentiles, so it is a distinct artifact rather than an invisible flag
+    a cached one silently depends on."""
+    exact = serve.stats_options({})
+    estimated = serve.stats_options({"windowed": True})
+    assert serve.artifact_cache_key("stats", ["item-0", "item-1"], exact) != (
+        serve.artifact_cache_key("stats", ["item-0", "item-1"], estimated)
+    )
+
+    body = {"ids": ["item-0", "item-1"]}
+    art_client.post("/artifacts/stats", json=body)
+    art_client.post("/artifacts/stats", json={**body, "windowed": True})
+    assert [c[2]["windowed"] for c in recorder.calls] == [False, True]
+
+
 def _stats_scenes(tmp_path):
     """Three same-footprint passes (fills 2/4/8) as items the renderer can read."""
     rasterio = pytest.importorskip("rasterio")
@@ -1184,6 +1254,33 @@ def test_lazy_stats_render_answers_byte_identically(tmp_path):
         serve.StackExecution(lazy=True, chunk_size=16, scheduler="threads"),
     ):
         assert serve.default_renderers(execution).stats(items, options) == eager, execution
+
+
+def test_windowed_stats_render_keeps_the_exact_numbers_exact(tmp_path):
+    """The trade, measured through the endpoint's own renderer: everything that
+    is a count or a sum is unchanged, only the percentiles become estimates --
+    and the document says so, which is what makes the extra cache entry honest."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("dask.array")
+    from umbra_py.load import _QUANTILE_BIN_DB
+
+    items = _stats_scenes(tmp_path)
+    renderers = serve.default_renderers(serve.StackExecution(lazy=True, chunk_size=16))
+    body = {"blocks": 2, "max_size": 64}
+    exact = json.loads(renderers.stats(items, serve.stats_options(body)))
+    estimated = json.loads(renderers.stats(items, serve.stats_options({**body, "windowed": True})))
+
+    assert "quantile_method" not in exact
+    assert estimated["quantile_method"] == "histogram"
+    assert estimated["quantile_bin_db"] == _QUANTILE_BIN_DB
+    assert any("window by window" in c for c in estimated["caveats"])
+
+    assert estimated["net_change"] == exact["net_change"]
+    assert estimated["spatial"] == exact["spatial"]
+    for a, b in zip(exact["passes"], estimated["passes"], strict=True):
+        assert (b["mean"], b["std"], b["valid_cells"]) == (a["mean"], a["std"], a["valid_cells"])
+        assert b["change_vs_previous"] == a["change_vs_previous"]
+        assert abs(b["median"] - a["median"]) <= _QUANTILE_BIN_DB
 
 
 def test_build_app_hands_the_policy_to_the_default_renderers(index_path, tmp_path, monkeypatch):
