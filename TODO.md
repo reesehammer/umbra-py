@@ -1147,12 +1147,48 @@ private), so no caller changed. Follow-ons that build on it, none a blocker:
   again; it was left alone here because moving it would relocate the one piece
   of mutable module state (`_LAST_GEOCODE_AT`, `_GEOCODE_CACHE`) that the split
   deliberately did *not* re-export.
-- **`cli.py` is now the outlier at 5 282 lines.** With `viz` split, it is by far
-  the largest module and the only one still mixing several concerns; the
-  remaining half of P3 #18 (the per-command date / task-name / limit option
-  groups) is the tracked slice of that, in the geography-option entry below.
+- ~~**`cli.py` is now the outlier at 5 282 lines.**~~ ✅ **Done** — see the
+  `cli/` package-split entry below. It was split the same way, along the seams
+  the commands already had.
 
 ---
+
+## `cli/` package-split follow-ons (`cli.py` → `cli/` shipped)
+
+- **Surfaced in:** the `cli` package-split PR (`CODEBASE_ANALYSIS.md` P3 #18/#19
+  / `STRATEGY.md` §8 structural debt), which the `viz/` entry above named.
+- **Code:** `src/umbra_py/cli/` (`__init__.py`, `__main__.py`, `_root.py`,
+  `_shared.py`, `discover.py`, `scenes.py`, `process.py`, `composites.py`,
+  `atlas.py`, `explore.py`, `indexes.py`), the `per-file-ignores` entry in
+  `pyproject.toml`, the repo map in `AGENTS.md`.
+
+The 5 522-line module is now nine modules grouped by what the verb does, with
+`cli/__init__.py` re-exporting every name it defined and the whole `--help`
+surface byte-identical to before. Follow-ons that build on it, none a blocker:
+
+- **`indexes.py` carries three sub-groups, not one concern.** At 1 162 lines it
+  is the largest of the nine because `umbra index`, `umbra semantic` and
+  `umbra embed` were kept together as "the local SQLite sidecars". They share a
+  shape (build / fetch / info over a `.db` beside the catalog index) but no
+  code beyond `_shared`, so splitting them three ways is a one-line-per-module
+  change if it grows again. Left as one module here because three ~400-line
+  files with the same import header buy separation the reader did not ask for.
+- **The command modules reach the shared plumbing as `_shared.<name>`.** That
+  is what keeps one patch target for the option-group parity suite (which
+  iterates over all fourteen gather commands), but it is a heavier idiom than
+  `from ._shared import _gather_items` at every call site. If a future change
+  gives the parity suite a per-command module map (`conftest` already owns the
+  roster), the qualified form could go back to a plain import.
+- **`explore.py` groups by "stands something up", which is the loosest seam.**
+  `mcp` and `serve` run servers; `demo`, `tiles` and `showcase` write static
+  artifacts that a server or Pages then hosts. They were put together because
+  the showcase composes the other four's outputs, but a `publish.py` /
+  `servers.py` division is defensible if either half grows.
+- **Nothing checks the module split itself.** The parity suite checks that every
+  gather command exposes the shared option groups, and `tests/test_llms_txt.py`
+  checks the generated command list, but no test asserts that a new command
+  lands in a module rather than in `_shared`. That is a convention held by
+  review, documented in `AGENTS.md` §2 and the `cli/__init__.py` docstring.
 
 ## Shared geography option-group follow-ons (`--intersects` everywhere shipped)
 

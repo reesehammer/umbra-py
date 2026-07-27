@@ -39,7 +39,16 @@ src/umbra_py/
   models.py          # UmbraItem dataclass + asset classification + intersects_bbox / intersects_polygon
   _geometry.py       # stdlib-only GeoJSON polygon parsing + intersection primitives (the `intersects` search filter, no shapely)
   download.py        # download_url / download_asset / download_item (resume support)
-  cli.py             # `umbra search | info | download`
+  cli/               # the `umbra` command group; every name re-exported from `umbra_py.cli` (see its __init__ docstring)
+    _root.py         #   the Click group itself, the UMBRA_JSON_ERRORS envelope, `main()`
+    _shared.py       #   shared option groups (geography / task name / acquisition properties / token / manifest) + how a command gets its items (`_gather_items`, `_item_from_url`)
+    discover.py      #   `search | watch | info | context | llms-txt | ask`: which acquisitions exist
+    scenes.py        #   `describe | download | quicklook | view | load`: one acquisition at a time
+    process.py       #   `stack | convert | chips`: data products rather than pictures
+    composites.py    #   `change | timescan | swipe`: multi-pass pictures of one site
+    atlas.py         #   `map | gallery`: where the archive has imagery
+    explore.py       #   `mcp | serve | demo | tiles | showcase`: the commands that stand something up
+    indexes.py       #   `index | semantic | embed`: the local SQLite sidecars
   constants.py       # bucket, STAC root URL, canonical product types
   convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened and radiometrically calibrated (behind [convert] extra)
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call)
@@ -82,8 +91,9 @@ TODO.md              # ledger of follow-ups intentionally scoped out of merged P
 - `grep -rn "<symbol>" src/ tests/` is reliable — the tree is small (~10 modules).
 - Public API is whatever `src/umbra_py/__init__.py` re-exports. If you add a
   public name, add it to `__all__`.
-- The CLI subcommands are defined in `cli.py`; each maps 1:1 to a library
-  function.
+- The CLI subcommands are defined in the `cli/` package, grouped by what the
+  verb does (see the repo map above); each maps 1:1 to a library function.
+  Anything more than one command module needs lives in `cli/_shared.py`.
 
 ---
 
@@ -282,8 +292,11 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 3. CHANGELOG entry under **Unreleased**.
 
 ### Add a new CLI flag
-1. Add the `@click.option` in `cli.py` next to the existing options on that
-   subcommand.
+1. Add the `@click.option` in the `cli/` module that owns the subcommand, next
+   to its existing options. If the option belongs on *every* gather command,
+   add it as a shared decorator in `cli/_shared.py` instead and put the command
+   on `tests/conftest.py`'s roster, so `tests/test_cli_option_groups.py` holds
+   the parity.
 2. Wire it through to the library function (don't put business logic in the
    CLI). → verify: `umbra <cmd> --help` shows it; add a click runner test if
    the behavior is non-trivial.

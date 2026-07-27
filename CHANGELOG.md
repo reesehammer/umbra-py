@@ -1261,6 +1261,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controls; Folium's own vendored CDN assets remain out of scope.
 
 ### Changed
+- **`cli.py` is now a `cli/` package — the last outlier module, split the way
+  `viz.py` was (`CODEBASE_ANALYSIS.md` P3 #18/#19 / `STRATEGY.md` §8).** With
+  `viz` split, `cli.py` was by a wide margin the largest module in the package
+  (5 522 lines, more than twice the next one) and the only one still mixing
+  several unrelated concerns in one namespace: twenty-eight commands across
+  three sub-groups, from `umbra search` to the SICD conversion pipeline to the
+  PMTiles showcase builder to three SQLite sidecar managers, plus the shared
+  option groups they all hang off. Every CLI change edited the same file, and
+  finding the command you wanted meant scrolling past six families of verbs to
+  reach the seventh.
+
+  It is now nine modules along the seams the commands already had, grouped by
+  *what the verb does* rather than by which library module it calls:
+  `_root.py` (the Click group, the `UMBRA_JSON_ERRORS` envelope, `main()`),
+  `_shared.py` (the option groups — geography, task name, acquisition
+  properties, token, manifest — and how a command obtains its items),
+  `discover.py` (`search`, `watch`, `info`, `context`, `llms-txt`, `ask`),
+  `scenes.py` (`describe`, `download`, `quicklook`, `view`, `load`),
+  `process.py` (`stack`, `convert`, `chips`), `composites.py` (`change`,
+  `timescan`, `swipe`), `atlas.py` (`map`, `gallery`), `explore.py` (`mcp`,
+  `serve`, `demo`, `tiles`, `showcase`) and `indexes.py` (`index`, `semantic`,
+  `embed`). Import order matters exactly once — `_root` defines the group the
+  command modules decorate — and `cli/__init__.py` imports them all, which is
+  what registers the commands.
+
+  **Nothing moved as far as a user is concerned, and that is checked rather
+  than claimed.** The full `--help` surface — the group, all twenty-eight
+  commands, all three sub-groups' subcommands, every option and every help
+  string — is byte-identical to the pre-split output, and every one of the 74
+  definitions is AST-identical to its pre-split form except for three
+  mechanical rewrites: relative imports one level deeper (`.foo` → `..foo`),
+  the shared helpers referenced through the module that defines them
+  (`_gather_items` → `_shared._gather_items`), and the thirteen copies of
+  `UmbraItem.from_dict(get_json(url), href=url)` collapsed into the one new
+  name in the change, `_shared._item_from_url`. `cli/__init__.py` re-exports
+  every name the old module defined, so `from umbra_py.cli import cli`, the
+  `umbra` / `umbra-py` console scripts, `python -m umbra_py.cli` (via a new
+  `__main__.py`) and the `mkdocs-click` CLI reference are all unchanged.
+
+  The one visible difference is the test seam, the same one the `viz` split
+  had: a helper is now patched on the module that *defines* it rather than on
+  the façade, because a re-exported function is looked up in its own module at
+  call time. That was kept to a single target instead of nine — the command
+  modules reach the shared plumbing as `_shared.<name>`, so
+  `monkeypatch.setattr("umbra_py.cli._shared._gather_items", …)` still holds
+  for *every* command, which is what lets the option-group parity suite keep
+  patching one thing while iterating over all fourteen gather commands.
+  `get_json`, `UmbraCatalog`, `geocode_place` and `UmbraItem` moved to the same
+  target for the same reason; the five render entry points tests stub
+  (`save_gallery`, `write_geojson`, `save_change_composite`,
+  `save_timescan_composite`, `save_swipe_map`) are patched on the command
+  module that calls them. Same 1 323 offline tests, same coverage, no runtime
+  behaviour changed. This closes the `cli.py` follow-on in `TODO.md` and the
+  structural-debt group in `STRATEGY.md` §8 bar the conditional R\*Tree upgrade.
 - **`viz.py` is now a `viz/` package — the last named piece of structural debt
   on the critical path (`CODEBASE_ANALYSIS.md` P3 #19 / `STRATEGY.md` §8).** At
   2 023 lines it was the second-largest module and the one every visual surface

@@ -178,8 +178,12 @@ def test_cli_load_writes_geotiff(tmp_path, monkeypatch):
 
     # `umbra load` fetches the STAC JSON then resolves the asset href; stub both
     # so the test stays offline and points at the local GeoTIFF.
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: {"id": "cli-acq", "assets": {}})
-    monkeypatch.setattr(cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(src_tif))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(src_tif)
+    )
 
     out = tmp_path / "clipped.tif"
     result = CliRunner().invoke(
@@ -489,9 +493,9 @@ def test_cli_stack_writes_datacube(tmp_path, monkeypatch):
         }
         for n, name in enumerate(paths, start=1)
     }
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
     monkeypatch.setattr(
-        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
     )
 
     out = tmp_path / "cube.tif"
@@ -536,9 +540,9 @@ def test_cli_stack_crs_writes_a_projected_cube(tmp_path, monkeypatch):
         }
         for n, name in enumerate(paths, start=1)
     }
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
     monkeypatch.setattr(
-        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
     )
 
     out = tmp_path / "cube.tif"
@@ -647,9 +651,9 @@ def test_cli_stack_json_manifest(tmp_path, monkeypatch):
         }
         for n, name in enumerate(paths, start=1)
     }
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
     monkeypatch.setattr(
-        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
     )
 
     out = tmp_path / "cube.tif"
@@ -1039,7 +1043,6 @@ def test_stack_stats_rejects_a_non_cube(tmp_path):
 
 def _stack_cli_env(tmp_path, monkeypatch, values=(2.0, 8.0)):
     """Two STAC URLs resolving to local constant-valued scenes, for CLI tests."""
-    from umbra_py import cli as cli_mod
 
     names = ("one", "two")
     paths = {
@@ -1054,9 +1057,9 @@ def _stack_cli_env(tmp_path, monkeypatch, values=(2.0, 8.0)):
         }
         for n, name in enumerate(names, start=1)
     }
-    monkeypatch.setattr(cli_mod, "get_json", lambda url: stac[url])
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
     monkeypatch.setattr(
-        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
     )
     return list(stac)
 
@@ -1207,9 +1210,9 @@ def test_cli_stack_stats_keeps_stdout_json_in_search_mode(tmp_path, monkeypatch)
         for n, name in enumerate(paths, start=1)
     ]
     monkeypatch.setattr(
-        cli_mod.UmbraItem, "asset_href", lambda self, asset="GEC": str(paths[self.id])
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
     )
-    monkeypatch.setattr(cli_mod, "_gather_items", lambda **kwargs: found)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: found)
 
     result = CliRunner().invoke(
         cli_mod.cli, ["stack", "--area", "SiteA", "--stats", "--max-size", "16"]

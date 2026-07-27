@@ -142,6 +142,12 @@ select = ["E", "F", "I", "UP", "B", "W"]
 # too. Those cannot go in `__all__` (that is the public `import *` surface),
 # so F401 is expected for every one of them.
 "src/umbra_py/viz/__init__.py" = ["F401"]
+# `cli/__init__.py` is the same kind of façade for the CLI split: the package
+# re-exports every name the old 5 500-line `cli.py` defined -- the commands, and
+# the private helpers tests address by name -- so no caller changed. Only `cli`
+# and `main` belong in `__all__` (the entry points), so F401 is expected for the
+# rest. The command-module imports are what register the commands on the group.
+"src/umbra_py/cli/__init__.py" = ["F401"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency/parameter markers are called in argument defaults by

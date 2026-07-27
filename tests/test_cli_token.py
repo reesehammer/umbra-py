@@ -129,7 +129,7 @@ def test_command_threads_token_to_gather(name, argv, monkeypatch):
         captured.update(kwargs)
         raise click.ClickException("stop after capture")
 
-    monkeypatch.setattr(cli_mod, "_gather_items", fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", fake_gather)
     _runner().invoke(cli_mod.cli, [*argv, "--token", "secret"])
     assert captured.get("token") == "secret"
 
@@ -143,7 +143,7 @@ def test_command_token_env_var_fallback(name, argv, monkeypatch):
         captured.update(kwargs)
         raise click.ClickException("stop after capture")
 
-    monkeypatch.setattr(cli_mod, "_gather_items", fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", fake_gather)
     _runner().invoke(cli_mod.cli, argv, env={CANOPY_TOKEN_ENV: "envtok"})
     assert captured.get("token") == "envtok"
 

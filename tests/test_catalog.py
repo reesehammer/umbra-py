@@ -292,7 +292,7 @@ def test_cli_search_area_flows_through(monkeypatch):
         captured.update(kwargs)
         return iter([])
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
     result = CliRunner().invoke(cli_mod.cli, ["search", "--area", "Centerfield"])
     assert result.exit_code == 0, result.output
     assert captured["area"] == "Centerfield"
@@ -311,7 +311,7 @@ def test_cli_search_fuzzy_flag_flows_through(monkeypatch):
         captured.update(kwargs)
         return iter([])
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
     result = CliRunner().invoke(cli_mod.cli, ["search", "--area", "utah centerfield", "--fuzzy"])
     assert result.exit_code == 0, result.output
     assert captured["fuzzy"] is True

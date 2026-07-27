@@ -286,7 +286,6 @@ def test_render_commands_forward_acquisition_filters(argv, monkeypatch, tmp_path
     composite the docs promise. The fake ``_gather_items`` records the kwargs and
     returns no items, so every command exits early with a clean error *after* the
     kwargs are captured -- no render, no viz extra, no network."""
-    from umbra_py import cli as cli_mod
 
     captured: dict = {}
 
@@ -294,7 +293,7 @@ def test_render_commands_forward_acquisition_filters(argv, monkeypatch, tmp_path
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
 
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -311,7 +310,6 @@ def test_render_command_unset_filters_forward_as_none(monkeypatch, tmp_path):
     """With no filter flags, the render command forwards ``None`` for each --
     an empty ``--pol`` tuple becomes ``None``, not ``[]`` -- so an unfiltered
     render searches exactly as before."""
-    from umbra_py import cli as cli_mod
 
     captured: dict = {}
 
@@ -319,7 +317,7 @@ def test_render_command_unset_filters_forward_as_none(monkeypatch, tmp_path):
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         runner.invoke(cli, ["change", "--local", "--out", "c.png", "--area", "SiteA"])

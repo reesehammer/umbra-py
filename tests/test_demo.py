@@ -329,7 +329,9 @@ def test_cli_demo_writes_html(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
 
     item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([item]))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([item])
+    )
 
     out = tmp_path / "demo.html"
     result = CliRunner().invoke(cli_mod.cli, ["demo", "--area", "Center", "--out", str(out)])
@@ -344,7 +346,7 @@ def test_cli_demo_rejects_non_html(monkeypatch, tmp_path):
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([]))
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([]))
     result = CliRunner().invoke(
         cli_mod.cli, ["demo", "--area", "X", "--out", str(tmp_path / "x.geojson")]
     )
@@ -357,7 +359,7 @@ def test_cli_demo_no_results(monkeypatch, tmp_path):
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([]))
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([]))
     result = CliRunner().invoke(
         cli_mod.cli, ["demo", "--area", "X", "--out", str(tmp_path / "x.html")]
     )
@@ -371,7 +373,9 @@ def test_cli_demo_no_lazy_imagery_flag(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
 
     item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([item]))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([item])
+    )
 
     out = tmp_path / "demo.html"
     result = CliRunner().invoke(
@@ -643,7 +647,7 @@ def test_cli_demo_pmtiles_builds_without_searching(monkeypatch, tmp_path):
     def _no_search(self, **_kw):  # pragma: no cover - must never be reached
         raise AssertionError("--pmtiles must not walk the catalog")
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", _no_search)
 
     out = tmp_path / "demo.html"
     result = CliRunner().invoke(

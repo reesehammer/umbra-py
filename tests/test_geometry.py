@@ -553,7 +553,7 @@ def test_gather_commands_forward_intersects(spec, monkeypatch, tmp_path):
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
 
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -575,7 +575,7 @@ def test_gather_commands_reject_polygon_with_rectangle(spec, monkeypatch, tmp_pa
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "_gather_items", lambda **kw: [])
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kw: [])
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         result = runner.invoke(
@@ -699,8 +699,10 @@ def test_change_swipe_chips_gained_place(spec, monkeypatch, tmp_path):
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(cli_mod, "_gather_items", _fake_gather)
-    monkeypatch.setattr(cli_mod, "geocode_place", lambda q: ((0.0, 0.0, 1.0, 1.0), "Nowhere"))
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.geocode_place", lambda q: ((0.0, 0.0, 1.0, 1.0), "Nowhere")
+    )
 
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):

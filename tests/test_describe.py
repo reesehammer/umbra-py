@@ -273,7 +273,7 @@ def test_default_describer_falls_back_to_openai_with_data_uri(monkeypatch):
 def fixed_description(monkeypatch, sample_item_dict):
     """Point the CLI's default describer + render at fixed values so ``umbra
     describe`` runs end-to-end without a model or the viz extra."""
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     reply = json.dumps(
         {
             "summary": "A bright industrial site surrounded by dark fields.",
@@ -310,7 +310,7 @@ def test_cli_describe_json_emits_structured_output(fixed_description):
 
 
 def test_cli_describe_reports_missing_key_cleanly(monkeypatch, sample_item_dict):
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     monkeypatch.setattr(describe_mod, "render_quicklook_png", lambda *a, **k: PNG)
     for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
@@ -320,7 +320,7 @@ def test_cli_describe_reports_missing_key_cleanly(monkeypatch, sample_item_dict)
 
 
 def test_cli_describe_reports_a_bad_reply_cleanly(monkeypatch, sample_item_dict):
-    monkeypatch.setattr("umbra_py.cli.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     monkeypatch.setattr(describe_mod, "render_quicklook_png", lambda *a, **k: PNG)
     monkeypatch.setattr(describe_mod, "default_describer", lambda **k: lambda m: "no json here")
     result = CliRunner().invoke(cli, ["describe", "https://example/item.json"])

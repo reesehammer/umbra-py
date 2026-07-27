@@ -81,9 +81,9 @@ def test_cli_search_place_resolves_to_bbox(monkeypatch):
         return iter([])
 
     monkeypatch.setattr(
-        cli_mod, "geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California, USA")
+        "umbra_py.cli._shared.geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California, USA")
     )
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
 
     result = CliRunner().invoke(cli_mod.cli, ["search", "--place", "California"])
     assert result.exit_code == 0, result.output
@@ -99,7 +99,7 @@ def test_cli_search_place_and_bbox_conflict(monkeypatch):
     def boom(_q):  # pragma: no cover - must not be reached
         raise AssertionError("geocode should not run when both options are given")
 
-    monkeypatch.setattr(cli_mod, "geocode_place", boom)
+    monkeypatch.setattr("umbra_py.cli._shared.geocode_place", boom)
     result = CliRunner().invoke(cli_mod.cli, ["search", "--place", "X", "--bbox", "0,0,1,1"])
     assert result.exit_code != 0
     assert "not both" in result.output.lower()
@@ -113,7 +113,7 @@ def test_cli_search_place_not_found_reports_cleanly(monkeypatch):
     def boom(_q):
         raise GeocodeError("No place matched 'zzz'.")
 
-    monkeypatch.setattr(cli_mod, "geocode_place", boom)
+    monkeypatch.setattr("umbra_py.cli._shared.geocode_place", boom)
     result = CliRunner().invoke(cli_mod.cli, ["search", "--place", "zzz"])
     assert result.exit_code != 0
     assert "No place matched" in result.output
@@ -130,8 +130,10 @@ def test_cli_map_place_resolves_to_bbox(monkeypatch, tmp_path):
         captured.update(kwargs)
         return iter([])
 
-    monkeypatch.setattr(cli_mod, "geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California"))
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California")
+    )
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
 
     # No items -> ClickException, but the geocode + bbox wiring still ran.
     result = CliRunner().invoke(
@@ -152,8 +154,10 @@ def test_cli_timescan_place_resolves_to_bbox(monkeypatch, tmp_path):
         captured.update(kwargs)
         return iter([])
 
-    monkeypatch.setattr(cli_mod, "geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California"))
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California")
+    )
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
 
     # No items -> ClickException ("need at least 3"), but the geocode + bbox
     # wiring still ran first.
@@ -172,7 +176,7 @@ def test_cli_timescan_place_and_bbox_conflict(monkeypatch, tmp_path):
     def boom(_q):  # pragma: no cover - must not be reached
         raise AssertionError("geocode should not run when both options are given")
 
-    monkeypatch.setattr(cli_mod, "geocode_place", boom)
+    monkeypatch.setattr("umbra_py.cli._shared.geocode_place", boom)
     result = CliRunner().invoke(
         cli_mod.cli,
         ["timescan", "--place", "X", "--bbox", "0,0,1,1", "--out", str(tmp_path / "t.png")],
@@ -193,8 +197,10 @@ def test_cli_gallery_place_resolves_and_labels_page(monkeypatch, tmp_path):
         captured.update(kwargs)
         return iter([UmbraItem(id="x", bbox=(-120.0, 35.0, -119.0, 36.0))])
 
-    monkeypatch.setattr(cli_mod, "geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California"))
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.geocode_place", lambda _q: (_CALIFORNIA_EXPECTED, "California")
+    )
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
 

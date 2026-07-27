@@ -496,7 +496,7 @@ def test_cli_map_local_reads_index_without_walking_s3(tmp_path, monkeypatch):
     db = str(tmp_path / "catalog.db")
 
     # Any live walk is a bug when --local is set: make it explode.
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", _no_live_walk)
 
     out = tmp_path / "map.geojson"
     result = CliRunner().invoke(
@@ -535,7 +535,7 @@ def test_cli_gallery_local_reads_index(tmp_path, monkeypatch):
 
     monkeypatch.setattr(viz_mod, "_require", lambda *_a, **_k: None)
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", _no_live_walk)
 
     out = tmp_path / "gallery.html"
     result = CliRunner().invoke(
@@ -567,7 +567,7 @@ def test_cli_gallery_local_uses_baked_thumbnails(tmp_path, monkeypatch):
         raise AssertionError("streamed a baked thumbnail")
 
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", boom)
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", _no_live_walk)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", _no_live_walk)
 
     out = tmp_path / "gallery.html"
     result = CliRunner().invoke(
@@ -806,7 +806,7 @@ def test_cli_search_live_reads_index_and_delta(tmp_path, monkeypatch):
     def fake_search(self, **kwargs):
         return iter([_D])  # one new pass from the live delta
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
     result = CliRunner().invoke(cli_mod.cli, ["search", "--local", "--live", "--db", db])
     assert result.exit_code == 0, result.output
     assert "4 item(s)." in result.output
@@ -848,7 +848,7 @@ def test_cli_index_update_refreshes_and_reports(tmp_path, monkeypatch):
         # Only the new pass is returned, as a real walk from the bound would.
         return iter([_D])
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", fake_search)
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", fake_search)
     result = CliRunner().invoke(cli_mod.cli, ["index", "update", "--db", db, "--overlap-days", "0"])
     assert result.exit_code == 0, result.output
     assert "1 new" in result.output
@@ -1542,7 +1542,7 @@ def test_cli_index_fetch_thumbnails_downloads_when_no_source_given(tmp_path, mon
         Path(dest).write_bytes((tmp_path / "release.thumbs.db").read_bytes())
         return Path(dest)
 
-    monkeypatch.setattr(cli_mod, "fetch_prebuilt_thumbnails", fake_fetch)
+    monkeypatch.setattr("umbra_py.cli.indexes.fetch_prebuilt_thumbnails", fake_fetch)
     result = CliRunner().invoke(cli_mod.cli, ["index", "fetch-thumbnails", "--db", str(db)])
     assert result.exit_code == 0, result.output
     assert "Merged 1 thumbnail(s)" in result.output

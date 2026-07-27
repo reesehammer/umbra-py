@@ -209,7 +209,7 @@ def test_cli_quicklook_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
     from umbra_py.viz import raster as viz_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     data = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(viz_mod, "_read_sar_band", lambda *a, **k: (data, None))
 
@@ -228,7 +228,7 @@ def test_cli_quicklook_rejects_bad_percentile(monkeypatch, tmp_path, sample_item
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         [
@@ -387,7 +387,9 @@ def test_cli_gallery_writes_html(monkeypatch, tmp_path, sample_item_dict):
     monkeypatch.setattr(viz_mod, "_thumbnail_data_uri", lambda *_a, **_k: "data:image/png;base64,Z")
 
     item = UmbraItem.from_dict(sample_item_dict)
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([item]))
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([item])
+    )
 
     out = tmp_path / "gallery.html"
     result = CliRunner().invoke(cli_mod.cli, ["gallery", "--area", "X", "--out", str(out)])
@@ -414,7 +416,7 @@ def test_cli_gallery_no_results(monkeypatch, tmp_path):
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter([]))
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter([]))
     result = CliRunner().invoke(
         cli_mod.cli, ["gallery", "--area", "Nowhere", "--out", str(tmp_path / "g.html")]
     )
@@ -583,7 +585,7 @@ def test_cli_change_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
     from umbra_py.viz import composites as viz_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(
         viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
@@ -611,7 +613,7 @@ def test_cli_change_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         ["change", "http://example/a.json", "--out", str(tmp_path / "x.png")],
@@ -772,7 +774,7 @@ def test_cli_change_gif_animates_search_results(monkeypatch, tmp_path):
     from umbra_py.viz import composites as viz_mod
 
     found = [_dated_item(str(k), f"2024-{k:02d}-01T00:00:00Z") for k in range(1, 6)]
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter(found))
     bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(5)]
     monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
 
@@ -794,7 +796,7 @@ def test_cli_change_gif_allows_many_explicit_urls(monkeypatch, tmp_path, sample_
     from umbra_py import cli as cli_mod
     from umbra_py.viz import composites as viz_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _u: sample_item_dict)
     bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(4)]
     monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
 
@@ -810,7 +812,7 @@ def test_cli_change_png_still_caps_at_three(monkeypatch, tmp_path, sample_item_d
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _u: sample_item_dict)
     urls = [f"http://example/{k}.json" for k in range(4)]
     result = CliRunner().invoke(cli_mod.cli, ["change", *urls, "--out", str(tmp_path / "c.png")])
     assert result.exit_code != 0
@@ -822,7 +824,7 @@ def test_cli_change_colormap_requires_gif(monkeypatch, tmp_path, sample_item_dic
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _u: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         [
@@ -853,7 +855,7 @@ def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
         _dated_item("mid", "2024-02-01T00:00:00Z"),
         _dated_item("new", "2024-03-01T00:00:00Z"),
     ]
-    monkeypatch.setattr(cli_mod.UmbraCatalog, "search", lambda self, **_kw: iter(found))
+    monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter(found))
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(
         viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
@@ -876,7 +878,7 @@ def test_cli_change_rejects_urls_and_search_together(monkeypatch, sample_item_di
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _u: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _u: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         ["change", "http://example/a.json", "--area", "X", "--out", str(tmp_path / "o.png")],
@@ -891,8 +893,7 @@ def test_cli_change_search_too_few_results(monkeypatch, tmp_path):
     from umbra_py import cli as cli_mod
 
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kw: iter([_dated_item("only", "2024-01-01T00:00:00Z")]),
     )
     result = CliRunner().invoke(
@@ -1222,8 +1223,7 @@ def test_cli_map_rejects_timeline_with_imagery(monkeypatch, tmp_path, sample_ite
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 
@@ -1319,8 +1319,7 @@ def test_cli_map_timeline_with_geocode_flows_through(monkeypatch, tmp_path, samp
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 
@@ -1345,8 +1344,7 @@ def test_cli_map_timeline_writes_animated_html(monkeypatch, tmp_path, sample_ite
 
     item = UmbraItem.from_dict(sample_item_dict)
     monkeypatch.setattr(
-        cli_mod.UmbraCatalog,
-        "search",
+        "umbra_py.cli._shared.UmbraCatalog.search",
         lambda self, **_kwargs: iter([item]),
     )
 
@@ -1465,7 +1463,7 @@ def test_cli_swipe_writes_html(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
     from umbra_py.viz import maps as viz_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     monkeypatch.setattr(viz_mod, "_coregister_bands", _fake_coregister(np))
 
     out = tmp_path / "swipe.html"
@@ -1483,7 +1481,7 @@ def test_cli_swipe_rejects_single_url(monkeypatch, tmp_path, sample_item_dict):
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         ["swipe", "http://example/a.json", "--out", str(tmp_path / "x.html")],
@@ -1497,7 +1495,7 @@ def test_cli_swipe_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample_it
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         [
@@ -1645,7 +1643,7 @@ def test_cli_timescan_writes_image(monkeypatch, tmp_path, sample_item_dict):
     from umbra_py import cli as cli_mod
     from umbra_py.viz import composites as viz_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(
         viz_mod,
@@ -1676,7 +1674,7 @@ def test_cli_timescan_rejects_too_few_urls(monkeypatch, tmp_path, sample_item_di
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         [
@@ -1696,7 +1694,7 @@ def test_cli_timescan_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample
 
     from umbra_py import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     result = CliRunner().invoke(
         cli_mod.cli,
         [

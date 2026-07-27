@@ -186,7 +186,7 @@ def test_assemble_forwards_demo_kwargs(tmp_path):
 # --- CLI ------------------------------------------------------------------
 def test_cli_showcase_builds_site(tmp_path, monkeypatch):
     items = [_item("a"), _item("b", -111.0, 40.0)]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: items)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: items)
     pm = tmp_path / "catalog.pmtiles"
     pmtiles.write_pmtiles(items, pm)
 
@@ -217,7 +217,7 @@ def test_cli_showcase_no_explore_map_only(tmp_path, monkeypatch):
     def _boom(**kwargs):  # pragma: no cover - asserted not called
         raise AssertionError("should not gather items with --no-explore")
 
-    monkeypatch.setattr("umbra_py.cli._gather_items", _boom)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _boom)
     pm = tmp_path / "catalog.pmtiles"
     pmtiles.write_pmtiles([_item()], pm)
 
@@ -248,7 +248,7 @@ def test_cli_showcase_rejects_both_basemap_sources(tmp_path):
 
 
 def test_cli_showcase_url_requires_fetch(tmp_path, monkeypatch):
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item()])
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: [_item()])
     result = CliRunner().invoke(
         cli,
         [
@@ -272,7 +272,7 @@ def test_cli_showcase_nothing_to_show(tmp_path):
 
 def test_cli_showcase_fetch_pmtiles(tmp_path, monkeypatch):
     """--fetch-pmtiles pulls the published basemap into the output dir."""
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: [_item()])
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: [_item()])
     archive = pmtiles.build_pmtiles([_item("a"), _item("b", -111.0, 40.0)], max_zoom=3)
 
     def fake_fetch(dest, *, url=None, progress=None):
@@ -461,7 +461,7 @@ def _stub_featured_renderer(monkeypatch):
 
 def test_cli_showcase_featured_auto_selects(tmp_path, monkeypatch):
     pool = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: pool)
     _stub_featured_renderer(monkeypatch)
 
     out = tmp_path / "site"
@@ -484,7 +484,7 @@ def test_cli_showcase_featured_area_curates(tmp_path, monkeypatch):
             return [_pass("Alpha", d) for d in (1, 2)]
         return []  # the curated name that matches nothing
 
-    monkeypatch.setattr("umbra_py.cli._gather_items", fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", fake_gather)
     _stub_featured_renderer(monkeypatch)
 
     out = tmp_path / "site"
@@ -518,7 +518,7 @@ def test_cli_showcase_featured_zero_never_gathers_a_pool(tmp_path, monkeypatch):
         calls.append(kwargs)
         return [_item()]
 
-    monkeypatch.setattr("umbra_py.cli._gather_items", fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", fake_gather)
     out = tmp_path / "site"
     result = CliRunner().invoke(
         cli, ["showcase", "--local", "--out", str(out), "--no-lazy-imagery"]
@@ -643,7 +643,7 @@ def test_cli_showcase_unified(tmp_path, monkeypatch):
     def _no_gather(**_kwargs):  # pragma: no cover - must never be reached
         raise AssertionError("--unified must not gather items")
 
-    monkeypatch.setattr("umbra_py.cli._gather_items", _no_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", _no_gather)
     archive = tmp_path / "catalog.pmtiles"
     archive.write_bytes(pmtiles.build_pmtiles([_item("a")], max_zoom=3))
 
@@ -795,7 +795,7 @@ def test_cli_showcase_featured_view_timescan_needs_three_passes(tmp_path, monkey
     """--featured-view timescan raises the bar a site must clear before any
     render is attempted: a two-pass site can't be summarised statistically."""
     pool = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: pool)
     _stub_featured_renderer(monkeypatch)
 
     out = tmp_path / "site"
@@ -821,7 +821,7 @@ def test_cli_showcase_featured_view_timescan_needs_three_passes(tmp_path, monkey
 
 def test_cli_showcase_featured_view_swipe(tmp_path, monkeypatch):
     pool = [_pass("Alpha", d) for d in (1, 2)]
-    monkeypatch.setattr("umbra_py.cli._gather_items", lambda **kwargs: pool)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: pool)
     _stub_featured_renderer(monkeypatch)
 
     out = tmp_path / "site"

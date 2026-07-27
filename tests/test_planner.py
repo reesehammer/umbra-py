@@ -358,7 +358,7 @@ def test_cli_ask_run_executes_the_search(fixed_plan, monkeypatch, sample_item_di
     fake = FakeSource()
     # Route execution through a fake backend instead of a live S3 walk.
     monkeypatch.setattr(
-        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+        "umbra_py.cli._shared._search_source", lambda local, db_path, token=None: (fake, False)
     )
 
     result = CliRunner().invoke(cli, ["ask", "q", "--run"])
@@ -402,7 +402,7 @@ def test_cli_ask_run_forwards_acquisition_filters(monkeypatch, sample_item_dict)
 
     fake = FakeSource()
     monkeypatch.setattr(
-        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+        "umbra_py.cli._shared._search_source", lambda local, db_path, token=None: (fake, False)
     )
 
     result = CliRunner().invoke(cli, ["ask", "q", "--run"])
@@ -424,7 +424,7 @@ def test_cli_ask_limit_flag_overrides_the_plan(fixed_plan, monkeypatch):
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr("umbra_py.cli._gather_items", fake_gather)
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", fake_gather)
     result = CliRunner().invoke(cli, ["ask", "q", "--run", "--limit", "99"])
     assert result.exit_code == 0, result.output
     assert captured["limit"] == 99
@@ -610,7 +610,7 @@ def test_cli_ask_aoi_run_sends_the_polygon_to_the_backend(
 
     fake = FakeSource()
     monkeypatch.setattr(
-        "umbra_py.cli._search_source", lambda local, db_path, token=None: (fake, False)
+        "umbra_py.cli._shared._search_source", lambda local, db_path, token=None: (fake, False)
     )
     result = CliRunner().invoke(
         cli, ["ask", "scenes over the delta", "--run", "--aoi", str(delta_file)]
