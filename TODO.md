@@ -924,9 +924,38 @@ not blockers:
   `[export]` extra alongside `[load]`, stays deterministic (no model call), and is
   offline-tested in `tests/test_chips.py` (round-tripped through pyarrow, incl. the
   null-datetime row).
-- **Chip the complex products.** The chipper reads amplitude rasters (GEC/CSI);
-  chipping SICD/CPHD would need the slant-plane handling that `convert.py`
-  begins — related to the still-open SICD → geocoded COG gap in `STRATEGY.md` 5.5.
+- ~~**Chip the complex products.**~~ ✅ **Done** (`umbra chips --asset SICD` /
+  `chip_item(asset="SICD", conversion=SicdConversion(...))`). The slant-plane
+  handling this entry was waiting on is exactly what `convert.py` finished, so
+  the chipper composes with it rather than reimplementing it: each acquisition is
+  fetched, geocoded through `sicd_to_geocoded_cog`, and chipped by the **same**
+  window loop that reads a GEC (one new context manager decides what the loop
+  opens; chip shape, filtering, manifest and naming are unchanged). Every
+  conversion setting comes with it — `--dem` / `--geoid` / `--rtc` /
+  `--rtc-model` / `--rtc-ref-angle` / `--calibrate` / `--convert-resolution` /
+  `--resampling`, collected in the frozen `SicdConversion` — so
+  `--rtc-model facet --calibrate gamma0` yields chips carrying a terrain-
+  flattened gamma-nought coefficient rather than relative brightness. Each
+  record's `calibration` / `rtc_model` are read back from the converted raster's
+  `UMBRA_*` tags (the processing that ran, not the request; `null` where
+  `conversion_tags` writes `"none"`), and the whole tag set is copied into every
+  chip GeoTIFF. The cost is stated: a SICD has no map grid to range-read, so the
+  product is downloaded whole — hence opt-in, one scene resident at a time, and
+  `--work-dir` keeping the download plus a COG cached under a digest of the
+  conversion settings so a re-run reuses it and a changed setting renames it.
+  The download-and-geocode step is an injectable `preparer`, so the whole path is
+  offline-tested with no `sarpy`, network or NITF. Follow-ons, neither a blocker:
+  - **A geocode-then-chip run converts the *whole* scene to keep part of it.**
+    With `--bbox`-style clipping the conversion could be restricted to the area
+    the chips will cover, which would cut both the warp cost and the disk the
+    intermediate COG needs. `sicd_to_geocoded_cog` has no clip parameter today,
+    so this is a change to `convert.py` first; the download is whole-product
+    either way, which is the larger cost.
+  - **`CSI` still goes down the amplitude path, which is right but undiscussed.**
+    A CSI is a colour sub-aperture *image* — already a display raster — so it is
+    streamed like a GEC and none of the conversion flags apply to it. `CPHD` stays
+    out entirely: it is phase history rather than a focused image, so there is no
+    image grid to chip until something focuses it.
 
 ---
 

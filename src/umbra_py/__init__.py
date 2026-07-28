@@ -15,8 +15,11 @@ __version__ = "0.1.0"
 from .catalog import UmbraCatalog
 from .chips import (
     CHIPPABLE_ASSETS,
+    COMPLEX_ASSETS,
+    RASTER_ASSETS,
     ChipDataset,
     ChipRecord,
+    SicdConversion,
     chip_item,
     write_chips,
     write_manifest,
@@ -188,7 +191,10 @@ __all__ = [
     "write_manifest_parquet",
     "ChipRecord",
     "ChipDataset",
+    "SicdConversion",
     "CHIPPABLE_ASSETS",
+    "RASTER_ASSETS",
+    "COMPLEX_ASSETS",
     "download_asset",
     "download_item",
     "download_url",

@@ -16,6 +16,13 @@
 > - **The durable design principles** (deterministic core / AI at the edges,
 >   images-are-the-API, context-as-a-product-surface, license propagation,
 >   agents-are-users) → [`STRATEGY.md` §7](STRATEGY.md#7-design-principles-to-hold-onto).
+> C4's chipper has since grown past the derived products too: `umbra chips
+> --asset SICD` geocodes each complex acquisition through the `umbra convert`
+> pipeline and cuts the identical tiles from the result, so an ML training set
+> can carry a terrain-flattened, radiometrically calibrated backscatter
+> coefficient from the full-resolution archive rather than relative brightness
+> from GEC.
+>
 > - **Open follow-ons** (e.g. registering `umbra-mcp` in the MCP registries) →
 >   [`TODO.md`](../TODO.md), with the remaining critical path in
 >   [`STRATEGY.md` §8](STRATEGY.md#8-current-status--remaining-critical-path).
