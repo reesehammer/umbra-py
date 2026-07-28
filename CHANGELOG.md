@@ -1317,6 +1317,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **SAR overlays now land on the ground they image: the browser driver reads the
+  COG's own georeferencing instead of stretching it onto the footprint bbox.**
+  Clicking "Get SAR image" on the published showcase explorer put the scene on
+  the map rotated — the coastline running the wrong way across Black River,
+  Jamaica, with the imagery ignoring the OpenStreetMap basemap underneath it.
+
+  The premise the placement rested on was wrong. `_lazy_imagery.py` documented
+  Umbra's GEC rasters as "north-up UTM" and reasoned that stretching such a grid
+  onto its lat/lon bounding box skews it only slightly over a few-km scene. A GEC
+  is **not** north-up: its pixel grid is rotated to the collect geometry, which
+  is why the four grid corners *are* the acquisition's STAC footprint polygon and
+  why that polygon is drawn as a tilted quad in the first place. The angle is
+  whatever the collect azimuth was — 77° for the reported scene, and different
+  for every acquisition in the archive — so bbox placement was not a small skew
+  but a rotation of the whole image. (The CRS was wrong in the docstring too:
+  GECs ship both in WGS84 geographic *and* in WGS84 UTM zones.)
+
+  The driver now reads the raster's affine (a GeoTIFF `ModelTransformation`) and
+  CRS geokey from the full-resolution IFD — overview IFDs carry no geo tags —
+  resamples the decoded overview onto a north-up lat/lon grid, and places *that*
+  at the grid's own envelope. Inverting the two CRSs GECs use costs a few lines
+  of Snyder series rather than a second CDN dependency, and the pixel → lon/lat
+  map is an affine fit through the four grid corners: exact for a geographic
+  raster, and within a couple of metres for a UTM one over a scene this size —
+  well inside one rendered pixel. A file whose georeferencing the driver can't
+  read still renders on the item's `data-bounds` footprint bbox, exactly as
+  before. Both engines are fixed by one change: the Leaflet build (`umbra map
+  --lazy-imagery`, the embedded-slice `umbra demo`) and the MapLibre build (the
+  whole-archive PMTiles explorer, which is what the showcase publishes).
+
+  **The same premise had broken the Python overlay path**, which the old
+  docstring pointed at as the pixel-accurate alternative: `viz._read_sar_band`
+  skipped its `WarpedVRT` whenever the source was already EPSG:4326, so a
+  rotated geographic GEC — the majority of the recent archive — went onto
+  `folium` maps unwarped and just as rotated. It is now warped whenever the grid
+  is not north-up, which is the condition that actually matters. `umbra view`,
+  the change/timescan composites and `umbra chips` were never affected (they
+  warp unconditionally or keep the native grid).
+
+  The arithmetic is offline-tested for real rather than grepped for: the
+  driver's georeferencing chunk is exercised under `node` against the reported
+  acquisition's actual transform (envelope, per-pixel source lookup, the
+  north-up and unreadable-CRS paths) and its UTM inverse is checked against
+  pyproj's answer in both hemispheres; the Python path gets a rotated-GeoTIFF
+  regression test.
 - **The weekly catalog publish now actually publishes: `umbra tiles --index-db`,
   not `--db`.** Both of the only two `Publish catalog index` runs this project
   has ever had died in the same place — `umbra tiles --local --db catalog.db`,

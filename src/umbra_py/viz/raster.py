@@ -178,8 +178,10 @@ def _read_sar_band(
     ``bounds`` is the dataset's geographic bounds. Only the bytes for the
     requested resolution are fetched (the asset is a cloud-optimized
     GeoTIFF read through GDAL's ``/vsicurl/`` driver). When
-    ``reproject_to_4326`` is True the raster is warped to lon/lat so it
-    can be placed on a web map; for a standalone quicklook the native
+    ``reproject_to_4326`` is True the raster is warped to a north-up
+    lon/lat grid so it can be placed on a web map -- including a GEC
+    that is already in EPSG:4326, whose grid is rotated to the collect
+    geometry rather than to north. For a standalone quicklook the native
     projection is read as-is (no warp distortion).
     """
     rasterio = _require("rasterio")
@@ -196,7 +198,12 @@ def _read_sar_band(
     with rasterio.open(f"/vsicurl/{url}") as src:
         if reproject_to_4326:
             epsg = src.crs.to_epsg() if src.crs else None
-            wrap = WarpedVRT(src, crs="EPSG:4326") if epsg != 4326 else None
+            # A GEC is geocoded but *not* north-up: its pixel grid is rotated to
+            # the collect geometry, so an EPSG:4326 one is already in lon/lat and
+            # still needs warping before it can be placed on a lat/lon box.
+            # `transform.b` / `.d` are the rotation terms; both zero is north-up.
+            north_up = src.transform.b == 0.0 and src.transform.d == 0.0
+            wrap = None if epsg == 4326 and north_up else WarpedVRT(src, crs="EPSG:4326")
         else:
             wrap = None
         ds = wrap if wrap is not None else src

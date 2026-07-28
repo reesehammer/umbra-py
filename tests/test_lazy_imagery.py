@@ -438,9 +438,10 @@ def test_both_engines_share_everything_above_the_placement():
         "GeoTIFF.fromUrl",
         "pickOverview",
         "computeStretch",
+        "rasterGeoreference",
         "rasterToDataURL",
         "window.umbraToggleSarImage",
-        "layers[id] = addOverlay(map, id, dataUrl, bounds);",
+        "layers[id] = addOverlay(map, id, dataUrl, geo ? geo.bounds : bounds);",
     )
     for engine in ("leaflet", "maplibre"):
         js = li.driver_script(percentile_low=2.0, percentile_high=98.0, engine=engine)
@@ -455,3 +456,211 @@ def test_unknown_engine_is_rejected():
 
     with pytest.raises(ValueError, match="Unknown map engine"):
         li.driver_script(percentile_low=2.0, percentile_high=98.0, engine="openlayers")
+
+
+# --- placing the overlay where the raster actually is -----------------------
+#
+# Regression cluster for the misaligned explorer overlay: a GEC is geocoded but
+# not north-up (its grid is rotated to the collect geometry), so stretching the
+# decoded overview onto the STAC footprint bbox rotated every scene off the map.
+
+
+def test_driver_reads_georeferencing_from_the_file():
+    """The driver must place the overlay from the raster's own affine and CRS,
+    not from the item's footprint bbox. A GEC carries the rotated affine as a
+    GeoTIFF ``ModelTransformation`` and its CRS as a geokey."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "ModelTransformation" in js
+    assert "getGeoKeys" in js
+    assert "ProjectedCSTypeGeoKey" in js and "GeographicTypeGeoKey" in js
+    # Geo tags live on the full-res IFD, not on the overview that gets decoded,
+    # so the picker has to hand back both.
+    assert "{ base: base, image: chosen || fallback }" in js
+    assert "rasterGeoreference(picked.base, picked.image, MAX_OUT_DIM)" in js
+
+
+def test_driver_keeps_the_footprint_bbox_as_the_fallback():
+    """A COG whose georeferencing we can't read must still render -- on the STAC
+    bbox, exactly as the driver behaved before it read geo tags."""
+    from umbra_py import _lazy_imagery as li
+
+    js = li.driver_script(percentile_low=2.0, percentile_high=98.0)
+    assert "layers[id] = addOverlay(map, id, dataUrl, geo ? geo.bounds : bounds);" in js
+    # parseBounds() (the data-bounds attribute) is still required up front.
+    assert "parseBounds" in js
+
+
+def _run_georef_js(snippet: str):
+    """Evaluate ``snippet`` against the driver's georeferencing chunk in node.
+
+    The chunk is plain arithmetic over a couple of geotiff.js accessors, so it
+    is the one part of the browser driver that can be checked for real rather
+    than grepped for. ``snippet`` must ``console.log`` one JSON value.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+
+    from umbra_py import _lazy_imagery as li
+
+    proc = subprocess.run(
+        [node, "-e", li._GEOREF_OPS + snippet],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+# A geotiff.js-shaped stub: just the four accessors the chunk calls.
+_FAKE_IMAGE_JS = """
+function fakeImage(w, h, fd, keys) {
+  return {
+    getWidth: function () { return w; },
+    getHeight: function () { return h; },
+    getFileDirectory: function () { return fd || {}; },
+    getGeoKeys: function () { return keys || {}; }
+  };
+}
+"""
+
+# The real georeferencing of a 16001x16001 EPSG:4326 GEC over Black River,
+# Jamaica (2025-10-29, Umbra-10) -- the acquisition the misalignment was
+# reported on. Its grid is rotated ~77 degrees off north.
+_ROTATED_GEC_JS = """
+var MT = [6.697947955201462e-07, 2.8742001330176995e-06, 0, -77.87635378074701,
+          2.7497634679268057e-06, -6.407965779008973e-07, 0, 18.010125116912462,
+          0, 0, 0, 0, 0, 0, 0, 1];
+var base = fakeImage(16001, 16001, { ModelTransformation: MT },
+                     { GeographicTypeGeoKey: 4326 });
+"""
+
+
+def test_georeference_envelope_matches_the_rasters_own_bounds():
+    """The overlay's placement box must be the envelope of the *rotated* grid's
+    four corners -- which is what GDAL reports as the dataset bounds."""
+    out = _run_georef_js(
+        _FAKE_IMAGE_JS
+        + _ROTATED_GEC_JS
+        + """
+var geo = rasterGeoreference(base, fakeImage(2001, 2001), 2048);
+console.log(JSON.stringify(geo.bounds));
+"""
+    )
+    (south, west), (north, east) = out
+    assert west == pytest.approx(-77.87635378074701, abs=1e-9)
+    assert south == pytest.approx(17.99987173086947, abs=1e-9)
+    assert east == pytest.approx(-77.81964631789548, abs=1e-9)
+    assert north == pytest.approx(18.054124082162758, abs=1e-9)
+
+
+def test_georeference_pulls_each_output_pixel_from_the_rotated_grid():
+    """The heart of the fix: an output pixel at a given lon/lat must resolve to
+    the source pixel the raster's affine puts there. Before, output pixel
+    (x, y) was source pixel (x, y) -- which is only true for a north-up grid."""
+    out = _run_georef_js(
+        _FAKE_IMAGE_JS
+        + _ROTATED_GEC_JS
+        + """
+var w = 2001, sx = 16001 / w;
+var geo = rasterGeoreference(base, fakeImage(w, w), 2048);
+var west = geo.bounds[0][1], north = geo.bounds[1][0];
+var lonPer = (geo.bounds[1][1] - west) / geo.width;
+var latPer = (north - geo.bounds[0][0]) / geo.height;
+var worst = 0, misses = 0;
+// Walk the interior of the source grid (the outermost ring is a half-pixel
+// sliver outside the rotated quad, and legitimately samples as transparent).
+for (var u = 20; u < w - 20; u += 53) {
+  for (var v = 20; v < w - 20; v += 53) {
+    var lon = MT[3] + MT[0] * (u + 0.5) * sx + MT[1] * (v + 0.5) * sx;
+    var lat = MT[7] + MT[4] * (u + 0.5) * sx + MT[5] * (v + 0.5) * sx;
+    var i = geo.sourceIndex(Math.floor((lon - west) / lonPer),
+                            Math.floor((north - lat) / latPer));
+    if (i < 0) { misses++; continue; }
+    var col = i % w, row = (i - col) / w;
+    worst = Math.max(worst, Math.abs(col - u), Math.abs(row - v));
+  }
+}
+console.log(JSON.stringify({ worst: worst, misses: misses }));
+"""
+    )
+    assert out["misses"] == 0
+    # Nearest neighbour through two floors, so one pixel of slack is the floor.
+    assert out["worst"] <= 1
+
+
+def test_georeference_inverts_utm_to_wgs84():
+    """GECs also ship in WGS84 UTM zones, so the driver carries a UTM inverse.
+    Checked against pyproj's answer for a real 32614 (North Dakota) GEC corner
+    and a southern-hemisphere point (where the false northing applies)."""
+    out = _run_georef_js(
+        _FAKE_IMAGE_JS
+        + """
+var north = fakeImage(1, 1, {}, { ProjectedCSTypeGeoKey: 32614 });
+var south = fakeImage(1, 1, {}, { ProjectedCSTypeGeoKey: 32733 });
+console.log(JSON.stringify([
+  modelToLonLat(north)(638879.6412305724, 5208544.292040982),
+  modelToLonLat(south)(699000.0, 7100000.0)
+]));
+"""
+    )
+    (lon_n, lat_n), (lon_s, lat_s) = out
+    # pyproj: Transformer.from_crs(32614, 4326, always_xy=True)
+    assert lon_n == pytest.approx(-97.17268968652004, abs=1e-7)
+    assert lat_n == pytest.approx(47.01583628252898, abs=1e-7)
+    # pyproj: Transformer.from_crs(32733, 4326, always_xy=True)
+    assert lon_s == pytest.approx(16.9916922806488, abs=1e-7)
+    assert lat_s == pytest.approx(-26.205772891560926, abs=1e-7)
+
+
+def test_georeference_leaves_a_north_up_raster_pixel_for_pixel():
+    """A plain north-up COG (tiepoint + pixel scale) must come out unrotated and
+    unresampled -- the fix must not degrade the case that already worked."""
+    out = _run_georef_js(
+        _FAKE_IMAGE_JS
+        + """
+var base = fakeImage(100, 50,
+  { ModelTiepoint: [0, 0, 0, -10.0, 5.0, 0], ModelPixelScale: [0.01, 0.02, 0] },
+  { GeographicTypeGeoKey: 4326 });
+var geo = rasterGeoreference(base, fakeImage(100, 50), 2048);
+console.log(JSON.stringify({
+  bounds: geo.bounds, width: geo.width, height: geo.height,
+  corner: geo.sourceIndex(0, 0), last: geo.sourceIndex(99, 49)
+}));
+"""
+    )
+    assert out["width"] == 100 and out["height"] == 50
+    (south, west), (north, east) = out["bounds"]
+    assert (west, south, east, north) == pytest.approx((-10.0, 4.0, -9.0, 5.0))
+    assert out["corner"] == 0
+    assert out["last"] == 49 * 100 + 99
+
+
+@pytest.mark.parametrize(
+    "image_js",
+    [
+        # No georeferencing tags at all.
+        "fakeImage(10, 10, {}, { GeographicTypeGeoKey: 4326 })",
+        # A CRS we can't invert without a projection library.
+        "fakeImage(10, 10, { ModelTransformation: [1,0,0,0, 0,1,0,0, 0,0,0,0, 0,0,0,1] },"
+        " { ProjectedCSTypeGeoKey: 3857 })",
+    ],
+)
+def test_georeference_returns_null_when_it_cannot_place_the_raster(image_js):
+    """Unreadable georeferencing must return null so the caller falls back to
+    the STAC bbox, rather than throwing and losing the overlay entirely."""
+    out = _run_georef_js(
+        _FAKE_IMAGE_JS
+        + f"""
+var img = {image_js};
+console.log(JSON.stringify(rasterGeoreference(img, img, 2048)));
+"""
+    )
+    assert out is None
