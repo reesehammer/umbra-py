@@ -95,7 +95,7 @@ dev = [
     # that were written against earlier ruff, turning `ruff format --check .`
     # red on an unrelated file set. Cap keeps CI tooling deterministic; lift it
     # deliberately in a dedicated PR that also reformats the Markdown examples.
-    "ruff>=0.4,<0.16",
+    "ruff>=0.4,<0.17",
     "mypy>=1.8",
     "types-requests>=2.28",
     "types-defusedxml>=0.7",
