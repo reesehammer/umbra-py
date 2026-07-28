@@ -7,8 +7,10 @@ to end with no network access and no model call.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -328,3 +330,348 @@ def test_cli_chips_from_url(tmp_path, monkeypatch):
     assert payload["chip_count"] == 4
     assert payload["items"] == ["cli-acq"]
     assert (out / "manifest.jsonl").exists()
+
+
+# --- Chipping the complex archive (--asset SICD) -----------------------------
+#
+# A SICD is complex slant-plane data with no map grid, so it is geocoded through
+# `umbra_py.convert` before the same window loop cuts its tiles. The download +
+# geocode step is the injectable `preparer`, so every test below runs the whole
+# chipping path with no `sarpy`, no network and no multi-gigabyte NITF -- the
+# same seam `describe`/`narrate` use for their renders.
+
+
+def _fake_preparer(cog_path, *, calls=None):
+    """A `SicdPreparer` that hands back an already-built raster."""
+
+    def prepare(item, asset, work_dir, conversion):
+        if calls is not None:
+            calls.append((item.id, asset, str(work_dir), conversion))
+        return cog_path
+
+    return prepare
+
+
+def _make_converted_cog(path, **tags):
+    """A small geocoded raster carrying the UMBRA_* provenance tags a real
+    `sicd_to_geocoded_cog` output would."""
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.convert import conversion_tags
+
+    tif, bounds, crs = _make_geotiff(path, width=20, height=20, nodata_corner=False)
+    with rasterio.open(tif, "r+") as ds:
+        ds.update_tags(**conversion_tags(source="scene.nitf", geocoded=True, **tags))
+    return tif
+
+
+def test_sicd_is_chippable_and_goes_through_the_preparer(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import CHIPPABLE_ASSETS, COMPLEX_ASSETS, chip_item
+
+    assert "SICD" in CHIPPABLE_ASSETS
+    assert COMPLEX_ASSETS == ("SICD",)
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0", rtc_model="facet")
+    calls: list = []
+    item = _item_for(tmp_path / "unused.tif", **{"sar:product_type": "SICD"})
+
+    records = chip_item(
+        item,
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog, calls=calls),
+    )
+
+    # The geometry is the ordinary one: a 20x20 raster in 10 px tiles.
+    assert len(records) == 4
+    assert [r.asset for r in records] == ["SICD"] * 4
+    # ...and the conversion ran exactly once for the acquisition.
+    assert len(calls) == 1
+    assert calls[0][0] == "test-acq"
+    assert calls[0][1] == "SICD"
+
+
+def test_sicd_records_report_the_processing_that_actually_ran(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="gamma0", rtc_model="facet")
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    # Read back from the raster's own tags, not from the request -- so the
+    # manifest reports the processing, not the intent.
+    assert {r.calibration for r in records} == {"gamma0"}
+    assert {r.rtc_model for r in records} == {"facet"}
+    assert records[0].to_dict()["calibration"] == "gamma0"
+
+
+def test_steps_that_did_not_run_are_null_not_the_string_none(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # conversion_tags writes "none" for a step that was skipped; a manifest
+    # field is null instead, so the two conventions are translated once.
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+    assert records[0].calibration is None
+    assert records[0].rtc_model is None
+
+
+def test_sicd_chips_carry_the_conversion_provenance_in_the_file(tmp_path):
+    pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+    from umbra_py.convert import read_conversion_tags
+
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif", calibration="sigma0", rtc_model="gamma", dem="glo30.tif"
+    )
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    chip = tmp_path / "chips" / records[0].path
+    prov = read_conversion_tags(chip)
+    # A chip says what its pixel values are without the manifest beside it.
+    assert prov["calibration"] == "sigma0"
+    assert prov["rtc_model"] == "gamma"
+    assert prov["dem"] == "glo30.tif"
+    assert prov["license"] == "CC-BY-4.0"
+    with rasterio.open(chip) as ds:
+        # The chip's own tags survive alongside the inherited ones.
+        assert ds.tags()["item_id"] == "test-acq"
+
+
+def test_amplitude_chips_are_untouched_by_the_provenance_plumbing(tmp_path):
+    pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    records = chip_item(_item_for(tif), tmp_path / "chips", chip_size=10)
+
+    assert records[0].calibration is None
+    assert records[0].rtc_model is None
+    with rasterio.open(tmp_path / "chips" / records[0].path) as ds:
+        # A GEC is the published product, not something this library made.
+        assert not [k for k in ds.tags() if k.startswith("UMBRA_")]
+
+
+def test_temporary_work_dir_is_removed_after_chipping(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    calls: list = []
+    chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog, calls=calls),
+    )
+    # No work_dir given -> the scene's bytes don't outlive the run, so a long
+    # series stays bounded to one acquisition on disk.
+    assert not Path(calls[0][2]).exists()
+
+
+def test_named_work_dir_is_used_and_kept(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    work = tmp_path / "work"
+    calls: list = []
+    chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        work_dir=work,
+        preparer=_fake_preparer(cog, calls=calls),
+    )
+    assert Path(calls[0][2]) == work
+    assert work.exists()
+
+
+def test_conversion_cache_key_tracks_every_setting():
+    from umbra_py.chips import SicdConversion
+
+    base = SicdConversion()
+    assert base.cache_key() == SicdConversion().cache_key()
+    # Each setting that changes the pixels changes the cached filename, so a
+    # re-run with different processing never chips the previous product.
+    for field_name, value in [
+        ("calibration", "sigma0"),
+        ("rtc", True),
+        ("rtc_model", "facet"),
+        ("dem", "glo30.tif"),
+        ("geoid", "egm96.tif"),
+        ("resolution", 1e-5),
+        ("resampling", "cubic"),
+        ("gcp_grid", 21),
+        ("projection_type", "PLANE"),
+        ("rtc_reference_deg", 30.0),
+    ]:
+        assert dataclasses.replace(base, **{field_name: value}).cache_key() != base.cache_key()
+
+
+def test_prepare_sicd_reuses_an_already_geocoded_scene(tmp_path):
+    from umbra_py.chips import SicdConversion, _prepare_sicd, _safe_slug
+
+    conversion = SicdConversion(calibration="sigma0")
+    work = tmp_path / "work"
+    work.mkdir()
+    cached = work / f"{_safe_slug('test-acq')}.{conversion.cache_key()}.tif"
+    cached.write_bytes(b"not really a tif")
+
+    item = _item_for(tmp_path / "unused.tif")
+    # Returns the cached COG without downloading or converting anything -- which
+    # is what makes a re-run over a large chip set cheap.
+    assert _prepare_sicd(item, "SICD", work, conversion) == cached
+
+
+def test_write_chips_reports_the_conversion_it_used(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    conversion = SicdConversion(calibration="sigma0")
+    dataset = write_chips(
+        [_item_for(tmp_path / "unused.tif")],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=conversion,
+        preparer=_fake_preparer(cog),
+    )
+    assert dataset.chip_count == 4
+    assert dataset.to_dict()["conversion"]["calibration"] == "sigma0"
+
+
+def test_write_chips_defaults_the_conversion_for_a_complex_asset(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    dataset = write_chips(
+        [_item_for(tmp_path / "unused.tif")],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+    # The summary reports the settings that ran, not the (absent) request.
+    assert dataset.to_dict()["conversion"]["projection_type"] == "HAE"
+
+
+def test_amplitude_dataset_summary_is_unchanged(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    dataset = write_chips([_item_for(tif)], tmp_path / "ds", chip_size=10)
+    assert "conversion" not in dataset.to_dict()
+
+
+def test_cli_chips_sicd_builds_the_conversion(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="gamma0", rtc_model="facet")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    real_write_chips = chips_mod.write_chips
+    captured: dict = {}
+
+    def _spy(items, out_dir, **kwargs):
+        captured.update(kwargs)
+        return real_write_chips(items, out_dir, preparer=_fake_preparer(cog), **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--chip-size",
+            "10",
+            "--dem",
+            "auto",
+            "--rtc",
+            "--rtc-model",
+            "facet",
+            "--calibrate",
+            "gamma0",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    conversion = captured["conversion"]
+    assert conversion.dem == "auto"
+    assert conversion.rtc is True
+    assert conversion.rtc_model == "facet"
+    assert conversion.calibration == "gamma0"
+    payload = json.loads(result.output)
+    assert payload["conversion"]["calibration"] == "gamma0"
+
+
+def test_cli_rejects_conversion_flags_on_an_amplitude_asset(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--calibrate",
+            "sigma0",
+        ],
+    )
+    # A silently ignored --calibrate would produce an uncalibrated dataset the
+    # caller believes is calibrated, so it is a usage error instead.
+    assert result.exit_code != 0
+    assert "--calibrate" in result.output
+    assert "--asset SICD" in result.output

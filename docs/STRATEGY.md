@@ -216,6 +216,18 @@ metadata naming the calibration, the RTC model and its resolved reference angle,
 the DEM/geoid, the projection, the scale and the CC-BY licence
 (`read_conversion_tags` / `umbra convert --provenance` / `gdalinfo`), because a
 physical measurement nobody can attribute to a calibration is not one.
+And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
+SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
+identical tiles from the result, so a training set can come from the
+full-resolution archive — and, with `--rtc-model facet --calibrate gamma0`, from
+a terrain-flattened gamma-nought coefficient rather than relative brightness,
+which is the difference between a model that transfers between scenes and one
+that memorises brightness. The chipper composes with the pipeline rather than
+reimplementing it (same window loop, conversion settings passed straight
+through, provenance read back from the raster's own `UMBRA_*` tags into both the
+manifest and every chip GeoTIFF), and states its cost: a SICD has no map grid to
+range-read, so the product is downloaded whole — opt-in, one scene resident at a
+time, and `--work-dir` making the expensive step resumable.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -436,6 +448,22 @@ from:
   `read_conversion_tags`, `umbra convert --provenance`, or `gdalinfo`. See the
   CHANGELOG. **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
+- ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
+  from GEC/CSI, so a model trained on Umbra data was never trained on the
+  full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`
+  geocodes each complex product through the pipeline above and cuts the identical
+  tiles from the result, so the two heaviest subsystems compose: the same window
+  loop, the same manifest, and every conversion setting (`--dem`, `--geoid`,
+  `--rtc`, `--rtc-model`, `--calibrate`, …) applying to what a training loader
+  reads. `--rtc-model facet --calibrate gamma0` makes a chip a terrain-flattened
+  gamma-nought measurement rather than relative brightness — the property that
+  lets a model transfer between scenes taken at different angles. Provenance is
+  read *back* from the converted raster's `UMBRA_*` tags into both the manifest
+  and every chip GeoTIFF, so a record reports the processing that ran rather than
+  the one requested. The whole-product download a SICD requires is stated rather
+  than hidden: opt-in, one scene resident at a time, and `--work-dir` caching the
+  geocoded COG under a digest of its settings so a re-run reuses it. See the
+  CHANGELOG.
 - ~~The datacube's memory ceiling (every pass read eagerly, so a long series had
   to be traded against resolution).~~ **shipped** — `to_stack(lazy=True)` /
   `umbra stack --lazy` (the new `[dask]` extra) make each acquisition one chunk

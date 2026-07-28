@@ -7,6 +7,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **ML training data from the *complex* archive: `umbra chips --asset SICD`.**
+  `umbra chips` cut tiles from the amplitude products only — `CHIPPABLE_ASSETS`
+  was `("GEC", "CSI")`, and the module said so in as many words: the complex
+  products "live in the slant plane and are not display rasters, so chipping
+  them makes no sense." That was true when it was written. It stopped being true
+  when `umbra convert` shipped: SICD → geocoded COG, with DEM orthorectification,
+  four terrain-flattening models and radiometric calibration. The gap left
+  behind was that the toolkit could turn a complex product into a physical,
+  map-ready raster, and separately cut training tiles — but not both, so a model
+  built on Umbra data was built on the *derived* products and never on the
+  full-resolution ones that are the point of 16–25 cm SAR.
+
+  `--asset SICD` closes it by composing the two rather than reimplementing
+  either. Each acquisition is fetched, geocoded through
+  `sicd_to_geocoded_cog`, and then chipped by the **same window loop** that
+  reads a GEC — one new context manager (`_chip_source`) decides what the loop
+  opens, and nothing about a chip's shape, filtering, manifest or naming
+  changes. Because the conversion is that conversion, `--dem` / `--geoid` /
+  `--rtc` / `--rtc-model` / `--rtc-ref-angle` / `--calibrate` /
+  `--convert-resolution` / `--resampling` all apply, so
+  `--rtc-model facet --calibrate gamma0` produces chips carrying a terrain-
+  flattened **gamma-nought** backscatter coefficient — a number that means the
+  same thing in two scenes taken from different angles, which is the difference
+  between a model that transfers and one that memorises brightness. The library
+  handle is `SicdConversion`, a frozen dataclass whose fields are passed
+  straight through; the one option deliberately withheld is `decibels`, because
+  the chipper's own `db` flag already chooses the scale and letting the
+  conversion choose it too would mean two paths and a calibrated chip whose
+  decibels were the decibels of something else.
+
+  **The provenance is read back, not remembered.** Each record's `calibration`
+  and `rtc_model` come from the converted raster's own `UMBRA_*` tags, so the
+  manifest reports the processing that ran rather than the processing that was
+  asked for, and a step that did not run is `null` rather than the string
+  `"none"` the tags use (one translation, in one place). The whole tag set is
+  copied into every chip GeoTIFF, so a tile says what its pixel values are
+  without the manifest beside it — `conversion_tags`' rule, applied to the tile.
+  A GEC chip carries no such tags and both fields stay `null`: a published
+  product is not something this library made, and the absence is the answer.
+
+  **The cost is stated rather than hidden.** Unlike the GEC path — where only a
+  tile's bytes cross the network — a SICD has no map grid to range-read, so the
+  product is downloaded whole before anything can be cut from it. So the mode is
+  opt-in, one scene is resident at a time (a temporary directory, removed after
+  the acquisition), and `--work-dir` keeps both the download and the geocoded
+  COG: a re-run reuses a scene already converted **with the same settings**,
+  keyed by a digest of `SicdConversion`, so changing `--calibrate` renames the
+  cache entry rather than silently chipping the previous product. Both halves
+  are resumable — `download_asset` resumes a partial NITF, and an existing COG
+  is not rebuilt. Passing a conversion flag with an amplitude `--asset` is a
+  usage error, not a silent no-op, since a quietly ignored `--calibrate` yields
+  an uncalibrated dataset its owner believes is calibrated.
+
+  The download-and-geocode step is an injectable `preparer` (the seam
+  `describe` / `narrate` use for their renders), so the whole path — grid,
+  provenance read-back, work-dir lifetime, cache key, CLI wiring and the
+  amplitude-asset refusal — is offline-tested in `tests/test_chips.py` with no
+  `sarpy`, no network and no multi-gigabyte NITF. No model is called. Needs the
+  `convert` extra alongside `load`.
 - **The windowed reduction reaches the hosted instance: `"windowed": true` on
   `POST /artifacts/stats`.** `stack_stats(windowed=True)` (below) lifted the
   measurement's memory ceiling for a local cube, and `umbra serve --stack-lazy

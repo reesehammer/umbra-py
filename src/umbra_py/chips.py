@@ -12,10 +12,11 @@ Design, following the package's determinism boundary (``docs/AGENTS.md``):
 
 - **No model is called.** Chipping is pure raster iteration + manifest logic;
   it stays in the deterministic core behind the ``[load]`` extra (``rasterio`` +
-  ``numpy``), exactly like :mod:`umbra_py.load`, which it mirrors. It reads band
-  1 of the item's geocoded GeoTIFF through GDAL's ``/vsicurl/`` driver, so only
-  the bytes for each tile are streamed over HTTP range requests -- no
-  multi-gigabyte download, and memory stays bounded to one chip at a time.
+  ``numpy``), exactly like :mod:`umbra_py.load`, which it mirrors. For an
+  amplitude product it reads band 1 of the item's geocoded GeoTIFF through
+  GDAL's ``/vsicurl/`` driver, so only the bytes for each tile are streamed over
+  HTTP range requests -- no multi-gigabyte download, and memory stays bounded to
+  one chip at a time.
 - **Fixed-size is a promise.** Only full ``chip_size`` x ``chip_size`` tiles are
   emitted; partial edge tiles are dropped, so every chip a training loader sees
   has the shape it expects. ``stride`` controls overlap (``stride < chip_size``
@@ -28,6 +29,20 @@ Design, following the package's determinism boundary (``docs/AGENTS.md``):
   geographic bbox, CRS, affine transform, and the acquisition metadata a model
   needs, plus the mandatory CC-BY attribution -- the same license discipline the
   library applies to GeoTIFF tags and xarray attrs, extended to the manifest.
+- **The complex products are chipped through the conversion pipeline.** A
+  ``SICD`` is not a display raster -- it is complex samples in the slant plane,
+  with no map grid to cut a georeferenced tile out of -- so for a long time the
+  chipper simply refused it, and the full-resolution half of Umbra's archive
+  (the half that is the point of 16-25 cm SAR) stayed out of reach of a training
+  loader. It is reachable now because :mod:`umbra_py.convert` shipped: with
+  ``asset="SICD"`` the acquisition is fetched, geocoded to a north-up
+  EPSG:4326 COG (optionally terrain-orthorectified, terrain-flattened and
+  radiometrically calibrated -- see :class:`SicdConversion`), and then chipped by
+  the *same* window loop that reads a GEC. Nothing about a chip's shape,
+  manifest or provenance changes; only where its pixels came from. The cost is
+  honest and stated: unlike the GEC path this downloads the whole product before
+  it can read any of it, so it is opt-in, one scene is resident at a time, and
+  ``work_dir`` makes the expensive step resumable across runs.
 
 The manifest is machine-readable first: ``.jsonl`` (one chip record per line --
 the standard ML manifest format) or ``.geojson`` (a ``FeatureCollection`` of
@@ -44,11 +59,14 @@ Install with: ``pip install "umbra-py[load]"`` (add ``[export]`` for
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import re
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+import tempfile
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -57,11 +75,18 @@ from .exceptions import AssetNotFoundError
 from .load import _open_path, _require
 from .models import UmbraItem
 
-#: Product types that are amplitude rasters this chipper can read. The complex
-#: ``SICD`` / ``CPHD`` products live in the slant plane and are not display
-#: rasters, so chipping them makes no sense; ``SIDD`` is a NITF that GDAL can
-#: read but is out of scope for the v1 chipper.
-CHIPPABLE_ASSETS = ("GEC", "CSI")
+#: Product types that are already amplitude rasters, read directly over HTTP
+#: range requests with no preparation.
+RASTER_ASSETS = ("GEC", "CSI")
+
+#: Product types that are complex slant-plane data, chipped by geocoding them
+#: first (see :class:`SicdConversion`). ``CPHD`` is phase history rather than a
+#: focused image, so it has no image grid to chip and stays out.
+COMPLEX_ASSETS = ("SICD",)
+
+#: Product types this chipper can read. ``SIDD`` is a NITF that GDAL can read
+#: but is out of scope.
+CHIPPABLE_ASSETS = (*RASTER_ASSETS, *COMPLEX_ASSETS)
 
 #: Progress callback: ``(item_index, item_total, item, chips_written)``.
 ProgressFn = Callable[[int, int, UmbraItem, int], None]
@@ -72,6 +97,149 @@ def _safe_slug(text: str) -> str:
     across items while staying readable)."""
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-._")
     return slug or "item"
+
+
+@dataclass(frozen=True)
+class SicdConversion:
+    """How a complex ``SICD`` is geocoded before it is chipped.
+
+    Every field is passed straight to :func:`umbra_py.convert.sicd_to_geocoded_cog`
+    and means exactly what it means there -- this is the chipper's handle on that
+    pipeline, not a second implementation of it. The defaults are the flat-earth
+    geocoding, which is what a training set wants unless the site has relief.
+
+    The one option deliberately *not* exposed is ``decibels``: the chipper's own
+    ``db`` flag already chooses the scale, so the conversion always writes linear
+    amplitude and the chip loop takes the logarithm. That keeps one code path for
+    both asset kinds, and keeps a calibrated chip's decibels the decibels *of the
+    calibrated quantity*.
+    """
+
+    dem: str | None = None
+    geoid: str | None = None
+    rtc: bool = False
+    rtc_model: str = "cosine"
+    rtc_reference_deg: float | None = None
+    calibration: str | None = None
+    resolution: float | None = None
+    resampling: str = "bilinear"
+    gcp_grid: int = 15
+    projection_type: str = "HAE"
+
+    def cache_key(self) -> str:
+        """A short stable digest of these settings.
+
+        Two conversions of one acquisition differ only by these values, so the
+        digest is what makes a cached geocoded COG in ``work_dir`` safe to reuse:
+        change a setting and the name changes with it, rather than silently
+        chipping the previous product.
+        """
+        blob = json.dumps(asdict(self), sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+#: Prepares a complex product for chipping: ``(item, asset, work_dir, conversion)``
+#: -> the path of a geocoded amplitude raster. Injectable so the whole chipping
+#: path is testable without ``sarpy``, a network, or a multi-gigabyte NITF.
+SicdPreparer = Callable[[UmbraItem, str, Path, SicdConversion], Path]
+
+
+def _provenance_tags(dataset: Any) -> dict[str, str]:
+    """The ``UMBRA_*`` conversion tags an open raster carries (empty if none).
+
+    A GEC streamed from the bucket has none -- it is the published product, not
+    something this library made -- so the absence is the honest answer, not a
+    gap to fill in.
+    """
+    from .convert import PROVENANCE_TAG_PREFIX  # noqa: PLC0415
+
+    return {
+        key: value for key, value in dataset.tags().items() if key.startswith(PROVENANCE_TAG_PREFIX)
+    }
+
+
+def _reported_step(provenance: dict[str, str], name: str) -> str | None:
+    """One processing step from the provenance tags, as ``None`` when it did not run.
+
+    :func:`umbra_py.convert.conversion_tags` writes ``"none"`` rather than
+    omitting a step that was skipped, so that a tag's absence never has to be
+    interpreted; a manifest field is the other convention, so translate once
+    here instead of at each use.
+    """
+    from .convert import PROVENANCE_TAG_PREFIX  # noqa: PLC0415
+
+    value = provenance.get(f"{PROVENANCE_TAG_PREFIX}{name}")
+    return None if value in (None, "none") else value
+
+
+@contextlib.contextmanager
+def _chip_source(
+    item: UmbraItem,
+    asset: str,
+    *,
+    conversion: SicdConversion | None,
+    work_dir: str | os.PathLike | None,
+    preparer: SicdPreparer | None,
+) -> Iterator[str]:
+    """Yield something ``rasterio`` can open for this item's ``asset``.
+
+    For an amplitude raster that is the remote URL itself, so only the bytes of
+    each tile cross the network. For a complex product it is a locally geocoded
+    COG, built once and (with ``work_dir``) kept.
+    """
+    if asset.upper() not in COMPLEX_ASSETS:
+        url = item.asset_href(asset)
+        if not url:
+            raise AssetNotFoundError(f"Item {item.id!r} has no resolvable URL for asset {asset!r}.")
+        yield _open_path(url)
+        return
+
+    prepare = preparer or _prepare_sicd
+    settings = conversion or SicdConversion()
+    if work_dir is not None:
+        kept = Path(work_dir)
+        kept.mkdir(parents=True, exist_ok=True)
+        yield str(prepare(item, asset, kept, settings))
+        return
+    with tempfile.TemporaryDirectory(prefix="umbra-chips-") as tmp:
+        yield str(prepare(item, asset, Path(tmp), settings))
+
+
+def _prepare_sicd(
+    item: UmbraItem,
+    asset: str,
+    work_dir: Path,
+    conversion: SicdConversion,
+) -> Path:
+    """Download a complex product and geocode it to a chippable COG.
+
+    Both halves are resumable: :func:`umbra_py.download.download_asset` resumes a
+    partial NITF, and a geocoded COG already present for these exact settings is
+    reused rather than rebuilt. Needs the ``[convert]`` extra.
+    """
+    from .convert import sicd_to_geocoded_cog  # noqa: PLC0415
+    from .download import download_asset  # noqa: PLC0415
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    dst = work_dir / f"{_safe_slug(item.id)}.{conversion.cache_key()}.tif"
+    if dst.exists():
+        return dst
+    src = download_asset(item, asset, work_dir)
+    return sicd_to_geocoded_cog(
+        src,
+        dst,
+        decibels=False,
+        gcp_grid=conversion.gcp_grid,
+        resolution=conversion.resolution,
+        resampling=conversion.resampling,
+        projection_type=conversion.projection_type,
+        dem=conversion.dem,
+        geoid=conversion.geoid,
+        rtc=conversion.rtc,
+        rtc_reference_deg=conversion.rtc_reference_deg,
+        rtc_model=conversion.rtc_model,
+        calibration=conversion.calibration,
+    )
 
 
 @dataclass
@@ -85,6 +253,13 @@ class ChipRecord:
     ``resolution_*`` pair), and how usable it is (``valid_fraction`` -- the
     fraction of finite, positive pixels). ``license`` / ``attribution`` travel
     with every record.
+
+    A chip cut from a complex product also carries what the conversion did to
+    its pixels -- ``calibration`` and ``rtc_model``, read back from the geocoded
+    raster's own provenance tags rather than from the request, so the record
+    reports the processing that actually ran. Both are ``None`` for a chip read
+    straight from an amplitude raster, and the full tag set travels in the chip
+    GeoTIFF itself.
     """
 
     path: str
@@ -106,6 +281,8 @@ class ChipRecord:
     incidence_angle_deg: float | None = None
     resolution_range_m: float | None = None
     resolution_azimuth_m: float | None = None
+    calibration: str | None = None
+    rtc_model: str | None = None
     license: str = DATA_LICENSE
     attribution: str = ATTRIBUTION
 
@@ -130,6 +307,8 @@ class ChipRecord:
             "incidence_angle_deg": self.incidence_angle_deg,
             "resolution_range_m": self.resolution_range_m,
             "resolution_azimuth_m": self.resolution_azimuth_m,
+            "calibration": self.calibration,
+            "rtc_model": self.rtc_model,
             "license": self.license,
             "attribution": self.attribution,
         }
@@ -168,6 +347,7 @@ class ChipDataset:
     asset: str
     units: str
     fmt: str
+    conversion: SicdConversion | None = None
 
     @property
     def chip_count(self) -> int:
@@ -175,6 +355,11 @@ class ChipDataset:
 
     def to_dict(self) -> dict[str, Any]:
         item_ids = sorted({r.item_id for r in self.records})
+        # The conversion block appears only when one ran, so an unconverted
+        # run's summary is unchanged by this field existing.
+        extra: dict[str, Any] = (
+            {"conversion": asdict(self.conversion)} if self.conversion is not None else {}
+        )
         return {
             "out_dir": self.out_dir,
             "manifest": self.manifest_path,
@@ -188,6 +373,7 @@ class ChipDataset:
             "items": item_ids,
             "license": DATA_LICENSE,
             "attribution": ATTRIBUTION,
+            **extra,
         }
 
 
@@ -200,10 +386,18 @@ def _write_geotiff_chip(
     item: UmbraItem,
     asset: str,
     units: str,
+    provenance: dict[str, str] | None = None,
 ) -> None:
     """Write one chip array as a single-band float32 GeoTIFF with geo + license
     tags, mirroring :func:`umbra_py.load.to_geotiff`'s profile so the chips read
-    identically in QGIS / rasterio."""
+    identically in QGIS / rasterio.
+
+    ``provenance`` is the source raster's ``UMBRA_*`` conversion tags, copied
+    through unchanged so a chip cut from a converted SICD says what its pixel
+    values are (calibration, terrain-flattening model, DEM, scale) without the
+    manifest beside it -- the same rule :func:`umbra_py.convert.conversion_tags`
+    applies to the scene, applied to the tile.
+    """
     from affine import Affine  # noqa: PLC0415
 
     profile = {
@@ -225,6 +419,7 @@ def _write_geotiff_chip(
             units=units,
             license=DATA_LICENSE,
             attribution=ATTRIBUTION,
+            **(provenance or {}),
         )
 
 
@@ -239,6 +434,9 @@ def chip_item(
     fmt: str = "geotiff",
     min_valid: float = 0.0,
     prefix: str | None = None,
+    conversion: SicdConversion | None = None,
+    work_dir: str | os.PathLike | None = None,
+    preparer: SicdPreparer | None = None,
 ) -> list[ChipRecord]:
     """Cut one acquisition into fixed-size, georeferenced training tiles.
 
@@ -247,6 +445,12 @@ def chip_item(
     each full ``chip_size`` x ``chip_size`` tile to ``out_dir`` as a GeoTIFF (or
     a NumPy ``.npy`` array). Returns a :class:`ChipRecord` per written chip.
 
+    With ``asset="SICD"`` the complex product is downloaded and geocoded first
+    (see :class:`SicdConversion`) and the resulting COG is chipped by this same
+    loop, so a training set can be cut from the full-resolution complex archive
+    -- optionally terrain-orthorectified, terrain-flattened and radiometrically
+    calibrated -- rather than only from the derived amplitude products.
+
     Parameters
     ----------
     item:
@@ -254,9 +458,11 @@ def chip_item(
     out_dir:
         Directory to write chips into (created if needed).
     asset:
-        Which product to read (``"GEC"`` or ``"CSI"``). The complex
-        ``SICD`` / ``CPHD`` products are not amplitude rasters and aren't
-        chippable.
+        Which product to read. ``"GEC"`` (the default) and ``"CSI"`` are
+        amplitude rasters, streamed tile by tile. ``"SICD"`` is the complex
+        slant-plane product: it has no map grid, so it is fetched whole and
+        geocoded before chipping (the ``[convert]`` extra). ``CPHD`` is phase
+        history rather than a focused image and is not chippable.
     chip_size:
         Tile edge in pixels. Only full tiles are emitted; a partial strip along
         the right/bottom edge is dropped, so every chip has this exact shape.
@@ -277,6 +483,19 @@ def chip_item(
     prefix:
         Filename stem for this item's chips (defaults to a slug of ``item.id``).
         Chips are named ``<prefix>_r<row>_c<col>.<ext>``.
+    conversion:
+        How to geocode a complex ``asset`` before chipping it. Ignored for the
+        amplitude rasters; defaults to :class:`SicdConversion`'s flat-earth
+        geocoding.
+    work_dir:
+        Where the downloaded product and the geocoded COG are kept when chipping
+        a complex ``asset``. ``None`` uses a temporary directory removed
+        afterwards, so disk stays bounded to one scene; naming a directory keeps
+        both files, which makes the expensive step resumable -- a re-run reuses a
+        COG already geocoded with the same settings instead of rebuilding it.
+    preparer:
+        Override for the download-and-geocode step (the test seam; defaults to
+        :func:`_prepare_sicd`).
 
     Returns
     -------
@@ -299,10 +518,6 @@ def chip_item(
     if not 0.0 <= min_valid <= 1.0:
         raise ValueError(f"min_valid must be in [0, 1], got {min_valid}.")
 
-    url = item.asset_href(asset)
-    if not url:
-        raise AssetNotFoundError(f"Item {item.id!r} has no resolvable URL for asset {asset!r}.")
-
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     stem = prefix or _safe_slug(item.id)
@@ -311,10 +526,16 @@ def chip_item(
     dt = item.datetime
 
     records: list[ChipRecord] = []
-    with rasterio.open(_open_path(url)) as src:
+    source_cm = _chip_source(
+        item, asset, conversion=conversion, work_dir=work_dir, preparer=preparer
+    )
+    with source_cm as source, rasterio.open(source) as src:
         nodata = src.nodata
         crs = src.crs
         crs_str = crs.to_string() if crs else None
+        provenance = _provenance_tags(src)
+        calibration = _reported_step(provenance, "CALIBRATION")
+        rtc_model = _reported_step(provenance, "RTC_MODEL")
         rows = range(0, src.height - chip_size + 1, step)
         cols = range(0, src.width - chip_size + 1, step)
         for row, r0 in enumerate(rows):
@@ -348,7 +569,15 @@ def chip_item(
                 if fmt == "geotiff":
                     chip_path = out_path / f"{name}.tif"
                     _write_geotiff_chip(
-                        rasterio, chip_path, data, crs_str, tuple(transform)[:6], item, asset, units
+                        rasterio,
+                        chip_path,
+                        data,
+                        crs_str,
+                        tuple(transform)[:6],
+                        item,
+                        asset,
+                        units,
+                        provenance,
                     )
                 else:
                     chip_path = out_path / f"{name}.npy"
@@ -375,6 +604,8 @@ def chip_item(
                         incidence_angle_deg=item.incidence_angle,
                         resolution_range_m=rng,
                         resolution_azimuth_m=azi,
+                        calibration=calibration,
+                        rtc_model=rtc_model,
                     )
                 )
     return records
@@ -482,6 +713,9 @@ def write_chips(
     min_valid: float = 0.0,
     manifest: str | None = "manifest.jsonl",
     progress: ProgressFn | None = None,
+    conversion: SicdConversion | None = None,
+    work_dir: str | os.PathLike | None = None,
+    preparer: SicdPreparer | None = None,
 ) -> ChipDataset:
     """Chip a whole search result into a training dataset with a manifest.
 
@@ -494,9 +728,20 @@ def write_chips(
     pass ``None`` to skip writing it and just collect the records. ``progress``
     is called ``(index, total, item, chips_written)`` after each item, for a CLI
     progress line.
+
+    ``conversion`` / ``work_dir`` / ``preparer`` apply when ``asset`` is a
+    complex product (see :func:`chip_item`). Each acquisition is prepared and
+    chipped in turn, so a run over many SICDs holds one scene on disk at a time
+    unless ``work_dir`` is set to keep them.
     """
     out_path = Path(out_dir)
     items = list(items)
+    # Resolve the default here rather than per item, so the dataset summary
+    # reports the settings that actually ran even when the caller passed none.
+    if asset.upper() in COMPLEX_ASSETS:
+        conversion = conversion or SicdConversion()
+    else:
+        conversion = None
     records: list[ChipRecord] = []
     for i, item in enumerate(items):
         recs = chip_item(
@@ -508,6 +753,9 @@ def write_chips(
             db=db,
             fmt=fmt,
             min_valid=min_valid,
+            conversion=conversion,
+            work_dir=work_dir,
+            preparer=preparer,
         )
         records.extend(recs)
         if progress is not None:
@@ -527,4 +775,5 @@ def write_chips(
         asset=asset,
         units="dB" if db else "amplitude",
         fmt=fmt.lower(),
+        conversion=conversion,
     )
