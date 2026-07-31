@@ -663,8 +663,84 @@ def convert(
     show_default=True,
     type=click.Choice(CHIPPABLE_ASSETS, case_sensitive=False),
     help="Which product to chip. GEC (the geocoded GeoTIFF) is the sensible "
-    "default; CSI also works. The complex SICD/CPHD products aren't amplitude "
-    "rasters and can't be chipped.",
+    "default and streams tile by tile; CSI also works. SICD is the complex "
+    "slant-plane product: it has no map grid, so each scene is downloaded whole "
+    "and geocoded first (the [convert] extra) before the same tiles are cut -- "
+    "which is how a training set reaches the full-resolution archive, and where "
+    "--calibrate / --rtc / --dem apply. CPHD is phase history, not an image.",
+)
+@click.option(
+    "--dem",
+    type=str,
+    default=None,
+    metavar="PATH|auto",
+    help="SICD only: terrain-orthorectify each scene against a digital elevation "
+    "model instead of the flat-earth projection. A path to any raster rasterio "
+    "can open, or 'auto' to fetch the covering Copernicus GLO-30 tiles.",
+)
+@click.option(
+    "--geoid",
+    type=str,
+    default=None,
+    metavar="PATH|auto",
+    help="SICD only: geoid-undulation grid converting sampled DEM heights to "
+    "height-above-ellipsoid, or 'auto' to fetch one. Requires --dem.",
+)
+@click.option(
+    "--rtc",
+    is_flag=True,
+    help="SICD only: radiometrically terrain-flatten each scene before chipping, "
+    "so slopes facing toward or away from the radar don't teach a model their "
+    "brightness. Requires --dem.",
+)
+@click.option(
+    "--rtc-model",
+    type=click.Choice(list(RTC_MODELS), case_sensitive=False),
+    default="cosine",
+    show_default=True,
+    help="SICD only: terrain-flattening model for --rtc (see 'umbra convert "
+    "--help' for what each one corrects).",
+)
+@click.option(
+    "--rtc-ref-angle",
+    type=float,
+    default=None,
+    metavar="DEGREES",
+    help="SICD only: reference incidence angle the --rtc flattening normalises "
+    "to. Omit to use each scene's own incidence angle.",
+)
+@click.option(
+    "--calibrate",
+    type=click.Choice(list(CALIBRATION_TYPES), case_sensitive=False),
+    default=None,
+    help="SICD only: radiometrically calibrate the pixels using the SICD's own "
+    "Radiometric scale factors, so chips carry a physical backscatter "
+    "coefficient rather than relative brightness -- the difference between a "
+    "model that transfers across scenes and one that doesn't. Composes with "
+    "--rtc. Fails clearly when the product carries no such scale factor.",
+)
+@click.option(
+    "--convert-resolution",
+    type=float,
+    default=None,
+    metavar="DEGREES",
+    help="SICD only: geocoded pixel size in degrees. Omit to keep the finer of "
+    "the two per-axis ground sample distances (throw no resolution away).",
+)
+@click.option(
+    "--resampling",
+    type=click.Choice(list(RESAMPLING_METHODS), case_sensitive=False),
+    default="bilinear",
+    show_default=True,
+    help="SICD only: warp kernel used to geocode each scene.",
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="SICD only: keep the downloaded product and the geocoded COG here "
+    "instead of a temporary directory. A re-run then reuses a scene already "
+    "geocoded with the same settings rather than fetching and warping it again.",
 )
 @click.option(
     "--chip-size",
@@ -741,6 +817,15 @@ def chips(
     item_urls,
     out_dir,
     asset,
+    dem,
+    geoid,
+    rtc,
+    rtc_model,
+    rtc_ref_angle,
+    calibrate,
+    convert_resolution,
+    resampling,
+    work_dir,
     chip_size,
     stride,
     fmt,
@@ -780,13 +865,50 @@ def chips(
       --start/--end and the command gathers a site's acquisitions
       automatically.
 
-    Only the bytes for each tile are streamed via HTTP range requests -- no full
-    download, and memory stays bounded to one chip. Requires the load extra
+    For the amplitude products (GEC, CSI) only the bytes for each tile are
+    streamed via HTTP range requests -- no full download, and memory stays
+    bounded to one chip. Requires the load extra
     (``pip install "umbra-py[load]"``).
+
+    \b
+    --asset SICD chips the complex archive instead: each scene is downloaded
+    whole and geocoded before its tiles are cut, so --dem, --rtc and
+    --calibrate apply and the chips can carry a physical backscatter
+    coefficient. That path needs the convert extra
+    (``pip install "umbra-py[convert]"``) and real bytes per scene, so give
+    --work-dir to keep the geocoded scenes and make a re-run cheap.
     """
-    from ..chips import write_chips
+    from ..chips import COMPLEX_ASSETS, SicdConversion, write_chips
 
     _shared._check_token_not_local(token, local, db_path)
+    conversion_flags = {
+        "--dem": dem,
+        "--geoid": geoid,
+        "--rtc": rtc,
+        "--rtc-ref-angle": rtc_ref_angle,
+        "--calibrate": calibrate,
+        "--convert-resolution": convert_resolution,
+        "--work-dir": work_dir,
+    }
+    if asset.upper() not in COMPLEX_ASSETS:
+        used = sorted(name for name, value in conversion_flags.items() if value)
+        if used:
+            raise click.UsageError(
+                f"{', '.join(used)} only appl{'ies' if len(used) == 1 else 'y'} to "
+                f"--asset SICD; {asset} is already a geocoded amplitude raster."
+            )
+        conversion = None
+    else:
+        conversion = SicdConversion(
+            dem=dem,
+            geoid=geoid,
+            rtc=rtc,
+            rtc_model=rtc_model,
+            rtc_reference_deg=rtc_ref_angle,
+            calibration=calibrate,
+            resolution=convert_resolution,
+            resampling=resampling,
+        )
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -840,6 +962,8 @@ def chips(
             min_valid=min_valid,
             manifest=manifest,
             progress=None if as_json else _report,
+            conversion=conversion,
+            work_dir=work_dir,
         )
 
     if as_json:

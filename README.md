@@ -984,9 +984,31 @@ umbra chips --area "Centerfield" --out chips/ --manifest chips.parquet
 
 # Or chip specific items directly, and print the dataset summary as JSON.
 umbra chips <item-json-url> --out chips/ --json
+
+# Chip the *complex* archive: each SICD is geocoded before its tiles are cut, so
+# a training set can come from the full-resolution product — terrain-corrected
+# and radiometrically calibrated, not relative brightness (needs the convert
+# extra: pip install "umbra-py[load,convert]").
+umbra chips --area "Centerfield" --out chips/ --asset SICD \
+    --dem auto --rtc --rtc-model facet --calibrate gamma0 --work-dir scenes/
 ```
 
-Only the bytes for each tile stream over HTTP range requests — no full download,
+**The complex products are chippable too.** A `SICD` is complex slant-plane data
+with no map grid, so `--asset SICD` fetches each scene and geocodes it through
+the same pipeline `umbra convert` uses, then cuts the identical tiles from the
+result — which is how a training set reaches the half of the archive that is the
+point of 16–25 cm SAR. Because the conversion is the one `umbra convert` runs,
+`--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` all apply: chips can
+carry a terrain-flattened, calibrated **gamma-nought** backscatter coefficient
+rather than relative brightness, and each chip GeoTIFF inherits the `UMBRA_*`
+provenance tags saying so (the manifest also carries `calibration` / `rtc_model`,
+read back from the raster rather than from the request). The cost is honest:
+unlike the GEC path this downloads each product whole, so it is opt-in, one scene
+is on disk at a time, and `--work-dir` keeps the geocoded scenes so a re-run
+reuses them instead of fetching and warping again.
+
+For the amplitude products (`GEC`, `CSI`) only the bytes for each tile stream
+over HTTP range requests — no full download,
 and memory stays bounded to one chip. Fixed-size is a promise (partial edge tiles
 are dropped), so every chip has the exact shape a loader expects; `--stride`
 overlaps tiles for dense inference / augmentation, and `--min-valid` drops the

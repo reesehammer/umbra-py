@@ -5,6 +5,13 @@ Cut scenes into fixed-size, georeferenced training tiles with per-chip metadata
 stac-geoparquet manifest. Chipping needs the `[load]` extra; the GeoParquet
 manifest and catalog export need `[export]`.
 
+The complex products are chippable too: `asset="SICD"` geocodes each acquisition
+through the [conversion pipeline](convert.md) — optionally terrain-orthorectified,
+terrain-flattened and radiometrically calibrated (see `SicdConversion`) — and cuts
+the identical tiles from the result, so a training set can carry a physical
+backscatter coefficient from the full-resolution archive. That path needs the
+`[convert]` extra alongside `[load]`.
+
 ## Chips
 
 ::: umbra_py.chip_item
@@ -19,7 +26,13 @@ manifest and catalog export need `[export]`.
 
 ::: umbra_py.ChipDataset
 
+::: umbra_py.SicdConversion
+
 ::: umbra_py.CHIPPABLE_ASSETS
+
+::: umbra_py.RASTER_ASSETS
+
+::: umbra_py.COMPLEX_ASSETS
 
 ## Catalog export
 
