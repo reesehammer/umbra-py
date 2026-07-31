@@ -47,20 +47,26 @@ from .models import UmbraItem
 from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
 
 def _require_mcp():
-    """Import the MCP SDK, or raise a helpful install hint."""
+    """Import the MCP SDK, or raise a helpful install hint.
+
+    ``mcp.server.mcpserver`` is the 2.0 home of what 1.x called
+    ``mcp.server.fastmcp``; the class is ``MCPServer`` rather than ``FastMCP``.
+    The extra requires ``mcp>=2``, so a stale 1.x install lands here as a
+    ``ModuleNotFoundError`` and gets the same upgrade hint as a missing one.
+    """
     try:
-        from mcp.server.fastmcp import FastMCP, Image
+        from mcp.server.mcpserver import Image, MCPServer
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via CLI
         raise MissingDependencyError(
-            "The MCP server needs the 'mcp' extra. Install it with:\n"
+            "The MCP server needs the 'mcp' extra (mcp>=2). Install it with:\n"
             "    pip install 'umbra-py[mcp]'",
             hint="pip install 'umbra-py[mcp]'",
         ) from exc
-    return FastMCP, Image
+    return MCPServer, Image
 
 
 # --------------------------------------------------------------------------
@@ -473,6 +479,12 @@ def timescan(
     image = viz.timescan_composite(items, asset=asset, db=db, max_size=max_size)
     caption = f"Timescan over {len(items)} passes (color = temporal activity). {ATTRIBUTION}"
     return [Image(data=_png_bytes(image), format="png"), caption]
+
+
+#: The tools whose answer *is* the picture -- they return MCP content blocks
+#: rather than JSON, so :func:`build_server` registers them without structured
+#: output (see the comment there).
+_IMAGE_TOOLS = (quicklook, change_composite, timescan)
 
 
 def stack_stats(
@@ -893,14 +905,14 @@ def main() -> None:
     build_server().run()
 
 
-def build_server() -> FastMCP:
-    """Construct and return the configured ``FastMCP`` server.
+def build_server() -> MCPServer:
+    """Construct and return the configured ``MCPServer``.
 
     Kept as a factory (rather than a module-level singleton) so tests can build
     and introspect it without side effects, and so the ``mcp`` import stays
     lazy — importing this module does not require the extra until you build.
     """
-    FastMCP, _Image = _require_mcp()
+    MCPServer, _Image = _require_mcp()
 
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
@@ -909,7 +921,7 @@ def build_server() -> FastMCP:
         if _canopy_token()
         else ""
     )
-    server = FastMCP(
+    server = MCPServer(
         "umbra",
         instructions=(
             "Search and visualize Umbra's open SAR archive. Start by reading "
@@ -944,7 +956,15 @@ def build_server() -> FastMCP:
         describe_scene,
         narrate_change,
     ):
-        server.add_tool(fn)
+        # The three tools that answer with a picture return MCP content blocks
+        # (an `Image` plus a caption), not JSON. The SDK derives a structured-
+        # output schema from the return annotation and then serialises the
+        # result against it -- which cannot represent an `Image`, so every call
+        # raised `ToolError: Unable to serialize unknown type`. Opting them out
+        # is what lets the radar scene reach the client at all; the JSON tools
+        # keep structured output, which is worth having for them.
+        image_tool = fn in _IMAGE_TOOLS
+        server.add_tool(fn, structured_output=False if image_tool else None)
 
     @server.resource(
         "umbra://context",
