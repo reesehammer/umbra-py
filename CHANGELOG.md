@@ -1376,6 +1376,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **The `mcp` extra is capped below 2.** `mcp` 2.0.0 was published on
+  2026-07-28 and removed the `mcp.server.fastmcp` module, which
+  `umbra_py.mcp_server` imports `FastMCP` and `Image` from. The extra asked for
+  `mcp>=1.2` with no upper bound, so from that release onward a fresh
+  `pip install "umbra-py[mcp]"` resolved to a version the server cannot import
+  at all — `umbra-mcp` died with `ModuleNotFoundError` before serving a single
+  tool, and CI's all-extras job stopped at collecting `tests/test_mcp_server.py`.
+
+  `mcp>=1.2,<2` is the honest constraint for code written against the 1.x
+  FastMCP API: it resolves to 1.29.0, the newest release that still exposes the
+  module. This is a pin correction, not a migration — porting `mcp_server.py` to
+  the 2.0 API is its own change, and the cap carries a comment saying so, the
+  same shape as the existing `ruff` cap right below it.
 - **The weekly catalog publish now actually publishes: `umbra tiles --index-db`,
   not `--db`.** Both of the only two `Publish catalog index` runs this project
   has ever had died in the same place — `umbra tiles --local --db catalog.db`,
