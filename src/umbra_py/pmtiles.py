@@ -563,7 +563,8 @@ def _cog_bounds(item: UmbraItem) -> str | None:
     exact ``data-bounds`` payload
     :func:`umbra_py._lazy_imagery.popup_button_html` writes, so the page hands
     it to the shared driver untouched. Coordinates are rounded to 5 decimals
-    (~1 m) — the overlay is a bbox-stretched quick look, so more precision would
+    (~1 m) — the driver places the overlay from the COG's own georeferencing and
+    only falls back to this box when it can't read them, so more precision would
     only inflate every tile.
     """
     if item.bbox is None:

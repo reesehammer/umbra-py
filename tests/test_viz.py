@@ -153,6 +153,120 @@ def test_stretch_to_rgba_colormap_produces_color():
     assert not (rgb[..., 0] == rgb[..., 1]).all()
 
 
+def _point_read_at_local_file(monkeypatch, path):
+    """Make ``_read_sar_band`` open ``path`` instead of a remote COG.
+
+    It reads through GDAL's ``/vsicurl/`` driver, which only speaks http(s).
+    The module resolves rasterio through ``_require``, so swapping in an
+    ``open`` that drops the prefix is enough to point it at a file on disk --
+    everything below (the WarpedVRT, the windowed read) stays real.
+    """
+    import rasterio
+
+    from umbra_py.viz import raster as raster_mod
+
+    class _LocalRasterio:
+        def __getattr__(self, name):
+            return getattr(rasterio, name)
+
+        @staticmethod
+        def open(target, *args, **kwargs):
+            assert str(target).startswith("/vsicurl/")
+            return rasterio.open(str(path), *args, **kwargs)
+
+    real_require = raster_mod._require
+    monkeypatch.setattr(
+        raster_mod,
+        "_require",
+        lambda module: _LocalRasterio() if module == "rasterio" else real_require(module),
+    )
+
+
+def test_read_sar_band_warps_a_rotated_epsg4326_gec(monkeypatch, tmp_path, sample_item_dict):
+    """Regression: an Umbra GEC is geocoded but *not* north-up -- its pixel grid
+    is rotated to the collect geometry. A GEC that is already in EPSG:4326 was
+    skipping the warp and being placed on a lat/lon box as if it were north-up,
+    which rotated the whole scene off the map. It must be warped like any other.
+    """
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import Affine
+
+    from umbra_py.viz.raster import _read_sar_band
+
+    # A uniformly-bright square whose grid is rotated 30 degrees off north.
+    size, pixel = 64, 0.001
+    transform = Affine.translation(10.0, 45.0) * Affine.rotation(30) * Affine.scale(pixel, -pixel)
+    scene = tmp_path / "rotated_gec.tif"
+    with rasterio.open(
+        scene,
+        "w",
+        driver="GTiff",
+        width=size,
+        height=size,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=transform,
+        nodata=0,
+    ) as dst:
+        dst.write(np.full((size, size), 200, dtype="uint8"), 1)
+
+    _point_read_at_local_file(monkeypatch, scene)
+    item = UmbraItem.from_dict(sample_item_dict)
+    data, bounds = _read_sar_band(item, "GEC", 256, reproject_to_4326=True)
+
+    # North-up output over a rotated footprint: the envelope's corners fall
+    # outside the imaged quad and read as nodata, while the middle is scene.
+    # Unwarped (the bug) every pixel would be 200.
+    assert data[0, 0] == 0 and data[0, -1] == 0
+    assert data[-1, 0] == 0 and data[-1, -1] == 0
+    assert data[data.shape[0] // 2, data.shape[1] // 2] == 200
+
+    # And the placement box is the envelope of the rotated grid's four corners,
+    # up to the whole pixel the warped grid snaps to.
+    corners = [transform * (u, v) for u, v in ((0, 0), (size, 0), (0, size), (size, size))]
+    assert bounds.left == pytest.approx(min(x for x, _ in corners), abs=pixel)
+    assert bounds.right == pytest.approx(max(x for x, _ in corners), abs=pixel)
+    assert bounds.bottom == pytest.approx(min(y for _, y in corners), abs=pixel)
+    assert bounds.top == pytest.approx(max(y for _, y in corners), abs=pixel)
+
+
+def test_read_sar_band_leaves_a_north_up_epsg4326_raster_unwarped(
+    monkeypatch, tmp_path, sample_item_dict
+):
+    """The warp is only needed because the grid is rotated; a north-up EPSG:4326
+    raster must still be read straight through, at its own dimensions."""
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    from umbra_py.viz.raster import _read_sar_band
+
+    scene = tmp_path / "north_up.tif"
+    with rasterio.open(
+        scene,
+        "w",
+        driver="GTiff",
+        width=40,
+        height=20,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=from_origin(10.0, 45.0, 0.001, 0.001),
+        nodata=0,
+    ) as dst:
+        dst.write(np.full((20, 40), 200, dtype="uint8"), 1)
+
+    _point_read_at_local_file(monkeypatch, scene)
+    item = UmbraItem.from_dict(sample_item_dict)
+    data, bounds = _read_sar_band(item, "GEC", 256, reproject_to_4326=True)
+
+    assert data.shape == (20, 40)
+    assert (data == 200).all()
+    assert (bounds.left, bounds.top) == pytest.approx((10.0, 45.0))
+
+
 def test_quicklook_returns_pil_image(monkeypatch):
     """quicklook reads a (mocked) band and returns a correctly-sized
     RGBA PIL image without touching the network."""

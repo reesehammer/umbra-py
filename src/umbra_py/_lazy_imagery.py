@@ -6,9 +6,9 @@ fetches `geotiff.js <https://geotiffjs.github.io/>`_ from a pinned CDN,
 streams a low-resolution overview of the GEC cloud-optimized GeoTIFF
 directly from the Umbra public bucket via HTTP range requests, applies
 the same percentile stretch that :func:`umbra_py.viz._stretch_to_rgba`
-performs in Python, paints the result to a ``<canvas>``, and drops it
-on the map as an image overlay placed at the item's footprint bbox --
-a Leaflet ``L.imageOverlay`` on a Folium or ``umbra demo`` page, a
+performs in Python, resamples it north-up onto a ``<canvas>`` using the
+raster's own georeferencing, and drops it on the map as an image
+overlay -- a Leaflet ``L.imageOverlay`` on a Folium or ``umbra demo`` page, a
 MapLibre ``image`` source plus ``raster`` layer on the whole-archive
 PMTiles explorer (``driver_script(engine=...)``). Only those two lines
 differ between the engines; the fetch, decode, stretch and button state
@@ -24,14 +24,26 @@ no worker dependency and works whether the page is served over http(s)
 **or** opened straight off disk. The COG bytes themselves come from S3
 over HTTPS (CORS ``*``), which is allowed from a ``file://`` origin.
 
-**Placement is a quick-look approximation.** Umbra GEC rasters are
-geocoded but in a projected CRS (UTM). Rather than reproject in the
-browser, the overlay is stretched to fill the item's STAC footprint
-bounding box (the same lat/lon extent used to draw the polygon). Over a
-few-km Umbra scene the skew from stretching a north-up UTM grid onto its
-lat/lon bbox is small -- fine for "where/what does this look like"
-exploration. For pixel-accurate overlays use the Python ``imagery=True``
-path, which reprojects through GDAL's ``WarpedVRT``.
+**Placement comes from the raster, not the footprint.** Umbra GEC
+rasters are geocoded but *not* north-up: the pixel grid is rotated to
+the collect geometry, so its four corners are the acquisition's
+footprint polygon and the angle differs for every acquisition.
+Stretching such a grid onto its lat/lon bounding box does not skew it
+slightly -- it spins the whole scene off the map. So the driver reads
+the file's own georeferencing (a GeoTIFF ``ModelTransformation`` plus
+the CRS geokey), resamples the decoded overview onto a north-up
+lat/lon grid, and places *that* at the grid's envelope. The item's
+STAC footprint bbox (``data-bounds``) stays as the fallback for a file
+whose georeferencing the driver can't read.
+
+Umbra publishes GECs both in WGS84 geographic and in WGS84 UTM zones,
+so those are the two CRSs the driver inverts -- the UTM inverse is a
+few lines of Snyder series rather than a second CDN dependency. The
+resampling is nearest-neighbour onto an affine fit through the grid
+corners, which is exact for a geographic raster and stays within a
+couple of metres for a UTM one over a scene this size. For a
+pixel-accurate overlay use the Python ``imagery=True`` path, which
+reprojects through GDAL's ``WarpedVRT``.
 
 A 200-item map weighs ~30 KB and pays *nothing* for the CDN until
 somebody clicks a button.
@@ -77,6 +89,12 @@ GEOTIFF_SRI = "sha384-QchpYxK+DqZYCChtK4SebrECTZEIQ0ahLhme9vwraN6KNxOGwtS66BG72w
 # range requests rather than the full-res image.
 _MAX_RENDER_DIM = 1024
 
+# Ceiling on the north-up canvas the rotated overview is resampled onto.
+# A rotated grid's lat/lon envelope is bigger than the grid itself (up to
+# ~2x per side at 45 degrees), so without a cap a diagonal scene would
+# allocate several times the overview's pixels.
+_MAX_OUTPUT_DIM = 2 * _MAX_RENDER_DIM
+
 
 def driver_script(
     *,
@@ -96,10 +114,10 @@ def driver_script(
         default, for Folium maps and the embedded-slice ``umbra demo``
         page) or ``"maplibre"`` (for the whole-archive PMTiles explorer).
         Everything above the placement -- the CDN load, the range-read,
-        the overview pick, the percentile stretch, the canvas paint and
-        the button state machine -- is identical; only the two lines that
-        add and remove the overlay differ, so the two pages share one
-        driver rather than one each.
+        the overview pick, the percentile stretch, the north-up resample
+        and the button state machine -- is identical; only the two lines
+        that add and remove the overlay differ, so the two pages share
+        one driver rather than one each.
 
     The returned snippet embeds the CDN URL (pinned at module level) as
     a JSON-encoded JS string literal, so a future bump to a URL with
@@ -121,8 +139,10 @@ def driver_script(
         plo=float(percentile_low),
         phi=float(percentile_high),
         max_dim=_MAX_RENDER_DIM,
+        max_out_dim=_MAX_OUTPUT_DIM,
         geotiff_url=json.dumps(GEOTIFF_JS),
         geotiff_sri=json.dumps(GEOTIFF_SRI),
+        georef_ops=_GEOREF_OPS,
         overlay_ops=overlay_ops,
     )
 
@@ -137,8 +157,9 @@ def popup_button_html(
     """Render the per-item button shown inside the polygon's popup.
 
     ``bounds`` is the item's lat/lon footprint as
-    ``(min_lon, min_lat, max_lon, max_lat)`` -- the driver places the
-    decoded overlay there. State (idle / loading / loaded) is reflected
+    ``(min_lon, min_lat, max_lon, max_lat)`` -- the driver's fallback
+    placement, used only when the COG itself carries no georeferencing
+    it can read. State (idle / loading / loaded) is reflected
     by swapping ``data-state`` and the visible text; the button is keyed
     by ``item_id`` so the driver can find the same DOM node on a
     "Remove image" click.
@@ -234,6 +255,153 @@ _OVERLAY_OPS: dict[str, str] = {
 }
 
 
+# The georeferencing half of the driver, substituted as `{georef_ops}`. It is
+# kept as its own chunk -- like the overlay ops above -- because it is the part
+# of the driver that is pure arithmetic and therefore the part that can be
+# exercised outside a browser (`tests/test_lazy_imagery.py` runs it under node).
+#
+# These are substituted *values*, not template text, so their braces are single
+# (unlike `_DRIVER_TEMPLATE`'s, which are doubled for `str.format`).
+_GEOREF_OPS = """
+  var WGS84_A = 6378137.0;
+  var WGS84_F = 1.0 / 298.257223563;
+  var UTM_K0 = 0.9996;
+
+  // Inverse UTM -> WGS84 lon/lat as the Snyder series (USGS PP 1395 section 8),
+  // good to well under a millimetre inside a zone. Written out rather than
+  // pulled from proj4js: UTM and plain WGS84 are the only two CRSs Umbra's GEC
+  // products use, and the map's whole CDN budget is spent on geotiff.js.
+  function utmToLonLat(easting, northing, zone, south) {
+    var e2 = WGS84_F * (2.0 - WGS84_F);
+    var ep2 = e2 / (1.0 - e2);
+    var x = easting - 500000.0;
+    var y = south ? northing - 10000000.0 : northing;
+    var mu = (y / UTM_K0)
+      / (WGS84_A * (1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 * e2 * e2 / 256));
+    var e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+    var e1_2 = e1 * e1, e1_3 = e1_2 * e1, e1_4 = e1_3 * e1;
+    var phi = mu
+      + (3 * e1 / 2 - 27 * e1_3 / 32) * Math.sin(2 * mu)
+      + (21 * e1_2 / 16 - 55 * e1_4 / 32) * Math.sin(4 * mu)
+      + (151 * e1_3 / 96) * Math.sin(6 * mu)
+      + (1097 * e1_4 / 512) * Math.sin(8 * mu);
+    var sinPhi = Math.sin(phi), cosPhi = Math.cos(phi), tanPhi = Math.tan(phi);
+    var c1 = ep2 * cosPhi * cosPhi;
+    var t1 = tanPhi * tanPhi;
+    var n1 = WGS84_A / Math.sqrt(1 - e2 * sinPhi * sinPhi);
+    var r1 = WGS84_A * (1 - e2) / Math.pow(1 - e2 * sinPhi * sinPhi, 1.5);
+    var d = x / (n1 * UTM_K0);
+    var d2 = d * d, d3 = d2 * d, d4 = d3 * d, d5 = d4 * d, d6 = d5 * d;
+    var lat = phi - (n1 * tanPhi / r1) * (d2 / 2
+      - (5 + 3 * t1 + 10 * c1 - 4 * c1 * c1 - 9 * ep2) * d4 / 24
+      + (61 + 90 * t1 + 298 * c1 + 45 * t1 * t1 - 252 * ep2 - 3 * c1 * c1) * d6 / 720);
+    var lon = (d - (1 + 2 * t1 + c1) * d3 / 6
+      + (5 - 2 * c1 + 28 * t1 - 3 * c1 * c1 + 8 * ep2 + 24 * t1 * t1) * d5 / 120) / cosPhi;
+    return [(zone * 6 - 183) + lon * 180 / Math.PI, lat * 180 / Math.PI];
+  }
+
+  // Pixel (column, row) -> the file's model coordinates, as the six affine
+  // terms. A rotated raster carries them as a ModelTransformation matrix; a
+  // north-up one as a tiepoint plus a pixel scale. Null when it has neither.
+  function geoTransformOf(image) {
+    var fd = image.getFileDirectory() || {};
+    var m = fd.ModelTransformation;
+    if (m && m.length >= 16) {
+      return { a: m[0], b: m[1], c: m[3], d: m[4], e: m[5], f: m[7] };
+    }
+    var tie = fd.ModelTiepoint, scale = fd.ModelPixelScale;
+    if (tie && tie.length >= 6 && scale && scale.length >= 2) {
+      return {
+        a: scale[0], b: 0, c: tie[3] - tie[0] * scale[0],
+        d: 0, e: -scale[1], f: tie[4] + tie[1] * scale[1]
+      };
+    }
+    return null;
+  }
+
+  // Model coordinates -> [lon, lat] for the CRS the file declares. Null for
+  // anything else, which sends the caller back to the STAC footprint bbox.
+  function modelToLonLat(image) {
+    var keys = image.getGeoKeys() || {};
+    var code = keys.ProjectedCSTypeGeoKey || keys.GeographicTypeGeoKey;
+    if (code === 4326) { return function (x, y) { return [x, y]; }; }
+    if (code >= 32601 && code <= 32660) {
+      return function (x, y) { return utmToLonLat(x, y, code - 32600, false); };
+    }
+    if (code >= 32701 && code <= 32760) {
+      return function (x, y) { return utmToLonLat(x, y, code - 32700, true); };
+    }
+    return null;
+  }
+
+  // Everything needed to paint `image` (an overview of the full-res `base`)
+  // north-up: the lat/lon box to place the canvas at, the canvas size, and the
+  // source pixel behind each output pixel. Null when `base` carries no
+  // georeferencing this driver can read.
+  //
+  // The pixel -> lon/lat map is taken as affine, least-squares fitted through
+  // the four grid corners. For a WGS84-geographic GEC that is exact (its model
+  // coordinates *are* lon/lat); for a UTM one it absorbs the projection's
+  // curvature to a couple of metres over a scene a few km across, well inside
+  // one pixel at the resolution an overview renders at.
+  function rasterGeoreference(base, image, maxOut) {
+    var t = geoTransformOf(base);
+    var toLonLat = modelToLonLat(base);
+    if (!t || !toLonLat) { return null; }
+    var w = image.getWidth(), h = image.getHeight();
+    // Overview IFDs carry no geo tags of their own, so the full-res affine is
+    // rescaled by however much this overview shrank the grid.
+    var sx = base.getWidth() / w, sy = base.getHeight() / h;
+    function corner(u, v) {
+      return toLonLat(t.c + t.a * u * sx + t.b * v * sy,
+                      t.f + t.d * u * sx + t.e * v * sy);
+    }
+    var c00 = corner(0, 0), cW0 = corner(w, 0), c0H = corner(0, h), cWH = corner(w, h);
+    // Per-column and per-row steps in lon/lat, averaged over both edges (which
+    // is the least-squares fit for a four-corner quad).
+    var du = [((cW0[0] - c00[0]) + (cWH[0] - c0H[0])) / (2 * w),
+              ((cW0[1] - c00[1]) + (cWH[1] - c0H[1])) / (2 * w)];
+    var dv = [((c0H[0] - c00[0]) + (cWH[0] - cW0[0])) / (2 * h),
+              ((c0H[1] - c00[1]) + (cWH[1] - cW0[1])) / (2 * h)];
+    var mid = [(c00[0] + cW0[0] + c0H[0] + cWH[0]) / 4,
+               (c00[1] + cW0[1] + c0H[1] + cWH[1]) / 4];
+    var org = [mid[0] - du[0] * w / 2 - dv[0] * h / 2,
+               mid[1] - du[1] * w / 2 - dv[1] * h / 2];
+    var det = du[0] * dv[1] - dv[0] * du[1];
+    if (!isFinite(det) || det === 0) { return null; }
+
+    var west = Math.min(c00[0], cW0[0], c0H[0], cWH[0]);
+    var east = Math.max(c00[0], cW0[0], c0H[0], cWH[0]);
+    var south = Math.min(c00[1], cW0[1], c0H[1], cWH[1]);
+    var north = Math.max(c00[1], cW0[1], c0H[1], cWH[1]);
+    // Sample the north-up grid at the source's own scale: the *coarser* of the
+    // two per-axis steps, so a rotated grid is not blown up along its diagonal
+    // (a north-up one comes out pixel for pixel, since one step is then zero).
+    var outW = Math.min(maxOut, Math.max(1, Math.round(
+      (east - west) / Math.max(Math.abs(du[0]), Math.abs(dv[0])))));
+    var outH = Math.min(maxOut, Math.max(1, Math.round(
+      (north - south) / Math.max(Math.abs(du[1]), Math.abs(dv[1])))));
+    var lonPer = (east - west) / outW, latPer = (north - south) / outH;
+
+    return {
+      bounds: [[south, west], [north, east]],
+      width: outW,
+      height: outH,
+      sourceIndex: function (ox, oy) {
+        var dLon = west + (ox + 0.5) * lonPer - org[0];
+        var dLat = north - (oy + 0.5) * latPer - org[1];
+        var u = (dLon * dv[1] - dLat * dv[0]) / det;
+        var v = (dLat * du[0] - dLon * du[1]) / det;
+        if (u < 0 || v < 0) { return -1; }
+        var col = u | 0, row = v | 0;
+        if (col >= w || row >= h) { return -1; }
+        return row * w + col;
+      }
+    };
+  }
+"""
+
+
 # The flow:
 #  1. First click loads geotiff.js once (dynamic <script>, no workers).
 #  2. GeoTIFF.fromUrl(url) opens the COG (headers only at first).
@@ -242,8 +410,12 @@ _OVERLAY_OPS: dict[str, str] = {
 #  4. readRasters() decodes that overview on the main thread.
 #  5. Percentile stretch over the first band (invalid / non-positive /
 #     nodata pixels -> transparent), matching _stretch_to_rgba.
-#  6. Paint to a canvas, toDataURL, drop it on the map at the item's STAC
-#     footprint bbox via the engine's addOverlay (see `{overlay_ops}`).
+#  6. Resample onto a north-up lat/lon canvas using the raster's own
+#     georeferencing (see `{georef_ops}`) -- a GEC's grid is rotated to
+#     the collect geometry -- then toDataURL and drop it on the map at
+#     that canvas's envelope via the engine's addOverlay (see
+#     `{overlay_ops}`). A file with unreadable georeferencing falls back
+#     to painting the source grid onto the item's STAC footprint bbox.
 #  7. Cache the overlay handle keyed by item id; second click removes it.
 _DRIVER_TEMPLATE = """
 (function() {{
@@ -253,6 +425,7 @@ _DRIVER_TEMPLATE = """
   var GEOTIFF_URL = {geotiff_url};
   var GEOTIFF_SRI = {geotiff_sri};
   var MAX_DIM = {max_dim};
+  var MAX_OUT_DIM = {max_out_dim};
 
   // Resolve the Folium map by walking up from the clicked button to the
   // enclosing `.folium-map` div, then looking up its id on `window`
@@ -271,7 +444,7 @@ _DRIVER_TEMPLATE = """
     // it, so their DOM-walk resolution above is untouched.
     return window.umbraLazyMap || null;
   }}
-{overlay_ops}
+{georef_ops}{overlay_ops}
   function loadLib() {{
     if (libPromise) return libPromise;
     libPromise = new Promise(function(resolve, reject) {{
@@ -313,10 +486,13 @@ _DRIVER_TEMPLATE = """
 
   // Smallest overview whose longest side is >= MAX_DIM, else the
   // largest image available (handles COGs whose overviews are all
-  // smaller than MAX_DIM, and is agnostic to IFD ordering).
+  // smaller than MAX_DIM, and is agnostic to IFD ordering). The full-res
+  // image comes back alongside it: overview IFDs carry no geo tags, so it
+  // is the one that says where the raster sits on the ground.
   function pickOverview(tiff) {{
     return tiff.getImageCount().then(function(count) {{
       var chain = Promise.resolve();
+      var base = null;
       var chosen = null, chosenMax = Infinity;
       var fallback = null, fallbackMax = -1;
       for (var i = 0; i < count; i++) {{
@@ -324,13 +500,16 @@ _DRIVER_TEMPLATE = """
           chain = chain.then(function() {{
             return tiff.getImage(idx);
           }}).then(function(img) {{
+            if (idx === 0) {{ base = img; }}
             var m = Math.max(img.getWidth(), img.getHeight());
             if (m >= MAX_DIM && m < chosenMax) {{ chosen = img; chosenMax = m; }}
             if (m > fallbackMax) {{ fallback = img; fallbackMax = m; }}
           }});
         }})(i);
       }}
-      return chain.then(function() {{ return chosen || fallback; }});
+      return chain.then(function() {{
+        return {{ base: base, image: chosen || fallback }};
+      }});
     }});
   }}
 
@@ -358,26 +537,35 @@ _DRIVER_TEMPLATE = """
     return {{ lo: lo, hi: hi }};
   }}
 
-  function rasterToDataURL(data, width, height, stretch, noData) {{
+  // With `geo`, the canvas is the north-up lat/lon grid rasterGeoreference()
+  // describes and each output pixel is pulled back through the raster's own
+  // affine; without it, the source grid is painted as-is and the caller places
+  // it on the item's STAC bbox, as this driver did before it read geo tags.
+  function rasterToDataURL(data, width, height, stretch, noData, geo) {{
+    var outW = geo ? geo.width : width;
+    var outH = geo ? geo.height : height;
     var canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = outW;
+    canvas.height = outH;
     var ctx = canvas.getContext('2d');
-    var img = ctx.createImageData(width, height);
+    var img = ctx.createImageData(outW, outH);
     var span = (stretch.hi - stretch.lo) || 1;
-    for (var i = 0; i < data.length; i++) {{
-      var v = data[i];
-      var o = i * 4;
-      if (!isFinite(v) || v <= 0 || (noData !== null && v === noData)) {{
-        img.data[o + 3] = 0;  // transparent
-        continue;
+    for (var oy = 0; oy < outH; oy++) {{
+      for (var ox = 0; ox < outW; ox++) {{
+        var o = (oy * outW + ox) * 4;
+        var i = geo ? geo.sourceIndex(ox, oy) : (oy * width + ox);
+        var v = i < 0 ? NaN : data[i];
+        if (!isFinite(v) || v <= 0 || (noData !== null && v === noData)) {{
+          img.data[o + 3] = 0;  // transparent
+          continue;
+        }}
+        var s = Math.max(0, Math.min(255,
+          Math.floor((v - stretch.lo) / span * 255)));
+        img.data[o] = s;
+        img.data[o + 1] = s;
+        img.data[o + 2] = s;
+        img.data[o + 3] = 255;
       }}
-      var s = Math.max(0, Math.min(255,
-        Math.floor((v - stretch.lo) / span * 255)));
-      img.data[o] = s;
-      img.data[o + 1] = s;
-      img.data[o + 2] = s;
-      img.data[o + 3] = 255;
     }}
     ctx.putImageData(img, 0, 0);
     return canvas.toDataURL('image/png');
@@ -406,13 +594,17 @@ _DRIVER_TEMPLATE = """
     button.textContent = 'Loading SAR image…';
     button.setAttribute('data-state', 'loading');
     var noData = null;
+    // Where the raster says it sits, or null for a file whose georeferencing
+    // we can't read -- then `bounds` (the STAC footprint bbox) still applies.
+    var geo = null;
     loadLib().then(function() {{
       return GeoTIFF.fromUrl(url);
     }}).then(function(tiff) {{
       return pickOverview(tiff);
-    }}).then(function(image) {{
-      noData = normalizeNoData(image.getGDALNoData());
-      return image.readRasters();
+    }}).then(function(picked) {{
+      geo = rasterGeoreference(picked.base, picked.image, MAX_OUT_DIM);
+      noData = normalizeNoData(picked.image.getGDALNoData());
+      return picked.image.readRasters();
     }}).then(function(rasters) {{
       var data = rasters[0];
       var stretch = computeStretch(data, noData);
@@ -422,8 +614,8 @@ _DRIVER_TEMPLATE = """
         button.setAttribute('data-state', 'error');
         return;
       }}
-      var dataUrl = rasterToDataURL(data, rasters.width, rasters.height, stretch, noData);
-      layers[id] = addOverlay(map, id, dataUrl, bounds);
+      var dataUrl = rasterToDataURL(data, rasters.width, rasters.height, stretch, noData, geo);
+      layers[id] = addOverlay(map, id, dataUrl, geo ? geo.bounds : bounds);
       button.disabled = false;
       button.textContent = 'Remove SAR image';
       button.setAttribute('data-state', 'loaded');

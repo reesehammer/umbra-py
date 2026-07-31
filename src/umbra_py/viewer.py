@@ -23,9 +23,9 @@ are computed *once* from a whole-scene overview at startup (see
 stretch the static :func:`umbra_py.viz.quicklook` would pick for the scene.
 
 **Pixel-accurate placement.** Unlike the browser-side lazy overlay (which
-stretches a north-up UTM raster onto its lat/lon bbox as a quick-look
-approximation), tiles are warped through GDAL into true Web Mercator, so the
-imagery lines up with the OpenStreetMap basemap.
+resamples a downsampled overview onto a lat/lon grid as a quick look), tiles
+are warped through GDAL into true Web Mercator, so the imagery lines up with
+the OpenStreetMap basemap.
 
 Requires the ``viz`` extra (``pip install "umbra-py[viz]"``).
 """
