@@ -1825,3 +1825,187 @@ def test_cli_stack_lazy_writes_the_datacube(tmp_path, monkeypatch):
     with rasterio.open(out) as ds:
         assert ds.count == 2
         assert ds.read([2])[0] == pytest.approx(8.0)
+
+
+# --- Conversion provenance on the measurement chain -------------------------
+#
+# ``umbra convert`` stamps UMBRA_* GeoTIFF tags saying what a pixel value is
+# (calibration, RTC model, amplitude scale). These check the consuming half:
+# a loaded array carries the record, a cube refuses to mix two of them, and a
+# raster written back out keeps it.
+
+
+def _tag_scene(path, **settings):
+    """Stamp ``umbra convert``-style provenance onto an existing test scene."""
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.convert import conversion_tags
+
+    with rasterio.open(path, "r+") as ds:
+        ds.update_tags(**conversion_tags(source=f"{path.name}.nitf", geocoded=True, **settings))
+    return path
+
+
+def _converted_scenes(tmp_path, *per_scene):
+    """Same-footprint passes, each converted with its own settings dict."""
+    return [
+        _stack_item(
+            _tag_scene(_stack_scene(tmp_path / f"c{n}.tif", value=2.0**n), **settings),
+            f"acq-{n}",
+            f"2024-0{n}-08T12:00:00Z",
+        )
+        for n, settings in enumerate(per_scene, start=1)
+    ]
+
+
+def test_to_xarray_surfaces_the_conversion_provenance(tmp_path):
+    pytest.importorskip("xarray")
+    from umbra_py import to_xarray
+
+    plain, _, _ = _make_geotiff(tmp_path / "scene.tif")
+    # A published Umbra product carries no such tags: absent, not empty, so the
+    # key never reads as "nothing was done to this".
+    assert "provenance" not in to_xarray(_item_for(plain)).attrs
+
+    converted = _tag_scene(
+        _stack_scene(tmp_path / "converted.tif"), calibration="gamma0", rtc_model="facet"
+    )
+    prov = to_xarray(_item_for(converted)).attrs["provenance"]
+    assert prov["calibration"] == "gamma0"
+    assert prov["rtc_model"] == "facet"
+    assert prov["units"] == "dB (gamma0)"
+    # Exactly what the file itself says, so the two answers cannot drift.
+    from umbra_py import read_conversion_tags
+
+    assert prov == read_conversion_tags(converted)
+
+
+def test_to_stack_carries_a_provenance_its_sources_agree_on(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    settings = {"calibration": "sigma0", "rtc_model": "gamma"}
+    cube = to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32)
+
+    assert cube.attrs["provenance"]["calibration"] == "sigma0"
+    assert cube.attrs["provenance"]["rtc_model"] == "gamma"
+
+
+def test_to_stack_omits_provenance_for_untagged_products(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # The ordinary case -- every published GEC is untagged, and a series of them
+    # agrees on that, so nothing is refused and nothing is claimed.
+    cube = to_stack(_three_scenes(tmp_path), max_size=32)
+    assert "provenance" not in cube.attrs
+
+
+def test_to_stack_refuses_to_mix_two_calibrations(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = _converted_scenes(tmp_path, {"calibration": "gamma0"}, {"calibration": "sigma0"})
+    with pytest.raises(ValueError, match="calibration disagrees") as exc:
+        to_stack(items, max_size=32)
+
+    message = str(exc.value)
+    # Both sides are named, with the acquisition standing for each.
+    assert "'gamma0' (acq-1)" in message
+    assert "'sigma0' (acq-2)" in message
+    assert "umbra convert --provenance" in message
+
+
+def test_to_stack_refuses_a_converted_raster_mixed_with_an_untagged_one(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    calibrated = _converted_scenes(tmp_path, {"calibration": "gamma0"})
+    raw = [_stack_item(_stack_scene(tmp_path / "raw.tif"), "acq-9", "2024-09-08T12:00:00Z")]
+
+    with pytest.raises(ValueError, match="calibration disagrees") as exc:
+        to_stack(calibrated + raw, max_size=32)
+    assert "'(unrecorded)' (acq-9)" in str(exc.value)
+
+
+def test_to_stack_refuses_to_mix_flattened_and_unflattened_passes(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = _converted_scenes(tmp_path, {"rtc_model": "facet"}, {})
+    with pytest.raises(ValueError, match="rtc_model disagrees"):
+        to_stack(items, max_size=32)
+
+
+def test_to_stack_allows_the_per_scene_keys_to_differ(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Each pass resolves its own reference incidence angle and names its own
+    # source file; neither says the pixel values mean different things.
+    cube = to_stack(
+        _converted_scenes(
+            tmp_path,
+            {"calibration": "gamma0", "rtc_model": "facet", "rtc_reference_deg": 31.0},
+            {"calibration": "gamma0", "rtc_model": "facet", "rtc_reference_deg": 44.5},
+        ),
+        max_size=32,
+    )
+
+    prov = cube.attrs["provenance"]
+    assert prov["calibration"] == "gamma0"
+    # Only the keys every source agreed on survive into the cube's record.
+    assert "rtc_reference_deg" not in prov
+    assert "source" not in prov
+
+
+def test_stack_stats_reports_the_provenance_and_drops_the_relative_caveat(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    settings = {"calibration": "gamma0", "rtc_model": "facet"}
+    stats = stack_stats(to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32))
+
+    assert stats["provenance"]["calibration"] == "gamma0"
+    caveats = " ".join(stats["caveats"])
+    assert "gamma0 radiometric calibration" in caveats
+    assert "not radiometrically calibrated" not in caveats
+    assert "facet model" in caveats
+
+
+def test_stack_stats_keeps_the_relative_caveat_for_published_products(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32))
+
+    assert "provenance" not in stats
+    assert "not radiometrically calibrated" in " ".join(stats["caveats"])
+
+
+def test_written_rasters_carry_the_provenance_forward(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import read_conversion_tags, stack_to_geotiff, to_geotiff
+
+    settings = {"calibration": "beta0", "rtc_model": "cosine"}
+    items = _converted_scenes(tmp_path, settings, settings)
+
+    cube_tif = stack_to_geotiff(items, tmp_path / "cube.tif", max_size=32)
+    assert read_conversion_tags(cube_tif)["calibration"] == "beta0"
+    assert read_conversion_tags(cube_tif)["rtc_model"] == "cosine"
+
+    scene_tif = to_geotiff(items[0], tmp_path / "scene_out.tif", max_size=32)
+    assert read_conversion_tags(scene_tif)["calibration"] == "beta0"
+
+    # A derivative of an untagged product stays untagged rather than claiming a
+    # conversion that never happened.
+    plain = to_geotiff(_three_scenes(tmp_path)[0], tmp_path / "plain.tif", max_size=32)
+    assert read_conversion_tags(plain) == {}

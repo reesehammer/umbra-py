@@ -28,6 +28,7 @@ from .chips import (
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .convert import (
+    conversion_provenance,
     conversion_tags,
     read_conversion_tags,
     sicd_calibration_types,
@@ -175,6 +176,7 @@ __all__ = [
     "sicd_to_amplitude_geotiff",
     "sicd_to_geocoded_cog",
     "sicd_calibration_types",
+    "conversion_provenance",
     "conversion_tags",
     "read_conversion_tags",
     "fetch_dem_for_bbox",

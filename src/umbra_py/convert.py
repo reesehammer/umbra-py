@@ -90,6 +90,7 @@ Install with: ``pip install "umbra-py[convert]"``
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -435,6 +436,26 @@ def conversion_tags(
     return {f"{PROVENANCE_TAG_PREFIX}{key}": value for key, value in tags.items()}
 
 
+def conversion_provenance(tags: Mapping[str, str]) -> dict[str, str]:
+    """Pick umbra-py's conversion provenance out of an already-read tag set.
+
+    The parsing half of :func:`read_conversion_tags`, split out because the
+    consumers of this provenance mostly hold the dataset already:
+    :func:`umbra_py.load.to_stack` reads every source's record while it is
+    resolving the shared grid, and re-opening each raster to ask would cost a
+    second round of range requests against a remote COG.
+
+    Returns the :func:`conversion_tags` entries with the
+    :data:`PROVENANCE_TAG_PREFIX` stripped and lower-cased, and an empty dict
+    for a tag set with none of them (a raster umbra-py did not convert).
+    """
+    return {
+        key[len(PROVENANCE_TAG_PREFIX) :].lower(): value
+        for key, value in tags.items()
+        if key.startswith(PROVENANCE_TAG_PREFIX)
+    }
+
+
 def read_conversion_tags(src: str | os.PathLike) -> dict[str, str]:
     """Read back the conversion provenance recorded in a converted raster.
 
@@ -453,11 +474,7 @@ def read_conversion_tags(src: str | os.PathLike) -> dict[str, str]:
 
     with rasterio.open(str(src)) as ds:
         tags = ds.tags()
-    return {
-        key[len(PROVENANCE_TAG_PREFIX) :].lower(): value
-        for key, value in tags.items()
-        if key.startswith(PROVENANCE_TAG_PREFIX)
-    }
+    return conversion_provenance(tags)
 
 
 def sicd_to_amplitude_geotiff(

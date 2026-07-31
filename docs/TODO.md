@@ -203,13 +203,53 @@ blocker:
   than floor-limited. Left out because it needs the `NoisePoly` /
   `NoiseLevelType` handling (absolute vs. relative) that no Umbra product
   currently exercises.
-- **Nothing *consumes* the provenance tags yet.** `to_xarray` / `to_stack` could
-  refuse to stack rasters whose `UMBRA_CALIBRATION` or `UMBRA_SCALE` disagree —
-  the same "a mixed selection is not a measurement" check `POST /artifacts/stats`
-  makes for polarization.
 - **MultiRTC interop.** Interop with
   [MultiRTC](https://github.com/MultiSAR/MultiRTC) is a heavier,
   research-oriented job and remains deferred.
+
+---
+
+## Provenance-consuming follow-ons (`to_stack` refuses mixed conversions)
+
+- **Surfaced in:** the provenance-consumption PR (`STRATEGY.md` 5.5, which the
+  DEM entry above named).
+- **Code:** `src/umbra_py/load.py` (`MEASUREMENT_PROVENANCE_KEYS`,
+  `_source_provenance`, `_shared_provenance`, `_as_geotiff_tags`, the
+  `provenance` attr on `to_xarray` / `to_stack` and key on `stack_stats`),
+  `src/umbra_py/convert.py` (`conversion_provenance`).
+
+`to_stack` now reads each source's `UMBRA_*` conversion record and refuses a
+series that disagrees on what its pixel values are; the shared record rides the
+cube into `stack_stats`, the written GeoTIFFs and `POST /artifacts/stats`.
+Follow-ons, none a blocker:
+
+- **The refusal has no override.** There is no `check_provenance=False`, matching
+  the polarization refusal it mirrors — a mixed selection is not a measurement,
+  so the fix is to re-convert or to stack fewer acquisitions. If a legitimate
+  "I know, show me anyway" case turns up (comparing a calibrated pass against an
+  uncalibrated one *as* the experiment), the escape hatch is one keyword on
+  `to_stack` plus a caveat in the summary saying it was used.
+- **The picture commands still don't check.** `umbra change` / `timescan` /
+  `swipe` co-register the same rasters through `viz._coregister_bands` and make
+  no provenance check, the same tolerance the polarization rule already has (a
+  mixed composite is confusing to look at; a mixed *number* is wrong). Worth
+  revisiting only if someone starts quoting decibels off a composite.
+- **Only the radiometric keys are grounds for refusal.** `dem`, `geoid` and
+  `projection` are carried when every source agrees and silently dropped when
+  they don't: they move a pixel's *position*, not its value, and `to_stack`
+  re-grids everything anyway. A series orthorectified against two different DEMs
+  therefore stacks. Add them to `MEASUREMENT_PROVENANCE_KEYS` if a DEM mix ever
+  produces misregistration worth failing on.
+- **The refusal is discovered by hitting it.** Nothing enumerates a selection's
+  conversions ahead of the call — no `umbra stack --provenance`-style preflight,
+  and `POST /artifacts/stats` reports the mix only as the text of its `400`.
+  Cheapest fix if it matters: have the search-side commands report the distinct
+  `UMBRA_CALIBRATION` values in a selection the way they report polarizations.
+- **A cube's provenance reaches the render manifest only inside `stats`.**
+  `umbra stack --json` emits the shared `{output, items_used, parameters}`
+  manifest (`docs/schemas/render-manifest.schema.json`), which has no provenance
+  field; the record is present only when `--stats` was also asked for. Adding it
+  to the manifest would mean a schema revision, so it waits for a consumer.
 
 ---
 
