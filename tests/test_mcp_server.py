@@ -20,7 +20,7 @@ import responses
 
 pytest.importorskip("mcp")
 
-from mcp.server.fastmcp import Image  # noqa: E402
+from mcp.server.mcpserver import Image  # noqa: E402
 
 from umbra_py import mcp_server as ms  # noqa: E402
 from umbra_py.exceptions import MissingDependencyError  # noqa: E402
@@ -260,6 +260,45 @@ def test_quicklook_returns_image_block(sample_item_dict, monkeypatch):
     out = ms.quicklook(ITEM_URL)
     assert isinstance(out[0], Image)
     assert out[1].endswith(ms.ATTRIBUTION)  # caption carries the attribution line
+
+
+@responses.activate
+def test_image_tools_reach_the_client_as_image_blocks(sample_item_dict, monkeypatch):
+    """Regression: the picture has to survive the *server*, not just the function.
+
+    Every test above calls the tool functions directly, so nothing exercised the
+    path a client actually takes. Through it, the SDK derives a structured-output
+    schema from the ``list[Any]`` return annotation and serializes the result
+    against it -- which cannot represent an ``Image``, so every call to the three
+    image tools failed with ``ToolError: Unable to serialize unknown type``.
+    They are registered without structured output for exactly this reason.
+    """
+    from PIL import Image as PILImage
+
+    import umbra_py.viz as viz
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    monkeypatch.setattr(viz, "quicklook", lambda item, **kw: PILImage.new("RGB", (4, 4), (1, 2, 3)))
+
+    server = ms.build_server()
+    result = asyncio.run(server.call_tool("quicklook", {"url": ITEM_URL}))
+
+    assert not result.is_error, result.content
+    kinds = [type(block).__name__ for block in result.content]
+    assert kinds == ["ImageContent", "TextContent"], kinds
+    assert result.content[1].text.endswith(ms.ATTRIBUTION)
+
+
+def test_json_tools_keep_structured_output():
+    """The opt-out is scoped to the image tools: everything answering in JSON
+    still advertises an output schema, which is what lets a client parse it."""
+    server = ms.build_server()
+    schemas = {t.name: t.output_schema for t in asyncio.run(server.list_tools())}
+
+    for name in ("quicklook", "change_composite", "timescan"):
+        assert schemas[name] is None, name
+    for name in ("search_catalog", "get_item", "stack_stats"):
+        assert schemas[name] is not None, name
 
 
 @responses.activate

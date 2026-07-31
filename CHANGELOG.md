@@ -1376,6 +1376,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **`umbra-mcp` runs on the current SDK again — ported to `mcp` 2.0 — and its
+  image tools reach a client for the first time.** `mcp` 2.0.0 renamed
+  `mcp.server.fastmcp` to `mcp.server.mcpserver` and `FastMCP` to `MCPServer`.
+  Nothing else in the surface this server uses moved: the constructor,
+  `add_tool`, `resource`, `prompt`, `run` and `Image` all keep their
+  signatures, so the port itself is the rename plus the extra's floor moving
+  from `mcp>=1.2,<2` to `mcp>=2`. The old module does not exist in 2.x and the
+  new one does not exist in 1.x, so the server cannot straddle it — hence a
+  floor rather than a range.
+
+  **Driving the ported server over a real stdio client surfaced a bug that was
+  never about 2.0.** `quicklook`, `change_composite` and `timescan` — the three
+  tools this module's docstring calls the differentiator, the ones that return
+  the rendered PNG so the model *sees* the radar scene — failed every single
+  invocation with `ToolError: Unable to serialize unknown type`. The SDK
+  derives a structured-output schema from a tool's return annotation and then
+  serialises the result against it; these return `list[Any]` holding an `Image`
+  content block, which has no JSON form. It reproduces identically on 1.29, so
+  it had been broken since structured output landed — invisible because every
+  test called the tool *functions* directly and nothing exercised the path a
+  client actually takes. The three are now registered with
+  `structured_output=False`; the eleven JSON tools keep their output schema.
+
+  Two tests close the gap that hid it: one drives `quicklook` through
+  `server.call_tool` and asserts an `ImageContent` + `TextContent` pair comes
+  back, the other asserts the opt-out is scoped — image tools carry no output
+  schema, JSON tools still do. Verified end to end against a real stdio session
+  too (`initialize` → `tools/call`), which returns an `image/png` block and the
+  attribution caption.
 - **SAR overlays now land on the ground they image: the browser driver reads the
   COG's own georeferencing instead of stretching it onto the footprint bbox.**
   Clicking "Get SAR image" on the published showcase explorer put the scene on
