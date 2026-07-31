@@ -241,8 +241,8 @@ def llms_txt() -> str:
         "the SAR ecosystem and why."
     )
     lines.append(
-        f"- [AI integration ideas]({_RAW_BASE}/docs/AI_INTEGRATION_IDEAS.md): the "
-        "MCP / STAC-API / AI-capability roadmap this bundle is part of."
+        f"- [Open follow-ons]({_RAW_BASE}/docs/TODO.md): the ledger of work "
+        "intentionally scoped out of merged PRs."
     )
     lines.append("")
 

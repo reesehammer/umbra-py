@@ -8,17 +8,17 @@
 > - **What has shipped** lives in [`CHANGELOG.md`](../CHANGELOG.md) (history,
 >   newest first) — the authoritative record. Do not re-narrate shipped work
 >   here.
-> - **Fine-grained open follow-ons** live in [`TODO.md`](../TODO.md) (the
+> - **Fine-grained open follow-ons** live in [`TODO.md`](TODO.md) (the
 >   per-PR ledger of items intentionally scoped out of merged PRs).
 > - **This file** carries the durable "why" and the short list of genuinely
 >   open workstreams (§8).
 >
 > The three companion planning docs — `CODEBASE_ANALYSIS.md`,
 > `DEMO_APP_GAPS.md`, and `AI_INTEGRATION_IDEAS.md` — were analysis snapshots
-> whose plans are now largely executed. They have been consolidated into this
-> file and reduced to short pointers. Their historical item IDs (`C1`, `G6`,
-> `P2 #11`, workstream `5.x`, …) still appear in source docstrings and commit
-> messages; the detail behind each lives in git history and the CHANGELOG.
+> whose plans are now executed. They have been consolidated into this file and
+> removed. Their historical item IDs (`C1`, `G6`, `P2 #11`, workstream `5.x`, …)
+> still appear in commit messages and CHANGELOG entries; the detail behind each
+> lives in git history and the CHANGELOG.
 
 ---
 
@@ -252,7 +252,7 @@ niche: a docs link, a registry listing, co-marketing, or upstreaming the index.
 
 These are the durable rules the AI-integration and demo work were built on;
 they apply to every future change (consolidated from the former
-`AI_INTEGRATION_IDEAS.md` §6).
+AI-integration plan's design-principles section).
 
 1. **Deterministic core, AI at the edges.** Models plan, describe, and
    narrate; the library searches, downloads, and renders. Never let a model
@@ -284,7 +284,8 @@ from:
 **Structural code debt (schedule, don't rush)**
 
 - Extract the shared search-vs-URLs gathering + common Click option groups out
-  of the CLI commands that still duplicate them (was `CODEBASE_ANALYSIS` P3 #18).
+  of the CLI commands that still duplicate them (was the P3 #18 codebase-analysis
+  item).
   **Partly shipped:** the gathering half (`_gather_items` / `_search_source`) and
   now the *geography* option group — `--bbox` / `--place` / `--intersects` are one
   shared pair of decorators plus one shared resolver across all fourteen gather
@@ -348,7 +349,7 @@ from:
 - SQLite R\*Tree upgrade *iff* the index grows to hundreds of thousands of
   items (the schema-version marker already makes this a migration, not a break).
 
-**Demo / hosting polish (was `DEMO_APP_GAPS` G7 + Path A polish)**
+**Demo / hosting polish (was the demo-gap analysis's G7 + Path A polish)**
 
 - Packaging/hosting: ~~a Dockerfile + compose for one-command self-hosting of
   `umbra serve`~~ **shipped** (`Dockerfile` + `docker-compose.yml` +
@@ -570,5 +571,5 @@ from:
   §5.2, and the "talk to Umbra" conversation in §5.6.
 
 Fine-grained follow-ons for individual shipped features are tracked in
-[`TODO.md`](../TODO.md); the record of everything already delivered is in
+[`TODO.md`](TODO.md); the record of everything already delivered is in
 [`CHANGELOG.md`](../CHANGELOG.md).

@@ -11,7 +11,7 @@ models paraphrasing a request -- actually type a site name:
 * a small typo (``"centrfield"``).
 
 ``fuzzy`` mode is the *deterministic first step* of the C1 natural-language
-search plan (see ``docs/AI_INTEGRATION_IDEAS.md``): natural language in, an
+search plan (see ``docs/STRATEGY.md``): natural language in, an
 ordinary filter out, **no model call at runtime**. It stays inside the
 library's determinism boundary -- plain token comparison and :mod:`difflib`,
 nothing learned, nothing networked -- so it is fully offline-testable.

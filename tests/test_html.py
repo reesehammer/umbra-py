@@ -206,7 +206,7 @@ def test_standalone_gallery_single_task_stays_flat():
     assert '<main class="umbra-grid">' in html
 
 
-# --- href scheme validation (CODEBASE_ANALYSIS.md §3.1) --------------------
+# --- href scheme validation -------------------------------------------------
 
 
 def test_safe_href_allows_http_and_escapes():

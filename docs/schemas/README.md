@@ -53,4 +53,5 @@ $ UMBRA_JSON=1 umbra map ...
 ```
 
 The `hint` is `null` when no single recovery step applies. See
-`docs/AI_INTEGRATION_IDEAS.md` §A1 for the rationale.
+[`STRATEGY.md` §7](../STRATEGY.md#7-design-principles-to-hold-onto) for the
+rationale ("agents are users; users are agents").

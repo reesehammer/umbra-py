@@ -1,8 +1,8 @@
 """``umbra describe``: a vision-language reading of a SAR scene, grounded in the
 imagery the library already renders and the domain facts it already carries.
 
-This is the first of the Tier C "VLM-in-the-loop" capabilities in
-``docs/AI_INTEGRATION_IDEAS.md`` (C2). Where ``umbra ask``
+This is the first of the Tier C "VLM-in-the-loop" capabilities (C2; see
+``docs/STRATEGY.md``). Where ``umbra ask``
 (:mod:`umbra_py.planner`) lets a model *plan* a search, ``umbra describe`` lets a
 model *read* a scene: it renders an item's quicklook, sends that picture plus the
 item's :meth:`~umbra_py.UmbraItem.to_llm_context` card to a vision model, and
@@ -13,7 +13,7 @@ new has to be invented -- only connected.
 
 How it stays honest
 -------------------
-The library's determinism boundary (``docs/AI_INTEGRATION_IDEAS.md`` §A4, §6.1)
+The library's determinism boundary (``docs/STRATEGY.md`` §7)
 still holds:
 
 1. **The picture and the metadata are produced deterministically.** The quicklook

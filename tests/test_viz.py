@@ -1712,7 +1712,7 @@ def test_cli_timescan_rejects_urls_and_search_mode(monkeypatch, tmp_path, sample
     assert "not both" in result.output
 
 
-# --- popup HTML escaping (CODEBASE_ANALYSIS.md §3.1) ------------------------
+# --- popup HTML escaping -----------------------------------------------------
 #
 # ``_popup_html`` interpolates remote STAC strings into a Folium popup. Those
 # strings are untrusted (the CLI accepts arbitrary item URLs), so every one is
@@ -1768,7 +1768,7 @@ def test_popup_html_keeps_and_escapes_http_href():
     assert "https://example.com/item.json?a=1&amp;b=2" in html
 
 
-# --- CC-BY data attribution on the interactive maps (DEMO_APP_GAPS G8) ---
+# --- CC-BY data attribution on the interactive maps ------------------------
 # Umbra open data is CC-BY-4.0; the licence notice must appear on every map we
 # generate, not just inside per-marker popups. It is registered with Leaflet's
 # attribution control so it renders beside the OSM tile credit.

@@ -57,7 +57,7 @@ GEOTIFF_JS = "https://unpkg.com/geotiff@3.0.5/dist-browser/geotiff.js"
 # Subresource Integrity digest for the exact bytes at `GEOTIFF_JS`. The
 # browser refuses to run the fetched script unless its hash matches, so a
 # compromised CDN or a hijacked package release can't inject code into
-# every map a user has generated (CODEBASE_ANALYSIS 3.4). unpkg serves the
+# every map a user has generated. unpkg serves the
 # published npm tarball verbatim, so the digest is reproducible from the
 # registry without touching the (egress-restricted) CDN host:
 #

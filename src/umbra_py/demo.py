@@ -4,7 +4,7 @@ Every other visual surface in the toolkit emits a *one-shot* artifact: a map
 of one search, a gallery of one set of thumbnails, a swipe of two passes. Change
 the date range or the product filter and you re-run the CLI and open a new file.
 This module produces the missing piece the demo-gap analysis
-(:doc:`DEMO_APP_GAPS`) calls the frontier — a **self-serve explorer**: one HTML
+called the frontier — a **self-serve explorer**: one HTML
 page over a whole slice of the catalog with *interactive* client-side filters
 (date range, product type, polarization, free-text site search), marker
 **clustering** so it scales past a Folium map's few-hundred-polygon ceiling, and
@@ -17,7 +17,7 @@ Design, deliberately in the repo's grain:
   blob, all filtering in the browser. It opens from ``file://`` or any static
   host (GitHub Pages), exactly like ``umbra swipe`` / ``umbra gallery`` output.
   No FastAPI, no build toolchain — the productized server app is
-  ``DEMO_APP_GAPS.md`` Path B; this is Path A's front end delivered as an
+  :mod:`umbra_py.serve`; this is the static front end delivered as an
   artifact.
 
 * **Optionally server-backed for analysis (R4).** With ``server_url`` set to a
@@ -25,7 +25,7 @@ Design, deliberately in the repo's grain:
   panel: its buttons POST the currently-filtered acquisitions to the server's
   ``/artifacts/change|timescan|swipe|stats`` endpoints and render the returned
   artifact in place — the "run this analysis here" affordance the demo-gap
-  analysis calls the last self-serve gap (``DEMO_APP_GAPS.md`` R4 / Path B). The
+  analysis called the last self-serve gap (R4). The
   server does the heavy raster work and caches every result; the page itself
   stays a static file (the panel is simply hidden when no ``server_url`` is
   configured, so the default build is unchanged).
@@ -53,7 +53,7 @@ Design, deliberately in the repo's grain:
   from ``GET /artifacts/thumbnail/{id}.png`` — the baked quicklook thumbnail
   ``umbra index bake-thumbnails`` stored in the index, served straight from local
   bytes with no render (falling back to a live quicklook render for a scene not
-  yet baked). This is the client wiring the ``DEMO_APP_GAPS.md`` G6 bake left
+  yet baked). This is the client wiring the G6 thumbnail bake left
   open: the primitive and the server endpoint shipped, so the detail panel now
   opens with a radar picture, not just metadata, and the heavier on-click
   "Get SAR image" COG overlay stays the deeper look. A scene with no baked
@@ -70,7 +70,7 @@ Design, deliberately in the repo's grain:
   explorable from a page that stays a few kilobytes, and the same sidebar
   filters (free-text, date range, product and polarization chips) run as
   MapLibre filter expressions evaluated inside the tiles. This is the
-  ``DEMO_APP_GAPS.md`` Path A follow-on that collapses the showcase's separate
+  whole-catalog follow-on that collapses the showcase's separate
   whole-catalog *map* and interactive *explorer* into one page (``umbra showcase
   --unified``). The archive carries each acquisition twice — a centroid at every
   zoom and its clipped **footprint polygon** at the deeper ones — so the page
@@ -259,13 +259,13 @@ def build_demo(
         "Analyze this view" panel whose buttons POST the currently-filtered
         acquisitions to the server's ``/artifacts/change|timescan|swipe|stats``
         endpoints and show the returned artifact — the R4 "run this analysis
-        here" affordance (``DEMO_APP_GAPS.md``). Three of them render a picture;
+        here" affordance. Three of them render a picture;
         "Quantify" (``/artifacts/stats``) reads out the numeric measurement
         instead, sparklining the site's and its peak block's pass-to-pass
         history beside the headline figures. It also turns on the instant
         thumbnail preview in the detail panel (served from the endpoint's
-        ``/artifacts/thumbnail/{id}.png`` baked thumbnail, ``DEMO_APP_GAPS.md``
-        G6). When ``None`` (default) the page stays fully static and
+        ``/artifacts/thumbnail/{id}.png`` baked thumbnail, the G6 bake).
+        When ``None`` (default) the page stays fully static and
         self-contained, exactly as before.
     pmtiles_url:
         Location of a whole-catalog ``.pmtiles`` archive relative to the page

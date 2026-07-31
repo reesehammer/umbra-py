@@ -1,0 +1,522 @@
+# Outstanding TODOs
+
+This file tracks follow-up items that were intentionally scoped out of merged
+PRs. Each entry should link to the PR that surfaced it, point at the code
+involved, and describe the smallest change that closes it out.
+
+When you finish one, delete the entry. The record of what shipped lives in
+[`CHANGELOG.md`](../CHANGELOG.md) — this file carries only the work that is
+still open.
+
+---
+
+## Workflow-CLI drift follow-ons (`tests/test_workflows.py` shipped)
+
+- **Surfaced in:** the publish-workflow fix (`STRATEGY.md` §8, "getting the
+  published artifacts to actually exist").
+- **Code:** `tests/test_workflows.py`, `.github/workflows/publish-index.yml`.
+
+Both of the only two `Publish catalog index` runs died on `umbra tiles --local
+--db catalog.db` (the option is `--index-db`), and because the tiling step ran
+before the release step the whole crawl went with it, so the `catalog-index`
+release was never created. The invocation is fixed, the uploads now sit with the
+steps that build them, and `tests/test_workflows.py` parses every `umbra …`
+invocation in `.github/workflows/*.yml` against the real Click command tree.
+Follow-ons, none a blocker:
+
+- **The first good snapshot still needs a human.** The workflow is weekly +
+  `workflow_dispatch`, so until a maintainer dispatches a run (or Monday's cron
+  fires), the release stays absent and `umbra index fetch` keeps 404ing. Nothing
+  in this repo can create it. Smallest close-out: dispatch the workflow once and
+  confirm `catalog.db`, `umbra-open-data.parquet`, `catalog.pmtiles` and
+  `catalog.html` land on the release, then confirm the Docs job's `workflow_run`
+  trigger (added in the showcase-404 fix) rebuilds the showcase off it.
+- **The check is a parse, not a run.** It catches renamed, dropped and
+  misspelled options — the drift that actually happened — but not an option
+  whose *meaning* changed, nor a value that is wrong (`--limit 1200` being too
+  small, a bad `--out` path). Running the commands would need a bucket crawl and
+  credentials, which is why the cheap check is the one that exists. If a
+  semantic break ever ships, the place to catch it is the live canary
+  (`live-canary.yml`), not here.
+- **Only `umbra` invocations are checked.** The workflows also call `gh`,
+  `python -c` and `pip` with arguments that can drift (the `python -c` in the
+  tiling step imports `umbra_py.pmtiles.save_viewer` and
+  `constants.CATALOG_INDEX_PMTILES_URL` by name, so a rename there breaks the
+  same run and no test would notice). Extending the scan to `python -c` bodies
+  is a small addition — compile them, or import the names — if that ever bites.
+- **The scan is textual, so a genuinely dynamic invocation would be missed.**
+  Nothing builds an `umbra` command line from a shell variable today; if
+  something ever does, the extractor will silently skip it. The self-check
+  (`test_the_scan_actually_found_the_published_commands`) pins the publish
+  pipeline's commands specifically for this reason, but it is a roster to keep
+  current, not a general guarantee.
+
+---
+
+## SessionStart hook follow-ons (`.claude/hooks/session-start.sh` shipped)
+
+- **Surfaced in:** the agent-session-hardening PR (`STRATEGY.md` §8).
+- **Code:** `.claude/hooks/session-start.sh`, `.claude/settings.json`.
+
+A `SessionStart` hook now installs umbra-py editable with every extra on a
+Claude-Code-on-the-web container (mirroring CI's `test-all-extras` job) so the
+linters, type-checker, test suite and `umbra` CLI all work from the first turn;
+`.claude/settings.json` also pre-approves the documented dev-loop + read-only
+commands. It runs synchronously. Follow-ons that build on it, none a blocker:
+
+- **Switch to async mode if startup latency matters.** The hook has no
+  `{"async": true}` line, so a web session waits for the ~10–30 s install before
+  the first turn — the safe default (no race where a check runs before its deps
+  exist). If maintainers prefer a faster session start, emit
+  `{"async": true, "asyncTimeout": 300000}` first and accept that early turns may
+  land before the install finishes.
+- **Trim the extras for a lighter/faster install.** The hook installs *all*
+  extras so nothing import-skips. If a maintainer only ever touches the core, a
+  `[dev]`-only install (matching the core CI matrix) is faster; the full set is
+  the deliberate default so the coverage-gated suite runs unabridged.
+- **`mypy` disagrees between the hook's environment and CI's.** Surfaced by the
+  `stack_stats` PR. CI's `type-check` job installs only `[dev]`, so Pillow is
+  absent and `[tool.mypy]`'s import-ignore covers it; the hook installs every
+  extra, so Pillow's stubs *are* checked and `viz/composites.py`'s `Image.ADAPTIVE`
+  reads as `[attr-defined]`. CI is green and the code is correct (`ADAPTIVE` is a
+  real Pillow constant the stubs place elsewhere), but every remote agent session
+  starts with one failing `mypy` line. Smallest fix: `cast` the constant or
+  narrow the ignore at that call site, so the documented dev loop is clean in
+  both environments.
+
+---
+
+## Index demo-denormalization follow-ons (`umbra index bake` shipped)
+
+- **Surfaced in:** the baked place-label PR (the G2/G6 demo-denormalization
+  gaps).
+- **Code:** `src/umbra_py/index.py` (`bake_places`, `bake_thumbnails`, the
+  `place` / `thumbnail` columns + the migrations), `umbra index bake` /
+  `bake-thumbnails` in `cli/indexes.py`, `UmbraItem.place` in `models.py`.
+
+`umbra index bake` reverse-geocodes each acquisition's footprint centroid once at
+build time into an additive `place` column, and `umbra index bake-thumbnails`
+caches a small PNG per acquisition, so every `--local` search and every render
+surface reads both from local bytes. Both are baked into the published weekly
+snapshot (`catalog.db` and the `catalog.thumbs.db` sidecar). Follow-ons that
+build on that, none a blocker:
+
+- **A precomputed centroid column.** The centroid is derived from the stored bbox
+  today (cheap), so a `centroid` column is only worth adding if a consumer needs
+  to query/sort on it in SQL rather than compute it per row.
+- **The published thumbnail sidecar has no total cap.** Each weekly run adds up
+  to `--limit` (1500) previews and never drops any, so `catalog.thumbs.db` grows
+  monotonically toward whole-catalog coverage at ~10–20 KB per 128 px scene.
+  That is the intended trajectory (and the download is opt-in), but if the asset
+  gets unwieldy the smallest fix is an export-side bound —
+  `export_thumbnails(limit=…, newest_first=True)`, mirroring the bake — so the
+  published file keeps the most recent N rather than everything ever baked.
+- **`newest_first` is opt-in, not the default.** `bake_thumbnails` still orders
+  by `href` unless asked, to keep an existing caller's batching stable. If no
+  caller depends on that order, making newest-first the default would be one
+  fewer flag to remember on the path where a cap actually matters.
+- **The published thumbnails are 128 px; `bake-thumbnails` defaults to 256.** A
+  local bake and the fetched sidecar therefore differ in size, and a merge keeps
+  whichever arrived first (`--overwrite` replaces). Recording the bake size in
+  the sidecar would let a merge prefer the larger preview rather than the
+  earlier one.
+
+---
+
+## Static GitHub Pages showcase follow-ons (`umbra showcase` shipped)
+
+- **Surfaced in:** the GitHub Pages showcase PR (`STRATEGY.md` §8 demo/hosting).
+- **Code:** `src/umbra_py/showcase.py` (`build_showcase` / `assemble_showcase`),
+  `umbra showcase` in `cli/explore.py`, the `Build catalog showcase` step in
+  `.github/workflows/docs.yml`.
+
+`umbra showcase` composes the whole-catalog PMTiles map (`umbra tiles`), the
+interactive explorer (`umbra demo`) and a self-contained landing page into one
+static, hostable directory; the `docs.yml` Pages job publishes it to
+`/showcase/` beside the docs (non-blocking, main-only). Follow-ons that build on
+it, none a blocker:
+
+- **Enable Pages for the repo (maintainer).** The `docs.yml` deploy job (and so
+  the showcase publish) is skipped until Settings → Pages → Source is set to
+  "GitHub Actions". Until then the showcase builds in CI but isn't served.
+- **The hosted page shows one featured view at a time.** `--featured-view
+  {change,timescan,swipe}` picks which marquee gallery is rendered and `docs.yml`
+  deploys the `change` one; showing more than one view on the same page would
+  need the landing page's featured section repeated per view rather than chosen.
+- **Auto-stamp the freshness date from the index.** The CI step passes the run
+  date to `--updated`; reading the fetched index's `built_at` (as `umbra index
+  info` does) would show the *snapshot's* age rather than the build's.
+
+---
+
+## Whole-catalog PMTiles tiling follow-ons (`umbra tiles` shipped)
+
+- **Surfaced in:** the `umbra tiles` PR (the demo's full-acquisition-set tiling
+  gap).
+- **Code:** `src/umbra_py/pmtiles.py`, `umbra tiles` in `cli/explore.py`.
+
+`umbra tiles` (a stdlib-only PMTiles v3 writer over acquisition centroids *and*
+footprint polygons, each feature carrying its COG reference plus the
+polarization / asset lists, + a MapLibre GL viewer — no extra, no tippecanoe) is
+shipped, and `umbra demo --pmtiles` reads it, so the whole-archive explorer is a
+superset of the embedded-slice one. Follow-ons, none a blocker:
+
+- **Leaf directories for very large catalogs.** The writer emits a single root
+  directory, which is spec-valid and ample for the current catalog (thousands of
+  tiles). If the tile count ever grows past a comfortable root-directory size,
+  add leaf-directory splitting (the PMTiles spec's mechanism) so readers still
+  fetch a small root first.
+- **The published archive only gains new properties on its next rebuild.** The
+  COG references and the `pol` / `assets` fields reach `catalog.pmtiles` on the
+  next `publish-index.yml` run, so until then the hosted showcase shows no "Get
+  SAR image" button and its polarization chips filter nothing out (every feature
+  lacks the key, and the "never hidden by a facet it has no value for" rule keeps
+  them all visible — the honest failure mode, but a silent one).
+- **The COG overlay is a bbox-stretched quicklook, not a reprojection.** The same
+  approximation the embedded-slice explorer makes; worth revisiting only if the
+  placement error becomes visible at the zooms people actually use.
+- **The facet chips are the only place the two explorer modes still differ.** The
+  slice app derives its chips from the slice it holds; the whole-archive app
+  offers the closed `POLARIZATIONS` set, so a chip can name a polarization the
+  archive has none of. Deriving it instead would need a facet summary in the
+  archive metadata — worth doing only if the same question comes up for another
+  field.
+
+---
+
+## SICD DEM orthorectification follow-ons (`umbra convert --dem` shipped)
+
+- **Surfaced in:** the DEM terrain-orthorectification PR (`STRATEGY.md` 5.5).
+- **Code:** `src/umbra_py/convert.py` (`_refine_gcps_with_dem`,
+  `_dem_height_sampler`, `_build_gcps_dem`, the RTC models, `conversion_tags`),
+  `umbra convert --dem` in `cli/process.py`.
+
+`umbra convert --dem PATH|auto` / `--geoid PATH|auto` / `--rtc --rtc-model
+{cosine,area,gamma,facet}` / `--calibrate {sigma0,beta0,gamma0,rcs}`
+terrain-orthorectifies, radiometrically flattens and calibrates a SICD, and
+stamps what actually ran into `UMBRA_*` GeoTIFF tags. Follow-ons, none a
+blocker:
+
+- **Noise-level subtraction.** SICD's `Radiometric.NoiseLevel` describes the
+  noise-equivalent floor; subtracting it in the power domain before the scale
+  factor would make low-backscatter surfaces (calm water, shadow) honest rather
+  than floor-limited. Left out because it needs the `NoisePoly` /
+  `NoiseLevelType` handling (absolute vs. relative) that no Umbra product
+  currently exercises.
+- **Nothing *consumes* the provenance tags yet.** `to_xarray` / `to_stack` could
+  refuse to stack rasters whose `UMBRA_CALIBRATION` or `UMBRA_SCALE` disagree —
+  the same "a mixed selection is not a measurement" check `POST /artifacts/stats`
+  makes for polarization.
+- **MultiRTC interop.** Interop with
+  [MultiRTC](https://github.com/MultiSAR/MultiRTC) is a heavier,
+  research-oriented job and remains deferred.
+
+---
+
+## Register `umbra-mcp` in the MCP registries and Anthropic's directory
+
+- **Surfaced in:** the `umbra-mcp` MCP server PR.
+- **Code:** `src/umbra_py/mcp_server.py`, `pyproject.toml` (`[mcp]` extra,
+  `umbra-mcp` console script).
+
+The server itself is shipped and runnable (`umbra mcp` / `uvx umbra-mcp`), and
+the agent-framework reach trilogy (MCP → LangChain → LlamaIndex) is complete.
+What is still open:
+
+- **Registration is a maintainer action.** Listing the server in the public MCP
+  registries and Anthropic's directory — the discovery half of the deliverable —
+  has not been done.
+- **`change_composite` drops its polarization-mixing warning.** Returning that
+  warning as structured text alongside the image block would let an agent see
+  why a composite is suspect instead of only handing back the picture.
+
+---
+
+## Grow the `umbra serve` STAC API (a hosted instance)
+
+- **Surfaced in:** the `umbra serve` STAC API PR.
+- **Code:** `src/umbra_py/serve.py`, `pyproject.toml` (`[serve]` extra).
+
+The read-only STAC API is shipped (landing / conformance / collections / items /
+`GET`+`POST /search` with bbox, datetime, geometry `intersects`, ids and token
+pagination), renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`,
+`GET /artifacts/thumbnail/{id}.png`, `POST /artifacts/change`, `.../timescan`,
+`.../swipe`, and the one that is numbers rather than a picture, `POST
+/artifacts/stats`) with an async job flow for long renders, and exposes the
+index's Umbra-specific filters through the STAC Query extension. Open follow-on:
+
+- **A hosted community instance.** The local-first server has no operational
+  cost; a public instance is a policy decision (COG-streaming egress) that would
+  make the archive queryable with zero install — pair it with the static demo
+  front end `umbra showcase` already builds.
+
+---
+
+## Canopy commercial-archive backend follow-ons (`UmbraCatalog(token=...)` shipped)
+
+- **Surfaced in:** the Canopy backend PR (`STRATEGY.md` 5.1).
+- **Code:** `src/umbra_py/catalog.py` (`_search_archive` / `_archive_page`),
+  `src/umbra_py/constants.py` (`CANOPY_ARCHIVE_URL`), `umbra search --token`.
+
+The commercial archive is searchable behind the same `search()` interface
+(bearer token → STAC API POST search + `rel="next"` pagination, offline-tested
+against a mocked API), including keyed `get_item` lookups, the visual commands
+and the MCP server. Open follow-ons, none a blocker:
+
+- **Push `product_types` / `area` down as STAC query/filter extensions.** They
+  are applied client-side today (exact parity with the open-bucket path). Once
+  the concrete Canopy field names are confirmed against the live API, sending
+  them as a STAC *query*/*filter* body would let the server pre-filter and cut
+  transferred pages. This needs a real token to verify, so it is deliberately
+  deferred rather than guessed.
+- **Verify request/response shapes against the live Canopy API.** The client is
+  built to the STAC API *standard*; confirm the exact search body, collection
+  ids, and pagination link shape Canopy emits, and adjust if it deviates. Add a
+  `network`-marked smoke test gated on a `UMBRA_CANOPY_TOKEN` secret.
+
+---
+
+## C1 natural-language search follow-ons (all four steps now shipped)
+
+The four C1 steps — relative dates (`dates.py`), the deterministic fuzzy task
+matcher (`fuzzy.py`), the model-planned `umbra ask` (`planner.py`), and the
+semantic embedding index (`semantic.py`) — are all shipped, as are the LangChain
+/ LlamaIndex wrappers and the MCP `search_catalog` semantic mode (see the
+CHANGELOG). Optional follow-on that builds on them, not a blocker:
+
+- **Embed task *descriptions*, not just names.** The current index embeds the
+  task label; if Umbra publishes per-task descriptions, embedding those too would
+  widen recall further.
+
+---
+
+## C2 VLM-in-the-loop follow-ons (`umbra describe` shipped)
+
+- **Surfaced in:** the `umbra describe` PR.
+- **Code:** `src/umbra_py/describe.py`, `src/umbra_py/narrate.py` (`[ai]` +
+  `[viz]` extras), `constants.AI_PROVENANCE`.
+
+`umbra describe` (scene description) and `umbra change --narrate` (change
+narration grounded in a deterministic per-block dB grid) are shipped on the CLI,
+MCP, LangChain and LlamaIndex surfaces. Open follow-on:
+
+- **A `describe` render is a fresh S3 read every call.** The thumbnail bake has
+  since landed (`umbra index bake-thumbnails` / `CatalogIndex.get_thumbnail`), so
+  feed the cached quicklook into `describe` via its injectable `render=` hook
+  instead of re-streaming the COG.
+
+---
+
+## C4/C5 ML dataset follow-ons (`umbra chips` shipped)
+
+- **Surfaced in:** the `umbra chips` PR (`STRATEGY.md` 5.5).
+- **Code:** `src/umbra_py/chips.py`, `umbra chips` in `cli/process.py`.
+
+`umbra chips` (fixed-size, georeferenced ML tiles + a `.jsonl` / `.geojson` /
+stac-geoparquet manifest, `[load]` extra, no model call) is shipped, including
+`--asset SICD`, which geocodes each complex acquisition through the `umbra
+convert` pipeline and cuts the identical tiles from the result. Follow-ons that
+build on it, not blockers:
+
+- **A geocode-then-chip run converts the *whole* scene to keep part of it.**
+  With `--bbox`-style clipping the conversion could be restricted to the area
+  the chips will cover, which would cut both the warp cost and the disk the
+  intermediate COG needs. `sicd_to_geocoded_cog` has no clip parameter today,
+  so this is a change to `convert.py` first; the download is whole-product
+  either way, which is the larger cost.
+- **`CSI` still goes down the amplitude path, which is right but undiscussed.**
+  A CSI is a colour sub-aperture *image* — already a display raster — so it is
+  streamed like a GEC and none of the conversion flags apply to it. `CPHD` stays
+  out entirely: it is phase history rather than a focused image, so there is no
+  image grid to chip until something focuses it.
+
+---
+
+## Time-series datacube follow-ons (`to_stack` / `umbra stack` shipped)
+
+- **Surfaced in:** the datacube PR (`STRATEGY.md` §2 / 5.5).
+- **Code:** `src/umbra_py/load.py` (`to_stack`, `stack_stats`,
+  `stack_to_geotiff`, `STACK_EXTENTS`, `_stack_bounds`, `_mask_slice`),
+  `umbra stack` in `cli/process.py`.
+
+`to_stack` co-registers several acquisitions onto one shared grid (lon/lat or a
+projected `crs=`, eagerly or lazily via `lazy=True` / `chunk_size=N`) and
+returns a `(time, y, x)` `xarray.DataArray`; `stack_stats` reduces it to JSON
+(per-pass distribution, pass-to-pass change, an N×N spatial breakdown, optional
+per-block series, optional windowed streaming), and both are surfaced on the
+CLI, the agent tools and `POST /artifacts/stats`. Follow-ons that build on it,
+none a blocker:
+
+- **The agent tools don't take `windowed`, deliberately.** The MCP / LangChain /
+  LlamaIndex `stack_stats` tools build an eager cube at `max_size=512`, where
+  there is no ceiling to lift — so `windowed` there would be a model-facing knob
+  whose only effect is making the percentiles approximate. Wire it only if those
+  tools ever grow the lazy/chunked build that would make it mean something; the
+  server was the front door with the memory problem.
+- **Only the refusal advertises the windowed capability.** A client discovers
+  that an instance can measure in windows by asking and reading the `400`;
+  nothing in the landing page or `/healthz` says so up front. Cheapest fix if it
+  matters: a field on the landing page's `stats` link.
+- **The quantile histogram is a Python dict of bin → count.** Fine at the sizes
+  this sees (a few thousand occupied bins per pass), but a pass spanning hundreds
+  of decibels holds proportionally more. If that ever matters, cap the axis or
+  widen the bin rather than reaching for a t-digest.
+- **The async job path shares the stack-execution policy.** An `"async": true`
+  stats request runs the same renderer on the job executor's thread, so
+  `--stack-scheduler threads` there means dask's pool *inside* a pool thread.
+  `synchronous` (the default) is the safe pairing; a per-path policy would only
+  be worth it if an operator wanted sync requests bounded and jobs fast.
+- **Nothing reports the stack-execution policy over HTTP.** The CLI echoes it at
+  startup, but a client cannot tell a lazy instance from an eager one — correct,
+  since the answers are identical, though an operator debugging memory has to
+  read the process's own logs.
+- **The eager path still opens every source up front.** Both paths open all the
+  datasets to resolve the grid (metadata only, but N handles at once). A two-pass
+  resolve — footprints first, then reads — would drop that to one at a time; it
+  saves handles, not bytes, so it was not worth the churn here.
+- **Share the co-registration with `viz`.** `viz._coregister_bands` does the
+  same warp-and-decimate for the render commands and predates this. They now
+  differ in what they return (bare arrays + bounds vs. a labelled cube) and in
+  masking (`viz` keeps raw values for its own stretch), so they were left
+  separate rather than forced into one function; if a third caller appears,
+  extract the shared VRT/grid step.
+- **The datacube notebook picks its own site from a live search.**
+  `examples/08_time_series_datacube.ipynb` fetches a repeat-imaged task at run
+  time, so it cannot pick a site with a *known* story — a curated task id (or an
+  `--area` the showcase already features) would make the printed numbers
+  reproducible and give the narrative something specific to point at.
+
+---
+
+## C5 archive-embedding follow-ons (`umbra embed` shipped)
+
+- **Surfaced in:** the `umbra embed` PR (`STRATEGY.md` 5.2).
+- **Code:** `src/umbra_py/embed.py`, `umbra embed` in `cli/indexes.py`.
+
+`umbra embed` (visual similarity search — one image vector per acquisition in a
+sidecar `catalog.embed.db`, `search_similar(item)` and text-to-scene, `[ai]` +
+`[viz]` extras) is shipped, as is the `umbra embed fetch` consume side and the
+opt-in publish step in `publish-index.yml`. Follow-ons that build on it, not
+blockers:
+
+- **Publishing the first embedding table is a maintainer action.** The weekly
+  workflow's embedding step is gated on a maintainer-set `OPENAI_API_KEY` secret
+  and is `continue-on-error`, so it costs nothing and publishes nothing until the
+  secret is set. (A stac-geoparquet embedding-table form is still an option if a
+  non-umbra-py consumer wants one.)
+- **A native vector index at scale.** Ranking is a brute-force cosine scan today
+  (instant at catalog scale, no binary dependency). If the archive grows to
+  hundreds of thousands of scenes, the schema leaves room to swap in `sqlite-vec`
+  or an ANN index behind the same `similar()` API.
+- **A SAR-tuned encoder.** The default targets a generic CLIP-family multimodal
+  `/embeddings` endpoint; a SAR-specific encoder (once one is broadly available)
+  would sharpen recall for radar-specific scene types. The `model` label already
+  guards against silently mixing encoders in one index.
+
+---
+
+## `viz/` package-split follow-ons (`viz.py` → `viz/` shipped)
+
+- **Surfaced in:** the `viz` package-split PR (`STRATEGY.md` §8 structural debt).
+- **Code:** `src/umbra_py/viz/` (`__init__.py`, `geojson.py`, `raster.py`,
+  `composites.py`, `contact_sheet.py`, `maps.py`, `_deps.py`), the
+  `per-file-ignores` entry in `pyproject.toml`, the `viz/__init__.py` row in
+  `llms_txt._MODULE_GUIDE`.
+
+The 2 023-line module is now six modules along the seams the code already had,
+with `viz/__init__.py` re-exporting every name it ever exported (public *and*
+private), so no caller changed. Follow-ons that build on it, none a blocker:
+
+- **The private re-exports are a compatibility layer, not a design.**
+  `viz/__init__.py` re-exports ~30 underscore-prefixed helpers because six other
+  package modules (`models`, `index`, `demo`, `narrate`, `describe`, `viewer`)
+  import them from `umbra_py.viz`. Pointing each of those imports at the module
+  that actually defines the helper (`from .viz.raster import _thumbnail_png`)
+  would let the façade shrink to the public surface and drop the `F401`
+  per-file-ignore. Deliberately not done here: it would put churn in six
+  unrelated modules in a change whose whole claim is that nothing outside `viz`
+  moved.
+- **`maps.py` is still 800 lines.** It carries three renderers (footprint,
+  timeline, swipe) plus the popup/legend/attribution/lazy-imagery HTML and the
+  Nominatim geocoder. The geocoder in particular is not a map — it is a
+  rate-limited network client with module-level state that `index.bake_places`
+  also drives. A `geocode.py` split is the natural next seam if the file grows
+  again; it was left alone here because moving it would relocate the one piece
+  of mutable module state (`_LAST_GEOCODE_AT`, `_GEOCODE_CACHE`) that the split
+  deliberately did *not* re-export.
+
+---
+
+## `cli/` package-split follow-ons (`cli.py` → `cli/` shipped)
+
+- **Surfaced in:** the `cli` package-split PR (`STRATEGY.md` §8 structural debt),
+  which the `viz/` entry above named.
+- **Code:** `src/umbra_py/cli/` (`__init__.py`, `__main__.py`, `_root.py`,
+  `_shared.py`, `discover.py`, `scenes.py`, `process.py`, `composites.py`,
+  `atlas.py`, `explore.py`, `indexes.py`), the `per-file-ignores` entry in
+  `pyproject.toml`, the repo map in `AGENTS.md`.
+
+The 5 522-line module is now nine modules grouped by what the verb does, with
+`cli/__init__.py` re-exporting every name it defined and the whole `--help`
+surface byte-identical to before. Follow-ons that build on it, none a blocker:
+
+- **`indexes.py` carries three sub-groups, not one concern.** At 1 162 lines it
+  is the largest of the nine because `umbra index`, `umbra semantic` and
+  `umbra embed` were kept together as "the local SQLite sidecars". They share a
+  shape (build / fetch / info over a `.db` beside the catalog index) but no
+  code beyond `_shared`, so splitting them three ways is a one-line-per-module
+  change if it grows again. Left as one module here because three ~400-line
+  files with the same import header buy separation the reader did not ask for.
+- **The command modules reach the shared plumbing as `_shared.<name>`.** That
+  is what keeps one patch target for the option-group parity suite (which
+  iterates over all fourteen gather commands), but it is a heavier idiom than
+  `from ._shared import _gather_items` at every call site. If a future change
+  gives the parity suite a per-command module map (`conftest` already owns the
+  roster), the qualified form could go back to a plain import.
+- **`explore.py` groups by "stands something up", which is the loosest seam.**
+  `mcp` and `serve` run servers; `demo`, `tiles` and `showcase` write static
+  artifacts that a server or Pages then hosts. They were put together because
+  the showcase composes the other four's outputs, but a `publish.py` /
+  `servers.py` division is defensible if either half grows.
+- **Nothing checks the module split itself.** The parity suite checks that every
+  gather command exposes the shared option groups, and `tests/test_llms_txt.py`
+  checks the generated command list, but no test asserts that a new command
+  lands in a module rather than in `_shared`. That is a convention held by
+  review, documented in `AGENTS.md` §2 and the `cli/__init__.py` docstring.
+
+---
+
+## Shared geography option-group follow-ons (`--intersects` everywhere shipped)
+
+- **Surfaced in:** the shared geography-option PR (`STRATEGY.md` §8 structural
+  debt).
+- **Code:** `src/umbra_py/cli/_shared.py` (`_geometry_option`, `_place_option`,
+  `_area_option`, `_resolve_geography`), `src/umbra_py/watch.py` (`watch_key`),
+  `src/umbra_py/context.py` (`_SEARCH_PARAMETERS`).
+
+`--bbox` / `--place` / `--intersects` and `--area` / `--fuzzy` are shared option
+groups applied to all fourteen gather commands, checked against one roster
+(`conftest.GATHER_COMMANDS`) by `tests/test_cli_option_groups.py`. What is still
+open:
+
+- **The date and limit options.** `--start` / `--end` / `--limit` /
+  `--max-search` are still written out per command, and the decision this entry
+  used to leave open is now made: **don't extract them.** The task-name and
+  geography groups were worth sharing because their *semantics* are identical
+  everywhere and only the wording varied — an override mechanism (or the "keep
+  bespoke help inline" convention) buys real drift-prevention. The date and limit
+  options are not that: `--limit`'s default is command-specific
+  (20 / 24 / 100 / 500 / 2000) as well as its help text ("Max results to plot" vs
+  "Max tiles" vs "Max acquisitions to load"), so a shared decorator would have to
+  parameterize both and would leave one line per command anyway — indirection with
+  no invariant behind it. Revisit only if a command ships with a *missing*
+  `--start`/`--limit` (the parity suite would be the place to catch it), which is
+  the evidence that would change the call. The *gathering* half (`_gather_items` /
+  `_search_source`) is already shared.
+- **The MCP `search_catalog` tool cannot plan a polygon.** `umbra ask --aoi` lets
+  the planner *select* one of the polygons the caller supplied, by name, rather
+  than author coordinates a hallucination could silently move. The other
+  model-planned surface takes `bbox` only — the same supply-then-select shape
+  would fit it (an operator-configured AOI directory rather than a CLI flag), but
+  an MCP client has no equivalent of `--aoi` to pass files through, so it needs a
+  server-side convention first.

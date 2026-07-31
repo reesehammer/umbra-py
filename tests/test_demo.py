@@ -226,7 +226,7 @@ def test_analyze_panel_sparkline_styles_ship(sample_item_dict):
 
 def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
     """With ``server_url`` set the detail panel leads with the baked-thumbnail
-    endpoint (DEMO_APP_GAPS G6): the app JS builds an ``.umbra-thumb`` image from
+    endpoint (the G6 thumbnail bake): the app JS builds an ``.umbra-thumb`` image from
     ``/artifacts/thumbnail/<id>.png`` off the server base, url-encoding the
     remote item id, and drops it on error so an unbaked scene is never a broken
     image."""
