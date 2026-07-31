@@ -209,6 +209,52 @@ blocker:
 
 ---
 
+## Area-of-interest clipping follow-ons (`--clip-bbox` on convert / chips shipped)
+
+- **Surfaced in:** the conversion-clipping PR (`STRATEGY.md` 5.5, which the
+  `umbra chips --asset SICD` entry above named).
+- **Code:** `src/umbra_py/convert.py` (`_clip_window`, `_reader_shape`, the
+  `origin=` parameters on `_build_gcps` / `_build_gcps_dem` /
+  `_calibrate_amplitude` / `_scene_geo_bbox`, `bounds=` on `_warp_gcps_to_cog`,
+  `bbox=` on `sicd_to_geocoded_cog`), `src/umbra_py/chips.py`
+  (`_clip_pixel_window`, `SicdConversion.bbox`, `bbox=` on `chip_item` /
+  `write_chips`), `umbra convert --clip-bbox` / `umbra chips --clip-bbox` in
+  `cli/process.py`.
+
+`sicd_to_geocoded_cog(bbox=…)` reads only the image window covering a lon/lat
+rectangle, sizes the control points, the calibration polynomials and the
+`--dem auto` fetch to it, and crops the output to the request; `chip_item(bbox=…)`
+tiles only that window and, for a complex asset, passes it down as the
+conversion's clip. Follow-ons, none a blocker:
+
+- **The clip is a rectangle, not a polygon.** The rest of the CLI takes an area
+  of interest as a *shape* (`--intersects`), and the shared geography group is
+  where that lives. A clipped conversion is a north-up raster, so a polygon could
+  only mask it after the warp rather than shrink the read — worth doing when
+  someone wants the mask, not for the cost.
+- **The window search runs on the flat-earth projection even with `--dem`.**
+  Terrain moves a ground point far less than the one-lattice-step padding, so a
+  DEM-orthorectified clip is still a superset in practice. If a scene over
+  extreme relief ever loses an edge pixel, the fix is to grow the pad by the
+  DEM's own height range × `tan(incidence)` rather than to run the refinement
+  loop twice.
+- **The clip is not in the provenance tags, deliberately.** The output's
+  geotransform already states which ground it covers, and `UMBRA_*` records what
+  a pixel value *means*; adding it would make a clipped and an unclipped
+  conversion of one site disagree on a key for no measurement reason. Revisit
+  only if someone needs to tell "clipped to X" from "the scene only covered X".
+- **`umbra convert --clip-bbox` takes coordinates, not a place.** `--place` /
+  `--area` resolve a name to a rectangle everywhere items are *searched*;
+  `convert` operates on a downloaded file and has no search, so the geocoder is
+  not wired in. One shared resolver call would do it if the coordinates prove
+  annoying in practice.
+- **Nothing reports what a clip saved.** The command says what it wrote, not
+  that it read 4% of the product to write it. A line on the non-JSON output
+  (window pixels vs. scene pixels) would make the flag's value visible at the
+  moment someone is deciding whether to use it.
+
+---
+
 ## Provenance-consuming follow-ons (`to_stack` refuses mixed conversions)
 
 - **Surfaced in:** the provenance-consumption PR (`STRATEGY.md` 5.5, which the
@@ -358,12 +404,6 @@ stac-geoparquet manifest, `[load]` extra, no model call) is shipped, including
 convert` pipeline and cuts the identical tiles from the result. Follow-ons that
 build on it, not blockers:
 
-- **A geocode-then-chip run converts the *whole* scene to keep part of it.**
-  With `--bbox`-style clipping the conversion could be restricted to the area
-  the chips will cover, which would cut both the warp cost and the disk the
-  intermediate COG needs. `sicd_to_geocoded_cog` has no clip parameter today,
-  so this is a change to `convert.py` first; the download is whole-product
-  either way, which is the larger cost.
 - **`CSI` still goes down the amplitude path, which is right but undiscussed.**
   A CSI is a colour sub-aperture *image* — already a display raster — so it is
   streamed like a GEC and none of the conversion flags apply to it. `CPHD` stays

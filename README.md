@@ -786,6 +786,12 @@ umbra convert scene_SICD.nitf scene_ortho.tif --dem copernicus_dem.tif
 # product. Needs a product that carries the scale factors; it says so if not.
 umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet --calibrate gamma0
 
+# Convert only the area you care about. A scene is tens of square kilometres at
+# 16-25 cm, and every step above is proportional to it. --clip-bbox turns the
+# ground rectangle back into the image window that covers it, reads only that,
+# and crops the output to the request -- same pixels, a fraction of the work.
+umbra convert scene_SICD.nitf site.tif --clip-bbox -112.05,40.72,-111.98,40.78
+
 # Every converted raster records how it was made -- calibration, terrain model
 # and reference angle, DEM/geoid, projection, scale, licence -- in its own
 # GeoTIFF tags, so a scene can say what its pixel values mean. Read it back
@@ -1004,6 +1010,12 @@ umbra chips <item-json-url> --out chips/ --json
 # extra: pip install "umbra-py[load,convert]").
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --dem auto --rtc --rtc-model facet --calibrate gamma0 --work-dir scenes/
+
+# Chip one site out of every pass rather than every scene whole. --clip-bbox
+# tiles only that window -- and for --asset SICD it is the *conversion's* clip
+# too, so the geocoding step costs what the site costs, not what the scene does.
+umbra chips --area "Centerfield" --out chips/ --asset SICD \
+    --clip-bbox -112.05,40.72,-111.98,40.78 --work-dir scenes/
 ```
 
 **The complex products are chippable too.** A `SICD` is complex slant-plane data
@@ -1018,7 +1030,11 @@ provenance tags saying so (the manifest also carries `calibration` / `rtc_model`
 read back from the raster rather than from the request). The cost is honest:
 unlike the GEC path this downloads each product whole, so it is opt-in, one scene
 is on disk at a time, and `--work-dir` keeps the geocoded scenes so a re-run
-reuses them instead of fetching and warping again.
+reuses them instead of fetching and warping again. `--clip-bbox` is what makes
+that path affordable when the subject is a *site*: it tiles only the window you
+name, and on the SICD path it becomes the conversion's own clip, so each pass is
+geocoded over the area of interest rather than over the whole collect (the same
+flag, and the same lon/lat convention, as `umbra stack --clip-bbox`).
 
 For the amplitude products (`GEC`, `CSI`) only the bytes for each tile stream
 over HTTP range requests — no full download,

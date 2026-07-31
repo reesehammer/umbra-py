@@ -123,12 +123,25 @@ class _FakeSicd:
 
 
 class _FakeReader:
+    """A sarpy-shaped reader that honours slicing, so a clipped read is visible.
+
+    ``reads`` records every key the converter asked for: whole-scene conversion
+    asks for ``[:, :]``, a clipped one asks for the window it resolved, which is
+    the difference the clip is *for*.
+    """
+
     def __init__(self, complex_data, sicd):
         self._data = complex_data
         self._sicd = sicd
+        self.reads: list[tuple] = []
 
-    def __getitem__(self, _key):  # reader[:, :]
-        return self._data
+    @property
+    def data_size(self):
+        return self._data.shape
+
+    def __getitem__(self, key):  # reader[:, :] or reader[r0:r1, c0:c1]
+        self.reads.append(key)
+        return self._data[key]
 
     def get_sicds_as_tuple(self):
         return (self._sicd,)
@@ -2268,3 +2281,355 @@ def test_cli_convert_without_a_destination_errors(tmp_path):
 
     assert result.exit_code != 0
     assert "DST" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Clipping to an area of interest (bbox= / --clip-bbox).
+# --------------------------------------------------------------------------- #
+
+
+def _ground(sicd, row, col, *, hae=0.0):
+    """Where the fake projection model puts one image point, as (lon, lat)."""
+    lon = sicd.lon0 + col * sicd.dlon + row * sicd.skew + hae * sicd.hae_shift
+    lat = sicd.lat0 - row * sicd.dlat + col * sicd.skew
+    return lon, lat
+
+
+def _bbox_around(sicd, row, col, *, pad=0.004):
+    lon, lat = _ground(sicd, row, col)
+    return (lon - pad, lat - pad, lon + pad, lat + pad)
+
+
+def test_clip_window_is_a_padded_superset_of_the_area_of_interest():
+    pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()
+    rows, cols = 60, 80
+    # A tiny area of interest well inside the scene: smaller than one lattice
+    # cell, which is why the search works on cells rather than lattice points.
+    bbox = _bbox_around(sicd, 30, 40, pad=0.002)
+    row0, row1, col0, col1 = convert._clip_window(sicd, (rows, cols), bbox, grid=17)
+
+    # A real window, strictly inside the scene, and much smaller than it.
+    assert 0 <= row0 < row1 <= rows
+    assert 0 <= col0 < col1 <= cols
+    assert (row1 - row0) * (col1 - col0) < 0.5 * rows * cols
+    # It contains the image point the area of interest was built around.
+    assert row0 <= 30 < row1
+    assert col0 <= 40 < col1
+
+
+def test_clip_window_covers_every_image_point_inside_the_bbox():
+    """The window is a superset: no pixel whose ground lands in the bbox is cut."""
+    pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()
+    rows, cols = 60, 80
+    bbox = _bbox_around(sicd, 22, 55, pad=0.006)
+    west, south, east, north = bbox
+    row0, row1, col0, col1 = convert._clip_window(sicd, (rows, cols), bbox, grid=17)
+
+    for row in range(rows):
+        for col in range(cols):
+            lon, lat = _ground(sicd, row, col)
+            if west <= lon <= east and south <= lat <= north:
+                assert row0 <= row < row1, (row, col)
+                assert col0 <= col < col1, (row, col)
+
+
+def test_clip_window_rejects_a_bbox_that_misses_the_scene():
+    pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()
+    with pytest.raises(ValueError, match="does not overlap the scene"):
+        convert._clip_window(sicd, (40, 40), (10.0, 10.0, 10.5, 10.5))
+
+
+def test_clip_window_rejects_a_degenerate_bbox():
+    pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()
+    with pytest.raises(ValueError, match="positive"):
+        convert._clip_window(sicd, (40, 40), (-100.0, 40.0, -100.0, 40.0))
+
+
+def test_build_gcps_origin_projects_scene_coordinates_but_labels_window_ones():
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    sicd = _FakeSicd()
+    gcps = convert._build_gcps(sicd, (10, 10), grid=2, projection_type="HAE", origin=(20, 30))
+
+    # Rows/cols index the *array* being warped, so they start at zero ...
+    assert {(g.row, g.col) for g in gcps} == {(0.0, 0.0), (0.0, 9.0), (9.0, 0.0), (9.0, 9.0)}
+    # ... while lon/lat come from where that pixel really is in the scene.
+    top_left = next(g for g in gcps if g.row == 0.0 and g.col == 0.0)
+    lon, lat = _ground(sicd, 20, 30)
+    assert top_left.x == pytest.approx(lon)
+    assert top_left.y == pytest.approx(lat)
+
+
+def test_scene_geo_bbox_origin_describes_the_window_not_the_scene():
+    pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()
+    whole = convert._scene_geo_bbox(sicd, (60, 80))
+    window = convert._scene_geo_bbox(sicd, (10, 10), origin=(25, 35))
+
+    assert window[0] > whole[0] and window[2] < whole[2]
+    assert window[1] > whole[1] and window[3] < whole[3]
+
+
+def test_calibration_origin_matches_the_same_pixels_of_the_whole_scene():
+    """A clipped read is calibrated at the image coordinates it came from."""
+    np = pytest.importorskip("numpy")
+
+    # A polynomial that varies across the image, so a wrong origin shows up.
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[2.0, 0.05], [0.03, 0.0]]))
+    amp = (np.arange(20 * 24, dtype="float32") + 1.0).reshape(20, 24)
+
+    whole = convert._calibrate_amplitude(sicd, amp, kind="sigma0", decibels=True)
+    row0, col0 = 6, 9
+    window = convert._calibrate_amplitude(
+        sicd,
+        amp[row0 : row0 + 5, col0 : col0 + 7],
+        kind="sigma0",
+        decibels=True,
+        origin=(row0, col0),
+    )
+
+    assert np.allclose(window, whole[row0 : row0 + 5, col0 : col0 + 7], atol=1e-5)
+
+
+def test_warp_gcps_to_cog_bounds_crop_without_changing_the_pixel_size(tmp_path):
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+
+    rows, cols = 32, 32
+    amp = (np.arange(rows * cols, dtype="float32") + 1.0).reshape(rows, cols)
+    gcps = _hand_gcps(rows, cols, res=0.01)  # spans lon -100..-99.69, lat 39.69..40
+
+    whole = convert._warp_gcps_to_cog(
+        amp,
+        gcps,
+        tmp_path / "whole.tif",
+        resolution=None,
+        resampling="nearest",
+        nodata=float("nan"),
+    )
+    clipped = convert._warp_gcps_to_cog(
+        amp,
+        gcps,
+        tmp_path / "clip.tif",
+        resolution=None,
+        resampling="nearest",
+        nodata=float("nan"),
+        bounds=(-99.95, 39.85, -99.85, 39.95),
+    )
+
+    with rasterio.open(whole) as full, rasterio.open(clipped) as part:
+        # Same ground sample distance -- clipping chooses ground, not sharpness.
+        assert part.transform.a == pytest.approx(full.transform.a)
+        assert part.width < full.width and part.height < full.height
+        assert part.bounds.left == pytest.approx(-99.95, abs=1e-9)
+        assert part.bounds.top == pytest.approx(39.95, abs=1e-9)
+        # The requested window is honoured to within the ceil on width/height.
+        assert part.bounds.right <= -99.85 + full.transform.a
+        assert part.bounds.bottom >= 39.85 - full.transform.a
+
+
+def test_warp_gcps_to_cog_rejects_bounds_off_the_control_points(tmp_path):
+    pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+
+    amp = np.ones((8, 8), dtype="float32")
+    with pytest.raises(ValueError, match="does not overlap"):
+        convert._warp_gcps_to_cog(
+            amp,
+            _hand_gcps(8, 8),
+            tmp_path / "x.tif",
+            resolution=0.01,
+            resampling="nearest",
+            nodata=0.0,
+            bounds=(10.0, 10.0, 10.5, 10.5),
+        )
+
+
+def _marked_complex(rows, cols, *, mark, value=5000.0):
+    """A flat scene with one bright block, so its ground position is findable."""
+    np = pytest.importorskip("numpy")
+    mag = np.ones((rows, cols), dtype="float64")
+    r, c = mark
+    mag[r : r + 3, c : c + 3] = value
+    return mag * (1 + 0j)
+
+
+def _bright_centroid(path):
+    """Ground centroid (lon, lat) of the bright block in a geocoded raster.
+
+    The centroid rather than the brightest pixel: the two rasters are sampled on
+    grids with different origins, so which single cell wins is arbitrary at the
+    sub-pixel level while the block's centre of mass is not.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    with rasterio.open(path) as ds:
+        band = ds.read(1)
+        finite = np.isfinite(band)
+        bright = finite & (band > 0.5 * float(np.nanmax(band[finite])))
+        rows, cols = np.nonzero(bright)
+        xs, ys = ds.xy(rows, cols)
+        return float(np.mean(xs)), float(np.mean(ys))
+
+
+def test_sicd_to_geocoded_cog_clip_reads_only_the_window_and_keeps_the_geolocation(
+    tmp_path, monkeypatch
+):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    rows, cols = 60, 80
+    mark = (31, 41)
+    data = _marked_complex(rows, cols, mark=mark)
+    sicd = _FakeSicd()
+
+    whole_reader = _FakeReader(data, sicd)
+    _patch_open_complex(monkeypatch, whole_reader)
+    whole = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "whole.tif", gcp_grid=9, resampling="nearest"
+    )
+
+    clip_reader = _FakeReader(data, _FakeSicd())
+    _patch_open_complex(monkeypatch, clip_reader)
+    bbox = _bbox_around(sicd, *mark, pad=0.02)
+    clipped = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "clip.tif",
+        gcp_grid=9,
+        resampling="nearest",
+        bbox=bbox,
+    )
+
+    # The whole-scene run reads everything; the clipped one reads a sub-window.
+    assert whole_reader.reads == [(slice(None), slice(None))]
+    (read_rows, read_cols) = clip_reader.reads[0]
+    assert read_rows.start > 0 or read_cols.start > 0
+    read_pixels = (read_rows.stop - read_rows.start) * (read_cols.stop - read_cols.start)
+    assert read_pixels < 0.5 * rows * cols
+
+    with rasterio.open(whole) as full, rasterio.open(clipped) as part:
+        assert part.width < full.width and part.height < full.height
+        # Cropped to the request (a pixel of slack for the ceil on width/height).
+        slack = 2 * part.transform.a
+        assert part.bounds.left >= bbox[0] - slack
+        assert part.bounds.right <= bbox[2] + slack
+        assert part.bounds.bottom >= bbox[1] - slack
+        assert part.bounds.top <= bbox[3] + slack
+
+    # The clip moved no ground: the bright block lands in the same place in
+    # both rasters, and where the projection model puts it. This is what an
+    # off-by-``origin`` GCP set would break -- the clipped window would be
+    # geocoded as if it were the whole scene, shifting it by the window offset
+    # (here tens of pixels), which is exactly the failure the padding cannot
+    # hide.
+    with rasterio.open(whole) as full:
+        pixel = full.transform.a
+    true_lon, true_lat = _ground(sicd, mark[0] + 1, mark[1] + 1)  # block centre
+    whole_lon, whole_lat = _bright_centroid(whole)
+    clip_lon, clip_lat = _bright_centroid(clipped)
+    assert clip_lon == pytest.approx(whole_lon, abs=0.5 * pixel)
+    assert clip_lat == pytest.approx(whole_lat, abs=0.5 * pixel)
+    assert clip_lon == pytest.approx(true_lon, abs=pixel)
+    assert clip_lat == pytest.approx(true_lat, abs=pixel)
+
+
+def test_sicd_to_geocoded_cog_clip_that_misses_the_scene_errors(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(20, 20), _FakeSicd()))
+    with pytest.raises(ValueError, match="does not overlap the scene"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf", tmp_path / "out.tif", bbox=(10.0, 10.0, 10.5, 10.5)
+        )
+
+
+def test_cli_convert_clip_bbox(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    sicd = _FakeSicd()
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(40, 50), sicd))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    out = tmp_path / "geo.tif"
+    west, south, east, north = _bbox_around(sicd, 20, 25, pad=0.02)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["convert", str(src), str(out), "--clip-bbox", f"{west},{south},{east},{north}"],
+    )
+
+    assert result.exit_code == 0, result.output
+    with rasterio.open(out) as ds:
+        # Cropped to the request, to within the ceil on the output width.
+        slack = ds.transform.a
+        assert ds.bounds.left >= west - slack
+        assert ds.bounds.right <= east + slack
+
+
+def test_cli_convert_clip_bbox_is_refused_on_the_slant_plane(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "amp.tif"),
+            "--slant-plane",
+            "--clip-bbox",
+            "-100.1,39.9,-99.9,40.1",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "no map grid" in result.output
+
+
+def test_clip_with_a_dem_searches_on_the_flat_earth_projection(tmp_path, monkeypatch):
+    """A DEM places the pixels; it does not decide which ones are read."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    dem = _write_dem(tmp_path / "dem.tif", kind="const")
+    sicd = _FakeSicd(hae_shift=1e-4)
+    reader = _FakeReader(_fake_complex(40, 50), sicd)
+    _patch_open_complex(monkeypatch, reader)
+
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "geo.tif",
+        gcp_grid=5,
+        # "DEM" would need a sarpy elevation model; the window search must not
+        # ask for one, so this also pins that the flat-earth path is used.
+        projection_type="DEM",
+        dem=str(dem),
+        bbox=_bbox_around(sicd, 20, 25, pad=0.02),
+    )
+
+    assert out.exists()
+    assert ("latlong", "HAE") in sicd.calls
+    assert not any(kind == "DEM" for _, kind in sicd.calls)

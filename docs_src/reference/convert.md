@@ -15,6 +15,16 @@ given file supports — products that carry no scale factors, which includes mos
 of Umbra's open data, raise rather than returning an uncalibrated number that
 looks calibrated.
 
+`sicd_to_geocoded_cog` also takes `bbox=` (`umbra convert --clip-bbox`) — a
+lon/lat rectangle to convert *instead of the whole scene*. A SICD is tens of
+square kilometres at 16–25 cm, and every step above is proportional to it, so
+keeping a site out of a collect otherwise costs the whole collect. With `bbox=`
+the ground rectangle is turned back into the image window that covers it, only
+that window is read from the product, and the output is cropped to the request —
+the same pixels the whole-scene conversion would have produced there, for a
+fraction of the memory, warp and disk. The download stays whole-product: a
+slant-plane NITF has no map grid to range-read.
+
 ::: umbra_py.sicd_to_geocoded_cog
 
 ::: umbra_py.sicd_to_amplitude_geotiff
