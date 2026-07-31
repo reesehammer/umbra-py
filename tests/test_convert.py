@@ -2186,6 +2186,23 @@ def test_read_conversion_tags_is_empty_for_a_foreign_raster(tmp_path):
     assert convert.read_conversion_tags(dem) == {}
 
 
+def test_conversion_provenance_parses_a_tag_set_without_reopening_the_raster():
+    # The parsing half read_conversion_tags delegates to, so a caller that
+    # already holds the dataset (to_stack, reading every source's record while
+    # it resolves the shared grid) does not pay a second round of range reads.
+    tags = convert.conversion_tags(
+        source="/private/path/scene.nitf", geocoded=True, calibration="gamma0"
+    )
+    parsed = convert.conversion_provenance({**tags, "AREA_OR_POINT": "Area"})
+
+    assert parsed["calibration"] == "gamma0"
+    assert parsed["source"] == "scene.nitf"
+    # Foreign tags are not provenance, and nothing keeps the UMBRA_ prefix.
+    assert "area_or_point" not in parsed
+    assert not any(key.startswith(convert.PROVENANCE_TAG_PREFIX) for key in parsed)
+    assert convert.conversion_provenance({"AREA_OR_POINT": "Area"}) == {}
+
+
 def test_cli_convert_provenance_prints_json(tmp_path, monkeypatch):
     pytest.importorskip("rasterio")
     pytest.importorskip("sarpy")

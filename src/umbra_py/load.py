@@ -78,6 +78,25 @@ STACK_AUTO_CRS = "utm"
 #: caveats already call relative rather than absolute.
 _QUANTILE_BIN_DB = 0.05
 
+#: The :func:`umbra_py.convert.conversion_tags` keys that decide what a pixel
+#: value *is*, and so which ones :func:`to_stack` refuses to mix. A stack's time
+#: axis is only a measurement if every slice was made the same way: differencing
+#: a calibrated pass against an uncalibrated one, or a terrain-flattened pass
+#: against a raw one, reports the difference between the two *conversions* as
+#: change on the ground. The keys deliberately left out are the ones that
+#: legitimately vary per acquisition -- ``source`` (a different scene each time)
+#: and ``rtc_reference_deg`` (each scene's own resolved incidence angle).
+#: Ordered most-explanatory first, because the first key that disagrees is the
+#: one the refusal names, and ``units`` is derived from the two before it -- a
+#: calibration mix should be reported as a calibration mix, not as its shadow.
+MEASUREMENT_PROVENANCE_KEYS = ("calibration", "rtc_model", "scale", "units")
+
+#: Stands in for "this raster carries no umbra-py provenance at all" when
+#: comparing sources. A published Umbra GEC has no ``UMBRA_*`` tags, so a whole
+#: series of them agrees on this value and nothing is refused; it is the *mix* of
+#: a converted raster with an untagged one that the sentinel catches.
+_UNRECORDED = "(unrecorded)"
+
 
 def _require(module: str):
     try:
@@ -178,6 +197,13 @@ def to_xarray(
         Umbra ``license`` and ``attribution`` you must carry with derived
         products. The CRS string round-trips through ``rasterio.crs.CRS`` /
         ``pyproj`` and ``rioxarray`` (``da.rio.write_crs(da.attrs["crs"])``).
+
+        A raster ``umbra convert`` produced also carries a ``provenance`` dict
+        -- exactly what :func:`~umbra_py.convert.read_conversion_tags` reads off
+        the file (``calibration``, ``rtc_model``, ``scale``, ``dem``, ...) -- so
+        an array knows whether its values are a physical backscatter coefficient
+        or relative brightness. The key is absent for Umbra's published products,
+        which carry no such tags.
     """
     rasterio = _require("rasterio")
     np = _require("numpy")
@@ -233,6 +259,9 @@ def to_xarray(
 
         nodata = src.nodata
         crs = src.crs
+        # Read while the dataset is open: for a raster ``umbra convert`` wrote,
+        # this is what the pixel values *are* (calibration, RTC model, scale).
+        provenance = _source_provenance(src)
         # Output transform: window origin scaled to the decimated grid. GEC is
         # north-up (no rotation), so a/e fully describe pixel size and y runs
         # top-to-bottom (negative e).
@@ -270,6 +299,10 @@ def to_xarray(
         "product_type": asset,
         "license": DATA_LICENSE,
         "attribution": ATTRIBUTION,
+        # Only for a raster that carries one; an Umbra-published product does
+        # not, and an empty record would read as "nothing was done" rather than
+        # "nothing is known".
+        "provenance": provenance or None,
     }
 
     return xr.DataArray(
@@ -332,8 +365,80 @@ def to_geotiff(
             units=da.attrs["units"],
             license=DATA_LICENSE,
             attribution=ATTRIBUTION,
+            # A conversion's provenance survives being loaded and written back
+            # out, so the derivative answers 'what is a pixel here?' too.
+            **_as_geotiff_tags(da.attrs.get("provenance") or {}),
         )
     return dest
+
+
+def _source_provenance(ds: Any) -> dict[str, str]:
+    """The ``UMBRA_*`` conversion provenance of an open source raster.
+
+    Empty for anything umbra-py did not convert, which is every product Umbra
+    publishes -- the tags exist only on the output of ``umbra convert`` (and of
+    the chipper and the writers below, which carry them forward).
+    """
+    from .convert import conversion_provenance  # noqa: PLC0415
+
+    return conversion_provenance(ds.tags())
+
+
+def _as_geotiff_tags(provenance: dict[str, str]) -> dict[str, str]:
+    """Re-namespace a carried provenance record as GeoTIFF tags for a derivative.
+
+    The inverse of :func:`~umbra_py.convert.conversion_provenance`, so a raster
+    written *from* a cube says what its values are in the same vocabulary the
+    raster the cube was read from used -- ``read_conversion_tags`` and
+    ``gdalinfo`` answer the same question of both.
+    """
+    from .convert import PROVENANCE_TAG_PREFIX  # noqa: PLC0415
+
+    return {f"{PROVENANCE_TAG_PREFIX}{key.upper()}": value for key, value in provenance.items()}
+
+
+def _shared_provenance(records: list[dict[str, str]], ids: list[str]) -> dict[str, str]:
+    """The provenance a stack's sources agree on, or a refusal naming the mix.
+
+    The consuming half of the provenance ``umbra convert`` writes. Two rasters
+    converted with different settings are pixel-for-pixel indistinguishable, so
+    before these tags existed a stack could silently put the difference between
+    two *conversions* on the time axis and report it as change on the ground.
+    Now the sources say what they are, and this is the check that reads them:
+    the same "a mixed selection is not a measurement" rule ``POST
+    /artifacts/stats`` already applies to polarization, applied to what the
+    pixel values mean.
+
+    Only :data:`MEASUREMENT_PROVENANCE_KEYS` are grounds for refusal. What comes
+    *back* is every key on which all the sources agree, so a cube built from one
+    conversion carries that conversion's whole record (and one built from
+    untagged products carries nothing, the usual case).
+    """
+    for key in MEASUREMENT_PROVENANCE_KEYS:
+        seen: dict[str, str] = {}
+        for record, item_id in zip(records, ids, strict=True):
+            seen.setdefault(record.get(key, _UNRECORDED), item_id)
+        if len(seen) > 1:
+            listed = ", ".join(f"{value!r} ({item_id})" for value, item_id in sorted(seen.items()))
+            raise ValueError(
+                f"Refusing to stack rasters whose {key} disagrees ({listed}): pixel "
+                "values made by different conversions are not comparable along a time "
+                "axis, so a change between two passes would be partly the difference "
+                f"between the two conversions. ({_UNRECORDED} is a raster with no "
+                "umbra-py conversion provenance, such as a published GEC.) Re-convert "
+                "the series with one set of 'umbra convert' settings, or stack only "
+                "the acquisitions that share one -- 'umbra convert --provenance FILE' "
+                "(umbra_py.read_conversion_tags) says what each raster carries."
+            )
+
+    if not any(records):
+        return {}
+    shared = set(records[0]).intersection(*(set(r) for r in records[1:]))
+    return {
+        key: records[0][key]
+        for key in sorted(shared)
+        if all(r[key] == records[0][key] for r in records)
+    }
 
 
 def _stack_items(items: Iterable[UmbraItem]) -> list[UmbraItem]:
@@ -716,13 +821,26 @@ def to_stack(
         coordinate along ``time`` so every slice keeps its provenance. Nodata and
         non-positive pixels are ``NaN`` and the dtype is always ``float32``.
         ``attrs`` mirror :func:`to_xarray`'s (``crs``, ``transform``,
-        ``bounds``, ``units``, ``license``, ``attribution``). Backed by NumPy,
+        ``bounds``, ``units``, ``license``, ``attribution``), plus the
+        ``provenance`` the sources agree on when they carry one. Backed by NumPy,
         or -- with ``lazy=True`` -- by a ``dask`` array chunked one slice per
         acquisition (or ``chunk_size``-square windows within each slice), which
         ``.compute()`` / ``.load()`` turn into the former.
 
     Notes
     -----
+    Sources that disagree about *what their pixel values are* are refused rather
+    than stacked. A raster ``umbra convert`` produced records its calibration,
+    RTC model and amplitude scale in ``UMBRA_*`` GeoTIFF tags, and stacking a
+    calibrated pass against an uncalibrated one (or against a published GEC,
+    which carries no tags at all) would put the difference between the two
+    conversions on the time axis where you would read it as change on the
+    ground. The rule is :data:`MEASUREMENT_PROVENANCE_KEYS`, the refusal names
+    the disagreement and the acquisitions on each side, and what the sources
+    *do* agree on is carried into ``attrs["provenance"]`` -- so a measurement
+    from :func:`stack_stats`, and any GeoTIFF written from the cube, can say
+    which conversion produced it.
+
     The default lon/lat grid stretches with latitude (cells are not equal-area),
     the same quick-look approximation ``umbra change`` / ``umbra timescan`` make.
     That is fine at scene scale and for comparing a cell to *itself* across
@@ -763,6 +881,12 @@ def to_stack(
             urls.append(url)
             ds = rasterio.open(_open_path(url))
             datasets.append(ds)
+
+        # Before any warping: a series whose slices were made differently is not
+        # a time series of one quantity, and the sources say so themselves.
+        provenance = _shared_provenance(
+            [_source_provenance(ds) for ds in datasets], [i.id for i in ordered]
+        )
 
         # Resolved once every source is open: "utm" reads the zone off the
         # ground they cover, so it needs their footprints.
@@ -832,6 +956,7 @@ def to_stack(
             "product_type": asset,
             "license": DATA_LICENSE,
             "attribution": ATTRIBUTION,
+            **({"provenance": provenance} if provenance else {}),
         },
     )
 
@@ -1513,7 +1638,10 @@ def stack_stats(
     -------
     dict
         ``{count, units, product_type, grid, passes, net_change,
-        change_threshold_db, license, attribution, caveats}``. Each entry in
+        change_threshold_db, license, attribution, caveats}``, plus
+        ``provenance`` when the cube carries one (:func:`to_stack`) — the
+        conversion its slices were made by, which is also what decides whether
+        the first caveat calls these decibels relative or calibrated. Each entry in
         ``passes`` carries ``item_id``, ``datetime``, ``valid_fraction`` and the
         distribution of that pass (``mean``/``median``/``std``/``p5``/``p95``, in
         the cube's own ``units``), plus ``change_vs_previous`` (``None`` for the
@@ -1585,12 +1713,29 @@ def stack_stats(
         changes=changes,
     )
 
+    # What the cube's own sources say they are (empty for Umbra's published
+    # products, which carry no conversion tags). The first two caveats are
+    # statements about the pixel values, so they are answerable from it rather
+    # than fixed: a calibrated, terrain-flattened cube has earned a narrower one.
+    provenance = dict(cube.attrs.get("provenance") or {})
+    calibration = provenance.get("calibration", "none")
+    rtc_model = provenance.get("rtc_model", "none")
+
     caveats = [
         "Umbra's open products are not radiometrically calibrated, so decibel "
         "values are relative: compare a cell to itself across dates, not to "
-        "another site or sensor.",
+        "another site or sensor."
+        if calibration == "none"
+        else f"These values carry the source products' own {calibration} radiometric "
+        "calibration (recorded by 'umbra convert' and read back off the rasters), so "
+        "a decibel value is a physical backscatter coefficient rather than relative "
+        "brightness.",
         "A decibel change is a measurement, not an interpretation -- differing "
-        "look geometry between passes moves backscatter too.",
+        "look geometry between passes moves backscatter too."
+        if rtc_model == "none"
+        else "A decibel change is a measurement, not an interpretation -- the terrain "
+        f"component of the look geometry was flattened ({rtc_model} model), but "
+        "incidence-angle-dependent scattering still moves backscatter between passes.",
     ]
     if area is None:
         caveats.append(
@@ -1611,6 +1756,9 @@ def stack_stats(
         "units": units,
         "product_type": cube.attrs.get("product_type"),
         "change_threshold_db": change_threshold_db,
+        # Present only when the sources recorded one, so its absence means "these
+        # are the published products as delivered" rather than "unknown".
+        **({"provenance": provenance} if provenance else {}),
         # Only when the percentiles are estimates: a summary that doesn't say
         # this is one whose numbers are all exact.
         **(
@@ -1766,5 +1914,6 @@ def _write_stack_geotiff(cube: xr.DataArray, dest: str | os.PathLike) -> Path:
             units=cube.attrs["units"],
             license=DATA_LICENSE,
             attribution=ATTRIBUTION,
+            **_as_geotiff_tags(cube.attrs.get("provenance") or {}),
         )
     return dest

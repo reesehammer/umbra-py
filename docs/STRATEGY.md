@@ -447,7 +447,25 @@ from:
   applied to a derivative). Steps that did not run report `"none"` rather than
   vanishing, and only the source *file name* is recorded. Read it with
   `read_conversion_tags`, `umbra convert --provenance`, or `gdalinfo`. See the
-  CHANGELOG. **Still open:** MultiRTC interop — heavy, research-oriented,
+  CHANGELOG.
+- ~~Nothing *consumed* those tags (they were written and read back, but no code
+  acted on them, so a stack could still mix two conversions and report the
+  difference between them as change).~~ **shipped** — `to_stack` reads every
+  source's record while it opens them and refuses, before any warping, a series
+  that disagrees on `MEASUREMENT_PROVENANCE_KEYS` (`calibration`, `rtc_model`,
+  `scale`, `units`), naming the key, both values and an acquisition on each side;
+  a raster with no tags is its own value, so a converted product mixed with a
+  published GEC is caught too, while a series of published GECs agrees and is
+  unaffected. The keys that legitimately vary per pass (`source`,
+  `rtc_reference_deg`) are excluded by design. It is the polarization refusal of
+  `POST /artifacts/stats` applied to what the pixel values *are*, and it reaches
+  that endpoint as a `400` with no change to `serve.py`. What the sources agree
+  on is carried rather than dropped: `to_xarray` / `to_stack` expose it as
+  `attrs["provenance"]`, `to_geotiff` and the datacube writer stamp it back into
+  the derivative's own `UMBRA_*` tags, and `stack_stats` both reports it and lets
+  it correct the two caveats that are claims about the pixel values — a
+  calibrated cube stops being told its decibels are relative. See the CHANGELOG.
+  **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the

@@ -350,6 +350,19 @@ because counting geographic cells measures nothing. `umbra stack --stats` prints
 the same object, and the `stack_stats` agent tool returns it over MCP /
 LangChain / LlamaIndex.
 
+A summary also says **what it measured**. Rasters `umbra convert` produced carry
+their calibration, terrain model and amplitude scale in `UMBRA_*` GeoTIFF tags
+(above), and the loaders read them: `to_xarray` / `to_stack` surface the record
+as `attrs["provenance"]`, `stack_stats` reports it and swaps its "these decibels
+are relative" caveat for a calibrated one, and a GeoTIFF written from the cube
+keeps the tags. The other half of reading them is a refusal — `to_stack` will
+not co-register passes whose calibration, terrain model or scale disagree (a
+raster with no tags at all, such as a published GEC, counts as its own kind), because
+the difference between two conversions would land on the time axis and read as
+change on the ground. It's the same "a mixed selection is not a measurement"
+rule `POST /artifacts/stats` applies to polarization, and it surfaces there as a
+`400` too.
+
 Measuring reads a whole slice per pass, so a cube `chunk_size` let you *write*
 sharper than memory was still capped at what you could *measure*.
 `windowed=True` walks the same windows the cube is chunked into:

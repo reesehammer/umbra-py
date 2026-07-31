@@ -7,6 +7,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The measurement chain reads the provenance it writes: `to_stack` refuses to
+  mix conversions, and a cube says which one made it.** `umbra convert` has
+  stamped `UMBRA_*` GeoTIFF tags into every raster it writes since the
+  provenance PR — calibration, RTC model and resolved reference angle, DEM/geoid,
+  projection, amplitude scale — and `read_conversion_tags` / `umbra convert
+  --provenance` read them back. Nothing *acted* on them. That left the gap the
+  tags were written to close still open one step downstream: two rasters
+  converted with different settings are pixel-for-pixel indistinguishable, so
+  `to_stack` would happily co-register a terrain-flattened gamma-nought pass
+  against a raw one and put the difference between the two **conversions** on
+  the time axis, where `stack_stats` reports it as change on the ground. The
+  numbers looked exactly like a measurement.
+
+  Now the sources are asked. Every dataset `to_stack` opens is read for its
+  conversion record (`conversion_provenance`, the parsing half of
+  `read_conversion_tags` split out so an already-open dataset needn't be
+  re-opened over the network), and a disagreement on any of
+  `MEASUREMENT_PROVENANCE_KEYS` — `calibration`, `rtc_model`, `scale`, `units` —
+  is a `ValueError` **before any warping**, naming the key, both values and an
+  acquisition standing for each side. A raster with no umbra-py tags at all is
+  its own value (`(unrecorded)`), so stacking a converted product against a
+  published GEC is caught too; a series of published GECs all agree on it, which
+  is why the ordinary path is unaffected. The keys deliberately left out are the
+  ones that *should* vary per pass: `source` (a different scene each time) and
+  `rtc_reference_deg` (each scene's own resolved incidence angle). It is the
+  same "a mixed selection is not a measurement" rule `POST /artifacts/stats`
+  already applies to polarization — and because that endpoint already turns a
+  `ValueError` from a render into a `400`, the refusal reaches HTTP (sync and
+  async job paths alike) with no change to `serve.py`.
+
+  What the sources *agree* on is carried forward rather than discarded.
+  `to_xarray` surfaces a single raster's record as `attrs["provenance"]` —
+  exactly what `read_conversion_tags` reads off that file, so the two answers
+  cannot drift — and `to_stack` carries the shared record onto the cube. From
+  there it propagates: `to_geotiff` and the datacube writer stamp it back as
+  `UMBRA_*` tags, so a derivative answers "what is a pixel here?" like its
+  sources did, and `stack_stats` reports it as a `provenance` key and lets it
+  correct the two caveats that are claims about the pixel values — a calibrated
+  cube no longer tells you its decibels are relative, and a terrain-flattened one
+  says the terrain component of the look geometry was flattened rather than
+  implying nothing was. The key is **absent**, not empty, when there is nothing
+  to report, so its absence reads as "these are the published products as
+  delivered" rather than "unknown". `umbra stack --stats`, the `stack_stats`
+  agent tools and `POST /artifacts/stats` all return the enriched summary for
+  free.
 - **ML training data from the *complex* archive: `umbra chips --asset SICD`.**
   `umbra chips` cut tiles from the amplitude products only — `CHIPPABLE_ASSETS`
   was `("GEC", "CSI")`, and the module said so in as many words: the complex
