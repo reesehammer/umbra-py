@@ -76,6 +76,15 @@ calibration a product cannot support raises rather than returning a
 plausible-looking number. :func:`sicd_calibration_types` reports what a given
 file supports before you ask for it.
 
+All of that work is proportional to the scene, and a scene is tens of square
+kilometres at 16–25 cm. ``bbox=`` on :func:`sicd_to_geocoded_cog` (``umbra
+convert --clip-bbox``) makes it proportional to the *area of interest* instead:
+the ground rectangle is turned back into the image window that covers it, only
+that window is read from the product, and the geocoded output is cropped to the
+rectangle. Nothing about the result changes — the pixels are the same pixels the
+whole-scene conversion would have produced there — only how much of the scene
+had to be detected, calibrated, projected, warped and written.
+
 Every raster written here records *how* it was made — the calibration, the
 terrain-flattening model and its reference angle, the DEM/geoid, the projection,
 the scale, and the data licence — as namespaced GeoTIFF metadata
@@ -315,10 +324,28 @@ def _apply_calibration(amplitude: np.ndarray, scale, *, decibels: bool):
     return _apply_terrain_flattening(amplitude, scale, decibels=decibels)
 
 
-def _calibrate_amplitude(sicd: Any, amplitude: np.ndarray, *, kind: str, decibels: bool):
-    """Calibrate a detected-amplitude raster against the SICD's own metadata."""
+def _calibrate_amplitude(
+    sicd: Any,
+    amplitude: np.ndarray,
+    *,
+    kind: str,
+    decibels: bool,
+    origin: tuple[int, int] = (0, 0),
+):
+    """Calibrate a detected-amplitude raster against the SICD's own metadata.
+
+    ``origin`` is the ``(row, col)`` position of ``amplitude`` inside the full
+    image. The scale-factor polynomials are functions of image coordinates, so a
+    clipped read has to be evaluated at the coordinates it actually came from —
+    the same correction ``ImageData.FirstRow`` / ``FirstCol`` already make for a
+    chipped *product*, applied to a chip this library cut itself.
+    """
     coefs = _calibration_coefficients(sicd, kind)
-    scale = _calibration_scale(coefs, amplitude.shape, **_image_grid_geometry(sicd))
+    geometry = _image_grid_geometry(sicd)
+    row0, col0 = origin
+    geometry["first_row"] += float(row0)
+    geometry["first_col"] += float(col0)
+    scale = _calibration_scale(coefs, amplitude.shape, **geometry)
     return _apply_calibration(amplitude, scale, decibels=decibels)
 
 
@@ -575,6 +602,7 @@ def _build_gcps(
     *,
     grid: int,
     projection_type: str,
+    origin: tuple[int, int] = (0, 0),
 ) -> list[GroundControlPoint]:
     """Ground control points mapping image (row, col) to lon/lat via the SICD model.
 
@@ -584,18 +612,27 @@ def _build_gcps(
     corner-stretch. ``projection_type`` is passed to
     :meth:`SICDType.project_image_to_ground_geo` (``"HAE"`` flat-earth,
     ``"PLANE"``, or ``"DEM"``).
+
+    ``shape`` is the shape of the array being warped and ``origin`` its
+    ``(row, col)`` position in the full image, so a clipped read
+    (:func:`_clip_window`) is projected with the *scene's* image coordinates
+    while the GCP rows/cols stay relative to the array itself — which is what
+    the warp indexes.
     """
     np = _require("numpy")
     from rasterio.control import GroundControlPoint  # noqa: PLC0415
 
     rows, cols = shape
+    row0, col0 = origin
     row_idx = _grid_indices(rows, grid)
     col_idx = _grid_indices(cols, grid)
     im_points = np.array([[r, c] for r in row_idx for c in col_idx], dtype="float64")
     # ordering="latlong" -> columns are [lat, lon, hae]; project on the scene's
     # height plane so a whole flat scene lands in the right place.
     ground = sicd.project_image_to_ground_geo(
-        im_points, ordering="latlong", projection_type=projection_type
+        im_points + np.array([row0, col0], dtype="float64"),
+        ordering="latlong",
+        projection_type=projection_type,
     )
     gcps = []
     for (row, col), (lat, lon, hae) in zip(im_points, ground, strict=True):
@@ -605,6 +642,118 @@ def _build_gcps(
             )
         )
     return gcps
+
+
+def _clip_window(
+    sicd: Any,
+    shape: tuple[int, int],
+    bbox: tuple[float, float, float, float],
+    *,
+    projection_type: str = "HAE",
+    grid: int = 33,
+) -> tuple[int, int, int, int]:
+    """The image-space window ``(row0, row1, col0, col1)`` covering a lon/lat bbox.
+
+    A SICD is stored in the radar's slant plane, so an area of interest on the
+    ground is a *rotated, sheared* region of the image — there is no bbox to
+    read directly. This finds the smallest axis-aligned image window that
+    contains it, by projecting a ``grid``×``grid`` lattice to ground (the same
+    projection :func:`_build_gcps` uses) and keeping every lattice **cell**
+    whose four corners' extent touches the requested bbox. Cells rather than
+    points, so an area of interest smaller than one lattice step is still found.
+
+    The window is a deliberate superset: it is padded by one lattice step on
+    every side, and the geocoded output is cropped to the requested bbox
+    afterwards (``bounds=`` on :func:`_warp_gcps_to_cog`). The search runs on
+    the flat-earth projection even when a DEM is given — terrain moves a point
+    on the ground by far less than the padding, and being generous here costs
+    a few extra image columns, while being tight would silently clip the edge
+    of the area someone asked for.
+
+    Returns a half-open window (``row1`` / ``col1`` are exclusive), and raises
+    when the bbox misses the scene entirely.
+    """
+    np = _require("numpy")
+
+    west, south, east, north = (float(v) for v in bbox)
+    if east <= west or north <= south:
+        raise ValueError(
+            f"bbox must be (min_lon, min_lat, max_lon, max_lat) with a positive "
+            f"extent, got {tuple(bbox)!r}."
+        )
+
+    rows, cols = shape
+    row_idx = _grid_indices(rows, grid)
+    col_idx = _grid_indices(cols, grid)
+    im_points = np.array([[r, c] for r in row_idx for c in col_idx], dtype="float64")
+    ground = np.asarray(
+        sicd.project_image_to_ground_geo(
+            im_points, ordering="latlong", projection_type=projection_type
+        ),
+        dtype="float64",
+    )
+    lat = ground[:, 0].reshape(len(row_idx), len(col_idx))
+    lon = ground[:, 1].reshape(len(row_idx), len(col_idx))
+
+    def _cells(idx: list[int]) -> list[tuple[int, int]]:
+        """Consecutive lattice pairs along one axis (a 1-wide axis is one cell)."""
+        if len(idx) == 1:
+            return [(0, 0)]
+        return [(i, i + 1) for i in range(len(idx) - 1)]
+
+    hits: list[tuple[int, int, int, int]] = []
+    for i0, i1 in _cells(row_idx):
+        for j0, j1 in _cells(col_idx):
+            corner_lon = lon[[i0, i0, i1, i1], [j0, j1, j0, j1]]
+            corner_lat = lat[[i0, i0, i1, i1], [j0, j1, j0, j1]]
+            if (
+                corner_lon.max() >= west
+                and corner_lon.min() <= east
+                and corner_lat.max() >= south
+                and corner_lat.min() <= north
+            ):
+                hits.append((i0, i1, j0, j1))
+    if not hits:
+        scene = _scene_geo_bbox(sicd, shape)
+        raise ValueError(
+            f"The requested bbox {(west, south, east, north)} does not overlap the "
+            f"scene, whose footprint is about {tuple(round(v, 6) for v in scene)}. "
+            "Nothing would be left to convert."
+        )
+
+    row_step = max(1, int(np.ceil((rows - 1) / max(1, len(row_idx) - 1))))
+    col_step = max(1, int(np.ceil((cols - 1) / max(1, len(col_idx) - 1))))
+    row0 = max(0, min(row_idx[i0] for i0, _, _, _ in hits) - row_step)
+    row1 = min(rows, max(row_idx[i1] for _, i1, _, _ in hits) + 1 + row_step)
+    col0 = max(0, min(col_idx[j0] for _, _, j0, _ in hits) - col_step)
+    col1 = min(cols, max(col_idx[j1] for _, _, _, j1 in hits) + 1 + col_step)
+    return row0, row1, col0, col1
+
+
+def _reader_shape(reader: Any, sicd: Any) -> tuple[int, int]:
+    """The full image shape ``(rows, cols)`` of an open complex reader.
+
+    Clipping has to know the image size *before* reading it — the whole point
+    is not to read all of it. sarpy exposes ``data_size``; the SICD's own
+    ``ImageData`` is the fallback, and either one being absent is an error
+    rather than a guess, because guessing wrong would silently convert the
+    wrong part of the scene.
+    """
+    size = getattr(reader, "data_size", None)
+    if size is not None and len(size) and isinstance(size[0], (tuple, list)):
+        size = size[0]  # a multi-image reader reports one shape per image
+    if size is not None and len(size) >= 2:
+        return int(size[0]), int(size[1])
+    image_data = getattr(sicd, "ImageData", None)
+    rows = getattr(image_data, "NumRows", None)
+    cols = getattr(image_data, "NumCols", None)
+    if rows is None or cols is None:
+        raise ValueError(
+            "Cannot determine the SICD image size, which clipping needs in order to "
+            "read only part of it (no reader data_size and no ImageData.NumRows / "
+            "NumCols). Convert without bbox= to read the whole scene."
+        )
+    return int(rows), int(cols)
 
 
 def _sicd_projector(sicd: Any, *, height_bin: float = 1.0):
@@ -1344,20 +1493,27 @@ def _terrain_flatten_on_grid(
     return _apply_terrain_flattening(warped, factor, decibels=decibels)
 
 
-def _scene_geo_bbox(sicd: Any, shape: tuple[int, int]) -> tuple[float, float, float, float]:
+def _scene_geo_bbox(
+    sicd: Any, shape: tuple[int, int], *, origin: tuple[int, int] = (0, 0)
+) -> tuple[float, float, float, float]:
     """Geographic bbox ``(west, south, east, north)`` of the scene's image corners.
 
     Projects the four image corners onto the scene height plane with SICD's own
     model, so :func:`umbra_py.dem.fetch_dem_for_bbox` knows which Copernicus DEM
     tiles to pull for ``dem="auto"``. A coarse footprint is all the tile resolver
     needs (tiles are 1° cells), so four corners suffice.
+
+    ``shape`` and ``origin`` describe the region actually being converted, so a
+    clipped conversion fetches the tiles covering the *clip* rather than the
+    whole scene.
     """
     np = _require("numpy")
 
     rows, cols = shape
+    row0, col0 = origin
     corners = np.array(
         [[0, 0], [0, cols - 1], [rows - 1, 0], [rows - 1, cols - 1]], dtype="float64"
-    )
+    ) + np.array([row0, col0], dtype="float64")
     ground = np.asarray(
         sicd.project_image_to_ground_geo(corners, ordering="latlong", projection_type="HAE"),
         dtype="float64",
@@ -1373,6 +1529,7 @@ def _build_gcps_dem(
     grid: int,
     sample_height: Any,
     h0: float,
+    origin: tuple[int, int] = (0, 0),
 ) -> list[GroundControlPoint]:
     """Terrain-orthorectified ground control points for :func:`_warp_gcps_to_cog`.
 
@@ -1380,17 +1537,21 @@ def _build_gcps_dem(
     surface by :func:`_refine_gcps_with_dem` (via the injectable
     ``sample_height``) instead of projected onto a single flat height plane, so
     the warp reproduces the true ground position over relief. The refined terrain
-    height is carried as the GCP ``z``.
+    height is carried as the GCP ``z``. ``origin`` places a clipped read inside
+    the full image, exactly as in :func:`_build_gcps`.
     """
     np = _require("numpy")
     from rasterio.control import GroundControlPoint  # noqa: PLC0415
 
     rows, cols = shape
+    row0, col0 = origin
     row_idx = _grid_indices(rows, grid)
     col_idx = _grid_indices(cols, grid)
     im_points = np.array([[r, c] for r in row_idx for c in col_idx], dtype="float64")
     project = _sicd_projector(sicd)
-    lats, lons, haes = _refine_gcps_with_dem(im_points, project, sample_height, h0=h0)
+    lats, lons, haes = _refine_gcps_with_dem(
+        im_points + np.array([row0, col0], dtype="float64"), project, sample_height, h0=h0
+    )
     gcps = []
     for (row, col), lat, lon, hae in zip(im_points, lats, lons, haes, strict=True):
         gcps.append(
@@ -1411,6 +1572,7 @@ def _warp_gcps_to_cog(
     nodata: float,
     post_warp: Any = None,
     tags: dict[str, str] | None = None,
+    bounds: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Warp a GCP-tagged amplitude array onto a north-up EPSG:4326 COG.
 
@@ -1428,6 +1590,12 @@ def _warp_gcps_to_cog(
     ``tags``, if given, are written as dataset metadata (see
     :func:`conversion_tags`) before the COG copy, so the provenance is carried
     by the emitted file rather than only by the caller.
+
+    ``bounds``, if given, is a ``(west, south, east, north)`` window the output
+    grid is restricted to — intersected with the GCP extent, so asking for more
+    ground than the scene covers yields the overlap rather than a margin of
+    nodata. The pixel size is still derived from the *whole* input, so clipping
+    changes which ground is written and not how finely it is sampled.
     """
     np = _require("numpy")
     from rasterio.crs import CRS  # noqa: PLC0415
@@ -1453,6 +1621,17 @@ def _warp_gcps_to_cog(
         resolution = min(span_x / cols, span_y / rows)
     if resolution <= 0:
         raise ValueError("resolution must be positive.")
+
+    if bounds is not None:
+        west, south, east, north = (float(v) for v in bounds)
+        minx, miny = max(minx, west), max(miny, south)
+        maxx, maxy = min(maxx, east), min(maxy, north)
+        span_x, span_y = maxx - minx, maxy - miny
+        if span_x <= 0 or span_y <= 0:
+            raise ValueError(
+                f"The requested clip {(west, south, east, north)} does not overlap the "
+                "ground the control points cover, so there is nothing to write."
+            )
 
     width = max(1, int(np.ceil(span_x / resolution)))
     height = max(1, int(np.ceil(span_y / resolution)))
@@ -1520,6 +1699,7 @@ def sicd_to_geocoded_cog(
     rtc_reference_deg: float | None = None,
     rtc_model: str = "cosine",
     calibration: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -1538,6 +1718,17 @@ def sicd_to_geocoded_cog(
     valley floors land in their true ground position. ``dem`` supersedes
     ``projection_type``. Pass ``dem="auto"`` to fetch the covering Copernicus
     GLO-30 DEM tiles for the scene automatically (see :mod:`umbra_py.dem`).
+
+    Pass ``bbox`` to convert only an **area of interest**. A SICD scene is tens
+    of square kilometres at 16–25 cm, so converting all of it to keep a corner
+    of it costs the whole warp, a scene-sized float raster in memory, and a
+    scene-sized COG on disk. With ``bbox`` only the image window covering that
+    ground is read from the product, everything downstream is sized to it, and
+    the output is cropped to the requested rectangle — so the cost of a
+    conversion follows the area someone asked for rather than the area the
+    satellite happened to collect. The download is whole-product either way (a
+    slant-plane NITF has no map grid to range-read), which is why the saving is
+    in the processing rather than in the bytes fetched.
 
     Parameters
     ----------
@@ -1653,6 +1844,20 @@ def sicd_to_geocoded_cog(
         support is a self-describing error rather than a plausible-looking
         number. :func:`sicd_calibration_types` reports what a given file
         supports. MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
+    bbox:
+        Optional area of interest ``(min_lon, min_lat, max_lon, max_lat)`` in
+        WGS-84 degrees. Only the image window covering that ground is read,
+        amplitude-detected, calibrated, projected and warped, and the output is
+        cropped to the rectangle (intersected with the scene, so asking for more
+        ground than the scene holds returns the overlap rather than a nodata
+        margin). Because a SICD lies in the slant plane, the window found is a
+        deliberate superset — the smallest axis-aligned image rectangle that
+        contains the rotated ground region, padded by one search step — so the
+        pixels read exceed the area kept, and both are a small fraction of the
+        scene for a small area of interest. ``None`` (the default) converts the
+        whole scene. The clip is *not* recorded in the provenance tags: the
+        output's own geotransform states exactly which ground it covers, and the
+        tags record what a pixel value means rather than where it is.
     """
     np = _require("numpy")
     _require("rasterio")
@@ -1674,15 +1879,32 @@ def sicd_to_geocoded_cog(
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
-    amplitude = _amplitude(reader[:, :], decibels=decibels)
+    if bbox is None:
+        origin = (0, 0)
+        amplitude = _amplitude(reader[:, :], decibels=decibels)
+    else:
+        # Ask which image window covers the ground first, then read only that --
+        # the point of a clip is that the scene-sized array never exists.
+        row0, row1, col0, col1 = _clip_window(
+            sicd,
+            _reader_shape(reader, sicd),
+            bbox,
+            # Flat-earth for the *search* even with a DEM: the padding covers the
+            # terrain shift, and the refinement loop below still places the pixels.
+            projection_type="HAE" if dem is not None else projection_type,
+        )
+        origin = (row0, col0)
+        amplitude = _amplitude(reader[row0:row1, col0:col1], decibels=decibels)
     if calibration is not None:
         # In image space: the SF polynomials are functions of image coordinates,
         # so calibrate before the warp resamples the grid away.
-        amplitude = _calibrate_amplitude(sicd, amplitude, kind=calibration, decibels=decibels)
+        amplitude = _calibrate_amplitude(
+            sicd, amplitude, kind=calibration, decibels=decibels, origin=origin
+        )
     if isinstance(dem, str) and dem.lower() == "auto":
         from . import dem as dem_mod  # noqa: PLC0415
 
-        dem = dem_mod.fetch_dem_for_bbox(_scene_geo_bbox(sicd, amplitude.shape))
+        dem = dem_mod.fetch_dem_for_bbox(_scene_geo_bbox(sicd, amplitude.shape, origin=origin))
     if dem is not None:
         import contextlib  # noqa: PLC0415
 
@@ -1704,6 +1926,7 @@ def sicd_to_geocoded_cog(
                 grid=gcp_grid,
                 sample_height=sample_height,
                 h0=_scene_reference_hae(sicd),
+                origin=origin,
             )
     elif geoid is not None:
         raise ValueError(
@@ -1711,7 +1934,13 @@ def sicd_to_geocoded_cog(
             "ellipsoidal (HAE), so pass a DEM to terrain-orthorectify against."
         )
     else:
-        gcps = _build_gcps(sicd, amplitude.shape, grid=gcp_grid, projection_type=projection_type)
+        gcps = _build_gcps(
+            sicd,
+            amplitude.shape,
+            grid=gcp_grid,
+            projection_type=projection_type,
+            origin=origin,
+        )
 
     post_warp = None
     reference_deg = None
@@ -1741,6 +1970,7 @@ def sicd_to_geocoded_cog(
         resampling=resampling,
         nodata=float(np.nan),
         post_warp=post_warp,
+        bounds=bbox,
         tags=conversion_tags(
             source=src,
             geocoded=True,

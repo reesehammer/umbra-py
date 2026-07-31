@@ -12,6 +12,14 @@ the identical tiles from the result, so a training set can carry a physical
 backscatter coefficient from the full-resolution archive. That path needs the
 `[convert]` extra alongside `[load]`.
 
+`bbox=` (`umbra chips --clip-bbox`) chips one area of interest out of each
+acquisition rather than the whole raster, numbering each chip's `row`/`col` from
+that window's corner. On the complex path it is also the
+[conversion's](convert.md) own clip, so each scene is geocoded over the site
+rather than whole — which is where the cost of chipping the complex archive
+actually lives. It is lon/lat whatever the raster's CRS is, matching
+`to_stack(bbox=…)`.
+
 ## Chips
 
 ::: umbra_py.chip_item

@@ -7,6 +7,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Convert (and chip) the area of interest, not the whole collect:
+  `umbra convert --clip-bbox` / `sicd_to_geocoded_cog(bbox=…)`.** The SICD
+  pipeline was all-or-nothing. `sicd_to_geocoded_cog` opened the product, read
+  `reader[:, :]` — every complex sample — detected amplitude over all of it,
+  calibrated all of it, projected a control lattice across all of it, warped all
+  of it and wrote all of it, and there was no way to ask for less. That is the
+  right default when the scene *is* the subject, but the common case is a site:
+  a few hundred metres of ground inside tens of square kilometres collected at
+  16–25 cm. Keeping that corner cost the whole scene twice over — a scene-sized
+  complex array and a scene-sized float raster resident, a scene-sized warp, and
+  a scene-sized COG on disk — which on a full-resolution product is the
+  difference between a laptop finishing and a laptop swapping. `umbra chips
+  --asset SICD` inherited the same bill per acquisition, so building a training
+  set over one site converted every pass whole to keep a fraction of each.
+
+  Now the ground rectangle is turned back into the image window that covers it.
+  `_clip_window` projects a lattice to ground with the same model the control
+  points use and keeps every lattice **cell** whose corner extent touches the
+  request — cells rather than points, so an area smaller than one lattice step
+  is still found — then pads by one step. Only that window is read from the
+  product (`reader[row0:row1, col0:col1]`), and everything downstream is sized
+  to it: the control points are projected at the scene coordinates the window
+  really occupies but labelled with the array's own rows and columns (`origin=`
+  on `_build_gcps` / `_build_gcps_dem`), the radiometric scale-factor
+  polynomials are evaluated at those same image coordinates (`origin=` on
+  `_calibrate_amplitude` — the correction `ImageData.FirstRow` already makes for
+  a chipped *product*, applied to a chip this library cut itself), `--dem auto`
+  fetches the tiles covering the window rather than the scene, and the geocoded
+  output is cropped to the request (`bounds=` on `_warp_gcps_to_cog`,
+  intersected with the control-point extent so asking for more ground than the
+  scene holds returns the overlap rather than a nodata margin). The pixel size
+  is still derived from the whole input, so a clip chooses *which* ground is
+  written and not how finely it is sampled — the pixels are the pixels the
+  whole-scene conversion would have produced there, which the tests pin by
+  geocoding a marked scene both ways and checking the mark lands in the same
+  place. A bbox that misses the scene is a self-describing error naming the
+  scene's footprint, not an empty raster.
+
+  The clip is deliberately **not** recorded in the `UMBRA_*` provenance tags:
+  the output's own geotransform states exactly which ground it covers, and the
+  tags say what a pixel value *means* rather than where it is — so a clipped and
+  an unclipped conversion of the same site still agree on every measurement key
+  and stack together under the `to_stack` provenance rule.
+
+  The window search is a superset by construction (the smallest axis-aligned
+  image rectangle containing a rotated ground region, padded), and it runs on
+  the flat-earth projection even when a DEM is given — terrain moves a point far
+  less than the padding, and being generous costs a few image columns while
+  being tight would silently clip the edge of what someone asked for.
+- **`umbra chips --clip-bbox`: chip a site, not a scene.** The same flag, the
+  same lon/lat convention and the same distinction from `--bbox` that `umbra
+  stack --clip-bbox` already established (`--bbox` filters which acquisitions
+  the search returns; `--clip-bbox` restricts what is read out of each one).
+  `chip_item(bbox=…)` / `write_chips(bbox=…)` tile only that window and number
+  each chip's `row`/`col` from its corner, for every asset. On `--asset SICD` it
+  is *also* the conversion's clip (`SicdConversion.bbox`, part of the
+  `cache_key` so a clipped COG never stands in for a whole-scene one in
+  `--work-dir`), which is where the cost of chipping the complex archive
+  actually lives: one flag, one decision, applied both to the tiling and to the
+  geocode that feeds it. The whole-product download is unchanged — a slant-plane
+  NITF has no map grid to range-read — so the saving is in the processing and
+  the disk, which is stated rather than implied.
 - **The measurement chain reads the provenance it writes: `to_stack` refuses to
   mix conversions, and a cube says which one made it.** `umbra convert` has
   stamped `UMBRA_*` GeoTIFF tags into every raster it writes since the

@@ -62,11 +62,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,12 @@ class SicdConversion:
     amplitude and the chip loop takes the logarithm. That keeps one code path for
     both asset kinds, and keeps a calibrated chip's decibels the decibels *of the
     calibrated quantity*.
+
+    ``bbox`` is set from :func:`chip_item`'s own ``bbox`` rather than passed
+    separately: chipping an area of interest out of a complex product means
+    geocoding only that area, so the two are one decision. It is part of
+    :meth:`cache_key` like every other field, so a clipped conversion never
+    stands in for a whole-scene one in ``work_dir``.
     """
 
     dem: str | None = None
@@ -125,6 +132,7 @@ class SicdConversion:
     resampling: str = "bilinear"
     gcp_grid: int = 15
     projection_type: str = "HAE"
+    bbox: tuple[float, float, float, float] | None = None
 
     def cache_key(self) -> str:
         """A short stable digest of these settings.
@@ -170,6 +178,46 @@ def _reported_step(provenance: dict[str, str], name: str) -> str | None:
 
     value = provenance.get(f"{PROVENANCE_TAG_PREFIX}{name}")
     return None if value in (None, "none") else value
+
+
+def _as_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """A bbox as four plain floats, so one written any sequence-ish way compares
+    and digests identically wherever it is stored."""
+    west, south, east, north = (float(v) for v in bbox)
+    return west, south, east, north
+
+
+def _clip_pixel_window(
+    src: Any, bbox: tuple[float, float, float, float]
+) -> tuple[int, int, int, int]:
+    """The raster window ``(row0, col0, row_stop, col_stop)`` covering a lon/lat bbox.
+
+    Rounded *outward* to whole pixels and clamped to the raster, so the tiling
+    loop can never run off the edge and the requested area is never trimmed by
+    rounding. The bbox is lon/lat whatever the raster's CRS is — the same
+    convention :func:`umbra_py.to_stack`'s ``bbox=`` follows.
+    """
+    from rasterio.warp import transform_bounds  # noqa: PLC0415
+    from rasterio.windows import from_bounds  # noqa: PLC0415
+
+    west, south, east, north = (float(v) for v in bbox)
+    if east <= west or north <= south:
+        raise ValueError(
+            f"bbox must be (min_lon, min_lat, max_lon, max_lat) with a positive "
+            f"extent, got {tuple(bbox)!r}."
+        )
+    if src.crs is not None:
+        west, south, east, north = transform_bounds("EPSG:4326", src.crs, west, south, east, north)
+    window = from_bounds(west, south, east, north, transform=src.transform)
+    row0 = max(0, int(math.floor(window.row_off)))
+    col0 = max(0, int(math.floor(window.col_off)))
+    row_stop = min(src.height, int(math.ceil(window.row_off + window.height)))
+    col_stop = min(src.width, int(math.ceil(window.col_off + window.width)))
+    if row_stop <= row0 or col_stop <= col0:
+        raise ValueError(
+            f"bbox {tuple(bbox)!r} does not overlap the raster, so there is nothing to chip."
+        )
+    return row0, col0, row_stop, col_stop
 
 
 @contextlib.contextmanager
@@ -239,6 +287,7 @@ def _prepare_sicd(
         rtc_reference_deg=conversion.rtc_reference_deg,
         rtc_model=conversion.rtc_model,
         calibration=conversion.calibration,
+        bbox=conversion.bbox,
     )
 
 
@@ -434,6 +483,7 @@ def chip_item(
     fmt: str = "geotiff",
     min_valid: float = 0.0,
     prefix: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
     conversion: SicdConversion | None = None,
     work_dir: str | os.PathLike | None = None,
     preparer: SicdPreparer | None = None,
@@ -483,6 +533,15 @@ def chip_item(
     prefix:
         Filename stem for this item's chips (defaults to a slug of ``item.id``).
         Chips are named ``<prefix>_r<row>_c<col>.<ext>``.
+    bbox:
+        Optional area of interest ``(min_lon, min_lat, max_lon, max_lat)`` in
+        WGS-84 degrees (whatever the raster's own CRS is, as in
+        :func:`umbra_py.to_stack`). Only tiles inside that window are cut, and
+        ``row`` / ``col`` are numbered from its corner. For a complex ``asset``
+        it also becomes the conversion's own clip, so the geocoding step is
+        sized to the area of interest rather than to the scene — which is where
+        the cost of chipping the complex archive actually lives. ``None`` chips
+        the whole raster.
     conversion:
         How to geocode a complex ``asset`` before chipping it. Ignored for the
         amplitude rasters; defaults to :class:`SicdConversion`'s flat-earth
@@ -526,6 +585,10 @@ def chip_item(
     dt = item.datetime
 
     records: list[ChipRecord] = []
+    if bbox is not None:
+        # One decision, applied in both places: a complex product is geocoded
+        # only over the area of interest, and every asset is then tiled over it.
+        conversion = replace(conversion or SicdConversion(), bbox=_as_bbox(bbox))
     source_cm = _chip_source(
         item, asset, conversion=conversion, work_dir=work_dir, preparer=preparer
     )
@@ -536,8 +599,12 @@ def chip_item(
         provenance = _provenance_tags(src)
         calibration = _reported_step(provenance, "CALIBRATION")
         rtc_model = _reported_step(provenance, "RTC_MODEL")
-        rows = range(0, src.height - chip_size + 1, step)
-        cols = range(0, src.width - chip_size + 1, step)
+        if bbox is None:
+            row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
+        else:
+            row0, col0, row_stop, col_stop = _clip_pixel_window(src, bbox)
+        rows = range(row0, row_stop - chip_size + 1, step)
+        cols = range(col0, col_stop - chip_size + 1, step)
         for row, r0 in enumerate(rows):
             for col, c0 in enumerate(cols):
                 window = Window(c0, r0, chip_size, chip_size)
@@ -711,6 +778,7 @@ def write_chips(
     db: bool = False,
     fmt: str = "geotiff",
     min_valid: float = 0.0,
+    bbox: tuple[float, float, float, float] | None = None,
     manifest: str | None = "manifest.jsonl",
     progress: ProgressFn | None = None,
     conversion: SicdConversion | None = None,
@@ -729,6 +797,10 @@ def write_chips(
     is called ``(index, total, item, chips_written)`` after each item, for a CLI
     progress line.
 
+    ``bbox`` restricts every acquisition to one area of interest (see
+    :func:`chip_item`) -- the usual shape of a dataset build, where the site is
+    the subject and the scenes are just the passes over it.
+
     ``conversion`` / ``work_dir`` / ``preparer`` apply when ``asset`` is a
     complex product (see :func:`chip_item`). Each acquisition is prepared and
     chipped in turn, so a run over many SICDs holds one scene on disk at a time
@@ -740,6 +812,8 @@ def write_chips(
     # reports the settings that actually ran even when the caller passed none.
     if asset.upper() in COMPLEX_ASSETS:
         conversion = conversion or SicdConversion()
+        if bbox is not None:
+            conversion = replace(conversion, bbox=_as_bbox(bbox))
     else:
         conversion = None
     records: list[ChipRecord] = []
@@ -753,6 +827,7 @@ def write_chips(
             db=db,
             fmt=fmt,
             min_valid=min_valid,
+            bbox=bbox,
             conversion=conversion,
             work_dir=work_dir,
             preparer=preparer,

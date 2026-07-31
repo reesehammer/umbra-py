@@ -675,3 +675,144 @@ def test_cli_rejects_conversion_flags_on_an_amplitude_asset(tmp_path, monkeypatc
     assert result.exit_code != 0
     assert "--calibrate" in result.output
     assert "--asset SICD" in result.output
+
+
+# --- Chipping one area of interest (bbox= / --clip-bbox) ---------------------
+
+
+def _lonlat_window(tif, row0, col0, row_stop, col_stop):
+    """The lon/lat bbox of a pixel window of a written raster."""
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.warp import transform_bounds
+
+    with rasterio.open(tif) as ds:
+        left, top = ds.transform * (col0, row0)
+        right, bottom = ds.transform * (col_stop, row_stop)
+        return transform_bounds(ds.crs, "EPSG:4326", left, bottom, right, top)
+
+
+def test_chip_item_bbox_tiles_only_the_area_of_interest(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    # The bottom-right quadrant: one 10 px tile out of the four the whole raster
+    # would give.
+    bbox = _lonlat_window(tif, 10, 10, 20, 20)
+
+    records = chip_item(_item_for(tif), tmp_path / "chips", chip_size=10, bbox=bbox)
+
+    assert len(records) == 1
+    # Rows/columns are numbered from the window's own corner, not the raster's.
+    assert (records[0].row, records[0].col) == (0, 0)
+    # The window starts at the quadrant, to within the pixel the bbox is rounded
+    # outward to (the raster is projected, so the lon/lat request is reprojected
+    # back and lands a hair off a pixel edge).
+    col_off, row_off, width, height = records[0].window
+    assert (width, height) == (10, 10)
+    assert abs(row_off - 10) <= 1 and abs(col_off - 10) <= 1
+    # And the chip really is (about) the ground that was asked for: a 10 px
+    # tile of a 10 m raster, so a pixel of slack is ~1e-4 degrees.
+    west, south, east, north = records[0].bbox
+    assert west == pytest.approx(bbox[0], abs=2e-4)
+    assert north == pytest.approx(bbox[3], abs=2e-4)
+
+
+def test_chip_item_without_bbox_still_tiles_the_whole_raster(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    assert len(chip_item(_item_for(tif), tmp_path / "chips", chip_size=10)) == 4
+
+
+def test_chip_item_bbox_off_the_raster_errors(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    with pytest.raises(ValueError, match="does not overlap"):
+        chip_item(_item_for(tif), tmp_path / "chips", chip_size=10, bbox=(10.0, 10.0, 10.5, 10.5))
+
+
+def test_chip_item_bbox_becomes_the_sicd_conversion_clip(tmp_path):
+    """The expensive half: a complex scene is geocoded over the area, not whole."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    bbox = _lonlat_window(cog, 10, 10, 20, 20)
+    calls: list = []
+
+    chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        bbox=bbox,
+        preparer=_fake_preparer(cog, calls=calls),
+    )
+
+    conversion = calls[0][3]
+    assert conversion.bbox == tuple(float(v) for v in bbox)
+
+
+def test_conversion_cache_key_tracks_the_clip(tmp_path):
+    from umbra_py.chips import SicdConversion
+
+    base = SicdConversion()
+    clipped = dataclasses.replace(base, bbox=(-100.0, 39.0, -99.0, 40.0))
+    # A clipped conversion is a different product, so it never reuses (or is
+    # reused as) the whole-scene COG cached in --work-dir.
+    assert clipped.cache_key() != base.cache_key()
+    assert (
+        clipped.cache_key()
+        == dataclasses.replace(base, bbox=(-100.0, 39.0, -99.0, 40.0)).cache_key()
+    )
+
+
+def test_cli_chips_clip_bbox_reaches_the_writer(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    bbox = _lonlat_window(tif, 10, 10, 20, 20)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+    real_write_chips = chips_mod.write_chips
+    captured: dict = {}
+
+    def _spy(items, out_dir, **kwargs):
+        captured.update(kwargs)
+        return real_write_chips(items, out_dir, **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--chip-size",
+            "10",
+            "--clip-bbox",
+            ",".join(str(v) for v in bbox),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["bbox"] == pytest.approx(bbox)
+    assert json.loads(result.output)["chip_count"] == 1

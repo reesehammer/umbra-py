@@ -218,7 +218,8 @@ the DEM/geoid, the projection, the scale and the CC-BY licence
 physical measurement nobody can attribute to a calibration is not one.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
-identical tiles from the result, so a training set can come from the
+identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
+of interest rather than the whole collect — so a training set can come from the
 full-resolution archive — and, with `--rtc-model facet --calibrate gamma0`, from
 a terrain-flattened gamma-nought coefficient rather than relative brightness,
 which is the difference between a model that transfers between scenes and one
@@ -228,6 +229,21 @@ through, provenance read back from the raster's own `UMBRA_*` tags into both the
 manifest and every chip GeoTIFF), and states its cost: a SICD has no map grid to
 range-read, so the product is downloaded whole — opt-in, one scene resident at a
 time, and `--work-dir` making the expensive step resumable.
+~~**Open:** the conversion is all-or-nothing, so a run whose subject is a *site*
+converts every scene whole to keep a fraction of each.~~ **shipped** — `umbra
+convert --clip-bbox` / `sicd_to_geocoded_cog(bbox=…)` turns the ground rectangle
+back into the image window that covers it, reads only that window from the
+product, sizes every downstream step to it (control points projected at the scene
+coordinates the window occupies but labelled with the array's own rows and
+columns, the radiometric scale-factor polynomials evaluated at those same image
+coordinates, `--dem auto` fetching the window's tiles rather than the scene's) and
+crops the geocoded output to the request. The pixel size still comes from the
+whole input, so a clip chooses *which* ground is written rather than how finely it
+is sampled — the pixels are the ones the whole-scene conversion would have put
+there. `umbra chips --clip-bbox` is the same decision one level up: it tiles only
+that window for every asset, and on `--asset SICD` it is the conversion's clip
+too, so the expensive step costs what the site costs rather than what the collect
+does.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -483,6 +499,19 @@ from:
   than hidden: opt-in, one scene resident at a time, and `--work-dir` caching the
   geocoded COG under a digest of its settings so a re-run reuses it. See the
   CHANGELOG.
+  ~~**Open:** the conversion under it is whole-scene, so chipping a *site* out of
+  a series converts every pass entirely to keep a fraction of each.~~
+  **shipped** — `umbra chips --clip-bbox` (and `umbra convert --clip-bbox` /
+  `sicd_to_geocoded_cog(bbox=…)` beneath it) turns the ground rectangle back into
+  the image window that covers it, reads only that window from the product, sizes
+  the control points, the radiometric polynomials and the `--dem auto` fetch to
+  it, and crops the output to the request — so *both* halves of a
+  geocode-then-chip run cost what the area of interest costs rather than what the
+  collect does, and the memory a full-resolution complex scene needs stops being
+  the ceiling on working with one. The pixel size still comes from the whole
+  input, so a clip chooses which ground is written rather than how finely; the
+  download stays whole-product, which a slant-plane NITF's lack of a map grid
+  makes unavoidable. See the CHANGELOG.
 - ~~The datacube's memory ceiling (every pass read eagerly, so a long series had
   to be traded against resolution).~~ **shipped** — `to_stack(lazy=True)` /
   `umbra stack --lazy` (the new `[dask]` extra) make each acquisition one chunk

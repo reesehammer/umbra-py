@@ -514,6 +514,16 @@ def stack(
     "Fails clearly when the product carries no such scale factor -- Umbra's open "
     "products usually don't.",
 )
+@click.option(
+    "--clip-bbox",
+    default=None,
+    help="Convert only a lon/lat window 'min_lon,min_lat,max_lon,max_lat' of the "
+    "scene. Only the image rows and columns covering that ground are read from "
+    "the product and warped, and the output is cropped to the window, so a small "
+    "area of interest costs a small conversion instead of a whole-scene one. The "
+    "download is whole-product either way -- a slant-plane NITF has no map grid "
+    "to range-read.",
+)
 def convert(
     src,
     dst,
@@ -530,6 +540,7 @@ def convert(
     rtc_ref_angle,
     rtc_model,
     calibrate,
+    clip_bbox,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 
@@ -545,6 +556,11 @@ def convert(
     radiometrically terrain-flatten the output, removing the geometric brightness
     swings that slopes cause. Pass --slant-plane for a quick, ungeoreferenced
     amplitude image instead.
+
+    A scene is tens of square kilometres at 16-25 cm, and all of the above is
+    proportional to it. Pass --clip-bbox to make it proportional to the area you
+    care about instead: only the image window covering that ground is read and
+    warped, and the output is cropped to it.
 
     Geocoding and flattening both leave the pixel values *relative* -- an image
     comparable with itself and nothing else. Add --calibrate to make them
@@ -587,6 +603,14 @@ def convert(
 
     decibels = not linear
     calibration = calibrate.lower() if calibrate else None
+    clip = _shared._parse_bbox(clip_bbox)
+    if slant_plane and clip is not None:
+        raise click.BadParameter(
+            "--clip-bbox needs the geocoded path: the slant-plane image has no map "
+            "grid, so there is no ground rectangle to cut from it. Drop "
+            "--slant-plane to convert an area of interest.",
+            param_hint="--clip-bbox",
+        )
     if slant_plane:
         with OrbitSpinner(f"Reading amplitude from {Path(src).name}"):
             try:
@@ -635,6 +659,7 @@ def convert(
                 rtc_reference_deg=rtc_ref_angle,
                 rtc_model=rtc_model.lower(),
                 calibration=calibration,
+                bbox=clip,
             )
         except ValueError as exc:  # e.g. the product carries no scale factor
             raise click.ClickException(str(exc)) from exc
@@ -782,6 +807,16 @@ def convert(
     "corners of a rotated footprint.",
 )
 @click.option(
+    "--clip-bbox",
+    default=None,
+    help="Chip only a lon/lat window 'min_lon,min_lat,max_lon,max_lat' of each "
+    "acquisition, numbering rows/columns from its corner. With --asset SICD it "
+    "is also the conversion's clip, so each scene is geocoded over the area of "
+    "interest rather than whole -- the expensive step then costs what the site "
+    "costs, not what the scene does. (Distinct from --bbox, which filters which "
+    "acquisitions the search returns.)",
+)
+@click.option(
     "--manifest",
     default="manifest.jsonl",
     show_default=True,
@@ -831,6 +866,7 @@ def chips(
     fmt,
     db,
     min_valid,
+    clip_bbox,
     manifest,
     area,
     bbox,
@@ -909,6 +945,7 @@ def chips(
             resolution=convert_resolution,
             resampling=resampling,
         )
+    clip = _shared._parse_bbox(clip_bbox)
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -960,6 +997,7 @@ def chips(
             db=db,
             fmt=fmt,
             min_valid=min_valid,
+            bbox=clip,
             manifest=manifest,
             progress=None if as_json else _report,
             conversion=conversion,
