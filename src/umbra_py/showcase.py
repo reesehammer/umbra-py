@@ -1,6 +1,6 @@
 """Static, hostable showcase site (the ``umbra showcase`` command).
 
-The demo-gap analysis (:doc:`DEMO_APP_GAPS`) closed almost every piece of a
+The demo-gap analysis closed almost every piece of a
 full-catalog interactive demo one command at a time: the whole-archive PMTiles
 basemap (``umbra tiles``), the self-serve interactive explorer (``umbra demo``),
 the published index/basemap snapshots a fresh install fetches with no crawl. The
@@ -52,7 +52,7 @@ Design, in the repo's grain:
 * **License propagation.** The mandatory CC-BY attribution rides on the landing
   page, exactly as it does on every other visual artifact.
 
-Was ``DEMO_APP_GAPS.md`` G7 / ``STRATEGY.md`` §8's "GitHub Pages deploy of the
+Was the G7 gap / ``docs/STRATEGY.md`` §8's "GitHub Pages deploy of the
 static ``umbra demo`` / ``catalog.pmtiles`` showcase" (and, for the featured
 gallery, its "precompute showcase artifacts for ~6-10 curated sites" R4
 follow-on).

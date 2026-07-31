@@ -332,7 +332,7 @@ class UmbraCatalog:
             typo, and a strict superset of the substring match (it never
             drops a result). So ``area="utah centerfield"`` or
             ``area="centrfield"`` still reaches ``"Centerfield, Utah"``.
-            No model call -- see ``docs/AI_INTEGRATION_IDEAS.md`` C1.
+            No model call -- the C1 deterministic first step.
         polarizations:
             Keep only items exposing at least one of these polarizations
             (case-insensitive, e.g. ``["VV"]``) -- the SAR-native filter that

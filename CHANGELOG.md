@@ -1599,6 +1599,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controls; Folium's own vendored CDN assets remain out of scope.
 
 ### Changed
+- **Planning docs consolidated: `TODO.md` moved under `docs/`, the three
+  analysis snapshots removed.** `TODO.md` sat at the repo root while every other
+  planning document lived in `docs/`; it is now `docs/TODO.md`, and it carries
+  only *open* work — the `## Done` log and every struck-through entry it had
+  accumulated are gone, because `CHANGELOG.md` is the record of what shipped and
+  keeping a second one meant maintaining the same history twice (the file went
+  from 1 735 lines to about a third of that, with every genuinely open follow-on
+  preserved, including the ones that were nested inside completed entries).
+  `docs/AI_INTEGRATION_IDEAS.md`, `docs/CODEBASE_ANALYSIS.md` and
+  `docs/DEMO_APP_GAPS.md` — already reduced to pointer stubs after their plans
+  were executed and consolidated into `docs/STRATEGY.md` — are deleted, and the
+  references to them cleaned up across `AGENTS.md`, `docs/STRATEGY.md`,
+  `docs/schemas/README.md`, the workflows, the module docstrings and the test
+  section comments (their historical item IDs — `C1`, `G6`, `P3 #18`, … — still
+  appear in this changelog, which is where that history belongs). The one
+  user-visible surface that changed is `llms.txt`: its "Optional" section now
+  links `docs/TODO.md` instead of the removed AI-integration roadmap.
 - **`cli.py` is now a `cli/` package — the last outlier module, split the way
   `viz.py` was (`CODEBASE_ANALYSIS.md` P3 #18/#19 / `STRATEGY.md` §8).** With
   `viz` split, `cli.py` was by a wide margin the largest module in the package

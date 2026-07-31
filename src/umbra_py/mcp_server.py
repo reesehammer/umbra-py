@@ -818,7 +818,7 @@ def describe_scene(
 
     **This is the one tool on the server that consults a model** — every other
     tool is deterministic. It is a deliberate, opt-in exception that preserves the
-    boundary the rest of the package holds (``docs/AI_INTEGRATION_IDEAS.md`` §A4):
+    boundary the rest of the package holds (``docs/STRATEGY.md`` §7):
     the picture and the metadata are produced deterministically, the model **only
     interprets** (its reply passes the deterministic ``parse_description``
     boundary — it never becomes a coordinate, a URL, or a filter), and every
@@ -872,8 +872,8 @@ def narrate_change(
     a human (or a test) can recompute.
 
     Like :func:`describe_scene`, this **consults a model** — the deliberate, opt-in
-    exception to the server's determinism boundary (``docs/AI_INTEGRATION_IDEAS.md``
-    §A4): the composite and the dB grid are produced deterministically, the model
+    exception to the server's determinism boundary (``docs/STRATEGY.md``
+    §7): the composite and the dB grid are produced deterministically, the model
     **only interprets** (its reply passes the ``parse_narration`` boundary — nothing
     it says becomes a coordinate, a URL, or a measurement; the measurements are the
     grid's), and every narration is stamped with the CC-BY attribution and an

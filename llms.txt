@@ -26,5 +26,5 @@ Determinism boundary: the core library is deterministic and never calls a model.
 ## Optional
 
 - [Strategy](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/STRATEGY.md): where the project sits in the SAR ecosystem and why.
-- [AI integration ideas](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/AI_INTEGRATION_IDEAS.md): the MCP / STAC-API / AI-capability roadmap this bundle is part of.
+- [Open follow-ons](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/TODO.md): the ledger of work intentionally scoped out of merged PRs.
 

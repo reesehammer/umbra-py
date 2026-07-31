@@ -450,7 +450,7 @@ def test_list_prefix_follows_continuation_token():
     assert "delimiter=" in seen_urls[0]
 
 
-# -- XML hardening (docs/CODEBASE_ANALYSIS.md §6 P2 #13) ---------------------
+# -- XML hardening ----------------------------------------------------------
 #
 # The bucket listing is remote, untrusted XML parsed on the core discovery
 # path. ``UmbraCatalog._parse_listing`` routes it through defusedxml so an
@@ -505,7 +505,7 @@ def test_list_prefix_rejects_malicious_response_body():
         cat._list_prefix("sar-data/tasks/")
 
 
-# -- concurrent sidecar fetching (docs/CODEBASE_ANALYSIS.md §4.2 / #9) --------
+# -- concurrent sidecar fetching ---------------------------------------------
 
 
 def _single_task_catalog(monkeypatch, stems, fake_get):

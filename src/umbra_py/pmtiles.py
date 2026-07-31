@@ -5,7 +5,7 @@ Every other map surface in the toolkit embeds its features *in the page*:
 gathered slice as an inline JSON blob its clustered Leaflet layer reads. Both
 are excellent up to a few hundred–few thousand acquisitions; both hit the same
 wall at the *whole acquisition set* the demo-gap analysis
-(:doc:`DEMO_APP_GAPS`, Path A step 3) names as the last open gap — thousands of
+named as the last open gap — thousands of
 DOM markers, or a multi-megabyte JSON blob, that no browser wants to hold at
 once.
 
@@ -58,7 +58,7 @@ They also carry a **reference to the acquisition's GEC cloud-optimized GeoTIFF**
 (``cog``, plus the ``bounds`` to place it), which is what lets a viewer over the
 archive stream the actual radar picture on click rather than stopping at
 metadata — the last capability the embedded-slice ``umbra demo`` had over the
-whole-archive one (``DEMO_APP_GAPS.md`` Path A). It stays lean because the
+whole-archive one. It stays lean because the
 product sits *next to* the item's STAC sidecar in the public bucket, so what is
 tiled is the bare filename and the page rebuilds the URL against the
 ``stac_href`` it already carries. Pass ``cog_asset=None`` for a metadata-only

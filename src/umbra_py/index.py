@@ -995,9 +995,9 @@ class CatalogIndex:
 
         :meth:`search` is instant but only returns what the index already holds;
         :meth:`UmbraCatalog.search` is always current but re-walks the whole
-        bucket every call. This is the transparent middle the analysis doc names
-        as "make the index the default path" (``docs/CODEBASE_ANALYSIS.md``
-        §4.4): the index answers the whole query from local SQL, and a *bounded*
+        bucket every call. This is the transparent middle the codebase analysis
+        named as "make the index the default path": the index answers the whole
+        query from local SQL, and a *bounded*
         live walk covers only acquisitions at or after the index's freshness
         horizon -- its maximum indexed ``acq_date`` minus ``overlap_days`` -- so
         the walk fetches sidecars only for recent passes rather than the whole

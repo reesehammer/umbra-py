@@ -58,7 +58,7 @@ jobs:
       # beside the docs. Main-only (it deploys only from main) and non-blocking:
       # if the catalog-index release isn't published yet, or the fetch fails, the
       # docs deploy must still go out, so this step never fails the job
-      # (DEMO_APP_GAPS.md G7 / R4, STRATEGY.md §8).
+      # (STRATEGY.md §8 demo/hosting).
       #
       # Non-blocking, but never *silent*. This was `continue-on-error`, which
       # reports the step as having succeeded, so a run that shipped no showcase

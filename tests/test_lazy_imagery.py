@@ -97,7 +97,7 @@ def test_driver_script_verifies_geotiff_with_sri_and_cors():
     """The dynamically-injected geotiff.js ``<script>`` must carry the
     pinned Subresource Integrity digest and load with
     ``crossorigin='anonymous'`` so the browser verifies the fetched
-    bytes before executing them (CODEBASE_ANALYSIS 3.4). Without both, a
+    bytes before executing them. Without both, a
     compromised CDN could run arbitrary script in every generated map."""
     from umbra_py import _lazy_imagery as li
 

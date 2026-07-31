@@ -196,7 +196,7 @@ jobs:
       # OPENAI_API_KEY as a repo secret, and never blocks the deterministic
       # publish (continue-on-error), so `umbra embed fetch` can pull a
       # `catalog.embed.db` beside `catalog.db` once a key is set. See
-      # STRATEGY.md 5.2 ("offer it upstream") / AI_INTEGRATION_IDEAS.md C5.
+      # STRATEGY.md 5.2 ("offer it upstream"); the C5 similarity workstream.
       - name: Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)
         if: ${{ env.OPENAI_API_KEY != '' }}
         continue-on-error: true

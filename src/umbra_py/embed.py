@@ -1,6 +1,6 @@
 """Archive scene embeddings: visual similarity search over the Umbra archive.
 
-This is the exploratory C5 capability in ``docs/AI_INTEGRATION_IDEAS.md`` -- the
+This is the exploratory C5 capability (see ``docs/STRATEGY.md``) -- the
 last open AI item, and the one that assumes an AI in the loop rather than merely
 making the library legible to one. Everything before it searched by *metadata*:
 :mod:`umbra_py.fuzzy` and :mod:`umbra_py.semantic` match a query against a task's

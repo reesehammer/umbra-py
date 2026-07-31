@@ -21,7 +21,7 @@ This buys two ecosystems from one component:
 On top of *discovery* the server also renders *artifacts on demand*, so a
 front end (or an agent) can trigger the library's visual products over **any**
 site straight from HTTP, not just a curated set baked at build time
-(``DEMO_APP_GAPS.md`` R4 / Path B):
+(the R4 self-serve gap the demo-gap analysis named):
 
 - ``GET  /artifacts/quicklook/{item_id}.png`` -- one acquisition's SAR quicklook;
 - ``GET  /artifacts/thumbnail/{item_id}.png`` -- its baked quicklook thumbnail,
@@ -1245,7 +1245,7 @@ def stats_frames(items: list[UmbraItem]) -> list[UmbraItem]:
 # overview returns in seconds, which is the honest first slice. But a large
 # ``max_size`` or a long timescan can take tens of seconds, and a synchronous
 # request holds a worker for the whole render. The productized shape
-# (``DEMO_APP_GAPS.md`` Path B step 2 / ``TODO.md``) is a small job queue: a
+# (``docs/TODO.md``) is a small job queue: a
 # request can opt in to ``"async": true``, get a ``202 Accepted`` + a job id
 # back immediately, poll ``GET /jobs/{id}`` for status, and fetch the finished
 # artifact from ``GET /jobs/{id}/result``. There is no separate result store --

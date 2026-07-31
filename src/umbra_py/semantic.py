@@ -1,8 +1,8 @@
 """Semantic task-name aliasing: the embedding-backed layer of natural-language
 search that plain string similarity can't (and shouldn't) fake.
 
-This is the last open piece of the C1 natural-language-search plan in
-``docs/AI_INTEGRATION_IDEAS.md``. The three earlier steps stay inside the
+This is the last open piece of the C1 natural-language-search plan (see
+``docs/STRATEGY.md``). The three earlier steps stay inside the
 library's determinism boundary: relative dates (:mod:`umbra_py.dates`) and the
 token-wise fuzzy matcher (:mod:`umbra_py.fuzzy`) turn language into a filter with
 **no model call**, and ``umbra ask`` (:mod:`umbra_py.planner`) lets a model
