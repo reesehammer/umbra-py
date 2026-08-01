@@ -163,16 +163,26 @@ def _coregister_bands(
     items: list[UmbraItem],
     asset: str,
     max_size: int,
-) -> tuple[list[Any], tuple[float, float, float, float]]:
+) -> tuple[list[Any], tuple[float, float, float, float], list[dict[str, str]]]:
     """Read each item's SAR band onto one shared EPSG:4326 grid.
 
-    Returns ``(bands, bounds)`` where ``bands`` is a list of 2D arrays --
-    one per item, all the same shape and pixel-aligned -- and ``bounds`` is
-    the geographic intersection ``(left, bottom, right, top)`` they cover.
+    Returns ``(bands, bounds, provenance)`` where ``bands`` is a list of 2D
+    arrays -- one per item, all the same shape and pixel-aligned -- ``bounds``
+    is the geographic intersection ``(left, bottom, right, top)`` they cover,
+    and ``provenance`` is each source's ``UMBRA_*`` conversion record (empty
+    for anything umbra-py did not convert, which is every product Umbra
+    publishes).
     Each source cloud-optimized GeoTIFF is read at a downsampled resolution
     via range requests and warped to lon/lat so the same output pixel
     refers to the same ground location across dates -- the prerequisite for
     an honest change comparison.
+
+    The provenance is collected here, while the datasets are open, because
+    that is the only place it is free: re-opening a remote COG to ask what its
+    pixel values mean would cost a second round of range requests. Callers
+    that render a *picture* ignore it; the one that quotes decibels
+    (:func:`umbra_py.narrate.render_change_png`) checks it, on the same rule
+    :func:`umbra_py.to_stack` applies to a datacube.
 
     Raises ``ValueError`` when the footprints don't overlap (nothing to
     compare).
@@ -182,8 +192,11 @@ def _coregister_bands(
     from rasterio.enums import Resampling  # noqa: PLC0415
     from rasterio.vrt import WarpedVRT  # noqa: PLC0415
 
+    from ..load import _source_provenance  # noqa: PLC0415
+
     datasets: list[Any] = []
     vrts: list[Any] = []
+    provenance: list[dict[str, str]] = []
     try:
         for item in items:
             url = item.asset_href(asset)
@@ -193,6 +206,7 @@ def _coregister_bands(
                 )
             ds = rasterio.open(f"/vsicurl/{url}")
             datasets.append(ds)
+            provenance.append(_source_provenance(ds))
             # A full-resolution warp to lon/lat. Cheap to construct -- nothing
             # is read until we do a *decimated* windowed read below, which
             # lets GDAL pull the matching cloud-optimized GeoTIFF overview
@@ -243,7 +257,7 @@ def _coregister_bands(
             v.close()
         for ds in datasets:
             ds.close()
-    return bands, (left, bottom, right, top)
+    return bands, (left, bottom, right, top), provenance
 
 
 def select_change_frames(
@@ -345,7 +359,7 @@ def change_composite(
     if len(items) not in (2, 3):
         raise ValueError(f"change_composite needs 2 or 3 acquisitions, got {len(items)}.")
 
-    bands, _ = _coregister_bands(items, asset, max_size)
+    bands, _, _ = _coregister_bands(items, asset, max_size)
     rgba = _compose_change_rgba(bands, percentile=percentile, db=db)
     return Image.fromarray(rgba, mode="RGBA")
 
@@ -412,7 +426,7 @@ def timescan_composite(
             "for two dates use change_composite."
         )
 
-    bands, _ = _coregister_bands(items, asset, max_size)
+    bands, _, _ = _coregister_bands(items, asset, max_size)
     rgba = _compose_timescan_rgba(bands, percentile=percentile, db=db)
     return Image.fromarray(rgba, mode="RGBA")
 
@@ -500,7 +514,7 @@ def change_animation(
     if len(items) < 2:
         raise ValueError(f"animation needs at least 2 acquisitions, got {len(items)}.")
 
-    bands, _ = _coregister_bands(items, asset, max_size)
+    bands, _, _ = _coregister_bands(items, asset, max_size)
     frames: list[Any] = []
     for item, band in zip(items, bands, strict=True):
         rgba = _stretch_to_rgba(band, percentile=percentile, db=db, colormap=colormap)

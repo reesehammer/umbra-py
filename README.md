@@ -363,7 +363,14 @@ raster with no tags at all, such as a published GEC, counts as its own kind), be
 the difference between two conversions would land on the time axis and read as
 change on the ground. It's the same "a mixed selection is not a measurement"
 rule `POST /artifacts/stats` applies to polarization, and it surfaces there as a
-`400` too.
+`400` too. `umbra change --narrate` refuses on the same rule, because its
+per-block decibel grid is a measurement between two passes even though the
+composite beside it is a picture — and when the passes do agree, the record they
+share travels into the narration sidecar and into what the model is told, so a
+quoted dB delta says whether it is a calibrated coefficient or relative
+amplitude. The commands that only draw (`umbra change` without `--narrate`,
+`timescan`, `swipe`) don't check: a mixed composite is confusing to look at, a
+mixed number is wrong.
 
 Measuring reads a whole slice per pass, so a cube `chunk_size` let you *write*
 sharper than memory was still capped at what you could *measure*.

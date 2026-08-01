@@ -795,7 +795,7 @@ def swipe_map(
     from folium.map import CustomPane  # noqa: PLC0415
     from folium.plugins import SideBySideLayers  # noqa: PLC0415
 
-    bands, bounds = _coregister_bands([before, after], asset, max_size)
+    bands, bounds, _ = _coregister_bands([before, after], asset, max_size)
     left_rgba = _stretch_to_rgba(bands[0], percentile=percentile, db=db)
     right_rgba = _stretch_to_rgba(bands[1], percentile=percentile, db=db)
 

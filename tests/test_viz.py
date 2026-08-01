@@ -631,7 +631,7 @@ def test_change_composite_returns_pil_image(monkeypatch):
 
     t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
     t2 = t1[::-1].copy()
-    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2], (0, 0, 1, 1)))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2], (0, 0, 1, 1), []))
 
     a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
     b = UmbraItem(id="b", bbox=(0.0, 0.0, 1.0, 1.0))
@@ -662,7 +662,7 @@ def test_save_change_composite_writes_png(monkeypatch, tmp_path):
 
     t1 = np.arange(1, 17, dtype="float32").reshape(4, 4)
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1), [])
     )
 
     a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
@@ -680,7 +680,7 @@ def test_save_change_composite_jpeg_flattens_alpha(monkeypatch, tmp_path):
 
     t1 = np.array([[0.0, 2.0], [3.0, 4.0]], dtype="float32")  # has an invalid pixel
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1.copy()], (0, 0, 1, 1))
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1.copy()], (0, 0, 1, 1), [])
     )
 
     a = UmbraItem(id="a", bbox=(0.0, 0.0, 1.0, 1.0))
@@ -702,7 +702,7 @@ def test_cli_change_writes_image(monkeypatch, tmp_path, sample_item_dict):
     monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1), [])
     )
 
     out = tmp_path / "change.png"
@@ -837,7 +837,7 @@ def test_change_animation_returns_ordered_frames(monkeypatch):
 
     def fake_coreg(items, asset, max_size):
         captured["order"] = [i.id for i in items]
-        return bands, (0, 0, 1, 1)
+        return bands, (0, 0, 1, 1), []
 
     monkeypatch.setattr(viz_mod, "_coregister_bands", fake_coreg)
     frames = viz_mod.change_animation([later, early])
@@ -868,7 +868,7 @@ def test_save_change_animation_writes_animated_gif(monkeypatch, tmp_path):
     base = np.arange(1, 17, dtype="float32").reshape(4, 4)
     bands = [np.roll(base, k, axis=0) for k in range(3)]
     items = [_dated_item(str(k), f"2024-0{k + 1}-01T00:00:00Z") for k in range(3)]
-    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1), []))
 
     out = viz_mod.save_change_animation(items, tmp_path / "lapse.gif", fps=4)
     assert out.exists()
@@ -890,7 +890,7 @@ def test_cli_change_gif_animates_search_results(monkeypatch, tmp_path):
     found = [_dated_item(str(k), f"2024-{k:02d}-01T00:00:00Z") for k in range(1, 6)]
     monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter(found))
     bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(5)]
-    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1), []))
 
     out = tmp_path / "lapse.gif"
     result = CliRunner().invoke(cli_mod.cli, ["change", "--area", "X", "--out", str(out)])
@@ -912,7 +912,7 @@ def test_cli_change_gif_allows_many_explicit_urls(monkeypatch, tmp_path, sample_
 
     monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _u: sample_item_dict)
     bands = [np.arange(1, 65, dtype="float32").reshape(8, 8) + k for k in range(4)]
-    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1)))
+    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0, 0, 1, 1), []))
 
     urls = [f"http://example/{k}.json" for k in range(4)]
     out = tmp_path / "lapse.gif"
@@ -972,7 +972,7 @@ def test_cli_change_search_mode_selects_and_renders(monkeypatch, tmp_path):
     monkeypatch.setattr("umbra_py.cli._shared.UmbraCatalog.search", lambda self, **_kw: iter(found))
     t1 = np.arange(1, 65, dtype="float32").reshape(8, 8)
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1))
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t1[::-1].copy()], (0, 0, 1, 1), [])
     )
 
     out = tmp_path / "change.png"
@@ -1489,7 +1489,7 @@ def _fake_coregister(np):
     """A mock for _coregister_bands: two pixel-aligned bands sharing bounds."""
     t1 = np.linspace(1.0, 100.0, 16, dtype="float32").reshape(4, 4)
     t2 = t1[::-1].copy()
-    return lambda *a, **k: ([t1, t2], (0.0, 0.0, 1.0, 1.0))
+    return lambda *a, **k: ([t1, t2], (0.0, 0.0, 1.0, 1.0), [])
 
 
 def test_swipe_map_has_sidebyside_and_two_overlays(monkeypatch):
@@ -1708,7 +1708,9 @@ def test_timescan_composite_returns_pil_image(monkeypatch):
     t1 = np.linspace(1.0, 100.0, 12, dtype="float32").reshape(3, 4)
     t2 = t1[::-1].copy()
     t3 = t1.copy()
-    monkeypatch.setattr(viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2, t3], (0, 0, 1, 1)))
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: ([t1, t2, t3], (0, 0, 1, 1), [])
+    )
 
     items = [UmbraItem(id=c, bbox=(0.0, 0.0, 1.0, 1.0)) for c in "abc"]
     img = viz_mod.timescan_composite(items)
@@ -1739,7 +1741,7 @@ def test_save_timescan_composite_writes_png(monkeypatch, tmp_path):
     monkeypatch.setattr(
         viz_mod,
         "_coregister_bands",
-        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1)),
+        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1), []),
     )
 
     items = [UmbraItem(id=c, bbox=(0.0, 0.0, 1.0, 1.0)) for c in "abc"]
@@ -1762,7 +1764,7 @@ def test_cli_timescan_writes_image(monkeypatch, tmp_path, sample_item_dict):
     monkeypatch.setattr(
         viz_mod,
         "_coregister_bands",
-        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1)),
+        lambda *a, **k: ([t1, t1[::-1].copy(), t1.copy()], (0, 0, 1, 1), []),
     )
 
     out = tmp_path / "timescan.png"
