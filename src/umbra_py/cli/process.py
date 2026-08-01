@@ -515,6 +515,17 @@ def stack(
     "products usually don't.",
 )
 @click.option(
+    "--subtract-noise",
+    is_flag=True,
+    help="Subtract the receiver's own thermal-noise floor (the SICD's "
+    "Radiometric.NoiseLevel polynomial) from pixel power before anything scales "
+    "it, so low-backscatter surfaces -- calm water, radar shadow, dry sand -- "
+    "report the ground instead of the sensor's sensitivity limit. Applied first, "
+    "because noise adds where calibration and --rtc multiply. Needs an ABSOLUTE "
+    "noise level: a relative one describes how the floor varies without saying "
+    "what it is, and fails clearly rather than subtracting a guess.",
+)
+@click.option(
     "--clip-bbox",
     default=None,
     help="Convert only a lon/lat window 'min_lon,min_lat,max_lon,max_lat' of the "
@@ -540,6 +551,7 @@ def convert(
     rtc_ref_angle,
     rtc_model,
     calibrate,
+    subtract_noise,
     clip_bbox,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
@@ -568,6 +580,12 @@ def convert(
     a backscatter coefficient (sigma0 / beta0 / gamma0) or an absolute radar
     cross-section, so the decibels mean the same thing across scenes and dates.
     It only works where the product supplies those scale factors.
+
+    A measured pixel is the ground's echo plus the receiver's own thermal noise,
+    and over a dark surface the second term is most of it -- so a calibrated
+    value there can be precise, physical and still be a report of the sensor
+    rather than the scene. Add --subtract-noise to take the product's own noise
+    floor off first, where noise actually adds.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -615,11 +633,17 @@ def convert(
         with OrbitSpinner(f"Reading amplitude from {Path(src).name}"):
             try:
                 path = sicd_to_amplitude_geotiff(
-                    src, dst, decibels=decibels, calibration=calibration
+                    src,
+                    dst,
+                    decibels=decibels,
+                    calibration=calibration,
+                    noise_subtract=subtract_noise,
                 )
             except ValueError as exc:  # e.g. the product carries no scale factor
                 raise click.ClickException(str(exc)) from exc
         label = f"{calibration}-calibrated " if calibration else ""
+        if subtract_noise:
+            label = f"noise-subtracted {label}"
         click.echo(f"Wrote slant-plane {label}amplitude GeoTIFF to {path}")
         return
 
@@ -659,6 +683,7 @@ def convert(
                 rtc_reference_deg=rtc_ref_angle,
                 rtc_model=rtc_model.lower(),
                 calibration=calibration,
+                noise_subtract=subtract_noise,
                 bbox=clip,
             )
         except ValueError as exc:  # e.g. the product carries no scale factor
@@ -671,6 +696,8 @@ def convert(
         kind = "geocoded COG"
     if calibration:
         kind = f"{calibration}-calibrated {kind}"
+    if subtract_noise:
+        kind = f"noise-subtracted {kind}"
     click.echo(f"Wrote {kind} to {path}")
 
 
@@ -743,6 +770,15 @@ def convert(
     "coefficient rather than relative brightness -- the difference between a "
     "model that transfers across scenes and one that doesn't. Composes with "
     "--rtc. Fails clearly when the product carries no such scale factor.",
+)
+@click.option(
+    "--subtract-noise",
+    is_flag=True,
+    help="SICD only: subtract the receiver's own thermal-noise floor (the SICD's "
+    "Radiometric.NoiseLevel polynomial) from pixel power before anything scales "
+    "it, so a chip over water or shadow teaches a model the ground rather than "
+    "the sensor's sensitivity limit. Needs an ABSOLUTE noise level; fails clearly "
+    "when the product declares none.",
 )
 @click.option(
     "--convert-resolution",
@@ -858,6 +894,7 @@ def chips(
     rtc_model,
     rtc_ref_angle,
     calibrate,
+    subtract_noise,
     convert_resolution,
     resampling,
     work_dir,
@@ -908,9 +945,10 @@ def chips(
 
     \b
     --asset SICD chips the complex archive instead: each scene is downloaded
-    whole and geocoded before its tiles are cut, so --dem, --rtc and
-    --calibrate apply and the chips can carry a physical backscatter
-    coefficient. That path needs the convert extra
+    whole and geocoded before its tiles are cut, so --dem, --rtc,
+    --calibrate and --subtract-noise apply and the chips can carry a physical
+    backscatter coefficient with the sensor's own noise floor taken off. That
+    path needs the convert extra
     (``pip install "umbra-py[convert]"``) and real bytes per scene, so give
     --work-dir to keep the geocoded scenes and make a re-run cheap.
     """
@@ -923,6 +961,7 @@ def chips(
         "--rtc": rtc,
         "--rtc-ref-angle": rtc_ref_angle,
         "--calibrate": calibrate,
+        "--subtract-noise": subtract_noise,
         "--convert-resolution": convert_resolution,
         "--work-dir": work_dir,
     }
@@ -942,6 +981,7 @@ def chips(
             rtc_model=rtc_model,
             rtc_reference_deg=rtc_ref_angle,
             calibration=calibrate,
+            noise_subtract=subtract_noise,
             resolution=convert_resolution,
             resampling=resampling,
         )

@@ -216,6 +216,21 @@ metadata naming the calibration, the RTC model and its resolved reference angle,
 the DEM/geoid, the projection, the scale and the CC-BY licence
 (`read_conversion_tags` / `umbra convert --provenance` / `gdalinfo`), because a
 physical measurement nobody can attribute to a calibration is not one.
+~~**Open:** calibration scales the ground's echo and the receiver's own thermal
+noise alike, so over a dark surface it reports the sensor rather than the
+scene.~~ **shipped** — `umbra convert --subtract-noise` /
+`sicd_to_geocoded_cog(noise_subtract=True)` takes the product's own
+`Radiometric.NoiseLevel` floor off the detected power *first*, because noise adds
+where the flattening and the calibration multiply, and because over calm water,
+radar shadow or dry sand that floor is most of the value — and, varying across
+the swath as it does, put a gradient in the answer that tracked the geometry
+rather than the ground. Only an `ABSOLUTE` noise level can be subtracted: a
+`RELATIVE` one describes how the floor varies without saying what it *is*, so it
+is a self-describing refusal rather than an invented offset (`sicd_noise_level`
+answers ahead of time, as `sicd_calibration_types` does for the scale factors).
+It is recorded (`UMBRA_NOISE_SUBTRACTION`) and *consumed*: `to_stack` refuses a
+series that subtracted the floor from some passes and not others, because over a
+dark cell that mix is the difference between the two passes.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -464,6 +479,23 @@ from:
   vanishing, and only the source *file name* is recorded. Read it with
   `read_conversion_tags`, `umbra convert --provenance`, or `gdalinfo`. See the
   CHANGELOG.
+- ~~Radiometric calibration made a pixel physical without making it the
+  *ground*: a measured value is the echo plus the receiver's own thermal noise,
+  so over a low-backscatter surface a calibrated number reported the sensor's
+  sensitivity.~~ **shipped** — `umbra convert --subtract-noise` /
+  `sicd_to_geocoded_cog(noise_subtract=True)` evaluates the SICD's own
+  `Radiometric.NoiseLevel.NoisePoly` per pixel, in the image coordinates the
+  pixels came from (so a `--clip-bbox` window gets its own part of the swath),
+  and subtracts it from detected power **before** anything scales it — the one
+  correction in the module that is not a multiplicative factor, which is exactly
+  why its position in the chain is the design. Where the floor meets the
+  measurement the residual is floored rather than driven negative: that pixel is
+  at the sensor's limit, which is a fact about the radar. `--rtc-model facet
+  --calibrate gamma0 --subtract-noise` is therefore a terrain-flattened
+  gamma-nought coefficient with the receiver removed, and `umbra chips
+  --subtract-noise` carries the same to a training set. A `RELATIVE` noise level,
+  a missing one, and a product with no `Radiometric` block each raise rather than
+  subtract a guess. See the CHANGELOG.
 - ~~Nothing *consumed* those tags (they were written and read back, but no code
   acted on them, so a stack could still mix two conversions and report the
   difference between them as change).~~ **shipped** — `to_stack` reads every
@@ -471,7 +503,10 @@ from:
   that disagrees on `MEASUREMENT_PROVENANCE_KEYS` (`calibration`, `rtc_model`,
   `scale`, `units`), naming the key, both values and an acquisition on each side;
   a raster with no tags is its own value, so a converted product mixed with a
-  published GEC is caught too, while a series of published GECs agrees and is
+  published GEC is caught too (`noise_subtraction` has since joined that key set;
+  a record that predates a key reads as "that step did not run" rather than as
+  the sentinel, so a new measurement key cannot retroactively split a series that
+  agrees), while a series of published GECs agrees and is
   unaffected. The keys that legitimately vary per pass (`source`,
   `rtc_reference_deg`) are excluded by design. It is the polarization refusal of
   `POST /artifacts/stats` applied to what the pixel values *are*, and it reaches

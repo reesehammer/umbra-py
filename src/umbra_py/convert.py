@@ -76,6 +76,22 @@ calibration a product cannot support raises rather than returning a
 plausible-looking number. :func:`sicd_calibration_types` reports what a given
 file supports before you ask for it.
 
+A calibrated pixel is still the sum of the ground's echo *and* the receiver's
+own thermal noise, and over a dark surface — calm water, radar shadow, dry sand
+— the second term is most of it. Scaling that sum by a calibration factor gives
+a number that is precise, physical and wrong: it reports the noise floor as
+backscatter, and because the floor varies across the swath it puts a gradient in
+the answer that has nothing to do with the scene. ``noise_subtract=True``
+(``umbra convert --subtract-noise``) removes it, in the power domain where noise
+adds, using the product's own ``Radiometric.NoiseLevel`` polynomial — so a low-
+backscatter surface reads as the low number it is rather than as the sensor's
+sensitivity. It is subtractive where calibration and flattening are
+multiplicative, so it goes *first*, on the raw detected power, before either
+scales it. Only an ``ABSOLUTE`` noise level can be subtracted: a ``RELATIVE``
+one describes how the floor varies without saying what it *is*, so asking to
+subtract it is a self-describing error rather than an arbitrary offset.
+:func:`sicd_noise_level` reports which kind (if any) a file carries.
+
 All of that work is proportional to the scene, and a scene is tens of square
 kilometres at 16–25 cm. ``bbox=`` on :func:`sicd_to_geocoded_cog` (``umbra
 convert --clip-bbox``) makes it proportional to the *area of interest* instead:
@@ -263,6 +279,39 @@ def _image_grid_geometry(sicd: Any) -> dict[str, float]:
     }
 
 
+def _image_poly_values(
+    coefs,
+    shape: tuple[int, int],
+    *,
+    row_ss: float,
+    col_ss: float,
+    scp_row: float,
+    scp_col: float,
+    first_row: float = 0.0,
+    first_col: float = 0.0,
+):
+    """Evaluate a SICD image-coordinate polynomial over a pixel grid.
+
+    The ``Radiometric`` polynomials — the scale factors *and* the noise level —
+    are all functions of image coordinates measured in **metres from the scene
+    centre point**: pixel ``(row, col)`` sits at ``((row + first_row - scp_row)
+    * row_ss, (col + first_col - scp_col) * col_ss)``. This is that shared
+    evaluation; what the numbers *mean* (a power ratio, a noise power in dB) and
+    which values are admissible is the caller's business.
+    """
+    np = _require("numpy")
+    from numpy.polynomial import polynomial as npoly  # noqa: PLC0415
+
+    rows, cols = shape
+    x = (np.arange(rows, dtype="float64") + first_row - scp_row) * row_ss
+    y = (np.arange(cols, dtype="float64") + first_col - scp_col) * col_ss
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    return np.asarray(
+        npoly.polyval2d(xx, yy, np.atleast_2d(np.asarray(coefs, dtype="float64"))),
+        dtype="float64",
+    )
+
+
 def _calibration_scale(
     coefs,
     shape: tuple[int, int],
@@ -277,10 +326,9 @@ def _calibration_scale(
     """Per-pixel power-domain scale factor from a SICD SF polynomial.
 
     Evaluates the 2-D polynomial over the image grid in SICD's own coordinates
-    — pixel ``(row, col)`` sits at ``((row + first_row - scp_row) * row_ss,
-    (col + first_col - scp_col) * col_ss)`` metres from the SCP — so a constant
-    polynomial (the common case) gives a flat scale and a higher-order one
-    tracks the across-swath variation the product describes.
+    (:func:`_image_poly_values`), so a constant polynomial (the common case)
+    gives a flat scale and a higher-order one tracks the across-swath variation
+    the product describes.
 
     A scale factor is a positive power ratio by construction; a non-positive or
     non-finite value means the metadata cannot be evaluated on this grid, which
@@ -288,15 +336,16 @@ def _calibration_scale(
     worse than none.
     """
     np = _require("numpy")
-    from numpy.polynomial import polynomial as npoly  # noqa: PLC0415
 
-    rows, cols = shape
-    x = (np.arange(rows, dtype="float64") + first_row - scp_row) * row_ss
-    y = (np.arange(cols, dtype="float64") + first_col - scp_col) * col_ss
-    xx, yy = np.meshgrid(x, y, indexing="ij")
-    scale = np.asarray(
-        npoly.polyval2d(xx, yy, np.atleast_2d(np.asarray(coefs, dtype="float64"))),
-        dtype="float64",
+    scale = _image_poly_values(
+        coefs,
+        shape,
+        row_ss=row_ss,
+        col_ss=col_ss,
+        scp_row=scp_row,
+        scp_col=scp_col,
+        first_row=first_row,
+        first_col=first_col,
     )
     bad = ~np.isfinite(scale) | (scale <= 0.0)
     if bool(bad.any()):
@@ -371,6 +420,203 @@ def sicd_calibration_types(src: str | os.PathLike) -> tuple[str, ...]:
 
 
 # --------------------------------------------------------------------------- #
+# Noise-floor subtraction (SICD ``Radiometric.NoiseLevel``).
+# --------------------------------------------------------------------------- #
+
+#: The only SICD ``NoiseLevelType`` that can be subtracted. ``"RELATIVE"``
+#: describes how the noise floor *varies* across the image without stating its
+#: absolute level, so subtracting it would mean inventing the offset.
+_SUBTRACTABLE_NOISE_LEVEL = "ABSOLUTE"
+
+#: Power floor left where the estimated noise meets or exceeds the measured
+#: power. Matches the ``1e-6`` magnitude floor :func:`_amplitude` already clamps
+#: the log scale at (power is magnitude squared), so a pixel driven to the floor
+#: by noise subtraction reads as the same "as dark as this raster goes" value a
+#: zero-amplitude pixel does, rather than as ``-inf``.
+_NOISE_RESIDUAL_FLOOR = 1e-12
+
+
+def _noise_level_type(sicd: Any) -> str | None:
+    """The SICD's ``Radiometric.NoiseLevel.NoiseLevelType``, upper-cased.
+
+    ``None`` when the product carries no noise-level metadata at all — the
+    honest answer for a product whose floor is undescribed, and the one
+    :func:`sicd_noise_level` hands back.
+    """
+    radiometric = getattr(sicd, "Radiometric", None)
+    level = getattr(radiometric, "NoiseLevel", None) if radiometric is not None else None
+    kind = getattr(level, "NoiseLevelType", None) if level is not None else None
+    return str(kind).upper() if kind else None
+
+
+def _noise_coefficients(sicd: Any):
+    """The 2-D ``NoisePoly`` coefficients (noise power in dB), off a SICD.
+
+    Raises a self-describing :class:`ValueError` for each way a product can fail
+    to support the subtraction — no ``Radiometric`` block, no ``NoiseLevel``, a
+    ``RELATIVE`` level, or an empty polynomial. The point of the feature is that
+    a noise floor is either measured or absent, never assumed: a subtraction of
+    a guessed floor is indistinguishable from a real one in the output and would
+    make dark surfaces confidently wrong.
+
+    Every metadata check runs before ``numpy`` is required, so "this product's
+    noise floor cannot be subtracted" is answerable without the ``convert``
+    extra.
+    """
+    radiometric = getattr(sicd, "Radiometric", None)
+    if radiometric is None:
+        raise ValueError(
+            "SICD carries no Radiometric metadata, so its noise floor cannot be "
+            "subtracted: the noise level has to come from the product. Umbra's open "
+            "products are typically uncalibrated -- convert without --subtract-noise "
+            "for the usual (noise-inclusive) amplitude image."
+        )
+    level = getattr(radiometric, "NoiseLevel", None)
+    if level is None:
+        raise ValueError(
+            "SICD Radiometric metadata carries no NoiseLevel block, so there is no "
+            "noise floor to subtract for this product."
+        )
+    kind = _noise_level_type(sicd)
+    if kind != _SUBTRACTABLE_NOISE_LEVEL:
+        raise ValueError(
+            f"SICD NoiseLevelType is {kind or 'unset'!r}, not "
+            f"{_SUBTRACTABLE_NOISE_LEVEL!r}: a relative noise level describes how the "
+            "floor varies across the image without stating what it is, so it cannot "
+            "be subtracted from pixel power without inventing the absolute offset."
+        )
+    poly = getattr(level, "NoisePoly", None)
+    if poly is None:
+        raise ValueError(
+            "SICD NoiseLevel carries no NoisePoly, so the noise power is undefined "
+            "even though the level is declared absolute."
+        )
+    np = _require("numpy")
+    coefs = np.atleast_2d(np.asarray(getattr(poly, "Coefs", poly), dtype="float64"))
+    if coefs.size == 0:
+        raise ValueError("SICD NoisePoly has no coefficients, so the noise power is undefined.")
+    return coefs
+
+
+def _noise_power(
+    coefs,
+    shape: tuple[int, int],
+    *,
+    row_ss: float,
+    col_ss: float,
+    scp_row: float,
+    scp_col: float,
+    first_row: float = 0.0,
+    first_col: float = 0.0,
+):
+    """Per-pixel noise power from a SICD ``NoisePoly``.
+
+    ``NoisePoly`` yields the thermal-noise power **in decibels** as a function
+    of the same image coordinates the scale factors use, so this evaluates it
+    there (:func:`_image_poly_values`) and converts to the linear power domain
+    where noise and signal add. A constant polynomial (the common case) gives a
+    flat floor; a higher-order one tracks the across-swath variation that is
+    exactly what a single scalar floor would smear into the result.
+
+    A non-finite value means the metadata cannot be evaluated on this grid,
+    which is raised rather than clamped — the same rule as the scale factors.
+    """
+    np = _require("numpy")
+
+    noise_db = _image_poly_values(
+        coefs,
+        shape,
+        row_ss=row_ss,
+        col_ss=col_ss,
+        scp_row=scp_row,
+        scp_col=scp_col,
+        first_row=first_row,
+        first_col=first_col,
+    )
+    bad = ~np.isfinite(noise_db)
+    if bool(bad.any()):
+        raise ValueError(
+            f"The SICD noise polynomial is non-finite over {int(bad.sum())} of "
+            f"{bad.size} pixels, so it cannot be evaluated on this image grid. The "
+            "product's NoiseLevel metadata is inconsistent with its image geometry."
+        )
+    return np.power(10.0, noise_db / 10.0)
+
+
+def _subtract_noise(amplitude: np.ndarray, noise: Any, *, decibels: bool):
+    """Remove an additive noise power from a detected-amplitude raster.
+
+    Noise adds to signal in *power*, which is the one place in this module the
+    correction is not a multiplicative factor: the flattening and the
+    calibration both scale power, so they commute with each other and with the
+    warp, while this one has to happen on the raw detected power before either
+    scales it.
+
+    ``amplitude`` is the module's usual pair of conventions — decibel power
+    (``20*log10`` of magnitude, which *is* ``10*log10`` of power) or linear
+    magnitude — and comes back in whichever it arrived in. Where the estimated
+    noise meets or exceeds the measured power the residual is floored at
+    :data:`_NOISE_RESIDUAL_FLOOR` rather than driven to zero or negative: those
+    pixels are at the sensor's sensitivity limit, which is a statement about the
+    radar and not a measurement of the ground. Non-finite pixels (the warp's
+    nodata) stay non-finite.
+    """
+    np = _require("numpy")
+
+    values = np.asarray(amplitude, dtype="float64")
+    power = np.power(10.0, values / 10.0) if decibels else np.square(values)
+    residual = np.clip(power - np.asarray(noise, dtype="float64"), _NOISE_RESIDUAL_FLOOR, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corrected = 10.0 * np.log10(residual) if decibels else np.sqrt(residual)
+    return np.asarray(corrected, dtype="float32")
+
+
+def _denoise_amplitude(
+    sicd: Any,
+    amplitude: np.ndarray,
+    *,
+    decibels: bool,
+    origin: tuple[int, int] = (0, 0),
+):
+    """Subtract the SICD's own noise floor from a detected-amplitude raster.
+
+    ``origin`` is the ``(row, col)`` position of ``amplitude`` inside the full
+    image, for the same reason :func:`_calibrate_amplitude` takes one: the noise
+    polynomial is a function of image coordinates, so a clipped read has to be
+    evaluated at the coordinates it actually came from.
+    """
+    coefs = _noise_coefficients(sicd)
+    geometry = _image_grid_geometry(sicd)
+    row0, col0 = origin
+    geometry["first_row"] += float(row0)
+    geometry["first_col"] += float(col0)
+    noise = _noise_power(coefs, amplitude.shape, **geometry)
+    return _subtract_noise(amplitude, noise, decibels=decibels)
+
+
+def sicd_noise_level(src: str | os.PathLike) -> str | None:
+    """Which noise level a SICD product's metadata declares, if any.
+
+    Returns ``"ABSOLUTE"`` (the floor is stated, so ``noise_subtract=True``
+    works), ``"RELATIVE"`` (the floor's *variation* is described but not its
+    level, so it cannot be subtracted), or ``None`` for a product with no noise
+    metadata at all. Ask this before passing ``noise_subtract=True`` when you
+    want to *check* rather than handle the error — the same role
+    :func:`sicd_calibration_types` plays for the scale factors.
+
+    Parameters
+    ----------
+    src:
+        Path to a SICD NITF file.
+    """
+    _require("sarpy")
+    from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
+
+    reader = open_complex(str(src))
+    return _noise_level_type(reader.get_sicds_as_tuple()[0])
+
+
+# --------------------------------------------------------------------------- #
 # Conversion provenance (what the pixel values mean, recorded in the raster).
 # --------------------------------------------------------------------------- #
 
@@ -402,6 +648,7 @@ def conversion_tags(
     geocoded: bool,
     decibels: bool = True,
     calibration: str | None = None,
+    noise_subtraction: str | None = None,
     rtc_model: str | None = None,
     rtc_reference_deg: float | None = None,
     projection_type: str | None = None,
@@ -435,6 +682,12 @@ def conversion_tags(
         (:func:`sicd_to_geocoded_cog`) or the ungeoreferenced slant-plane
         amplitude (:func:`sicd_to_amplitude_geotiff`). The geocoding parameters
         below are recorded only for the former.
+    noise_subtraction:
+        The SICD noise level that was subtracted (``"absolute"``), or ``None``
+        for a raster that still carries its noise floor. Recorded because it is
+        the difference between "this surface backscatters at −25 dB" and "this
+        sensor cannot hear below −25 dB", which the pixel values themselves
+        cannot distinguish after the fact.
     rtc_reference_deg:
         The *resolved* reference incidence angle the flattening normalised to
         (the scene incidence angle when the caller passed none), so the tag
@@ -447,6 +700,7 @@ def conversion_tags(
         "SCALE": "decibels" if decibels else "linear",
         "UNITS": _pixel_units(calibration=calibration, decibels=decibels),
         "CALIBRATION": calibration or "none",
+        "NOISE_SUBTRACTION": noise_subtraction or "none",
         "RTC_MODEL": rtc_model or "none",
     }
     if rtc_model is not None and rtc_reference_deg is not None:
@@ -510,6 +764,7 @@ def sicd_to_amplitude_geotiff(
     *,
     decibels: bool = True,
     calibration: str | None = None,
+    noise_subtract: bool = False,
 ) -> Path:
     """Read a SICD (complex) image and write its detected amplitude as a GeoTIFF.
 
@@ -532,6 +787,11 @@ def sicd_to_amplitude_geotiff(
         ``None`` writes the uncalibrated amplitude. Raises when the product
         carries no scale factor for the requested calibration — ask
         :func:`sicd_calibration_types` first to check.
+    noise_subtract:
+        If true, subtract the SICD's own ``Radiometric.NoiseLevel`` floor from
+        pixel power before any calibration (see :func:`sicd_to_geocoded_cog`).
+        Raises when the product declares no absolute noise level — ask
+        :func:`sicd_noise_level` first to check.
     """
     _require("sarpy")
     _require("rasterio")
@@ -545,10 +805,14 @@ def sicd_to_amplitude_geotiff(
         )
 
     reader = open_complex(str(src))
+    sicd = reader.get_sicds_as_tuple()[0]
     amplitude = _amplitude(reader[:, :], decibels=decibels)
+    if noise_subtract:
+        # Before the calibration: noise adds to raw power, so it comes off there.
+        amplitude = _denoise_amplitude(sicd, amplitude, decibels=decibels)
     if calibration is not None:
         amplitude = _calibrate_amplitude(
-            reader.get_sicds_as_tuple()[0],
+            sicd,
             amplitude,
             kind=calibration,
             decibels=decibels,
@@ -576,6 +840,7 @@ def sicd_to_amplitude_geotiff(
                 geocoded=False,
                 decibels=decibels,
                 calibration=calibration,
+                noise_subtraction=_SUBTRACTABLE_NOISE_LEVEL.lower() if noise_subtract else None,
             )
         )
     return dst
@@ -1699,6 +1964,7 @@ def sicd_to_geocoded_cog(
     rtc_reference_deg: float | None = None,
     rtc_model: str = "cosine",
     calibration: str | None = None,
+    noise_subtract: bool = False,
     bbox: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
@@ -1844,6 +2110,25 @@ def sicd_to_geocoded_cog(
         support is a self-describing error rather than a plausible-looking
         number. :func:`sicd_calibration_types` reports what a given file
         supports. MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
+    noise_subtract:
+        If true, subtract the receiver's own thermal-noise floor — the SICD's
+        ``Radiometric.NoiseLevel.NoisePoly``, evaluated per pixel — from the
+        detected power before anything scales it. A measured pixel is the
+        ground's echo *plus* that floor, and over a low-backscatter surface
+        (calm water, radar shadow, dry sand) the floor is most of it, so an
+        uncorrected value there reports the sensor's sensitivity as if it were
+        the scene's brightness — and, because the floor varies across the swath,
+        varies with the geometry rather than the ground. Subtraction is the one
+        correction here that is not a multiplicative factor, so it is applied
+        first, in image space, on raw power: ``calibration`` and ``rtc`` then
+        scale what is left.
+
+        Only an ``ABSOLUTE`` noise level can be subtracted. A ``RELATIVE`` one
+        describes the floor's shape without its level, and a product may declare
+        no noise level at all; both raise a self-describing error rather than
+        subtracting a guess, and :func:`sicd_noise_level` reports which case a
+        file is in before you ask. ``False`` (the default) leaves the noise
+        floor in, which is what an uncalibrated relative image already assumes.
     bbox:
         Optional area of interest ``(min_lon, min_lat, max_lon, max_lat)`` in
         WGS-84 degrees. Only the image window covering that ground is read,
@@ -1895,6 +2180,11 @@ def sicd_to_geocoded_cog(
         )
         origin = (row0, col0)
         amplitude = _amplitude(reader[row0:row1, col0:col1], decibels=decibels)
+    if noise_subtract:
+        # First, and in image space: the noise floor is additive in power and is
+        # a polynomial in image coordinates, so it comes off the raw detected
+        # power before the multiplicative corrections scale what is left.
+        amplitude = _denoise_amplitude(sicd, amplitude, decibels=decibels, origin=origin)
     if calibration is not None:
         # In image space: the SF polynomials are functions of image coordinates,
         # so calibrate before the warp resamples the grid away.
@@ -1976,6 +2266,7 @@ def sicd_to_geocoded_cog(
             geocoded=True,
             decibels=decibels,
             calibration=calibration,
+            noise_subtraction=_SUBTRACTABLE_NOISE_LEVEL.lower() if noise_subtract else None,
             rtc_model=rtc_model if rtc else None,
             rtc_reference_deg=reference_deg,
             projection_type=projection_type,

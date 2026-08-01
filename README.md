@@ -351,12 +351,14 @@ the same object, and the `stack_stats` agent tool returns it over MCP /
 LangChain / LlamaIndex.
 
 A summary also says **what it measured**. Rasters `umbra convert` produced carry
-their calibration, terrain model and amplitude scale in `UMBRA_*` GeoTIFF tags
+their calibration, noise-floor subtraction, terrain model and amplitude scale in
+`UMBRA_*` GeoTIFF tags
 (above), and the loaders read them: `to_xarray` / `to_stack` surface the record
 as `attrs["provenance"]`, `stack_stats` reports it and swaps its "these decibels
 are relative" caveat for a calibrated one, and a GeoTIFF written from the cube
 keeps the tags. The other half of reading them is a refusal — `to_stack` will
-not co-register passes whose calibration, terrain model or scale disagree (a
+not co-register passes whose calibration, noise-floor subtraction, terrain model
+or scale disagree (a
 raster with no tags at all, such as a published GEC, counts as its own kind), because
 the difference between two conversions would land on the time axis and read as
 change on the ground. It's the same "a mixed selection is not a measurement"
@@ -786,14 +788,23 @@ umbra convert scene_SICD.nitf scene_ortho.tif --dem copernicus_dem.tif
 # product. Needs a product that carries the scale factors; it says so if not.
 umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet --calibrate gamma0
 
+# A pixel is the ground's echo *plus* the receiver's own thermal noise, and over
+# a dark surface (calm water, radar shadow, dry sand) the second term is most of
+# it -- so a calibrated value there reports the sensor's sensitivity, not the
+# scene. --subtract-noise takes the product's own noise floor off first, in the
+# power domain where noise adds. Needs an ABSOLUTE NoiseLevel; says so if not.
+umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet \
+    --calibrate gamma0 --subtract-noise
+
 # Convert only the area you care about. A scene is tens of square kilometres at
 # 16-25 cm, and every step above is proportional to it. --clip-bbox turns the
 # ground rectangle back into the image window that covers it, reads only that,
 # and crops the output to the request -- same pixels, a fraction of the work.
 umbra convert scene_SICD.nitf site.tif --clip-bbox -112.05,40.72,-111.98,40.78
 
-# Every converted raster records how it was made -- calibration, terrain model
-# and reference angle, DEM/geoid, projection, scale, licence -- in its own
+# Every converted raster records how it was made -- calibration, noise-floor
+# subtraction, terrain model and reference angle, DEM/geoid, projection, scale,
+# licence -- in its own
 # GeoTIFF tags, so a scene can say what its pixel values mean. Read it back
 # (also visible to plain gdalinfo, or umbra_py.read_conversion_tags).
 umbra convert scene_g0.tif --provenance
@@ -1023,11 +1034,13 @@ with no map grid, so `--asset SICD` fetches each scene and geocodes it through
 the same pipeline `umbra convert` uses, then cuts the identical tiles from the
 result — which is how a training set reaches the half of the archive that is the
 point of 16–25 cm SAR. Because the conversion is the one `umbra convert` runs,
-`--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` all apply: chips can
-carry a terrain-flattened, calibrated **gamma-nought** backscatter coefficient
-rather than relative brightness, and each chip GeoTIFF inherits the `UMBRA_*`
-provenance tags saying so (the manifest also carries `calibration` / `rtc_model`,
-read back from the raster rather than from the request). The cost is honest:
+`--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` /
+`--subtract-noise` all apply: chips can carry a terrain-flattened, calibrated
+**gamma-nought** backscatter coefficient with the receiver's own noise floor
+removed rather than relative brightness, and each chip GeoTIFF inherits the
+`UMBRA_*` provenance tags saying so (the manifest also carries `calibration` /
+`noise_subtraction` / `rtc_model`, read back from the raster rather than from the
+request). The cost is honest:
 unlike the GEC path this downloads each product whole, so it is opt-in, one scene
 is on disk at a time, and `--work-dir` keeps the geocoded scenes so a re-run
 reuses them instead of fetching and warping again. `--clip-bbox` is what makes

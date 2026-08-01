@@ -89,13 +89,29 @@ _QUANTILE_BIN_DB = 0.05
 #: Ordered most-explanatory first, because the first key that disagrees is the
 #: one the refusal names, and ``units`` is derived from the two before it -- a
 #: calibration mix should be reported as a calibration mix, not as its shadow.
-MEASUREMENT_PROVENANCE_KEYS = ("calibration", "rtc_model", "scale", "units")
+MEASUREMENT_PROVENANCE_KEYS = (
+    "calibration",
+    "noise_subtraction",
+    "rtc_model",
+    "scale",
+    "units",
+)
 
 #: Stands in for "this raster carries no umbra-py provenance at all" when
 #: comparing sources. A published Umbra GEC has no ``UMBRA_*`` tags, so a whole
 #: series of them agrees on this value and nothing is refused; it is the *mix* of
 #: a converted raster with an untagged one that the sentinel catches.
 _UNRECORDED = "(unrecorded)"
+
+#: What a *converted* raster that is silent about a step is taken to have done:
+#: nothing. ``conversion_tags`` writes ``"none"`` for every step that did not
+#: run, so the only way a key goes missing from a real record is a raster
+#: converted by an older umbra-py that had no such step -- which did not run it
+#: either. Reading that as ``"none"`` rather than :data:`_UNRECORDED` keeps a
+#: new key from retroactively splitting a series that agrees; a raster with *no*
+#: umbra-py provenance is still :data:`_UNRECORDED`, because there the silence
+#: is about the whole conversion rather than one step of it.
+_STEP_NOT_RUN = "none"
 
 
 def _require(module: str):
@@ -412,12 +428,16 @@ def _shared_provenance(records: list[dict[str, str]], ids: list[str]) -> dict[st
     Only :data:`MEASUREMENT_PROVENANCE_KEYS` are grounds for refusal. What comes
     *back* is every key on which all the sources agree, so a cube built from one
     conversion carries that conversion's whole record (and one built from
-    untagged products carries nothing, the usual case).
+    untagged products carries nothing, the usual case). A converted raster that
+    is silent about one key reads as :data:`_STEP_NOT_RUN` for it rather than as
+    :data:`_UNRECORDED`, so a step added in a later umbra-py does not split a
+    series whose older members simply never had it.
     """
     for key in MEASUREMENT_PROVENANCE_KEYS:
         seen: dict[str, str] = {}
         for record, item_id in zip(records, ids, strict=True):
-            seen.setdefault(record.get(key, _UNRECORDED), item_id)
+            missing = _STEP_NOT_RUN if record else _UNRECORDED
+            seen.setdefault(record.get(key, missing), item_id)
         if len(seen) > 1:
             listed = ", ".join(f"{value!r} ({item_id})" for value, item_id in sorted(seen.items()))
             raise ValueError(
@@ -1737,6 +1757,16 @@ def stack_stats(
         f"component of the look geometry was flattened ({rtc_model} model), but "
         "incidence-angle-dependent scattering still moves backscatter between passes.",
     ]
+    if provenance.get("noise_subtraction", "none") != "none":
+        # Only said when it was earned. The default -- a floor left in -- is the
+        # assumption the first caveat's "relative" already covers, and saying so
+        # for every published product would be noise about noise.
+        caveats.append(
+            "The receiver's own thermal-noise floor was subtracted from these values "
+            "(recorded by 'umbra convert'), so a dark cell reports the ground rather "
+            "than the sensor's sensitivity limit -- except where the subtraction drove "
+            "it to the floor, which is that limit."
+        )
     if area is None:
         caveats.append(
             f"The cube's grid is geographic ({crs_name}), whose cells are not "

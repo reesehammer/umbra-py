@@ -2055,6 +2055,303 @@ def test_cli_convert_calibrate_unavailable_is_a_clean_error(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
+# Noise-floor subtraction (SICD ``Radiometric.NoiseLevel``).
+#
+# Calibration makes a pixel physical; it does not make it the *ground*. A
+# measured pixel is the echo plus the receiver's own thermal noise, and over a
+# dark surface the second term dominates -- so these tests pin the arithmetic
+# (subtraction in the power domain, before the multiplicative corrections, at
+# the image coordinates the window came from) and the refusals (a product that
+# cannot state its floor says so rather than having one subtracted for it).
+# --------------------------------------------------------------------------- #
+
+
+def _noise_level(level="ABSOLUTE", coefs=((0.0,),), *, poly=True):
+    """A SICD ``Radiometric.NoiseLevel`` block: a level type and its NoisePoly."""
+    block = type("_FakeNoiseLevel", (), {})()
+    block.NoiseLevelType = level
+    if poly:
+        block.NoisePoly = _FakePoly(coefs)
+    return block
+
+
+def _radiometric_noise(level="ABSOLUTE", coefs=((0.0,),), *, poly=True, **polys):
+    """A ``Radiometric`` block carrying a NoiseLevel (and any SF polynomials)."""
+    block = _radiometric(**polys)
+    block.NoiseLevel = _noise_level(level, coefs, poly=poly)
+    return block
+
+
+def test_noise_level_type_reports_what_the_product_declares():
+    # No Radiometric block at all -- the shape of an Umbra open product.
+    assert convert._noise_level_type(_FakeSicd()) is None
+    # Radiometric, but nothing said about the floor.
+    assert convert._noise_level_type(_FakeSicd(radiometric=_radiometric())) is None
+    assert convert._noise_level_type(_FakeSicd(radiometric=_radiometric_noise())) == "ABSOLUTE"
+    assert (
+        convert._noise_level_type(_FakeSicd(radiometric=_radiometric_noise("relative")))
+        == "RELATIVE"
+    )
+
+
+def test_noise_coefficients_missing_block_raises_and_says_why():
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        convert._noise_coefficients(_FakeSicd())
+
+
+def test_noise_coefficients_without_a_noise_level_raises():
+    sicd = _FakeSicd(radiometric=_radiometric(SigmaZeroSFPoly=[[2.0]]))
+    with pytest.raises(ValueError, match="no NoiseLevel block"):
+        convert._noise_coefficients(sicd)
+
+
+def test_noise_coefficients_refuses_a_relative_noise_level():
+    # The whole point: a relative level says how the floor *varies*, not what it
+    # is, so subtracting it would mean inventing the offset -- and the result
+    # would look exactly like a real measurement.
+    sicd = _FakeSicd(radiometric=_radiometric_noise("RELATIVE"))
+    with pytest.raises(ValueError, match="relative noise level"):
+        convert._noise_coefficients(sicd)
+
+
+def test_noise_coefficients_absolute_level_without_a_poly_raises():
+    sicd = _FakeSicd(radiometric=_radiometric_noise(poly=False))
+    with pytest.raises(ValueError, match="no NoisePoly"):
+        convert._noise_coefficients(sicd)
+
+
+def test_noise_coefficients_rejects_an_empty_poly():
+    pytest.importorskip("numpy")
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[]))
+    with pytest.raises(ValueError, match="no coefficients"):
+        convert._noise_coefficients(sicd)
+
+
+def test_noise_power_converts_the_decibel_polynomial_to_linear_power():
+    np = pytest.importorskip("numpy")
+    # NoisePoly is quoted in dB, and noise adds in linear power -- getting this
+    # conversion wrong subtracts a number in the wrong units entirely.
+    noise = convert._noise_power(
+        [[-20.0]], (3, 4), row_ss=1.0, col_ss=1.0, scp_row=0.0, scp_col=0.0
+    )
+    assert noise.shape == (3, 4)
+    assert np.allclose(noise, 0.01)
+
+
+def test_noise_power_tracks_the_across_swath_variation():
+    np = pytest.importorskip("numpy")
+    # A floor that rises across the image is the case a single scalar would
+    # smear: evaluated in metres from the SCP, like the scale factors.
+    coefs = [[-30.0, 2.0], [0.0, 0.0]]  # noise_db = -30 + 2*y
+    noise = convert._noise_power(coefs, (2, 5), row_ss=1.0, col_ss=0.5, scp_row=0.0, scp_col=1.0)
+    cols = (np.arange(5) - 1.0) * 0.5
+    assert np.allclose(noise, 10.0 ** ((-30.0 + 2.0 * cols[None, :]) / 10.0))
+
+
+def test_noise_power_rejects_a_non_finite_polynomial():
+    np = pytest.importorskip("numpy")
+    with pytest.raises(ValueError, match="non-finite"):
+        convert._noise_power([[np.inf]], (2, 2), row_ss=1.0, col_ss=1.0, scp_row=0.0, scp_col=0.0)
+
+
+def test_subtract_noise_is_a_power_domain_subtraction_in_both_scales():
+    np = pytest.importorskip("numpy")
+    noise = np.full((1, 2), 0.25)
+
+    # Linear magnitude: power is the square, so sqrt(4 - 0.25) comes back.
+    lin = np.array([[2.0, np.nan]], dtype="float32")
+    out_lin = convert._subtract_noise(lin, noise, decibels=False)
+    assert out_lin[0, 0] == pytest.approx(math.sqrt(4.0 - 0.25), rel=1e-5)
+    assert np.isnan(out_lin[0, 1])  # the warp's nodata stays nodata
+
+    # Decibels: 20*log10(magnitude) IS 10*log10(power), so the same measurement.
+    db = np.array([[20.0 * math.log10(2.0), np.nan]], dtype="float32")
+    out_db = convert._subtract_noise(db, noise, decibels=True)
+    assert out_db[0, 0] == pytest.approx(10.0 * math.log10(4.0 - 0.25), rel=1e-5)
+    assert np.isnan(out_db[0, 1])
+    assert 20.0 * math.log10(float(out_lin[0, 0])) == pytest.approx(float(out_db[0, 0]), rel=1e-5)
+
+
+def test_subtract_noise_floors_pixels_at_or_below_the_noise():
+    np = pytest.importorskip("numpy")
+    # A pixel the radar could not hear over its own noise is at the sensor's
+    # sensitivity limit, which is a statement about the radar. Flooring it keeps
+    # it dark and finite; letting it go negative would make sqrt/log undefined.
+    noise = np.full((1, 3), 1.0)
+    lin = np.array([[0.5, 1.0, 2.0]], dtype="float32")
+    out = convert._subtract_noise(lin, noise, decibels=False)
+    assert np.all(np.isfinite(out))
+    assert out[0, 0] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
+    assert out[0, 1] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
+    assert out[0, 2] == pytest.approx(math.sqrt(3.0), rel=1e-5)
+
+
+def test_denoise_origin_matches_the_same_pixels_of_the_whole_scene():
+    """A clipped read has its floor evaluated where the pixels came from."""
+    np = pytest.importorskip("numpy")
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-20.0, 0.4], [0.2, 0.0]]))
+    amp = (np.arange(20 * 24, dtype="float32") + 1.0).reshape(20, 24)
+
+    whole = convert._denoise_amplitude(sicd, amp, decibels=True)
+    row0, col0 = 6, 9
+    window = convert._denoise_amplitude(
+        sicd, amp[row0 : row0 + 5, col0 : col0 + 7], decibels=True, origin=(row0, col0)
+    )
+    assert np.allclose(window, whole[row0 : row0 + 5, col0 : col0 + 7], atol=1e-5)
+
+
+def test_sicd_to_amplitude_geotiff_subtracts_the_products_own_floor(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(6, 8)
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_amplitude_geotiff(tmp_path / "in.ntf", tmp_path / "plain.tif")
+
+    noise_db = -3.0
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[noise_db]]))
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    denoised = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "in.ntf", tmp_path / "denoised.tif", noise_subtract=True
+    )
+
+    with rasterio.open(plain) as a, rasterio.open(denoised) as b:
+        va, vb = a.read(1), b.read(1)
+        residual = np.clip(
+            10.0 ** (va / 10.0) - 10.0 ** (noise_db / 10.0), convert._NOISE_RESIDUAL_FLOOR, None
+        )
+        assert np.allclose(vb, 10.0 * np.log10(residual), atol=1e-4)
+        # It only ever takes brightness away.
+        assert np.all(vb <= va + 1e-4)
+
+
+def test_sicd_to_amplitude_geotiff_records_the_subtraction(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-40.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 6), sicd))
+    out = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "in.ntf", tmp_path / "denoised.tif", noise_subtract=True
+    )
+    assert convert.read_conversion_tags(out)["noise_subtraction"] == "absolute"
+
+
+def test_sicd_to_geocoded_cog_subtracts_the_floor_before_calibrating(tmp_path, monkeypatch):
+    """Order matters: noise adds to raw power, so it comes off before the scale."""
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _fake_complex(10, 12)
+    noise_db, scale = -3.0, 100.0
+
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    plain = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf", tmp_path / "plain.tif", gcp_grid=6, resampling="nearest"
+    )
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[noise_db]], SigmaZeroSFPoly=[[scale]]))
+    _patch_open_complex(monkeypatch, _FakeReader(data, sicd))
+    both = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "both.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        calibration="sigma0",
+        noise_subtract=True,
+    )
+
+    with rasterio.open(plain) as a, rasterio.open(both) as b:
+        va, vb = a.read(1), b.read(1)
+        finite = np.isfinite(va) & np.isfinite(vb)
+        assert finite.any()
+        power = 10.0 ** (va[finite] / 10.0)
+        noise = 10.0 ** (noise_db / 10.0)
+        subtract_then_scale = 10.0 * np.log10(
+            scale * np.clip(power - noise, convert._NOISE_RESIDUAL_FLOOR, None)
+        )
+        scale_then_subtract = 10.0 * np.log10(
+            np.clip(scale * power - noise, convert._NOISE_RESIDUAL_FLOOR, None)
+        )
+        assert np.allclose(vb[finite], subtract_then_scale, atol=1e-3)
+        # The wrong order is a different, plausible-looking answer.
+        assert not np.allclose(vb[finite], scale_then_subtract, atol=1e-3)
+        assert convert.read_conversion_tags(both)["noise_subtraction"] == "absolute"
+
+
+def test_sicd_to_geocoded_cog_without_noise_metadata_raises(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(6, 6), _FakeSicd()))
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf", tmp_path / "out.tif", gcp_grid=4, noise_subtract=True
+        )
+
+
+def test_sicd_noise_level_reports_the_products_own_metadata(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(4, 4), _FakeSicd()))
+    assert convert.sicd_noise_level(tmp_path / "in.ntf") is None
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise("ABSOLUTE"))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(4, 4), sicd))
+    assert convert.sicd_noise_level(tmp_path / "in.ntf") == "ABSOLUTE"
+
+
+def test_cli_convert_subtract_noise(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-6.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), sicd))
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    dst = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(dst), "--subtract-noise", "--resampling", "nearest"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "noise-subtracted" in result.output
+    with rasterio.open(dst) as ds:
+        assert np.isfinite(ds.read(1)).any()
+    assert convert.read_conversion_tags(dst)["noise_subtraction"] == "absolute"
+
+
+def test_cli_convert_subtract_noise_unavailable_is_a_clean_error(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    # A relative noise level is the interesting refusal: the metadata is there,
+    # it just cannot answer the question being asked of it.
+    sicd = _FakeSicd(radiometric=_radiometric_noise("RELATIVE"))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), sicd))
+
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "geo.tif"), "--subtract-noise"]
+    )
+
+    assert result.exit_code != 0
+    assert "relative noise level" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+# --------------------------------------------------------------------------- #
 # Conversion provenance (what the pixel values mean, recorded in the raster).
 # --------------------------------------------------------------------------- #
 
