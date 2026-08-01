@@ -7,6 +7,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Bring the speckle averaging to the products people actually use
+  (`umbra stack --speckle-filter {boxcar,lee}` / `to_stack(speckle_filter=…)`).**
+  The correction that shipped last is the largest one the pipeline makes and the
+  only one that never reached this library's main subject. Speckle — the
+  interference pattern coherent illumination makes on a rough surface, whose
+  standard deviation equals its mean on a single look — is averaged down by
+  `umbra convert --speckle-filter`, which works in the radar's own image space
+  and therefore only on complex SICD products. Umbra's **published GEC rasters**
+  arrive already geocoded and never go through that pipeline, so the archive this
+  library exists to make usable had no way to average speckle at all — and every
+  number `stack_stats` reports from a cube of them carried that uncertainty
+  undocumented and unaddressed, which is exactly the gap `--noise-model
+  estimated` closed for the noise floor.
+
+  `to_stack(speckle_filter=…, speckle_window=…)` closes it one step down the
+  chain: each pass is filtered on the cube's **shared grid**, after
+  co-registration, in the power domain — where a mean is the surface's
+  backscatter rather than the ~2.5 dB-low geometric mean a mean of decibels
+  would give. The filters are `convert`'s own (`umbra_py.convert._filter_speckle`
+  is the arithmetic, reused rather than reimplemented, so `"boxcar"` and
+  `"lee"` cannot come to mean two things): `"boxcar"` averages the window
+  unconditionally, `"lee"` only where the window is no more variable than
+  speckle alone would explain, so edges and points survive.
+
+  Where it runs is the design, not an accident of plumbing. This is the first
+  point at which a source exists on the cube's own grid, so the window averages
+  *the cells the cube reports* — which makes the resolution it spends the
+  resolution a measurement of that cube quotes. Filtering earlier, where speckle
+  is one independent sample per pixel, remains `umbra convert`'s job; a series
+  that already records a filter is **refused** rather than filtered twice,
+  because two averagings leave an effective resolution neither window names and
+  the record could only claim one of them.
+
+  Both halves of the trade are recorded in the keys `umbra convert` already
+  writes (`speckle_filter` / `speckle_window`), because they describe the raster
+  rather than who made it. So the machinery built for the converted archive
+  applies unchanged: `stack_stats` states the trade (a less noisy estimate of
+  each cell; the resolution of a window rather than of a cell),
+  `stack_to_geotiff` / `umbra stack --out` stamp it into the written cube's
+  `UMBRA_*` tags, and `to_stack` refuses to difference a filtered cube against
+  an unfiltered pass — the smoothing would read as change, strongest exactly
+  where the ground has the most structure.
+
+  Two things it will not do, both self-describing rather than silent: it cannot
+  be combined with `chunk_size` (a filter window would straddle two windows read
+  independently, and `"lee"` reads its speckle parameter off the whole pass, so
+  a chunked cube would stop equalling the unchunked one it is documented to
+  match — `lazy=True` alone, one chunk per pass, filters fine and is pinned
+  identical to the eager path), and a misspelt filter or an even window fails at
+  the call rather than from inside a deferred read. `umbra stack
+  --speckle-filter lee --speckle-window 5` is the same on the CLI, in the
+  `--json` manifest's parameters and in the file it writes.
 - **Average the speckle down, and say what that cost (`umbra convert
   --speckle-filter {boxcar,lee}`).** Every correction the conversion pipeline had
   targeted something the *sensor* added — a geometric brightness swing, an

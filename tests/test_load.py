@@ -2174,7 +2174,7 @@ def test_stack_stats_says_the_series_was_speckle_filtered(tmp_path):
     # size a reader is quoting: better estimates, coarser measurements.
     assert "speckle-filtered (boxcar, 7x7 window" in caveats
     assert "less noisy estimate" in caveats
-    assert "resolution is that of a 7-pixel window" in caveats
+    assert "resolution is that of a 7-wide window" in caveats
 
 
 def test_to_stack_allows_the_per_scene_keys_to_differ(tmp_path):
@@ -2272,3 +2272,265 @@ def test_to_stack_does_not_refuse_over_the_subtractions_own_diagnostics(tmp_path
     # says nothing rather than quoting one pass's number for the whole series.
     assert "noise_floored_fraction" not in prov
     assert "noise_floor_margin_db" not in prov
+
+
+# --- Filtering speckle on the cube's own grid (``to_stack(speckle_filter=...)``)
+#
+# The conversion pipeline filters in the radar's image space, so it reaches only
+# the complex archive. These pin the same averaging one step down the chain,
+# where it reaches the published GEC rasters: what it removes, what it costs,
+# what it records, and the two things it refuses to do.
+
+
+def _edge_scene(path, *, dark=1.0, bright=10.0, width=40, height=40):
+    """A scene split down the middle, with multiplicative speckle on both halves.
+
+    The fixture a filter comparison needs: a step no averaging should blur *and*
+    a grain every averaging should remove, so "smoothed the field" and "smoothed
+    the edge" are separable outcomes rather than one number.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    rng = np.random.default_rng(11)
+    surface = np.where(np.arange(width) < width // 2, dark, bright)
+    values = np.broadcast_to(surface, (height, width)) * rng.gamma(4.0, 0.25, (height, width))
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=height,
+        width=width,
+        count=1,
+        dtype="float32",
+        crs="EPSG:32633",
+        transform=from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    ) as dst:
+        dst.write(values.astype("float32"), 1)
+    return path
+
+
+def _edge_scenes(tmp_path, count=2):
+    """``count`` passes of the same split scene, one per month."""
+    return [
+        _stack_item(_edge_scene(tmp_path / f"e{n}.tif"), f"acq-{n}", f"2024-0{n}-08T12:00:00Z")
+        for n in range(1, count + 1)
+    ]
+
+
+def test_to_stack_speckle_filter_averages_each_pass_down(tmp_path):
+    """The point of the filter: less scatter per cell, same surface underneath."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = _spread_scenes(tmp_path, count=2)
+    kwargs = {"max_size": 40, "crs": "utm"}
+    plain = to_stack(items, **kwargs)
+    filtered = to_stack(items, speckle_filter="boxcar", speckle_window=5, **kwargs)
+
+    assert filtered.shape == plain.shape
+    for i in range(plain.shape[0]):
+        assert np.nanstd(filtered.values[i]) < 0.5 * np.nanstd(plain.values[i])
+        # Averaging happens in power, so the mean of the power is preserved --
+        # which is the whole reason the filter does not work in decibels, where
+        # the same average would be a geometric mean and read systematically low.
+        assert np.nanmean(np.square(filtered.values[i])) == pytest.approx(
+            np.nanmean(np.square(plain.values[i])), rel=0.05
+        )
+
+
+def test_to_stack_lee_keeps_the_edge_boxcar_averages_across(tmp_path):
+    """The difference between the two filters, measured rather than described."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = _edge_scenes(tmp_path)
+    kwargs = {"max_size": 40, "crs": "utm", "speckle_window": 5}
+    boxcar = to_stack(items, speckle_filter="boxcar", **kwargs).values[0]
+    lee = to_stack(items, speckle_filter="lee", **kwargs).values[0]
+
+    # The step is halfway across, so column edge-1 is dark ground and column
+    # edge is bright ground. A boxcar window straddling them averages the two
+    # together; Lee sees a window more variable than speckle alone explains and
+    # leaves those cells nearer their own side.
+    edge = boxcar.shape[1] // 2
+    boxcar_step = np.nanmean(boxcar[:, edge]) - np.nanmean(boxcar[:, edge - 1])
+    lee_step = np.nanmean(lee[:, edge]) - np.nanmean(lee[:, edge - 1])
+    # Lee holds about 1.9x of the step boxcar keeps here; the factor depends on
+    # the contrast and the window, so the assertion is the direction with room
+    # rather than the measured number.
+    assert lee_step > 1.5 * boxcar_step
+
+    # Away from the edge both are doing the job they exist for.
+    interior = np.s_[:, 2 : edge - 3]
+    plain = to_stack(items, max_size=40, crs="utm").values[0]
+    assert np.nanstd(lee[interior]) < np.nanstd(plain[interior])
+    assert np.nanstd(boxcar[interior]) < np.nanstd(plain[interior])
+
+
+def test_to_stack_speckle_filter_records_itself_on_untagged_products(tmp_path):
+    """A published GEC carries no provenance; a cube that filtered one now does."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    cube = to_stack(_spread_scenes(tmp_path, count=2), max_size=32, speckle_filter="lee")
+
+    # The keys `umbra convert` writes, because they describe the raster rather
+    # than who made it -- which is what keeps the refusal below working.
+    assert cube.attrs["provenance"] == {"speckle_filter": "lee", "speckle_window": "5"}
+    caveats = " ".join(stack_stats(cube)["caveats"])
+    assert "speckle-filtered (lee, 5x5 window)" in caveats
+    assert "resolution is that of a 5-wide window" in caveats
+    # Still Umbra's published products otherwise: filtering says nothing about
+    # calibration, so the relative-decibels caveat stands.
+    assert "not radiometrically calibrated" in caveats
+
+
+def test_stack_to_geotiff_writes_the_filter_it_applied(tmp_path):
+    """The written file says what its values are, so re-reading it is checked."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import read_conversion_tags, stack_to_geotiff, to_stack
+
+    dest = stack_to_geotiff(
+        _spread_scenes(tmp_path, count=2),
+        tmp_path / "filtered.tif",
+        max_size=32,
+        speckle_filter="boxcar",
+        speckle_window=7,
+    )
+    tags = read_conversion_tags(dest)
+    assert tags["speckle_filter"] == "boxcar"
+    assert tags["speckle_window"] == "7"
+
+    # And the record is consumed, not just written: that raster stacked against
+    # an unfiltered product is the smoothing differenced against the ground. The
+    # key the refusal names is the *first* the two disagree on, which here is the
+    # earliest one in MEASUREMENT_PROVENANCE_KEYS -- a raster umbra-py wrote
+    # carries a record and a published GEC carries none, so they part company
+    # before the filter is reached.
+    written = _stack_item(dest, "acq-filtered", "2024-05-08T12:00:00Z")
+    with pytest.raises(ValueError, match="Refusing to stack rasters whose") as exc:
+        to_stack([written, *_spread_scenes(tmp_path, count=1)], max_size=32)
+    assert "(unrecorded)" in str(exc.value)
+
+
+def test_to_stack_speckle_filter_matches_between_the_eager_and_lazy_paths(tmp_path):
+    """Deferring a pass's read must not change what the filter did to it."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("dask.array")
+    from umbra_py import to_stack
+
+    items = _spread_scenes(tmp_path, count=2)
+    kwargs = {"max_size": 32, "crs": "utm", "speckle_filter": "lee"}
+    eager = to_stack(items, **kwargs)
+    lazy = to_stack(items, lazy=True, **kwargs)
+
+    assert np.array_equal(eager.values, lazy.compute().values, equal_nan=True)
+
+
+def test_to_stack_refuses_to_filter_an_already_filtered_series(tmp_path):
+    """Two averagings leave a resolution neither window names."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    settings = {"calibration": "sigma0", "speckle_filter": "boxcar", "speckle_window": 3}
+    items = _converted_scenes(tmp_path, settings, settings)
+
+    with pytest.raises(ValueError, match="already filtered") as exc:
+        to_stack(items, max_size=32, speckle_filter="lee", speckle_window=5)
+    assert "boxcar, 3x3 window" in str(exc.value)
+    # Without the request the sources' own filter is carried, as before.
+    assert to_stack(items, max_size=32).attrs["provenance"]["speckle_filter"] == "boxcar"
+
+
+def test_to_stack_refuses_a_speckle_filter_on_a_chunked_cube(tmp_path):
+    """A window that straddles two independently-read windows is not one window."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    with pytest.raises(ValueError, match="cannot be combined with chunk_size") as exc:
+        to_stack(
+            _spread_scenes(tmp_path, count=2),
+            max_size=32,
+            lazy=True,
+            chunk_size=16,
+            speckle_filter="boxcar",
+        )
+    assert "lazy=True alone" in str(exc.value)
+
+
+def test_to_stack_checks_the_filter_at_the_call_not_at_compute(tmp_path):
+    """A misspelt filter or an even window fails where it was asked for."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    items = _spread_scenes(tmp_path, count=2)
+    with pytest.raises(ValueError, match="Unknown speckle_filter 'median'"):
+        to_stack(items, max_size=32, speckle_filter="median")
+    with pytest.raises(ValueError, match="speckle_window must be an odd integer"):
+        to_stack(items, max_size=32, speckle_filter="boxcar", speckle_window=4)
+
+
+def test_cli_stack_speckle_filter_reaches_the_cube_and_the_manifest(tmp_path, monkeypatch):
+    pytest.importorskip("xarray")
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _speckle_scene(tmp_path / "one.tif", scale=1.0),
+        "two": _speckle_scene(tmp_path / "two.tif", scale=2.0),
+    }
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+
+    out = tmp_path / "cube.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "stack",
+            "http://example.com/one.json",
+            "http://example.com/two.json",
+            "--out",
+            str(out),
+            "--max-size",
+            "32",
+            "--speckle-filter",
+            "boxcar",
+            "--speckle-window",
+            "5",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(result.output)
+    assert manifest["parameters"]["speckle_filter"] == "boxcar"
+    assert manifest["parameters"]["speckle_window"] == 5
+    with rasterio.open(out) as ds:
+        assert ds.tags()["UMBRA_SPECKLE_FILTER"] == "boxcar"
+        assert ds.tags()["UMBRA_SPECKLE_WINDOW"] == "5"
+        assert np.nanstd(ds.read(1)) > 0
