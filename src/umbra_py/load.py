@@ -38,6 +38,16 @@ to fit in memory either. ``stack_stats(windowed=True)`` finishes the chain by
 *measuring* those windows rather than whole passes, at the cost of the one
 statistic a window cannot carry exactly: a percentile.
 
+``to_stack(speckle_filter=…)`` averages **speckle** down on the shared grid
+before the series is assembled. That correction previously reached only the
+complex archive (``umbra convert --speckle-filter``, which filters in the
+radar's own image space), so the products this library actually exists for --
+Umbra's published GEC rasters, already geocoded and never converted here --
+carried the dominant uncertainty in every number this module reports, with
+nothing able to remove it. Filtering here is the same power-domain averaging one
+step further down the chain: it is what makes a *cube* a less noisy measurement,
+rather than what makes its inputs one.
+
 Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 """
 
@@ -49,6 +59,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .constants import ATTRIBUTION, DATA_LICENSE
+from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .exceptions import AssetNotFoundError, MissingDependencyError
 from .models import UmbraItem
 
@@ -648,11 +659,56 @@ def _stack_grid(
     return _StackGrid(crs, left, bottom, right, top, out_w, out_h, width / out_w, height / out_h)
 
 
-def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool) -> Any:
+class _Speckle(NamedTuple):
+    """The speckle filter every slice of a cube is read through.
+
+    Resolved once in :func:`to_stack` -- the name checked against
+    :data:`~umbra_py.convert.SPECKLE_FILTERS`, the window checked odd and at
+    least 3 -- so a slab read long afterwards inside a ``dask`` task carries a
+    valid filter instead of failing at compute time.
+    """
+
+    name: str
+    window: int
+
+
+def _filter_slab(slab: Any, speckle: _Speckle | None, *, db: bool) -> Any:
+    """Speckle-filter one slab, or hand it back untouched.
+
+    The same power-domain averaging ``umbra convert --speckle-filter`` applies in
+    the radar's image space, applied instead to the slab a source was read onto.
+    Reusing :func:`umbra_py.convert._filter_speckle` is the point: a cube's cells
+    are then filtered by the identical arithmetic (and recorded in the identical
+    vocabulary) as a converted raster's pixels, so the two cannot drift on what
+    ``boxcar`` or ``lee`` means.
+
+    What the filter *achieved* on this slab -- the equivalent looks either side
+    of it -- is computed and dropped. It is a per-scene diagnostic, and a lazy
+    cube's slabs are read one deferred task at a time with nowhere to report it
+    back to; :func:`umbra_py.convert.sicd_to_geocoded_cog` is where that number
+    is kept.
+    """
+    if speckle is None:
+        return slab
+    from .convert import _filter_speckle  # noqa: PLC0415
+
+    filtered, _achieved = _filter_speckle(
+        slab, decibels=db, name=speckle.name, window=speckle.window
+    )
+    return filtered
+
+
+def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool, speckle: _Speckle | None) -> Any:
     """One scene, read onto the shared grid: the unit of work a stack is made of.
 
     Ground the scene doesn't cover stays ``NaN``, so a ``"union"`` cube's
     padding reads as "no observation" rather than as a value.
+
+    ``speckle`` filters the assembled slab, which is *after* the warp rather than
+    before it. That ordering is forced -- this function is the first place a
+    source exists on the cube's own grid -- and it is what the filter means here:
+    the window averages the cells the cube reports, so the resolution it spends
+    is the resolution a measurement of this cube quotes.
     """
     from rasterio.enums import Resampling  # noqa: PLC0415
 
@@ -687,7 +743,7 @@ def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool) -> Any:
                 resampling=Resampling.average,
             )[0].astype("float32")
             slab[row0:row1, col0:col1] = _mask_slice(np, data, vrt.nodata, db=db)
-    return slab
+    return _filter_slab(slab, speckle, db=db)
 
 
 def _chunk_spans(total: int, size: int) -> list[tuple[int, int]]:
@@ -718,7 +774,7 @@ def _sub_grid(grid: _StackGrid, rows: tuple[int, int], cols: tuple[int, int]) ->
     )
 
 
-def _open_slab(url: str, grid: _StackGrid, *, db: bool) -> Any:
+def _open_slab(url: str, grid: _StackGrid, *, db: bool, speckle: _Speckle | None = None) -> Any:
     """Open one source and read its slab -- the deferred task of a lazy cube.
 
     Self-contained on purpose: a dask task runs long after :func:`to_stack`
@@ -732,11 +788,18 @@ def _open_slab(url: str, grid: _StackGrid, *, db: bool) -> Any:
 
     with rasterio.open(_open_path(url)) as ds:
         with WarpedVRT(ds, crs=grid.crs, resampling=Resampling.average) as vrt:
-            return _read_slab(np, vrt, grid, db=db)
+            return _read_slab(np, vrt, grid, db=db, speckle=speckle)
 
 
 def _lazy_slab(
-    dask: Any, dask_array: Any, url: str, grid: _StackGrid, *, db: bool, chunk_size: int | None
+    dask: Any,
+    dask_array: Any,
+    url: str,
+    grid: _StackGrid,
+    *,
+    db: bool,
+    chunk_size: int | None,
+    speckle: _Speckle | None,
 ) -> Any:
     """One pass as a deferred dask array: the whole slab, or a grid of windows.
 
@@ -746,11 +809,16 @@ def _lazy_slab(
     ``chunk_size``-square windows that are read (and held) independently. The
     price is request count: each window opens the source and issues its own
     range requests, so a pass costs one read per window instead of one in total.
+
+    ``speckle`` therefore only ever arrives without ``chunk_size``
+    (:func:`to_stack` refuses the pair): a filter window that straddled two
+    windows would have to be reconciled across them, and ``"lee"`` reads its
+    speckle parameter off the array it is handed, which a window is not.
     """
 
     def task(part: _StackGrid) -> Any:
         return dask_array.from_delayed(
-            dask.delayed(_open_slab)(url, part, db=db),
+            dask.delayed(_open_slab)(url, part, db=db, speckle=speckle),
             shape=(part.height, part.width),
             dtype="float32",
         )
@@ -760,6 +828,68 @@ def _lazy_slab(
     rows = _chunk_spans(grid.height, chunk_size)
     cols = _chunk_spans(grid.width, chunk_size)
     return dask_array.block([[task(_sub_grid(grid, r, c)) for c in cols] for r in rows])
+
+
+def _filtered_provenance(provenance: dict[str, str], speckle: _Speckle) -> dict[str, str]:
+    """A cube's record after it filtered its own slices, or a refusal to filter twice.
+
+    The keys are ``umbra convert``'s own (``speckle_filter`` / ``speckle_window``)
+    because they describe the raster rather than who made it: a cube whose cells
+    were averaged over a 5-cell window *is* a 5-window-filtered product, and
+    recording it in a second vocabulary would only hide it from the check that
+    matters -- :func:`_shared_provenance` refusing to difference this cube
+    against an unfiltered one later.
+
+    Which is also why filtering an already-filtered series is refused rather than
+    composed. Two averagings do not make a third the record could name: a
+    3-window pass filtered again over 5 cells resolves neither 3 nor 5, so the
+    honest record does not exist, and a cube that understated its own resolution
+    would understate it in exactly the numbers :func:`stack_stats` reports.
+    """
+    already = provenance.get("speckle_filter", _STEP_NOT_RUN)
+    if already != _STEP_NOT_RUN:
+        window = provenance.get("speckle_window", "?")
+        raise ValueError(
+            f"Refusing to speckle-filter a series that is already filtered ({already}, "
+            f"{window}x{window} window, recorded by 'umbra convert'): averaging twice "
+            "leaves a cube whose effective resolution is neither window, so the record "
+            "it would carry -- and every number measured from it -- would understate "
+            "what the smoothing cost. Drop speckle_filter to keep the sources' own, or "
+            "stack the unfiltered products and filter here."
+        )
+    return {**provenance, "speckle_filter": speckle.name, "speckle_window": str(speckle.window)}
+
+
+def _resolve_speckle(name: str | None, window: int, *, chunk_size: int | None) -> _Speckle | None:
+    """Check a requested speckle filter at the call, before any bytes are read.
+
+    A lazy cube defers its reads into ``dask`` tasks that run whenever something
+    asks for values, so a filter validated where it is *applied* would report a
+    misspelt name or an even window from inside a compute rather than from the
+    call that got it wrong -- the same reason the grid is resolved eagerly.
+    """
+    if name is None:
+        return None
+    if name not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"Unknown speckle_filter {name!r}; choose one of {', '.join(SPECKLE_FILTERS)}."
+        )
+    if chunk_size is not None:
+        # Not a limitation to route around: a window centred on a cell near a
+        # chunk edge needs cells the neighbouring chunk holds, and "lee" reads
+        # its speckle parameter off the array it filters, which under chunking
+        # is a window rather than the pass. Either would make a chunked cube
+        # differ from the unchunked one it is documented to equal.
+        raise ValueError(
+            "speckle_filter cannot be combined with chunk_size: the filter window "
+            "would straddle two windows read independently, and 'lee' reads its "
+            "speckle parameter off the whole pass. Stack with lazy=True alone (one "
+            "chunk per pass, which the filter sees whole), or filter the sources "
+            "themselves with 'umbra convert --speckle-filter'."
+        )
+    from .convert import _check_speckle_window  # noqa: PLC0415
+
+    return _Speckle(name, _check_speckle_window(window))
 
 
 def to_stack(
@@ -773,6 +903,8 @@ def to_stack(
     crs: str | None = None,
     lazy: bool = False,
     chunk_size: int | None = None,
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
 ) -> xr.DataArray:
     """Co-register several acquisitions into one ``(time, y, x)`` datacube.
 
@@ -847,6 +979,38 @@ def to_stack(
         own bytes, so a pass costs ⌈h/c⌉ × ⌈w/c⌉ reads rather than one -- which
         is why it is opt-in and why the window wants to be a decent fraction of
         the grid (512–2048), not a tile. The values are unchanged.
+    speckle_filter:
+        Average **speckle** down before the series is assembled: one of
+        :data:`~umbra_py.convert.SPECKLE_FILTERS` (``"boxcar"``, the multilook,
+        or ``"lee"``, which averages only where a window is no more variable than
+        speckle alone explains), applied to each pass on the shared grid in the
+        power domain. Speckle is not sensor noise -- it is the interference
+        pattern coherent illumination makes on a rough surface, so a single
+        look's power scatters about the surface's true backscatter with a
+        standard deviation *equal to its mean*, and averaging is the only thing
+        that removes it. It is therefore the dominant uncertainty in every number
+        :func:`stack_stats` reports from an unfiltered cube, and the reason a
+        cell-by-cell difference between two passes is mostly interference rather
+        than change.
+
+        Opt-in, because what it spends is resolution: a window that averages N
+        cells reports ground N cells across. Both halves are recorded in the
+        cube's ``provenance`` (``speckle_filter`` / ``speckle_window``, the same
+        keys ``umbra convert`` writes), so :func:`stack_stats` states the trade,
+        a GeoTIFF written from the cube carries it, and a later stack refuses to
+        difference this cube against an unfiltered one.
+
+        The filtering happens *after* co-registration -- this is the first point
+        a source exists on the cube's own grid -- so the window averages the
+        cells the cube reports rather than the source's own pixels. Filtering
+        earlier, in the radar's image space where speckle is one independent
+        sample per pixel, is ``umbra convert --speckle-filter``'s job; sources
+        that already record one are refused here rather than filtered twice.
+        Incompatible with ``chunk_size`` (see it above).
+    speckle_window:
+        Edge of the odd, centred window ``speckle_filter`` averages over, in
+        cells of the shared grid. Wider removes more speckle and more detail; it
+        costs no more to compute (the filters use a summed-area table).
 
     Returns
     -------
@@ -875,7 +1039,9 @@ def to_stack(
     the disagreement and the acquisitions on each side, and what the sources
     *do* agree on is carried into ``attrs["provenance"]`` -- so a measurement
     from :func:`stack_stats`, and any GeoTIFF written from the cube, can say
-    which conversion produced it.
+    which conversion produced it. ``speckle_filter=`` adds to that record rather
+    than sitting outside it: a cube that averaged its own slices says so in the
+    same two keys, and is refused against an unfiltered one for the same reason.
 
     The default lon/lat grid stretches with latitude (cells are not equal-area),
     the same quick-look approximation ``umbra change`` / ``umbra timescan`` make.
@@ -900,6 +1066,7 @@ def to_stack(
             raise ValueError("chunk_size needs lazy=True; an eager cube is read a slab at a time.")
         if int(chunk_size) < 1:
             raise ValueError(f"chunk_size must be a positive pixel count; got {chunk_size!r}.")
+    speckle = _resolve_speckle(speckle_filter, speckle_window, chunk_size=chunk_size)
     if lazy:
         # Fail on the missing extra before any bytes are streamed, not after.
         dask, dask_array = _require_dask()
@@ -923,6 +1090,8 @@ def to_stack(
         provenance = _shared_provenance(
             [_source_provenance(ds) for ds in datasets], [i.id for i in ordered]
         )
+        if speckle is not None:
+            provenance = _filtered_provenance(provenance, speckle)
 
         # Resolved once every source is open: "utm" reads the zone off the
         # ground they cover, so it needs their footprints.
@@ -950,12 +1119,14 @@ def to_stack(
         data = (
             dask_array.stack(
                 [
-                    _lazy_slab(dask, dask_array, url, grid, db=db, chunk_size=chunk_size)
+                    _lazy_slab(
+                        dask, dask_array, url, grid, db=db, chunk_size=chunk_size, speckle=speckle
+                    )
                     for url in urls
                 ]
             )
             if lazy
-            else np.stack([_read_slab(np, vrt, grid, db=db) for vrt in vrts])
+            else np.stack([_read_slab(np, vrt, grid, db=db, speckle=speckle) for vrt in vrts])
         )
     finally:
         for v in vrts:
@@ -1813,12 +1984,16 @@ def stack_stats(
         # better estimates *and* coarser measurements, and which of the two a
         # reader cares about depends on the block size they are quoting.
         window = provenance.get("speckle_window", "?")
+        # Unattributed on purpose: the filter is either the sources' own (`umbra
+        # convert --speckle-filter`, in the radar's image space) or this cube's
+        # (`to_stack(speckle_filter=...)`, on the shared grid), and the trade the
+        # caveat states is the same trade either way.
         caveats.append(
             f"Every pass was speckle-filtered ({speckle_filter}, {window}x{window} "
-            "window, recorded by 'umbra convert'), so a cell's decibels are a less "
-            "noisy estimate of its surface than a single look is -- and its effective "
-            f"resolution is that of a {window}-pixel window, so detail smaller than "
-            "that has been averaged away rather than measured."
+            "window), so a cell's decibels are a less noisy estimate of its surface "
+            "than a single look is -- and its effective resolution is that of a "
+            f"{window}-wide window, so detail smaller than that has been averaged "
+            "away rather than measured."
         )
     if area is None:
         caveats.append(
@@ -1886,6 +2061,8 @@ def stack_to_geotiff(
     crs: str | None = None,
     lazy: bool = False,
     chunk_size: int | None = None,
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
 ) -> Path:
     """Co-register several acquisitions and write the cube to a GeoTIFF.
 
@@ -1903,6 +2080,11 @@ def stack_to_geotiff(
     ``chunk_size`` and a band is written one *window* at a time too, so a grid
     too large for one slice to be resident still writes. The file is
     byte-identical however it was read.
+
+    ``speckle_filter`` (see :func:`to_stack`) averages speckle down in every
+    band before it is written, and the file records that it did -- so the raster
+    a GIS opens says what its values are, and re-stacking it against an
+    unfiltered product is refused rather than measured.
     """
     cube = to_stack(
         items,
@@ -1914,6 +2096,8 @@ def stack_to_geotiff(
         crs=crs,
         lazy=lazy,
         chunk_size=chunk_size,
+        speckle_filter=speckle_filter,
+        speckle_window=speckle_window,
     )
     return _write_stack_geotiff(cube, dest)
 

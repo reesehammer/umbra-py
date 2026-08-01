@@ -303,6 +303,26 @@ biases it down, so it is a floor on the looks present rather than a claim about
 them. `umbra chips --speckle-filter` carries it to a training set, where every
 record says which window it was cut with — a chip's resolution, as opposed to its
 pixel size, being what decides what a model can learn to see.
+~~**Open:** that averaging happens in the radar's own image space, so it reaches
+the complex archive and nothing else — and the products this library is mostly
+used with, Umbra's *published* GEC rasters, arrive already geocoded and never go
+through the pipeline at all, so the archive it exists for could not average
+speckle by any route.~~ **shipped** — `umbra stack --speckle-filter {boxcar,lee}`
+/ `to_stack(speckle_filter=…)` runs the same two filters, the same arithmetic and
+the same power domain one step down the chain: on each pass of a datacube, on the
+shared grid, which is the first point a source exists on the cube's own
+coordinates. That placement is the claim rather than a convenience — the window
+averages the cells the cube *reports*, so the resolution it spends is the
+resolution a `stack_stats` number quotes. It records itself in `umbra convert`'s
+own two keys rather than a second vocabulary, because a cube whose cells were
+averaged over an N-cell window *is* an N-window-filtered raster: which means the
+caveat, the written GeoTIFF's tags and the refusal to difference a filtered pass
+against an unfiltered one all apply with no new machinery. Filtering a series
+that already carries a filter is refused rather than composed (two averagings
+leave a resolution neither window names), and the one combination that cannot be
+made exact — a filter window straddling the independently-read windows
+`chunk_size` cuts, with `lee`'s scene-read looks parameter differing per window —
+is refused rather than approximated.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -716,6 +736,21 @@ from:
   buy fewer than 25 independent looks. Not a default: what it spends is
   resolution. `umbra chips --speckle-filter` carries it to a training set with the
   window in every manifest record. See the CHANGELOG.
+  ~~**Open:** it filters in the radar's image space, so it reaches only the
+  complex archive — and Umbra's *published* GEC rasters, which arrive geocoded and
+  never enter that pipeline, had no route to averaging at all. The correction that
+  matters most for change detection could not be applied to the products change
+  detection is done on.~~ **shipped** — `umbra stack --speckle-filter` /
+  `to_stack(speckle_filter=…)` averages each pass down on the cube's shared grid,
+  which is the first place a GEC exists on coordinates the library owns. The
+  filters are `convert`'s own functions rather than a second implementation, and
+  the record is `convert`'s own two keys rather than a second vocabulary — so the
+  `stack_stats` caveat, the written cube's `UMBRA_*` tags and the refusal to
+  difference a filtered pass against an unfiltered one all work unchanged on a
+  cube that filtered itself. Filtering an already-filtered series is refused (two
+  averagings leave a resolution neither window names), and so is pairing the
+  filter with `--chunk-size`, whose independently-read windows a filter window
+  would straddle. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

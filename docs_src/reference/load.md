@@ -45,6 +45,22 @@ because a percentile is the one statistic that needs the whole pass at once. The
 summary says which it is (`quantile_method` / `quantile_bin_db`, plus a caveat),
 so the two kinds of number are never confused.
 
+`to_stack(speckle_filter=...)` (`umbra stack --speckle-filter`) averages
+**speckle** down in every pass before the series is assembled — the one
+uncertainty in those numbers that no correction in the conversion pipeline
+touches, and the largest: a single look's power scatters about its surface's
+true backscatter as widely as its own mean, so an unfiltered cell-to-cell
+difference is mostly interference rather than change. `"boxcar"` averages the
+window unconditionally (the multilook); `"lee"` averages only where a window is
+no more variable than speckle alone explains, so edges and points survive. It is
+the only surface that reaches Umbra's *published* GEC rasters —
+[`umbra convert --speckle-filter`](convert.md) filters complex products in the
+radar's own image space, before geocoding. Opt-in, because what it spends is
+resolution, and both halves are recorded in the cube's `provenance` (the same
+`speckle_filter` / `speckle_window` keys a converted raster carries), so
+`stack_stats` states the trade and a later stack refuses to difference a
+filtered cube against an unfiltered pass.
+
 ::: umbra_py.to_xarray
 
 ::: umbra_py.to_stack

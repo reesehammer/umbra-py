@@ -372,6 +372,38 @@ amplitude. The commands that only draw (`umbra change` without `--narrate`,
 `timescan`, `swipe`) don't check: a mixed composite is confusing to look at, a
 mixed number is wrong.
 
+Every number above carries one uncertainty none of those corrections touch.
+Coherent illumination of a rough surface interferes with itself, so a
+single-look pixel's power scatters about its surface's true backscatter with a
+standard deviation *equal to its mean* — that's speckle, and averaging is the
+only thing that removes it. `speckle_filter=` does the averaging on the cube's
+shared grid, which is the only place it reaches the products this library is
+mostly used with: `umbra convert --speckle-filter` filters complex SICDs before
+geocoding, so it never sees a published GEC.
+
+```python
+cube = to_stack(passes, max_size=1024, db=True, crs="utm", speckle_filter="lee")
+cube.attrs["provenance"]        # {'speckle_filter': 'lee', 'speckle_window': '5'}
+stack_stats(cube)["caveats"]    # ...and the summary states what the window cost
+```
+
+`"boxcar"` averages the window unconditionally (the multilook — most variance
+removed, blind to the edge it averages across); `"lee"` averages only where a
+window is no more variable than speckle alone explains, so edges, points and
+textured ground survive. Both work in the power domain, where a mean is the
+surface's backscatter rather than the ~2.5 dB-low geometric mean a mean of
+decibels would give.
+
+It's opt-in, because what it spends is the reason to use this archive: a window
+that averages N cells reports ground N cells across. So the cube records both
+halves in the same `provenance` keys `umbra convert` writes — `stack_stats`
+states the trade, a written GeoTIFF carries it, and stacking a filtered cube
+against an unfiltered pass is refused by the rule above. Sources that already
+record a filter are refused rather than filtered twice (two averagings leave a
+resolution neither window names), and the filter can't be combined with
+`chunk_size`, whose independently-read windows a filter window would straddle.
+`umbra stack --speckle-filter lee --speckle-window 5` is the same on the CLI.
+
 Measuring reads a whole slice per pass, so a cube `chunk_size` let you *write*
 sharper than memory was still capped at what you could *measure*.
 `windowed=True` walks the same windows the cube is chunked into:
@@ -711,6 +743,10 @@ umbra load <item-json-url> --out aoi.tif --bbox -68.05,10.45,-68.0,10.5 --max-si
 umbra stack --area "Centerfield" --pol VV --db --out centerfield.tif
 # ...on a metric, equal-area grid instead of lon/lat (for area measurements).
 umbra stack --area "Centerfield" --pol VV --db --crs utm --out centerfield_utm.tif
+# ...with speckle averaged down first, so a cell-to-cell difference is change
+# rather than interference. The cube records the window it spent to get there.
+umbra stack --area "Centerfield" --pol VV --db --crs utm --stats \
+    --speckle-filter lee --speckle-window 5
 
 # Visualize search results: interactive HTML map or GeoJSON for any GIS.
 umbra map --start 2024-01-01 --end 2024-01-31 --product GEC --out footprints.html
@@ -857,6 +893,9 @@ umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise \
 #   Equivalent looks 1.0 -> 12.7, of 25 pixels averaged
 umbra convert scene_SICD.nitf scene_filtered.tif --calibrate gamma0 \
     --speckle-filter lee --speckle-window 5
+# This filters in the radar's own image space, so it only reaches the complex
+# archive. For the published GEC rasters the same averaging is a datacube
+# option -- `umbra stack --speckle-filter`, above.
 
 # Convert only the area you care about. A scene is tens of square kilometres at
 # 16-25 cm, and every step above is proportional to it. --clip-bbox turns the

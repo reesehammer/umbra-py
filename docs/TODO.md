@@ -360,8 +360,11 @@ carries into every manifest record and rolls up across the batch
   `SPECKLE_FILTER` / `SPECKLE_WINDOW` / `SPECKLE_ENL_BEFORE` / `SPECKLE_ENL_AFTER`
   / `SPECKLE_LOOKS` tags, `_ENL_BLOCK`, `_ENL_BLOCK_WINDOWS`, `_ENL_PERCENTILE`,
   `_ENL_MIN_VALID`), `src/umbra_py/load.py` (`MEASUREMENT_PROVENANCE_KEYS`, the
-  `stack_stats` caveat), `src/umbra_py/cli/process.py` (`_echo_speckle_report`,
-  `--speckle-filter` / `--speckle-window` on `convert` and `chips`),
+  `stack_stats` caveat, and — for the cube's own filtering — `_Speckle`,
+  `_filter_slab`, `_resolve_speckle`, `_filtered_provenance`, the
+  `speckle_filter=` / `speckle_window=` parameters on `to_stack` /
+  `stack_to_geotiff`), `src/umbra_py/cli/process.py` (`_echo_speckle_report`,
+  `--speckle-filter` / `--speckle-window` on `stack`, `convert` and `chips`),
   `src/umbra_py/chips.py` (`SicdConversion.speckle_filter` / `.speckle_window`,
   `ChipRecord.speckle_filter` / `.speckle_window`).
 
@@ -402,14 +405,40 @@ of looks before and after. Follow-ons, none a blocker:
   range — would want the same per-line treatment `--noise-model estimated-range`
   gives the noise floor. No Umbra product is known to need it, so it waits for
   evidence rather than being written on the analogy.
-- **Nothing filters the *published* GEC products.** `--speckle-filter` is a
-  conversion option, so it reaches the complex archive (`umbra convert`, `umbra
-  chips --asset SICD`) and not a GEC read straight from the bucket — where the
-  same averaging would be just as useful for change detection. The blocker is
-  where it would live: a GEC is already a geocoded raster, so the filter belongs to
-  whatever *loads* it (`to_stack`, `chip_item`), which means a second surface with
-  its own provenance question (a filtered cube is not the product it names). Worth
-  doing when someone wants a smoothed *cube* rather than smoothed inputs.
+- ~~**Nothing filters the *published* GEC products.**~~ **shipped for the cube** —
+  `to_stack(speckle_filter=…)` / `umbra stack --speckle-filter` averages each pass
+  down on the shared grid, so the same filters reach a GEC read straight from the
+  bucket. The provenance question this entry deferred was answered by *not*
+  inventing a second vocabulary: a cube whose cells were averaged over an N-cell
+  window is an N-window-filtered raster, so it records itself in `umbra convert`'s
+  own `speckle_filter` / `speckle_window` keys and every consumer of those keys
+  (the `stack_stats` caveat, the written GeoTIFF's tags, the `to_stack` refusal)
+  works unchanged. Filtering an already-filtered series is refused rather than
+  composed. What is still open, and smaller:
+  - **`chip_item` is the other loader, and it does not filter.** `umbra chips`
+    exposes `--speckle-filter` only on the `--asset SICD` path, where it is the
+    conversion's flag; a GEC chip set still cannot be smoothed. The cube was done
+    first because it is where the numbers are quoted (`stack_stats`), and a chip
+    set's answer is a model's rather than a caveat's. The same
+    `_filter_slab` + provenance-key pair would do it.
+  - **A filtered cube reports no ENL.** `_filter_speckle` measures the equivalent
+    looks either side of the filter and `_filter_slab` drops the pair: it is a
+    per-scene diagnostic, and a lazy cube's slabs are read inside deferred tasks
+    with nowhere to report back to. Threading it out for the *eager* path only
+    would make a cube's diagnostics depend on how it was read, which is worse
+    than not having them; a per-slice coordinate on the cube (like `item_id`) is
+    the shape that would work if someone wants the number.
+  - **`chunk_size` and the filter are mutually exclusive.** A window straddling
+    two independently-read windows would need a halo, and `"lee"`'s scene-read
+    looks parameter would still differ per window — so the pair is refused rather
+    than made approximately right. A halo plus an explicit `looks=` on
+    `_filter_speckle` would lift it; nothing needs it yet, since `lazy=True`
+    alone (one chunk per pass) already filters at any length of series.
+  - **`POST /artifacts/stats` cannot ask for it.** `umbra serve` builds its cube
+    without the option, so a hosted measurement is always unfiltered. Unlike
+    `--stack-lazy` this one *moves the numbers*, so it belongs in the request body
+    and in the artifact cache key — the shape `"windowed": true` already
+    established. The agent tools are the same call and the same question.
 - **The filter runs on the whole window in memory.** `_box_sum`'s summed-area
   table makes the cost independent of the window size but holds a scene-sized
   float64 table, on top of the scene-sized power array `_detected_power` already

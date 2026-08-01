@@ -317,6 +317,35 @@ def _echo_chip_noise_report(dataset: ChipDataset) -> None:
     "subtraction.",
 )
 @click.option(
+    "--speckle-filter",
+    type=click.Choice(list(SPECKLE_FILTERS), case_sensitive=False),
+    default=None,
+    help="Average speckle down in every pass, on the shared grid, before the "
+    "cube is assembled. Speckle is the interference pattern coherent "
+    "illumination makes on a rough surface, so a single look's power scatters "
+    "about the surface's true backscatter as widely as its own mean -- which "
+    "makes it the dominant uncertainty in every number --stats reports, and a "
+    "cell-by-cell difference between two passes mostly interference rather than "
+    "change. 'boxcar' averages the window unconditionally (the multilook); 'lee' "
+    "averages only where the window is no more variable than speckle alone "
+    "explains, so edges and points survive. Not a default: what it spends is "
+    "resolution. The cube records the filter and its window, so the statistics "
+    "state the trade and a later stack refuses to difference it against an "
+    "unfiltered cube. (Filters the published GEC rasters too, which 'umbra "
+    "convert --speckle-filter' cannot reach.)",
+)
+@click.option(
+    "--speckle-window",
+    type=int,
+    default=SPECKLE_WINDOW_DEFAULT,
+    show_default=True,
+    metavar="CELLS",
+    help="Edge of the odd, centred window --speckle-filter averages over, in "
+    "cells of the shared grid (so --max-size decides what it covers on the "
+    "ground). Wider removes more speckle and more detail; it costs no more to "
+    "compute.",
+)
+@click.option(
     "--lazy",
     is_flag=True,
     help="Read each pass on demand (one dask chunk per acquisition) instead of "
@@ -361,6 +390,8 @@ def stack(
     extent,
     crs,
     db,
+    speckle_filter,
+    speckle_window,
     lazy,
     chunk_size,
     polarizations,
@@ -403,6 +434,17 @@ def stack(
     mean hides, reads as "the northeast brightened, between these two passes".
     --block-series keeps each block's whole sequence rather than just that
     peak, which is what distinguishes a steady drift from a single step.
+
+    --speckle-filter averages down the one uncertainty every number above
+    otherwise carries. A single-look SAR pixel's power scatters about its
+    surface's true backscatter as widely as its own mean, so an unfiltered
+    cell-to-cell difference is mostly interference; averaging is the only
+    correction, and this is the only place it reaches the published GEC
+    rasters ('umbra convert --speckle-filter' filters complex products before
+    geocoding, so it never sees them). Each pass is filtered on the shared
+    grid, and the cube records the filter and its window -- so --stats states
+    both halves of the trade (less noisy cells, coarser resolution) and a later
+    stack refuses to difference this cube against an unfiltered one.
 
     --lazy lifts the ceiling on how much series fits: passes are read on
     demand (one dask chunk each) and written or measured a slice at a time, so
@@ -514,6 +556,8 @@ def stack(
             crs=crs,
             lazy=lazy,
             chunk_size=chunk_size,
+            speckle_filter=speckle_filter,
+            speckle_window=speckle_window,
         )
         path = _write_stack_geotiff(cube, out_path) if out_path else None
         summary = (
@@ -538,6 +582,13 @@ def stack(
                 "extent": extent,
                 "crs": crs or "EPSG:4326",
                 "db": db,
+                # Only when it ran: a key that said "none" on every unfiltered
+                # cube would be noise in the manifest of the common case.
+                **(
+                    {"speckle_filter": speckle_filter, "speckle_window": speckle_window}
+                    if speckle_filter
+                    else {}
+                ),
                 **_shared._acquisition_filter_manifest(
                     polarizations, min_incidence, max_incidence, max_resolution
                 ),
