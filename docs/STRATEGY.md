@@ -269,6 +269,15 @@ floor leaves in a scene. It is a *third* provenance value, not a better
 constant guess, `stack_stats` says which limit went away and which did not, and
 `UMBRA_NOISE_FLOOR_SPREAD_DB` reports the swing found — the number that says
 whether the constant model was missing anything at all.
+~~**Open:** every one of those inferred models was justified by an argument the
+open archive could not check, since a product that states no floor states no
+truth either.~~ **shipped** — `compare_noise_models` / `umbra convert
+--noise-check` scores an inferred floor against a product's own `NoisePoly` where
+one exists, splitting the error into the offset the estimate reads low by and how
+well it follows the real floor once that offset is granted; against a synthetic
+10 dB ramp the fitted profile scores 0.2 dB of shape error where the constant
+estimate scores the ramp's full deviation, 2.9 dB. Which is the difference
+between a model that is argued and one that is measured.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -611,6 +620,30 @@ from:
   --noise-model estimated-range` carries it to a training set, where a flat floor
   showed up as an offset between chips cut from opposite edges of one swath. See
   the CHANGELOG.
+- ~~Every one of the inferred models above rested on an *argument* — the estimate
+  reads low but consistently, so the per-line fit recovers the shape a scalar
+  cannot — and the archive they exist for could not check it, because a product
+  that states no floor states no truth either.~~ **shipped** —
+  `compare_noise_models` / `umbra convert --noise-check` scores the inferred
+  floors against a product's own `ABSOLUTE` `NoisePoly` where one exists, split
+  into the two parts the claims are about: the offset the estimate reads low by
+  (`bias_db`) and, once that offset is granted, how well it follows the real floor
+  across the image (`shape_error_db`), beside how much swing there was to find at
+  all (`measured_spread_db`). On a synthetic SICD whose stated floor *is* the
+  floor its pixels were built from, the fitted profile recovers a 10 dB ramp to
+  0.1 dB and scores 0.2 dB of shape error where the constant estimate scores
+  2.9 dB — exactly the ramp's own deviation about its midpoint, i.e. everything a
+  scalar had to leave behind — and both models read low by about 5.5 dB, within a
+  decibel of each other, as a fifth percentile of a speckled noise-only population
+  should. The measurement also found two things the argument had not: a constant
+  estimate is biased low on a *varying* floor even with no speckle at all (a
+  pooled percentile lands near the near-range end of a ramp, not its middle), and
+  where backscatter sinks toward the floor the fitted profile reads the swing
+  ~30% flat. Both are recorded rather than smoothed over — the second is a caveat
+  on quoting `UMBRA_NOISE_FLOOR_SPREAD_DB`, and it is the kind of finding that
+  only a measurement produces. **Open:** running it on a *real* product, which
+  needs a Canopy scene or any SICD carrying the metadata Umbra's open archive
+  does not — see `TODO.md`.
 - ~~Nothing *consumed* those tags (they were written and read back, but no code
   acted on them, so a stack could still mix two conversions and report the
   difference between them as change).~~ **shipped** — `to_stack` reads every

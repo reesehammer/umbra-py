@@ -30,3 +30,32 @@ slant-plane NITF has no map grid to range-read.
 ::: umbra_py.sicd_to_amplitude_geotiff
 
 ::: umbra_py.sicd_calibration_types
+
+## Noise floor
+
+A measured pixel is the ground's echo plus the receiver's own thermal noise, so
+over a dark surface a calibrated value reports the sensor rather than the scene.
+`noise_subtract=True` (`umbra convert --subtract-noise`) removes it in the power
+domain, before anything scales it, and `noise_model=` says where the floor comes
+from: `"measured"` reads the product's own `Radiometric.NoiseLevel` polynomial,
+`"estimated"` infers one constant from the scene's own darkest pixels, and
+`"estimated-range"` infers one per range line and fits it against range so the
+inferred floor follows the swath. The inferred models need no metadata, which is
+the point — most of Umbra's open products carry no `Radiometric` block at all, so
+`"measured"` refuses on exactly the archive this library exists for. Ask
+`sicd_noise_level()` which kind a file declares.
+
+`compare_noise_models()` (`umbra convert --noise-check`) is how those inferences
+get checked. On a product that *does* state an absolute floor there is a truth to
+score against, so it runs the estimators over the product's pixels and differences
+each result against the product's own `NoisePoly` — reporting the offset the
+estimate reads low by and, once that offset is granted, how well it follows the
+real floor across the image. It writes nothing and converts nothing.
+
+::: umbra_py.sicd_noise_level
+
+::: umbra_py.compare_noise_models
+
+::: umbra_py.NoiseModelComparison
+
+::: umbra_py.NoiseModelAgreement

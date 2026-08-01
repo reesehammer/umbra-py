@@ -29,6 +29,10 @@ from .chips import (
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .convert import (
+    INFERRED_NOISE_MODELS,
+    NoiseModelAgreement,
+    NoiseModelComparison,
+    compare_noise_models,
     conversion_provenance,
     conversion_tags,
     read_conversion_tags,
@@ -179,6 +183,10 @@ __all__ = [
     "sicd_to_geocoded_cog",
     "sicd_calibration_types",
     "sicd_noise_level",
+    "compare_noise_models",
+    "NoiseModelAgreement",
+    "NoiseModelComparison",
+    "INFERRED_NOISE_MODELS",
     "conversion_provenance",
     "conversion_tags",
     "read_conversion_tags",
