@@ -80,7 +80,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .constants import ATTRIBUTION, DATA_LICENSE
 
@@ -108,6 +108,21 @@ CHIPPABLE_ASSETS = (*RASTER_ASSETS, *COMPLEX_ASSETS)
 
 #: Progress callback: ``(item_index, item_total, item, chips_written)``.
 ProgressFn = Callable[[int, int, UmbraItem, int], None]
+
+#: Edge of the grid of full-resolution windows :func:`_scene_speckle` samples to
+#: establish a scene's speckle statistics: 3 means up to nine windows spread
+#: evenly over the area being chipped. It is a *sample* because the alternative
+#: is reading the whole product — the thing streaming a GEC tile by tile exists
+#: to avoid — and a grid rather than a random draw because a chip set has to be
+#: reproducible: the same acquisition and the same area give the same windows,
+#: so they give the same filter.
+_SPECKLE_SAMPLE_GRID = 3
+
+#: Edge, in pixels, of each of those windows. Large enough to hold many
+#: measuring blocks (:data:`umbra_py.convert._ENL_BLOCK`, sized to the filter
+#: window), small enough that nine of them are a handful of megabytes rather
+#: than a download.
+_SPECKLE_SAMPLE_SIZE = 512
 
 
 def _safe_slug(text: str) -> str:
@@ -216,6 +231,32 @@ def _reported_number(provenance: dict[str, str], name: str) -> float | None:
     return None if value is None else float(value)
 
 
+def _speckle_provenance(scene: Any) -> dict[str, str]:
+    """A scene's :class:`umbra_py.convert.SpeckleFiltering` as ``UMBRA_*`` tags.
+
+    ``umbra convert``'s own keys rather than a second vocabulary, for the reason
+    :func:`umbra_py.load._filtered_provenance` gives: a tile whose cells were
+    averaged over an N-pixel window *is* an N-window-filtered raster, so every
+    consumer of those tags -- the refusal to difference a filtered pass against
+    an unfiltered one, ``stack_stats``' caveat, a reader running ``gdalinfo`` on
+    a chip -- works on it unchanged. The values are written by the same
+    :func:`umbra_py.convert.conversion_tags` formatter, so a chip cut from a
+    filtered GEC and one cut from a filtered SICD read identically.
+    """
+    from .convert import PROVENANCE_TAG_PREFIX, _speckle_detail_tags  # noqa: PLC0415
+
+    tags = {
+        "SPECKLE_FILTER": scene.filter,
+        **_speckle_detail_tags(
+            window=scene.window,
+            enl_before=scene.enl_before,
+            enl_after=scene.enl_after,
+            looks=scene.looks,
+        ),
+    }
+    return {f"{PROVENANCE_TAG_PREFIX}{key}": value for key, value in tags.items()}
+
+
 def _as_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     """A bbox as four plain floats, so one written any sequence-ish way compares
     and digests identically wherever it is stored."""
@@ -254,6 +295,176 @@ def _clip_pixel_window(
             f"bbox {tuple(bbox)!r} does not overlap the raster, so there is nothing to chip."
         )
     return row0, col0, row_stop, col_stop
+
+
+def _invalid_mask(np: Any, data: Any, nodata: float | None) -> Any:
+    """Which pixels of a read are not a measurement: non-finite, nodata, or ``<= 0``.
+
+    One definition, because the speckle filter and the chip loop have to agree on
+    it: a pixel the loop counts as invalid must be one the filter excluded from
+    its neighbours' windows, or an edge chip's values would be dragged toward a
+    zero that never was a return.
+    """
+    invalid = ~np.isfinite(data)
+    if nodata is not None:
+        invalid |= data == nodata
+    invalid |= data <= 0
+    return invalid
+
+
+class _ChipSpeckle(NamedTuple):
+    """The speckle filter every tile of one acquisition is cut through.
+
+    ``name`` and ``window`` are checked at the call (before any bytes are read),
+    and ``scene`` is what the filter's own parameters and diagnostics were read
+    from -- :func:`_scene_speckle`, once per acquisition. Carrying the scene
+    record here rather than re-reading it per tile is the whole design: ``lee``'s
+    speckle parameter is a property of the *product's* processing, so a tile that
+    read it off its own 512 pixels would filter a chip over water differently
+    from the one beside it over a city, and a training set would carry that seam.
+    """
+
+    name: str
+    window: int
+    scene: Any  # umbra_py.convert.SpeckleFiltering
+
+
+def _resolve_chip_speckle(name: str | None, window: int) -> tuple[str, int] | None:
+    """Check a requested chip-side speckle filter before any bytes are read.
+
+    Mirrors :func:`umbra_py.load._resolve_speckle`: a misspelt filter or an even
+    window should fail at the call that got it wrong, not part-way through a run
+    that has already streamed scenes.
+    """
+    if name is None:
+        return None
+    from .convert import SPECKLE_FILTERS, _check_speckle_window  # noqa: PLC0415
+
+    lowered = name.lower()
+    if lowered not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"Unknown speckle_filter {name!r}; choose one of {', '.join(SPECKLE_FILTERS)}."
+        )
+    return lowered, _check_speckle_window(window)
+
+
+def _with_conversion_speckle(
+    conversion: SicdConversion | None, name: str, window: int
+) -> SicdConversion:
+    """Route a chip-side speckle request into the conversion, for a complex asset.
+
+    A ``SICD`` is filtered *before* it is geocoded, in the radar's own image
+    space, where speckle is one independent sample per pixel -- so the honest
+    place for the flag on that path is :class:`SicdConversion`, not the tile
+    loop. One request, placed where it is most correct for the asset it is
+    filtering; naming it twice and differently is refused rather than silently
+    resolved, since only the caller knows which they meant.
+    """
+    settings = conversion or SicdConversion()
+    already = settings.speckle_filter
+    if already is not None and (already != name or settings.speckle_window != window):
+        raise ValueError(
+            f"Conflicting speckle filters for a complex asset: the conversion asks for "
+            f"{already!r} over a {settings.speckle_window}x{settings.speckle_window} window "
+            f"and the chipper for {name!r} over {window}x{window}. A SICD is filtered once, "
+            "in image space before it is geocoded, so name it in one place."
+        )
+    return replace(settings, speckle_filter=name, speckle_window=window)
+
+
+def _sample_offsets(start: int, stop: int, size: int, count: int) -> list[int]:
+    """Up to ``count`` evenly spread window origins covering ``[start, stop)``.
+
+    Collapses to a single origin where the span is no wider than one window, and
+    de-duplicates where the spread would repeat one -- so a small raster is
+    sampled once rather than nine times over.
+    """
+    if stop - start <= size or count < 2:
+        return [start]
+    last = stop - size
+    return sorted({start + round(i * (last - start) / (count - 1)) for i in range(count)})
+
+
+def _scene_speckle(src: Any, name: str, window: int, extent: tuple[int, int, int, int]) -> Any:
+    """Read one acquisition's speckle statistics off a sample of its own windows.
+
+    Returns a :class:`umbra_py.convert.SpeckleFiltering` measured for the scene:
+    the equivalent number of looks before and after the filter, and -- for
+    ``"lee"`` -- the looks the filter will be told the speckle has. Every tile is
+    then cut through :func:`umbra_py.convert._filter_speckle` with that one
+    ``looks``, so the whole chip set is filtered by the same arithmetic with the
+    same parameter and two overlapping tiles cannot disagree about the ground
+    they share.
+
+    It is a sample rather than a whole-scene read because the chipper's promise
+    is that only the bytes of the tiles cross the network. The blocks of every
+    sampled window are *pooled* before the percentile is taken
+    (:func:`umbra_py.convert._block_enl_ratios`), which is what makes the result
+    an estimate of the scene rather than an average of nine estimates -- and the
+    grid is fixed, so the same acquisition gives the same number on every run.
+
+    The pair it reports describes the sampled windows, which is the honest scope:
+    the same caveat :func:`umbra_py.convert._estimate_enl` carries about texture
+    biasing a block's ENL down applies, so the *ratio* is the number to trust.
+    """
+    np = _require("numpy")
+    from rasterio.windows import Window  # noqa: PLC0415
+
+    from .convert import (  # noqa: PLC0415
+        _ENL_BLOCK,
+        _ENL_BLOCK_WINDOWS,
+        _ENL_PERCENTILE,
+        SpeckleFiltering,
+        _block_enl_ratios,
+        _boxcar_power,
+        _detected_power,
+        _lee_power,
+    )
+
+    row0, col0, row_stop, col_stop = extent
+    size = _SPECKLE_SAMPLE_SIZE
+    # The same block size `_filter_speckle` would use, so this scene's numbers are
+    # comparable with a converted raster's rather than differently biased.
+    block = max(_ENL_BLOCK, _ENL_BLOCK_WINDOWS * window)
+    nodata = src.nodata
+
+    powers = []
+    for r0 in _sample_offsets(row0, row_stop, size, _SPECKLE_SAMPLE_GRID):
+        for c0 in _sample_offsets(col0, col_stop, size, _SPECKLE_SAMPLE_GRID):
+            height = min(size, row_stop - r0)
+            width = min(size, col_stop - c0)
+            patch = src.read([1], window=Window(c0, r0, width, height))[0].astype("float32")
+            patch = np.where(_invalid_mask(np, patch, nodata), np.nan, patch)
+            powers.append(_detected_power(patch, decibels=False))
+
+    def _pooled(arrays: list[Any]) -> float | None:
+        ratios = np.concatenate(arrays) if arrays else np.empty(0, dtype="float64")
+        return float(np.percentile(ratios, _ENL_PERCENTILE)) if ratios.size else None
+
+    enl_before = _pooled([_block_enl_ratios(p, block=block) for p in powers])
+
+    looks: float | None = None
+    if name == "lee":
+        # Clamped at single-look for the reason `_filter_speckle` clamps it: no
+        # product has fewer looks than one, so a lower read is the estimator
+        # meeting texture, and believing it is licence to smooth structure away.
+        looks = max(enl_before, 1.0) if enl_before is not None else 1.0
+
+    after = []
+    for power in powers:
+        filtered = (
+            _lee_power(power, window, looks=looks)
+            if looks is not None
+            else _boxcar_power(power, window)
+        )
+        after.append(_block_enl_ratios(np.where(np.isfinite(power), filtered, np.nan), block=block))
+    return SpeckleFiltering(
+        filter=name,
+        window=window,
+        enl_before=enl_before,
+        enl_after=_pooled(after),
+        looks=looks,
+    )
 
 
 @contextlib.contextmanager
@@ -347,11 +558,26 @@ class ChipRecord:
     its pixels -- ``calibration``, ``noise_subtraction``, ``speckle_filter`` /
     ``speckle_window`` and ``rtc_model``, read back from the geocoded raster's own
     provenance tags rather than from the request, so the record reports the
-    processing that actually ran. All are ``None`` for a chip read straight from
-    an amplitude raster, and the full tag set travels in the chip GeoTIFF itself.
+    processing that actually ran. ``calibration``, ``noise_subtraction`` and
+    ``rtc_model`` are ``None`` for a chip read straight from an amplitude raster
+    -- those steps need a complex product -- and the full tag set travels in the
+    chip GeoTIFF itself.
     The speckle pair is the one that says what a chip's *resolution* is as
     opposed to its pixel size: a 5x5-filtered chip resolves ground five pixels
-    across, which is what a model trained on it can learn to see.
+    across, which is what a model trained on it can learn to see. It is filled in
+    on **either** path, because an amplitude raster can be filtered too -- on the
+    published GEC the tiles themselves are averaged (see :func:`chip_item`'s
+    ``speckle_filter``), on a SICD the scene is, in the radar's own image space
+    before it is geocoded.
+
+    ``speckle_enl_before`` / ``speckle_enl_after`` / ``speckle_looks`` are that
+    filter's *diagnostics* (see :class:`umbra_py.convert.SpeckleFiltering`): the
+    scene's equivalent number of looks either side of the window, and the looks
+    ``"lee"`` assumed for the speckle it was separating from structure. Like the
+    noise diagnostics they describe the acquisition a chip was cut from rather
+    than the chip, so every chip of one scene carries the same three; the ratio
+    of the pair is what says whether the resolution the window spent bought
+    anything, and either level on its own reads low on a textured scene.
 
     ``noise_floored_fraction`` and ``noise_floor_margin_db`` come from the same
     tags and are the noise subtraction's two *diagnostics* (see
@@ -389,6 +615,9 @@ class ChipRecord:
     noise_floor_margin_db: float | None = None
     speckle_filter: str | None = None
     speckle_window: int | None = None
+    speckle_enl_before: float | None = None
+    speckle_enl_after: float | None = None
+    speckle_looks: float | None = None
     rtc_model: str | None = None
     license: str = DATA_LICENSE
     attribution: str = ATTRIBUTION
@@ -420,6 +649,9 @@ class ChipRecord:
             "noise_floor_margin_db": self.noise_floor_margin_db,
             "speckle_filter": self.speckle_filter,
             "speckle_window": self.speckle_window,
+            "speckle_enl_before": self.speckle_enl_before,
+            "speckle_enl_after": self.speckle_enl_after,
+            "speckle_looks": self.speckle_looks,
             "rtc_model": self.rtc_model,
             "license": self.license,
             "attribution": self.attribution,
@@ -532,6 +764,87 @@ def _summarise_noise(records: Iterable[ChipRecord]) -> NoiseSummary | None:
     )
 
 
+@dataclass(frozen=True)
+class SpeckleSummary:
+    """What the speckle filter did across a whole chipping run.
+
+    The same shape :class:`NoiseSummary` has, for the same reason: the
+    diagnostics are per scene, and what a dataset builder actually wants to know
+    about a batch is **did the window buy anything, and on how many of these
+    scenes did it not?** A filter's job is to raise the equivalent number of
+    looks, and the honest report of that is the ratio -- both levels read low on
+    a textured scene, so ``enl_after`` alone says little.
+
+    Counted per *acquisition*, since the numbers describe the scene each chip was
+    cut from. Never a refusal: a scene that is textured everywhere is legitimate
+    imagery, and a small gain there is the outcome rather than a fault.
+
+    Attributes
+    ----------
+    scenes:
+        Acquisitions in this run whose chips were speckle-filtered.
+    filters, windows:
+        The distinct filters and window edges across them, sorted -- normally one
+        of each, since a run filters every scene the same way.
+    gain_scenes:
+        How many of ``scenes`` reported an ENL either side of the filter, so a
+        gain could be computed at all. A scene smaller than one measuring block,
+        or with too little finite ground in it, reports neither.
+    low_gain_scenes:
+        How many of ``gain_scenes`` came out below ``gain_warn``. This is the
+        number the roll-up exists for.
+    gain_warn:
+        The advisory threshold applied (``convert.SPECKLE_ENL_GAIN_WARN``).
+    min_gain, median_gain:
+        The worst and the typical ``enl_after / enl_before`` in the batch,
+        ``None`` when no scene reported a pair.
+    """
+
+    scenes: int
+    filters: list[str]
+    windows: list[int]
+    gain_scenes: int
+    low_gain_scenes: int
+    gain_warn: float
+    min_gain: float | None = None
+    median_gain: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _summarise_speckle(records: Iterable[ChipRecord]) -> SpeckleSummary | None:
+    """Roll a run's per-scene speckle diagnostics up into one :class:`SpeckleSummary`.
+
+    ``None`` when no chip in the run was filtered, which keeps the summary out of
+    an ordinary unfiltered run's output entirely.
+    """
+    from .convert import SPECKLE_ENL_GAIN_WARN  # noqa: PLC0415
+
+    scenes: dict[str, ChipRecord] = {}
+    for record in records:
+        if record.speckle_filter is not None:
+            scenes.setdefault(record.item_id, record)
+    if not scenes:
+        return None
+
+    gains = sorted(
+        r.speckle_enl_after / r.speckle_enl_before
+        for r in scenes.values()
+        if r.speckle_enl_before and r.speckle_enl_after
+    )
+    return SpeckleSummary(
+        scenes=len(scenes),
+        filters=sorted({str(r.speckle_filter) for r in scenes.values()}),
+        windows=sorted({int(r.speckle_window) for r in scenes.values() if r.speckle_window}),
+        gain_scenes=len(gains),
+        low_gain_scenes=sum(1 for g in gains if g < SPECKLE_ENL_GAIN_WARN),
+        gain_warn=SPECKLE_ENL_GAIN_WARN,
+        min_gain=gains[0] if gains else None,
+        median_gain=gains[len(gains) // 2] if gains else None,
+    )
+
+
 @dataclass
 class ChipDataset:
     """The result of a chipping run: the written chips plus their manifest.
@@ -564,6 +877,15 @@ class ChipDataset:
         """
         return _summarise_noise(self.records)
 
+    @property
+    def speckle(self) -> SpeckleSummary | None:
+        """The run's speckle-filtering roll-up, or ``None`` when none ran.
+
+        Derived from ``records`` like :attr:`noise`, so it cannot disagree with
+        the manifest beside it.
+        """
+        return _summarise_speckle(self.records)
+
     def to_dict(self) -> dict[str, Any]:
         item_ids = sorted({r.item_id for r in self.records})
         # The conversion block appears only when one ran, so an unconverted
@@ -574,6 +896,9 @@ class ChipDataset:
         noise = self.noise
         if noise is not None:
             extra["noise"] = noise.to_dict()
+        speckle = self.speckle
+        if speckle is not None:
+            extra["speckle"] = speckle.to_dict()
         return {
             "out_dir": self.out_dir,
             "manifest": self.manifest_path,
@@ -649,6 +974,8 @@ def chip_item(
     min_valid: float = 0.0,
     prefix: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
     conversion: SicdConversion | None = None,
     work_dir: str | os.PathLike | None = None,
     preparer: SicdPreparer | None = None,
@@ -707,6 +1034,31 @@ def chip_item(
         sized to the area of interest rather than to the scene — which is where
         the cost of chipping the complex archive actually lives. ``None`` chips
         the whole raster.
+    speckle_filter:
+        Optionally average speckle down, one of
+        :data:`umbra_py.convert.SPECKLE_FILTERS` -- so a tile teaches a model the
+        surface rather than the interference pattern coherent illumination made
+        on it, whose standard deviation equals its mean on a single look. It runs
+        wherever it is most correct for the asset: on a **published amplitude
+        raster** the tiles themselves are averaged, which is the first (and only)
+        point at which those pixels exist in this library at all; on a
+        ``SICD`` it is routed into the conversion
+        (:attr:`SicdConversion.speckle_filter`) and runs in the radar's own image
+        space before geocoding, where speckle is one independent sample per pixel.
+        ``None`` (the default) filters nothing: what a window spends is
+        resolution, so it is a request rather than a default.
+
+        On the raster path each tile is read with a ``speckle_window // 2`` halo
+        and cropped back after filtering, so every chip pixel averages the
+        neighbours it would have had in a whole-scene filter -- which is what
+        makes two overlapping tiles agree about the ground they share -- and
+        ``"lee"``'s speckle parameter is read once for the acquisition
+        (:func:`_scene_speckle`) rather than per tile. Both numbers land in every
+        :class:`ChipRecord`.
+    speckle_window:
+        Edge of the odd, centred window ``speckle_filter`` averages over, in
+        pixels (:data:`umbra_py.convert.SPECKLE_WINDOW_DEFAULT`). Wider removes
+        more speckle and more detail; it costs no more to compute.
     conversion:
         How to geocode a complex ``asset`` before chipping it. Ignored for the
         amplitude rasters; defaults to :class:`SicdConversion`'s flat-earth
@@ -750,10 +1102,18 @@ def chip_item(
     dt = item.datetime
 
     records: list[ChipRecord] = []
+    requested = _resolve_chip_speckle(speckle_filter, speckle_window)
+    complex_asset = asset.upper() in COMPLEX_ASSETS
     if bbox is not None:
         # One decision, applied in both places: a complex product is geocoded
         # only over the area of interest, and every asset is then tiled over it.
         conversion = replace(conversion or SicdConversion(), bbox=_as_bbox(bbox))
+    if requested is not None and complex_asset:
+        # Filtered in image space instead, before the geocoding -- so nothing is
+        # left for the tile loop to do and the record comes back off the
+        # converted raster's own tags like every other conversion setting.
+        conversion = _with_conversion_speckle(conversion, *requested)
+        requested = None
     source_cm = _chip_source(
         item, asset, conversion=conversion, work_dir=work_dir, preparer=preparer
     )
@@ -766,27 +1126,89 @@ def chip_item(
         noise_subtraction = _reported_step(provenance, "NOISE_SUBTRACTION")
         noise_floored_fraction = _reported_number(provenance, "NOISE_FLOORED_FRACTION")
         noise_floor_margin_db = _reported_number(provenance, "NOISE_FLOOR_MARGIN_DB")
-        speckle_filter = _reported_step(provenance, "SPECKLE_FILTER")
-        speckle_window = _reported_number(provenance, "SPECKLE_WINDOW")
+        chip_filter = _reported_step(provenance, "SPECKLE_FILTER")
+        chip_window = _reported_number(provenance, "SPECKLE_WINDOW")
+        enl_before = _reported_number(provenance, "SPECKLE_ENL_BEFORE")
+        enl_after = _reported_number(provenance, "SPECKLE_ENL_AFTER")
+        looks = _reported_number(provenance, "SPECKLE_LOOKS")
         rtc_model = _reported_step(provenance, "RTC_MODEL")
         if bbox is None:
             row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
         else:
             row0, col0, row_stop, col_stop = _clip_pixel_window(src, bbox)
+
+        speckle: _ChipSpeckle | None = None
+        if requested is not None:
+            name, size = requested
+            if chip_filter is not None:
+                raise ValueError(
+                    f"Refusing to speckle-filter tiles cut from an already-filtered raster "
+                    f"({chip_filter}, {chip_window}x{chip_window} window, recorded by "
+                    "'umbra convert'): averaging twice leaves a chip whose effective "
+                    "resolution is neither window, so the record it would carry -- and "
+                    "anything a model learns from it -- would understate what the "
+                    "smoothing cost."
+                )
+            # Once for the acquisition, before any tile is cut, so every tile is
+            # filtered with the same parameter (see `_scene_speckle`).
+            scene = _scene_speckle(src, name, size, (row0, col0, row_stop, col_stop))
+            speckle = _ChipSpeckle(name, size, scene)
+            chip_filter, chip_window = name, float(size)
+            enl_before, enl_after, looks = scene.enl_before, scene.enl_after, scene.looks
+            provenance = {**provenance, **_speckle_provenance(scene)}
+
         rows = range(row0, row_stop - chip_size + 1, step)
         cols = range(col0, col_stop - chip_size + 1, step)
         for row, r0 in enumerate(rows):
             for col, c0 in enumerate(cols):
                 window = Window(c0, r0, chip_size, chip_size)
-                data = src.read([1], window=window)[0].astype("float32")
+                if speckle is None:
+                    data = src.read([1], window=window)[0].astype("float32")
+                else:
+                    # A halo of half a window on every side, clipped to the
+                    # raster: every chip pixel then averages the neighbours a
+                    # whole-scene filter would have given it, which is the only
+                    # way two overlapping tiles can agree about shared ground.
+                    pad = speckle.window // 2
+                    hr0, hc0 = max(0, r0 - pad), max(0, c0 - pad)
+                    hr1 = min(src.height, r0 + chip_size + pad)
+                    hc1 = min(src.width, c0 + chip_size + pad)
+                    halo = src.read([1], window=Window(hc0, hr0, hc1 - hc0, hr1 - hr0))[0].astype(
+                        "float32"
+                    )
+                    inner = (
+                        slice(r0 - hr0, r0 - hr0 + chip_size),
+                        slice(c0 - hc0, c0 - hc0 + chip_size),
+                    )
+                    data = halo[inner]
 
-                invalid = ~np.isfinite(data)
-                if nodata is not None:
-                    invalid |= data == nodata
-                invalid |= data <= 0
+                invalid = _invalid_mask(np, data, nodata)
                 valid_fraction = float(1.0 - invalid.mean())
                 if valid_fraction < min_valid:
+                    # Decided before the filter runs, on the values the tile was
+                    # read with: a filter changes values, not the mask, so a
+                    # dropped tile is the same tile either way and this only
+                    # saves the work.
                     continue
+
+                if speckle is not None:
+                    from .convert import _filter_speckle  # noqa: PLC0415
+
+                    # Excluded rather than zeroed, so an edge pixel averages the
+                    # returns it has instead of being dragged toward nothing.
+                    masked = np.where(_invalid_mask(np, halo, nodata), np.nan, halo)
+                    filtered, _achieved = _filter_speckle(
+                        masked,
+                        decibels=False,
+                        name=speckle.name,
+                        window=speckle.window,
+                        # `lee`'s speckle parameter. For `boxcar`, which needs
+                        # none, any value says the other half of what passing it
+                        # means: this scene's statistics were established once in
+                        # `_scene_speckle` and are not to be re-read off a tile.
+                        looks=speckle.scene.looks if speckle.scene.looks is not None else 1.0,
+                    )
+                    data = filtered[inner]
 
                 if db:
                     with np.errstate(divide="ignore", invalid="ignore"):
@@ -845,11 +1267,14 @@ def chip_item(
                         noise_subtraction=noise_subtraction,
                         noise_floored_fraction=noise_floored_fraction,
                         noise_floor_margin_db=noise_floor_margin_db,
-                        speckle_filter=speckle_filter,
+                        speckle_filter=chip_filter,
                         # An int in the manifest: it is a pixel count, and a
                         # loader comparing it against a chip size should not have
                         # to think about 5.0 vs 5.
-                        speckle_window=int(speckle_window) if speckle_window is not None else None,
+                        speckle_window=int(chip_window) if chip_window is not None else None,
+                        speckle_enl_before=enl_before,
+                        speckle_enl_after=enl_after,
+                        speckle_looks=looks,
                         rtc_model=rtc_model,
                     )
                 )
@@ -957,6 +1382,8 @@ def write_chips(
     fmt: str = "geotiff",
     min_valid: float = 0.0,
     bbox: tuple[float, float, float, float] | None = None,
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
     manifest: str | None = "manifest.jsonl",
     progress: ProgressFn | None = None,
     conversion: SicdConversion | None = None,
@@ -979,6 +1406,11 @@ def write_chips(
     :func:`chip_item`) -- the usual shape of a dataset build, where the site is
     the subject and the scenes are just the passes over it.
 
+    ``speckle_filter`` / ``speckle_window`` average speckle down in every scene
+    (see :func:`chip_item`), which for a complex ``asset`` means routing the
+    request into ``conversion`` -- so the settings the summary reports are the
+    ones that ran, whichever path they took.
+
     ``conversion`` / ``work_dir`` / ``preparer`` apply when ``asset`` is a
     complex product (see :func:`chip_item`). Each acquisition is prepared and
     chipped in turn, so a run over many SICDs holds one scene on disk at a time
@@ -986,12 +1418,16 @@ def write_chips(
     """
     out_path = Path(out_dir)
     items = list(items)
-    # Resolve the default here rather than per item, so the dataset summary
+    requested = _resolve_chip_speckle(speckle_filter, speckle_window)
+    # Resolve the defaults here rather than per item, so the dataset summary
     # reports the settings that actually ran even when the caller passed none.
     if asset.upper() in COMPLEX_ASSETS:
         conversion = conversion or SicdConversion()
         if bbox is not None:
             conversion = replace(conversion, bbox=_as_bbox(bbox))
+        if requested is not None:
+            conversion = _with_conversion_speckle(conversion, *requested)
+            requested = None
     else:
         conversion = None
     records: list[ChipRecord] = []
@@ -1006,6 +1442,8 @@ def write_chips(
             fmt=fmt,
             min_valid=min_valid,
             bbox=bbox,
+            speckle_filter=None if requested is None else requested[0],
+            speckle_window=speckle_window if requested is None else requested[1],
             conversion=conversion,
             work_dir=work_dir,
             preparer=preparer,

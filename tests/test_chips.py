@@ -1224,3 +1224,467 @@ def test_cli_chips_clip_bbox_reaches_the_writer(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["bbox"] == pytest.approx(bbox)
     assert json.loads(result.output)["chip_count"] == 1
+
+
+# --- Speckle-filtering the published amplitude rasters ------------------------
+#
+# `umbra convert --speckle-filter` reaches the complex archive and `umbra stack
+# --speckle-filter` reaches a datacube, but the chipper's own loader -- the one
+# that turns Umbra's *published* GEC rasters into a training set -- had no route
+# to averaging speckle at all. These cover the two things that made the tile
+# loop the hard place to put it: a window straddling a tile boundary, and
+# `lee`'s speckle parameter being a property of the product rather than of the
+# 512 pixels it happens to be looking at.
+
+
+def _speckle_scene(path, *, width=96, height=96, seed=7):
+    """A synthetic single-look scene: exponential power over two surfaces.
+
+    Speckle on one look is exponentially distributed in power, so this is what
+    an ENL estimate should read 1.0 on -- and the bright/dark step is the
+    structure `lee` is supposed to keep and `boxcar` is not.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    rng = np.random.default_rng(seed)
+    truth = np.where(np.arange(width)[None, :] < width // 2, 1.0, 6.0) * np.ones((height, 1))
+    data = np.sqrt(rng.exponential(truth)).astype("float32")
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(data, 1)
+    return path, data
+
+
+@pytest.mark.parametrize("name", ["boxcar", "lee"])
+def test_a_filtered_tile_equals_the_whole_scene_filter_over_the_same_ground(tmp_path, name):
+    """The halo claim, which is the whole reason this can be done tile by tile.
+
+    A window centred near a tile's edge needs pixels the neighbouring tile holds.
+    Read the tile alone and those pixels are missing, so an edge pixel averages a
+    truncated window -- and two *overlapping* tiles then disagree about the same
+    ground, which is a seam a model would learn. Reading a half-window halo and
+    cropping after the filter makes each tile pixel-identical to that region of
+    the scene filtered whole, which is what this asserts (with stride < chip_size,
+    so tiles do overlap).
+    """
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+    from umbra_py.convert import _filter_speckle
+
+    tif, data = _speckle_scene(tmp_path / "scene.tif")
+    records = chip_item(
+        _item_for(tif),
+        tmp_path / "chips",
+        chip_size=32,
+        stride=16,
+        speckle_filter=name,
+        speckle_window=5,
+    )
+    assert len(records) == 25  # 5x5 overlapping tiles
+
+    # The same filter over the whole scene, told the same looks the chipper read
+    # for the acquisition -- so what is being compared is the windowing, not the
+    # parameter.
+    looks = records[0].speckle_looks
+    whole, _ = _filter_speckle(
+        data, decibels=False, name=name, window=5, looks=looks if looks else 1.0
+    )
+    for record in records:
+        col_off, row_off, width, height = record.window
+        with rasterio.open(tmp_path / "chips" / record.path) as src:
+            tile = src.read(1)
+        expected = whole[row_off : row_off + height, col_off : col_off + width]
+        assert np.array_equal(tile, expected)
+
+
+def test_lee_reads_its_speckle_parameter_once_for_the_acquisition(tmp_path):
+    """Not once per tile, which is what would make the filter vary across a scene.
+
+    `lee`'s ``looks`` says how variable speckle alone would make a window, so it
+    decides where the filter smooths and where it keeps the pixel. It is a
+    property of the *product's* processing, so a tile that read it off its own
+    pixels would filter one over water differently from the one beside it over a
+    city -- for no reason in the data.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif", width=128, height=128)
+    records = chip_item(
+        _item_for(tif), tmp_path / "chips", chip_size=32, speckle_filter="lee", speckle_window=5
+    )
+
+    assert len({r.speckle_looks for r in records}) == 1
+    # Clamped at single-look: no product has fewer looks than one, so a lower
+    # read is the estimator meeting texture rather than physics.
+    assert records[0].speckle_looks >= 1.0
+
+
+def test_boxcar_needs_no_looks_and_reports_none(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    records = chip_item(_item_for(tif), tmp_path / "chips", chip_size=32, speckle_filter="boxcar")
+
+    assert records[0].speckle_filter == "boxcar"
+    assert records[0].speckle_looks is None
+
+
+def test_a_filtered_amplitude_record_reports_what_the_window_achieved(tmp_path):
+    """The window says how many *pixels* were averaged; the ENL pair says how
+    many independent *measurements* that was, which is the number that matters."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    records = chip_item(
+        _item_for(tif),
+        tmp_path / "chips",
+        chip_size=32,
+        speckle_filter="boxcar",
+        speckle_window=5,
+    )
+
+    record = records[0]
+    assert record.speckle_filter == "boxcar"
+    assert record.speckle_window == 5
+    # Single-look imagery sits at about 1.0 before, and a 5x5 boxcar over truly
+    # independent samples buys most of its 25 pixels back as looks.
+    assert record.speckle_enl_before == pytest.approx(1.0, abs=0.3)
+    assert record.speckle_enl_after > 5.0 * record.speckle_enl_before
+    # A per-scene diagnostic, so every tile of the acquisition carries the same.
+    assert len({r.speckle_enl_after for r in records}) == 1
+
+
+def test_a_filtered_amplitude_chip_carries_the_umbra_tags_in_the_file(tmp_path):
+    """`umbra convert`'s own vocabulary, not a second one -- so `to_stack`'s
+    refusal to difference a filtered pass against an unfiltered one, and anyone
+    running gdalinfo on a chip, both work on it unchanged."""
+    pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    records = chip_item(
+        _item_for(tif), tmp_path / "chips", chip_size=32, speckle_filter="lee", speckle_window=5
+    )
+
+    with rasterio.open(tmp_path / "chips" / records[0].path) as src:
+        tags = src.tags()
+    assert tags["UMBRA_SPECKLE_FILTER"] == "lee"
+    assert tags["UMBRA_SPECKLE_WINDOW"] == "5"
+    assert "UMBRA_SPECKLE_ENL_BEFORE" in tags
+    assert "UMBRA_SPECKLE_LOOKS" in tags
+
+
+def test_an_unfiltered_amplitude_run_is_unchanged(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item, write_chips
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    records = chip_item(_item_for(tif), tmp_path / "chips", chip_size=32)
+
+    assert records[0].speckle_filter is None
+    assert records[0].speckle_window is None
+    assert records[0].speckle_enl_before is None
+    assert records[0].speckle_looks is None
+
+    dataset = write_chips([_item_for(tif)], tmp_path / "ds", chip_size=32, manifest=None)
+    # Absent from the summary entirely, so an ordinary run's --json payload is
+    # unchanged by this feature existing.
+    assert dataset.speckle is None
+    assert "speckle" not in dataset.to_dict()
+
+
+def test_the_filter_does_not_change_which_tiles_are_dropped(tmp_path):
+    """A filter changes values, not the mask, so min_valid decides the same way
+    either side of it -- the drop is computed on the tile as read."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20)
+    plain = chip_item(_item_for(tif), tmp_path / "a", chip_size=10, min_valid=0.9)
+    filtered = chip_item(
+        _item_for(tif), tmp_path / "b", chip_size=10, min_valid=0.9, speckle_filter="boxcar"
+    )
+
+    assert [(r.row, r.col) for r in plain] == [(r.row, r.col) for r in filtered]
+    assert [r.valid_fraction for r in plain] == [r.valid_fraction for r in filtered]
+
+
+def test_nodata_is_excluded_from_its_neighbours_windows(tmp_path):
+    """Rather than averaged in as a zero, which would drag an edge tile's values
+    toward a return the sensor never got."""
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # The top-left 5x5 block is non-positive (`_make_geotiff`'s nodata corner).
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20)
+    records = chip_item(_item_for(tif), tmp_path / "chips", chip_size=10, speckle_filter="boxcar")
+
+    corner = next(r for r in records if (r.row, r.col) == (0, 0))
+    with rasterio.open(tmp_path / "chips" / corner.path) as src:
+        tile = src.read(1)
+    # The invalid block stays invalid -- a filter has no measurement there to
+    # improve, and filling it from neighbours would invent ground.
+    assert np.isnan(tile[:5, :5]).all()
+    # And a pixel just outside it is finite and positive rather than dragged to
+    # zero by five columns of nothing.
+    assert np.isfinite(tile[0, 5]) and tile[0, 5] > 0
+
+
+def test_an_even_speckle_window_is_refused_at_the_call(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif")
+    with pytest.raises(ValueError, match="odd integer"):
+        chip_item(
+            _item_for(tif),
+            tmp_path / "chips",
+            chip_size=10,
+            speckle_filter="boxcar",
+            speckle_window=4,
+        )
+    with pytest.raises(ValueError, match="Unknown speckle_filter"):
+        chip_item(_item_for(tif), tmp_path / "chips", chip_size=10, speckle_filter="frost")
+    # Nothing was read, so nothing was written.
+    assert not (tmp_path / "chips").exists() or not list((tmp_path / "chips").glob("*.tif"))
+
+
+def test_filtering_an_already_filtered_raster_is_refused(tmp_path):
+    """Two averagings leave a resolution neither window names, so the record a
+    chip would carry -- and anything a model learns from it -- would understate
+    what the smoothing cost. The same rule `to_stack` applies to a cube."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "filtered.tif", speckle_filter="lee", speckle_window=3)
+    item = _item_for(tmp_path / "unused.tif")
+    item.asset_href = lambda asset="GEC": str(cog)  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="already-filtered"):
+        chip_item(item, tmp_path / "chips", chip_size=10, speckle_filter="boxcar")
+
+
+def test_a_complex_asset_routes_the_filter_into_the_conversion(tmp_path):
+    """A SICD is filtered in the radar's own image space, before geocoding, where
+    speckle is one independent sample per pixel -- so the request goes there
+    rather than to the tile loop."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", speckle_filter="lee", speckle_window=7)
+    dataset = write_chips(
+        [_item_for(tmp_path / "unused.tif")],
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        manifest=None,
+        speckle_filter="lee",
+        speckle_window=7,
+        preparer=_fake_preparer(cog),
+    )
+
+    assert isinstance(dataset.conversion, SicdConversion)
+    assert dataset.conversion.speckle_filter == "lee"
+    assert dataset.conversion.speckle_window == 7
+    # And the record still comes off the converted raster's own tags, so it
+    # reports the processing that ran rather than the one requested.
+    assert dataset.records[0].speckle_filter == "lee"
+
+
+def test_two_conflicting_speckle_requests_are_refused(tmp_path):
+    """Only the caller knows which they meant, so it is not silently resolved."""
+    from umbra_py.chips import SicdConversion, write_chips
+
+    with pytest.raises(ValueError, match="Conflicting speckle filters"):
+        write_chips(
+            [_item_for(tmp_path / "unused.tif")],
+            tmp_path / "chips",
+            asset="SICD",
+            manifest=None,
+            speckle_filter="boxcar",
+            conversion=SicdConversion(speckle_filter="lee"),
+        )
+
+
+def test_speckle_summary_counts_scenes_not_chips(tmp_path):
+    """The diagnostics describe the scene each tile was cut from, so counting
+    chips would weight a wide scene more heavily than a narrow one."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import write_chips
+
+    first, _ = _speckle_scene(tmp_path / "a.tif", seed=1)
+    second, _ = _speckle_scene(tmp_path / "b.tif", seed=2)
+    items = [_item_for(first), _item_for(second)]
+    items[1].id = "second-acq"
+
+    dataset = write_chips(
+        items, tmp_path / "ds", chip_size=32, manifest=None, speckle_filter="boxcar"
+    )
+
+    summary = dataset.speckle
+    assert summary is not None
+    assert dataset.chip_count > summary.scenes
+    assert summary.scenes == 2
+    assert summary.filters == ["boxcar"]
+    assert summary.windows == [5]
+    assert summary.median_gain > 1.0
+    assert dataset.to_dict()["speckle"]["scenes"] == 2
+
+
+def test_sample_offsets_spread_and_collapse(tmp_path):
+    from umbra_py.chips import _sample_offsets
+
+    # A span no wider than one window is sampled once rather than nine times over.
+    assert _sample_offsets(0, 400, 512, 3) == [0]
+    # Otherwise evenly spread, first at the start and last flush with the end.
+    offsets = _sample_offsets(0, 2048, 512, 3)
+    assert offsets == [0, 768, 1536]
+    assert offsets[-1] + 512 == 2048
+
+
+def test_cli_chips_filters_an_amplitude_asset(tmp_path, monkeypatch):
+    """--speckle-filter used to be rejected on GEC as a SICD-only flag; the
+    published rasters are exactly what it is most needed on."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--chip-size",
+            "32",
+            "--speckle-filter",
+            "boxcar",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["speckle"]["filters"] == ["boxcar"]
+    assert payload["speckle"]["scenes"] == 1
+
+
+def test_cli_chips_reports_what_the_window_bought(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--chip-size",
+            "32",
+            "--speckle-filter",
+            "boxcar",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "speckle: boxcar over 5x5, on 1 scene(s)" in result.output
+    assert "equivalent looks up by" in result.output
+
+
+def test_cli_chips_says_nothing_about_speckle_when_none_ran(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    tif, _ = _speckle_scene(tmp_path / "scene.tif")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--chip-size",
+            "32",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "speckle" not in result.output
+
+
+def test_cli_chips_rejects_an_even_speckle_window(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--speckle-filter",
+            "boxcar",
+            "--speckle-window",
+            "4",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--speckle-window" in result.output

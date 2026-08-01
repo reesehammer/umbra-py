@@ -187,6 +187,48 @@ def _echo_chip_noise_report(dataset: ChipDataset) -> None:
         )
 
 
+def _echo_chip_speckle_report(dataset: ChipDataset) -> None:
+    """Say what the speckle filter achieved across a chip run's scenes.
+
+    :func:`_echo_speckle_report` is the same job for the one raster ``umbra
+    convert`` writes, and this is its batch form for the reason
+    :func:`_echo_chip_noise_report` is the noise report's: the question is about
+    the *set*, not about each scene, so what is printed is the typical gain and a
+    count of the scenes the window bought little on. Silent when no filter ran.
+
+    The gain rather than the level, because both levels read low on a textured
+    scene -- the ratio is what says the window did something. And an advisory
+    rather than an error, because on imagery textured everywhere ``lee`` leaving
+    most pixels alone is the filter working.
+    """
+    speckle = dataset.speckle
+    if speckle is None:
+        return
+    filters = "/".join(speckle.filters)
+    windows = "/".join(f"{w}x{w}" for w in speckle.windows)
+    click.echo(f"  speckle: {filters} over {windows}, on {speckle.scenes} scene(s)")
+    if speckle.median_gain is None:
+        # No block of any sampled window was homogeneous enough to read an ENL
+        # from -- honest, and worth saying, since the filter still ran.
+        click.echo(
+            "  no homogeneous block to measure looks in, so the ENL gain is unreported "
+            "(the filter still ran; every record's speckle_filter says so)"
+        )
+        return
+    click.echo(
+        f"  equivalent looks up by {speckle.median_gain:.1f}x on the median scene "
+        f"(speckle_enl_before/after in every record)"
+    )
+    if speckle.low_gain_scenes:
+        click.echo(
+            f"  Note: {speckle.low_gain_scenes} of {speckle.gain_scenes} scene(s) gained "
+            f"under {speckle.gain_warn:g}x (worst {speckle.min_gain:.1f}x) -- those scenes "
+            "are textured almost everywhere (which is what 'lee' is meant to leave alone) "
+            "or their pixels are correlated, in which case a wider --speckle-window is "
+            "what buys independent looks."
+        )
+
+
 @cli.command()
 @click.argument("item_urls", nargs=-1)
 @click.option(
@@ -1138,14 +1180,16 @@ def convert(
     "--speckle-filter",
     type=click.Choice(list(SPECKLE_FILTERS), case_sensitive=False),
     default=None,
-    help="SICD only: speckle-filter each scene before it is chipped, so a tile "
-    "teaches a model the surface rather than the interference pattern coherent "
-    "illumination made on it (a single look's power scatters as widely as its own "
-    "mean). 'boxcar' averages the window unconditionally; 'lee' averages only "
-    "where the window is no more variable than speckle alone explains, keeping "
-    "edges. What it spends is resolution -- a window that averages N pixels "
-    "resolves ground N pixels across -- so every chip's manifest entry records the "
-    "filter and its window.",
+    help="Speckle-filter every scene, so a tile teaches a model the surface "
+    "rather than the interference pattern coherent illumination made on it (a "
+    "single look's power scatters as widely as its own mean). 'boxcar' averages "
+    "the window unconditionally; 'lee' averages only where the window is no more "
+    "variable than speckle alone explains, keeping edges. It runs wherever it is "
+    "most correct for the asset: on GEC/CSI the tiles themselves are averaged; "
+    "with --asset SICD the scene is, in the radar's own image space before it is "
+    "geocoded. What it spends is resolution -- a window that averages N pixels "
+    "resolves ground N pixels across -- so every chip's manifest entry records "
+    "the filter, its window, and the equivalent looks either side of it.",
 )
 @click.option(
     "--speckle-window",
@@ -1153,7 +1197,8 @@ def convert(
     default=SPECKLE_WINDOW_DEFAULT,
     show_default=True,
     metavar="PIXELS",
-    help="SICD only: edge of the odd, centred window --speckle-filter averages over.",
+    help="Edge of the odd, centred window --speckle-filter averages over. Wider "
+    "removes more speckle and more detail; it costs no more to compute.",
 )
 @click.option(
     "--convert-resolution",
@@ -1322,11 +1367,21 @@ def chips(
     (``pip install "umbra-py[load]"``).
 
     \b
+    --speckle-filter applies to any asset. It averages down the one uncertainty
+    a SAR pixel carries that is not the sensor's fault and is larger than any
+    that is: on a single look, power scatters about the surface's true
+    backscatter as widely as its own mean, so an unfiltered tile teaches a model
+    the interference pattern as much as the ground. On GEC/CSI the tiles
+    themselves are averaged (each read with a halo, so overlapping tiles agree);
+    with --asset SICD the scene is, before geocoding. What it costs is
+    resolution, which is why it is opt-in and in every manifest record.
+
+    \b
     --asset SICD chips the complex archive instead: each scene is downloaded
     whole and geocoded before its tiles are cut, so --dem, --rtc,
-    --calibrate, --subtract-noise and --speckle-filter apply and the chips can
+    --calibrate and --subtract-noise apply too and the chips can
     carry a physical backscatter coefficient with the sensor's own noise floor
-    taken off and its speckle averaged down. That
+    taken off. That
     path needs the convert extra
     (``pip install "umbra-py[convert]"``) and real bytes per scene, so give
     --work-dir to keep the geocoded scenes and make a re-run cheap.
@@ -1341,7 +1396,6 @@ def chips(
         "--rtc-ref-angle": rtc_ref_angle,
         "--calibrate": calibrate,
         "--subtract-noise": subtract_noise,
-        "--speckle-filter": speckle_filter,
         "--convert-resolution": convert_resolution,
         "--work-dir": work_dir,
     }
@@ -1363,11 +1417,20 @@ def chips(
             calibration=calibrate,
             noise_subtract=subtract_noise,
             noise_model=noise_model.lower(),
-            speckle_filter=speckle_filter.lower() if speckle_filter else None,
-            speckle_window=speckle_window,
             resolution=convert_resolution,
             resampling=resampling,
         )
+    speckle = speckle_filter.lower() if speckle_filter else None
+    if speckle:
+        # Checked here so an even window is a parameter error naming the flag,
+        # rather than a ValueError raised part-way through a run that has
+        # already streamed scenes.
+        from ..convert import _check_speckle_window  # noqa: PLC0415
+
+        try:
+            _check_speckle_window(speckle_window)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--speckle-window") from exc
     clip = _shared._parse_bbox(clip_bbox)
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
@@ -1421,6 +1484,8 @@ def chips(
             fmt=fmt,
             min_valid=min_valid,
             bbox=clip,
+            speckle_filter=speckle,
+            speckle_window=speckle_window,
             manifest=manifest,
             progress=None if as_json else _report,
             conversion=conversion,
@@ -1437,3 +1502,4 @@ def chips(
     if dataset.manifest_path:
         click.echo(f"  manifest -> {dataset.manifest_path}")
     _echo_chip_noise_report(dataset)
+    _echo_chip_speckle_report(dataset)

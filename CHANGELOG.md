@@ -7,6 +7,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Average the speckle down on the way into a training set
+  (`umbra chips --speckle-filter {boxcar,lee}` on *any* asset).** The filter
+  reached the complex archive (`umbra convert`), the datacube (`umbra stack`)
+  and the server, and stopped at the one loader whose output is not a picture or
+  a number but a **dataset**: `umbra chips` exposed `--speckle-filter` only on
+  the `--asset SICD` path, where it was the conversion's flag, so a chip set cut
+  from Umbra's *published* GEC rasters — which is most chip sets — could not be
+  smoothed at all. That is the place it matters most and the place it was
+  missing: a model trained on single-look tiles is being shown an interference
+  pattern whose standard deviation equals the signal's mean, and unlike a caveat
+  on a measurement, nothing downstream can put that back.
+
+  `--speckle-filter` now applies to every asset, running wherever it is most
+  correct for the one it is filtering. On `GEC` / `CSI` the **tiles** are
+  averaged, which is the first (and only) point at which those pixels exist in
+  this library. On `SICD` the request is routed into `SicdConversion` and the
+  scene is filtered in the radar's own image space before geocoding, where
+  speckle is one independent sample per pixel — the same flag, placed where it is
+  more correct, rather than a second knob. Naming both, differently, is refused
+  rather than silently resolved.
+
+  Two things made the tile loop the hard place to put this, and both are answered
+  rather than approximated — the pair `to_stack`'s `chunk_size` refusal named as
+  what would be needed. **A window straddling a tile boundary:** each tile is read
+  with a half-window halo, filtered, and cropped back, so every chip pixel
+  averages the neighbours a whole-scene filter would have given it. That is not a
+  close approximation but an identity — a filtered tile is bit-for-bit equal to
+  that region of the scene filtered whole, which is what makes two *overlapping*
+  tiles (`--stride < --chip-size`) agree about the ground they share instead of
+  carrying a seam a model would learn. **`lee`'s speckle parameter:** it is read
+  once per acquisition from a fixed 3×3 grid of full-resolution sample windows
+  and pooled at the block level before the percentile is taken, so it estimates
+  the scene rather than averaging nine estimates of it. Per tile it would have
+  made the filter smooth a tile over water differently from the one beside it
+  over a city, for no reason in the data; the grid is fixed rather than random so
+  a chip set is reproducible, and it is a sample rather than a whole-scene read
+  because the chipper's promise is that only the bytes of the tiles cross the
+  network. `_filter_speckle` gained the `looks=` parameter that carries it.
+
+  What the filter cost and what it bought are both recorded. Every
+  `ChipRecord` carries `speckle_filter` / `speckle_window` — the pair that says a
+  chip's *resolution* as opposed to its pixel size — and now
+  `speckle_enl_before` / `speckle_enl_after` / `speckle_looks` as well, on
+  **either** path: the equivalent number of looks either side of the window,
+  which is the only honest answer to whether the resolution it spent bought
+  anything (a window averaging N pixels buys fewer than N looks on a product
+  sampled finer than it resolves, as Umbra's are). `ChipDataset.speckle` rolls
+  them up across the run the way `ChipDataset.noise` already does — per
+  acquisition, since the numbers describe the scene each tile was cut from — so
+  `umbra chips` prints, and `--json` reports, the median gain plus a count of the
+  scenes the window bought little on. Advisory, never a refusal: a scene textured
+  everywhere is legitimate imagery, and `lee` leaving it alone is the filter
+  working.
+
+  The chips record themselves in `umbra convert`'s own `UMBRA_SPECKLE_*` tags
+  rather than a second vocabulary, for the reason the datacube does: a tile whose
+  cells were averaged over an N-pixel window *is* an N-window-filtered raster, so
+  `to_stack`'s refusal to difference a filtered pass against an unfiltered one,
+  the `stack_stats` caveat and `gdalinfo` all work on a chip unchanged. Filtering
+  tiles cut from an already-filtered raster is refused rather than composed — two
+  averagings leave a resolution neither window names. `min_valid` decides on the
+  tile as read, so which tiles a run drops is identical filtered or not, and a
+  run that asks for no filter is byte-for-byte unchanged, summary field included.
 - **Let a hosted measurement average the speckle down too
   (`"speckle_filter"` on `POST /artifacts/stats`, and on the `stack_stats` agent
   tool).** The filter that shipped last reached the library and the CLI and

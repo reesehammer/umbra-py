@@ -415,12 +415,39 @@ of looks before and after. Follow-ons, none a blocker:
   (the `stack_stats` caveat, the written GeoTIFF's tags, the `to_stack` refusal)
   works unchanged. Filtering an already-filtered series is refused rather than
   composed. What is still open, and smaller:
-  - **`chip_item` is the other loader, and it does not filter.** `umbra chips`
-    exposes `--speckle-filter` only on the `--asset SICD` path, where it is the
-    conversion's flag; a GEC chip set still cannot be smoothed. The cube was done
-    first because it is where the numbers are quoted (`stack_stats`), and a chip
-    set's answer is a model's rather than a caveat's. The same
-    `_filter_slab` + provenance-key pair would do it.
+  - ~~**`chip_item` is the other loader, and it does not filter.**~~ **shipped** —
+    `umbra chips --speckle-filter` applies to any asset: on `GEC`/`CSI` the tiles
+    themselves are averaged, on `SICD` the request is routed into
+    `SicdConversion` so the scene is filtered in image space before geocoding.
+    The two questions a tile loop raises were answered rather than approximated —
+    a half-window **halo** per tile (so a filtered tile is bit-for-bit the region
+    of the whole-scene filter, and overlapping tiles agree about shared ground)
+    and `lee`'s looks read **once per acquisition** by `_scene_speckle`, from a
+    fixed 3×3 grid of sample windows pooled at block level, since it is a
+    property of the product rather than of the pixels one tile covers.
+    `_filter_speckle` gained the `looks=` parameter that carries it. What is
+    still open, and smaller:
+    - **The scene's looks is a sample, not a whole-scene read.** Nine 512-pixel
+      windows on a fixed grid, because reading the product whole is the thing
+      streaming a GEC tile by tile exists to avoid. That is the right trade for a
+      number the estimator reads to about a percent from ~1700 pooled blocks, but
+      it means an acquisition whose speckle statistics genuinely vary across the
+      swath (a multilook that changed with range — the same case the per-line
+      noise model exists for) is described by one number. `_sample_offsets` and
+      `_SPECKLE_SAMPLE_GRID` are where a denser or per-region read would go; it
+      wants a real product that shows the variation first.
+    - **The ENL pair describes the sampled windows, not the tiles.** It is a
+      per-scene diagnostic by design (every record of one acquisition carries the
+      same three), so a run cannot say which *tiles* the filter bought least on —
+      only which scenes. Measuring per tile would be a different statistic and a
+      noisier one (a 512-pixel read of a ratio of noisy estimates); worth doing
+      only if someone wants to select chips on it rather than scenes.
+    - **`--clip-bbox` narrows the sample too, which is right but undiscussed.**
+      The grid spans the *chipping extent*, so a clipped run reads its looks from
+      the area of interest rather than the collect. That is the correct scope for
+      the tiles being cut, but it means the same acquisition clipped two ways can
+      report two ENLs. Both are honest reads of what was chipped; recording the
+      extent beside the number would say so.
   - **A filtered cube reports no ENL.** `_filter_speckle` measures the equivalent
     looks either side of the filter and `_filter_slab` drops the pair: it is a
     per-scene diagnostic, and a lazy cube's slabs are read inside deferred tasks
@@ -431,9 +458,15 @@ of looks before and after. Follow-ons, none a blocker:
   - **`chunk_size` and the filter are mutually exclusive.** A window straddling
     two independently-read windows would need a halo, and `"lee"`'s scene-read
     looks parameter would still differ per window — so the pair is refused rather
-    than made approximately right. A halo plus an explicit `looks=` on
-    `_filter_speckle` would lift it; nothing needs it yet, since `lazy=True`
-    alone (one chunk per pass) already filters at any length of series.
+    than made approximately right. Both halves of the fix now *exist*: `umbra
+    chips` reads a halo per tile and `_filter_speckle` takes an explicit
+    `looks=`, so lifting this is wiring rather than design — give `_read_slab` a
+    halo sized to the window (`_sub_grid` would have to grow the chunk and crop
+    after) and resolve the looks once per pass rather than per chunk, as
+    `_scene_speckle` does per acquisition. Still nothing needs it: `lazy=True`
+    alone (one chunk per pass) already filters at any length of series, and the
+    chunked path exists for a *single scene* too large to hold, where the halo
+    read is a second range request per window.
   - ~~**`POST /artifacts/stats` cannot ask for it.**~~ **shipped** —
     `"speckle_filter": "boxcar" | "lee"` (plus an optional odd
     `"speckle_window"`) is a request field on the stats endpoint and a parameter
