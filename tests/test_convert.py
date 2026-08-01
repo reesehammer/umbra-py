@@ -3866,3 +3866,347 @@ def test_cli_convert_noise_check_without_a_stated_floor_is_a_clean_error(tmp_pat
     assert result.exit_code != 0
     # The refusal names what the product does carry, rather than inventing one.
     assert "no Radiometric metadata" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Speckle filtering.
+#
+# Speckle is multiplicative and is the same physics on every SAR image, so it
+# can be *made* here rather than faked: a single-look intensity is exponentially
+# distributed about its surface's true backscatter, which numpy draws directly.
+# That makes every claim in the module checkable -- the ENL of single-look
+# imagery is 1, a boxcar over N pixels reaches about N looks, and Lee keeps an
+# edge the boxcar smears.
+# --------------------------------------------------------------------------- #
+
+
+def _speckle_field(rows=192, cols=192, *, bright=0.1, dark=0.01, seed=7):
+    """A two-surface single-look scene: exponential speckle about a step in power.
+
+    Returned as linear *power*, which is the domain the filters work in; the
+    conversion-level tests turn it into magnitude or decibels as needed.
+    """
+    np = pytest.importorskip("numpy")
+
+    rng = np.random.default_rng(seed)
+    truth = np.where(np.arange(cols)[None, :] < cols // 2, bright, dark) * np.ones((rows, 1))
+    return rng.exponential(truth), truth
+
+
+def test_speckle_window_must_be_odd_and_at_least_three():
+    for bad in (2, 4, 1, 0, -3):
+        with pytest.raises(ValueError, match="odd integer"):
+            convert._check_speckle_window(bad)
+    assert convert._check_speckle_window(3) == 3
+    assert convert._check_speckle_window(9) == 9
+
+
+def test_unknown_speckle_filter_is_refused():
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="Unknown speckle_filter"):
+        convert._filter_speckle(np.ones((8, 8), dtype="float32"), decibels=False, name="frost")
+
+
+def test_estimate_enl_reads_single_look_imagery_as_one_look():
+    pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field()
+    # The definition, measured: a single-look intensity's standard deviation
+    # equals its mean, so mean^2/variance is 1 -- and it is 1 across a step in
+    # brightness too, because the estimate is per block rather than per scene.
+    assert convert._estimate_enl(power, block=16) == pytest.approx(1.0, abs=0.15)
+
+
+def test_estimate_enl_is_none_without_a_block_to_read():
+    np = pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field(rows=8, cols=8)
+    assert convert._estimate_enl(power, block=16) is None
+    # A constant raster has no speckle to count the looks of, which is an absent
+    # answer rather than an infinite one.
+    assert convert._estimate_enl(np.full((64, 64), 3.0), block=16) is None
+
+
+def test_boxcar_reaches_about_the_looks_it_averaged():
+    np = pytest.importorskip("numpy")
+
+    # One surface, so the only variance in the scene is speckle: this is the
+    # estimator's calibration rather than a test of how it copes with structure.
+    power = np.random.default_rng(17).exponential(np.full((320, 320), 0.05))
+    for window in (3, 5, 9):
+        block = max(convert._ENL_BLOCK, convert._ENL_BLOCK_WINDOWS * window)
+        enl = convert._estimate_enl(convert._boxcar_power(power, window), block=block)
+        # The pixels of this synthetic scene are independent, so a window of N^2
+        # of them averages N^2 independent looks -- which is the claim
+        # ``_ENL_BLOCK_WINDOWS`` exists to keep true. A fixed 16-pixel block
+        # instead reads 15-25 % high on the wider windows, because a block only
+        # two windows across holds too few independent samples to divide by.
+        assert enl == pytest.approx(window**2, rel=0.1)
+    naive = convert._estimate_enl(convert._boxcar_power(power, 9), block=convert._ENL_BLOCK)
+    assert naive > 1.1 * 81
+
+
+def test_boxcar_preserves_the_mean_power_of_each_surface():
+    np = pytest.importorskip("numpy")
+
+    power, truth = _speckle_field()
+    filtered = convert._boxcar_power(power, 5)
+    # Averaging removes variance, not signal: well inside each surface the mean
+    # is unchanged, which is what makes the filter a better *estimate* of the
+    # same quantity rather than a different one.
+    for cols in (slice(8, 88), slice(104, 184)):
+        assert float(filtered[:, cols].mean()) == pytest.approx(
+            float(truth[:, cols].mean()), rel=0.05
+        )
+    assert float(np.nanstd(filtered[:, 8:88])) < 0.3 * float(np.nanstd(power[:, 8:88]))
+
+
+def test_lee_keeps_the_edge_the_boxcar_smears():
+    np = pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field()
+    edge = power.shape[1] // 2
+    band = slice(edge - 8, edge), slice(edge, edge + 8)
+
+    def step_db(arr):
+        return 10.0 * math.log10(float(arr[:, band[0]].mean()) / float(arr[:, band[1]].mean()))
+
+    boxcar = convert._boxcar_power(power, 9)
+    lee = convert._lee_power(power, 9, looks=1.0)
+    # The truth is a 10 dB step. Both filters average across it, but Lee only
+    # averages where the window is no more variable than speckle alone explains,
+    # so it holds more of the contrast -- the whole reason it exists.
+    assert step_db(lee) > step_db(boxcar)
+    assert step_db(lee) == pytest.approx(10.0, abs=3.5)
+    # And it still removes speckle: the ENL rises well above single-look.
+    block = convert._ENL_BLOCK_WINDOWS * 9
+    assert convert._estimate_enl(lee, block=block) > 20.0
+    # Homogeneous ground is smoothed as hard as the boxcar smooths it: the two
+    # differ at structure, not everywhere.
+    assert float(np.nanstd(lee[:, 8:80])) == pytest.approx(
+        float(np.nanstd(boxcar[:, 8:80])), rel=0.4
+    )
+
+
+def test_lee_takes_its_looks_from_the_scene_but_never_below_single_look():
+    np = pytest.importorskip("numpy")
+
+    rng = np.random.default_rng(11)
+    # Texture on top of speckle: every block is more variable than speckle alone,
+    # so the ENL estimate reads *below* 1. No product has fewer looks than one,
+    # so believing that read would tell the filter speckle is worse than it is --
+    # licence to smooth structure away.
+    textured = rng.exponential(0.05 * np.exp(rng.normal(0.0, 0.6, (128, 128))))
+    assert convert._estimate_enl(textured, block=16) < 1.0
+
+    _filtered, info = convert._filter_speckle(
+        10.0 * np.log10(textured), decibels=True, name="lee", window=5
+    )
+    assert info.enl_before is not None and info.enl_before < 1.0
+    assert info.looks == 1.0
+
+
+def test_filter_speckle_reports_what_it_did_and_is_scale_independent():
+    np = pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field()
+    from_db, db_info = convert._filter_speckle(
+        10.0 * np.log10(power), decibels=True, name="boxcar", window=5
+    )
+    from_linear, lin_info = convert._filter_speckle(
+        np.sqrt(power), decibels=False, name="boxcar", window=5
+    )
+    # Filtering happens in the power domain whichever scale the raster arrived
+    # in, so the two paths are the same measurement -- a mean of decibels would
+    # be the geometric mean of the powers, biased low by ~2.5 dB on single-look
+    # speckle.
+    assert np.allclose(
+        10.0 ** (from_db.astype("float64") / 10.0),
+        np.square(from_linear.astype("float64")),
+        rtol=1e-4,
+    )
+    for info in (db_info, lin_info):
+        assert (info.filter, info.window, info.looks) == ("boxcar", 5, None)
+        assert info.enl_before == pytest.approx(1.0, abs=0.15)
+        assert info.enl_after == pytest.approx(25.0, rel=0.15)
+
+
+def test_filter_speckle_keeps_nodata_and_averages_the_neighbours_it_has():
+    np = pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field(rows=64, cols=64)
+    holed = power.copy()
+    holed[10, 10] = np.nan
+    # Linear magnitude in, linear magnitude out; the filter squares it internally.
+    filtered, _info = convert._filter_speckle(
+        np.sqrt(holed), decibels=False, name="boxcar", window=3
+    )
+
+    # A nodata pixel stays nodata (it is not ground to average), and its
+    # neighbours are averaged from the valid pixels they do have rather than
+    # dragged toward zero.
+    assert not np.isfinite(filtered[10, 10])
+    assert np.isfinite(filtered[10, 11])
+    window = holed[9:12, 10:13]
+    assert float(filtered[10, 11]) ** 2 == pytest.approx(float(np.nanmean(window)), rel=1e-4)
+
+
+def _speckled_sicd_scene(rows=96, cols=96):
+    """A fake complex SICD whose magnitudes carry real single-look speckle."""
+    np = pytest.importorskip("numpy")
+
+    power, _truth = _speckle_field(rows=rows, cols=cols, seed=13)
+    return np.sqrt(power) * (1 + 0j)
+
+
+def test_sicd_to_geocoded_cog_records_the_speckle_filter(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    data = _speckled_sicd_scene()
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "geo.tif",
+        resolution=0.01,
+        resampling="nearest",
+        speckle_filter="lee",
+        speckle_window=5,
+    )
+
+    tags = convert.read_conversion_tags(out)
+    assert tags["speckle_filter"] == "lee"
+    assert tags["speckle_window"] == "5"
+    # The diagnostics: what the filter started from and reached on this scene,
+    # plus the looks it assumed, so a pixel value is reproducible.
+    assert float(tags["speckle_enl_before"]) == pytest.approx(1.0, abs=0.2)
+    assert float(tags["speckle_enl_after"]) > 5.0 * float(tags["speckle_enl_before"])
+    assert float(tags["speckle_looks"]) == pytest.approx(1.0, abs=0.2)
+    with rasterio.open(out) as ds:
+        assert ds.crs.to_epsg() == 4326
+
+
+def test_an_unfiltered_conversion_says_so_rather_than_omitting_the_key(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(16, 16), _FakeSicd()))
+    out = convert.sicd_to_amplitude_geotiff(tmp_path / "in.ntf", tmp_path / "amp.tif")
+    tags = convert.read_conversion_tags(out)
+    # ``"none"`` rather than a missing key, so a stack of unfiltered passes agrees
+    # on it and nothing has to interpret an absence.
+    assert tags["speckle_filter"] == "none"
+    assert "speckle_window" not in tags
+    assert "speckle_enl_after" not in tags
+
+
+def test_slant_plane_speckle_filter_smooths_and_records(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+
+    data = _speckled_sicd_scene()
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    raw = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "in.ntf", tmp_path / "raw.tif", decibels=False
+    )
+    _patch_open_complex(monkeypatch, _FakeReader(data, _FakeSicd()))
+    filtered = convert.sicd_to_amplitude_geotiff(
+        tmp_path / "in.ntf",
+        tmp_path / "filtered.tif",
+        decibels=False,
+        speckle_filter="boxcar",
+        speckle_window=5,
+    )
+
+    with rasterio.open(raw) as ds:
+        before = ds.read(1)
+    with rasterio.open(filtered) as ds:
+        after = ds.read(1)
+    assert after.shape == before.shape  # the filter changes values, not geometry
+    assert float(np.nanstd(after)) < float(np.nanstd(before))
+    assert convert.read_conversion_tags(filtered)["speckle_filter"] == "boxcar"
+
+
+def test_a_bad_speckle_window_is_refused_before_the_product_is_read(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    reader = _FakeReader(_fake_complex(16, 16), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+    with pytest.raises(ValueError, match="odd integer"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf",
+            tmp_path / "geo.tif",
+            speckle_filter="boxcar",
+            speckle_window=4,
+        )
+    # Nothing was read: an unusable window is worth finding out about without
+    # first pulling a multi-gigabyte scene through the amplitude detection.
+    assert reader.reads == []
+
+
+def test_cli_convert_speckle_filter_reports_the_looks_it_reached(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_speckled_sicd_scene(), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "geo.tif"),
+            "--speckle-filter",
+            "boxcar",
+            "--speckle-window",
+            "5",
+            "--resolution",
+            "0.01",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "boxcar-filtered geocoded COG" in result.output
+    # The window says how many pixels were averaged; the ENL says how many
+    # independent looks that was, which is the number worth printing.
+    assert "Equivalent looks" in result.output
+    assert "of 25 pixels averaged" in result.output
+
+
+def test_cli_convert_rejects_an_even_speckle_window_as_a_parameter_error(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(16, 16), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "geo.tif"),
+            "--speckle-filter",
+            "lee",
+            "--speckle-window",
+            "6",
+        ],
+    )
+    assert result.exit_code != 0
+    # A typo in a flag, reported as one -- not as a conversion failure.
+    assert "--speckle-window" in result.output
+    assert "odd integer" in result.output

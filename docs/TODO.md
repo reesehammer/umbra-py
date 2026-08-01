@@ -349,6 +349,77 @@ carries into every manifest record and rolls up across the batch
 
 ---
 
+## Speckle-filtering follow-ons (`umbra convert --speckle-filter` shipped)
+
+- **Surfaced in:** the speckle-filtering PR (`STRATEGY.md` 5.5, which the
+  noise-floor entry above named).
+- **Code:** `src/umbra_py/convert.py` (`SPECKLE_FILTERS`,
+  `SPECKLE_WINDOW_DEFAULT`, `SPECKLE_ENL_GAIN_WARN`, `SpeckleFiltering`,
+  `_check_speckle_window`, `_box_sum`, `_local_moments`, `_estimate_enl`,
+  `_boxcar_power`, `_lee_power`, `_filter_speckle`, `_speckle_tag_values`, the
+  `SPECKLE_FILTER` / `SPECKLE_WINDOW` / `SPECKLE_ENL_BEFORE` / `SPECKLE_ENL_AFTER`
+  / `SPECKLE_LOOKS` tags, `_ENL_BLOCK`, `_ENL_BLOCK_WINDOWS`, `_ENL_PERCENTILE`,
+  `_ENL_MIN_VALID`), `src/umbra_py/load.py` (`MEASUREMENT_PROVENANCE_KEYS`, the
+  `stack_stats` caveat), `src/umbra_py/cli/process.py` (`_echo_speckle_report`,
+  `--speckle-filter` / `--speckle-window` on `convert` and `chips`),
+  `src/umbra_py/chips.py` (`SicdConversion.speckle_filter` / `.speckle_window`,
+  `ChipRecord.speckle_filter` / `.speckle_window`).
+
+Speckle — the interference pattern coherent illumination makes on a rough
+surface, whose standard deviation equals its mean on a single look — is averaged
+down by `--speckle-filter boxcar` (the multilook) or `lee` (averaging only where a
+window is no more variable than speckle alone explains), in the power domain, last
+in image space. The filter and its window are recorded and refused-on-mix by
+`to_stack`; what the filter achieved is recorded as the scene's equivalent number
+of looks before and after. Follow-ons, none a blocker:
+
+- **Two filters, not the usual four.** Frost, Kuan and Gamma-MAP are the other
+  standard local-statistics filters, and refined Lee is the directional variant
+  that keeps a *linear* edge better than plain Lee. They are all the same shape as
+  `_lee_power` (a weight computed from local moments), so each is a small addition
+  — but each is also another knob with its own failure mode, and the two that
+  shipped span the honest range: average everything, or average where averaging is
+  defensible. Add one when a real scene shows the existing pair leaving something
+  on the table.
+- **The window is square in image space, not on the ground.** A SICD's row and
+  column ground sample distances differ (range and azimuth), so an N×N pixel
+  window is a rectangle on the ground. That is the right domain to filter in — the
+  radar's own grid is where speckle is one independent sample per pixel — but it
+  means the *resolution* a filtered chip carries is anisotropic, and only the
+  pixel count is recorded. Recording the ground extent of the window beside it
+  would say so; it needs a consumer that cares which axis it lost.
+- **The ENL estimate is a floor, and nothing says how tight a floor.** Structure
+  inside a block deflates that block's ENL, so the median block reads low on a
+  textured scene: the pair before/after is trustworthy as a *ratio*, and either
+  level on its own is conservative. The natural refinement is the spread of the
+  per-block distribution (how much the blocks disagreed), which would say whether
+  the scene gave a clean read or a mixed one — the same move the noise estimator's
+  margin diagnostic made. Worth doing if the ENL starts being quoted as a
+  measurement rather than as evidence that the filter worked.
+- **`lee`'s looks parameter is read once per scene.** It is the scene's own ENL
+  (clamped at single-look), which is right for a product with uniform processing;
+  a scene whose looks varied across the swath — a multilook that changed with
+  range — would want the same per-line treatment `--noise-model estimated-range`
+  gives the noise floor. No Umbra product is known to need it, so it waits for
+  evidence rather than being written on the analogy.
+- **Nothing filters the *published* GEC products.** `--speckle-filter` is a
+  conversion option, so it reaches the complex archive (`umbra convert`, `umbra
+  chips --asset SICD`) and not a GEC read straight from the bucket — where the
+  same averaging would be just as useful for change detection. The blocker is
+  where it would live: a GEC is already a geocoded raster, so the filter belongs to
+  whatever *loads* it (`to_stack`, `chip_item`), which means a second surface with
+  its own provenance question (a filtered cube is not the product it names). Worth
+  doing when someone wants a smoothed *cube* rather than smoothed inputs.
+- **The filter runs on the whole window in memory.** `_box_sum`'s summed-area
+  table makes the cost independent of the window size but holds a scene-sized
+  float64 table, on top of the scene-sized power array `_detected_power` already
+  makes. That is the same order the noise estimators already work at, and
+  `--clip-bbox` is the answer for a scene too large to hold; a tiled
+  implementation (overlapping windows, one strip at a time) is the fix if the
+  whole-scene path becomes the common one.
+
+---
+
 ## Area-of-interest clipping follow-ons (`--clip-bbox` on convert / chips shipped)
 
 - **Surfaced in:** the conversion-clipping PR (`STRATEGY.md` 5.5, which the

@@ -138,6 +138,27 @@ subtracted was ground. ``umbra convert`` prints both and says so below
 uniform scene is legitimate, and the honest answer there is a measured floor,
 not a different guess.
 
+Every correction above targets something the *sensor* added — a geometric
+brightness swing, an arbitrary scale, a thermal floor. What is left after all of
+them is not an error at all: coherent illumination of a rough surface interferes
+with itself, so a single-look pixel's power is exponentially distributed about
+the surface's true backscatter, with a standard deviation equal to its mean. That
+is speckle, it is the dominant uncertainty in every one of those calibrated
+numbers, and averaging is the only thing that reduces it.
+``speckle_filter=`` (``umbra convert --speckle-filter``) does the averaging, in
+the power domain, last in image space: ``"boxcar"`` averages the window
+unconditionally — the multilook — and ``"lee"`` averages only where the window is
+no more variable than speckle alone would explain, keeping edges and points
+(Lee 1980). The trade is explicit and is why no filter is the default: what is
+bought is measurement precision, and what is spent is resolution — a window that
+averages ``N`` pixels reports ground ``N`` pixels across, and 25 cm resolution is
+the reason to use this archive. So the filter and its window are recorded
+(``UMBRA_SPECKLE_FILTER`` / ``UMBRA_SPECKLE_WINDOW``, both refused-on-mix by
+:func:`umbra_py.load.to_stack`, since averaging one pass and not another shows up
+as change), and so is what the filter actually *achieved*: the equivalent number
+of looks before and after (:func:`_estimate_enl`), which on an oversampled
+product is well below the window's pixel count and is the number that says so.
+
 All of that work is proportional to the scene, and a scene is tens of square
 kilometres at 16–25 cm. ``bbox=`` on :func:`sicd_to_geocoded_cog` (``umbra
 convert --clip-bbox``) makes it proportional to the *area of interest* instead:
@@ -1333,6 +1354,410 @@ def compare_noise_models(
 
 
 # --------------------------------------------------------------------------- #
+# Speckle filtering (the granular texture coherent imaging has instead of noise).
+# --------------------------------------------------------------------------- #
+
+#: Speckle filters accepted by :func:`sicd_to_geocoded_cog` /
+#: :func:`sicd_to_amplitude_geotiff` (``speckle_filter=``), applied to detected
+#: **power** in image space:
+#:
+#: * ``"boxcar"`` averages the window unconditionally — the multilook every SAR
+#:   workflow starts with. It is the strongest variance reduction available for a
+#:   given window and the bluntest: an edge inside the window is averaged across
+#:   just as happily as a homogeneous field is.
+#: * ``"lee"`` is the local-statistics minimum-mean-square-error filter (Lee
+#:   1980): it averages where the window's variability is what speckle alone
+#:   would produce and leaves the pixel alone where it is more variable than
+#:   that, so edges, points and textured ground survive. It smooths less than
+#:   ``"boxcar"`` on purpose.
+SPECKLE_FILTERS = ("boxcar", "lee")
+
+#: Default window edge, in pixels, for :data:`SPECKLE_FILTERS`. Odd so the
+#: window is centred on the pixel it replaces; 5 rather than 3 because Umbra's
+#: products are sampled finer than their resolution (neighbouring pixels are
+#: partly the same measurement), so a 3-pixel window averages fewer independent
+#: looks than its size suggests — see :attr:`SpeckleFiltering.enl_after`.
+SPECKLE_WINDOW_DEFAULT = 5
+
+#: Smallest edge of the non-overlapping blocks :func:`_estimate_enl` reads its
+#: per-block mean and variance from. Large enough that a block's variance is a
+#: usable estimate, small enough that many blocks land inside one surface — which
+#: is what the estimator needs, since a block spanning two surfaces measures the
+#: contrast between them rather than the speckle within either.
+_ENL_BLOCK = 16
+
+#: How many filter windows wide a block must be, when the raster being measured
+#: has been through a window of its own. A block's variance is only a usable
+#: estimate of the field's variance if the block holds enough *independent*
+#: samples, and a filter makes neighbouring pixels dependent out to its window —
+#: so a 16-pixel block after a 9×9 filter holds about three independent samples
+#: and its variance is far too noisy to divide by. Six windows keeps the estimate
+#: within a few percent of the truth on synthetic single-look imagery for every
+#: window this module accepts (measured in ``tests/test_convert.py``).
+_ENL_BLOCK_WINDOWS = 6
+
+#: Which percentile of the per-block ENL distribution :func:`_estimate_enl`
+#: reports: the **median**, i.e. the typical block rather than the most uniform
+#: one. Picking the upper tail instead would look like the better idea — texture
+#: can only inflate a block's variance, so only push its ENL down — but the ENL
+#: of a block is a ratio of noisy estimates, and its upper tail is dominated by
+#: the blocks whose variance happened to come out low rather than by the blocks
+#: that were genuinely uniform. The median is the estimate that texture biases
+#: *down*, which is the safe direction for a number that says how much speckle
+#: was removed.
+_ENL_PERCENTILE = 50.0
+
+#: Fraction of a block's pixels that must be finite before its ENL is believed.
+#: A block mostly outside the collect (or mostly nodata after a clip) has too few
+#: samples for a variance to mean anything.
+_ENL_MIN_VALID = 0.5
+
+#: Below this ratio of :attr:`SpeckleFiltering.enl_after` to ``enl_before``,
+#: ``umbra convert`` says the window bought little. An advisory, never a refusal:
+#: on a scene that is textured everywhere — or a product whose pixels are heavily
+#: oversampled — a small gain is the honest outcome rather than a fault.
+SPECKLE_ENL_GAIN_WARN = 1.5
+
+
+@dataclass(frozen=True)
+class SpeckleFiltering:
+    """What one speckle filter did, beyond changing the pixels.
+
+    Speckle is not sensor noise: it is the interference pattern coherent
+    illumination produces on a rough surface, so it is *multiplicative*, it is
+    the same physics on every SAR image, and averaging is the only thing that
+    removes it. Which means a filtered raster differs from an unfiltered one in
+    two ways that both matter downstream — its variance and its effective
+    resolution — and neither is visible in the pixel values afterwards. Hence
+    the record.
+
+    Attributes
+    ----------
+    filter:
+        Which of :data:`SPECKLE_FILTERS` ran.
+    window:
+        Edge of the (odd, centred) window it ran over, in pixels.
+    enl_before, enl_after:
+        The scene's **equivalent number of looks** before and after, as
+        :func:`_estimate_enl` reads it: the median block's ``mean² / variance``
+        of detected power, which is the standard measure of how much speckle is
+        left. Single-look imagery sits at about 1.0 and every filter's job is to
+        raise it, so the pair is the filter's own effect measured on the scene it
+        ran on rather than claimed from its window size. Both read low on a
+        textured scene, so the *ratio* is the number to trust rather than either
+        level. ``None`` where the raster was smaller than one measuring block or
+        no block held enough finite pixels (:data:`_ENL_MIN_VALID`).
+
+        The gain is worth reading rather than assuming: a ``window²``-pixel
+        boxcar averages ``window²`` *pixels* but only as many independent
+        *looks* as the product's sampling provides, and Umbra samples finer than
+        its resolution, so the achieved ENL lands below the window's pixel count.
+        That gap is a fact about the product, and this is where it shows up.
+    looks:
+        The ENL ``"lee"`` assumed for the speckle it was separating from scene
+        structure — :attr:`enl_before`, i.e. read off the scene rather than
+        assumed, clamped at single-look (no product has fewer looks than one, so a
+        lower read is the estimator meeting texture) and falling back to 1.0 where
+        the scene gave no block to read. ``None`` for ``"boxcar"``, which needs no
+        such parameter. It is recorded because the filter's output depends on it,
+        so a pixel value is not reproducible without it.
+
+    Notes
+    -----
+    Like :class:`NoiseSubtraction`'s diagnostics, ``enl_before`` / ``enl_after``
+    / ``looks`` describe *this scene* rather than what a pixel value means, so
+    they are recorded (see :func:`conversion_tags`) but stay out of
+    :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`: two passes of one site
+    legitimately differ on them, and refusing a stack over that would end every
+    series. ``filter`` and ``window`` are the opposite case and *are* in that key
+    set — a 5×5-averaged pass differenced against an unfiltered one reports the
+    filter as change.
+    """
+
+    filter: str
+    window: int
+    enl_before: float | None = None
+    enl_after: float | None = None
+    looks: float | None = None
+
+
+def _check_speckle_window(window: int) -> int:
+    """Reject a speckle window that cannot be centred on the pixel it replaces.
+
+    Odd and at least 3: an even window has no centre pixel (the output would be
+    shifted half a pixel against its own geolocation), and a 1-pixel window is a
+    filter that does nothing, which is better spelled by not asking for one.
+    """
+    size = int(window)
+    if size < 3 or size % 2 == 0:
+        raise ValueError(
+            f"speckle_window must be an odd integer >= 3, got {window!r}. The window "
+            "is centred on the pixel it replaces, so an even edge would shift the "
+            "output half a pixel against its own geolocation, and 1 would filter "
+            "nothing."
+        )
+    return size
+
+
+def _box_sum(values: np.ndarray, window: int):
+    """Sum of ``values`` over the ``window``-square neighbourhood of each pixel.
+
+    A summed-area table (two cumulative sums) rather than a convolution, so the
+    cost is independent of the window size — a 9×9 filter costs what a 3×3 one
+    does, which is what makes the window a free parameter rather than a budget.
+    Windows are **clipped** at the image edge rather than padded, so an edge
+    pixel averages the neighbours it has; :func:`_local_moments` divides by the
+    matching count, which is why the count is computed the same way.
+    """
+    np = _require("numpy")
+
+    rows, cols = values.shape
+    pad = window // 2
+    table = np.zeros((rows + 1, cols + 1), dtype="float64")
+    np.cumsum(values, axis=0, dtype="float64", out=table[1:, 1:])
+    np.cumsum(table[1:, 1:], axis=1, dtype="float64", out=table[1:, 1:])
+
+    r = np.arange(rows)
+    c = np.arange(cols)
+    r0, r1 = np.clip(r - pad, 0, rows), np.clip(r + pad + 1, 0, rows)
+    c0, c1 = np.clip(c - pad, 0, cols), np.clip(c + pad + 1, 0, cols)
+    total = table[np.ix_(r1, c1)]
+    total -= table[np.ix_(r0, c1)]
+    total -= table[np.ix_(r1, c0)]
+    total += table[np.ix_(r0, c0)]
+    return total
+
+
+def _local_moments(power: np.ndarray, window: int, *, squares: bool):
+    """Windowed mean (and optionally mean-square) of a power raster, plus counts.
+
+    Non-finite pixels — the nodata a clip or a previous warp leaves — are
+    *excluded* from their neighbours' windows rather than treated as zero, which
+    is the difference between an edge pixel that averages its real neighbours and
+    one dragged toward nothing. Returns ``(mean, mean_sq, count)`` with
+    ``mean_sq`` ``None`` when ``squares`` is false, and ``NaN`` means where a
+    window held no finite pixel at all.
+    """
+    np = _require("numpy")
+
+    finite = np.isfinite(power)
+    filled = np.where(finite, power, 0.0)
+    count = _box_sum(finite.astype("float64"), window)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(count > 0, _box_sum(filled, window) / count, np.nan)
+        mean_sq = (
+            np.where(count > 0, _box_sum(np.square(filled), window) / count, np.nan)
+            if squares
+            else None
+        )
+    return mean, mean_sq, count
+
+
+def _estimate_enl(
+    power: np.ndarray,
+    *,
+    block: int = _ENL_BLOCK,
+    percentile: float = _ENL_PERCENTILE,
+) -> float | None:
+    """Read a raster's equivalent number of looks off its own blocks.
+
+    ENL is ``mean² / variance`` of detected power, and over a homogeneous surface
+    that ratio *is* the number of independent looks averaged into each pixel —
+    1.0 for single-look imagery, higher the more speckle has been averaged away.
+    Measured over a whole scene it is meaningless, because the variance would be
+    the scene's own contrast; so it is measured per block and the median block is
+    reported (:data:`_ENL_PERCENTILE`).
+
+    Structure inside a block inflates its variance and so deflates its ENL, which
+    means this reads *low* on a textured scene — it is a floor on the looks
+    present, not a claim about them, and that is the direction to be wrong in for
+    a number quoted as "this is how much speckle was removed". It is a diagnostic:
+    nothing in the conversion depends on it except ``"lee"``'s own speckle
+    parameter, which is clamped at single-look for exactly this reason.
+
+    ``block`` should span several of any filter window the raster has been through
+    (:data:`_ENL_BLOCK_WINDOWS`): a block only a window or two across holds a
+    handful of *independent* samples, and dividing by a variance estimated from a
+    handful of samples biases the ratio high.
+
+    ``None`` when the raster is smaller than one block, when no block held enough
+    finite pixels (:data:`_ENL_MIN_VALID`), or when every qualifying block had
+    zero variance — a synthetic constant raster, where there is no speckle to
+    count the looks of.
+    """
+    np = _require("numpy")
+
+    rows = (power.shape[0] // block) * block
+    cols = (power.shape[1] // block) * block
+    if rows == 0 or cols == 0:
+        return None
+    tiles = power[:rows, :cols].reshape(rows // block, block, cols // block, block)
+    valid = np.isfinite(tiles).sum(axis=(1, 3))
+    with warnings.catch_warnings():
+        # An all-nodata block is expected (a clip's corners); its mean is NaN and
+        # it is dropped below rather than warned about.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = np.nanmean(tiles, axis=(1, 3))
+        # ddof=1: the block's variance is being *estimated* from its pixels, and
+        # the population form biases it low, which would bias the ratio -- the
+        # number reported -- high.
+        var = np.nanvar(tiles, axis=(1, 3), ddof=1)
+    keep = (valid >= max(4, int(_ENL_MIN_VALID * block * block))) & (var > 0) & (mean > 0)
+    if not keep.any():
+        return None
+    return float(np.percentile(np.square(mean[keep]) / var[keep], float(percentile)))
+
+
+def _boxcar_power(power: np.ndarray, window: int):
+    """Unconditional windowed mean of a power raster — the multilook."""
+    np = _require("numpy")
+
+    mean, _mean_sq, count = _local_moments(power, window, squares=False)
+    return np.where(count > 0, mean, power)
+
+
+def _lee_power(power: np.ndarray, window: int, *, looks: float):
+    """Lee's local-statistics minimum-MSE speckle filter, in the power domain.
+
+    Speckle multiplies, so over a homogeneous surface a window's coefficient of
+    variation is a known constant — ``1/sqrt(looks)`` — and any *excess*
+    variability is scene structure. The filter is that comparison: it returns
+    ``mean + b·(pixel − mean)`` with
+
+    ``b = (var − mean²/looks) / (var · (1 + 1/looks))``
+
+    clipped to ``[0, 1]``. Where the window is no more variable than speckle
+    alone explains, ``b`` is 0 and the pixel becomes the local mean (full
+    smoothing); across an edge or on a bright point ``b`` approaches 1 and the
+    pixel is kept. That is the whole difference from :func:`_boxcar_power`: the
+    same window, applied only where averaging is defensible.
+
+    ``looks`` is the ENL the speckle is assumed to have, read off the scene by
+    :func:`_estimate_enl` rather than assumed — a filter told the imagery is
+    single-look when it has already been averaged over-smooths, because it reads
+    real structure as speckle it is allowed to remove.
+    """
+    np = _require("numpy")
+
+    mean, mean_sq, count = _local_moments(power, window, squares=True)
+    var = np.maximum(mean_sq - np.square(mean), 0.0)
+    speckle_var = np.square(mean) / float(looks)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        weight = np.clip((var - speckle_var) / (var * (1.0 + 1.0 / float(looks))), 0.0, 1.0)
+    weight = np.where(np.isfinite(weight), weight, 0.0)
+    return np.where(count > 0, mean + weight * (power - mean), power)
+
+
+def _filter_speckle(
+    amplitude: np.ndarray,
+    *,
+    decibels: bool,
+    name: str,
+    window: int = SPECKLE_WINDOW_DEFAULT,
+) -> tuple[np.ndarray, SpeckleFiltering]:
+    """Speckle-filter a detected-amplitude raster, in the power domain.
+
+    Power, not amplitude or decibels, for the same reason the noise subtraction
+    works there: speckle is multiplicative in amplitude and its statistics — the
+    coefficient of variation :func:`_lee_power` tests against, and the ENL both
+    filters are measured by — are defined on intensity. A mean of decibels is the
+    geometric mean of the powers, which is biased low by about 2.5 dB for
+    single-look speckle; a mean of powers is the estimate of the surface's
+    backscatter. So the raster is converted to power, filtered, and converted
+    back to whichever scale it arrived in.
+
+    Non-finite pixels stay non-finite — a filter changes values, not the mask —
+    and they are excluded from their neighbours' windows rather than counted as
+    zero (:func:`_local_moments`).
+
+    Returns the filtered raster and a :class:`SpeckleFiltering` describing what
+    the filter did to it — the ENL it started from, the ENL it reached, and (for
+    ``"lee"``) the looks it assumed.
+    """
+    np = _require("numpy")
+
+    if name not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"Unknown speckle_filter {name!r}; choose one of {', '.join(SPECKLE_FILTERS)}."
+        )
+    size = _check_speckle_window(window)
+    power = _detected_power(amplitude, decibels=decibels)
+    # One block size for both reads, sized to the window the *filtered* raster
+    # will carry, so the pair is a before/after of one measurement rather than two
+    # differently-biased ones.
+    block = max(_ENL_BLOCK, _ENL_BLOCK_WINDOWS * size)
+    enl_before = _estimate_enl(power, block=block)
+
+    looks: float | None = None
+    if name == "lee":
+        # Read off the scene and clamped at single-look. No SAR product carries
+        # fewer than one look, so a read below 1.0 is the estimator meeting a
+        # textured scene rather than physics -- and believing it would tell the
+        # filter that speckle is worse than it is, which is licence to smooth
+        # structure away. Under-smoothing is the safe direction.
+        looks = max(enl_before, 1.0) if enl_before is not None else 1.0
+        filtered = _lee_power(power, size, looks=looks)
+    else:
+        filtered = _boxcar_power(power, size)
+
+    enl_after = _estimate_enl(filtered, block=block)
+    # A filter changes values, not the mask: a nodata pixel had no measurement to
+    # improve, and filling it from its neighbours would invent ground where the
+    # scene has none (the same rule the noise subtraction follows).
+    filtered = np.where(np.isfinite(power), filtered, np.nan)
+    # The same "as dark as this raster goes" clamp `_amplitude` applies to
+    # magnitude, so a window that averaged only zeros reads as the darkest value
+    # the raster can hold rather than as -inf.
+    filtered = np.clip(filtered, _NOISE_RESIDUAL_FLOOR, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corrected = 10.0 * np.log10(filtered) if decibels else np.sqrt(filtered)
+    return (
+        np.asarray(corrected, dtype="float32"),
+        SpeckleFiltering(
+            filter=name,
+            window=size,
+            enl_before=enl_before,
+            enl_after=enl_after,
+            looks=looks,
+        ),
+    )
+
+
+class _SpeckleTagValues(TypedDict):
+    """The :func:`conversion_tags` keywords a :class:`SpeckleFiltering` fills in."""
+
+    speckle_filter: str | None
+    speckle_window: int | None
+    speckle_enl_before: float | None
+    speckle_enl_after: float | None
+    speckle_looks: float | None
+
+
+def _speckle_tag_values(speckle: SpeckleFiltering | None) -> _SpeckleTagValues:
+    """A :class:`SpeckleFiltering` as :func:`conversion_tags` keyword arguments.
+
+    One place for the mapping so both writers (slant-plane and geocoded) record
+    the same numbers, the same way :func:`_noise_tag_values` does for the noise
+    subtraction.
+    """
+    if speckle is None:
+        return {
+            "speckle_filter": None,
+            "speckle_window": None,
+            "speckle_enl_before": None,
+            "speckle_enl_after": None,
+            "speckle_looks": None,
+        }
+    return {
+        "speckle_filter": speckle.filter,
+        "speckle_window": speckle.window,
+        "speckle_enl_before": speckle.enl_before,
+        "speckle_enl_after": speckle.enl_after,
+        "speckle_looks": speckle.looks,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Conversion provenance (what the pixel values mean, recorded in the raster).
 # --------------------------------------------------------------------------- #
 
@@ -1369,6 +1794,11 @@ def conversion_tags(
     noise_floored_fraction: float | None = None,
     noise_floor_margin_db: float | None = None,
     noise_floor_spread_db: float | None = None,
+    speckle_filter: str | None = None,
+    speckle_window: int | None = None,
+    speckle_enl_before: float | None = None,
+    speckle_enl_after: float | None = None,
+    speckle_looks: float | None = None,
     rtc_model: str | None = None,
     rtc_reference_deg: float | None = None,
     projection_type: str | None = None,
@@ -1430,6 +1860,22 @@ def conversion_tags(
         :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`: they legitimately
         differ between passes of one series, so a stack must not be refused over
         them. All are omitted when no floor was subtracted.
+    speckle_filter:
+        Which speckle filter ran (:data:`SPECKLE_FILTERS`) and ``speckle_window``
+        the window edge it ran over, or ``None`` for a raster that still carries
+        its full speckle. Both are in
+        :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`, because a filtered
+        pixel is an average over ground the unfiltered one resolved separately:
+        differencing a 5×5-averaged pass against an unfiltered pass — or against a
+        7×7-averaged one — reports the filter as change.
+    speckle_enl_before:
+        Along with ``speckle_enl_after`` and ``speckle_looks``, the filter's
+        *diagnostics* (see :class:`SpeckleFiltering`): the equivalent number of
+        looks the scene carried before and after, and the looks a ``"lee"`` filter
+        assumed. Recorded because the achieved ENL is what says whether the window
+        bought what its size suggests, and left out of the measurement keys for
+        the same reason the noise diagnostics are — they legitimately differ
+        between passes of one series. All are omitted when no filter ran.
     rtc_reference_deg:
         The *resolved* reference incidence angle the flattening normalised to
         (the scene incidence angle when the caller passed none), so the tag
@@ -1443,6 +1889,7 @@ def conversion_tags(
         "UNITS": _pixel_units(calibration=calibration, decibels=decibels),
         "CALIBRATION": calibration or "none",
         "NOISE_SUBTRACTION": noise_subtraction or "none",
+        "SPECKLE_FILTER": speckle_filter or "none",
         "RTC_MODEL": rtc_model or "none",
     }
     if noise_subtraction is not None:
@@ -1454,6 +1901,15 @@ def conversion_tags(
             tags["NOISE_FLOOR_MARGIN_DB"] = f"{float(noise_floor_margin_db):.6g}"
         if noise_floor_spread_db is not None:
             tags["NOISE_FLOOR_SPREAD_DB"] = f"{float(noise_floor_spread_db):.6g}"
+    if speckle_filter is not None:
+        if speckle_window is not None:
+            tags["SPECKLE_WINDOW"] = str(int(speckle_window))
+        if speckle_enl_before is not None:
+            tags["SPECKLE_ENL_BEFORE"] = f"{float(speckle_enl_before):.4g}"
+        if speckle_enl_after is not None:
+            tags["SPECKLE_ENL_AFTER"] = f"{float(speckle_enl_after):.4g}"
+        if speckle_looks is not None:
+            tags["SPECKLE_LOOKS"] = f"{float(speckle_looks):.4g}"
     if rtc_model is not None and rtc_reference_deg is not None:
         tags["RTC_REFERENCE_DEG"] = f"{float(rtc_reference_deg):.6g}"
     if geocoded:
@@ -1517,6 +1973,8 @@ def sicd_to_amplitude_geotiff(
     calibration: str | None = None,
     noise_subtract: bool = False,
     noise_model: str = "measured",
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
 ) -> Path:
     """Read a SICD (complex) image and write its detected amplitude as a GeoTIFF.
 
@@ -1550,6 +2008,13 @@ def sicd_to_amplitude_geotiff(
         ``"estimated"`` infers one constant floor from the scene's own pixels
         and needs no metadata; ``"estimated-range"`` infers one per range line
         and fits it against range. Ignored when ``noise_subtract`` is false.
+    speckle_filter:
+        Optional speckle filter, one of :data:`SPECKLE_FILTERS`, applied to
+        detected power after any calibration (see
+        :func:`sicd_to_geocoded_cog` for what each one trades). ``None`` leaves
+        the scene's full speckle in.
+    speckle_window:
+        Edge of the odd, centred window that filter averages over.
     """
     _require("sarpy")
     _require("rasterio")
@@ -1565,6 +2030,11 @@ def sicd_to_amplitude_geotiff(
         raise ValueError(
             f"Unknown noise_model {noise_model!r}; choose one of {', '.join(NOISE_MODELS)}."
         )
+    if speckle_filter is not None and speckle_filter not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"Unknown speckle_filter {speckle_filter!r}; choose one of "
+            f"{', '.join(SPECKLE_FILTERS)}."
+        )
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
@@ -1579,6 +2049,11 @@ def sicd_to_amplitude_geotiff(
             amplitude,
             kind=calibration,
             decibels=decibels,
+        )
+    speckle: SpeckleFiltering | None = None
+    if speckle_filter is not None:
+        amplitude, speckle = _filter_speckle(
+            amplitude, decibels=decibels, name=speckle_filter, window=speckle_window
         )
 
     dst = Path(dst)
@@ -1605,6 +2080,7 @@ def sicd_to_amplitude_geotiff(
                 calibration=calibration,
                 noise_subtraction=_NOISE_PROVENANCE[noise_model] if noise_subtract else None,
                 **_noise_tag_values(noise),
+                **_speckle_tag_values(speckle),
             )
         )
     return dst
@@ -2730,6 +3206,8 @@ def sicd_to_geocoded_cog(
     calibration: str | None = None,
     noise_subtract: bool = False,
     noise_model: str = "measured",
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
     bbox: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
@@ -2934,6 +3412,47 @@ def sicd_to_geocoded_cog(
         ``UMBRA_NOISE_FLOOR_DB`` for the inferred ones), and
         :func:`umbra_py.load.to_stack` refuses to difference a series that mixes
         any two of them.
+    speckle_filter:
+        Optional speckle filter, one of :data:`SPECKLE_FILTERS`, applied to
+        detected power in image space. Speckle is not sensor noise and no floor
+        subtraction touches it: it is the interference pattern coherent
+        illumination produces on a rough surface, so a single-look pixel's power
+        is exponentially distributed about the surface's true backscatter — its
+        standard deviation *equals* its mean. That is why a single Umbra pixel is
+        a poor measurement of a surface even after calibration, why a
+        pixel-by-pixel difference between two passes is dominated by speckle
+        rather than by change, and why every SAR workflow averages before it
+        measures. Averaging is also the only correction available, because
+        speckle is a property of the illumination rather than an additive error to
+        remove.
+
+        ``"boxcar"`` averages the window unconditionally — the multilook, maximum
+        variance reduction, blind to edges. ``"lee"`` averages only where the
+        window's variability is what speckle alone would produce and keeps the
+        pixel where it is more variable than that (Lee 1980), so edges and points
+        survive at the cost of smoothing less. Both run in the power domain, after
+        the noise subtraction and the calibration: the noise estimators read the
+        scene's own low tail, whose *distribution* a filter would narrow, and a
+        smooth multiplicative scale factor commutes with a local average anyway,
+        so the filter goes last in image space — before the warp, which is where
+        the pixel grid stops being the radar's.
+
+        What it costs is resolution, and that cost is the reason it is opt-in: a
+        window that averages ``N`` pixels reports ground ``N`` pixels across. The
+        raster records the filter and its window (``UMBRA_SPECKLE_FILTER`` /
+        ``UMBRA_SPECKLE_WINDOW``) and :func:`umbra_py.load.to_stack` refuses to
+        difference a series that mixes two of them, since the smoothing would
+        otherwise be read as change. It also records what the filter *achieved* on
+        this scene — the equivalent number of looks before and after
+        (``UMBRA_SPECKLE_ENL_BEFORE`` / ``_AFTER``), which is the honest answer to
+        "how much speckle did that remove?" and is generally well below the
+        window's pixel count, because Umbra samples finer than it resolves.
+    speckle_window:
+        Edge of the odd, centred window ``speckle_filter`` averages over
+        (:data:`SPECKLE_WINDOW_DEFAULT`). Larger windows remove more speckle and
+        more detail; the cost is independent of the size
+        (:func:`_box_sum`), so the choice is about the imagery rather than the
+        runtime. Ignored when ``speckle_filter`` is ``None``.
     bbox:
         Optional area of interest ``(min_lon, min_lat, max_lon, max_lat)`` in
         WGS-84 degrees. Only the image window covering that ground is read,
@@ -2970,6 +3489,15 @@ def sicd_to_geocoded_cog(
         raise ValueError(
             f"Unknown noise_model {noise_model!r}; choose one of {', '.join(NOISE_MODELS)}."
         )
+    if speckle_filter is not None and speckle_filter not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"Unknown speckle_filter {speckle_filter!r}; choose one of "
+            f"{', '.join(SPECKLE_FILTERS)}."
+        )
+    if speckle_filter is not None:
+        # Before the read: an unusable window is worth finding out about without
+        # first pulling a multi-gigabyte scene through the amplitude detection.
+        _check_speckle_window(speckle_window)
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
@@ -3004,6 +3532,15 @@ def sicd_to_geocoded_cog(
         # so calibrate before the warp resamples the grid away.
         amplitude = _calibrate_amplitude(
             sicd, amplitude, kind=calibration, decibels=decibels, origin=origin
+        )
+    speckle: SpeckleFiltering | None = None
+    if speckle_filter is not None:
+        # Last in image space, and before the warp: the window has to be square
+        # in the *radar's* grid (where speckle is one sample per pixel and
+        # independent of its neighbours), not in the resampled ground grid, where
+        # neighbouring pixels can be interpolations of the same measurement.
+        amplitude, speckle = _filter_speckle(
+            amplitude, decibels=decibels, name=speckle_filter, window=speckle_window
         )
     if isinstance(dem, str) and dem.lower() == "auto":
         from . import dem as dem_mod  # noqa: PLC0415
@@ -3082,6 +3619,7 @@ def sicd_to_geocoded_cog(
             calibration=calibration,
             noise_subtraction=_NOISE_PROVENANCE[noise_model] if noise_subtract else None,
             **_noise_tag_values(noise),
+            **_speckle_tag_values(speckle),
             rtc_model=rtc_model if rtc else None,
             rtc_reference_deg=reference_deg,
             projection_type=projection_type,

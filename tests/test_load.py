@@ -2086,6 +2086,97 @@ def test_stack_stats_says_when_the_subtracted_floor_was_only_estimated(tmp_path)
     assert "estimated from each scene's own darkest pixels" in caveats
 
 
+def test_to_stack_refuses_a_speckle_filtered_pass_against_an_unfiltered_one(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # A filtered pass reports the average of the ground its window covered, so
+    # the difference against an unfiltered pass is the smoothing -- strongest
+    # exactly where the ground has the most structure, which is where a change
+    # measurement is being read.
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "speckle_filter": "lee", "speckle_window": 5},
+        settings,
+    )
+    with pytest.raises(ValueError, match="speckle_filter disagrees") as exc:
+        to_stack(items, max_size=32)
+    assert "'lee' (acq-1)" in str(exc.value)
+    assert "'none' (acq-2)" in str(exc.value)
+
+
+def test_to_stack_refuses_two_speckle_windows(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Same filter, different window: both passes are smoothed, so "was it
+    # filtered?" agrees -- but they resolve different ground, and the difference
+    # between a 3-pixel and a 9-pixel average is not change.
+    settings = {"calibration": "sigma0", "speckle_filter": "boxcar"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "speckle_window": 3},
+        {**settings, "speckle_window": 9},
+    )
+    with pytest.raises(ValueError, match="speckle_window disagrees") as exc:
+        to_stack(items, max_size=32)
+    assert "'3' (acq-1)" in str(exc.value)
+    assert "'9' (acq-2)" in str(exc.value)
+
+
+def test_to_stack_allows_the_speckle_diagnostics_to_differ(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # What each scene's own ENL was, and the looks a Lee filter read off it, are
+    # measurements *of that scene*: no two real passes agree on them, so refusing
+    # over them would end every series.
+    settings = {"calibration": "gamma0", "speckle_filter": "lee", "speckle_window": 5}
+    cube = to_stack(
+        _converted_scenes(
+            tmp_path,
+            {
+                **settings,
+                "speckle_enl_before": 1.1,
+                "speckle_enl_after": 18.0,
+                "speckle_looks": 1.1,
+            },
+            {
+                **settings,
+                "speckle_enl_before": 0.9,
+                "speckle_enl_after": 21.0,
+                "speckle_looks": 1.0,
+            },
+        ),
+        max_size=32,
+    )
+    prov = cube.attrs["provenance"]
+    assert prov["speckle_filter"] == "lee"
+    assert prov["speckle_window"] == "5"
+    # Carried only where they agree, so a diagnostic that differs is dropped
+    # rather than attributed to the cube.
+    assert "speckle_enl_after" not in prov
+
+
+def test_stack_stats_says_the_series_was_speckle_filtered(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    settings = {"calibration": "gamma0", "speckle_filter": "boxcar", "speckle_window": 7}
+    stats = stack_stats(to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32))
+    caveats = " ".join(stats["caveats"])
+    # Both halves of the trade, because which one matters depends on the block
+    # size a reader is quoting: better estimates, coarser measurements.
+    assert "speckle-filtered (boxcar, 7x7 window" in caveats
+    assert "less noisy estimate" in caveats
+    assert "resolution is that of a 7-pixel window" in caveats
+
+
 def test_to_stack_allows_the_per_scene_keys_to_differ(tmp_path):
     pytest.importorskip("xarray")
     pytest.importorskip("numpy")

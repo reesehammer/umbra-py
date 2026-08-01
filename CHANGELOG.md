@@ -7,6 +7,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Average the speckle down, and say what that cost (`umbra convert
+  --speckle-filter {boxcar,lee}`).** Every correction the conversion pipeline had
+  targeted something the *sensor* added — a geometric brightness swing, an
+  arbitrary scale, a thermal noise floor. What is left after all of them is not an
+  error at all, and it is larger than any of them: coherent illumination of a
+  rough surface interferes with itself, so a single-look pixel's power is
+  exponentially distributed about the surface's true backscatter, with a standard
+  deviation **equal to its mean**. That is speckle. It is why a single Umbra pixel
+  is a poor measurement of a surface even after `--calibrate --subtract-noise`
+  made it physical, why a pixel-by-pixel difference between two passes is mostly
+  speckle rather than change, and why every SAR workflow averages before it
+  measures. Nothing in the library did that averaging, so the pipeline's last step
+  produced calibrated numbers whose dominant uncertainty was undocumented and
+  unaddressed.
+
+  `speckle_filter=` on `sicd_to_geocoded_cog` / `sicd_to_amplitude_geotiff` does
+  it, in the power domain — where speckle's statistics are defined, and where a
+  mean is the surface's backscatter rather than the ~2.5 dB-low geometric mean a
+  mean of decibels would give. Two filters, because they answer different
+  questions: `"boxcar"` averages the `--speckle-window` window unconditionally
+  (the multilook — most variance removed for a given window, and blind to the edge
+  it averages across), and `"lee"` compares each window's variability against what
+  speckle *alone* would produce and averages only where the two agree, so edges,
+  points and textured ground survive (Lee 1980). Its speckle parameter is read off
+  the scene rather than assumed, and clamped at single-look: no product carries
+  fewer looks than one, so a lower read is the estimator meeting texture, and
+  believing it would be licence to smooth structure away.
+
+  The filter is opt-in and not defaulted, because what it *spends* is the reason
+  to use this archive: a window that averages N pixels reports ground N pixels
+  across. So the trade is recorded on both sides. `UMBRA_SPECKLE_FILTER` /
+  `UMBRA_SPECKLE_WINDOW` say what was done and are in
+  `load.MEASUREMENT_PROVENANCE_KEYS`, so `to_stack` refuses to difference a
+  filtered pass against an unfiltered one — or a 3-pixel average against a
+  9-pixel one — since the smoothing would otherwise be read as change, strongest
+  exactly where the ground has the most structure. `stack_stats` states both
+  halves in a caveat (a less noisy estimate of each cell; the resolution of a
+  window rather than of a pixel), because which half matters depends on the block
+  size being quoted.
+
+  And what the filter *achieved* is measured rather than claimed:
+  `UMBRA_SPECKLE_ENL_BEFORE` / `_AFTER` report the scene's equivalent number of
+  looks either side of it — the median block's `mean² / variance` of detected
+  power, the standard measure of how much speckle is left. That number is the one
+  the window size cannot supply: a 5×5 boxcar averages 25 *pixels* but only as
+  many independent *looks* as the product's sampling provides, and Umbra samples
+  finer than it resolves, so the achieved ENL lands below the pixel count. `umbra
+  convert` prints the pair (`Equivalent looks 1.0 -> 12.7, of 25 pixels
+  averaged`) and, under `SPECKLE_ENL_GAIN_WARN`, says the window bought little and
+  why that can be the honest outcome rather than a fault. The estimator is
+  calibrated in `tests/test_convert.py` against synthetic single-look imagery,
+  where speckle can be *made* rather than faked: it reads 1.0 on unfiltered
+  imagery and within 10 % of N² after an N-pixel boxcar, which is what the
+  block sizing (`_ENL_BLOCK_WINDOWS`) exists to keep true — a block only a couple
+  of windows across holds too few independent samples to divide by, and reads
+  15–25 % high. Structure biases it *down*, so it is a floor on the looks present
+  rather than a claim about them.
+
+  `umbra chips --speckle-filter` carries the same to a training set, where the
+  trade is a different one: a single-look chip teaches a model the interference
+  pattern as much as the surface, and a filtered chip teaches it a surface at
+  coarser resolution. Because that decides what a model can learn to see, every
+  `ChipRecord` carries `speckle_filter` / `speckle_window` — read back from the
+  geocoded raster's own tags, so the manifest reports the processing rather than
+  the request — and both are part of `SicdConversion.cache_key`, so a filtered
+  conversion never stands in for an unfiltered one in `--work-dir`.
+
 - **Measure the inferred noise floor against a measured one
   (`compare_noise_models` / `umbra convert --noise-check`).** The two inferred
   noise models shipped on an argument. `--noise-model estimated` reads a scene's

@@ -83,6 +83,12 @@ from pathlib import Path
 from typing import Any
 
 from .constants import ATTRIBUTION, DATA_LICENSE
+
+# The one eager import from `convert`: a default has to exist when the dataclass
+# below is defined, and duplicating the number here is exactly the drift the
+# shared constant prevents. `convert`'s module level is stdlib-only (its heavy
+# dependencies are behind `_require`), so this pulls in no extra.
+from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import AssetNotFoundError
 from .load import _open_path, _require
 from .models import UmbraItem
@@ -141,6 +147,8 @@ class SicdConversion:
     calibration: str | None = None
     noise_subtract: bool = False
     noise_model: str = "measured"
+    speckle_filter: str | None = None
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT
     resolution: float | None = None
     resampling: str = "bilinear"
     gcp_grid: int = 15
@@ -317,6 +325,8 @@ def _prepare_sicd(
         calibration=conversion.calibration,
         noise_subtract=conversion.noise_subtract,
         noise_model=conversion.noise_model,
+        speckle_filter=conversion.speckle_filter,
+        speckle_window=conversion.speckle_window,
         bbox=conversion.bbox,
     )
 
@@ -334,11 +344,14 @@ class ChipRecord:
     with every record.
 
     A chip cut from a complex product also carries what the conversion did to
-    its pixels -- ``calibration``, ``noise_subtraction`` and ``rtc_model``, read
-    back from the geocoded raster's own provenance tags rather than from the
-    request, so the record reports the processing that actually ran. All three
-    are ``None`` for a chip read straight from an amplitude raster, and the full
-    tag set travels in the chip GeoTIFF itself.
+    its pixels -- ``calibration``, ``noise_subtraction``, ``speckle_filter`` /
+    ``speckle_window`` and ``rtc_model``, read back from the geocoded raster's own
+    provenance tags rather than from the request, so the record reports the
+    processing that actually ran. All are ``None`` for a chip read straight from
+    an amplitude raster, and the full tag set travels in the chip GeoTIFF itself.
+    The speckle pair is the one that says what a chip's *resolution* is as
+    opposed to its pixel size: a 5x5-filtered chip resolves ground five pixels
+    across, which is what a model trained on it can learn to see.
 
     ``noise_floored_fraction`` and ``noise_floor_margin_db`` come from the same
     tags and are the noise subtraction's two *diagnostics* (see
@@ -374,6 +387,8 @@ class ChipRecord:
     noise_subtraction: str | None = None
     noise_floored_fraction: float | None = None
     noise_floor_margin_db: float | None = None
+    speckle_filter: str | None = None
+    speckle_window: int | None = None
     rtc_model: str | None = None
     license: str = DATA_LICENSE
     attribution: str = ATTRIBUTION
@@ -403,6 +418,8 @@ class ChipRecord:
             "noise_subtraction": self.noise_subtraction,
             "noise_floored_fraction": self.noise_floored_fraction,
             "noise_floor_margin_db": self.noise_floor_margin_db,
+            "speckle_filter": self.speckle_filter,
+            "speckle_window": self.speckle_window,
             "rtc_model": self.rtc_model,
             "license": self.license,
             "attribution": self.attribution,
@@ -749,6 +766,8 @@ def chip_item(
         noise_subtraction = _reported_step(provenance, "NOISE_SUBTRACTION")
         noise_floored_fraction = _reported_number(provenance, "NOISE_FLOORED_FRACTION")
         noise_floor_margin_db = _reported_number(provenance, "NOISE_FLOOR_MARGIN_DB")
+        speckle_filter = _reported_step(provenance, "SPECKLE_FILTER")
+        speckle_window = _reported_number(provenance, "SPECKLE_WINDOW")
         rtc_model = _reported_step(provenance, "RTC_MODEL")
         if bbox is None:
             row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
@@ -826,6 +845,11 @@ def chip_item(
                         noise_subtraction=noise_subtraction,
                         noise_floored_fraction=noise_floored_fraction,
                         noise_floor_margin_db=noise_floor_margin_db,
+                        speckle_filter=speckle_filter,
+                        # An int in the manifest: it is a pixel count, and a
+                        # loader comparing it against a chip size should not have
+                        # to think about 5.0 vs 5.
+                        speckle_window=int(speckle_window) if speckle_window is not None else None,
                         rtc_model=rtc_model,
                     )
                 )

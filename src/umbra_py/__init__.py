@@ -30,8 +30,10 @@ from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
 from .convert import (
     INFERRED_NOISE_MODELS,
+    SPECKLE_FILTERS,
     NoiseModelAgreement,
     NoiseModelComparison,
+    SpeckleFiltering,
     compare_noise_models,
     conversion_provenance,
     conversion_tags,
@@ -187,6 +189,8 @@ __all__ = [
     "NoiseModelAgreement",
     "NoiseModelComparison",
     "INFERRED_NOISE_MODELS",
+    "SpeckleFiltering",
+    "SPECKLE_FILTERS",
     "conversion_provenance",
     "conversion_tags",
     "read_conversion_tags",

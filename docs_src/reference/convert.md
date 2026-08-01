@@ -52,6 +52,35 @@ each result against the product's own `NoisePoly` — reporting the offset the
 estimate reads low by and, once that offset is granted, how well it follows the
 real floor across the image. It writes nothing and converts nothing.
 
+## Speckle
+
+Every correction above targets something the sensor added. Speckle is not one of
+them: coherent illumination of a rough surface interferes with itself, so a
+single-look pixel's power scatters about the surface's true backscatter with a
+standard deviation equal to its mean. That is the dominant uncertainty in a
+calibrated number, the reason a pixel-by-pixel difference between two passes is
+mostly speckle, and it cannot be subtracted — averaging is the only correction.
+
+`speckle_filter=` (`umbra convert --speckle-filter`) does the averaging in the
+power domain, last in image space: `"boxcar"` averages the `speckle_window`
+window unconditionally — the multilook, maximum variance reduction, blind to
+edges — and `"lee"` averages only where the window is no more variable than
+speckle alone would explain, keeping edges and points (Lee 1980). No filter is
+the default because what it spends is resolution: a window that averages *N*
+pixels reports ground *N* pixels across, and 25 cm is the reason to use this
+archive.
+
+So the raster records both what it did (`UMBRA_SPECKLE_FILTER`,
+`UMBRA_SPECKLE_WINDOW` — both refused-on-mix by
+[`to_stack`](load.md), since averaging one pass and not another shows up as
+change) and what it achieved: the equivalent number of looks before and after
+(`UMBRA_SPECKLE_ENL_BEFORE` / `_AFTER`). That pair is the honest answer to "how
+much speckle did that remove?", and on a product sampled finer than it resolves
+it lands below the window's pixel count — which is a fact about the product, not
+a fault in the filter.
+
+::: umbra_py.SpeckleFiltering
+
 ::: umbra_py.sicd_noise_level
 
 ::: umbra_py.compare_noise_models
