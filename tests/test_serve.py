@@ -1335,6 +1335,87 @@ def test_speckle_filter_is_part_of_the_cache_key(art_client, recorder):
     assert [c[2]["speckle_filter"] for c in recorder.calls] == [None, "boxcar"]
 
 
+# ---- what an instance says it can be asked for (the landing page) ---------
+
+
+#: The two instance shapes, and which of the complementary stats options each
+#: honours. Every instance is one or the other: ``windowed`` needs the cube built
+#: in windows, ``speckle_filter`` needs each pass whole.
+_INSTANCE_SHAPES = (
+    (None, "speckle_filter", "windowed"),
+    (serve.StackExecution(lazy=True), "speckle_filter", "windowed"),
+    (serve.StackExecution(lazy=True, chunk_size=128), "windowed", "speckle_filter"),
+)
+
+
+@pytest.mark.parametrize(("execution", "supported", "refused"), _INSTANCE_SHAPES)
+def test_landing_page_advertises_which_stats_options_an_instance_honours(
+    execution, supported, refused
+):
+    """The pair is complementary, so which one works is a property of the
+    instance -- and was previously discoverable only by sending a request and
+    reading the ``400``."""
+    page = serve.landing_page("http://localhost:8000/", artifacts=True, stack_execution=execution)
+    (link,) = [ln for ln in page["links"] if ln["rel"] == "stats"]
+    capabilities = link[serve.STATS_CAPABILITY_FIELD]
+
+    assert capabilities[supported] == {"supported": True}
+    assert capabilities[refused]["supported"] is False
+    # The unsupported one says *why*, so a client can tell the operator what to
+    # change rather than only that it was told no.
+    assert "umbra serve" in capabilities[refused]["reason"]
+    # And the shape of the instance, which is what makes the reason legible.
+    assert capabilities["stacking"] == (execution or serve.StackExecution()).describe()
+
+
+def test_the_advertisement_is_the_refusal(monkeypatch):
+    """One source of truth, checked against the renderer that enforces it: a
+    refused option's advertised ``reason`` is the exact message the render
+    raises, and an advertised one renders."""
+    from umbra_py import load
+
+    monkeypatch.setattr(load, "to_stack", lambda items, **kwargs: "CUBE")
+    monkeypatch.setattr(load, "stack_stats", lambda cube, **kwargs: {"count": 2, "units": "dB"})
+    items = [_StatsItem("a"), _StatsItem("b")]
+    asked = {"windowed": {"windowed": True}, "speckle_filter": {"speckle_filter": "boxcar"}}
+
+    for execution, supported, refused in _INSTANCE_SHAPES:
+        page = serve.landing_page("http://x/", artifacts=True, stack_execution=execution)
+        (link,) = [ln for ln in page["links"] if ln["rel"] == "stats"]
+        capabilities = link[serve.STATS_CAPABILITY_FIELD]
+        render = serve.default_renderers(execution).stats
+
+        with pytest.raises(ValueError) as excinfo:
+            render(items, serve.stats_options(asked[refused]))
+        assert str(excinfo.value) == capabilities[refused]["reason"]
+
+        # The other half: what the page advertises actually renders. Without it
+        # a page that refused everything would pass the check above.
+        assert json.loads(render(items, serve.stats_options(asked[supported])))["units"] == "dB"
+
+
+def test_the_advertisement_reaches_the_running_server(index_path, tmp_path):
+    """Not a document builder in isolation: the route hands the instance's own
+    policy to the page, so a client reads it from ``GET /``."""
+    app = serve.build_app(
+        index_path,
+        stack_execution=serve.StackExecution(lazy=True, chunk_size=64),
+        cache_dir=tmp_path / "cache",
+    )
+    client = TestClient(app)
+    (link,) = [ln for ln in client.get("/").json()["links"] if ln["rel"] == "stats"]
+    capabilities = link[serve.STATS_CAPABILITY_FIELD]
+    assert capabilities["windowed"]["supported"] is True
+    assert capabilities["speckle_filter"]["supported"] is False
+    assert "64px windows" in capabilities["stacking"]
+
+
+def test_an_unknown_stats_option_is_a_programming_error():
+    """The roster is the vocabulary: a typo must not read as "supported"."""
+    with pytest.raises(ValueError, match="option must be one of"):
+        serve.stats_option_refusal(serve.StackExecution(), "speckle-filter")
+
+
 def _stats_scenes(tmp_path):
     """Three same-footprint passes (fills 2/4/8) as items the renderer can read."""
     rasterio = pytest.importorskip("rasterio")

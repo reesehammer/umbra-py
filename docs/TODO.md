@@ -478,13 +478,10 @@ of looks before and after. Follow-ons, none a blocker:
     one without, which makes the pair unsatisfiable everywhere and so refused
     together at the request. `umbra serve` echoes which of the two an instance
     can honour. What is still open, and smaller:
-    - **The landing page still doesn't advertise either capability.** A client
-      discovers whether an instance can filter (or measure in windows) by asking
-      and reading the `400`; the startup echo tells the *operator*, not the
-      caller. This is the same gap the datacube section's "only the refusal
-      advertises the windowed capability" entry names, now with two options
-      behind it rather than one — which is the evidence that would justify a
-      field on the landing page's `stats` link.
+    - ~~**The landing page still doesn't advertise either capability.**~~
+      **shipped** — the `stats` link's `umbra:options` reports both, with the
+      would-be `400`'s own text as the `reason` on the unsupported one (see the
+      datacube section's entry, where the follow-ons live).
     - **`umbra serve` has no `--stack-speckle-*` default.** Every request that
       wants a filter must name it, because a server-set default would be exactly
       the invisible flag the cache key rule exists to prevent. Worth revisiting
@@ -742,12 +739,29 @@ none a blocker:
   server was the front door with the memory problem. (They *do* take
   `speckle_filter`, which is the opposite case: it changes the answer's quality
   rather than the memory, so it means something at any cube size.)
-- **Only the refusal advertises an instance's stats capabilities.** A client
-  discovers that an instance can measure in windows — or speckle-filter, the
-  complementary option a chunked instance *cannot* honour — by asking and reading
-  the `400`; nothing in the landing page or `/healthz` says so up front. Cheapest
-  fix if it matters: a field on the landing page's `stats` link, now naming two
-  options rather than one.
+- ~~**Only the refusal advertises an instance's stats capabilities.**~~
+  **shipped** — the landing page's `stats` link carries `umbra:options`
+  (`serve.stats_capabilities`): `windowed` and `speckle_filter` each report
+  `supported`, an unsupported one carries the `reason` its `400` would have
+  given, and `stacking` names the instance's policy. Advertisement and refusal
+  are one function (`serve.stats_option_refusal`), and the suite drives the
+  renderer against the page to check it. What is still open, and smaller:
+  - **`/healthz` still says nothing about it.** Deliberate: the health document
+    is kept tiny so a container `HEALTHCHECK` or a Kubernetes probe can poll it
+    cheaply, and a probe is not a client picking request options. Revisit only
+    if something that cannot fetch `/` needs the capability.
+  - **The advertisement describes the *policy*, not the injected renderers.**
+    `build_app(renderers=…)` replaces the stacking entirely, so a caller that
+    injects its own is advertising `StackExecution`'s behaviour rather than its
+    own — the same scope the policy itself already has (it "applies only to the
+    default renderers"). A `capabilities=` override on `build_app` is the shape
+    if an embedder ever needs one.
+  - **Nothing advertises the always-refused pair.** `windowed` *and*
+    `speckle_filter` together is a `400` on every instance, refused in
+    `stats_options` rather than per instance, so it is a fact about the API and
+    not about the server — it lives in the docs and the OpenAPI description. A
+    client that reads `umbra:options` sees one option unsupported anyway, so the
+    combination is unreachable in practice.
 - **The quantile histogram is a Python dict of bin → count.** Fine at the sizes
   this sees (a few thousand occupied bins per pass), but a pass spanning hundreds
   of decibels holds proportionally more. If that ever matters, cap the axis or
