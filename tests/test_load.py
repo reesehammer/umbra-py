@@ -2118,3 +2118,30 @@ def test_written_rasters_carry_the_provenance_forward(tmp_path):
     # conversion that never happened.
     plain = to_geotiff(_three_scenes(tmp_path)[0], tmp_path / "plain.tif", max_size=32)
     assert read_conversion_tags(plain) == {}
+
+
+def test_to_stack_does_not_refuse_over_the_subtractions_own_diagnostics(tmp_path):
+    """How much a pass was floored is not what its pixel values mean."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Two passes of one site, converted identically -- and each carrying its own
+    # measured floored fraction and margin, because those describe the scene the
+    # correction met rather than the correction. A refusal here would make the
+    # diagnostics unusable: no two real passes agree on them, so recording them
+    # would have ended every series.
+    settings = {"calibration": "sigma0", "noise_subtraction": "estimated"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "noise_floored_fraction": 0.02, "noise_floor_margin_db": 14.0},
+        {**settings, "noise_floored_fraction": 0.31, "noise_floor_margin_db": 7.5},
+    )
+    cube = to_stack(items, max_size=32)
+
+    prov = cube.attrs["provenance"]
+    assert prov["noise_subtraction"] == "estimated"
+    # Carried only where the sources agree, and here they do not -- so the cube
+    # says nothing rather than quoting one pass's number for the whole series.
+    assert "noise_floored_fraction" not in prov
+    assert "noise_floor_margin_db" not in prov

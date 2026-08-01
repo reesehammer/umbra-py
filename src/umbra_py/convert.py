@@ -106,6 +106,21 @@ rather than ``"absolute"``, with the inferred level in
 ``UMBRA_NOISE_FLOOR_DB`` — and :func:`umbra_py.load.to_stack` refuses to
 difference a series that mixes the two.
 
+Those two exchanges were documented; they were not *reported*, so on any given
+scene there was no way to tell whether they had bitten. Every subtraction now
+also records what it did to the image (:class:`NoiseSubtraction`):
+``UMBRA_NOISE_FLOORED_FRACTION``, how much of the raster the floor drove to the
+sensor's sensitivity limit, and — for the estimated model —
+``UMBRA_NOISE_FLOOR_MARGIN_DB``, how far the scene's own median power sat above
+the inferred floor. The second is the estimator's assumption made checkable: it
+works because a SAR scene's dark surfaces are a *different population* from its
+ordinary backscatter, so a wide margin is the evidence that they were, and a
+narrow one says this scene was bright everywhere and the fifth percentile it
+subtracted was ground. ``umbra convert`` prints both and says so below
+:data:`NOISE_MARGIN_WARN_DB`. It stays an advisory rather than a refusal — a
+uniform scene is legitimate, and the honest answer there is a measured floor,
+not a different guess.
+
 All of that work is proportional to the scene, and a scene is tens of square
 kilometres at 16–25 cm. ``bbox=`` on :func:`sicd_to_geocoded_cog` (``umbra
 convert --clip-bbox``) makes it proportional to the *area of interest* instead:
@@ -131,8 +146,9 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from . import __version__
 from .constants import ATTRIBUTION, DATA_LICENSE
@@ -484,6 +500,58 @@ _NOISE_PROVENANCE = {
 #: zero-amplitude pixel does, rather than as ``-inf``.
 _NOISE_RESIDUAL_FLOOR = 1e-12
 
+#: Below this separation between the *estimated* floor and the scene's own median
+#: power, ``umbra convert`` says the scene had little dark ground to read (see
+#: :attr:`NoiseSubtraction.margin_db`). It is an advisory threshold, never a
+#: refusal: "how bimodal is this scene?" is a heuristic, and a scene can be
+#: legitimately uniform. 6 dB is a factor of four in power — enough that the low
+#: tail is a different population from typical backscatter rather than its lower
+#: shoulder, and low enough that ordinary single-surface scenes clear it.
+NOISE_MARGIN_WARN_DB = 6.0
+
+
+@dataclass(frozen=True)
+class NoiseSubtraction:
+    """What one noise-floor subtraction did, beyond changing the pixels.
+
+    :func:`_denoise_amplitude` computes all three of these on its way through the
+    array and, before this existed, threw them away — which left the correction's
+    two documented failure modes invisible in the one place they matter, the
+    output. They are diagnostics of *this* raster, not statements about what a
+    pixel value means, so they are recorded (see :func:`conversion_tags`) but are
+    deliberately **not** in :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`: a
+    stack of passes that were floored to different degrees is still a stack of
+    comparable measurements.
+
+    Attributes
+    ----------
+    floored_fraction:
+        Fraction of the raster's finite pixels the subtraction drove to
+        :data:`_NOISE_RESIDUAL_FLOOR` — where the floor met or exceeded the
+        measured power. That is exactly "how much of this image is at the
+        sensor's sensitivity limit", a fact about the radar rather than the
+        ground, and a large value is the tell that a scene is being reported
+        mostly as its own noise. Counted in image space over the window actually
+        read, so a ``bbox=`` clip reports its own window rather than the scene.
+    floor_db:
+        The single floor subtracted, in decibels, for the estimated model.
+        ``None`` for the measured one, which is a polynomial across the image and
+        has no one value to report.
+    margin_db:
+        How far the scene's own *median* power sits above that estimated floor.
+        The estimator assumes the scene contains a noise-dominated population to
+        read; when it does, the median is far above the fifth percentile, and
+        when it doesn't — uniformly bright imagery, where the fifth percentile is
+        ground — the two collapse together and the subtraction removes real
+        backscatter. This number is that distance, so the assumption is reported
+        rather than merely documented (:data:`NOISE_MARGIN_WARN_DB`). ``None``
+        for the measured model, which assumes nothing about the scene.
+    """
+
+    floored_fraction: float
+    floor_db: float | None = None
+    margin_db: float | None = None
+
 
 def _noise_level_type(sicd: Any) -> str | None:
     """The SICD's ``Radiometric.NoiseLevel.NoiseLevelType``, upper-cased.
@@ -609,15 +677,28 @@ def _subtract_noise(amplitude: np.ndarray, noise: Any, *, decibels: bool):
     pixels are at the sensor's sensitivity limit, which is a statement about the
     radar and not a measurement of the ground. Non-finite pixels (the warp's
     nodata) stay non-finite.
+
+    Returns the corrected raster and the fraction of its finite pixels that
+    landed on that floor — the "how much of this image is the sensor rather than
+    the scene?" number, which is free here (the comparison is already being made)
+    and unrecoverable afterwards, since a floored pixel and a genuinely
+    floor-valued one are the same value in the output.
     """
     np = _require("numpy")
 
     values = np.asarray(amplitude, dtype="float64")
     power = np.power(10.0, values / 10.0) if decibels else np.square(values)
-    residual = np.clip(power - np.asarray(noise, dtype="float64"), _NOISE_RESIDUAL_FLOOR, None)
+    residual = power - np.asarray(noise, dtype="float64")
+    finite = np.isfinite(residual)
+    finite_count = int(finite.sum())
+    floored = int(np.logical_and(finite, residual <= _NOISE_RESIDUAL_FLOOR).sum())
+    residual = np.clip(residual, _NOISE_RESIDUAL_FLOOR, None)
     with np.errstate(divide="ignore", invalid="ignore"):
         corrected = 10.0 * np.log10(residual) if decibels else np.sqrt(residual)
-    return np.asarray(corrected, dtype="float32")
+    return (
+        np.asarray(corrected, dtype="float32"),
+        floored / finite_count if finite_count else 0.0,
+    )
 
 
 def _estimate_noise_power(
@@ -625,7 +706,7 @@ def _estimate_noise_power(
     *,
     decibels: bool,
     percentile: float = NOISE_ESTIMATE_PERCENTILE,
-) -> float:
+) -> tuple[float, float]:
     """Infer a constant noise floor from a detected-amplitude raster itself.
 
     A SAR scene almost always contains surfaces that return essentially nothing
@@ -646,8 +727,13 @@ def _estimate_noise_power(
     Both facts are why it records itself as ``"estimated"`` rather than sharing
     a provenance value with the measured floor (see :data:`_NOISE_PROVENANCE`).
 
-    Returns the floor as linear power, in the same arbitrary units the product's
-    pixels carry, for :func:`_subtract_noise` to take off.
+    Returns the floor **and the scene's median power**, both as linear power in
+    the same arbitrary units the product's pixels carry: the first for
+    :func:`_subtract_noise` to take off, the second because the distance between
+    them is the only evidence the estimator leaves about whether its assumption
+    held (see :attr:`NoiseSubtraction.margin_db`). The median comes from the same
+    already-computed, already-filtered array, so asking for it costs one more
+    pass over the finite values rather than a second conversion of the scene.
     """
     np = _require("numpy")
 
@@ -665,7 +751,7 @@ def _estimate_noise_power(
             "Cannot estimate a noise floor from this image: no pixel carries a "
             "finite value, so the scene's power distribution is empty."
         )
-    return float(np.percentile(finite, float(percentile)))
+    return float(np.percentile(finite, float(percentile))), float(np.median(finite))
 
 
 def _denoise_amplitude(
@@ -676,7 +762,7 @@ def _denoise_amplitude(
     origin: tuple[int, int] = (0, 0),
     model: str = "measured",
     percentile: float = NOISE_ESTIMATE_PERCENTILE,
-) -> tuple[np.ndarray, float | None]:
+) -> tuple[np.ndarray, NoiseSubtraction]:
     """Subtract a noise floor from a detected-amplitude raster.
 
     ``model`` picks where the floor comes from, one of :data:`NOISE_MODELS`:
@@ -693,16 +779,21 @@ def _denoise_amplitude(
     no image-coordinate dependence and so ignores it — a clip's floor is
     inferred from the clip, which is the only ground it can see.
 
-    Returns the corrected raster and, for the estimated model, the floor it
-    inferred in decibels (``None`` for the measured one, which is per-pixel and
-    has no single value to report).
+    Returns the corrected raster and a :class:`NoiseSubtraction` describing what
+    the correction did to it: always how much of the image it drove to the
+    sensor's limit, and for the estimated model the floor it inferred plus how
+    far the scene's median sat above it.
     """
     if model not in NOISE_MODELS:
         raise ValueError(f"Unknown noise_model {model!r}; choose one of {', '.join(NOISE_MODELS)}.")
     if model == "estimated":
-        floor = _estimate_noise_power(amplitude, decibels=decibels, percentile=percentile)
-        floor_db = 10.0 * math.log10(floor) if floor > 0.0 else float("-inf")
-        return _subtract_noise(amplitude, floor, decibels=decibels), floor_db
+        floor, median = _estimate_noise_power(amplitude, decibels=decibels, percentile=percentile)
+        corrected, floored = _subtract_noise(amplitude, floor, decibels=decibels)
+        return corrected, NoiseSubtraction(
+            floored_fraction=floored,
+            floor_db=10.0 * math.log10(floor) if floor > 0.0 else float("-inf"),
+            margin_db=_margin_db(median, floor),
+        )
 
     coefs = _noise_coefficients(sicd)
     geometry = _image_grid_geometry(sicd)
@@ -710,7 +801,48 @@ def _denoise_amplitude(
     geometry["first_row"] += float(row0)
     geometry["first_col"] += float(col0)
     noise = _noise_power(coefs, amplitude.shape, **geometry)
-    return _subtract_noise(amplitude, noise, decibels=decibels), None
+    corrected, floored = _subtract_noise(amplitude, noise, decibels=decibels)
+    return corrected, NoiseSubtraction(floored_fraction=floored)
+
+
+class _NoiseTagValues(TypedDict):
+    """The :func:`conversion_tags` keywords a :class:`NoiseSubtraction` fills in."""
+
+    noise_floor_db: float | None
+    noise_floored_fraction: float | None
+    noise_floor_margin_db: float | None
+
+
+def _noise_tag_values(noise: NoiseSubtraction | None) -> _NoiseTagValues:
+    """A :class:`NoiseSubtraction` as :func:`conversion_tags` keyword arguments.
+
+    One place for the mapping so both writers (slant-plane and geocoded) record
+    the same three numbers, and so a raster written without the subtraction
+    passes ``None`` for all of them rather than omitting different keys.
+    """
+    if noise is None:
+        return {
+            "noise_floor_db": None,
+            "noise_floored_fraction": None,
+            "noise_floor_margin_db": None,
+        }
+    return {
+        "noise_floor_db": noise.floor_db,
+        "noise_floored_fraction": noise.floored_fraction,
+        "noise_floor_margin_db": noise.margin_db,
+    }
+
+
+def _margin_db(median: float, floor: float) -> float | None:
+    """How far a scene's median power sits above an inferred floor, in decibels.
+
+    ``None`` where the ratio is undefined — a non-positive floor or median, which
+    a scene of pure zeros produces — because an absent number is a smaller lie
+    than an infinite one in a tag a reader will parse as a float.
+    """
+    if floor <= 0.0 or median <= 0.0:
+        return None
+    return 10.0 * math.log10(median / floor)
 
 
 def sicd_noise_level(src: str | os.PathLike) -> str | None:
@@ -774,6 +906,8 @@ def conversion_tags(
     calibration: str | None = None,
     noise_subtraction: str | None = None,
     noise_floor_db: float | None = None,
+    noise_floored_fraction: float | None = None,
+    noise_floor_margin_db: float | None = None,
     rtc_model: str | None = None,
     rtc_reference_deg: float | None = None,
     projection_type: str | None = None,
@@ -822,6 +956,16 @@ def conversion_tags(
         ``rtc_reference_deg`` is: an inferred number that nobody can read back
         is not reproducible. Omitted for the measured floor, which is a
         polynomial across the image rather than one value.
+    noise_floored_fraction:
+        How much of the image the subtraction drove to the sensor's sensitivity
+        limit, and ``noise_floor_margin_db`` how far the scene's median power sat
+        above an *estimated* floor — the two diagnostics of
+        :class:`NoiseSubtraction`. They describe how well the correction was
+        supported by this scene rather than what a pixel value means, which is
+        why they are recorded here but stay out of
+        :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`: they legitimately
+        differ between passes of one series, so a stack must not be refused over
+        them. Both are omitted when no floor was subtracted.
     rtc_reference_deg:
         The *resolved* reference incidence angle the flattening normalised to
         (the scene incidence angle when the caller passed none), so the tag
@@ -837,8 +981,13 @@ def conversion_tags(
         "NOISE_SUBTRACTION": noise_subtraction or "none",
         "RTC_MODEL": rtc_model or "none",
     }
-    if noise_subtraction is not None and noise_floor_db is not None:
-        tags["NOISE_FLOOR_DB"] = f"{float(noise_floor_db):.6g}"
+    if noise_subtraction is not None:
+        if noise_floor_db is not None:
+            tags["NOISE_FLOOR_DB"] = f"{float(noise_floor_db):.6g}"
+        if noise_floored_fraction is not None:
+            tags["NOISE_FLOORED_FRACTION"] = f"{float(noise_floored_fraction):.4g}"
+        if noise_floor_margin_db is not None:
+            tags["NOISE_FLOOR_MARGIN_DB"] = f"{float(noise_floor_margin_db):.6g}"
     if rtc_model is not None and rtc_reference_deg is not None:
         tags["RTC_REFERENCE_DEG"] = f"{float(rtc_reference_deg):.6g}"
     if geocoded:
@@ -953,12 +1102,10 @@ def sicd_to_amplitude_geotiff(
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
     amplitude = _amplitude(reader[:, :], decibels=decibels)
-    noise_floor_db = None
+    noise: NoiseSubtraction | None = None
     if noise_subtract:
         # Before the calibration: noise adds to raw power, so it comes off there.
-        amplitude, noise_floor_db = _denoise_amplitude(
-            sicd, amplitude, decibels=decibels, model=noise_model
-        )
+        amplitude, noise = _denoise_amplitude(sicd, amplitude, decibels=decibels, model=noise_model)
     if calibration is not None:
         amplitude = _calibrate_amplitude(
             sicd,
@@ -990,7 +1137,7 @@ def sicd_to_amplitude_geotiff(
                 decibels=decibels,
                 calibration=calibration,
                 noise_subtraction=_NOISE_PROVENANCE[noise_model] if noise_subtract else None,
-                noise_floor_db=noise_floor_db,
+                **_noise_tag_values(noise),
             )
         )
     return dst
@@ -2359,12 +2506,14 @@ def sicd_to_geocoded_cog(
         )
         origin = (row0, col0)
         amplitude = _amplitude(reader[row0:row1, col0:col1], decibels=decibels)
-    noise_floor_db = None
+    noise: NoiseSubtraction | None = None
     if noise_subtract:
         # First, and in image space: the noise floor is additive in power and is
         # a polynomial in image coordinates, so it comes off the raw detected
-        # power before the multiplicative corrections scale what is left.
-        amplitude, noise_floor_db = _denoise_amplitude(
+        # power before the multiplicative corrections scale what is left. Its
+        # diagnostics are therefore counted over the image window read, which is
+        # the population the correction actually saw.
+        amplitude, noise = _denoise_amplitude(
             sicd, amplitude, decibels=decibels, origin=origin, model=noise_model
         )
     if calibration is not None:
@@ -2449,7 +2598,7 @@ def sicd_to_geocoded_cog(
             decibels=decibels,
             calibration=calibration,
             noise_subtraction=_NOISE_PROVENANCE[noise_model] if noise_subtract else None,
-            noise_floor_db=noise_floor_db,
+            **_noise_tag_values(noise),
             rtc_model=rtc_model if rtc else None,
             rtc_reference_deg=reference_deg,
             projection_type=projection_type,

@@ -2160,13 +2160,13 @@ def test_subtract_noise_is_a_power_domain_subtraction_in_both_scales():
 
     # Linear magnitude: power is the square, so sqrt(4 - 0.25) comes back.
     lin = np.array([[2.0, np.nan]], dtype="float32")
-    out_lin = convert._subtract_noise(lin, noise, decibels=False)
+    out_lin, _ = convert._subtract_noise(lin, noise, decibels=False)
     assert out_lin[0, 0] == pytest.approx(math.sqrt(4.0 - 0.25), rel=1e-5)
     assert np.isnan(out_lin[0, 1])  # the warp's nodata stays nodata
 
     # Decibels: 20*log10(magnitude) IS 10*log10(power), so the same measurement.
     db = np.array([[20.0 * math.log10(2.0), np.nan]], dtype="float32")
-    out_db = convert._subtract_noise(db, noise, decibels=True)
+    out_db, _ = convert._subtract_noise(db, noise, decibels=True)
     assert out_db[0, 0] == pytest.approx(10.0 * math.log10(4.0 - 0.25), rel=1e-5)
     assert np.isnan(out_db[0, 1])
     assert 20.0 * math.log10(float(out_lin[0, 0])) == pytest.approx(float(out_db[0, 0]), rel=1e-5)
@@ -2179,11 +2179,15 @@ def test_subtract_noise_floors_pixels_at_or_below_the_noise():
     # it dark and finite; letting it go negative would make sqrt/log undefined.
     noise = np.full((1, 3), 1.0)
     lin = np.array([[0.5, 1.0, 2.0]], dtype="float32")
-    out = convert._subtract_noise(lin, noise, decibels=False)
+    out, floored = convert._subtract_noise(lin, noise, decibels=False)
     assert np.all(np.isfinite(out))
     assert out[0, 0] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
     assert out[0, 1] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
     assert out[0, 2] == pytest.approx(math.sqrt(3.0), rel=1e-5)
+    # The two floored pixels are exactly "how much of this image is the sensor",
+    # which the output alone cannot answer: a floored pixel and a genuinely
+    # floor-valued one are the same value once written.
+    assert floored == pytest.approx(2 / 3)
 
 
 def test_denoise_origin_matches_the_same_pixels_of_the_whole_scene():
@@ -2193,15 +2197,17 @@ def test_denoise_origin_matches_the_same_pixels_of_the_whole_scene():
     sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-20.0, 0.4], [0.2, 0.0]]))
     amp = (np.arange(20 * 24, dtype="float32") + 1.0).reshape(20, 24)
 
-    whole, whole_floor = convert._denoise_amplitude(sicd, amp, decibels=True)
+    whole, whole_noise = convert._denoise_amplitude(sicd, amp, decibels=True)
     row0, col0 = 6, 9
-    window, window_floor = convert._denoise_amplitude(
+    window, window_noise = convert._denoise_amplitude(
         sicd, amp[row0 : row0 + 5, col0 : col0 + 7], decibels=True, origin=(row0, col0)
     )
     assert np.allclose(window, whole[row0 : row0 + 5, col0 : col0 + 7], atol=1e-5)
     # The measured floor is a polynomial across the image, so there is no single
     # level to report -- unlike the estimated one, which is exactly one number.
-    assert whole_floor is None and window_floor is None
+    # It assumes nothing about the scene either, so there is no margin to quote.
+    assert whole_noise.floor_db is None and window_noise.floor_db is None
+    assert whole_noise.margin_db is None and window_noise.margin_db is None
 
 
 def test_sicd_to_amplitude_geotiff_subtracts_the_products_own_floor(tmp_path, monkeypatch):
@@ -2375,12 +2381,17 @@ def test_estimate_noise_power_reads_the_low_tail_of_the_scenes_own_power():
     power = np.concatenate([np.full(200, 1.0), np.full(800, 100.0)])
     lin = np.sqrt(power).reshape(20, 50).astype("float32")
 
-    assert convert._estimate_noise_power(lin, decibels=False, percentile=5.0) == pytest.approx(1.0)
+    floor, median = convert._estimate_noise_power(lin, decibels=False, percentile=5.0)
+    assert floor == pytest.approx(1.0)
+    # The median comes back beside the floor because the distance between them is
+    # the estimator's own assumption -- that the dark tail is a *different*
+    # population from ordinary backscatter -- made checkable.
+    assert median == pytest.approx(100.0)
 
     # Same measurement in the decibel scale: 10*log10 of power IS 20*log10 of
     # magnitude, so the estimator has to undo whichever one it was handed.
     db = (10.0 * np.log10(power)).reshape(20, 50).astype("float32")
-    assert convert._estimate_noise_power(db, decibels=True, percentile=5.0) == pytest.approx(
+    assert convert._estimate_noise_power(db, decibels=True, percentile=5.0)[0] == pytest.approx(
         1.0, rel=1e-5
     )
 
@@ -2390,9 +2401,9 @@ def test_estimate_noise_power_ignores_the_warps_nodata():
 
     values = np.array([[1.0, np.nan, 10.0, np.nan, 10.0]], dtype="float32")
     # Counting the NaNs would move the percentile off a shrinking population.
-    assert convert._estimate_noise_power(values, decibels=False, percentile=50.0) == pytest.approx(
-        100.0
-    )
+    assert convert._estimate_noise_power(values, decibels=False, percentile=50.0)[
+        0
+    ] == pytest.approx(100.0)
 
 
 def test_estimate_noise_power_rejects_an_all_nodata_image():
@@ -2422,9 +2433,14 @@ def test_denoise_estimated_needs_no_radiometric_metadata_at_all():
     with pytest.raises(ValueError, match="no Radiometric metadata"):
         convert._denoise_amplitude(sicd, amp, decibels=False, model="measured")
 
-    out, floor_db = convert._denoise_amplitude(sicd, amp, decibels=False, model="estimated")
+    out, noise = convert._denoise_amplitude(sicd, amp, decibels=False, model="estimated")
     # Floor = the 5th percentile of power = 1.0 (10% of the scene sits there).
-    assert floor_db == pytest.approx(0.0)
+    assert noise.floor_db == pytest.approx(0.0)
+    # 90% of the scene is at power 100, so the median sits 20 dB above the floor:
+    # this scene plainly had dark ground to read, and says so.
+    assert noise.margin_db == pytest.approx(20.0)
+    # Only the dark population is driven to the residual floor.
+    assert noise.floored_fraction == pytest.approx(0.1)
     assert np.all(out <= amp + 1e-4)  # it only ever takes brightness away
     assert out[0, 0] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
     assert out[-1, -1] == pytest.approx(math.sqrt(100.0 - 1.0), rel=1e-5)
@@ -2463,7 +2479,7 @@ def test_geocoded_cog_estimated_floor_is_recorded_as_an_inference(tmp_path, monk
         * math.log10(
             convert._estimate_noise_power(
                 convert._amplitude(_fake_complex(10, 12), decibels=True), decibels=True
-            )
+            )[0]
         ),
         rel=1e-4,
     )
@@ -3130,3 +3146,200 @@ def test_clip_with_a_dem_searches_on_the_flat_earth_projection(tmp_path, monkeyp
     assert out.exists()
     assert ("latlong", "HAE") in sicd.calls
     assert not any(kind == "DEM" for _, kind in sicd.calls)
+
+
+# --------------------------------------------------------------------------- #
+# What the subtraction did to the image. Both noise models have documented
+# limits -- everything at the sensor's floor is clamped, and the estimated model
+# assumes the scene contained dark ground to read -- and until these numbers were
+# recorded, neither limit was visible on any particular scene.
+# --------------------------------------------------------------------------- #
+
+
+def test_subtract_noise_counts_the_floored_fraction_over_finite_pixels_only():
+    np = pytest.importorskip("numpy")
+
+    # Two of the four real pixels are at or under the floor; the warp's nodata is
+    # neither floored nor measured, so counting it would shrink the answer toward
+    # zero on exactly the clipped scenes where the fraction matters most.
+    noise = np.full((1, 5), 1.0)
+    lin = np.array([[0.5, 1.0, 2.0, 3.0, np.nan]], dtype="float32")
+    _, floored = convert._subtract_noise(lin, noise, decibels=False)
+    assert floored == pytest.approx(0.5)
+
+    # An all-nodata window has no population to report a fraction of.
+    _, none_finite = convert._subtract_noise(
+        np.full((2, 2), np.nan, dtype="float32"), np.ones((2, 2)), decibels=False
+    )
+    assert none_finite == 0.0
+
+
+def test_estimated_margin_separates_a_bimodal_scene_from_a_uniform_one():
+    """The estimator's assumption, made checkable rather than only documented."""
+    np = pytest.importorskip("numpy")
+
+    sicd = _FakeSicd()  # no Radiometric block: only the estimated model can run
+    # Dark water (power 1) under bright land (power 1000): the fifth percentile
+    # lands in a population 30 dB below the median, which is the evidence that
+    # the two are different populations at all.
+    bimodal = np.sqrt(
+        np.concatenate([np.full(100, 1.0), np.full(900, 1000.0)]).reshape(25, 40)
+    ).astype("float32")
+    _, dark_ground = convert._denoise_amplitude(sicd, bimodal, decibels=False, model="estimated")
+    assert dark_ground.margin_db == pytest.approx(30.0)
+    assert dark_ground.margin_db > convert.NOISE_MARGIN_WARN_DB
+
+    # Uniformly bright imagery -- dense city, forest at high incidence -- has no
+    # noise-dominated tail, so the fifth percentile IS ground and subtracting it
+    # takes real backscatter off. The margin collapses, which is the only warning
+    # the estimate can honestly give.
+    uniform = np.full((25, 40), math.sqrt(1000.0), dtype="float32")
+    _, no_dark_ground = convert._denoise_amplitude(sicd, uniform, decibels=False, model="estimated")
+    assert no_dark_ground.margin_db == pytest.approx(0.0)
+    assert no_dark_ground.margin_db < convert.NOISE_MARGIN_WARN_DB
+    # And it shows in the other diagnostic too: the whole scene lands on the floor.
+    assert no_dark_ground.floored_fraction == pytest.approx(1.0)
+
+
+def test_margin_is_absent_rather_than_infinite_where_the_ratio_is_undefined():
+    # A tag a reader parses as a float should not have to carry "-inf": an absent
+    # number is a smaller lie than an infinite one.
+    assert convert._margin_db(0.0, 1.0) is None
+    assert convert._margin_db(1.0, 0.0) is None
+    assert convert._margin_db(100.0, 1.0) == pytest.approx(20.0)
+
+
+def test_geocoded_cog_records_what_the_estimated_subtraction_did(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "estimated.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        noise_subtract=True,
+        noise_model="estimated",
+    )
+    tags = convert.read_conversion_tags(out)
+    # Counted in image space, over the window the correction actually saw --
+    # not over the warped output, which has nodata the subtraction never met.
+    assert 0.0 <= float(tags["noise_floored_fraction"]) <= 1.0
+    assert float(tags["noise_floor_margin_db"]) > 0.0
+
+
+def test_measured_floor_reports_the_floored_fraction_but_no_margin(tmp_path, monkeypatch):
+    """The measured model assumes nothing about the scene, so it claims nothing."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-40.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), sicd))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "measured.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        noise_subtract=True,
+    )
+    tags = convert.read_conversion_tags(out)
+    # "How much of this image is at the sensor's limit" is a fact about either
+    # floor, so it is reported for both.
+    assert "noise_floored_fraction" in tags
+    # The margin exists to check an inference. There is none to check here.
+    assert "noise_floor_margin_db" not in tags
+
+
+def test_conversion_tags_omit_the_diagnostics_when_nothing_was_subtracted():
+    tags = convert.conversion_tags(
+        source="scene.ntf",
+        geocoded=True,
+        noise_subtraction=None,
+        noise_floored_fraction=0.42,
+        noise_floor_margin_db=11.0,
+    )
+    assert tags["UMBRA_NOISE_SUBTRACTION"] == "none"
+    assert "UMBRA_NOISE_FLOORED_FRACTION" not in tags
+    assert "UMBRA_NOISE_FLOOR_MARGIN_DB" not in tags
+
+
+def test_cli_convert_says_what_the_subtraction_did(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "geo.tif"),
+            "--subtract-noise",
+            "--noise-model",
+            "estimated",
+            "--resampling",
+            "nearest",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "at the sensor's limit" in result.output
+    assert "below the scene median" in result.output
+
+
+def test_cli_convert_advises_when_the_scene_had_no_dark_ground(tmp_path, monkeypatch):
+    """An advisory, not a refusal: a uniform scene is legitimate."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    # Uniform brightness: the fifth percentile is ground, so the subtraction is
+    # taking real backscatter off and the margin collapses to nothing.
+    flat = np.full((10, 12), 5.0 + 0j)
+    _patch_open_complex(monkeypatch, _FakeReader(flat, _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "flat.tif"),
+            "--subtract-noise",
+            "--noise-model",
+            "estimated",
+            "--resampling",
+            "nearest",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "little dark ground" in result.output
+    assert "--noise-model measured" in result.output
+
+
+def test_cli_convert_stays_quiet_about_a_subtraction_that_did_not_run(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "plain.tif"), "--resampling", "nearest"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "sensor's limit" not in result.output

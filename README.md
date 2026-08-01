@@ -807,6 +807,18 @@ umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet \
 # `umbra stack` refuses to difference a series that mixes the two floors.
 umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise --noise-model estimated
 
+# Either floor also says what it did to *this* scene, rather than leaving its
+# limits as documentation: how much of the image it drove to the sensor's
+# sensitivity limit (UMBRA_NOISE_FLOORED_FRACTION), and -- for the estimate --
+# how far the scene's median power sat above the floor it inferred
+# (UMBRA_NOISE_FLOOR_MARGIN_DB). A wide margin is the evidence that the dark
+# tail really was a different population from the backscatter; a narrow one says
+# this scene was bright everywhere and the estimate took real signal off, so the
+# command says so and points at --noise-model measured. Advisory, not a refusal:
+# a uniform scene is legitimate.
+#   12.4% of the image is at the sensor's limit after the subtraction
+#   Estimated floor of -31.2 dB sits 17.8 dB below the scene median
+
 # Convert only the area you care about. A scene is tens of square kilometres at
 # 16-25 cm, and every step above is proportional to it. --clip-bbox turns the
 # ground rectangle back into the image window that covers it, reads only that,

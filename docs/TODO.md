@@ -210,8 +210,10 @@ blocker:
 - **Code:** `src/umbra_py/convert.py` (`_noise_level_type`,
   `_noise_coefficients`, `_noise_power`, `_estimate_noise_power`,
   `_subtract_noise`, `_denoise_amplitude`, `sicd_noise_level`, `NOISE_MODELS`,
-  `NOISE_ESTIMATE_PERCENTILE`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` /
-  `NOISE_FLOOR_DB` tags), `src/umbra_py/load.py`
+  `NOISE_ESTIMATE_PERCENTILE`, `NOISE_MARGIN_WARN_DB`, `NoiseSubtraction`,
+  `_margin_db`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` / `NOISE_FLOOR_DB` /
+  `NOISE_FLOORED_FRACTION` / `NOISE_FLOOR_MARGIN_DB` tags),
+  `src/umbra_py/cli/process.py` (`_echo_noise_report`), `src/umbra_py/load.py`
   (`MEASUREMENT_PROVENANCE_KEYS`, `_STEP_NOT_RUN`), `src/umbra_py/chips.py`
   (`SicdConversion.noise_subtract` / `.noise_model`,
   `ChipRecord.noise_subtraction`),
@@ -227,15 +229,12 @@ own power — which is what works on Umbra's open products, since they generally
 carry no `Radiometric` block at all. The two record themselves as different
 things (`UMBRA_NOISE_SUBTRACTION` of `"absolute"` vs `"estimated"`, plus
 `UMBRA_NOISE_FLOOR_DB` for the estimate) and `to_stack` refuses a series that
-mixes any two of subtracted / unsubtracted / estimated. Follow-ons, none a
+mixes any two of subtracted / unsubtracted / estimated. Each subtraction also
+reports what it did to the scene it ran on — `UMBRA_NOISE_FLOORED_FRACTION` and,
+for the estimate, `UMBRA_NOISE_FLOOR_MARGIN_DB` — which `umbra convert` prints
+and turns into an advisory below `NOISE_MARGIN_WARN_DB`. Follow-ons, none a
 blocker:
 
-- **Nothing reports how much of the scene the floor swallowed.** The fraction of
-  pixels driven to `_NOISE_RESIDUAL_FLOOR` is exactly the "how much of this image
-  is at the sensor's limit?" number, and it is computed and thrown away. A count
-  on the non-JSON output (or a `UMBRA_NOISE_FLOORED_FRACTION` tag) would make the
-  answer visible where the decision is made; left out because it means either a
-  return-value change or a tag whose value varies with the clip window.
 - **A `RELATIVE` noise level is refused rather than used.** It carries real
   information — the *shape* of the floor across the swath — which could flatten
   the noise-induced gradient without claiming an absolute level. That is a
@@ -259,14 +258,20 @@ blocker:
   dark ground) would recover some of that, but it is a genuinely different
   estimator with its own failure mode — it wants its own provenance value rather
   than quietly changing what `"estimated"` means.
-- **Nothing warns when the scene had no dark ground to read.** Over uniformly
-  bright imagery the 5th percentile *is* ground, so the subtraction removes
-  signal, and the only signal that it happened is the caveat `stack_stats`
-  attaches to any estimated cube. The image's own statistics could say more —
-  a low tail that sits close to the median is the tell — but "how bimodal is
-  this scene?" is a heuristic, and a threshold on it would fail quietly in a
-  different direction. Worth adding as a *reported* number (the ratio of the
-  estimated floor to the scene median) before it is ever worth a refusal.
+- **The two diagnostics reach `umbra convert`, not `umbra chips`.** A chip run
+  converts many scenes, so its equivalent of the advisory is a *summary* across
+  the batch ("4 of 22 scenes had under 6 dB of margin") rather than a line per
+  scene. Both numbers are already in every chip GeoTIFF's tags — `chip_item`
+  copies the whole provenance set — so what is missing is only the roll-up and a
+  field on `ChipRecord`. Left out because it wants a decision about what a batch
+  should say, not because it is hard.
+- **The margin threshold is one constant for every scene type.**
+  `NOISE_MARGIN_WARN_DB` (6 dB) is where the advisory fires, and what counts as
+  "enough dark ground" plausibly differs between a coastal scene and an inland
+  one. It is deliberately not a flag: a knob on a heuristic invites tuning it
+  until the warning goes away, which is the opposite of the point. The number is
+  reported unconditionally, so anyone who disagrees with the threshold can read
+  the margin itself.
 - **`umbra chips` exposes the flag but not the check.** There is no chip-side
   equivalent of `sicd_noise_level`, so a batch over acquisitions whose metadata
   varies fails on the first product that cannot support it rather than reporting

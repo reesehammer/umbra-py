@@ -36,6 +36,47 @@ def _noise_label(noise_model: str) -> str:
     return "noise-subtracted" if noise_model.lower() == "measured" else "noise-estimated"
 
 
+def _echo_noise_report(path: Path) -> None:
+    """Say what the noise subtraction did to the raster just written.
+
+    The subtraction's two documented limits -- it floors whatever sits at the
+    sensor's sensitivity limit, and the estimated model assumes the scene
+    contained dark ground to read -- were true of every conversion and visible in
+    none of them. The numbers that answer both are recorded in the output's own
+    ``UMBRA_*`` tags, so they are read back from there rather than returned
+    through the conversion functions: what gets printed is then exactly what the
+    file will still say tomorrow, and ``sicd_to_geocoded_cog`` keeps returning a
+    path.
+
+    The margin note is an advisory, never an error. A scene that is genuinely
+    uniform is not a mistake, and the fix where one matters is a *measured*
+    floor, not a differently-tuned guess -- so this says what happened and leaves
+    the call to the person making it.
+    """
+    from ..convert import NOISE_MARGIN_WARN_DB, read_conversion_tags  # noqa: PLC0415
+
+    tags = read_conversion_tags(path)
+    floored = tags.get("noise_floored_fraction")
+    if floored is not None:
+        click.echo(
+            f"  {float(floored):.1%} of the image is at the sensor's limit after the "
+            "subtraction (UMBRA_NOISE_FLOORED_FRACTION)"
+        )
+    margin = tags.get("noise_floor_margin_db")
+    if margin is None:
+        return
+    floor_db = tags.get("noise_floor_db")
+    level = f" of {float(floor_db):.1f} dB" if floor_db is not None else ""
+    click.echo(f"  Estimated floor{level} sits {float(margin):.1f} dB below the scene median")
+    if float(margin) < NOISE_MARGIN_WARN_DB:
+        click.echo(
+            f"  Note: that is under {NOISE_MARGIN_WARN_DB:g} dB, so this scene had little "
+            "dark ground for the estimate to read -- the fifth percentile it subtracted "
+            "is likely real backscatter rather than the receiver. Use --noise-model "
+            "measured where the product states its own floor."
+        )
+
+
 @cli.command()
 @click.argument("item_urls", nargs=-1)
 @click.option(
@@ -615,7 +656,11 @@ def convert(
     where noise actually adds. By default the floor is the product's own stated
     one; --noise-model estimated infers it from the scene's own darkest pixels
     instead, which is what works on Umbra's open products, since they generally
-    carry no noise metadata to read.
+    carry no noise metadata to read. Either way the conversion then reports what
+    the subtraction did to this scene: how much of the image it drove to the
+    sensor's sensitivity limit, and -- for the estimate, which assumes the scene
+    contained dark ground to read -- how far the scene's median sat above the
+    floor it inferred. A narrow margin says that assumption did not hold here.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -676,6 +721,8 @@ def convert(
         if subtract_noise:
             label = f"{_noise_label(noise_model)} {label}"
         click.echo(f"Wrote slant-plane {label}amplitude GeoTIFF to {path}")
+        if subtract_noise:
+            _echo_noise_report(path)
         return
 
     auto_dem = bool(dem) and dem.lower() == "auto"
@@ -731,6 +778,8 @@ def convert(
     if subtract_noise:
         kind = f"{_noise_label(noise_model)} {kind}"
     click.echo(f"Wrote {kind} to {path}")
+    if subtract_noise:
+        _echo_noise_report(path)
 
 
 @cli.command()

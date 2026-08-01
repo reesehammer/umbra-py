@@ -245,7 +245,12 @@ clothes: `UMBRA_NOISE_SUBTRACTION` records `"estimated"` rather than `"absolute"
 (with the level it inferred in a new `UMBRA_NOISE_FLOOR_DB`), which is precisely
 what makes `to_stack` refuse to difference an inferred floor against a measured
 one, `stack_stats` name the estimate's two limits, and a `--work-dir` chip cache
-keep the two products apart.
+keep the two products apart. Those limits are now *measured* on each scene rather
+than only named: `UMBRA_NOISE_FLOORED_FRACTION` says how much of the image the
+floor drove to the sensor's limit, and `UMBRA_NOISE_FLOOR_MARGIN_DB` how far the
+scene's median sat above an inferred floor — the estimator's own assumption
+turned into a number, since the model works exactly to the degree that a scene's
+dark surfaces are a different population from its backscatter.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -530,6 +535,25 @@ from:
   bright scene has no dark ground to read, so the subtraction takes real
   backscatter off), and a `SicdConversion.cache_key` that keeps an estimated
   conversion out of a measured one's `--work-dir` slot. See the CHANGELOG.
+- ~~Those two limits were *stated*, never *measured*, so on any particular scene
+  there was no way to tell whether either had bitten.~~ **shipped** — every
+  subtraction now records what it did to the image it ran on:
+  `UMBRA_NOISE_FLOORED_FRACTION`, how much of the raster the floor drove to the
+  sensor's sensitivity limit (either model), and `UMBRA_NOISE_FLOOR_MARGIN_DB`,
+  how far the scene's own median power sat above an *inferred* floor. Both were
+  already being computed and discarded — `_subtract_noise` makes the comparison
+  that defines the first, and `_estimate_noise_power` holds the distribution the
+  second is read from — and the second is the estimator's assumption made
+  checkable rather than merely documented: the model works because a scene's dark
+  surfaces are a different population from its backscatter, so the distance
+  between the fifth percentile and the median is the evidence that they were.
+  `umbra convert` prints both and, under `NOISE_MARGIN_WARN_DB`, says the scene
+  had little dark ground to read and points at `--noise-model measured` — an
+  advisory, never a refusal, because a uniform scene is legitimate and the honest
+  fix there is a measured floor rather than a tuned guess. They are diagnostics
+  of a scene rather than claims about a pixel, so they stay out of
+  `MEASUREMENT_PROVENANCE_KEYS` by design: no two real passes agree on them, and
+  refusing over them would have ended every series. See the CHANGELOG.
 - ~~Nothing *consumed* those tags (they were written and read back, but no code
   acted on them, so a stack could still mix two conversions and report the
   difference between them as change).~~ **shipped** — `to_stack` reads every
