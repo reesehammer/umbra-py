@@ -4210,3 +4210,121 @@ def test_cli_convert_rejects_an_even_speckle_window_as_a_parameter_error(tmp_pat
     # A typo in a flag, reported as one -- not as a conversion failure.
     assert "--speckle-window" in result.output
     assert "odd integer" in result.output
+
+
+def _tagged_raster(path, **tags):
+    """A 1-pixel GeoTIFF carrying whatever conversion tags a test wants read back.
+
+    ``_echo_speckle_report`` is a pure reader of the output's own tags, so its
+    branches are exercised against handcrafted ones rather than by hunting for a
+    synthetic scene that happens to produce each case.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=1,
+        width=1,
+        count=1,
+        dtype="float32",
+        transform=from_origin(0, 0, 1, 1),
+    ) as ds:
+        ds.write(np.ones((1, 1), dtype="float32"), 1)
+        ds.update_tags(**convert.conversion_tags(source="scene.nitf", geocoded=True, **tags))
+    return path
+
+
+def test_speckle_report_says_when_a_window_bought_little(tmp_path, capsys):
+    pytest.importorskip("rasterio")
+    from umbra_py.cli.process import _echo_speckle_report
+
+    _echo_speckle_report(
+        _tagged_raster(
+            tmp_path / "meagre.tif",
+            speckle_filter="lee",
+            speckle_window=5,
+            speckle_enl_before=1.0,
+            speckle_enl_after=1.2,
+            speckle_looks=1.0,
+        )
+    )
+    out = capsys.readouterr().out
+    assert "Equivalent looks 1.0 -> 1.2, of 25 pixels averaged" in out
+    # An advisory, and one that names both honest explanations: on imagery that
+    # is textured everywhere 'lee' is *meant* to leave most pixels alone.
+    assert "bought" in out and "textured almost everywhere" in out
+
+    _echo_speckle_report(
+        _tagged_raster(
+            tmp_path / "ample.tif",
+            speckle_filter="boxcar",
+            speckle_window=5,
+            speckle_enl_before=1.0,
+            speckle_enl_after=18.0,
+        )
+    )
+    ample = capsys.readouterr().out
+    assert "Equivalent looks 1.0 -> 18.0" in ample
+    assert "bought" not in ample
+
+
+def test_speckle_report_says_when_there_was_no_block_to_measure(tmp_path, capsys):
+    pytest.importorskip("rasterio")
+    from umbra_py.cli.process import _echo_speckle_report
+
+    # A raster smaller than one measuring block (or with no uniform block in it)
+    # still got filtered; the missing number is the ENL gain, not the filter.
+    _echo_speckle_report(
+        _tagged_raster(tmp_path / "tiny.tif", speckle_filter="boxcar", speckle_window=3)
+    )
+    out = capsys.readouterr().out
+    assert "No homogeneous block to measure looks in" in out
+    assert "the filter still ran" in out
+
+
+def test_cli_convert_slant_plane_names_the_filter_and_its_looks(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_speckled_sicd_scene(), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(tmp_path / "amp.tif"),
+            "--slant-plane",
+            "--speckle-filter",
+            "lee",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "slant-plane lee-filtered amplitude GeoTIFF" in result.output
+    # Lee's own speckle parameter is part of what made the pixels, so it is
+    # printed as well as recorded.
+    assert "Speckle taken as" in result.output
+    assert "Equivalent looks" in result.output
+
+
+def test_slant_plane_conversion_refuses_an_unknown_speckle_filter(tmp_path, monkeypatch):
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    reader = _FakeReader(_fake_complex(8, 8), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+    with pytest.raises(ValueError, match="Unknown speckle_filter"):
+        convert.sicd_to_amplitude_geotiff(
+            tmp_path / "in.ntf", tmp_path / "amp.tif", speckle_filter="frost"
+        )
+    assert reader.reads == []
