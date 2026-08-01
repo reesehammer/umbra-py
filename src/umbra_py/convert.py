@@ -1553,6 +1553,42 @@ def _local_moments(power: np.ndarray, window: int, *, squares: bool):
     return mean, mean_sq, count
 
 
+def _block_enl_ratios(power: np.ndarray, *, block: int = _ENL_BLOCK):
+    """The per-block ``mean² / variance`` ratios :func:`_estimate_enl` reduces.
+
+    Split out because the reduction and the blocks are separable: a caller that
+    reads a scene in pieces -- :func:`umbra_py.chips._scene_speckle`, which
+    samples windows of a raster it never holds whole -- needs to *pool* the
+    blocks of several arrays before taking the percentile, and pooling
+    percentiles is not the same thing as the percentile of the pooled blocks.
+
+    Returns a flat array, empty where the raster is smaller than one block, no
+    block held enough finite pixels (:data:`_ENL_MIN_VALID`), or every
+    qualifying block had zero variance.
+    """
+    np = _require("numpy")
+
+    rows = (power.shape[0] // block) * block
+    cols = (power.shape[1] // block) * block
+    if rows == 0 or cols == 0:
+        return np.empty(0, dtype="float64")
+    tiles = power[:rows, :cols].reshape(rows // block, block, cols // block, block)
+    valid = np.isfinite(tiles).sum(axis=(1, 3))
+    with warnings.catch_warnings():
+        # An all-nodata block is expected (a clip's corners); its mean is NaN and
+        # it is dropped below rather than warned about.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = np.nanmean(tiles, axis=(1, 3))
+        # ddof=1: the block's variance is being *estimated* from its pixels, and
+        # the population form biases it low, which would bias the ratio -- the
+        # number reported -- high.
+        var = np.nanvar(tiles, axis=(1, 3), ddof=1)
+    keep = (valid >= max(4, int(_ENL_MIN_VALID * block * block))) & (var > 0) & (mean > 0)
+    if not keep.any():
+        return np.empty(0, dtype="float64")
+    return np.square(mean[keep]) / var[keep]
+
+
 def _estimate_enl(
     power: np.ndarray,
     *,
@@ -1587,25 +1623,10 @@ def _estimate_enl(
     """
     np = _require("numpy")
 
-    rows = (power.shape[0] // block) * block
-    cols = (power.shape[1] // block) * block
-    if rows == 0 or cols == 0:
+    ratios = _block_enl_ratios(power, block=block)
+    if ratios.size == 0:
         return None
-    tiles = power[:rows, :cols].reshape(rows // block, block, cols // block, block)
-    valid = np.isfinite(tiles).sum(axis=(1, 3))
-    with warnings.catch_warnings():
-        # An all-nodata block is expected (a clip's corners); its mean is NaN and
-        # it is dropped below rather than warned about.
-        warnings.simplefilter("ignore", RuntimeWarning)
-        mean = np.nanmean(tiles, axis=(1, 3))
-        # ddof=1: the block's variance is being *estimated* from its pixels, and
-        # the population form biases it low, which would bias the ratio -- the
-        # number reported -- high.
-        var = np.nanvar(tiles, axis=(1, 3), ddof=1)
-    keep = (valid >= max(4, int(_ENL_MIN_VALID * block * block))) & (var > 0) & (mean > 0)
-    if not keep.any():
-        return None
-    return float(np.percentile(np.square(mean[keep]) / var[keep], float(percentile)))
+    return float(np.percentile(ratios, float(percentile)))
 
 
 def _boxcar_power(power: np.ndarray, window: int):
@@ -1654,6 +1675,7 @@ def _filter_speckle(
     decibels: bool,
     name: str,
     window: int = SPECKLE_WINDOW_DEFAULT,
+    looks: float | None = None,
 ) -> tuple[np.ndarray, SpeckleFiltering]:
     """Speckle-filter a detected-amplitude raster, in the power domain.
 
@@ -1673,6 +1695,17 @@ def _filter_speckle(
     Returns the filtered raster and a :class:`SpeckleFiltering` describing what
     the filter did to it — the ENL it started from, the ENL it reached, and (for
     ``"lee"``) the looks it assumed.
+
+    ``looks`` supplies that speckle parameter from a *wider scope* than this
+    array, and is the reason a caller that filters a scene in pieces gets the
+    same answer as one that filters it whole. When it is given, this array's own
+    ENL is not read at all: ``"lee"`` filters by the supplied value, and the
+    returned record carries no ``enl_before`` / ``enl_after``, because measuring
+    them here would describe the piece rather than the scene the looks came from
+    (``"boxcar"`` needs no such parameter, so for it only the skipped
+    measurement applies). :func:`umbra_py.chips._scene_speckle` is the caller
+    this exists for — it establishes both numbers once per acquisition and then
+    cuts every tile through the identical filter.
     """
     np = _require("numpy")
 
@@ -1686,21 +1719,23 @@ def _filter_speckle(
     # will carry, so the pair is a before/after of one measurement rather than two
     # differently-biased ones.
     block = max(_ENL_BLOCK, _ENL_BLOCK_WINDOWS * size)
-    enl_before = _estimate_enl(power, block=block)
+    measure = looks is None
+    enl_before = _estimate_enl(power, block=block) if measure else None
 
-    looks: float | None = None
     if name == "lee":
         # Read off the scene and clamped at single-look. No SAR product carries
         # fewer than one look, so a read below 1.0 is the estimator meeting a
         # textured scene rather than physics -- and believing it would tell the
         # filter that speckle is worse than it is, which is licence to smooth
         # structure away. Under-smoothing is the safe direction.
-        looks = max(enl_before, 1.0) if enl_before is not None else 1.0
+        if looks is None:
+            looks = max(enl_before, 1.0) if enl_before is not None else 1.0
         filtered = _lee_power(power, size, looks=looks)
     else:
+        looks = None
         filtered = _boxcar_power(power, size)
 
-    enl_after = _estimate_enl(filtered, block=block)
+    enl_after = _estimate_enl(filtered, block=block) if measure else None
     # A filter changes values, not the mask: a nodata pixel had no measurement to
     # improve, and filling it from its neighbours would invent ground where the
     # scene has none (the same rule the noise subtraction follows).
@@ -1766,6 +1801,34 @@ def _speckle_tag_values(speckle: SpeckleFiltering | None) -> _SpeckleTagValues:
 #: never collides with the product's own tags, and so
 #: :func:`read_conversion_tags` can pick it back out of a mixed tag set.
 PROVENANCE_TAG_PREFIX = "UMBRA_"
+
+
+def _speckle_detail_tags(
+    *,
+    window: int | None,
+    enl_before: float | None,
+    enl_after: float | None,
+    looks: float | None,
+) -> dict[str, str]:
+    """The unprefixed tags describing a speckle filter that ran, minus its name.
+
+    One formatter, because :mod:`umbra_py.chips` writes the same four keys onto a
+    tile it filtered itself: a chip cut from a filtered GEC and one cut from a
+    filtered SICD have to read identically, down to the number of significant
+    figures, or a manifest built from both would sort them into two products.
+    A value that was never measured is omitted rather than written as a sentinel
+    -- unlike a processing *step*, an absent diagnostic has only one meaning.
+    """
+    tags: dict[str, str] = {}
+    if window is not None:
+        tags["SPECKLE_WINDOW"] = str(int(window))
+    if enl_before is not None:
+        tags["SPECKLE_ENL_BEFORE"] = f"{float(enl_before):.4g}"
+    if enl_after is not None:
+        tags["SPECKLE_ENL_AFTER"] = f"{float(enl_after):.4g}"
+    if looks is not None:
+        tags["SPECKLE_LOOKS"] = f"{float(looks):.4g}"
+    return tags
 
 
 def _pixel_units(*, calibration: str | None, decibels: bool) -> str:
@@ -1902,14 +1965,14 @@ def conversion_tags(
         if noise_floor_spread_db is not None:
             tags["NOISE_FLOOR_SPREAD_DB"] = f"{float(noise_floor_spread_db):.6g}"
     if speckle_filter is not None:
-        if speckle_window is not None:
-            tags["SPECKLE_WINDOW"] = str(int(speckle_window))
-        if speckle_enl_before is not None:
-            tags["SPECKLE_ENL_BEFORE"] = f"{float(speckle_enl_before):.4g}"
-        if speckle_enl_after is not None:
-            tags["SPECKLE_ENL_AFTER"] = f"{float(speckle_enl_after):.4g}"
-        if speckle_looks is not None:
-            tags["SPECKLE_LOOKS"] = f"{float(speckle_looks):.4g}"
+        tags.update(
+            _speckle_detail_tags(
+                window=speckle_window,
+                enl_before=speckle_enl_before,
+                enl_after=speckle_enl_after,
+                looks=speckle_looks,
+            )
+        )
     if rtc_model is not None and rtc_reference_deg is not None:
         tags["RTC_REFERENCE_DEG"] = f"{float(rtc_reference_deg):.6g}"
     if geocoded:

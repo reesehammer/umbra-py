@@ -330,6 +330,29 @@ a hosted or model-driven measurement stops being the noisiest one the chain can
 produce. It turned out to be `"windowed"`'s exact complement — filtering needs a
 pass whole, windowed measurement needs it chunked — so each is a `400` on the
 instance the other needs, and the two are refused together at the request.
+~~**Open:** it reached every surface that renders a picture or returns a number,
+and stopped at the one whose output is a *dataset* — `umbra chips` took
+`--speckle-filter` only on the complex path, so a training set cut from the
+published GEC rasters could not be smoothed at all.~~ **shipped** — `umbra chips
+--speckle-filter` now applies to any asset, running where it is most correct for
+each: on `GEC`/`CSI` the **tiles** are averaged, on `SICD` the request is routed
+into the conversion and the scene is filtered in image space before geocoding.
+This is the place the correction matters most, because unlike a caveat on a
+measurement nothing downstream can put back what a model was trained without.
+The two things that made a tile loop the hard place to put it are answered rather
+than approximated — the exact pair `to_stack`'s `chunk_size` refusal named. A
+window straddling a tile boundary: every tile is read with a half-window **halo**
+and cropped after filtering, so a filtered tile is *bit-for-bit* the same as that
+region of the scene filtered whole, which is what makes two overlapping tiles
+agree about shared ground rather than carry a seam a model would learn. And
+`lee`'s speckle parameter: it is read **once per acquisition** from a fixed grid
+of sample windows, pooled at the block level before the percentile, since it is a
+property of the product's processing — per tile it would smooth one over water
+differently from the one beside it over a city. What the window spent and what it
+bought both reach the manifest: `speckle_enl_before` / `_after` / `_looks` join
+`speckle_filter` / `speckle_window` in every record on **either** path, and
+`ChipDataset.speckle` rolls them up per acquisition the way the noise summary
+does. **This closes the speckle group.**
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -771,7 +794,24 @@ from:
   complementary — filtering needs each pass whole, windowed measurement needs the
   cube chunked — so each is refused on the instance the other requires, which
   makes the pair unsatisfiable everywhere and refusable at the request itself.
-  **This closes the speckle group bar the chip-side loader.**
+  ~~**Open:** the chip-side loader, the one surface whose output is a *dataset*
+  rather than a picture or a number — `umbra chips` took `--speckle-filter` only
+  on the complex path, so a training set cut from the published GEC rasters could
+  not be smoothed at all.~~ **shipped** — `umbra chips --speckle-filter` applies
+  to any asset now, averaging the **tiles** on `GEC`/`CSI` and routing into the
+  conversion on `SICD`. It is the place the correction matters most, because
+  unlike a caveat on a measurement nothing downstream can put back what a model
+  was trained without. The two obstacles a tile loop has are answered rather than
+  approximated — the pair `to_stack`'s `chunk_size` refusal named as what it would
+  take: a half-window **halo** per tile, which makes a filtered tile *bit-for-bit*
+  the region of the whole-scene filter (so overlapping tiles agree rather than
+  carrying a seam a model would learn), and `lee`'s speckle parameter read **once
+  per acquisition** from a fixed grid of sample windows, pooled at block level,
+  since it is a property of the product's processing rather than of the 512 pixels
+  a tile covers. Both halves of the trade reach the manifest — `speckle_enl_before`
+  / `_after` / `_looks` beside `speckle_filter` / `speckle_window` on either path,
+  and a `ChipDataset.speckle` roll-up counted per acquisition like the noise one.
+  **This closes the speckle group.**
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

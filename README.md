@@ -1123,9 +1123,13 @@ umbra chips <item-json-url> --out chips/ --json
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --dem auto --rtc --rtc-model facet --calibrate gamma0 --work-dir scenes/
 
-# Average the speckle down before the tiles are cut, so a chip teaches a model
-# the surface rather than the interference pattern on it. What it spends is
-# resolution, so every record says which filter and window it was cut with.
+# Average the speckle down, so a chip teaches a model the surface rather than
+# the interference pattern on it. Works on any asset: on the published GEC the
+# tiles themselves are averaged, on --asset SICD the scene is, before geocoding.
+# What it spends is resolution, so every record says which filter and window it
+# was cut with and the equivalent looks either side of it.
+umbra chips --area "Centerfield" --out chips/ --speckle-filter lee
+
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --calibrate gamma0 --speckle-filter lee --work-dir scenes/
 
@@ -1142,7 +1146,7 @@ the same pipeline `umbra convert` uses, then cuts the identical tiles from the
 result — which is how a training set reaches the half of the archive that is the
 point of 16–25 cm SAR. Because the conversion is the one `umbra convert` runs,
 `--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` /
-`--subtract-noise` / `--noise-model` / `--speckle-filter` all apply: chips can
+`--subtract-noise` / `--noise-model` all apply: chips can
 carry a terrain-flattened, calibrated
 **gamma-nought** backscatter coefficient with the receiver's own noise floor
 removed and its speckle averaged down, rather than relative brightness, and each
@@ -1166,6 +1170,24 @@ that path affordable when the subject is a *site*: it tiles only the window you
 name, and on the SICD path it becomes the conversion's own clip, so each pass is
 geocoded over the area of interest rather than over the whole collect (the same
 flag, and the same lon/lat convention, as `umbra stack --clip-bbox`).
+
+**Speckle is filtered on either path.** `--speckle-filter {boxcar,lee}` is not
+SICD-only: on the published amplitude rasters — the products most chip sets are
+actually built from — the *tiles* are averaged, which is the first point at
+which those pixels exist in this library at all. Each tile is read with a
+half-window halo and cropped after filtering, so every chip pixel averages the
+neighbours a whole-scene filter would have given it and two overlapping tiles
+agree about the ground they share; and `lee`'s speckle parameter is read once
+per acquisition from a fixed sample of its windows, not per tile, because it is
+a property of the product's processing rather than of the 512 pixels a tile
+happens to cover. Every record carries `speckle_filter` / `speckle_window` plus
+`speckle_enl_before` / `speckle_enl_after` / `speckle_looks` — the equivalent
+number of looks either side of the window, which is what says whether the
+resolution it spent bought anything — and the run prints (and `--json` reports)
+one roll-up: *"equivalent looks up by 4.2x on the median scene"*, with a count
+of the scenes the window bought little on. The chips carry `umbra convert`'s own
+`UMBRA_SPECKLE_*` tags, so `to_stack`'s refusal to difference a filtered pass
+against an unfiltered one works on them unchanged.
 
 For the amplitude products (`GEC`, `CSI`) only the bytes for each tile stream
 over HTTP range requests — no full download,
