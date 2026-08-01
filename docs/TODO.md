@@ -209,10 +209,13 @@ blocker:
   `NoiseSubtraction`, `_margin_db`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` /
   `NOISE_FLOOR_DB` / `NOISE_FLOORED_FRACTION` / `NOISE_FLOOR_MARGIN_DB` /
   `NOISE_FLOOR_SPREAD_DB` tags),
-  `src/umbra_py/cli/process.py` (`_echo_noise_report`), `src/umbra_py/load.py`
+  `src/umbra_py/cli/process.py` (`_echo_noise_report`, `_echo_chip_noise_report`),
+  `src/umbra_py/load.py`
   (`MEASUREMENT_PROVENANCE_KEYS`, `_STEP_NOT_RUN`), `src/umbra_py/chips.py`
   (`SicdConversion.noise_subtract` / `.noise_model`,
-  `ChipRecord.noise_subtraction`),
+  `ChipRecord.noise_subtraction` / `.noise_floored_fraction` /
+  `.noise_floor_margin_db`, `NoiseSummary`, `_summarise_noise`,
+  `ChipDataset.noise`, `_reported_number`),
   `umbra convert --subtract-noise --noise-model` /
   `umbra chips --subtract-noise --noise-model` in `cli/process.py`.
 
@@ -231,8 +234,9 @@ plus `UMBRA_NOISE_FLOOR_DB` for the inferred ones) and `to_stack` refuses a seri
 that mixes any two of them. Each subtraction also
 reports what it did to the scene it ran on — `UMBRA_NOISE_FLOORED_FRACTION` and,
 for the estimate, `UMBRA_NOISE_FLOOR_MARGIN_DB` — which `umbra convert` prints
-and turns into an advisory below `NOISE_MARGIN_WARN_DB`. Follow-ons, none a
-blocker:
+and turns into an advisory below `NOISE_MARGIN_WARN_DB`, and which a chip run
+carries into every manifest record and rolls up across the batch
+(`ChipDataset.noise`). Follow-ons, none a blocker:
 
 - **A `RELATIVE` noise level is refused rather than used.** It carries real
   information — the *shape* of the floor across the swath — which could flatten
@@ -279,13 +283,21 @@ blocker:
   profiles differenced, which would turn "does this estimator work?" from an
   argument into a number. No Umbra open product carries the metadata to do it
   on, so it needs either a Canopy product or a synthetic SICD fixture.
-- **The two diagnostics reach `umbra convert`, not `umbra chips`.** A chip run
-  converts many scenes, so its equivalent of the advisory is a *summary* across
-  the batch ("4 of 22 scenes had under 6 dB of margin") rather than a line per
-  scene. Both numbers are already in every chip GeoTIFF's tags — `chip_item`
-  copies the whole provenance set — so what is missing is only the roll-up and a
-  field on `ChipRecord`. Left out because it wants a decision about what a batch
-  should say, not because it is hard.
+- ~~**The two diagnostics reach `umbra convert`, not `umbra chips`.**~~
+  **shipped** — `ChipRecord.noise_floored_fraction` / `.noise_floor_margin_db`
+  put both numbers in every manifest record (so a loader filters the affected
+  scenes out without opening a raster), and `ChipDataset.noise` /
+  `chips.NoiseSummary` rolls them up across the run — counted per acquisition,
+  since the diagnostics describe the scene a chip was cut from — for the
+  `--json` payload and the two-or-three-line report `umbra chips` prints. The
+  decision this entry deferred was what a batch should *say*: a count rather
+  than a line per scene ("2 of 22 scene(s) had under 6 dB of margin"), silent
+  when the estimate held everywhere, and an advisory rather than a refusal for
+  the same reason it is one per scene. Open, and smaller: the roll-up covers the
+  *inferred* floors' margin and both models' floored fraction, but nothing
+  summarises `UMBRA_NOISE_FLOOR_SPREAD_DB` across a batch — the swing of a fitted
+  profile is per scene and does not obviously add up, so it waits for someone who
+  wants it.
 - **The margin threshold is one constant for every scene type.**
   `NOISE_MARGIN_WARN_DB` (6 dB) is where the advisory fires, and what counts as
   "enough dark ground" plausibly differs between a coastal scene and an inland

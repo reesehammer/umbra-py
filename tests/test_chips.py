@@ -436,6 +436,247 @@ def test_sicd_records_report_a_subtracted_noise_floor(tmp_path):
     assert records[0].to_dict()["noise_subtraction"] == "absolute"
 
 
+# --- What the subtraction did to the batch -----------------------------------
+#
+# The two diagnostics an inferred floor records are per scene, and `umbra
+# convert` prints them for the one raster it writes. A chip run converts many,
+# so the same numbers reach a dataset builder as a manifest field per chip and
+# one roll-up across the run.
+
+
+def _preparer_for(mapping):
+    """A `SicdPreparer` that hands each acquisition its own prepared raster."""
+
+    def prepare(item, asset, work_dir, conversion):
+        return mapping[item.id]
+
+    return prepare
+
+
+def _sicd_item(item_id, tif_path):
+    item = _item_for(tif_path, **{"sar:product_type": "SICD"})
+    item.id = item_id
+    return item
+
+
+def test_sicd_records_carry_the_noise_diagnostics(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # Whether the estimate had dark ground to read is a property of the scene a
+    # chip came from, so it travels with the chip -- a loader can drop the
+    # scenes whose dark tail was ground without opening a raster.
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif",
+        noise_subtraction="estimated",
+        noise_floor_db=-21.5,
+        noise_floored_fraction=0.031,
+        noise_floor_margin_db=4.25,
+    )
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    assert {r.noise_floored_fraction for r in records} == {0.031}
+    assert {r.noise_floor_margin_db for r in records} == {4.25}
+    assert records[0].to_dict()["noise_floor_margin_db"] == 4.25
+
+
+def test_a_measured_floor_reports_no_margin(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # The measured model assumes nothing about the scene, so it has no
+    # assumption to report -- a null, not a zero.
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif", noise_subtraction="absolute", noise_floored_fraction=0.004
+    )
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    assert records[0].noise_floored_fraction == 0.004
+    assert records[0].noise_floor_margin_db is None
+
+
+def test_noise_summary_counts_scenes_not_chips(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import write_chips
+
+    # Two acquisitions, four chips each: one scene the estimate held on and one
+    # it did not. The roll-up answers "how many scenes", because the numbers
+    # describe scenes -- counting chips would weight a wide scene more heavily.
+    good = _make_converted_cog(
+        tmp_path / "good.tif",
+        noise_subtraction="estimated-range",
+        noise_floored_fraction=0.01,
+        noise_floor_margin_db=11.5,
+    )
+    poor = _make_converted_cog(
+        tmp_path / "poor.tif",
+        noise_subtraction="estimated-range",
+        noise_floored_fraction=0.22,
+        noise_floor_margin_db=3.5,
+    )
+    items = [_sicd_item("acq-good", good), _sicd_item("acq-poor", poor)]
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_preparer_for({"acq-good": good, "acq-poor": poor}),
+    )
+
+    assert dataset.chip_count == 8
+    noise = dataset.noise
+    assert noise is not None
+    assert noise.scenes == 2
+    assert noise.models == ["estimated-range"]
+    assert noise.margin_scenes == 2
+    assert noise.low_margin_scenes == 1
+    assert noise.min_margin_db == 3.5
+    assert noise.max_floored_fraction == 0.22
+    # ...and it rides out in the machine-readable summary too.
+    assert dataset.to_dict()["noise"]["low_margin_scenes"] == 1
+
+
+def test_a_run_that_subtracted_nothing_has_no_noise_summary(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import write_chips
+
+    # A GEC run is untouched by the roll-up existing: no subtraction ran, so
+    # there is nothing to say and the summary stays out of the output.
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    dataset = write_chips([_item_for(tif)], tmp_path / "ds", chip_size=10)
+
+    assert dataset.noise is None
+    assert "noise" not in dataset.to_dict()
+
+
+def test_cli_chips_reports_the_scenes_the_estimate_should_not_be_trusted_on(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif",
+        noise_subtraction="estimated",
+        noise_floored_fraction=0.18,
+        noise_floor_margin_db=3.2,
+    )
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    real_write_chips = chips_mod.write_chips
+
+    def _spy(items, out_dir, **kwargs):
+        return real_write_chips(items, out_dir, preparer=_fake_preparer(cog), **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    args = [
+        "chips",
+        "http://example.com/item.json",
+        "--out",
+        str(tmp_path / "ds"),
+        "--asset",
+        "SICD",
+        "--chip-size",
+        "10",
+        "--subtract-noise",
+        "--noise-model",
+        "estimated",
+    ]
+    result = CliRunner().invoke(cli_mod.cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert "estimated, subtracted on 1 scene(s)" in result.output
+    assert "18.0% of a scene is at the sensor's limit" in result.output
+    # The advisory names the count, the threshold and the way out -- it is never
+    # a refusal, because a uniformly bright scene is legitimate imagery.
+    assert "1 of 1 scene(s) had under 6 dB of margin" in result.output
+    assert "--noise-model measured" in result.output
+
+    payload = json.loads(
+        CliRunner().invoke(cli_mod.cli, [*args, "--out", str(tmp_path / "ds2"), "--json"]).output
+    )
+    assert payload["noise"] == {
+        "scenes": 1,
+        "models": ["estimated"],
+        "margin_scenes": 1,
+        "low_margin_scenes": 1,
+        "margin_warn_db": 6.0,
+        "min_margin_db": 3.2,
+        "max_floored_fraction": 0.18,
+    }
+
+
+def test_cli_chips_says_nothing_extra_when_the_estimate_held(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    # A wide margin needs no comment: the roll-up says what was subtracted and
+    # stops there, so the advisory means something when it does appear.
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif",
+        noise_subtraction="estimated",
+        noise_floored_fraction=0.01,
+        noise_floor_margin_db=14.0,
+    )
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    real_write_chips = chips_mod.write_chips
+    monkeypatch.setattr(
+        chips_mod,
+        "write_chips",
+        lambda items, out_dir, **kwargs: real_write_chips(
+            items, out_dir, preparer=_fake_preparer(cog), **kwargs
+        ),
+    )
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--chip-size",
+            "10",
+            "--subtract-noise",
+            "--noise-model",
+            "estimated",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "subtracted on 1 scene(s)" in result.output
+    assert "margin" not in result.output
+
+
 def test_steps_that_did_not_run_are_null_not_the_string_none(tmp_path):
     pytest.importorskip("numpy")
     pytest.importorskip("rasterio")
