@@ -1089,6 +1089,250 @@ def sicd_noise_level(src: str | os.PathLike) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Scoring an inferred noise floor against a measured one.
+# --------------------------------------------------------------------------- #
+
+#: The noise models :func:`compare_noise_models` can score — :data:`NOISE_MODELS`
+#: without ``"measured"``, which is the reference the others are scored against
+#: rather than a candidate.
+INFERRED_NOISE_MODELS = tuple(model for model in NOISE_MODELS if model != "measured")
+
+
+@dataclass(frozen=True)
+class NoiseModelAgreement:
+    """How closely one inferred noise floor matches the product's measured one.
+
+    The two inferred models (:func:`_estimate_noise_power`,
+    :func:`_estimate_noise_profile`) make a documented pair of claims: that the
+    floor they read is *biased low but consistently so*, and that the range
+    profile adds the across-swath **shape** a constant cannot. Both claims are
+    about the difference between the inferred floor and the true one, which is
+    unobservable on a product that states no floor — so this splits the measured
+    difference into exactly those two parts.
+
+    Attributes
+    ----------
+    model:
+        The model scored, one of :data:`INFERRED_NOISE_MODELS`.
+    floor_db:
+        The level it inferred (the profile's median for ``"estimated-range"``),
+        the same number the conversion records in ``UMBRA_NOISE_FLOOR_DB``.
+    spread_db:
+        Peak-to-peak swing of the inferred floor — ``0.0`` for the constant
+        estimate by construction, and ``UMBRA_NOISE_FLOOR_SPREAD_DB`` for the
+        profile. Compare against :attr:`NoiseModelComparison.measured_spread_db`,
+        which is how much swing was actually there to find.
+    bias_db:
+        Median of ``inferred − measured`` in decibels: the *offset*. Expected
+        negative, because a percentile of a speckled noise-only population sits
+        below that population's mean — the estimators read low, which
+        under-subtracts, which is the safe direction. A positive bias is the
+        interesting failure: the scene had too little dark ground and the low
+        tail read was backscatter.
+    shape_error_db:
+        RMS of ``inferred − measured`` **after removing the bias**: what is left
+        once the offset above is granted, i.e. how well the inferred floor
+        follows the true one across the image. This is the number the range
+        profile exists to reduce, and on a scene whose floor genuinely varies a
+        constant estimate cannot score better here than the measured floor's own
+        RMS deviation about its mean.
+    residual_db:
+        RMS of ``inferred − measured`` with the bias included — how wrong the
+        subtracted floor was in absolute terms, which is what the pixels
+        actually got.
+    """
+
+    model: str
+    floor_db: float
+    spread_db: float
+    bias_db: float
+    shape_error_db: float
+    residual_db: float
+
+
+@dataclass(frozen=True)
+class NoiseModelComparison:
+    """The measured noise floor of one product, and how the estimators did on it.
+
+    Attributes
+    ----------
+    source:
+        File name of the product compared on (the name only, for the same reason
+        :func:`conversion_tags` records only that).
+    shape:
+        ``(rows, cols)`` of the image window the comparison ran over — the whole
+        scene, or the ``bbox=`` window when one was given.
+    measured_floor_db:
+        Median of the product's own ``NoisePoly`` over that window: the truth
+        the estimates are scored against.
+    measured_spread_db:
+        Peak-to-peak swing of that measured floor across the window. This is the
+        premise of the whole range-profile model: where it is near zero, a
+        constant estimate had nothing to miss and the two inferred models should
+        score alike; where it is wide, it is the artefact a scalar floor leaves
+        behind.
+    models:
+        One :class:`NoiseModelAgreement` per model scored, in the order asked
+        for.
+    """
+
+    source: str
+    shape: tuple[int, int]
+    measured_floor_db: float
+    measured_spread_db: float
+    models: tuple[NoiseModelAgreement, ...]
+
+
+def _floor_agreement(model: str, inferred_db, measured_db, *, floor_db: float, spread_db: float):
+    """Score one inferred floor against the measured one, both in decibels.
+
+    Split rather than summed: the offset (:attr:`NoiseModelAgreement.bias_db`)
+    and what is left after granting it (``shape_error_db``) answer two different
+    questions, and the estimators are only ever claimed to get the second right.
+    The median is used for the offset and the RMS for the errors, so one
+    contaminated corner of a scene moves the offset a little and the error a lot
+    — which is the ordering that makes the two numbers readable together.
+
+    ``inferred_db`` broadcasts against ``measured_db``: a scalar for the constant
+    estimate, an ``(rows, 1)`` column for the fitted profile.
+    """
+    np = _require("numpy")
+
+    inferred = np.broadcast_to(np.asarray(inferred_db, dtype="float64"), measured_db.shape)
+    diff = inferred - measured_db
+    bias = float(np.median(diff))
+    return NoiseModelAgreement(
+        model=model,
+        floor_db=float(floor_db),
+        spread_db=float(spread_db),
+        bias_db=bias,
+        shape_error_db=float(np.sqrt(np.mean(np.square(diff - bias)))),
+        residual_db=float(np.sqrt(np.mean(np.square(diff)))),
+    )
+
+
+def compare_noise_models(
+    src: str | os.PathLike,
+    *,
+    models: tuple[str, ...] = INFERRED_NOISE_MODELS,
+    percentile: float = NOISE_ESTIMATE_PERCENTILE,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> NoiseModelComparison:
+    """Score the inferred noise floors against the one a product measures.
+
+    ``noise_model="estimated"`` and ``"estimated-range"`` infer the receiver's
+    floor from the scene's own darkest pixels, which is what lets the correction
+    run on Umbra's open archive at all — those products carry no ``Radiometric``
+    block to read a floor from. That is also why the inference was, until this,
+    only ever *argued*: the archive it was built for has no truth to check it
+    against.
+
+    A product that does state an ``ABSOLUTE`` noise level has both. This runs the
+    inferred models over such a product's pixels and differences each result
+    against its own ``NoisePoly``, which turns "does the estimator work?" into
+    two numbers per model: the offset it reads low by, and — after granting that
+    offset — how well it follows the real floor across the image
+    (:class:`NoiseModelAgreement`). Nothing is written and no conversion is
+    performed; this is the measurement, not a correction.
+
+    What to expect, and what each departure means:
+
+    * ``bias_db`` negative on both models, by roughly the same amount. A
+      percentile of a speckled noise-only population sits below that
+      population's mean, so both estimators read low and under-subtract, which
+      leaves a little of the receiver in rather than taking real backscatter
+      out. Positive is the failure the margin diagnostic warns about: too little
+      dark ground, so the low tail was ground.
+    * ``shape_error_db`` much smaller for ``"estimated-range"`` than for
+      ``"estimated"`` **when** ``measured_spread_db`` is wide. That is the whole
+      claim of the fitted profile, and where the floor is genuinely flat there is
+      nothing to separate the two models and they should score alike.
+
+    Parameters
+    ----------
+    src:
+        Path to a SICD NITF file that declares an ``ABSOLUTE`` noise level. One
+        that does not raises, naming what it carries — the same refusal
+        ``noise_model="measured"`` makes, for the same reason: there is no truth
+        here to score against. :func:`sicd_noise_level` answers it ahead of time.
+    models:
+        Which inferred models to score, a subset of
+        :data:`INFERRED_NOISE_MODELS`.
+    percentile:
+        The low-tail percentile the estimators read, defaulting to the one they
+        use in a conversion (:data:`NOISE_ESTIMATE_PERCENTILE`). Exposed here and
+        nowhere else on purpose: this is the surface where the number is being
+        *measured* rather than trusted, so sweeping it is the point.
+    bbox:
+        Optional ``(min_lon, min_lat, max_lon, max_lat)`` window to compare over
+        instead of the whole scene, resolved exactly as ``bbox=`` on
+        :func:`sicd_to_geocoded_cog` — including evaluating the ``NoisePoly`` at
+        the image coordinates the window actually occupies, without which the
+        measured floor would be read off the wrong part of the swath.
+    """
+    np = _require("numpy")
+    _require("sarpy")
+    from sarpy.io.complex.converter import open_complex  # noqa: PLC0415
+
+    unknown = [model for model in models if model not in INFERRED_NOISE_MODELS]
+    if unknown:
+        raise ValueError(
+            f"Cannot compare noise model(s) {', '.join(repr(m) for m in unknown)}; "
+            f"choose from {', '.join(INFERRED_NOISE_MODELS)}. 'measured' is the "
+            "reference every model here is scored against, not a candidate."
+        )
+    if not models:
+        raise ValueError("No noise models to compare; pass at least one of INFERRED_NOISE_MODELS.")
+
+    reader = open_complex(str(src))
+    sicd = reader.get_sicds_as_tuple()[0]
+    # Read the measured floor's metadata *first*: on a product that cannot supply
+    # one there is nothing to compare against, and finding that out before
+    # reading a multi-gigabyte scene is free.
+    coefs = _noise_coefficients(sicd)
+
+    origin = (0, 0)
+    if bbox is not None:
+        row0, row1, col0, col1 = _clip_window(sicd, _reader_shape(reader, sicd), bbox)
+        data = reader[row0:row1, col0:col1]
+        origin = (row0, col0)
+    else:
+        data = reader[:, :]
+    amplitude = _amplitude(data, decibels=True)
+
+    geometry = _image_grid_geometry(sicd)
+    geometry["first_row"] += float(origin[0])
+    geometry["first_col"] += float(origin[1])
+    measured_db = 10.0 * np.log10(_noise_power(coefs, amplitude.shape, **geometry))
+
+    scored: list[NoiseModelAgreement] = []
+    for model in models:
+        if model == "estimated-range":
+            profile, _median, level_db, spread_db = _estimate_noise_profile(
+                amplitude, decibels=True, percentile=percentile
+            )
+            inferred_db = 10.0 * np.log10(profile)
+        else:
+            floor, _median = _estimate_noise_power(amplitude, decibels=True, percentile=percentile)
+            level_db = 10.0 * math.log10(floor) if floor > 0.0 else float("-inf")
+            inferred_db = level_db
+            spread_db = 0.0
+        scored.append(
+            _floor_agreement(
+                model, inferred_db, measured_db, floor_db=level_db, spread_db=spread_db
+            )
+        )
+
+    return NoiseModelComparison(
+        source=Path(src).name,
+        shape=(int(amplitude.shape[0]), int(amplitude.shape[1])),
+        measured_floor_db=float(np.median(measured_db)),
+        measured_spread_db=float(measured_db.max() - measured_db.min()),
+        models=tuple(scored),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Conversion provenance (what the pixel values mean, recorded in the raster).
 # --------------------------------------------------------------------------- #
 

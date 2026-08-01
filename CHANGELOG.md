@@ -7,6 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Measure the inferred noise floor against a measured one
+  (`compare_noise_models` / `umbra convert --noise-check`).** The two inferred
+  noise models shipped on an argument. `--noise-model estimated` reads a scene's
+  low power tail as its receiver floor and `estimated-range` fits that read per
+  range line, and both were justified in prose: a percentile of a speckled
+  noise-only population sits *below* that population's mean, so the estimate is
+  biased low but consistently so; the per-line fit therefore recovers the
+  across-swath **shape** a single scalar cannot. Neither claim could be checked
+  on the archive the models exist for, because a product that states no floor
+  states no truth either — so the whole chain rested on reasoning nobody could
+  put a number to.
+
+  `compare_noise_models(src)` supplies that number where a product *does* declare
+  an `ABSOLUTE` noise level. It runs the inferred models over the product's own
+  pixels, evaluates its `NoisePoly` over the same grid, and differences the two
+  in decibels — split into exactly the two parts the claims are about:
+  `bias_db`, the median offset (expected negative, because under-subtraction is
+  the safe direction), and `shape_error_db`, the RMS error *after* granting that
+  offset, which is how well the inferred floor follows the real one across the
+  image. `measured_spread_db` is the premise beside them: how much swing was
+  there to find at all. Nothing is written and no conversion runs — this is the
+  measurement, not a correction — and `bbox=` compares over one window, with the
+  `NoisePoly` evaluated at the image coordinates that window actually occupies,
+  without which the truth would be read off the wrong part of the swath.
+
+  On a synthetic SICD whose stated floor *is* the floor its pixels were built
+  from (`tests/test_convert.py`), the answer is decisive: against a floor ramping
+  10 dB across the swath, the fitted profile recovers the swing to 0.1 dB and
+  scores a shape error of 0.2 dB where the constant estimate scores 2.9 dB —
+  which is precisely the ramp's own deviation about its midpoint, i.e. everything
+  a scalar had to leave behind. Both models read low by about 5.5 dB, within
+  1 dB of each other, exactly as a fifth percentile of an exponentially
+  distributed noise-only population should.
+
+  Two things the measurement found that the argument had not. A constant estimate
+  is biased low on a *varying* floor even with no speckle at all, because a
+  percentile pooled over the whole scene lands near the near-range end of a ramp
+  rather than at its middle — a second error, separate from the shape error, and
+  now reported apart from it. And where backscatter sinks toward the floor (land
+  returning about what the receiver does at far range), the fitted profile reads
+  the swing ~30% flat: the low tail stops being a separate population at the far
+  edge before it does at the near edge. The subtraction stays conservative in
+  both cases, but `UMBRA_NOISE_FLOOR_SPREAD_DB` understates on such a scene, which
+  is a thing to know before quoting it.
+
+  `umbra convert SRC --noise-check` prints the comparison as JSON (no `DST`, like
+  `--provenance`), honours `--clip-bbox`, and refuses on a product with no
+  absolute level by naming what it does carry — the same refusal `--noise-model
+  measured` makes, for the same reason. The estimators' percentile is exposed as
+  a keyword *here and nowhere else*: this is the surface where the number is
+  being measured rather than trusted, so sweeping it is the point.
 - **Say which scenes in a training set the noise estimate should not have been
   trusted on (`umbra chips`).** Every noise subtraction already measured its own
   two limits on the scene it ran on — `UMBRA_NOISE_FLOORED_FRACTION`, how much of

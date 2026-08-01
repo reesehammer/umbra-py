@@ -204,7 +204,9 @@ blocker:
 - **Code:** `src/umbra_py/convert.py` (`_noise_level_type`,
   `_noise_coefficients`, `_noise_power`, `_estimate_noise_power`,
   `_estimate_noise_profile`, `_check_percentile`, `_detected_power`,
-  `_subtract_noise`, `_denoise_amplitude`, `sicd_noise_level`, `NOISE_MODELS`,
+  `_subtract_noise`, `_denoise_amplitude`, `sicd_noise_level`,
+  `compare_noise_models`, `NoiseModelComparison`, `NoiseModelAgreement`,
+  `_floor_agreement`, `INFERRED_NOISE_MODELS`, `NOISE_MODELS`,
   `NOISE_ESTIMATE_PERCENTILE`, `NOISE_PROFILE_DEGREE`, `NOISE_MARGIN_WARN_DB`,
   `NoiseSubtraction`, `_margin_db`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` /
   `NOISE_FLOOR_DB` / `NOISE_FLOORED_FRACTION` / `NOISE_FLOOR_MARGIN_DB` /
@@ -278,11 +280,46 @@ carries into every manifest record and rolls up across the batch
   known factor for N-look intensity), which is a claim about the product's
   processing rather than about its pixels — worth doing only alongside a
   `Grid.ImpRespBW`/multilook read that says how many looks a scene actually has.
-- **Nothing compares the fitted floor against a measured one.** A product that
-  carries an `ABSOLUTE` `NoisePoly` could be converted both ways and the two
-  profiles differenced, which would turn "does this estimator work?" from an
-  argument into a number. No Umbra open product carries the metadata to do it
-  on, so it needs either a Canopy product or a synthetic SICD fixture.
+  The bias is now *measurable* rather than only argued (`compare_noise_models`
+  reports it as `bias_db`), which is what would make such a correction checkable
+  — but the measurement is on a synthetic single-look population, so it confirms
+  the arithmetic rather than supplying the factor a real product needs.
+- ~~**Nothing compares the fitted floor against a measured one.**~~ **shipped** —
+  `compare_noise_models` / `umbra convert --noise-check` runs the inferred models
+  over a product that *does* declare an `ABSOLUTE` level and differences each
+  against its own `NoisePoly`, split into the offset (`bias_db`) and what is left
+  after granting it (`shape_error_db`). The synthetic-SICD route is the one that
+  shipped — a fixture whose stated floor is the floor its pixels were built from
+  — since no Umbra open product carries the metadata. What is still open, and
+  smaller:
+  - **A real product has never been run through it.** The numbers below are from
+    a synthetic scene, which validates the arithmetic and the claims but not the
+    estimator against a real receiver's roll-off, real speckle statistics or a
+    real multilook. A Canopy product (or any SICD with an `ABSOLUTE` `NoisePoly`)
+    run through `--noise-check` would say so; that is a `network`-marked test
+    gated on a token, like the Canopy backend's.
+  - **The comparison found the estimate compressing over dark ground.** Where
+    backscatter sinks toward the floor, the fitted profile reads the swing ~30%
+    flat — the low tail stops being a separate population at the far edge before
+    it does at the near edge. The subtraction stays conservative, so this is a
+    caveat on quoting `UMBRA_NOISE_FLOOR_SPREAD_DB`, not a correction to make.
+    Reporting it *per scene* would mean a second statistic that says how
+    separated the two populations were per range line — the margin diagnostic
+    is that number for the scene as a whole, so the natural form is a per-line
+    margin's minimum. Worth doing if the spread starts being used as a
+    measurement rather than as evidence that the constant model was missing
+    something.
+  - **A constant estimate's bias on a varying floor is now visible but not
+    acted on.** `--noise-check` shows `"estimated"` reading low by more than
+    speckle alone accounts for when the floor ramps, because a pooled percentile
+    lands near the near-range end. Nothing warns about it, deliberately: the fix
+    is `estimated-range`, which already exists, and a warning that says "use the
+    other model" on a scene where the user chose this one is noise.
+  - **Nothing sweeps the percentile.** `compare_noise_models(percentile=…)` is
+    the one surface that exposes it, so the obvious next question — is 5.0 the
+    right tail? — is now answerable but unanswered. It wants the real product
+    above first: the answer on a synthetic exponential population is arithmetic,
+    not evidence.
 - ~~**The two diagnostics reach `umbra convert`, not `umbra chips`.**~~
   **shipped** — `ChipRecord.noise_floored_fraction` / `.noise_floor_margin_db`
   put both numbers in every manifest record (so a loader filters the affected

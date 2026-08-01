@@ -9,6 +9,7 @@ radiometric calibration), and the ML chip set with its manifest.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import click
@@ -508,6 +509,15 @@ def stack(
     "values. Takes no DST.",
 )
 @click.option(
+    "--noise-check",
+    is_flag=True,
+    help="Don't convert: score the inferred noise floors (--noise-model "
+    "estimated / estimated-range) against the floor SRC's own metadata states, "
+    "and print the comparison as JSON -- how far each estimate reads low, and "
+    "how well it follows the real floor across the swath once that offset is "
+    "granted. Needs a product declaring an ABSOLUTE noise level. Takes no DST.",
+)
+@click.option(
     "--slant-plane",
     is_flag=True,
     help="Skip geocoding: write the raw slant-plane amplitude with no "
@@ -662,6 +672,7 @@ def convert(
     src,
     dst,
     provenance,
+    noise_check,
     slant_plane,
     linear,
     gcp_grid,
@@ -719,7 +730,11 @@ def convert(
     scene: how much of the image it drove to the sensor's sensitivity limit, and
     -- for an inferred floor, which assumes the scene contained dark ground to
     read -- how far the scene's median sat above it, plus the swing a fitted
-    profile found. A narrow margin says that assumption did not hold here.
+    profile found. A narrow margin says that assumption did not hold here. Where
+    a product states its own floor there is a truth to check those inferences
+    against: --noise-check converts nothing and scores them against it instead,
+    reporting how far each estimate reads low and how well it follows the real
+    floor across the swath once that offset is granted.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -731,11 +746,30 @@ def convert(
     (``pip install "umbra-py[convert]"``).
     """
     from ..convert import (  # noqa: PLC0415
+        compare_noise_models,
         read_conversion_tags,
         sicd_to_amplitude_geotiff,
         sicd_to_geocoded_cog,
     )
 
+    if provenance and noise_check:
+        raise click.BadParameter(
+            "--provenance reads an already-converted raster's tags and "
+            "--noise-check reads a SICD's pixels; pick one.",
+            param_hint="--noise-check",
+        )
+    if noise_check:
+        if dst is not None:
+            raise click.BadParameter(
+                "--noise-check reads SRC and writes nothing; drop the DST argument.",
+                param_hint="DST",
+            )
+        try:
+            comparison = compare_noise_models(src, bbox=_shared._parse_bbox(clip_bbox))
+        except ValueError as exc:  # e.g. the product states no absolute floor
+            raise click.ClickException(str(exc)) from exc
+        click.echo(json.dumps(asdict(comparison), indent=2))
+        return
     if provenance:
         if dst is not None:
             raise click.BadParameter(

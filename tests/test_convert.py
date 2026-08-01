@@ -11,6 +11,7 @@ to end offline.
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -3573,3 +3574,295 @@ def test_cli_convert_noise_model_estimated_range_reports_the_swing(tmp_path, mon
     # The profile has no single level, so the line says which number it quotes.
     assert "Fitted floor of median" in result.output
     assert convert.read_conversion_tags(dst)["noise_subtraction"] == "estimated-range"
+
+
+# --------------------------------------------------------------------------- #
+# Scoring an inferred floor against a measured one (``compare_noise_models``).
+#
+# The two inferred models were shipped on an argument -- that a percentile of a
+# scene's darkest pixels reads the receiver, low but consistently so, and that
+# fitting it per range line recovers the across-swath shape a scalar cannot.
+# Neither claim could be checked on the archive they exist for, because a
+# product that states no floor states no truth either. These tests supply that
+# truth synthetically: a SICD whose NoisePoly *is* the floor the pixels were
+# built from, so the difference between the estimate and the fact is a number.
+# --------------------------------------------------------------------------- #
+
+
+def _noise_poly_coefficients(rows, *, near_db, far_db):
+    """A NoisePoly stating the ramp ``_range_varying_noise_scene`` builds.
+
+    The scene's floor is linear in decibels from ``near_db`` at row 0 to
+    ``far_db`` at the last row, and a SICD NoisePoly is a polynomial in image
+    coordinates measured in metres from the SCP -- so with ``row_ss=1`` and the
+    SCP on row 0, the row coordinate *is* the row index and the ramp is a
+    first-degree coefficient. Anything else would put the truth and the pixels
+    on different grids, which is the one mistake this fixture cannot make.
+    """
+    return [[near_db], [(far_db - near_db) / (rows - 1)]]
+
+
+def _measuring_sicd(rows, *, near_db=-30.0, far_db=-20.0):
+    """A ``_FakeSicd`` whose stated noise floor matches the scene it is paired with."""
+    return _FakeSicd(
+        radiometric=_radiometric_noise(
+            coefs=_noise_poly_coefficients(rows, near_db=near_db, far_db=far_db)
+        ),
+        row_ss=1.0,
+        col_ss=1.0,
+        scp_row=0.0,
+        scp_col=0.0,
+    )
+
+
+def _speckled_noise_scene(
+    rows=64, cols=100, *, near_db=-30.0, far_db=-20.0, signal_db=-10.0, water=20, seed=0
+):
+    """The same ramp, but with speckle -- which is what biases an estimator.
+
+    ``_range_varying_noise_scene`` puts every dark pixel at exactly the floor,
+    so a percentile of them *is* the floor. A real noise-only population is
+    exponentially distributed around its mean power, so its fifth percentile
+    sits well below that mean: the conservative bias both inferred models carry
+    and neither can see. This fixture is that population.
+    """
+    np = pytest.importorskip("numpy")
+
+    rng = np.random.default_rng(seed)
+    floor = 10.0 ** (np.linspace(near_db, far_db, rows) / 10.0)[:, None]
+    power = rng.exponential(np.tile(floor, (1, cols)))
+    power[:, water:] += rng.exponential(10.0 ** (signal_db / 10.0), size=(rows, cols - water))
+    return np.sqrt(power).astype("float32")
+
+
+def _compare(monkeypatch, tmp_path, magnitude, sicd, **kwargs):
+    """Run ``compare_noise_models`` over a magnitude raster and a paired SICD."""
+    _patch_open_complex(monkeypatch, _FakeReader(magnitude * (1 + 0j), sicd))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    return convert.compare_noise_models(src, **kwargs)
+
+
+def test_compare_noise_models_splits_the_error_into_offset_and_shape(tmp_path, monkeypatch):
+    """The measurement the two inferred models were shipped without."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    rows = 64
+    magnitude, _ = _range_varying_noise_scene(rows=rows)
+    comparison = _compare(monkeypatch, tmp_path, magnitude, _measuring_sicd(rows))
+
+    assert comparison.source == "scene.ntf"
+    assert comparison.shape == magnitude.shape
+    # The truth: a floor ramping 10 dB across the swath, median at its midpoint.
+    assert comparison.measured_spread_db == pytest.approx(10.0, abs=1e-6)
+    assert comparison.measured_floor_db == pytest.approx(-25.0, abs=1e-6)
+
+    scored = {agreement.model: agreement for agreement in comparison.models}
+    assert tuple(scored) == convert.INFERRED_NOISE_MODELS
+
+    # Every dark pixel in this fixture sits exactly on the floor, so the fitted
+    # profile reads each line's level exactly right and the only thing left for
+    # it to get wrong is the shape.
+    assert scored["estimated-range"].bias_db == pytest.approx(0.0, abs=0.05)
+    # The constant estimate reads low even here, with no speckle to blame: a low
+    # percentile pooled over the whole scene lands near the *near-range* end of a
+    # floor that ramps, not at its middle. That offset is a second thing the
+    # scalar model gets wrong on a varying floor, and it is separate from the
+    # shape error below -- which is why the two numbers are reported apart.
+    assert -4.0 < scored["estimated"].bias_db < -1.0
+
+    # A constant floor against a linear ramp: what is left after granting the
+    # offset is the ramp's own deviation about its midpoint, 10/sqrt(12) dB.
+    assert scored["estimated"].shape_error_db == pytest.approx(10.0 / math.sqrt(12.0), abs=0.15)
+    assert scored["estimated"].spread_db == 0.0
+    # The fitted profile follows it: that residual is what the model buys, and
+    # it recovers the swing the constant one had no way to represent.
+    assert scored["estimated-range"].shape_error_db < 0.05
+    assert scored["estimated-range"].spread_db == pytest.approx(10.0, abs=0.05)
+    assert scored["estimated-range"].residual_db < scored["estimated"].residual_db / 10.0
+
+
+def test_compare_noise_models_measures_the_conservative_bias_speckle_causes(tmp_path, monkeypatch):
+    """The other half of the claim: both models read low, by about the same."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    rows = 64
+    comparison = _compare(
+        monkeypatch, tmp_path, _speckled_noise_scene(rows=rows), _measuring_sicd(rows)
+    )
+    scored = {agreement.model: agreement for agreement in comparison.models}
+
+    # A fifth percentile of an exponentially distributed noise-only population
+    # sits below that population's mean power -- 10*log10(-ln(0.95)/0.05) worth
+    # of it once the tail is read over a 20%-dark line -- so both models
+    # under-subtract, leaving a little of the receiver in rather than taking
+    # ground out. Under-subtraction is the safe direction, and this is how far it
+    # goes: a number the archive this correction exists for cannot supply.
+    assert -8.0 < scored["estimated-range"].bias_db < -3.0
+    assert scored["estimated"].bias_db < 0.0
+    # Nearly the same offset on both, which is the claim that lets the profile
+    # carry the shape while the level stays conservative.
+    assert abs(scored["estimated"].bias_db - scored["estimated-range"].bias_db) < 2.0
+
+    # And it *is* very nearly the same offset on every line, which is why it
+    # moves the fitted curve down without bending it: the profile recovers the
+    # swing through the speckle, and what is left is a fifth of a decibel.
+    assert scored["estimated-range"].shape_error_db < 0.5
+    assert scored["estimated-range"].shape_error_db < scored["estimated"].shape_error_db / 5.0
+    assert scored["estimated-range"].spread_db == pytest.approx(10.0, abs=0.5)
+    # The constant model's shape error is the ramp's own deviation about its
+    # midpoint, exactly as in the noiseless case: speckle does not change what a
+    # scalar cannot represent.
+    assert scored["estimated"].shape_error_db == pytest.approx(10.0 / math.sqrt(12.0), abs=0.15)
+
+
+def test_compare_noise_models_shows_the_estimate_compressing_over_dark_ground(
+    tmp_path, monkeypatch
+):
+    """A limit of the estimator that only a measurement could have found.
+
+    The inference reads a range line's low tail as its floor, which holds while
+    the ground is well above that floor. Where backscatter sinks *toward* it --
+    a scene whose land returns about what the receiver does at far range -- the
+    tail stops being a separate population at the far edge before it does at the
+    near edge, so the fitted ramp reads flatter than the real one. The subtracted
+    floor is still conservative (the bias only deepens), but the swing the model
+    reports understates the swing that was there.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    rows = 64
+    comparison = _compare(
+        monkeypatch,
+        tmp_path,
+        _speckled_noise_scene(rows=rows, signal_db=-25.0),
+        _measuring_sicd(rows),
+    )
+    fitted = next(a for a in comparison.models if a.model == "estimated-range")
+
+    assert comparison.measured_spread_db == pytest.approx(10.0, abs=1e-6)
+    assert 6.0 < fitted.spread_db < 9.0  # under-read, and knowably so
+    assert fitted.bias_db < -5.0
+    # Still far better than a scalar, which is the decision this informs: the
+    # profile is worth using here, it just should not be quoted as the truth.
+    assert fitted.shape_error_db < 1.5
+
+
+def test_compare_noise_models_reads_the_truth_at_the_clipped_windows_coordinates(
+    tmp_path, monkeypatch
+):
+    """A clip's measured floor is the swath it covers, not the scene's average."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    rows, cols = 64, 100
+    magnitude, _ = _range_varying_noise_scene(rows=rows, cols=cols)
+    sicd = _measuring_sicd(rows)
+    # The ground under the far end of the swath, where the stated floor is
+    # highest -- taken as the bounding box of that image region's own corners,
+    # and wide enough to keep the dark columns the estimate reads inside it.
+    corners = [_ground(sicd, row, col) for row in (48, rows - 1) for col in (0, 30)]
+    bbox = (
+        min(lon for lon, _ in corners),
+        min(lat for _, lat in corners),
+        max(lon for lon, _ in corners),
+        max(lat for _, lat in corners),
+    )
+    clipped = _compare(monkeypatch, tmp_path, magnitude, sicd, bbox=bbox)
+    whole = _compare(monkeypatch, tmp_path, magnitude, sicd)
+
+    assert clipped.shape[0] < whole.shape[0]
+    # Evaluating the NoisePoly at the window's own image coordinates is the
+    # whole point: read at the array's rows instead, and the truth would be the
+    # near-edge floor while the pixels came from the far edge.
+    assert clipped.measured_floor_db > whole.measured_floor_db + 2.0
+    assert clipped.measured_spread_db < whole.measured_spread_db
+    # And the estimator still scores well against it, on the window's own tail.
+    fitted = next(a for a in clipped.models if a.model == "estimated-range")
+    assert abs(fitted.bias_db) < 0.5
+    assert np.isfinite(fitted.shape_error_db)
+
+
+def test_compare_noise_models_refuses_a_product_with_no_truth_to_check_against(
+    tmp_path, monkeypatch
+):
+    """No stated floor, nothing to score: the same refusal 'measured' makes."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    magnitude, _ = _range_varying_noise_scene(rows=32, cols=40)
+    # An Umbra open product: no Radiometric block at all.
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        _compare(monkeypatch, tmp_path, magnitude, _FakeSicd())
+    # A relative level describes the floor's variation without stating it, so it
+    # is not a truth either -- the same reason it cannot be subtracted.
+    relative = _FakeSicd(radiometric=_radiometric_noise("RELATIVE"))
+    with pytest.raises(ValueError, match="relative noise level"):
+        _compare(monkeypatch, tmp_path, magnitude, relative)
+
+
+def test_compare_noise_models_rejects_measured_as_a_candidate(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+
+    magnitude, _ = _range_varying_noise_scene(rows=32, cols=40)
+    with pytest.raises(ValueError, match="reference"):
+        _compare(monkeypatch, tmp_path, magnitude, _measuring_sicd(32), models=("measured",))
+    with pytest.raises(ValueError, match="at least one"):
+        _compare(monkeypatch, tmp_path, magnitude, _measuring_sicd(32), models=())
+
+
+def test_cli_convert_noise_check_prints_the_comparison(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    rows = 64
+    magnitude, _ = _range_varying_noise_scene(rows=rows)
+    _patch_open_complex(monkeypatch, _FakeReader(magnitude * (1 + 0j), _measuring_sicd(rows)))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(cli_mod.cli, ["convert", str(src), "--noise-check"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["measured_spread_db"] == pytest.approx(10.0, abs=1e-6)
+    models = {entry["model"]: entry for entry in payload["models"]}
+    assert set(models) == set(convert.INFERRED_NOISE_MODELS)
+    assert models["estimated-range"]["shape_error_db"] < models["estimated"]["shape_error_db"]
+
+    # It reads SRC and writes nothing, so a DST is a mistake worth naming.
+    with_dst = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "out.tif"), "--noise-check"]
+    )
+    assert with_dst.exit_code != 0
+    assert "writes nothing" in with_dst.output
+
+    # The two read-only modes read different things -- a converted raster's tags
+    # and a SICD's pixels -- so asking for both is a question, not a request.
+    both = CliRunner().invoke(cli_mod.cli, ["convert", str(src), "--noise-check", "--provenance"])
+    assert both.exit_code != 0
+    assert "pick one" in both.output
+
+
+def test_cli_convert_noise_check_without_a_stated_floor_is_a_clean_error(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    magnitude, _ = _range_varying_noise_scene(rows=32, cols=40)
+    _patch_open_complex(monkeypatch, _FakeReader(magnitude * (1 + 0j), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+
+    result = CliRunner().invoke(cli_mod.cli, ["convert", str(src), "--noise-check"])
+    assert result.exit_code != 0
+    # The refusal names what the product does carry, rather than inventing one.
+    assert "no Radiometric metadata" in result.output
