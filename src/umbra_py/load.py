@@ -413,8 +413,10 @@ def _as_geotiff_tags(provenance: dict[str, str]) -> dict[str, str]:
     return {f"{PROVENANCE_TAG_PREFIX}{key.upper()}": value for key, value in provenance.items()}
 
 
-def _shared_provenance(records: list[dict[str, str]], ids: list[str]) -> dict[str, str]:
-    """The provenance a stack's sources agree on, or a refusal naming the mix.
+def _shared_provenance(
+    records: list[dict[str, str]], ids: list[str], *, action: str = "stack"
+) -> dict[str, str]:
+    """The provenance a measurement's sources agree on, or a refusal naming the mix.
 
     The consuming half of the provenance ``umbra convert`` writes. Two rasters
     converted with different settings are pixel-for-pixel indistinguishable, so
@@ -432,6 +434,11 @@ def _shared_provenance(records: list[dict[str, str]], ids: list[str]) -> dict[st
     is silent about one key reads as :data:`_STEP_NOT_RUN` for it rather than as
     :data:`_UNRECORDED`, so a step added in a later umbra-py does not split a
     series whose older members simply never had it.
+
+    ``action`` names what is being refused, because the rule outgrew the
+    datacube: :func:`umbra_py.narrate.render_change_png` applies the same check
+    to the pair of passes it quotes decibels between. Only the verb differs --
+    why a mix is not a measurement is identical either way.
     """
     for key in MEASUREMENT_PROVENANCE_KEYS:
         seen: dict[str, str] = {}
@@ -441,12 +448,12 @@ def _shared_provenance(records: list[dict[str, str]], ids: list[str]) -> dict[st
         if len(seen) > 1:
             listed = ", ".join(f"{value!r} ({item_id})" for value, item_id in sorted(seen.items()))
             raise ValueError(
-                f"Refusing to stack rasters whose {key} disagrees ({listed}): pixel "
+                f"Refusing to {action} rasters whose {key} disagrees ({listed}): pixel "
                 "values made by different conversions are not comparable along a time "
                 "axis, so a change between two passes would be partly the difference "
                 f"between the two conversions. ({_UNRECORDED} is a raster with no "
                 "umbra-py conversion provenance, such as a published GEC.) Re-convert "
-                "the series with one set of 'umbra convert' settings, or stack only "
+                "the series with one set of 'umbra convert' settings, or use only "
                 "the acquisitions that share one -- 'umbra convert --provenance FILE' "
                 "(umbra_py.read_conversion_tags) says what each raster carries."
             )

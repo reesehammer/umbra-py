@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 
 import pytest
 from click.testing import CliRunner
@@ -144,6 +145,19 @@ def test_build_messages_embeds_primer_legend_grid_and_image():
     # The metadata card and the numeric grid travel as ground truth.
     assert "Centerfield, Utah" in messages["user"]
     assert "per grid cell" in messages["user"]
+    # Nothing claims a conversion the sources didn't record.
+    assert "pixel_values" not in messages["user"]
+
+
+def test_build_messages_states_what_the_decibels_are_when_converted():
+    """A converted pair's record reaches the model, so it reads a calibrated
+    dB delta as one. Absent for published products, which is the usual case."""
+    np = pytest.importorskip("numpy")
+    stats = compute_change_stats(np.ones((6, 6)), np.full((6, 6), 4.0), (0, 0, 1, 1), grid=2)
+    stats = replace(stats, provenance={"calibration": "gamma0", "units": "gamma0"})
+    messages = build_narrate_messages({"place": "Centerfield, Utah"}, stats, PNG)
+    assert "pixel_values" in messages["user"]
+    assert "gamma0" in messages["user"]
 
 
 # --- parse_narration: the interpretation boundary ---------------------------
@@ -278,7 +292,9 @@ def test_render_change_png_returns_png_and_stats(monkeypatch):
     later = np.ones((16, 16), dtype="float32")
     later[0:8, 8:16] = 8.0
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([earlier, later], (0.0, 0.0, 1.0, 1.0))
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: ([earlier, later], (0.0, 0.0, 1.0, 1.0), [{}, {}]),
     )
     png, stats = render_change_png(_two_items(), grid=2)
     assert png.startswith(b"\x89PNG\r\n")
@@ -290,6 +306,75 @@ def test_render_change_png_returns_png_and_stats(monkeypatch):
 def test_render_change_png_rejects_wrong_count():
     with pytest.raises(ValueError, match="2 or 3"):
         render_change_png([_two_items()[0]])
+
+
+def _fake_coregister(monkeypatch, np, records):
+    """Patch co-registration with two flat bands and the given source records."""
+    import umbra_py.viz as viz_mod
+
+    bands = [np.ones((8, 8), dtype="float32"), np.full((8, 8), 2.0, dtype="float32")]
+    monkeypatch.setattr(
+        viz_mod, "_coregister_bands", lambda *a, **k: (bands, (0.0, 0.0, 1.0, 1.0), records)
+    )
+
+
+def test_render_change_png_refuses_mixed_conversions(monkeypatch):
+    """A dB grid measured between two differently-converted passes would be
+    partly the difference between the two *conversions*, so it is refused --
+    the rule to_stack applies to a datacube, applied to the pair change
+    narration quotes numbers between."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+
+    _fake_coregister(
+        monkeypatch,
+        np,
+        [{"calibration": "gamma0", "scale": "amplitude"}, {"calibration": "none"}],
+    )
+    with pytest.raises(ValueError, match="calibration disagrees") as exc:
+        render_change_png(_two_items(), grid=2)
+    message = str(exc.value)
+    assert "measure change between" in message
+    # Names both values and an acquisition on each side.
+    assert "'gamma0'" in message and "'none'" in message
+
+
+def test_render_change_png_refuses_a_converted_raster_mixed_with_a_published_one(monkeypatch):
+    """The usual mix: one pass converted by `umbra convert`, one published GEC
+    (no UMBRA_* tags at all). The untagged raster is its own value, so it is
+    caught rather than read as 'that step did not run'."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+
+    _fake_coregister(monkeypatch, np, [{"calibration": "sigma0"}, {}])
+    with pytest.raises(ValueError, match="calibration disagrees") as exc:
+        render_change_png(_two_items(), grid=2)
+    assert "(unrecorded)" in str(exc.value)
+
+
+def test_render_change_png_carries_the_shared_provenance(monkeypatch):
+    """Passes that agree are measured, and what they agree on rides out on the
+    stats -- so a dB delta in the sidecar can be attributed."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+
+    record = {"calibration": "gamma0", "rtc_model": "facet", "units": "gamma0"}
+    _fake_coregister(monkeypatch, np, [dict(record), dict(record)])
+    _png, stats = render_change_png(_two_items(), grid=2)
+    assert stats.provenance == record
+    assert stats.to_dict()["provenance"] == record
+
+
+def test_render_change_png_leaves_published_products_unlabelled(monkeypatch):
+    """Two published GECs agree (on carrying nothing), so nothing is refused
+    and the sidecar claims no conversion -- the common case."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+
+    _fake_coregister(monkeypatch, np, [{}, {}])
+    _png, stats = render_change_png(_two_items(), grid=2)
+    assert stats.provenance == {}
+    assert stats.to_dict()["provenance"] == {}
 
 
 # --- default_narrator: provider selection from env (no network) -------------
@@ -338,7 +423,9 @@ def fixed_narration(monkeypatch, sample_item_dict):
     later = np.ones((16, 16), dtype="float32")
     later[0:8, 8:16] = 8.0
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([earlier, later], (0.0, 0.0, 1.0, 1.0))
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: ([earlier, later], (0.0, 0.0, 1.0, 1.0), [{}, {}]),
     )
     reply = json.dumps(
         {
@@ -419,7 +506,9 @@ def test_cli_change_narrate_reports_missing_key_cleanly(monkeypatch, sample_item
     monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
     earlier = np.ones((8, 8), dtype="float32")
     monkeypatch.setattr(
-        viz_mod, "_coregister_bands", lambda *a, **k: ([earlier, earlier.copy()], (0, 0, 1, 1))
+        viz_mod,
+        "_coregister_bands",
+        lambda *a, **k: ([earlier, earlier.copy()], (0, 0, 1, 1), [{}, {}]),
     )
     for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)

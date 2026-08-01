@@ -7,6 +7,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Refuse to *measure* change between passes converted differently
+  (`render_change_png` / `umbra change --narrate`).** `to_stack` already reads
+  each source's `UMBRA_*` conversion record and refuses a datacube whose slices
+  disagree on what a pixel value is, because differencing a calibrated pass
+  against an uncalibrated one puts the gap between the two *conversions* on the
+  time axis and reports it as change on the ground. The composite path was
+  exempt from that rule on the argument that a mixed picture is merely confusing
+  to look at — but one caller on that path does not make a picture. `umbra change
+  --narrate` divides the co-registered scene into a grid and quotes a signed
+  **decibel** delta per block, ships it as a JSON sidecar the module's own
+  docstring calls auditable, and hands it to a vision model as the ground truth
+  it is told not to contradict. Every one of those numbers was a difference of
+  two rasters nothing had checked.
+
+  `_coregister_bands` now returns each source's conversion record alongside the
+  bands and bounds. It is collected there because that is the only place it is
+  free — the datasets are already open, and re-opening a remote COG to ask what
+  its pixels mean would cost a second round of range requests, which is exactly
+  the reason `conversion_provenance` exists as a separate function from
+  `read_conversion_tags`. `render_change_png` checks it through the same
+  `load._shared_provenance` the datacube uses, on the same
+  `MEASUREMENT_PROVENANCE_KEYS` (`calibration`, `noise_subtraction`, `rtc_model`,
+  `scale`, `units`), so a mixed pair raises before a single number is computed
+  and before the model call that would quote it. The refusal names the key, both
+  values and an acquisition on each side; a converted raster mixed with a
+  published GEC is caught too, since an untagged raster is its own value.
+
+  The check stops there deliberately: `change_composite`, `timescan_composite`,
+  `change_animation` and `swipe_map` take the third return value and ignore it.
+  They make pictures, and the project's existing polarization rule already draws
+  that line — `POST /artifacts/stats` refuses a mixed-polarization *selection*
+  while the picture endpoints tolerate one. This is that line applied to what the
+  pixel values are rather than to how they were received.
+
+  What the sources agree on is carried rather than dropped. `ChangeStats` gains a
+  `provenance` field that reaches `to_dict()`, so the narration sidecar says
+  whether its decibels are a calibrated coefficient or relative amplitude, and
+  `build_narrate_messages` puts the record in the model's ground-truth block as
+  `pixel_values` — only when there is one, so the prompt for the usual case
+  (published GEC products, which umbra-py did not convert) is byte-identical to
+  before. `_shared_provenance` gained one keyword, `action`, so the refusal says
+  "measure change between" rather than "stack"; the reason a mix is not a
+  measurement is the same either way.
 - **Let the inferred noise floor follow the swath: `umbra convert --noise-model
   estimated-range` / `sicd_to_geocoded_cog(noise_model="estimated-range")`.** The
   entry below shipped an estimated floor with two named limits, and the first of

@@ -58,7 +58,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from .constants import AI_PROVENANCE, ATTRIBUTION, POLARIZATION_CAVEAT
@@ -139,6 +139,14 @@ class ChangeStats:
     :func:`compute_change_stats` from the co-registered dB amplitudes -- no model
     is involved -- so any statement in a :class:`ChangeNarration` can be checked
     against a number here.
+
+    ``provenance`` says what those decibels *are*: the ``UMBRA_*`` conversion
+    record the compared passes agree on, carried by
+    :func:`render_change_png` from the rasters it read. It is empty for the
+    usual case -- published GEC products, which umbra-py did not convert -- and
+    carries the calibration, RTC model, noise subtraction, scale and units when
+    the sources were converted, so a dB delta quoted from this grid can be
+    attributed rather than merely believed.
     """
 
     grid_rows: int
@@ -151,6 +159,7 @@ class ChangeStats:
     peak_compass: str | None = None
     peak_direction: str | None = None
     peak_mean_delta_db: float | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """A plain JSON-serialisable view of the grid (for the sidecar / ``--json``)."""
@@ -159,6 +168,7 @@ class ChangeStats:
             "grid_cols": self.grid_cols,
             "change_threshold_db": self.change_threshold_db,
             "bounds": list(self.bounds),
+            "provenance": dict(self.provenance),
             "scene_mean_abs_delta_db": self.scene_mean_abs_delta_db,
             "scene_changed_fraction": self.scene_changed_fraction,
             "peak_compass": self.peak_compass,
@@ -512,7 +522,7 @@ def build_narrate_messages(
     """
     system = _SYSTEM_PROMPT.format(primer=_SAR_PRIMER)
     card = json.dumps(change_card, indent=2)
-    scene = {
+    scene: dict[str, Any] = {
         "grid_rows": stats.grid_rows,
         "grid_cols": stats.grid_cols,
         "change_threshold_db": stats.change_threshold_db,
@@ -522,6 +532,11 @@ def build_narrate_messages(
         "peak_direction": stats.peak_direction,
         "peak_mean_delta_db": stats.peak_mean_delta_db,
     }
+    if stats.provenance:
+        # What those decibels *are*. Only present when the sources said, so the
+        # prompt for the usual case -- published GEC products, which umbra-py
+        # did not convert -- is byte-identical to before this key existed.
+        scene["pixel_values"] = stats.provenance
     user = (
         "Acquisitions compared (ground truth -- do not contradict):\n"
         f"{card}\n\n"
@@ -622,6 +637,19 @@ def render_change_png(
     The change magnitudes are always measured in decibels regardless of the
     composite's ``db`` display stretch -- ``db`` only affects the picture's
     contrast, not the physics. Requires the ``viz`` extra.
+
+    Because those decibels are a *measurement*, the compared passes must have
+    been made the same way. Each source's ``UMBRA_*`` conversion record is read
+    while it is open and checked with
+    :func:`umbra_py.load._shared_provenance`, so a pair that disagrees on what
+    its pixel values are (a calibrated pass against an uncalibrated one, a
+    terrain-flattened one against a raw one) raises rather than reporting the
+    difference between the two *conversions* as change on the ground. It is the
+    rule :func:`umbra_py.to_stack` applies to a datacube, applied to the two
+    passes this quotes numbers between -- and it is why the check lives here
+    rather than in :func:`umbra_py.change_composite`, which makes a picture: a
+    mixed composite is confusing to look at, a mixed number is wrong. What the
+    sources agree on rides out on :attr:`ChangeStats.provenance`.
     """
     # Validate the input before requiring the viz extra, so a bad item count is
     # the same ValueError with or without the extra installed.
@@ -631,13 +659,14 @@ def render_change_png(
 
     from io import BytesIO  # noqa: PLC0415
 
+    from .load import _shared_provenance  # noqa: PLC0415
     from .viz import _compose_change_rgba, _coregister_bands, _require  # noqa: PLC0415
 
     _require("PIL")
     from PIL import Image  # noqa: PLC0415
 
     try:
-        bands, bounds = _coregister_bands(items, asset, max_size)
+        bands, bounds, records = _coregister_bands(items, asset, max_size)
     except MissingDependencyError:
         raise
     except UmbraError:
@@ -645,8 +674,14 @@ def render_change_png(
     except Exception as exc:  # rasterio / GDAL surface a variety of read errors
         raise NarrateError(f"Could not read the acquisitions to compare: {exc}") from exc
 
-    stats = compute_change_stats(
-        bands[0], bands[-1], bounds, grid=grid, change_threshold_db=change_threshold_db
+    # Before any number is quoted: the passes must agree on what a pixel means.
+    shared = _shared_provenance(records, [it.id for it in items], action="measure change between")
+
+    stats = replace(
+        compute_change_stats(
+            bands[0], bands[-1], bounds, grid=grid, change_threshold_db=change_threshold_db
+        ),
+        provenance=shared,
     )
     rgba = _compose_change_rgba(bands, percentile=percentile, db=db)
     buf = BytesIO()

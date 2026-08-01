@@ -617,6 +617,18 @@ from:
   the derivative's own `UMBRA_*` tags, and `stack_stats` both reports it and lets
   it correct the two caveats that are claims about the pixel values — a
   calibrated cube stops being told its decibels are relative. See the CHANGELOG.
+  ~~**Still open:** the *composite* path made no such check, on the argument that
+  a mixed picture is only confusing to look at.~~ **shipped** — one caller on
+  that path does not make a picture. `umbra change --narrate` quotes a signed
+  **decibel** delta per grid block, ships it as an auditable JSON sidecar and
+  hands it to a vision model as ground truth, so `render_change_png` now applies
+  the same `MEASUREMENT_PROVENANCE_KEYS` refusal to the pair it measures between
+  — before a number is computed and before the model call that would quote it.
+  `_coregister_bands` collects each source's record while the datasets are open
+  (the only place it is free), the picture commands take it and ignore it — the
+  line `POST /artifacts/stats` already draws for polarization — and what the
+  passes agree on rides out on `ChangeStats.provenance`, into the sidecar and
+  into the model's ground-truth block, so a quoted dB delta can be attributed.
   **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
@@ -739,15 +751,17 @@ from:
   snapshot), and `tests/test_workflows.py` parses every `umbra …` invocation in
   `.github/workflows/*.yml` against the real Click command tree so the same
   drift fails a pull request rather than a Monday morning. See the CHANGELOG.
-  **Open, and operational rather than code:** the workflow is weekly +
-  `workflow_dispatch`, so the first good snapshot needs a maintainer to dispatch
-  a run (or to wait for the Monday cron); until one lands, the artifacts stay
-  absent and the docs job keeps emitting its "showcase not built" warning.
+  ~~**Open, and operational rather than code:** the first good snapshot needs a
+  maintainer to dispatch a run.~~ **Done** — run 3 of `Publish catalog index`
+  (dispatched 2026-07-27) succeeded, and the rolling `catalog-index` release now
+  carries all five artifacts: `catalog.db`, `umbra-open-data.parquet`,
+  `catalog.pmtiles`, `catalog.thumbs.db` and `catalog.html`. `umbra index fetch`,
+  `umbra tiles --fetch`, the thumbnail sidecar and the Pages showcase built from
+  them resolve for the first time. **This group is closed**; the weekly cron
+  keeps it current.
 
 **Maintainer / relationship actions (no code)**
 
-- Dispatch `Publish catalog index` once so the rolling `catalog-index` release
-  exists (see the group above; the code side is fixed).
 - Register the PyPI Trusted Publisher and cut the `v0.1.0` GitHub Release to
   claim the name (release plumbing already ships).
 - The ecosystem-visibility actions in §5.3, the "offer it upstream" move in

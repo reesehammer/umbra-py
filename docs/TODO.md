@@ -21,16 +21,10 @@ Both of the only two `Publish catalog index` runs died on `umbra tiles --local
 before the release step the whole crawl went with it, so the `catalog-index`
 release was never created. The invocation is fixed, the uploads now sit with the
 steps that build them, and `tests/test_workflows.py` parses every `umbra …`
-invocation in `.github/workflows/*.yml` against the real Click command tree.
-Follow-ons, none a blocker:
+invocation in `.github/workflows/*.yml` against the real Click command tree. Run
+3 (dispatched 2026-07-27) then succeeded, so the release and all five of its
+artifacts exist. Follow-ons, none a blocker:
 
-- **The first good snapshot still needs a human.** The workflow is weekly +
-  `workflow_dispatch`, so until a maintainer dispatches a run (or Monday's cron
-  fires), the release stays absent and `umbra index fetch` keeps 404ing. Nothing
-  in this repo can create it. Smallest close-out: dispatch the workflow once and
-  confirm `catalog.db`, `umbra-open-data.parquet`, `catalog.pmtiles` and
-  `catalog.html` land on the release, then confirm the Docs job's `workflow_run`
-  trigger (added in the showcase-404 fix) rebuilds the showcase off it.
 - **The check is a parse, not a run.** It catches renamed, dropped and
   misspelled options — the drift that actually happened — but not an option
   whose *meaning* changed, nor a value that is wrong (`--limit 1200` being too
@@ -359,12 +353,18 @@ conversion's clip. Follow-ons, none a blocker:
 - **Code:** `src/umbra_py/load.py` (`MEASUREMENT_PROVENANCE_KEYS`,
   `_source_provenance`, `_shared_provenance`, `_as_geotiff_tags`, the
   `provenance` attr on `to_xarray` / `to_stack` and key on `stack_stats`),
-  `src/umbra_py/convert.py` (`conversion_provenance`).
+  `src/umbra_py/convert.py` (`conversion_provenance`),
+  `src/umbra_py/viz/composites.py` (`_coregister_bands`),
+  `src/umbra_py/narrate.py` (`ChangeStats.provenance`, `render_change_png`,
+  `build_narrate_messages`).
 
 `to_stack` now reads each source's `UMBRA_*` conversion record and refuses a
 series that disagrees on what its pixel values are; the shared record rides the
-cube into `stack_stats`, the written GeoTIFFs and `POST /artifacts/stats`.
-Follow-ons, none a blocker:
+cube into `stack_stats`, the written GeoTIFFs and `POST /artifacts/stats`. The
+same refusal now covers the one *composite*-path caller that quotes numbers —
+`render_change_png`, behind `umbra change --narrate` — via the records
+`_coregister_bands` collects while the sources are open. Follow-ons, none a
+blocker:
 
 - **The refusal has no override.** There is no `check_provenance=False`, matching
   the polarization refusal it mirrors — a mixed selection is not a measurement,
@@ -372,11 +372,21 @@ Follow-ons, none a blocker:
   "I know, show me anyway" case turns up (comparing a calibrated pass against an
   uncalibrated one *as* the experiment), the escape hatch is one keyword on
   `to_stack` plus a caveat in the summary saying it was used.
-- **The picture commands still don't check.** `umbra change` / `timescan` /
-  `swipe` co-register the same rasters through `viz._coregister_bands` and make
-  no provenance check, the same tolerance the polarization rule already has (a
-  mixed composite is confusing to look at; a mixed *number* is wrong). Worth
-  revisiting only if someone starts quoting decibels off a composite.
+- **The picture commands still don't check, now deliberately.** `umbra change` /
+  `timescan` / `swipe` take the records `_coregister_bands` returns and ignore
+  them — the same tolerance the polarization rule has (a mixed composite is
+  confusing to look at; a mixed *number* is wrong), and the records are now there
+  for free if that ever stops being the right call. What changed is that the one
+  caller on that path which *does* quote decibels, `render_change_png`, refuses.
+  A warning on the picture commands is the obvious next step if a mixed composite
+  turns out to mislead in practice; it was left out because a warning nobody can
+  act on is noise.
+- **A refused pair costs the co-registration first.** `render_change_png` reads
+  the records from the datasets `_coregister_bands` opens, so a mixed pair is
+  caught *after* the overview reads and before the model call — the expensive,
+  billable step. Failing before the reads would need a metadata-only pre-open per
+  source (a second round of range requests on the passing path, which is the
+  common one), so the cheap ordering is the one that ships.
 - **Only the radiometric keys are grounds for refusal.** `dem`, `geoid` and
   `projection` are carried when every source agrees and silently dropped when
   they don't: they move a pixel's *position*, not its value, and `to_stack`
