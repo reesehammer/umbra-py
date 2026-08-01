@@ -209,10 +209,12 @@ blocker:
   entry above named).
 - **Code:** `src/umbra_py/convert.py` (`_noise_level_type`,
   `_noise_coefficients`, `_noise_power`, `_estimate_noise_power`,
+  `_estimate_noise_profile`, `_check_percentile`, `_detected_power`,
   `_subtract_noise`, `_denoise_amplitude`, `sicd_noise_level`, `NOISE_MODELS`,
-  `NOISE_ESTIMATE_PERCENTILE`, `NOISE_MARGIN_WARN_DB`, `NoiseSubtraction`,
-  `_margin_db`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` / `NOISE_FLOOR_DB` /
-  `NOISE_FLOORED_FRACTION` / `NOISE_FLOOR_MARGIN_DB` tags),
+  `NOISE_ESTIMATE_PERCENTILE`, `NOISE_PROFILE_DEGREE`, `NOISE_MARGIN_WARN_DB`,
+  `NoiseSubtraction`, `_margin_db`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` /
+  `NOISE_FLOOR_DB` / `NOISE_FLOORED_FRACTION` / `NOISE_FLOOR_MARGIN_DB` /
+  `NOISE_FLOOR_SPREAD_DB` tags),
   `src/umbra_py/cli/process.py` (`_echo_noise_report`), `src/umbra_py/load.py`
   (`MEASUREMENT_PROVENANCE_KEYS`, `_STEP_NOT_RUN`), `src/umbra_py/chips.py`
   (`SicdConversion.noise_subtract` / `.noise_model`,
@@ -223,13 +225,16 @@ blocker:
 The receiver's own thermal-noise floor is subtracted from detected power before
 any multiplicative correction scales it. Where that floor comes from is
 `--noise-model`: `measured` reads the product's own
-`Radiometric.NoiseLevel.NoisePoly` (only an `ABSOLUTE` level is accepted), and
+`Radiometric.NoiseLevel.NoisePoly` (only an `ABSOLUTE` level is accepted),
 `estimated` infers one constant per scene from the 5th percentile of the image's
 own power — which is what works on Umbra's open products, since they generally
-carry no `Radiometric` block at all. The two record themselves as different
-things (`UMBRA_NOISE_SUBTRACTION` of `"absolute"` vs `"estimated"`, plus
-`UMBRA_NOISE_FLOOR_DB` for the estimate) and `to_stack` refuses a series that
-mixes any two of subtracted / unsubtracted / estimated. Each subtraction also
+carry no `Radiometric` block at all — and `estimated-range` infers one per range
+line and fits those against range, so an inferred floor follows the swath instead
+of leaving the constant model's gradient behind (its swing is reported in
+`UMBRA_NOISE_FLOOR_SPREAD_DB`). The three record themselves as different things
+(`UMBRA_NOISE_SUBTRACTION` of `"absolute"` / `"estimated"` / `"estimated-range"`,
+plus `UMBRA_NOISE_FLOOR_DB` for the inferred ones) and `to_stack` refuses a series
+that mixes any two of them. Each subtraction also
 reports what it did to the scene it ran on — `UMBRA_NOISE_FLOORED_FRACTION` and,
 for the estimate, `UMBRA_NOISE_FLOOR_MARGIN_DB` — which `umbra convert` prints
 and turns into an advisory below `NOISE_MARGIN_WARN_DB`. Follow-ons, none a
@@ -251,13 +256,35 @@ blocker:
   to need a different tail (very high incidence, all-water), thread it through
   as `noise_percentile=` and record it beside `UMBRA_NOISE_FLOOR_DB` so the
   number stays reproducible.
-- **The estimate is one constant, so it cannot follow the swath.** A measured
-  `NoisePoly` varies across the image; the estimate is a scalar, which leaves
-  the across-swath gradient the measured floor removes. A per-range-line
-  estimate (fit the low tail against range, interpolate across lines with no
-  dark ground) would recover some of that, but it is a genuinely different
-  estimator with its own failure mode — it wants its own provenance value rather
-  than quietly changing what `"estimated"` means.
+- **The range profile is fitted along rows only.** `"estimated-range"` fits the
+  low tail against the row coordinate, which is range in a SICD, and takes the
+  floor as constant along azimuth. That is the right first axis — the antenna
+  elevation pattern and range spreading are what make a floor vary — but a long
+  collect can also drift along azimuth (receiver temperature, azimuth beam
+  shape). A 2-D surface fit would cover both; it needs enough dark ground in
+  *both* directions to be better rather than merely more flexible, so it wants
+  evidence from a real scene before it is written.
+- **The fit's degree and trim are library-level constants.**
+  `NOISE_PROFILE_DEGREE` (2), `_NOISE_PROFILE_TRIM_DB` (3.0) and
+  `_NOISE_PROFILE_MIN_SAMPLES` (16) are not threaded through
+  `sicd_to_geocoded_cog` or the CLI, for the same reason
+  `NOISE_ESTIMATE_PERCENTILE` is not: a knob whose right value depends on how a
+  particular scene's dark ground is distributed is one most callers would turn
+  wrongly, and the honest fix where the default is wrong is a *measured* floor.
+  If a class of scenes needs a different curve, thread it through and record it
+  beside `UMBRA_NOISE_FLOOR_SPREAD_DB` so the number stays reproducible.
+- **The fitted level carries the same conservative bias as the constant one.** A
+  percentile of a speckled noise-only population sits below that population's
+  mean, so both inferred models read low; the profile fixes the *gradient*, not
+  the offset. Correcting the offset means assuming a speckle distribution (a
+  known factor for N-look intensity), which is a claim about the product's
+  processing rather than about its pixels — worth doing only alongside a
+  `Grid.ImpRespBW`/multilook read that says how many looks a scene actually has.
+- **Nothing compares the fitted floor against a measured one.** A product that
+  carries an `ABSOLUTE` `NoisePoly` could be converted both ways and the two
+  profiles differenced, which would turn "does this estimator work?" from an
+  argument into a number. No Umbra open product carries the metadata to do it
+  on, so it needs either a Canopy product or a synthetic SICD fixture.
 - **The two diagnostics reach `umbra convert`, not `umbra chips`.** A chip run
   converts many scenes, so its equivalent of the advisory is a *summary* across
   the batch ("4 of 22 scenes had under 6 dB of margin") rather than a line per

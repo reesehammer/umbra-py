@@ -807,9 +807,25 @@ umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet \
 # `umbra stack` refuses to difference a series that mixes the two floors.
 umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise --noise-model estimated
 
-# Either floor also says what it did to *this* scene, rather than leaving its
+# "One constant rather than a polynomial across the swath" is not a rounding
+# error: a receiver's sensitivity varies with range, so a scalar under-subtracts
+# at one edge of the swath and over-subtracts at the other, leaving exactly the
+# gradient the correction exists to remove. --noise-model estimated-range takes
+# the same low-tail read *per range line* (SICD stores range along the image
+# rows) and fits those floors against range, so an inferred floor follows the
+# swath the way the measured one does -- still with no metadata. The fit is what
+# makes it work on a real scene: it interpolates across the lines that had no
+# dark ground to read, and drops the lines whose tail sits far above it, since
+# bright ground can only push a line's low tail up. It is recorded as its own
+# third thing ("estimated-range"), and it reports the swing it found in
+# UMBRA_NOISE_FLOOR_SPREAD_DB -- near zero means the constant floor was missing
+# nothing.
+umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise \
+    --noise-model estimated-range
+
+# Every floor also says what it did to *this* scene, rather than leaving its
 # limits as documentation: how much of the image it drove to the sensor's
-# sensitivity limit (UMBRA_NOISE_FLOORED_FRACTION), and -- for the estimate --
+# sensitivity limit (UMBRA_NOISE_FLOORED_FRACTION), and -- for an inferred one --
 # how far the scene's median power sat above the floor it inferred
 # (UMBRA_NOISE_FLOOR_MARGIN_DB). A wide margin is the evidence that the dark
 # tail really was a different population from the backscatter; a narrow one says
