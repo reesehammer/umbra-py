@@ -1757,7 +1757,8 @@ def stack_stats(
         f"component of the look geometry was flattened ({rtc_model} model), but "
         "incidence-angle-dependent scattering still moves backscatter between passes.",
     ]
-    if provenance.get("noise_subtraction", "none") != "none":
+    noise_subtraction = provenance.get("noise_subtraction", "none")
+    if noise_subtraction != "none":
         # Only said when it was earned. The default -- a floor left in -- is the
         # assumption the first caveat's "relative" already covers, and saying so
         # for every published product would be noise about noise.
@@ -1766,6 +1767,17 @@ def stack_stats(
             "(recorded by 'umbra convert'), so a dark cell reports the ground rather "
             "than the sensor's sensitivity limit -- except where the subtraction drove "
             "it to the floor, which is that limit."
+        )
+    if noise_subtraction == "estimated":
+        # The number that came off was inferred from each scene, not read from
+        # it, and a caveat that did not say so would let an estimate be quoted
+        # with a measurement's confidence.
+        caveats.append(
+            "That floor was estimated from each scene's own darkest pixels rather "
+            "than read from the products' noise metadata, so it is one constant per "
+            "pass (it cannot follow the across-swath variation) and it assumes every "
+            "scene contained dark ground to measure -- over uniformly bright imagery "
+            "it takes real backscatter off."
         )
     if area is None:
         caveats.append(

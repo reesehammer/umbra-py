@@ -2193,12 +2193,15 @@ def test_denoise_origin_matches_the_same_pixels_of_the_whole_scene():
     sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-20.0, 0.4], [0.2, 0.0]]))
     amp = (np.arange(20 * 24, dtype="float32") + 1.0).reshape(20, 24)
 
-    whole = convert._denoise_amplitude(sicd, amp, decibels=True)
+    whole, whole_floor = convert._denoise_amplitude(sicd, amp, decibels=True)
     row0, col0 = 6, 9
-    window = convert._denoise_amplitude(
+    window, window_floor = convert._denoise_amplitude(
         sicd, amp[row0 : row0 + 5, col0 : col0 + 7], decibels=True, origin=(row0, col0)
     )
     assert np.allclose(window, whole[row0 : row0 + 5, col0 : col0 + 7], atol=1e-5)
+    # The measured floor is a polynomial across the image, so there is no single
+    # level to report -- unlike the estimated one, which is exactly one number.
+    assert whole_floor is None and window_floor is None
 
 
 def test_sicd_to_amplitude_geotiff_subtracts_the_products_own_floor(tmp_path, monkeypatch):
@@ -2349,6 +2352,203 @@ def test_cli_convert_subtract_noise_unavailable_is_a_clean_error(tmp_path, monke
     assert result.exit_code != 0
     assert "relative noise level" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+# --------------------------------------------------------------------------- #
+# The estimated noise floor (``noise_model="estimated"``).
+#
+# The measured floor is the better number and Umbra's open products do not carry
+# it -- they generally ship with no Radiometric block at all -- so the
+# correction refused on exactly the archive this library exists for. These tests
+# pin the estimator's arithmetic, the two ways it can be asked for something it
+# cannot do, and the part that keeps it honest: an inferred floor is recorded,
+# reported and refused as a *different* thing from a measured one.
+# --------------------------------------------------------------------------- #
+
+
+def test_estimate_noise_power_reads_the_low_tail_of_the_scenes_own_power():
+    np = pytest.importorskip("numpy")
+
+    # A scene that is 20% dark water at 1.0 power and 80% land at 100.0. The
+    # fifth percentile lands inside the noise-dominated population, which is the
+    # whole argument: the darkest surfaces record the receiver, not the ground.
+    power = np.concatenate([np.full(200, 1.0), np.full(800, 100.0)])
+    lin = np.sqrt(power).reshape(20, 50).astype("float32")
+
+    assert convert._estimate_noise_power(lin, decibels=False, percentile=5.0) == pytest.approx(1.0)
+
+    # Same measurement in the decibel scale: 10*log10 of power IS 20*log10 of
+    # magnitude, so the estimator has to undo whichever one it was handed.
+    db = (10.0 * np.log10(power)).reshape(20, 50).astype("float32")
+    assert convert._estimate_noise_power(db, decibels=True, percentile=5.0) == pytest.approx(
+        1.0, rel=1e-5
+    )
+
+
+def test_estimate_noise_power_ignores_the_warps_nodata():
+    np = pytest.importorskip("numpy")
+
+    values = np.array([[1.0, np.nan, 10.0, np.nan, 10.0]], dtype="float32")
+    # Counting the NaNs would move the percentile off a shrinking population.
+    assert convert._estimate_noise_power(values, decibels=False, percentile=50.0) == pytest.approx(
+        100.0
+    )
+
+
+def test_estimate_noise_power_rejects_an_all_nodata_image():
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="no pixel carries a finite value"):
+        convert._estimate_noise_power(np.full((3, 3), np.nan), decibels=False)
+
+
+@pytest.mark.parametrize("percentile", [0.0, 100.0, -5.0, 101.0])
+def test_estimate_noise_power_rejects_a_percentile_outside_the_distribution(percentile):
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="between 0 and 100"):
+        convert._estimate_noise_power(np.ones((2, 2)), decibels=False, percentile=percentile)
+
+
+def test_denoise_estimated_needs_no_radiometric_metadata_at_all():
+    """The point of the model: it works on a product that states nothing."""
+    np = pytest.importorskip("numpy")
+
+    # _FakeSicd() with no Radiometric block is the shape of an Umbra open
+    # product, and is exactly what the measured model refuses.
+    sicd = _FakeSicd()
+    amp = np.concatenate([np.full(100, 1.0), np.full(900, 10.0)]).reshape(25, 40).astype("float32")
+
+    with pytest.raises(ValueError, match="no Radiometric metadata"):
+        convert._denoise_amplitude(sicd, amp, decibels=False, model="measured")
+
+    out, floor_db = convert._denoise_amplitude(sicd, amp, decibels=False, model="estimated")
+    # Floor = the 5th percentile of power = 1.0 (10% of the scene sits there).
+    assert floor_db == pytest.approx(0.0)
+    assert np.all(out <= amp + 1e-4)  # it only ever takes brightness away
+    assert out[0, 0] == pytest.approx(math.sqrt(convert._NOISE_RESIDUAL_FLOOR))
+    assert out[-1, -1] == pytest.approx(math.sqrt(100.0 - 1.0), rel=1e-5)
+
+
+def test_denoise_rejects_an_unknown_noise_model():
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="Unknown noise_model"):
+        convert._denoise_amplitude(_FakeSicd(), np.ones((2, 2)), decibels=False, model="guessed")
+
+
+def test_geocoded_cog_estimated_floor_is_recorded_as_an_inference(tmp_path, monkeypatch):
+    """A measured floor and an inferred one are not the same claim."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    # No Radiometric block: the measured model cannot run on this product.
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "estimated.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        noise_subtract=True,
+        noise_model="estimated",
+    )
+    tags = convert.read_conversion_tags(out)
+    # Deliberately NOT "absolute": load.MEASUREMENT_PROVENANCE_KEYS carries
+    # noise_subtraction, so this value is what makes to_stack refuse a series
+    # that differences an inferred floor against a measured one.
+    assert tags["noise_subtraction"] == "estimated"
+    # An inferred number nobody can read back is not reproducible.
+    assert float(tags["noise_floor_db"]) == pytest.approx(
+        10.0
+        * math.log10(
+            convert._estimate_noise_power(
+                convert._amplitude(_fake_complex(10, 12), decibels=True), decibels=True
+            )
+        ),
+        rel=1e-4,
+    )
+
+
+def test_measured_floor_still_records_absolute_and_no_level(tmp_path, monkeypatch):
+    """Rasters converted before noise_model= existed still compare equal."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    sicd = _FakeSicd(radiometric=_radiometric_noise(coefs=[[-40.0]]))
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), sicd))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "measured.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        noise_subtract=True,
+    )
+    tags = convert.read_conversion_tags(out)
+    assert tags["noise_subtraction"] == "absolute"
+    # The measured floor is a polynomial across the image, so there is no single
+    # level to quote and the tag stays off rather than reporting a mean.
+    assert "noise_floor_db" not in tags
+
+
+def test_conversion_tags_omit_the_floor_when_nothing_was_subtracted():
+    tags = convert.conversion_tags(
+        source="scene.ntf", geocoded=True, noise_subtraction=None, noise_floor_db=-31.4
+    )
+    assert tags["UMBRA_NOISE_SUBTRACTION"] == "none"
+    assert "UMBRA_NOISE_FLOOR_DB" not in tags
+
+
+def test_cli_convert_noise_model_estimated_works_without_noise_metadata(tmp_path, monkeypatch):
+    rasterio = pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    np = pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(10, 12), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    dst = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(dst),
+            "--subtract-noise",
+            "--noise-model",
+            "estimated",
+            "--resampling",
+            "nearest",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The output line names the two apart, as the tags and the stack refusal do.
+    assert "noise-estimated" in result.output
+    with rasterio.open(dst) as ds:
+        assert np.isfinite(ds.read(1)).any()
+    assert convert.read_conversion_tags(dst)["noise_subtraction"] == "estimated"
+
+
+def test_cli_convert_defaults_to_the_measured_floor(tmp_path, monkeypatch):
+    """--subtract-noise alone means exactly what it meant before this option."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 8), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    result = CliRunner().invoke(
+        cli_mod.cli, ["convert", str(src), str(tmp_path / "geo.tif"), "--subtract-noise"]
+    )
+
+    assert result.exit_code != 0
+    assert "no Radiometric metadata" in result.output
 
 
 # --------------------------------------------------------------------------- #

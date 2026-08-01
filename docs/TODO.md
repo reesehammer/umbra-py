@@ -208,18 +208,27 @@ blocker:
 - **Surfaced in:** the noise-subtraction PR (`STRATEGY.md` 5.5, which the DEM
   entry above named).
 - **Code:** `src/umbra_py/convert.py` (`_noise_level_type`,
-  `_noise_coefficients`, `_noise_power`, `_subtract_noise`, `_denoise_amplitude`,
-  `sicd_noise_level`, the `NOISE_SUBTRACTION` tag), `src/umbra_py/load.py`
+  `_noise_coefficients`, `_noise_power`, `_estimate_noise_power`,
+  `_subtract_noise`, `_denoise_amplitude`, `sicd_noise_level`, `NOISE_MODELS`,
+  `NOISE_ESTIMATE_PERCENTILE`, `_NOISE_PROVENANCE`, the `NOISE_SUBTRACTION` /
+  `NOISE_FLOOR_DB` tags), `src/umbra_py/load.py`
   (`MEASUREMENT_PROVENANCE_KEYS`, `_STEP_NOT_RUN`), `src/umbra_py/chips.py`
-  (`SicdConversion.noise_subtract`, `ChipRecord.noise_subtraction`),
-  `umbra convert --subtract-noise` / `umbra chips --subtract-noise` in
-  `cli/process.py`.
+  (`SicdConversion.noise_subtract` / `.noise_model`,
+  `ChipRecord.noise_subtraction`),
+  `umbra convert --subtract-noise --noise-model` /
+  `umbra chips --subtract-noise --noise-model` in `cli/process.py`.
 
 The receiver's own thermal-noise floor is subtracted from detected power before
-any multiplicative correction scales it, from the product's own
-`Radiometric.NoiseLevel.NoisePoly`; only an `ABSOLUTE` level is accepted, the
-result is recorded in `UMBRA_NOISE_SUBTRACTION` and `to_stack` refuses a series
-that mixes subtracted and unsubtracted passes. Follow-ons, none a blocker:
+any multiplicative correction scales it. Where that floor comes from is
+`--noise-model`: `measured` reads the product's own
+`Radiometric.NoiseLevel.NoisePoly` (only an `ABSOLUTE` level is accepted), and
+`estimated` infers one constant per scene from the 5th percentile of the image's
+own power — which is what works on Umbra's open products, since they generally
+carry no `Radiometric` block at all. The two record themselves as different
+things (`UMBRA_NOISE_SUBTRACTION` of `"absolute"` vs `"estimated"`, plus
+`UMBRA_NOISE_FLOOR_DB` for the estimate) and `to_stack` refuses a series that
+mixes any two of subtracted / unsubtracted / estimated. Follow-ons, none a
+blocker:
 
 - **Nothing reports how much of the scene the floor swallowed.** The fraction of
   pixels driven to `_NOISE_RESIDUAL_FLOOR` is exactly the "how much of this image
@@ -233,12 +242,31 @@ that mixes subtracted and unsubtracted passes. Follow-ons, none a blocker:
   different product (a relative correction, not a subtraction), so it wants its
   own name and its own provenance value rather than a quiet reinterpretation of
   this flag.
-- **The floor is subtracted, not estimated.** A product with no `NoiseLevel`
-  gets an error, which is the honest answer; estimating the floor from the
-  scene's own darkest percentile is a well-known alternative that would make the
-  correction available on Umbra's open products. It would also be an *inferred*
-  number wearing the same tag as a measured one, so it needs a distinct
-  provenance value (`estimated`) before it would be safe to add.
+- **The estimator's percentile is fixed at the library level.**
+  `NOISE_ESTIMATE_PERCENTILE` (5.0) is a module constant that
+  `_estimate_noise_power` takes as a default and nothing above it overrides — not
+  `sicd_to_geocoded_cog`, not the CLI. That is deliberate: a knob whose right
+  value depends on how much dark ground a scene happens to contain is a knob
+  most callers would turn wrongly, and the honest fix for a scene where 5% is
+  wrong is a *measured* floor, not a tuned guess. If a class of scenes turns out
+  to need a different tail (very high incidence, all-water), thread it through
+  as `noise_percentile=` and record it beside `UMBRA_NOISE_FLOOR_DB` so the
+  number stays reproducible.
+- **The estimate is one constant, so it cannot follow the swath.** A measured
+  `NoisePoly` varies across the image; the estimate is a scalar, which leaves
+  the across-swath gradient the measured floor removes. A per-range-line
+  estimate (fit the low tail against range, interpolate across lines with no
+  dark ground) would recover some of that, but it is a genuinely different
+  estimator with its own failure mode — it wants its own provenance value rather
+  than quietly changing what `"estimated"` means.
+- **Nothing warns when the scene had no dark ground to read.** Over uniformly
+  bright imagery the 5th percentile *is* ground, so the subtraction removes
+  signal, and the only signal that it happened is the caveat `stack_stats`
+  attaches to any estimated cube. The image's own statistics could say more —
+  a low tail that sits close to the median is the tell — but "how bimodal is
+  this scene?" is a heuristic, and a threshold on it would fail quietly in a
+  different direction. Worth adding as a *reported* number (the ratio of the
+  estimated floor to the scene median) before it is ever worth a refusal.
 - **`umbra chips` exposes the flag but not the check.** There is no chip-side
   equivalent of `sicd_noise_level`, so a batch over acquisitions whose metadata
   varies fails on the first product that cannot support it rather than reporting

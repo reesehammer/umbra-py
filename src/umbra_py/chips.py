@@ -129,6 +129,7 @@ class SicdConversion:
     rtc_reference_deg: float | None = None
     calibration: str | None = None
     noise_subtract: bool = False
+    noise_model: str = "measured"
     resolution: float | None = None
     resampling: str = "bilinear"
     gcp_grid: int = 15
@@ -289,6 +290,7 @@ def _prepare_sicd(
         rtc_model=conversion.rtc_model,
         calibration=conversion.calibration,
         noise_subtract=conversion.noise_subtract,
+        noise_model=conversion.noise_model,
         bbox=conversion.bbox,
     )
 
