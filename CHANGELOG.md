@@ -7,6 +7,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Make the noise subtraction say what it did to the scene:
+  `UMBRA_NOISE_FLOORED_FRACTION` and `UMBRA_NOISE_FLOOR_MARGIN_DB`.** The two
+  entries below shipped a correction with two honestly-stated limits — it clamps
+  every pixel the floor meets or exceeds, and the estimated model assumes the
+  scene contained dark ground to read at all — and stated them in a docstring.
+  On any *particular* conversion, neither was visible. A scene where the
+  subtraction floored half the image and one where it floored nothing produced
+  the same output, the same tags and the same line on the way out; so did a scene
+  with 30 dB of water under its buildings and one that was uniformly bright,
+  where the fifth percentile taken off is not the receiver but the ground.
+
+  Both numbers were already being computed and thrown away. `_subtract_noise`
+  compares power against the floor, so it knows exactly how many finite pixels
+  landed on `_NOISE_RESIDUAL_FLOOR` — the "how much of this image is at the
+  sensor's sensitivity limit?" fraction, which is unrecoverable afterwards
+  because a floored pixel and a genuinely floor-valued one are the same value
+  once written. `_estimate_noise_power` has the scene's whole finite power
+  distribution in hand to take a percentile of, so the median it needs to be
+  compared against costs one more pass over an array that already exists. Both
+  now come back in a `NoiseSubtraction` record and into the raster's own
+  provenance: `UMBRA_NOISE_FLOORED_FRACTION` for either model, and
+  `UMBRA_NOISE_FLOOR_MARGIN_DB` — how far the scene's median power sits above the
+  inferred floor — for the estimate.
+
+  The margin is the estimator's own assumption made checkable. It works because a
+  SAR scene's dark surfaces are a *different population* from its ordinary
+  backscatter, so the distance between the fifth percentile and the median is the
+  evidence that they were: wide, and the low tail was noise; narrow, and the
+  scene had no noise-dominated population and the subtraction removed signal.
+  `umbra convert` prints both diagnostics and, below `NOISE_MARGIN_WARN_DB`
+  (6 dB — a factor of four in power), says the scene had little dark ground to
+  read and points at `--noise-model measured`. It stays an **advisory, never a
+  refusal**: a uniform scene is a legitimate scene, "how bimodal is this image?"
+  is a heuristic, and the honest fix where it matters is a measured floor rather
+  than a differently-tuned guess. The CLI reads the numbers back out of the file
+  it just wrote rather than taking them through a return value, so what is
+  printed is exactly what the raster will still say tomorrow.
+
+  They are diagnostics of a scene, not claims about what a pixel value *means*,
+  which is why they are deliberately **not** in
+  `load.MEASUREMENT_PROVENANCE_KEYS`: no two real passes agree on how much of
+  each was floored, so recording them there would have ended every series
+  `to_stack` could build. They are carried into a cube's `attrs["provenance"]`
+  only under the existing "every source agrees" rule, so a stack quotes them when
+  they are the same number and stays silent rather than quoting one pass's for
+  the whole series.
 - **Make the noise correction reach the archive it was built for: `umbra convert
   --noise-model estimated` / `sicd_to_geocoded_cog(noise_model="estimated")`.**
   The noise-floor subtraction below reads the product's own
