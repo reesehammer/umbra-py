@@ -7,6 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Say which scenes in a training set the noise estimate should not have been
+  trusted on (`umbra chips`).** Every noise subtraction already measured its own
+  two limits on the scene it ran on — `UMBRA_NOISE_FLOORED_FRACTION`, how much of
+  the image the floor drove to the sensor's sensitivity limit, and
+  `UMBRA_NOISE_FLOOR_MARGIN_DB`, how far the scene's median power sat above an
+  *inferred* floor, which is the estimator's own assumption turned into a number.
+  `umbra convert` prints both for the one raster it writes. A chip run converts
+  *many* — twenty passes over a site is an ordinary dataset build — and there the
+  numbers reached the chip GeoTIFFs' tags and stopped: nothing in the manifest, no
+  line on the way out. A training set could therefore contain a handful of scenes
+  whose dark tail was ground rather than receiver, with the evidence sitting
+  unread inside the files.
+
+  Two surfaces, because the question has two audiences. Each `ChipRecord` now
+  carries `noise_floored_fraction` and `noise_floor_margin_db`, read back from the
+  converted raster's own tags like `calibration` and `noise_subtraction` beside
+  them, so a loader can drop the affected scenes with a one-line manifest filter
+  and never open a raster. And the run reports one `NoiseSummary` roll-up —
+  scenes, models, how many reported a margin, how many sat under
+  `NOISE_MARGIN_WARN_DB`, the narrowest margin and the worst floored fraction —
+  on `ChipDataset.noise`, in the `--json` payload, and as up to three lines on the
+  way out (*"noise floor: estimated-range, subtracted on 22 scene(s)"*, and where
+  it applies, *"2 of 22 scene(s) had under 6 dB of margin"*).
+
+  It is counted per **acquisition**, not per chip: the diagnostics describe the
+  scene a chip was cut from, so every chip of one pass repeats them and counting
+  chips would weight a wide scene more heavily than a narrow one for no reason.
+  The summary is derived from the records rather than accumulated during the run,
+  so it cannot disagree with the manifest beside it, and it is absent entirely
+  from a run where no floor came off — a `GEC` dataset's output is unchanged by
+  this existing. The advisory stays an advisory, as it is per scene: a uniformly
+  bright scene is legitimate imagery, and the honest fix where the margin matters
+  is `--noise-model measured`, not a differently-tuned guess.
 - **Refuse to *measure* change between passes converted differently
   (`render_change_png` / `umbra change --narrate`).** `to_stack` already reads
   each source's `UMBRA_*` conversion record and refuses a datacube whose slices

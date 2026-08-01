@@ -43,6 +43,17 @@ Design, following the package's determinism boundary (``docs/AGENTS.md``):
   honest and stated: unlike the GEC path this downloads the whole product before
   it can read any of it, so it is opt-in, one scene is resident at a time, and
   ``work_dir`` makes the expensive step resumable across runs.
+- **A batch says which of its scenes the noise estimate should not be trusted
+  on.** The inferred noise floors (``--noise-model estimated`` /
+  ``estimated-range``) work because a SAR scene's dark surfaces are a different
+  population from its backscatter, and :class:`umbra_py.convert.NoiseSubtraction`
+  measures how true that was of each scene. ``umbra convert`` prints those
+  numbers for the one raster it writes; a chip run converts many, so they arrive
+  here twice over -- per chip, as :class:`ChipRecord` fields a training loader
+  can filter the manifest on, and once for the run as a
+  :class:`NoiseSummary` roll-up that counts the scenes with too little dark
+  ground to read. Neither is a refusal: a uniformly bright scene is legitimate
+  imagery, and the honest fix where it matters is a measured floor.
 
 The manifest is machine-readable first: ``.jsonl`` (one chip record per line --
 the standard ML manifest format) or ``.geojson`` (a ``FeatureCollection`` of
@@ -182,6 +193,21 @@ def _reported_step(provenance: dict[str, str], name: str) -> str | None:
     return None if value in (None, "none") else value
 
 
+def _reported_number(provenance: dict[str, str], name: str) -> float | None:
+    """One numeric diagnostic from the provenance tags, as ``None`` when absent.
+
+    The diagnostics :class:`umbra_py.convert.NoiseSubtraction` records are
+    written only by the step that computed them, so unlike a processing step
+    there is no ``"none"`` sentinel to translate -- an absent tag means the
+    subtraction those numbers describe did not run. GeoTIFF metadata is strings,
+    so the float lives here rather than in every caller.
+    """
+    from .convert import PROVENANCE_TAG_PREFIX  # noqa: PLC0415
+
+    value = provenance.get(f"{PROVENANCE_TAG_PREFIX}{name}")
+    return None if value is None else float(value)
+
+
 def _as_bbox(bbox: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     """A bbox as four plain floats, so one written any sequence-ish way compares
     and digests identically wherever it is stored."""
@@ -313,6 +339,16 @@ class ChipRecord:
     request, so the record reports the processing that actually ran. All three
     are ``None`` for a chip read straight from an amplitude raster, and the full
     tag set travels in the chip GeoTIFF itself.
+
+    ``noise_floored_fraction`` and ``noise_floor_margin_db`` come from the same
+    tags and are the noise subtraction's two *diagnostics* (see
+    :class:`umbra_py.convert.NoiseSubtraction`): how much of the scene the floor
+    drove to the sensor's sensitivity limit, and -- for an inferred floor -- how
+    far the scene's own median power sat above it. They describe the scene the
+    chip was cut from rather than the chip, so every chip of one acquisition
+    carries the same pair; a training loader that wants to drop the scenes whose
+    dark tail was ground rather than receiver can filter the manifest on the
+    second without opening a raster.
     """
 
     path: str
@@ -336,6 +372,8 @@ class ChipRecord:
     resolution_azimuth_m: float | None = None
     calibration: str | None = None
     noise_subtraction: str | None = None
+    noise_floored_fraction: float | None = None
+    noise_floor_margin_db: float | None = None
     rtc_model: str | None = None
     license: str = DATA_LICENSE
     attribution: str = ATTRIBUTION
@@ -363,6 +401,8 @@ class ChipRecord:
             "resolution_azimuth_m": self.resolution_azimuth_m,
             "calibration": self.calibration,
             "noise_subtraction": self.noise_subtraction,
+            "noise_floored_fraction": self.noise_floored_fraction,
+            "noise_floor_margin_db": self.noise_floor_margin_db,
             "rtc_model": self.rtc_model,
             "license": self.license,
             "attribution": self.attribution,
@@ -383,6 +423,96 @@ class ChipRecord:
             "geometry": {"type": "Polygon", "coordinates": [ring]},
             "properties": self.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class NoiseSummary:
+    """What the noise subtraction did across a whole chipping run.
+
+    :class:`umbra_py.convert.NoiseSubtraction`'s diagnostics are per scene, and
+    ``umbra convert`` prints them for the one raster it wrote. A chip run
+    converts *many* scenes, so the equivalent there is not a line each -- it is
+    the question a dataset builder actually has: **were any of these scenes ones
+    the estimator should not have been used on?** The inferred floors work
+    because a SAR scene's dark surfaces are a different population from its
+    backscatter; where they aren't, the subtraction takes real backscatter off,
+    and the tell is a narrow margin between the floor and the scene's median
+    power. That is a property of some scenes in a batch and not others, which is
+    exactly what a roll-up is for.
+
+    Counted per *acquisition* rather than per chip: the numbers describe the
+    scene each chip was cut from, so counting chips would weight a wide scene
+    more heavily than a narrow one for no reason. Scenes that produced no chips
+    (everything dropped by ``min_valid``) are not in the batch this describes.
+
+    Attributes
+    ----------
+    scenes:
+        Acquisitions in this run whose chips carry a noise subtraction.
+    models:
+        The distinct ``UMBRA_NOISE_SUBTRACTION`` values across them, sorted --
+        normally one, since a run converts every scene the same way.
+    margin_scenes:
+        How many of ``scenes`` reported a margin at all. Only the inferred
+        floors do: a measured floor is the product's own metadata and assumes
+        nothing about the scene, so it has nothing to report.
+    low_margin_scenes:
+        How many of ``margin_scenes`` sat below ``margin_warn_db``. This is the
+        number the roll-up exists for.
+    margin_warn_db:
+        The advisory threshold applied (``convert.NOISE_MARGIN_WARN_DB``).
+    min_margin_db:
+        The narrowest margin in the batch -- the worst scene, ``None`` when no
+        scene reported one.
+    max_floored_fraction:
+        The largest fraction of a scene the floor drove to the sensor's
+        sensitivity limit. Reported by both models.
+    """
+
+    scenes: int
+    models: list[str]
+    margin_scenes: int
+    low_margin_scenes: int
+    margin_warn_db: float
+    min_margin_db: float | None = None
+    max_floored_fraction: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _summarise_noise(records: Iterable[ChipRecord]) -> NoiseSummary | None:
+    """Roll a run's per-scene noise diagnostics up into one :class:`NoiseSummary`.
+
+    ``None`` when no chip in the run came from a scene that subtracted a floor,
+    which keeps the summary out of an ordinary GEC run's output entirely.
+    """
+    from .convert import NOISE_MARGIN_WARN_DB  # noqa: PLC0415
+
+    # One entry per acquisition: the diagnostics are the scene's, so every chip
+    # of one item repeats them.
+    scenes: dict[str, ChipRecord] = {}
+    for record in records:
+        if record.noise_subtraction is not None:
+            scenes.setdefault(record.item_id, record)
+    if not scenes:
+        return None
+
+    margins = [
+        r.noise_floor_margin_db for r in scenes.values() if r.noise_floor_margin_db is not None
+    ]
+    floored = [
+        r.noise_floored_fraction for r in scenes.values() if r.noise_floored_fraction is not None
+    ]
+    return NoiseSummary(
+        scenes=len(scenes),
+        models=sorted({str(r.noise_subtraction) for r in scenes.values()}),
+        margin_scenes=len(margins),
+        low_margin_scenes=sum(1 for m in margins if m < NOISE_MARGIN_WARN_DB),
+        margin_warn_db=NOISE_MARGIN_WARN_DB,
+        min_margin_db=min(margins) if margins else None,
+        max_floored_fraction=max(floored) if floored else None,
+    )
 
 
 @dataclass
@@ -408,6 +538,15 @@ class ChipDataset:
     def chip_count(self) -> int:
         return len(self.records)
 
+    @property
+    def noise(self) -> NoiseSummary | None:
+        """The run's noise-subtraction roll-up, or ``None`` when none ran.
+
+        Derived from ``records`` rather than accumulated during the run, so the
+        summary can never disagree with the manifest it sits beside.
+        """
+        return _summarise_noise(self.records)
+
     def to_dict(self) -> dict[str, Any]:
         item_ids = sorted({r.item_id for r in self.records})
         # The conversion block appears only when one ran, so an unconverted
@@ -415,6 +554,9 @@ class ChipDataset:
         extra: dict[str, Any] = (
             {"conversion": asdict(self.conversion)} if self.conversion is not None else {}
         )
+        noise = self.noise
+        if noise is not None:
+            extra["noise"] = noise.to_dict()
         return {
             "out_dir": self.out_dir,
             "manifest": self.manifest_path,
@@ -605,6 +747,8 @@ def chip_item(
         provenance = _provenance_tags(src)
         calibration = _reported_step(provenance, "CALIBRATION")
         noise_subtraction = _reported_step(provenance, "NOISE_SUBTRACTION")
+        noise_floored_fraction = _reported_number(provenance, "NOISE_FLOORED_FRACTION")
+        noise_floor_margin_db = _reported_number(provenance, "NOISE_FLOOR_MARGIN_DB")
         rtc_model = _reported_step(provenance, "RTC_MODEL")
         if bbox is None:
             row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
@@ -680,6 +824,8 @@ def chip_item(
                         resolution_azimuth_m=azi,
                         calibration=calibration,
                         noise_subtraction=noise_subtraction,
+                        noise_floored_fraction=noise_floored_fraction,
+                        noise_floor_margin_db=noise_floor_margin_db,
                         rtc_model=rtc_model,
                     )
                 )

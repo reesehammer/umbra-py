@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 
 from .._spinner import OrbitSpinner
-from ..chips import CHIPPABLE_ASSETS
+from ..chips import CHIPPABLE_ASSETS, ChipDataset
 from ..constants import PRODUCT_ASSETS
 from ..convert import CALIBRATION_TYPES, NOISE_MODELS, RESAMPLING_METHODS, RTC_MODELS
 from ..load import STACK_EXTENTS
@@ -90,6 +90,43 @@ def _echo_noise_report(path: Path) -> None:
             "dark ground for the estimate to read -- the fifth percentile it subtracted "
             "is likely real backscatter rather than the receiver. Use --noise-model "
             "measured where the product states its own floor."
+        )
+
+
+def _echo_chip_noise_report(dataset: ChipDataset) -> None:
+    """Say what the noise subtraction did across a chip run's scenes.
+
+    :func:`_echo_noise_report` is the same job for the one raster ``umbra
+    convert`` writes. A chip run converts many, so a line per scene would bury
+    the only question a dataset builder has -- *were any of these scenes ones the
+    estimate should not have been trusted on?* -- under twenty lines saying it
+    was fine. What is printed is therefore a count, and the count is silent when
+    it is zero: an estimate that held on every scene needs no comment.
+
+    The advisory stays advisory here for the same reason it is one per scene: a
+    uniformly bright scene is legitimate imagery, and the honest fix where the
+    margin matters is a measured floor, not a differently-tuned guess. The
+    numbers are in every manifest record, so a loader can act on them per scene
+    rather than take the batch's word for it.
+    """
+    noise = dataset.noise
+    if noise is None:
+        return
+    models = "/".join(noise.models)
+    click.echo(f"  noise floor: {models}, subtracted on {noise.scenes} scene(s)")
+    if noise.max_floored_fraction is not None:
+        click.echo(
+            f"  up to {noise.max_floored_fraction:.1%} of a scene is at the sensor's "
+            "limit after the subtraction"
+        )
+    if noise.low_margin_scenes:
+        click.echo(
+            f"  Note: {noise.low_margin_scenes} of {noise.margin_scenes} scene(s) had "
+            f"under {noise.margin_warn_db:g} dB of margin above the estimated floor "
+            f"(narrowest {noise.min_margin_db:.1f} dB) -- those scenes had little dark "
+            "ground for the estimate to read, so what came off them is likely real "
+            "backscatter. Filter the manifest on noise_floor_margin_db, or use "
+            "--noise-model measured where the products state their own floor."
         )
 
 
@@ -1171,3 +1208,4 @@ def chips(
     )
     if dataset.manifest_path:
         click.echo(f"  manifest -> {dataset.manifest_path}")
+    _echo_chip_noise_report(dataset)

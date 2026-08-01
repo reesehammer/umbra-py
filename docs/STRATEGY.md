@@ -279,7 +279,9 @@ which is the difference between a model that transfers between scenes and one
 that memorises brightness. The chipper composes with the pipeline rather than
 reimplementing it (same window loop, conversion settings passed straight
 through, provenance read back from the raster's own `UMBRA_*` tags into both the
-manifest and every chip GeoTIFF), and states its cost: a SICD has no map grid to
+manifest and every chip GeoTIFF — including the noise estimate's two per-scene
+diagnostics, which a batch reports as a count of the scenes that had too little
+dark ground to read rather than as a line each), and states its cost: a SICD has no map grid to
 range-read, so the product is downloaded whole — opt-in, one scene resident at a
 time, and `--work-dir` making the expensive step resumable.
 ~~**Open:** the conversion is all-or-nothing, so a run whose subject is a *site*
@@ -572,6 +574,18 @@ from:
   of a scene rather than claims about a pixel, so they stay out of
   `MEASUREMENT_PROVENANCE_KEYS` by design: no two real passes agree on them, and
   refusing over them would have ended every series. See the CHANGELOG.
+  ~~**Open:** both numbers reached `umbra convert`'s one raster and stopped, so a
+  *training set* built from twenty passes could carry a handful of scenes whose
+  dark tail was ground rather than receiver with the evidence unread inside the
+  files.~~ **shipped** — `umbra chips` now carries them into every manifest
+  record (`ChipRecord.noise_floored_fraction` / `.noise_floor_margin_db`, so a
+  loader drops the affected scenes with a filter rather than a raster read) and
+  rolls them up across the run (`ChipDataset.noise` / `NoiseSummary`, in the
+  `--json` payload and on the way out). The roll-up is counted per *acquisition*,
+  because the diagnostics describe the scene a chip was cut from; it is derived
+  from the records rather than accumulated, so it cannot disagree with the
+  manifest beside it; and it is absent from a run where no floor came off, so a
+  `GEC` dataset's output is unchanged.
 - ~~The inferred floor was one constant for a whole scene, so it could not follow
   the across-swath variation the measured polynomial exists to describe — leaving
   a gradient that tracks the geometry rather than the ground, which is the

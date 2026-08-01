@@ -20,6 +20,15 @@ rather than whole — which is where the cost of chipping the complex archive
 actually lives. It is lon/lat whatever the raster's CRS is, matching
 `to_stack(bbox=…)`.
 
+Where the conversion *inferred* the noise floor (`--noise-model estimated` /
+`estimated-range`), the run also says which of its scenes that estimate should
+not be trusted on. Each `ChipRecord` carries the scene's own
+`noise_floor_margin_db` and `noise_floored_fraction`, so a training loader can
+filter the manifest instead of opening rasters, and `ChipDataset.noise`
+(`NoiseSummary`) counts the scenes that had too little dark ground to read. It is
+an advisory, never a refusal — a uniformly bright scene is legitimate imagery, and
+the honest fix where the margin matters is `--noise-model measured`.
+
 ## Chips
 
 ::: umbra_py.chip_item
@@ -33,6 +42,8 @@ actually lives. It is lon/lat whatever the raster's CRS is, matching
 ::: umbra_py.ChipRecord
 
 ::: umbra_py.ChipDataset
+
+::: umbra_py.NoiseSummary
 
 ::: umbra_py.SicdConversion
 

@@ -1087,7 +1087,14 @@ terrain-flattened, calibrated
 removed rather than relative brightness, and each chip GeoTIFF inherits the
 `UMBRA_*` provenance tags saying so (the manifest also carries `calibration` /
 `noise_subtraction` / `rtc_model`, read back from the raster rather than from the
-request). The cost is honest:
+request). A run that *inferred* the noise floor also says which of its scenes it
+should not have been trusted on: each record carries that scene's
+`noise_floor_margin_db` and `noise_floored_fraction`, and the run prints (and
+`--json` reports) one roll-up — *"2 of 22 scene(s) had under 6 dB of margin"* —
+because a scene that was bright everywhere had no dark ground for the fifth
+percentile to read, so what came off it was real backscatter. It stays an
+advisory: filter the manifest on the margin, or use `--noise-model measured`
+where the products state their own floor. The cost is honest:
 unlike the GEC path this downloads each product whole, so it is opt-in, one scene
 is on disk at a time, and `--work-dir` keeps the geocoded scenes so a re-run
 reuses them instead of fetching and warping again. `--clip-bbox` is what makes
