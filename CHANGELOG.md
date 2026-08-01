@@ -7,6 +7,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Let a hosted measurement average the speckle down too
+  (`"speckle_filter"` on `POST /artifacts/stats`, and on the `stack_stats` agent
+  tool).** The filter that shipped last reached the library and the CLI and
+  stopped there, so every measurement made *through the server* — the front door
+  built precisely so a QGIS user, a browser front end or an OpenAPI-driven agent
+  could measure a site without installing anything — was unfiltered, and no
+  request could ask otherwise. On a quiet site that is not a missing convenience:
+  single-look speckle scatters as widely as its own mean, so a per-cell decibel
+  delta between two unfiltered passes is mostly interference, and the endpoint
+  whose whole purpose is returning numbers a program can act on was returning the
+  noisiest ones the chain can produce.
+
+  A request may now send `"speckle_filter": "boxcar" | "lee"` (with an optional
+  odd `"speckle_window"`, default 5) and the option rides straight through to
+  `to_stack(speckle_filter=…)` — the same arithmetic, the same shared grid, the
+  same power domain, and the same record. Nothing in `stack_stats` changed: the
+  cube carries `umbra convert`'s own `speckle_filter` / `speckle_window` keys, so
+  the response's `caveats` state the trade (a less noisy estimate of each cell;
+  the effective resolution of a window rather than of a cell) with no server-side
+  vocabulary of its own.
+
+  Where the option *lives* is the decision this makes. It is a request field in
+  the artifact cache key rather than an instance policy like `--stack-lazy`,
+  because — like `"windowed"` and unlike the lazy build — it **moves the
+  numbers**: a cached artifact whose values depended on a server flag nobody
+  could see is the failure mode both rules exist to prevent. And it is the exact
+  complement of `"windowed"`: filtering needs each pass whole, so it is refused
+  (`400`) on an instance started with `--stack-chunk-size`, where `"windowed"` is
+  refused on one *without*. That makes the pair unsatisfiable on every instance,
+  so they are refused together at the request rather than one instance at a time;
+  an unknown filter name or a window that cannot be centred is likewise a `400`
+  from `stats_options` rather than an error raised from inside a datacube build.
+  `umbra serve` echoes at startup which of the two an instance can honour, and an
+  unapplied window is normalised away so it can never split the cache for an
+  artifact it had no effect on.
+
+  The agent surfaces get the same pair (`stack_stats(urls=[…],
+  speckle_filter="lee")` on MCP / LangChain / LlamaIndex), where — unlike
+  `"windowed"`, deliberately left out because those tools build an eager
+  512-pixel cube with no ceiling to lift — it answers a question a model actually
+  has: the numbers look noisy against a picture that looks quiet. Validation is
+  left to `to_stack`'s own check, which runs before a source is opened, so a
+  model that invents a filter name gets the library's message and costs no bytes.
 - **Bring the speckle averaging to the products people actually use
   (`umbra stack --speckle-filter {boxcar,lee}` / `to_stack(speckle_filter=…)`).**
   The correction that shipped last is the largest one the pipeline makes and the

@@ -410,6 +410,55 @@ def test_stack_stats_block_series_is_opt_in_on_the_agent_surface(sample_item_dic
         ms.stack_stats(urls, block_series=True)
 
 
+@responses.activate
+def test_stack_stats_forwards_the_speckle_filter(sample_item_dict, monkeypatch):
+    """The correction with the largest effect on a per-cell delta reaches the
+    agent surface too -- and it is the *cube* that filters, on the shared grid,
+    so it rides through the build rather than the reduction."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+
+    seen: dict = {}
+
+    def fake_to_stack(items, **kwargs):
+        seen.update(kwargs)
+        return _constant_cube()
+
+    monkeypatch.setattr(load, "to_stack", fake_to_stack)
+
+    # Off by default: what a filter spends is resolution, so it is asked for.
+    ms.stack_stats([ITEM_URL, second_url])
+    assert seen["speckle_filter"] is None
+    assert seen["speckle_window"] == ms.SPECKLE_WINDOW_DEFAULT
+
+    ms.stack_stats([ITEM_URL, second_url], speckle_filter="lee", speckle_window=7)
+    assert (seen["speckle_filter"], seen["speckle_window"]) == ("lee", 7)
+
+
+@responses.activate
+def test_stack_stats_leaves_a_bad_speckle_filter_to_the_one_implementation(sample_item_dict):
+    """No second copy of the check on the agent surface: ``to_stack`` validates
+    before it opens a source, so a model that invents a filter name gets the
+    library's own message and costs no bytes."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("rasterio")
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+
+    with pytest.raises(ValueError, match="Unknown speckle_filter"):
+        ms.stack_stats([ITEM_URL, second_url], speckle_filter="frost")
+    with pytest.raises(ValueError, match="odd integer"):
+        ms.stack_stats([ITEM_URL, second_url], speckle_filter="boxcar", speckle_window=4)
+
+
 def _constant_cube():
     """A tiny two-pass dB cube on a projected grid, built without any I/O."""
     np = pytest.importorskip("numpy")

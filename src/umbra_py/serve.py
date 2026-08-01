@@ -76,6 +76,22 @@ It needs a chunked instance to lower anything, so on one without
 ``--stack-chunk-size`` it is refused (``400``) rather than silently answered
 with worse percentiles and identical memory.
 
+``"speckle_filter": "boxcar" | "lee"`` is a request option for the same reason
+and a larger one. Speckle -- the interference pattern coherent illumination
+makes on rough ground, whose standard deviation equals its mean on a single look
+-- is the dominant uncertainty in a per-cell decibel delta, so an unfiltered
+hosted measurement quotes mostly interference wherever the change is small.
+``to_stack(speckle_filter=…)`` averages it down on the shared grid before
+anything is measured, the cube records what it did in ``umbra convert``'s own
+``speckle_filter`` / ``speckle_window`` keys, and ``stack_stats`` turns that
+record into the caveat that states the trade: the window that removed the
+variance also spent the resolution, so a cell reports ground several cells
+across. That is a number *and* a caveat moving, so it is in the cache key.
+It is the exact complement of ``windowed``: filtering needs the pass whole, so
+it is refused (``400``) on an instance started with ``--stack-chunk-size``,
+while ``windowed`` is refused on one without -- which makes the two mutually
+exclusive on every instance, and so refused together at the request.
+
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
 to ``"async": true`` for a small job queue: it gets a ``202 Accepted`` + a job
@@ -126,6 +142,7 @@ from .constants import (
     PRODUCT_ASSETS,
     PRODUCT_TYPE_EXPLANATIONS,
 )
+from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
 from .load import STACK_AUTO_CRS, STACK_EXTENTS
@@ -996,6 +1013,22 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
                 "estimate the percentiles without lowering the memory. Ask the operator "
                 "for 'umbra serve --stack-lazy --stack-chunk-size N', or drop 'windowed'."
             )
+        # The mirror image of the refusal above, and for a reason of substance
+        # rather than of cost: a filter window centred near a chunk edge averages
+        # cells the neighbouring chunk holds, and "lee" reads its speckle
+        # parameter off the array it is handed -- so on a chunked instance the
+        # filtered cube would differ from the unchunked one it is documented to
+        # equal. ``to_stack`` refuses the pair itself; catching it here names the
+        # server flag that caused it instead of a library keyword the client
+        # never passed.
+        if opts["speckle_filter"] and execution.chunk_size:
+            raise ValueError(
+                "speckle filtering needs an unchunked instance: this server stacks "
+                f"{execution.describe()}, and a filter window near a chunk edge needs "
+                "cells the neighbouring chunk holds. Ask the operator for 'umbra serve "
+                "--stack-lazy' without '--stack-chunk-size' (one chunk per pass, which "
+                "the filter sees whole), or drop 'speckle_filter'."
+            )
         # The one renderer behind the ``load`` extra rather than ``viz``: it
         # co-registers the passes into a datacube and reduces it to numbers.
         from .load import stack_stats, to_stack
@@ -1016,6 +1049,11 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
                 crs=opts["crs"],
                 lazy=execution.lazy,
                 chunk_size=execution.chunk_size,
+                # Unlike ``lazy``/``chunk_size`` these are the client's: they
+                # change what the cells *are*, and the cube records them so the
+                # reduction's caveats say the resolution the numbers cost.
+                speckle_filter=opts["speckle_filter"],
+                speckle_window=opts["speckle_window"] or SPECKLE_WINDOW_DEFAULT,
             )
             payload = stack_stats(
                 cube,
@@ -1066,18 +1104,30 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
     backscatter is a difference. Pass ``"crs": null`` for a lon/lat grid (and
     accept ``None`` areas rather than wrong ones).
 
-    ``windowed`` is here — in the request options the cache key hashes — rather
-    than in the instance's :class:`StackExecution`, because it is the one
-    stacking choice that *moves a number*: it trades each pass's exact
-    median/p5/p95 for histogram estimates in exchange for never holding a whole
-    slice. A cached artifact whose quantiles depended on a server flag nobody
-    could see is the failure mode that decides this; asking for it is asking for
-    a different artifact.
+    ``windowed`` and ``speckle_filter`` are here — in the request options the
+    cache key hashes — rather than in the instance's :class:`StackExecution`,
+    because they are the stacking choices that *move a number*. ``windowed``
+    trades each pass's exact median/p5/p95 for histogram estimates in exchange
+    for never holding a whole slice; ``speckle_filter`` averages the interference
+    pattern down before anything is measured, which is the correction with the
+    largest effect on a per-cell decibel delta and the one that spends resolution
+    to get it. A cached artifact whose numbers depended on a server flag nobody
+    could see is the failure mode that decides both; asking for either is asking
+    for a different artifact.
 
-    Raises ``ValueError`` for an unknown ``extent``, a non-positive threshold, or
-    a ``block_series`` asked for without a ``blocks`` grid to hang it on — each
-    of which the route maps to a ``400``. (Whether the *instance* can honour
-    ``windowed`` is not knowable here, so that refusal lives in the renderer.)
+    ``speckle_window`` is normalised to ``None`` when no filter was asked for, so
+    two unfiltered requests that differ only in a window nobody applied are one
+    artifact rather than two cache entries.
+
+    Raises ``ValueError`` for an unknown ``extent``, a non-positive threshold, a
+    ``block_series`` asked for without a ``blocks`` grid to hang it on, an
+    unknown ``speckle_filter`` or a window that cannot be centred, and for
+    ``windowed`` together with ``speckle_filter`` — each of which the route maps
+    to a ``400``. That last pair is refused here rather than per instance because
+    it is unsatisfiable on *every* instance: windowed measurement needs a chunked
+    build and the filter needs an unchunked one (see :class:`StackExecution` and
+    the renderer's own two refusals). Whether a particular instance can honour
+    either alone is not knowable here, so those refusals live in the renderer.
     """
     body = body or {}
     # ``db`` defaults to True here (radiometric scale), unlike the composites.
@@ -1105,10 +1155,44 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
         block_series=bool(body.get("block_series", False)),
         windowed=bool(body.get("windowed", False)),
         change_threshold_db=threshold,
+        **_speckle_options(body),
     )
     if options["block_series"] and not options["blocks"]:
         raise ValueError("block_series needs a blocks grid; send blocks: N as well.")
+    if options["windowed"] and options["speckle_filter"]:
+        raise ValueError(
+            "windowed and speckle_filter cannot be combined: measuring window by window "
+            "needs an instance that builds the cube in windows, and the filter needs one "
+            "that does not (a window centred near a chunk edge averages cells the "
+            "neighbouring chunk holds). Ask for whichever the instance supports, not both."
+        )
     return options
+
+
+def _speckle_options(body: Mapping[str, Any]) -> dict[str, Any]:
+    """The speckle-filtering half of :func:`stats_options`, validated at the request.
+
+    Checked here rather than inside the render for the same reason
+    :func:`~umbra_py.load._resolve_speckle` checks at the call: a misspelt filter
+    or an even window is the client's mistake, and it should cost a ``400`` with
+    the name in it rather than an error raised from somewhere inside a datacube
+    build. The window is dropped entirely when no filter runs, so it never splits
+    the cache for an artifact it had no effect on.
+    """
+    from .convert import _check_speckle_window
+
+    requested = body.get("speckle_filter")
+    name = str(requested).lower() if requested else None
+    if name is not None and name not in SPECKLE_FILTERS:
+        raise ValueError(
+            f"speckle_filter must be one of {list(SPECKLE_FILTERS)}, got {requested!r}."
+        )
+    window = (
+        _check_speckle_window(int(body.get("speckle_window") or SPECKLE_WINDOW_DEFAULT))
+        if name is not None
+        else None
+    )
+    return {"speckle_filter": name, "speckle_window": window}
 
 
 def artifact_cache_key(kind: str, item_ids: Sequence[str], options: Mapping[str, Any]) -> str:
@@ -2101,6 +2185,18 @@ def build_app(
             estimates. The response says which is which -- ``quantile_method``
             and ``quantile_bin_db`` appear exactly when they are estimates --
             and it caches apart from the exact reduction.
+
+            ``"speckle_filter": "boxcar" | "lee"`` (with an optional odd
+            ``"speckle_window"``, default 5) averages **speckle** down on the
+            shared grid before anything is measured -- the correction with the
+            largest effect on a per-cell decibel delta, since single-look speckle
+            scatters as widely as its own mean. ``boxcar`` is the multilook;
+            ``lee`` averages only where a window is no more variable than speckle
+            alone explains, so edges and bright points survive. What it spends is
+            resolution, which the response's ``caveats`` state rather than the
+            request having to remember. It needs the pass whole, so it is the
+            complement of ``windowed``: a ``400`` on an instance started with
+            ``--stack-chunk-size``, and the two are refused together.
             """
             return _composite(
                 request,

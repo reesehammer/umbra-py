@@ -40,6 +40,7 @@ from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
 from .constants import ATTRIBUTION, CANOPY_TOKEN_ENV, DATA_LICENSE
 from .context import llm_context
+from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import MissingDependencyError
 from .geocode import geocode_place as _geocode_place
 from .index import CatalogIndex, default_index_path
@@ -497,6 +498,8 @@ def stack_stats(
     change_threshold_db: float = 3.0,
     blocks: int = 0,
     block_series: bool = False,
+    speckle_filter: str | None = None,
+    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
 ) -> dict[str, Any]:
     """Measure how much a site changed across its passes, as numbers.
 
@@ -535,6 +538,21 @@ def stack_stats(
     (passes − 1) records — so ask for it only when the *shape* of the history is
     the question, not the size of the change.
 
+    ``speckle_filter="boxcar"`` or ``"lee"`` averages **speckle** down before
+    anything is measured. Speckle is not sensor noise: it is the interference
+    pattern coherent illumination makes on rough ground, and on single-look
+    imagery it scatters as widely as its own mean — so on a quiet site an
+    unfiltered per-cell decibel delta is mostly interference rather than change.
+    ``"boxcar"`` averages every window (most variance removed, blind to the edges
+    it averages across); ``"lee"`` averages only where a window is no more
+    variable than speckle alone explains, so edges and bright points survive.
+    Reach for it when the change you are looking for is small, or when the
+    numbers look noisy against a picture that looks quiet; leave it off when the
+    question is about *fine* structure, because what it spends is resolution — a
+    ``speckle_window``-cell window (odd, 5 by default) makes each cell report
+    ground that many cells across. The returned ``caveats`` say so, so a quoted
+    figure carries the trade with it.
+
     Refuses to mix polarizations (HH and VV are not comparable). **No model is
     called** — this is arithmetic over streamed COG overviews, so the numbers are
     reproducible and safe to quote. Read the ``caveats`` before interpreting
@@ -558,6 +576,8 @@ def stack_stats(
         db=True,
         extent=extent,
         crs=crs,
+        speckle_filter=speckle_filter,
+        speckle_window=speckle_window,
     )
     return _stack_stats(
         cube,
