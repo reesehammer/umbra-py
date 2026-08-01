@@ -231,6 +231,21 @@ answers ahead of time, as `sicd_calibration_types` does for the scale factors).
 It is recorded (`UMBRA_NOISE_SUBTRACTION`) and *consumed*: `to_stack` refuses a
 series that subtracted the floor from some passes and not others, because over a
 dark cell that mix is the difference between the two passes.
+~~**Open:** that floor is read from metadata Umbra's open products do not carry,
+so the correction refused on exactly the archive it was built for.~~ **shipped** —
+`umbra convert --noise-model estimated` /
+`sicd_to_geocoded_cog(noise_model="estimated")` infers the floor from the scene
+instead of reading it: a SAR image's darkest surfaces return essentially nothing,
+so the low tail of its own power distribution *is* the receiver, and its 5th
+percentile is a robust read of it. It needs no metadata, which is the point. What
+it costs is named rather than smoothed over — one scalar cannot follow the swath
+the way a `NoisePoly` does, and a scene that is bright everywhere has no dark
+ground to read — and so the inference is never allowed to wear a measurement's
+clothes: `UMBRA_NOISE_SUBTRACTION` records `"estimated"` rather than `"absolute"`
+(with the level it inferred in a new `UMBRA_NOISE_FLOOR_DB`), which is precisely
+what makes `to_stack` refuse to difference an inferred floor against a measured
+one, `stack_stats` name the estimate's two limits, and a `--work-dir` chip cache
+keep the two products apart.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -496,6 +511,25 @@ from:
   --subtract-noise` carries the same to a training set. A `RELATIVE` noise level,
   a missing one, and a product with no `Radiometric` block each raise rather than
   subtract a guess. See the CHANGELOG.
+- ~~The floor was *read*, never inferred, so the correction refused on Umbra's
+  open products — which generally carry no `Radiometric` block at all. A shipped
+  correction that could not be applied to the archive this library exists for.~~
+  **shipped** — `umbra convert --noise-model {measured,estimated}` /
+  `sicd_to_geocoded_cog(noise_model=…)` names where the floor comes from, the
+  same shape `--rtc` / `--rtc-model` already has. `measured` is the previous
+  behaviour exactly; `estimated` takes the 5th percentile of the scene's own
+  detected power, on the argument that a SAR image's water, shadow and smooth
+  ground return essentially nothing, so what is recorded there is the receiver.
+  Everything downstream is untouched — the same subtraction, in the same
+  position, first and on raw power — because what differs between the two is the
+  provenance of the number, not the physics. That difference is carried
+  end-to-end rather than asserted: a distinct `UMBRA_NOISE_SUBTRACTION` value
+  (`"estimated"`), the inferred level in `UMBRA_NOISE_FLOOR_DB`, a `to_stack`
+  refusal on a series that mixes the two floors, a `stack_stats` caveat naming
+  the estimate's two limits (one constant cannot follow the swath; a uniformly
+  bright scene has no dark ground to read, so the subtraction takes real
+  backscatter off), and a `SicdConversion.cache_key` that keeps an estimated
+  conversion out of a measured one's `--work-dir` slot. See the CHANGELOG.
 - ~~Nothing *consumed* those tags (they were written and read back, but no code
   acted on them, so a stack could still mix two conversions and report the
   difference between them as change).~~ **shipped** — `to_stack` reads every

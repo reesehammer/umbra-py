@@ -662,6 +662,8 @@ def test_cli_chips_sicd_builds_the_conversion(tmp_path, monkeypatch):
             "--calibrate",
             "gamma0",
             "--subtract-noise",
+            "--noise-model",
+            "estimated",
             "--json",
         ],
     )
@@ -673,8 +675,61 @@ def test_cli_chips_sicd_builds_the_conversion(tmp_path, monkeypatch):
     assert conversion.rtc_model == "facet"
     assert conversion.calibration == "gamma0"
     assert conversion.noise_subtract is True
+    assert conversion.noise_model == "estimated"
     payload = json.loads(result.output)
     assert payload["conversion"]["calibration"] == "gamma0"
+
+
+def test_cli_chips_defaults_to_the_measured_noise_floor(tmp_path, monkeypatch):
+    """--subtract-noise alone means what it meant before --noise-model existed."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    captured: dict = {}
+    real_write_chips = chips_mod.write_chips
+
+    def _spy(items, out_dir, **kwargs):
+        captured.update(kwargs)
+        return real_write_chips(items, out_dir, preparer=_fake_preparer(cog), **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--chip-size",
+            "10",
+            "--subtract-noise",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["conversion"].noise_model == "measured"
+
+
+def test_conversion_cache_key_separates_a_measured_floor_from_an_inferred_one():
+    from umbra_py.chips import SicdConversion
+
+    # The work_dir cache is keyed on the settings, so a run that estimated the
+    # floor must never hand back the COG a run that measured it left behind:
+    # the pixels differ and nothing downstream would notice.
+    measured = SicdConversion(noise_subtract=True, noise_model="measured")
+    estimated = SicdConversion(noise_subtract=True, noise_model="estimated")
+    assert measured.cache_key() != estimated.cache_key()
 
 
 def test_cli_rejects_conversion_flags_on_an_amplitude_asset(tmp_path, monkeypatch):

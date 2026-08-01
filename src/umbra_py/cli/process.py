@@ -16,13 +16,24 @@ import click
 from .._spinner import OrbitSpinner
 from ..chips import CHIPPABLE_ASSETS
 from ..constants import PRODUCT_ASSETS
-from ..convert import CALIBRATION_TYPES, RESAMPLING_METHODS, RTC_MODELS
+from ..convert import CALIBRATION_TYPES, NOISE_MODELS, RESAMPLING_METHODS, RTC_MODELS
 from ..load import STACK_EXTENTS
 from ..viz import (
     select_change_frames,
 )
 from . import _shared
 from ._root import cli
+
+
+def _noise_label(noise_model: str) -> str:
+    """How a noise-subtracted product describes itself on the way out.
+
+    The two models are named apart everywhere else -- in the provenance tags, in
+    the refusal ``umbra stack`` raises on a mixed series -- so the line that says
+    what was written names them apart too. A measured floor and an inferred one
+    are not the same claim about the pixels.
+    """
+    return "noise-subtracted" if noise_model.lower() == "measured" else "noise-estimated"
 
 
 @cli.command()
@@ -521,9 +532,24 @@ def stack(
     "Radiometric.NoiseLevel polynomial) from pixel power before anything scales "
     "it, so low-backscatter surfaces -- calm water, radar shadow, dry sand -- "
     "report the ground instead of the sensor's sensitivity limit. Applied first, "
-    "because noise adds where calibration and --rtc multiply. Needs an ABSOLUTE "
-    "noise level: a relative one describes how the floor varies without saying "
-    "what it is, and fails clearly rather than subtracting a guess.",
+    "because noise adds where calibration and --rtc multiply. Where the floor "
+    "comes from is --noise-model.",
+)
+@click.option(
+    "--noise-model",
+    type=click.Choice(list(NOISE_MODELS), case_sensitive=False),
+    default="measured",
+    show_default=True,
+    help="Where --subtract-noise gets the floor. 'measured' reads the product's "
+    "own Radiometric.NoiseLevel polynomial, so the floor follows the across-swath "
+    "variation the sensor states -- but it needs an ABSOLUTE noise level and "
+    "fails clearly without one, which is most of Umbra's open archive. "
+    "'estimated' infers one constant floor from the scene's own darkest pixels "
+    "(a SAR image's water, shadow and smooth ground return essentially nothing, "
+    "so the low tail of its power distribution is the receiver), needs no "
+    "metadata, and is recorded as an inference: UMBRA_NOISE_SUBTRACTION reads "
+    "'estimated' rather than 'absolute', and 'umbra stack' refuses to difference "
+    "a series that mixes the two.",
 )
 @click.option(
     "--clip-bbox",
@@ -552,6 +578,7 @@ def convert(
     rtc_model,
     calibrate,
     subtract_noise,
+    noise_model,
     clip_bbox,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
@@ -584,8 +611,11 @@ def convert(
     A measured pixel is the ground's echo plus the receiver's own thermal noise,
     and over a dark surface the second term is most of it -- so a calibrated
     value there can be precise, physical and still be a report of the sensor
-    rather than the scene. Add --subtract-noise to take the product's own noise
-    floor off first, where noise actually adds.
+    rather than the scene. Add --subtract-noise to take that floor off first,
+    where noise actually adds. By default the floor is the product's own stated
+    one; --noise-model estimated infers it from the scene's own darkest pixels
+    instead, which is what works on Umbra's open products, since they generally
+    carry no noise metadata to read.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -638,12 +668,13 @@ def convert(
                     decibels=decibels,
                     calibration=calibration,
                     noise_subtract=subtract_noise,
+                    noise_model=noise_model.lower(),
                 )
             except ValueError as exc:  # e.g. the product carries no scale factor
                 raise click.ClickException(str(exc)) from exc
         label = f"{calibration}-calibrated " if calibration else ""
         if subtract_noise:
-            label = f"noise-subtracted {label}"
+            label = f"{_noise_label(noise_model)} {label}"
         click.echo(f"Wrote slant-plane {label}amplitude GeoTIFF to {path}")
         return
 
@@ -684,6 +715,7 @@ def convert(
                 rtc_model=rtc_model.lower(),
                 calibration=calibration,
                 noise_subtract=subtract_noise,
+                noise_model=noise_model.lower(),
                 bbox=clip,
             )
         except ValueError as exc:  # e.g. the product carries no scale factor
@@ -697,7 +729,7 @@ def convert(
     if calibration:
         kind = f"{calibration}-calibrated {kind}"
     if subtract_noise:
-        kind = f"noise-subtracted {kind}"
+        kind = f"{_noise_label(noise_model)} {kind}"
     click.echo(f"Wrote {kind} to {path}")
 
 
@@ -777,8 +809,19 @@ def convert(
     help="SICD only: subtract the receiver's own thermal-noise floor (the SICD's "
     "Radiometric.NoiseLevel polynomial) from pixel power before anything scales "
     "it, so a chip over water or shadow teaches a model the ground rather than "
-    "the sensor's sensitivity limit. Needs an ABSOLUTE noise level; fails clearly "
-    "when the product declares none.",
+    "the sensor's sensitivity limit. Where the floor comes from is --noise-model.",
+)
+@click.option(
+    "--noise-model",
+    type=click.Choice(list(NOISE_MODELS), case_sensitive=False),
+    default="measured",
+    show_default=True,
+    help="SICD only: where --subtract-noise gets the floor. 'measured' reads the "
+    "product's own Radiometric.NoiseLevel and fails clearly without an ABSOLUTE "
+    "level -- which is most of Umbra's open archive; 'estimated' infers one "
+    "constant floor per scene from its own darkest pixels and needs no metadata. "
+    "Each chip's manifest entry records which ran, so a training set never mixes "
+    "a measured floor with an inferred one without saying so.",
 )
 @click.option(
     "--convert-resolution",
@@ -895,6 +938,7 @@ def chips(
     rtc_ref_angle,
     calibrate,
     subtract_noise,
+    noise_model,
     convert_resolution,
     resampling,
     work_dir,
@@ -982,6 +1026,7 @@ def chips(
             rtc_reference_deg=rtc_ref_angle,
             calibration=calibrate,
             noise_subtract=subtract_noise,
+            noise_model=noise_model.lower(),
             resolution=convert_resolution,
             resampling=resampling,
         )

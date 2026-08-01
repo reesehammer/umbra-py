@@ -791,10 +791,21 @@ umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet --
 # A pixel is the ground's echo *plus* the receiver's own thermal noise, and over
 # a dark surface (calm water, radar shadow, dry sand) the second term is most of
 # it -- so a calibrated value there reports the sensor's sensitivity, not the
-# scene. --subtract-noise takes the product's own noise floor off first, in the
-# power domain where noise adds. Needs an ABSOLUTE NoiseLevel; says so if not.
+# scene. --subtract-noise takes the noise floor off first, in the power domain
+# where noise adds. By default that floor is the product's own stated one, which
+# needs an ABSOLUTE NoiseLevel; it says so when the product carries none.
 umbra convert scene_SICD.nitf scene_g0.tif --dem auto --rtc --rtc-model facet \
     --calibrate gamma0 --subtract-noise
+
+# Umbra's open products generally carry no noise metadata to read, so
+# --noise-model estimated infers the floor from the scene instead: a SAR image's
+# darkest surfaces return essentially nothing, so the low tail of its own power
+# distribution *is* the receiver. It needs no metadata; in exchange it is one
+# constant rather than a polynomial across the swath, and it assumes the scene
+# has dark ground to read. It records itself as an inference (UMBRA_NOISE_-
+# SUBTRACTION reads "estimated", with the level in UMBRA_NOISE_FLOOR_DB), and
+# `umbra stack` refuses to difference a series that mixes the two floors.
+umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise --noise-model estimated
 
 # Convert only the area you care about. A scene is tens of square kilometres at
 # 16-25 cm, and every step above is proportional to it. --clip-bbox turns the
@@ -1035,7 +1046,8 @@ the same pipeline `umbra convert` uses, then cuts the identical tiles from the
 result — which is how a training set reaches the half of the archive that is the
 point of 16–25 cm SAR. Because the conversion is the one `umbra convert` runs,
 `--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` /
-`--subtract-noise` all apply: chips can carry a terrain-flattened, calibrated
+`--subtract-noise` / `--noise-model` all apply: chips can carry a
+terrain-flattened, calibrated
 **gamma-nought** backscatter coefficient with the receiver's own noise floor
 removed rather than relative brightness, and each chip GeoTIFF inherits the
 `UMBRA_*` provenance tags saying so (the manifest also carries `calibration` /

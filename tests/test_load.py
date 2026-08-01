@@ -2011,6 +2011,43 @@ def test_stack_stats_says_when_the_noise_floor_was_subtracted(tmp_path):
     # And says nothing when it wasn't: the default summary is unchanged.
     plain = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32))
     assert "thermal-noise floor" not in " ".join(plain["caveats"])
+    # A measured floor is quoted without the estimator's caveats attached.
+    assert "estimated from each scene" not in " ".join(stats["caveats"])
+
+
+def test_to_stack_refuses_an_inferred_floor_differenced_against_a_measured_one(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Both passes had *a* floor taken off, so the coarse "was noise subtracted?"
+    # question agrees -- but one number was read from the product and the other
+    # inferred from the image, and the gap between them lands on the time axis.
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "noise_subtraction": "absolute"},
+        {**settings, "noise_subtraction": "estimated"},
+    )
+    with pytest.raises(ValueError, match="noise_subtraction disagrees") as exc:
+        to_stack(items, max_size=32)
+    assert "'absolute' (acq-1)" in str(exc.value)
+    assert "'estimated' (acq-2)" in str(exc.value)
+
+
+def test_stack_stats_says_when_the_subtracted_floor_was_only_estimated(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    settings = {"calibration": "sigma0", "noise_subtraction": "estimated"}
+    stats = stack_stats(to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32))
+    caveats = " ".join(stats["caveats"])
+    # Both: the floor came off *and* the number that came off was inferred. A
+    # summary that said only the first would let an estimate be quoted with a
+    # measurement's confidence.
+    assert "thermal-noise floor was subtracted" in caveats
+    assert "estimated from each scene's own darkest pixels" in caveats
 
 
 def test_to_stack_allows_the_per_scene_keys_to_differ(tmp_path):

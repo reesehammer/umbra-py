@@ -7,6 +7,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Make the noise correction reach the archive it was built for: `umbra convert
+  --noise-model estimated` / `sicd_to_geocoded_cog(noise_model="estimated")`.**
+  The noise-floor subtraction below reads the product's own
+  `Radiometric.NoiseLevel` polynomial — the right number, and one Umbra's open
+  products do not have. They generally ship with no `Radiometric` block at all,
+  so `--subtract-noise` raised a clean, correct, useless error on essentially
+  every scene in the open archive: a shipped correction that could not be
+  applied to the data this library exists for.
+
+  `--noise-model` names where the floor comes from, the same shape `--rtc` /
+  `--rtc-model` already has. `measured` (the default, and exactly the previous
+  behaviour) reads the product's metadata. `estimated` infers the floor from the
+  scene: a SAR image's darkest surfaces — calm water, radar shadow, smooth
+  ground — return essentially nothing, so what is recorded there is the
+  receiver, and the low tail of the image's own power distribution *is* the
+  noise floor. `_estimate_noise_power` takes its 5th percentile (low enough that
+  ordinary land backscatter sits well above it, high enough not to land in the
+  speckle tail of the darkest pixels — the floor wanted is the mean power of the
+  noise-dominated population, not its minimum), in the linear power domain
+  whichever scale it was handed, ignoring the warp's nodata. Everything
+  downstream is unchanged: the same `_subtract_noise` in the same position,
+  first and on raw detected power, because what differs between the two models
+  is the provenance of the number and not the physics.
+
+  The trade is real, so it is named rather than smoothed over. The estimate is
+  one scalar, so it cannot follow the across-swath variation a `NoisePoly`
+  describes; and it assumes the scene contains dark ground at all — over imagery
+  that is bright everywhere, the 5th percentile *is* ground and subtracting it
+  removes signal. Which is why the inference is never allowed to wear a
+  measurement's clothes. `UMBRA_NOISE_SUBTRACTION` records `"estimated"`, a
+  distinct value from the measured floor's `"absolute"` (unchanged, so rasters
+  converted before this option existed still compare equal to ones converted
+  after it), and the level it inferred rides along in a new
+  `UMBRA_NOISE_FLOOR_DB` tag — for the same reason `RTC_REFERENCE_DEG` exists,
+  since an inferred number nobody can read back is not reproducible. Because
+  `noise_subtraction` is already in `load.MEASUREMENT_PROVENANCE_KEYS`, that one
+  distinct value is what makes `to_stack` **refuse** a series that differences an
+  inferred floor against a measured one — a mix where the coarse "was noise
+  subtracted?" question agrees and the gap between the two numbers would land on
+  the time axis as change. `stack_stats` adds a second caveat naming the
+  estimate's two limits when a cube carries one, `umbra convert` says
+  "noise-estimated" rather than "noise-subtracted" on the way out, and `umbra
+  chips --noise-model` carries the whole thing to a training set (it is part of
+  `SicdConversion.cache_key`, so a `--work-dir` run that estimated the floor
+  never hands back the COG a run that measured it left behind).
+
 - **Subtract the sensor before measuring the ground: `umbra convert
   --subtract-noise` / `sicd_to_geocoded_cog(noise_subtract=True)`.** A
   calibrated pixel was a physical number and, over a dark surface, the wrong
