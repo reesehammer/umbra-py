@@ -436,6 +436,90 @@ def test_sicd_records_report_a_subtracted_noise_floor(tmp_path):
     assert records[0].to_dict()["noise_subtraction"] == "absolute"
 
 
+def test_sicd_records_report_the_speckle_filter_and_its_window(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # A filtered chip's *resolution* is its window, not its pixel size, so a
+    # training loader has to be able to read that off the manifest -- a model
+    # trained on 5x5-averaged tiles cannot learn to see what they averaged away.
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif",
+        calibration="gamma0",
+        speckle_filter="lee",
+        speckle_window=5,
+        speckle_enl_after=18.0,
+    )
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    assert {r.speckle_filter for r in records} == {"lee"}
+    # An int, because a loader comparing it against a chip size should not have
+    # to think about 5.0 against 5.
+    assert {r.speckle_window for r in records} == {5}
+    assert records[0].to_dict()["speckle_window"] == 5
+
+
+def test_unfiltered_sicd_records_carry_no_speckle_fields(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="gamma0")
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    # ``conversion_tags`` writes "none" for a step that did not run; the manifest
+    # convention is ``None``, so the translation happens once on the way in.
+    assert records[0].speckle_filter is None
+    assert records[0].speckle_window is None
+
+
+def test_speckle_settings_reach_the_conversion(tmp_path):
+    from umbra_py.chips import SicdConversion, _prepare_sicd
+
+    seen = {}
+
+    def fake_geocode(src, dst, **kwargs):
+        seen.update(kwargs)
+        Path(dst).write_bytes(b"cog")
+        return Path(dst)
+
+    import umbra_py.convert as convert_mod
+    import umbra_py.download as download_mod
+
+    original_geocode = convert_mod.sicd_to_geocoded_cog
+    original_download = download_mod.download_asset
+    convert_mod.sicd_to_geocoded_cog = fake_geocode
+    download_mod.download_asset = lambda item, asset, work_dir: Path(work_dir) / "scene.ntf"
+    try:
+        _prepare_sicd(
+            _item_for(tmp_path / "unused.tif"),
+            "SICD",
+            tmp_path / "work",
+            SicdConversion(speckle_filter="boxcar", speckle_window=9),
+        )
+    finally:
+        convert_mod.sicd_to_geocoded_cog = original_geocode
+        download_mod.download_asset = original_download
+
+    # The chipper is a handle on the conversion pipeline, not a second
+    # implementation of it: the flags are passed straight down.
+    assert seen["speckle_filter"] == "boxcar"
+    assert seen["speckle_window"] == 9
+
+
 # --- What the subtraction did to the batch -----------------------------------
 #
 # The two diagnostics an inferred floor records are per scene, and `umbra
@@ -799,6 +883,8 @@ def test_conversion_cache_key_tracks_every_setting():
         ("gcp_grid", 21),
         ("projection_type", "PLANE"),
         ("rtc_reference_deg", 30.0),
+        ("speckle_filter", "lee"),
+        ("speckle_window", 7),
     ]:
         assert dataclasses.replace(base, **{field_name: value}).cache_key() != base.cache_key()
 

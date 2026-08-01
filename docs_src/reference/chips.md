@@ -20,6 +20,15 @@ rather than whole — which is where the cost of chipping the complex archive
 actually lives. It is lon/lat whatever the raster's CRS is, matching
 `to_stack(bbox=…)`.
 
+`--speckle-filter` / `speckle_filter=` on `SicdConversion` carries the
+[conversion's](convert.md) speckle averaging to a training set, which is a
+different trade there than it is for one scene: a single-look chip teaches a model
+the interference pattern as much as the surface, and a filtered chip teaches it a
+surface at coarser resolution. Because that decides what a model *can* learn to
+see, every `ChipRecord` carries `speckle_filter` and `speckle_window` — read back
+from the geocoded raster's own tags, so the manifest reports the processing rather
+than the request.
+
 Where the conversion *inferred* the noise floor (`--noise-model estimated` /
 `estimated-range`), the run also says which of its scenes that estimate should
 not be trusted on. Each `ChipRecord` carries the scene's own

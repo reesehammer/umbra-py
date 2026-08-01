@@ -842,6 +842,22 @@ umbra convert scene_SICD.nitf scene_denoised.tif --subtract-noise \
 #   12.4% of the image is at the sensor's limit after the subtraction
 #   Estimated floor of -31.2 dB sits 17.8 dB below the scene median
 
+# What is left after all of that is speckle, and it is not an error: a coherently
+# illuminated rough surface interferes with itself, so one look's power scatters
+# about the surface's true backscatter with a standard deviation equal to its mean
+# -- which is why a pixel-by-pixel difference between two passes is mostly speckle
+# rather than change. Nothing subtracts it; averaging is the only correction.
+# --speckle-filter boxcar averages the window unconditionally (the multilook);
+# --speckle-filter lee averages only where the window is no more variable than
+# speckle alone explains, so edges and points survive. It is opt-in because what
+# it spends is resolution: a window that averages N pixels reports ground N pixels
+# across. The raster records the filter, the window, and the equivalent looks it
+# actually reached -- which on a product sampled finer than it resolves is below
+# the pixels averaged, and is the honest measure of what the filter bought.
+#   Equivalent looks 1.0 -> 12.7, of 25 pixels averaged
+umbra convert scene_SICD.nitf scene_filtered.tif --calibrate gamma0 \
+    --speckle-filter lee --speckle-window 5
+
 # Convert only the area you care about. A scene is tens of square kilometres at
 # 16-25 cm, and every step above is proportional to it. --clip-bbox turns the
 # ground rectangle back into the image window that covers it, reads only that,
@@ -1068,6 +1084,12 @@ umbra chips <item-json-url> --out chips/ --json
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --dem auto --rtc --rtc-model facet --calibrate gamma0 --work-dir scenes/
 
+# Average the speckle down before the tiles are cut, so a chip teaches a model
+# the surface rather than the interference pattern on it. What it spends is
+# resolution, so every record says which filter and window it was cut with.
+umbra chips --area "Centerfield" --out chips/ --asset SICD \
+    --calibrate gamma0 --speckle-filter lee --work-dir scenes/
+
 # Chip one site out of every pass rather than every scene whole. --clip-bbox
 # tiles only that window -- and for --asset SICD it is the *conversion's* clip
 # too, so the geocoding step costs what the site costs, not what the scene does.
@@ -1081,13 +1103,16 @@ the same pipeline `umbra convert` uses, then cuts the identical tiles from the
 result — which is how a training set reaches the half of the archive that is the
 point of 16–25 cm SAR. Because the conversion is the one `umbra convert` runs,
 `--dem` / `--geoid` / `--rtc` / `--rtc-model` / `--calibrate` /
-`--subtract-noise` / `--noise-model` all apply: chips can carry a
-terrain-flattened, calibrated
+`--subtract-noise` / `--noise-model` / `--speckle-filter` all apply: chips can
+carry a terrain-flattened, calibrated
 **gamma-nought** backscatter coefficient with the receiver's own noise floor
-removed rather than relative brightness, and each chip GeoTIFF inherits the
+removed and its speckle averaged down, rather than relative brightness, and each
+chip GeoTIFF inherits the
 `UMBRA_*` provenance tags saying so (the manifest also carries `calibration` /
-`noise_subtraction` / `rtc_model`, read back from the raster rather than from the
-request). A run that *inferred* the noise floor also says which of its scenes it
+`noise_subtraction` / `speckle_filter` / `speckle_window` / `rtc_model`, read back
+from the raster rather than from the request — the speckle pair being what says a
+chip's *resolution* as opposed to its pixel size, and so what a model trained on
+it can learn to see). A run that *inferred* the noise floor also says which of its scenes it
 should not have been trusted on: each record carries that scene's
 `noise_floor_margin_db` and `noise_floored_fraction`, and the run prints (and
 `--json` reports) one roll-up — *"2 of 22 scene(s) had under 6 dB of margin"* —

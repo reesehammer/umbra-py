@@ -278,6 +278,31 @@ well it follows the real floor once that offset is granted; against a synthetic
 10 dB ramp the fitted profile scores 0.2 dB of shape error where the constant
 estimate scores the ramp's full deviation, 2.9 dB. Which is the difference
 between a model that is argued and one that is measured.
+~~**Open:** every correction above targets something the *sensor* added, and what
+is left after all of them is larger than any of them — speckle, whose standard
+deviation equals its mean on a single look, so the pipeline's calibrated numbers
+carried an undocumented dominant uncertainty and nothing averaged it down.~~
+**shipped** — `umbra convert --speckle-filter {boxcar,lee}` averages in the power
+domain, last in image space: `boxcar` is the multilook (most variance removed for
+a window, blind to the edge it averages across) and `lee` averages only where a
+window is no more variable than speckle alone would explain, so edges and points
+survive — with its speckle parameter read off the scene and clamped at single-look,
+since no product has fewer looks than one and believing a lower read is licence to
+smooth structure away. It is opt-in because what it spends is the reason to use
+this archive: a window that averages N pixels reports ground N pixels across. So
+both sides of that trade are recorded — `UMBRA_SPECKLE_FILTER` /
+`UMBRA_SPECKLE_WINDOW` join `MEASUREMENT_PROVENANCE_KEYS`, so `to_stack` refuses
+to difference a filtered pass against an unfiltered one (the smoothing would read
+as change, strongest where the ground has the most structure) and `stack_stats`
+states both halves — and what the filter *achieved* is measured rather than
+claimed: `UMBRA_SPECKLE_ENL_BEFORE` / `_AFTER`, the equivalent number of looks
+either side, which on a product sampled finer than it resolves lands **below** the
+pixels averaged. That estimator is itself calibrated against synthetic single-look
+imagery (1.0 unfiltered, within 10 % of N² after an N-pixel boxcar), and structure
+biases it down, so it is a floor on the looks present rather than a claim about
+them. `umbra chips --speckle-filter` carries it to a training set, where every
+record says which window it was cut with — a chip's resolution, as opposed to its
+pixel size, being what decides what a model can learn to see.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -678,6 +703,19 @@ from:
   into the model's ground-truth block, so a quoted dB delta can be attributed.
   **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
+- ~~Nothing removed **speckle**, the one uncertainty in a calibrated pixel that is
+  not the sensor's fault and is bigger than everything that is: a single look's
+  power scatters about its surface's true backscatter as widely as its own mean, so
+  a pixel-by-pixel difference between two passes was mostly interference rather
+  than change.~~ **shipped** — `umbra convert --speckle-filter {boxcar,lee}`
+  averages it down in the power domain (`boxcar` unconditionally, `lee` only where
+  a window is no more variable than speckle alone explains), records what it did
+  in two keys `to_stack` refuses to mix, and measures what it achieved as the
+  scene's equivalent number of looks before and after — the number a window size
+  cannot supply, since Umbra samples finer than it resolves, so 25 averaged pixels
+  buy fewer than 25 independent looks. Not a default: what it spends is
+  resolution. `umbra chips --speckle-filter` carries it to a training set with the
+  window in every manifest record. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

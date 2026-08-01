@@ -17,7 +17,14 @@ import click
 from .._spinner import OrbitSpinner
 from ..chips import CHIPPABLE_ASSETS, ChipDataset
 from ..constants import PRODUCT_ASSETS
-from ..convert import CALIBRATION_TYPES, NOISE_MODELS, RESAMPLING_METHODS, RTC_MODELS
+from ..convert import (
+    CALIBRATION_TYPES,
+    NOISE_MODELS,
+    RESAMPLING_METHODS,
+    RTC_MODELS,
+    SPECKLE_FILTERS,
+    SPECKLE_WINDOW_DEFAULT,
+)
 from ..load import STACK_EXTENTS
 from ..viz import (
     select_change_frames,
@@ -91,6 +98,55 @@ def _echo_noise_report(path: Path) -> None:
             "dark ground for the estimate to read -- the fifth percentile it subtracted "
             "is likely real backscatter rather than the receiver. Use --noise-model "
             "measured where the product states its own floor."
+        )
+
+
+def _echo_speckle_report(path: Path) -> None:
+    """Say what the speckle filter actually achieved on the raster just written.
+
+    A filter's window says how many *pixels* were averaged; the equivalent number
+    of looks says how many independent *measurements* that was, which is the
+    smaller number on any product sampled finer than it resolves -- as Umbra's
+    are. Both are recorded in the output's own tags (the same reason
+    :func:`_echo_noise_report` reads them back from there rather than through the
+    conversion's return value), so what is printed is what the file will still say
+    tomorrow.
+
+    The note below :data:`umbra_py.convert.SPECKLE_ENL_GAIN_WARN` is an advisory,
+    never an error: on imagery that is textured everywhere -- dense city, forest --
+    ``lee`` is *supposed* to leave most pixels alone, so a small gain there is the
+    filter working rather than failing.
+    """
+    from ..convert import SPECKLE_ENL_GAIN_WARN, read_conversion_tags  # noqa: PLC0415
+
+    tags = read_conversion_tags(path)
+    before, after = tags.get("speckle_enl_before"), tags.get("speckle_enl_after")
+    window = tags.get("speckle_window")
+    looks = tags.get("speckle_looks")
+    if looks is not None:
+        click.echo(
+            f"  Speckle taken as {float(looks):.1f}-look for the filter's own "
+            "statistics (UMBRA_SPECKLE_LOOKS)"
+        )
+    if before is None or after is None:
+        # No block of the image was homogeneous enough to read an ENL from --
+        # honest, and worth saying, since the filter still ran.
+        click.echo(
+            "  No homogeneous block to measure looks in, so the ENL gain is unreported "
+            "(the filter still ran; UMBRA_SPECKLE_FILTER records it)"
+        )
+        return
+    ceiling = f", of {int(window) ** 2} pixels averaged" if window is not None else ""
+    click.echo(
+        f"  Equivalent looks {float(before):.1f} -> {float(after):.1f}{ceiling} "
+        "(UMBRA_SPECKLE_ENL_BEFORE/AFTER)"
+    )
+    if float(before) > 0 and float(after) / float(before) < SPECKLE_ENL_GAIN_WARN:
+        click.echo(
+            f"  Note: that is under {SPECKLE_ENL_GAIN_WARN:g}x, so this window bought "
+            "little -- either the scene is textured almost everywhere (which is what "
+            "'lee' is meant to leave alone) or the product's pixels are correlated, in "
+            "which case a wider --speckle-window is what buys independent looks."
         )
 
 
@@ -659,6 +715,32 @@ def stack(
     "that mixes any two of them.",
 )
 @click.option(
+    "--speckle-filter",
+    type=click.Choice(list(SPECKLE_FILTERS), case_sensitive=False),
+    default=None,
+    help="Speckle-filter the detected power before geocoding. Speckle is not "
+    "sensor noise and no floor subtraction removes it: coherent illumination of a "
+    "rough surface interferes with itself, so a single-look pixel's power scatters "
+    "about the surface's true backscatter with a standard deviation equal to its "
+    "mean -- which is why a pixel-by-pixel difference between two passes is mostly "
+    "speckle. Averaging is the only correction. 'boxcar' averages the window "
+    "unconditionally (the multilook: most variance removed, blind to edges); 'lee' "
+    "averages only where the window is no more variable than speckle alone "
+    "explains, so edges and points survive. Not a default, because what it spends "
+    "is resolution -- a window that averages N pixels reports ground N pixels "
+    "across. The raster records the filter, the window and the equivalent looks it "
+    "reached, and 'umbra stack' refuses to difference a series that mixes two.",
+)
+@click.option(
+    "--speckle-window",
+    type=int,
+    default=SPECKLE_WINDOW_DEFAULT,
+    show_default=True,
+    metavar="PIXELS",
+    help="Edge of the odd, centred window --speckle-filter averages over. Wider "
+    "removes more speckle and more detail; it costs no more to compute.",
+)
+@click.option(
     "--clip-bbox",
     default=None,
     help="Convert only a lon/lat window 'min_lon,min_lat,max_lon,max_lat' of the "
@@ -687,6 +769,8 @@ def convert(
     calibrate,
     subtract_noise,
     noise_model,
+    speckle_filter,
+    speckle_window,
     clip_bbox,
 ) -> None:
     """Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
@@ -735,6 +819,16 @@ def convert(
     against: --noise-check converts nothing and scores them against it instead,
     reporting how far each estimate reads low and how well it follows the real
     floor across the swath once that offset is granted.
+
+    What is left after all of that is speckle, which is not an error at all: a
+    coherently illuminated rough surface interferes with itself, so one look's
+    power scatters about the surface's true backscatter as widely as its own mean.
+    It is the dominant uncertainty in every number above, and averaging is the only
+    correction. --speckle-filter does it -- 'boxcar' unconditionally, 'lee' only
+    where the window is more uniform than an edge would be -- and reports the
+    equivalent looks the scene reached, which on imagery sampled finer than it
+    resolves is well under the pixels averaged. It is opt-in because what it
+    spends is resolution, which is the reason to use this archive.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -789,6 +883,16 @@ def convert(
 
     decibels = not linear
     calibration = calibrate.lower() if calibrate else None
+    speckle = speckle_filter.lower() if speckle_filter else None
+    if speckle:
+        from ..convert import _check_speckle_window  # noqa: PLC0415
+
+        try:
+            # One rule, checked in the library and reported as a parameter error
+            # here -- a bad window is a typo, not a conversion failure.
+            _check_speckle_window(speckle_window)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--speckle-window") from exc
     clip = _shared._parse_bbox(clip_bbox)
     if slant_plane and clip is not None:
         raise click.BadParameter(
@@ -807,15 +911,21 @@ def convert(
                     calibration=calibration,
                     noise_subtract=subtract_noise,
                     noise_model=noise_model.lower(),
+                    speckle_filter=speckle,
+                    speckle_window=speckle_window,
                 )
             except ValueError as exc:  # e.g. the product carries no scale factor
                 raise click.ClickException(str(exc)) from exc
         label = f"{calibration}-calibrated " if calibration else ""
+        if speckle:
+            label = f"{speckle}-filtered {label}"
         if subtract_noise:
             label = f"{_noise_label(noise_model)} {label}"
         click.echo(f"Wrote slant-plane {label}amplitude GeoTIFF to {path}")
         if subtract_noise:
             _echo_noise_report(path)
+        if speckle:
+            _echo_speckle_report(path)
         return
 
     auto_dem = bool(dem) and dem.lower() == "auto"
@@ -856,6 +966,8 @@ def convert(
                 calibration=calibration,
                 noise_subtract=subtract_noise,
                 noise_model=noise_model.lower(),
+                speckle_filter=speckle,
+                speckle_window=speckle_window,
                 bbox=clip,
             )
         except ValueError as exc:  # e.g. the product carries no scale factor
@@ -868,11 +980,15 @@ def convert(
         kind = "geocoded COG"
     if calibration:
         kind = f"{calibration}-calibrated {kind}"
+    if speckle:
+        kind = f"{speckle}-filtered {kind}"
     if subtract_noise:
         kind = f"{_noise_label(noise_model)} {kind}"
     click.echo(f"Wrote {kind} to {path}")
     if subtract_noise:
         _echo_noise_report(path)
+    if speckle:
+        _echo_speckle_report(path)
 
 
 @cli.command()
@@ -966,6 +1082,27 @@ def convert(
     "chips cut from opposite edges of a swath are not offset by the floor the "
     "constant model left behind. Each chip's manifest entry records which ran, so "
     "a training set never mixes two floors without saying so.",
+)
+@click.option(
+    "--speckle-filter",
+    type=click.Choice(list(SPECKLE_FILTERS), case_sensitive=False),
+    default=None,
+    help="SICD only: speckle-filter each scene before it is chipped, so a tile "
+    "teaches a model the surface rather than the interference pattern coherent "
+    "illumination made on it (a single look's power scatters as widely as its own "
+    "mean). 'boxcar' averages the window unconditionally; 'lee' averages only "
+    "where the window is no more variable than speckle alone explains, keeping "
+    "edges. What it spends is resolution -- a window that averages N pixels "
+    "resolves ground N pixels across -- so every chip's manifest entry records the "
+    "filter and its window.",
+)
+@click.option(
+    "--speckle-window",
+    type=int,
+    default=SPECKLE_WINDOW_DEFAULT,
+    show_default=True,
+    metavar="PIXELS",
+    help="SICD only: edge of the odd, centred window --speckle-filter averages over.",
 )
 @click.option(
     "--convert-resolution",
@@ -1083,6 +1220,8 @@ def chips(
     calibrate,
     subtract_noise,
     noise_model,
+    speckle_filter,
+    speckle_window,
     convert_resolution,
     resampling,
     work_dir,
@@ -1134,8 +1273,9 @@ def chips(
     \b
     --asset SICD chips the complex archive instead: each scene is downloaded
     whole and geocoded before its tiles are cut, so --dem, --rtc,
-    --calibrate and --subtract-noise apply and the chips can carry a physical
-    backscatter coefficient with the sensor's own noise floor taken off. That
+    --calibrate, --subtract-noise and --speckle-filter apply and the chips can
+    carry a physical backscatter coefficient with the sensor's own noise floor
+    taken off and its speckle averaged down. That
     path needs the convert extra
     (``pip install "umbra-py[convert]"``) and real bytes per scene, so give
     --work-dir to keep the geocoded scenes and make a re-run cheap.
@@ -1150,6 +1290,7 @@ def chips(
         "--rtc-ref-angle": rtc_ref_angle,
         "--calibrate": calibrate,
         "--subtract-noise": subtract_noise,
+        "--speckle-filter": speckle_filter,
         "--convert-resolution": convert_resolution,
         "--work-dir": work_dir,
     }
@@ -1171,6 +1312,8 @@ def chips(
             calibration=calibrate,
             noise_subtract=subtract_noise,
             noise_model=noise_model.lower(),
+            speckle_filter=speckle_filter.lower() if speckle_filter else None,
+            speckle_window=speckle_window,
             resolution=convert_resolution,
             resampling=resampling,
         )

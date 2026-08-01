@@ -83,15 +83,24 @@ _QUANTILE_BIN_DB = 0.05
 #: axis is only a measurement if every slice was made the same way: differencing
 #: a calibrated pass against an uncalibrated one, or a terrain-flattened pass
 #: against a raw one, reports the difference between the two *conversions* as
-#: change on the ground. The keys deliberately left out are the ones that
-#: legitimately vary per acquisition -- ``source`` (a different scene each time)
-#: and ``rtc_reference_deg`` (each scene's own resolved incidence angle).
+#: change on the ground. ``speckle_filter`` / ``speckle_window`` are here for the
+#: same reason one step further out: a speckle-filtered pass reports the average
+#: of the ground a window covers, so differencing it against an unfiltered pass
+#: (or one filtered with a different window) reports the smoothing as change,
+#: strongest exactly where the ground has the most structure. The keys
+#: deliberately left out are the ones that legitimately vary per acquisition --
+#: ``source`` (a different scene each time), ``rtc_reference_deg`` (each scene's
+#: own resolved incidence angle) and the per-scene diagnostics of the noise
+#: subtraction and the speckle filter (how much of *that* scene hit the sensor's
+#: floor, the ENL *that* scene reached).
 #: Ordered most-explanatory first, because the first key that disagrees is the
 #: one the refusal names, and ``units`` is derived from the two before it -- a
 #: calibration mix should be reported as a calibration mix, not as its shadow.
 MEASUREMENT_PROVENANCE_KEYS = (
     "calibration",
     "noise_subtraction",
+    "speckle_filter",
+    "speckle_window",
     "rtc_model",
     "scale",
     "units",
@@ -1797,6 +1806,19 @@ def stack_stats(
             "follows the swath -- but it is still an inference, and it assumes every "
             "pass contained dark ground somewhere along range to read: over uniformly "
             "bright imagery it takes real backscatter off."
+        )
+    speckle_filter = provenance.get("speckle_filter", "none")
+    if speckle_filter != "none":
+        # Said because it cuts both ways: a filtered cube's per-cell numbers are
+        # better estimates *and* coarser measurements, and which of the two a
+        # reader cares about depends on the block size they are quoting.
+        window = provenance.get("speckle_window", "?")
+        caveats.append(
+            f"Every pass was speckle-filtered ({speckle_filter}, {window}x{window} "
+            "window, recorded by 'umbra convert'), so a cell's decibels are a less "
+            "noisy estimate of its surface than a single look is -- and its effective "
+            f"resolution is that of a {window}-pixel window, so detail smaller than "
+            "that has been averaged away rather than measured."
         )
     if area is None:
         caveats.append(
