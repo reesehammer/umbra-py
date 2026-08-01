@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Say what a hosted instance can be asked for (`umbra:options` on the landing
+  page's `stats` link).** `POST /artifacts/stats` takes two request options
+  whose availability is not the request's to decide: `"windowed": true` needs
+  the cube built in windows (`umbra serve --stack-lazy --stack-chunk-size N`)
+  and `"speckle_filter"` needs each pass whole, so they are exact complements
+  and **every instance honours exactly one of them**. Which one was discoverable
+  only by sending a request and reading the `400` — the startup echo tells the
+  operator, not the caller — which is a poor deal for the client this endpoint
+  exists for: an agent or a browser front end that installed nothing locally and
+  cannot see the server's flags.
+
+  The landing page now carries the answer. Each option under the `stats` link's
+  `umbra:options` reports whether this server supports it and, when it does not,
+  the `reason` it would be refused with, beside a `stacking` line naming the
+  instance's policy — so a client picks the option that works before spending a
+  request, and can tell the operator which flag to change rather than only that
+  it was told no.
+
+  The advertisement is the refusal rather than a description of it. Both come
+  from one function (`serve.stats_option_refusal`): the renderer raises the
+  string it returns and the landing page publishes the same string, so a page
+  that claims support the endpoint does not give is not a drift that can happen.
+  That tie is checked rather than asserted — for all three instance shapes the
+  suite reads the page, then drives the *renderer*: the refused option must
+  raise a `ValueError` whose message is character-for-character the advertised
+  `reason`, and the supported one must render. Advertising is derived from the
+  policy the route already holds, so nothing about the refusals, the cache key
+  or the answers changed.
 - **Average the speckle down on the way into a training set
   (`umbra chips --speckle-filter {boxcar,lee}` on *any* asset).** The filter
   reached the complex archive (`umbra convert`), the datacube (`umbra stack`)

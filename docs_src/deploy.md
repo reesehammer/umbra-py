@@ -132,7 +132,22 @@ pass's `median` / `p5` / `p95` become histogram estimates (`quantile_method` /
 than in an invisible server flag a cached artifact would depend on. Sent to an
 instance with no `--stack-chunk-size`, it answers `400` naming the flag — there
 would be no windows to walk, so it could only estimate percentiles for the same
-memory.
+memory. The complementary field is `"speckle_filter"`, which needs each pass
+whole and so is the `400` on a chunked instance.
+
+Which of that pair a deployment honours is therefore a consequence of the flags
+above, and clients read it off the landing page rather than by probing:
+
+```bash
+curl -s http://127.0.0.1:8000/ | jq '.links[] | select(.rel=="stats")."umbra:options"'
+# {"stacking": "lazy (1024px windows, synchronous scheduler)",
+#  "windowed": {"supported": true},
+#  "speckle_filter": {"supported": false, "reason": "speckle filtering needs an …"}}
+```
+
+The `reason` on an unsupported option is the same string the endpoint's `400`
+carries, so an operator changing `--stack-chunk-size` changes both together, and
+`stacking` repeats the policy line the container logs at startup.
 
 ## Behind a reverse proxy
 

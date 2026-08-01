@@ -330,6 +330,14 @@ a hosted or model-driven measurement stops being the noisiest one the chain can
 produce. It turned out to be `"windowed"`'s exact complement — filtering needs a
 pass whole, windowed measurement needs it chunked — so each is a `400` on the
 instance the other needs, and the two are refused together at the request.
+~~**Open:** which of the two a given instance honours was discoverable only by
+sending a request and reading the `400`.~~ **shipped** — the landing page's
+`stats` link carries `umbra:options`, where each option reports whether this
+server supports it and an unsupported one carries the reason its refusal would
+have given, so a client that installed nothing locally picks the option that
+works before spending a request. Advertisement and refusal are one function, and
+the suite drives the renderer against the page rather than trusting the pair to
+stay in step.
 ~~**Open:** it reached every surface that renders a picture or returns a number,
 and stopped at the one whose output is a *dataset* — `umbra chips` took
 `--speckle-filter` only on the complex path, so a training set cut from the

@@ -1532,6 +1532,24 @@ are refused together at the request. The same pair reaches the agent tools
 (`stack_stats(urls=[...], speckle_filter="lee")` on MCP / LangChain /
 LlamaIndex).
 
+Since exactly one of that pair works on any given instance, the landing page
+says **which**, so a client picks before it asks rather than by reading a `400`:
+
+```bash
+curl -s http://127.0.0.1:8000/ | jq '.links[] | select(.rel=="stats")."umbra:options"'
+# {
+#   "stacking": "lazy (1024px windows, synchronous scheduler)",
+#   "windowed": {"supported": true},
+#   "speckle_filter": {"supported": false, "reason": "speckle filtering needs an
+#      unchunked instance: this server stacks lazy (1024px windows, …"}
+# }
+```
+
+The unsupported option carries the reason it *would* be refused with — the same
+string the endpoint raises, so the advertisement cannot drift from the refusal
+it predicts — and `stacking` is the policy line the server echoes at startup, so
+a client can tell the operator which flag to change.
+
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
 and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished

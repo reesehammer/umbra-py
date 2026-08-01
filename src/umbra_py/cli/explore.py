@@ -154,6 +154,10 @@ def serve(
             click.echo('    requests may send "windowed": true (estimated percentiles)')
         else:
             click.echo('    requests may send "speckle_filter": "boxcar" | "lee"')
+        # And the client learns the same thing without asking: the landing
+        # page's "stats" link reports both options and the reason for the one
+        # this instance cannot honour.
+        click.echo('    advertised on / as the "stats" link\'s "umbra:options"')
     try:
         run_stac_server(
             host=host,

@@ -92,6 +92,13 @@ it is refused (``400``) on an instance started with ``--stack-chunk-size``,
 while ``windowed`` is refused on one without -- which makes the two mutually
 exclusive on every instance, and so refused together at the request.
 
+Because exactly one of that pair works on any given instance, *which* one is a
+fact a client needs before it asks. The landing page's ``stats`` link carries
+it (:data:`STATS_CAPABILITY_FIELD` -> :func:`stats_capabilities`): each option
+reports whether this server supports it and, when it does not, the reason it
+would be refused with -- the same string :func:`stats_option_refusal` gives the
+renderer, so the advertisement cannot drift from the ``400`` it predicts.
+
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
 to ``"async": true`` for a small job queue: it gets a ``202 Accepted`` + a job
@@ -463,12 +470,24 @@ def _link(rel: str, href: str, *, type: str = "application/json", **extra: Any) 
     return link
 
 
-def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
+def landing_page(
+    base_url: str,
+    *,
+    artifacts: bool = False,
+    stack_execution: StackExecution | None = None,
+) -> dict[str, Any]:
     """The STAC API landing page (a STAC ``Catalog`` with conformance + links).
 
     When ``artifacts`` is true the returned links also advertise the on-demand
     render endpoints (``/artifacts/...``) so a client can discover them without
     reading the OpenAPI document.
+
+    The ``stats`` link carries one thing the others cannot: which of its request
+    options *this* instance can honour. ``stack_execution`` is the instance's
+    :class:`StackExecution` (the eager default when omitted), and the link's
+    :data:`STATS_CAPABILITY_FIELD` reports :func:`stats_capabilities` for it, so
+    a client picks between ``windowed`` and ``speckle_filter`` by reading the
+    landing page rather than by sending a request and parsing the ``400``.
     """
     base = base_url.rstrip("/")
     geojson = "application/geo+json"
@@ -535,6 +554,7 @@ def landing_page(base_url: str, *, artifacts: bool = False) -> dict[str, Any]:
                 type="application/json",
                 method="POST",
                 title="On-demand change statistics over a site's passes (JSON)",
+                **{STATS_CAPABILITY_FIELD: stats_capabilities(stack_execution)},
             ),
         ]
     return {
@@ -905,6 +925,86 @@ class StackExecution:
         return f"lazy ({window}, {self.scheduler} scheduler)"
 
 
+#: The ``POST /artifacts/stats`` request options whose availability is a property
+#: of the *instance* rather than of the request: each needs the cube built a
+#: particular way, and :class:`StackExecution` decides that once per server.
+STATS_INSTANCE_OPTIONS = ("windowed", "speckle_filter")
+
+#: The landing-page link field that carries :func:`stats_capabilities`. Namespaced
+#: like ``umbra:place`` on an item, because it is this façade's own vocabulary
+#: rather than anything STAC defines.
+STATS_CAPABILITY_FIELD = "umbra:options"
+
+
+def stats_option_refusal(execution: StackExecution, option: str) -> str | None:
+    """Why *this* instance cannot honour a stats option, or ``None`` if it can.
+
+    The single source of truth for both halves of the answer: the renderer
+    raises the string this returns (which the route maps to a ``400``), and
+    :func:`stats_capabilities` puts the same string on the landing page. A
+    client therefore reads the reason it *would* be refused for before spending
+    a request, and the advertisement cannot drift from the refusal because
+    there is only one of them.
+
+    ``option`` must be one of :data:`STATS_INSTANCE_OPTIONS`; anything else is a
+    programming error rather than a client's, so it raises instead of quietly
+    reporting support.
+    """
+    if option not in STATS_INSTANCE_OPTIONS:
+        raise ValueError(f"option must be one of {list(STATS_INSTANCE_OPTIONS)}, got {option!r}.")
+    # A window-by-window reduction walks the cube's own chunks, so on an
+    # instance that builds one chunk per pass (or none at all) it would estimate
+    # the percentiles without holding any less -- a strictly worse answer.
+    if option == "windowed" and not execution.chunk_size:
+        return (
+            "windowed measurement needs a chunked instance: this server stacks "
+            f"{execution.describe()}, so measuring window by window would only "
+            "estimate the percentiles without lowering the memory. Ask the operator "
+            "for 'umbra serve --stack-lazy --stack-chunk-size N', or drop 'windowed'."
+        )
+    # The mirror image, and for a reason of substance rather than of cost: a
+    # filter window centred near a chunk edge averages cells the neighbouring
+    # chunk holds, and "lee" reads its speckle parameter off the array it is
+    # handed -- so on a chunked instance the filtered cube would differ from the
+    # unchunked one it is documented to equal. ``to_stack`` refuses the pair
+    # itself; refusing here names the server flag that caused it instead of a
+    # library keyword the client never passed.
+    if option == "speckle_filter" and execution.chunk_size:
+        return (
+            "speckle filtering needs an unchunked instance: this server stacks "
+            f"{execution.describe()}, and a filter window near a chunk edge needs "
+            "cells the neighbouring chunk holds. Ask the operator for 'umbra serve "
+            "--stack-lazy' without '--stack-chunk-size' (one chunk per pass, which "
+            "the filter sees whole), or drop 'speckle_filter'."
+        )
+    return None
+
+
+def stats_capabilities(execution: StackExecution | None = None) -> dict[str, Any]:
+    """What ``POST /artifacts/stats`` will accept on an instance, as a document.
+
+    The two options in :data:`STATS_INSTANCE_OPTIONS` are exact complements --
+    ``windowed`` needs the cube built in windows and ``speckle_filter`` needs
+    each pass whole -- so every instance honours exactly one of them, and which
+    one was previously discoverable only by sending a request and reading the
+    ``400``. This is that answer up front: each option reports ``supported``,
+    and an unsupported one carries the ``reason`` it would have been refused
+    with (the same string, from :func:`stats_option_refusal`). ``stacking`` is
+    the operator-facing policy line the CLI echoes at startup, so a client
+    debugging a refusal sees the shape of the instance rather than only the
+    verdict.
+    """
+    execution = execution or StackExecution()
+    capabilities: dict[str, Any] = {"stacking": execution.describe()}
+    for option in STATS_INSTANCE_OPTIONS:
+        refusal = stats_option_refusal(execution, option)
+        entry: dict[str, Any] = {"supported": refusal is None}
+        if refusal is not None:
+            entry["reason"] = refusal
+        capabilities[option] = entry
+    return capabilities
+
+
 @dataclass(frozen=True)
 class Renderers:
     """The render functions the artifact endpoints call, as opaque bytes.
@@ -1001,34 +1101,16 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
         return m.get_root().render().encode("utf-8")
 
     def stats(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
-        # A window-by-window reduction walks the cube's own chunks, so on an
-        # instance that builds one chunk per pass (or none at all) it would
-        # estimate the percentiles without holding any less -- a strictly worse
-        # answer. Refused before the import, so it costs a ``400`` and not the
-        # ``load`` extra.
-        if opts["windowed"] and not execution.chunk_size:
-            raise ValueError(
-                "windowed measurement needs a chunked instance: this server stacks "
-                f"{execution.describe()}, so measuring window by window would only "
-                "estimate the percentiles without lowering the memory. Ask the operator "
-                "for 'umbra serve --stack-lazy --stack-chunk-size N', or drop 'windowed'."
-            )
-        # The mirror image of the refusal above, and for a reason of substance
-        # rather than of cost: a filter window centred near a chunk edge averages
-        # cells the neighbouring chunk holds, and "lee" reads its speckle
-        # parameter off the array it is handed -- so on a chunked instance the
-        # filtered cube would differ from the unchunked one it is documented to
-        # equal. ``to_stack`` refuses the pair itself; catching it here names the
-        # server flag that caused it instead of a library keyword the client
-        # never passed.
-        if opts["speckle_filter"] and execution.chunk_size:
-            raise ValueError(
-                "speckle filtering needs an unchunked instance: this server stacks "
-                f"{execution.describe()}, and a filter window near a chunk edge needs "
-                "cells the neighbouring chunk holds. Ask the operator for 'umbra serve "
-                "--stack-lazy' without '--stack-chunk-size' (one chunk per pass, which "
-                "the filter sees whole), or drop 'speckle_filter'."
-            )
+        # The two options whose availability is the instance's rather than the
+        # request's (see :func:`stats_option_refusal`, which is also what the
+        # landing page advertises, so a refusal here is one a client could have
+        # read ahead of time). Both land before the import, so an option this
+        # instance cannot honour costs a ``400`` and not the ``load`` extra.
+        for option in STATS_INSTANCE_OPTIONS:
+            if opts[option]:
+                refusal = stats_option_refusal(execution, option)
+                if refusal is not None:
+                    raise ValueError(refusal)
         # The one renderer behind the ``load`` extra rather than ``viz``: it
         # co-registers the passes into a datacube and reduces it to numbers.
         from .load import stack_stats, to_stack
@@ -1612,7 +1694,13 @@ def build_app(
 
     @app.get("/", tags=["STAC"])
     def get_landing(request: Request) -> dict[str, Any]:
-        return landing_page(str(request.base_url), artifacts=artifacts)
+        # The stacking policy rides along so the ``stats`` link can advertise
+        # which of its instance-dependent options this server accepts. It
+        # describes the *default* renderers, as the policy itself does; injected
+        # ones do their own stacking and answer for themselves.
+        return landing_page(
+            str(request.base_url), artifacts=artifacts, stack_execution=stack_execution
+        )
 
     @app.get("/conformance", tags=["STAC"])
     def get_conformance() -> dict[str, Any]:
