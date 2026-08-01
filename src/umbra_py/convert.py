@@ -106,11 +106,28 @@ rather than ``"absolute"``, with the inferred level in
 ``UMBRA_NOISE_FLOOR_DB`` — and :func:`umbra_py.load.to_stack` refuses to
 difference a series that mixes the two.
 
+The first of those exchanges — one constant where the measured floor is a
+polynomial — is the one that shows up *in the picture*: a receiver's sensitivity
+varies with range, so a scalar taken off the whole scene under-subtracts at one
+edge of the swath and over-subtracts at the other, leaving exactly the gradient
+the correction exists to remove. ``noise_model="estimated-range"`` (``umbra
+convert --noise-model estimated-range``) infers a floor that *follows* range
+instead: SICD stores range along the image rows, so it reads the low tail of
+each range line separately and fits those per-line floors against range
+(:func:`_estimate_noise_profile`). The fit is what makes it usable — it
+interpolates across the lines that had no dark ground to read, and it discards
+the lines whose tail sits far *above* it, since ground contamination can only
+push a line's low tail up. It is still an inference from the pixels, so it is
+recorded as its own third thing (``"estimated-range"``) rather than quietly
+changing what ``"estimated"`` means, and it reports the swing it found in
+``UMBRA_NOISE_FLOOR_SPREAD_DB`` — the number that says whether there was any
+across-swath variation for the constant model to have missed.
+
 Those two exchanges were documented; they were not *reported*, so on any given
 scene there was no way to tell whether they had bitten. Every subtraction now
 also records what it did to the image (:class:`NoiseSubtraction`):
 ``UMBRA_NOISE_FLOORED_FRACTION``, how much of the raster the floor drove to the
-sensor's sensitivity limit, and — for the estimated model —
+sensor's sensitivity limit, and — for the inferred floors —
 ``UMBRA_NOISE_FLOOR_MARGIN_DB``, how far the scene's own median power sat above
 the inferred floor. The second is the estimator's assumption made checkable: it
 works because a SAR scene's dark surfaces are a *different population* from its
@@ -145,6 +162,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -472,14 +490,43 @@ _SUBTRACTABLE_NOISE_LEVEL = "ABSOLUTE"
 #:   the point: Umbra's open products generally ship without a ``Radiometric``
 #:   block at all, so ``"measured"`` refuses on exactly the archive this library
 #:   exists for. It is an *inference* from the image and is recorded as one.
-NOISE_MODELS = ("measured", "estimated")
+#: * ``"estimated-range"`` infers a floor that varies across the swath, by
+#:   reading the same low tail *per range line* and fitting those floors against
+#:   range (see :func:`_estimate_noise_profile`). Same input as ``"estimated"``
+#:   — the pixels, no metadata — and the same assumption, applied line by line
+#:   rather than once; what it buys is the across-swath variation a single
+#:   scalar cannot represent, which is the one difference from the measured
+#:   floor that shows up as a gradient in the output.
+NOISE_MODELS = ("measured", "estimated", "estimated-range")
 
 #: Percentile of the scene's own detected power taken as the noise floor by
-#: ``noise_model="estimated"``. Low enough that ordinary land backscatter sits
-#: well above it, high enough not to land in the speckle tail of the darkest
-#: pixels — the floor wanted is the *mean* power of the noise-dominated
-#: population, not its minimum.
+#: ``noise_model="estimated"`` (and, per range line, by ``"estimated-range"``).
+#: Low enough that ordinary land backscatter sits well above it, high enough not
+#: to land in the speckle tail of the darkest pixels — the floor wanted is the
+#: *mean* power of the noise-dominated population, not its minimum.
 NOISE_ESTIMATE_PERCENTILE = 5.0
+
+#: Degree of the polynomial ``noise_model="estimated-range"`` fits to the
+#: per-range-line floors. Quadratic because that is the shape a receiver's
+#: sensitivity actually has across a swath — a smooth roll-off from the antenna
+#: elevation pattern and range spreading, not a step — and because a low degree
+#: is what makes the fit an *interpolator* over the lines with no dark ground
+#: rather than a curve that chases each line's speckle.
+NOISE_PROFILE_DEGREE = 2
+
+#: Finite pixels a range line needs before its percentile is believed. A line
+#: mostly outside the collect (or mostly nodata after a clip) has too few samples
+#: for a low-tail percentile to mean anything; it is dropped and the fit covers
+#: it, which is the whole reason the profile is a fit rather than a lookup.
+_NOISE_PROFILE_MIN_SAMPLES = 16
+
+#: Decibels above the fitted profile beyond which a range line is treated as
+#: contaminated and dropped before the fit is redone. The trim is deliberately
+#: **one-sided**: bright ground can only push a line's low tail *up* (a line with
+#: no dark surfaces reports its dimmest backscatter, not the receiver), so a line
+#: far below the fit is noise-only and informative while one far above it is a
+#: line the estimator could not read.
+_NOISE_PROFILE_TRIM_DB = 3.0
 
 #: The :func:`conversion_tags` ``NOISE_SUBTRACTION`` value each model records.
 #: ``"measured"`` keeps the ``"absolute"`` it has always written (the SICD level
@@ -491,6 +538,7 @@ NOISE_ESTIMATE_PERCENTILE = 5.0
 _NOISE_PROVENANCE = {
     "measured": _SUBTRACTABLE_NOISE_LEVEL.lower(),
     "estimated": "estimated",
+    "estimated-range": "estimated-range",
 }
 
 #: Power floor left where the estimated noise meets or exceeds the measured
@@ -534,9 +582,12 @@ class NoiseSubtraction:
         mostly as its own noise. Counted in image space over the window actually
         read, so a ``bbox=`` clip reports its own window rather than the scene.
     floor_db:
-        The single floor subtracted, in decibels, for the estimated model.
-        ``None`` for the measured one, which is a polynomial across the image and
-        has no one value to report.
+        The floor subtracted, in decibels, for the inferred models — the single
+        constant for ``"estimated"``, and the *median* of the fitted profile for
+        ``"estimated-range"``, which is the one level that stands for a floor
+        varying across the swath (its swing is ``floor_spread_db``). ``None`` for
+        the measured model, which is a polynomial the product states rather than
+        a number this module inferred, and so is reproducible from the file.
     margin_db:
         How far the scene's own *median* power sits above that estimated floor.
         The estimator assumes the scene contains a noise-dominated population to
@@ -546,11 +597,20 @@ class NoiseSubtraction:
         backscatter. This number is that distance, so the assumption is reported
         rather than merely documented (:data:`NOISE_MARGIN_WARN_DB`). ``None``
         for the measured model, which assumes nothing about the scene.
+    floor_spread_db:
+        Peak-to-peak swing of the fitted floor across range, for
+        ``"estimated-range"`` only. It is the answer to "was there anything here
+        for the constant model to have missed?" — near zero and the two inferred
+        models agree, wide and the scalar was leaving a gradient behind. ``None``
+        for the constant estimate (whose spread is zero by construction, so
+        recording it would say nothing) and for the measured floor (whose
+        variation is the product's own metadata, readable from the SICD).
     """
 
     floored_fraction: float
     floor_db: float | None = None
     margin_db: float | None = None
+    floor_spread_db: float | None = None
 
 
 def _noise_level_type(sicd: Any) -> str | None:
@@ -660,6 +720,35 @@ def _noise_power(
     return np.power(10.0, noise_db / 10.0)
 
 
+def _check_percentile(percentile: float) -> None:
+    """Reject a noise-estimate percentile that is not inside the distribution.
+
+    Shared by the two estimators so "which tail?" fails the same way whether the
+    caller asked for one floor or one per range line.
+    """
+    if not 0.0 < float(percentile) < 100.0:
+        raise ValueError(
+            f"Noise-estimate percentile must be between 0 and 100 (exclusive), got "
+            f"{percentile!r}. It selects the low tail of the scene's own power "
+            "distribution, so 0 is the darkest single pixel and 100 the brightest."
+        )
+
+
+def _detected_power(amplitude: np.ndarray, *, decibels: bool):
+    """A detected-amplitude raster as linear power, whichever scale it arrived in.
+
+    The module carries amplitude in two conventions -- decibel power
+    (``20*log10`` of magnitude, which *is* ``10*log10`` of power) or linear
+    magnitude -- and every noise operation happens in the power domain, because
+    that is the domain noise adds in. One place for the conversion so the three
+    functions that need it cannot drift on which log it undoes.
+    """
+    np = _require("numpy")
+
+    values = np.asarray(amplitude, dtype="float64")
+    return np.power(10.0, values / 10.0) if decibels else np.square(values)
+
+
 def _subtract_noise(amplitude: np.ndarray, noise: Any, *, decibels: bool):
     """Remove an additive noise power from a detected-amplitude raster.
 
@@ -686,8 +775,7 @@ def _subtract_noise(amplitude: np.ndarray, noise: Any, *, decibels: bool):
     """
     np = _require("numpy")
 
-    values = np.asarray(amplitude, dtype="float64")
-    power = np.power(10.0, values / 10.0) if decibels else np.square(values)
+    power = _detected_power(amplitude, decibels=decibels)
     residual = power - np.asarray(noise, dtype="float64")
     finite = np.isfinite(residual)
     finite_count = int(finite.sum())
@@ -737,14 +825,8 @@ def _estimate_noise_power(
     """
     np = _require("numpy")
 
-    if not 0.0 < float(percentile) < 100.0:
-        raise ValueError(
-            f"Noise-estimate percentile must be between 0 and 100 (exclusive), got "
-            f"{percentile!r}. It selects the low tail of the scene's own power "
-            "distribution, so 0 is the darkest single pixel and 100 the brightest."
-        )
-    values = np.asarray(amplitude, dtype="float64")
-    power = np.power(10.0, values / 10.0) if decibels else np.square(values)
+    _check_percentile(percentile)
+    power = _detected_power(amplitude, decibels=decibels)
     finite = power[np.isfinite(power)]
     if finite.size == 0:
         raise ValueError(
@@ -752,6 +834,123 @@ def _estimate_noise_power(
             "finite value, so the scene's power distribution is empty."
         )
     return float(np.percentile(finite, float(percentile))), float(np.median(finite))
+
+
+def _estimate_noise_profile(
+    amplitude: np.ndarray,
+    *,
+    decibels: bool,
+    percentile: float = NOISE_ESTIMATE_PERCENTILE,
+    degree: int = NOISE_PROFILE_DEGREE,
+):
+    """Infer a *range-varying* noise floor from a detected-amplitude raster.
+
+    :func:`_estimate_noise_power` reads the low tail of the whole scene and gets
+    one number for it. A receiver's sensitivity is not one number: it varies with
+    range, which is why the measured floor (:func:`_noise_power`) is a polynomial
+    and why subtracting a scalar leaves an across-swath gradient behind — the
+    very artefact the correction exists to remove. This reads the same low tail
+    **per range line** instead. SICD stores range along the image rows
+    (``Grid.Row`` is the range direction, ``Grid.Col`` azimuth), so a row is a
+    set of azimuth samples at one range and its own percentile is the receiver at
+    that range.
+
+    A per-line percentile alone would be unusable: a line crossing nothing but
+    city has no dark ground, so its low tail is dim *backscatter* and sits above
+    the floor, and a line that is mostly nodata has too few samples to take a
+    percentile of at all. Both are handled by making the profile a **fit** rather
+    than a lookup — a degree-``degree`` polynomial in the row coordinate:
+
+    * lines with fewer than :data:`_NOISE_PROFILE_MIN_SAMPLES` finite pixels are
+      dropped, and the fit covers them by interpolation;
+    * the fit is then redone without the lines sitting more than
+      :data:`_NOISE_PROFILE_TRIM_DB` **above** it. That trim is one-sided on
+      purpose: contamination can only raise a line's low tail, never lower it, so
+      a line far above the curve is one the estimator could not read while a line
+      far below it is noise-only and is exactly what should be believed.
+
+    The fit runs in decibels, where the measured ``NoisePoly`` is also written
+    and where the roll-off is close to polynomial, and the result is converted to
+    linear power for :func:`_subtract_noise` — which broadcasts a column vector
+    across the azimuth samples of each line.
+
+    What this adds over :func:`_estimate_noise_power` is the *shape*, not the
+    level. A percentile of a speckled noise-only population sits below that
+    population's mean power by an amount set by the percentile, so both
+    estimators read a floor that is conservatively low — and because that bias is
+    very nearly the same decibel offset on every line, it moves the whole fitted
+    curve down without bending it. Under-subtraction is the safe direction (it
+    leaves a little of the receiver in rather than taking real backscatter out),
+    and it is the *gradient*, not the offset, that a constant floor puts into a
+    scene and that this removes.
+
+    Returns the profile as an ``(rows, 1)`` power array, the scene's median power
+    (for :attr:`NoiseSubtraction.margin_db`, as above), the profile's median
+    level in decibels (the one number that stands for it) and its peak-to-peak
+    swing in decibels — the last being the evidence for whether this model was
+    worth using over the constant one at all.
+
+    Raises when too few range lines qualify to fit a curve through, naming
+    ``"estimated"`` as the model that needs only one.
+    """
+    np = _require("numpy")
+
+    _check_percentile(percentile)
+    degree = int(degree)
+    if degree < 0:
+        raise ValueError(f"Noise-profile degree must be non-negative, got {degree!r}.")
+    power = _detected_power(amplitude, decibels=decibels)
+    if power.ndim != 2:
+        raise ValueError(
+            f"A range-varying noise floor needs a 2-D image to fit across, got shape "
+            f"{power.shape!r}."
+        )
+    finite = np.isfinite(power)
+    if not bool(finite.any()):
+        raise ValueError(
+            "Cannot estimate a noise floor from this image: no pixel carries a "
+            "finite value, so the scene's power distribution is empty."
+        )
+    rows = power.shape[0]
+
+    # One low-tail read per range line, over that line's finite samples only.
+    masked = np.where(finite, power, np.nan)
+    with warnings.catch_warnings():
+        # An all-nodata line is expected here, not exceptional -- it is dropped
+        # below and the fit covers it.
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        line_floor = np.nanpercentile(masked, float(percentile), axis=1)
+    usable = (
+        np.isfinite(line_floor)
+        & (line_floor > 0.0)
+        & (finite.sum(axis=1) >= _NOISE_PROFILE_MIN_SAMPLES)
+    )
+    if int(usable.sum()) < degree + 1:
+        raise ValueError(
+            f"Only {int(usable.sum())} of {rows} range lines carry enough dark ground to "
+            f"read a noise floor from, which is too few to fit a degree-{degree} profile "
+            f"through (it needs {degree + 1}). Use noise_model='estimated' for one "
+            "constant floor over the whole scene, or noise_model='measured' where the "
+            "product states its own."
+        )
+
+    # Row index normalised to [-1, 1] so the fit is conditioned the same way for
+    # a 500-line clip as for a 50 000-line collect.
+    x = np.linspace(-1.0, 1.0, rows) if rows > 1 else np.zeros(1)
+    y = 10.0 * np.log10(line_floor[usable])
+    coefs = np.polyfit(x[usable], y, degree)
+    keep = (y - np.polyval(coefs, x[usable])) <= _NOISE_PROFILE_TRIM_DB
+    if not bool(keep.all()) and int(keep.sum()) >= degree + 1:
+        coefs = np.polyfit(x[usable][keep], y[keep], degree)
+
+    profile_db = np.polyval(coefs, x)
+    profile = np.power(10.0, profile_db / 10.0).reshape(rows, 1)
+    return (
+        profile,
+        float(np.median(power[finite])),
+        float(np.median(profile_db)),
+        float(profile_db.max() - profile_db.min()),
+    )
 
 
 def _denoise_amplitude(
@@ -768,24 +967,38 @@ def _denoise_amplitude(
     ``model`` picks where the floor comes from, one of :data:`NOISE_MODELS`:
     ``"measured"`` reads the SICD's own ``Radiometric.NoiseLevel`` polynomial,
     ``"estimated"`` infers a constant one from the image
-    (:func:`_estimate_noise_power`). The subtraction itself is the same either
-    way — :func:`_subtract_noise`, in the power domain, before anything scales
-    it — because what differs is the provenance of the number, not the physics.
+    (:func:`_estimate_noise_power`), and ``"estimated-range"`` infers one that
+    varies across the swath (:func:`_estimate_noise_profile`). The subtraction
+    itself is the same in every case — :func:`_subtract_noise`, in the power
+    domain, before anything scales it — because what differs is the provenance of
+    the number, not the physics.
 
     ``origin`` is the ``(row, col)`` position of ``amplitude`` inside the full
     image, for the same reason :func:`_calibrate_amplitude` takes one: the noise
     polynomial is a function of image coordinates, so a clipped read has to be
-    evaluated at the coordinates it actually came from. The estimated model has
-    no image-coordinate dependence and so ignores it — a clip's floor is
-    inferred from the clip, which is the only ground it can see.
+    evaluated at the coordinates it actually came from. The estimated models have
+    no image-coordinate dependence and so ignore it — a clip's floor is inferred
+    from the clip, which is the only ground it can see, and the range profile is
+    fitted over the clip's own rows.
 
     Returns the corrected raster and a :class:`NoiseSubtraction` describing what
     the correction did to it: always how much of the image it drove to the
-    sensor's limit, and for the estimated model the floor it inferred plus how
-    far the scene's median sat above it.
+    sensor's limit, and for the inferred floors the level plus how far the
+    scene's median sat above it (and, for the range profile, its swing).
     """
     if model not in NOISE_MODELS:
         raise ValueError(f"Unknown noise_model {model!r}; choose one of {', '.join(NOISE_MODELS)}.")
+    if model == "estimated-range":
+        profile, median, level_db, spread_db = _estimate_noise_profile(
+            amplitude, decibels=decibels, percentile=percentile
+        )
+        corrected, floored = _subtract_noise(amplitude, profile, decibels=decibels)
+        return corrected, NoiseSubtraction(
+            floored_fraction=floored,
+            floor_db=level_db,
+            margin_db=_margin_db(median, 10.0 ** (level_db / 10.0)),
+            floor_spread_db=spread_db,
+        )
     if model == "estimated":
         floor, median = _estimate_noise_power(amplitude, decibels=decibels, percentile=percentile)
         corrected, floored = _subtract_noise(amplitude, floor, decibels=decibels)
@@ -811,25 +1024,28 @@ class _NoiseTagValues(TypedDict):
     noise_floor_db: float | None
     noise_floored_fraction: float | None
     noise_floor_margin_db: float | None
+    noise_floor_spread_db: float | None
 
 
 def _noise_tag_values(noise: NoiseSubtraction | None) -> _NoiseTagValues:
     """A :class:`NoiseSubtraction` as :func:`conversion_tags` keyword arguments.
 
     One place for the mapping so both writers (slant-plane and geocoded) record
-    the same three numbers, and so a raster written without the subtraction
-    passes ``None`` for all of them rather than omitting different keys.
+    the same numbers, and so a raster written without the subtraction passes
+    ``None`` for all of them rather than omitting different keys.
     """
     if noise is None:
         return {
             "noise_floor_db": None,
             "noise_floored_fraction": None,
             "noise_floor_margin_db": None,
+            "noise_floor_spread_db": None,
         }
     return {
         "noise_floor_db": noise.floor_db,
         "noise_floored_fraction": noise.floored_fraction,
         "noise_floor_margin_db": noise.margin_db,
+        "noise_floor_spread_db": noise.floor_spread_db,
     }
 
 
@@ -908,6 +1124,7 @@ def conversion_tags(
     noise_floor_db: float | None = None,
     noise_floored_fraction: float | None = None,
     noise_floor_margin_db: float | None = None,
+    noise_floor_spread_db: float | None = None,
     rtc_model: str | None = None,
     rtc_reference_deg: float | None = None,
     projection_type: str | None = None,
@@ -943,29 +1160,32 @@ def conversion_tags(
         below are recorded only for the former.
     noise_subtraction:
         Which noise floor was subtracted — ``"absolute"`` for the SICD's own
-        stated level, ``"estimated"`` for one inferred from the scene — or
-        ``None`` for a raster that still carries its floor. Recorded because it
-        is the difference between "this surface backscatters at −25 dB" and
-        "this sensor cannot hear below −25 dB", which the pixel values
-        themselves cannot distinguish after the fact; and the two values are
-        distinct because a measured floor and an inferred one are not the same
+        stated level, ``"estimated"`` for one constant inferred from the scene,
+        ``"estimated-range"`` for one inferred per range line — or ``None`` for a
+        raster that still carries its floor. Recorded because it is the
+        difference between "this surface backscatters at −25 dB" and "this sensor
+        cannot hear below −25 dB", which the pixel values themselves cannot
+        distinguish after the fact; and the values are distinct because a
+        measured floor, a constant guess and a fitted profile are not the same
         claim about the pixels.
     noise_floor_db:
-        The estimated floor actually subtracted, in decibels, for
-        ``noise_subtraction="estimated"``. Recorded for the same reason
+        The estimated floor actually subtracted, in decibels, for the inferred
+        models (the profile's median level for ``"estimated-range"``, whose swing
+        is ``noise_floor_spread_db``). Recorded for the same reason
         ``rtc_reference_deg`` is: an inferred number that nobody can read back
         is not reproducible. Omitted for the measured floor, which is a
-        polynomial across the image rather than one value.
+        polynomial the product itself states rather than one this module chose.
     noise_floored_fraction:
         How much of the image the subtraction drove to the sensor's sensitivity
-        limit, and ``noise_floor_margin_db`` how far the scene's median power sat
-        above an *estimated* floor — the two diagnostics of
-        :class:`NoiseSubtraction`. They describe how well the correction was
-        supported by this scene rather than what a pixel value means, which is
-        why they are recorded here but stay out of
+        limit, ``noise_floor_margin_db`` how far the scene's median power sat
+        above an *estimated* floor, and ``noise_floor_spread_db`` how far a fitted
+        range profile swung from one edge of the swath to the other — the
+        diagnostics of :class:`NoiseSubtraction`. They describe how well the
+        correction was supported by this scene rather than what a pixel value
+        means, which is why they are recorded here but stay out of
         :data:`umbra_py.load.MEASUREMENT_PROVENANCE_KEYS`: they legitimately
         differ between passes of one series, so a stack must not be refused over
-        them. Both are omitted when no floor was subtracted.
+        them. All are omitted when no floor was subtracted.
     rtc_reference_deg:
         The *resolved* reference incidence angle the flattening normalised to
         (the scene incidence angle when the caller passed none), so the tag
@@ -988,6 +1208,8 @@ def conversion_tags(
             tags["NOISE_FLOORED_FRACTION"] = f"{float(noise_floored_fraction):.4g}"
         if noise_floor_margin_db is not None:
             tags["NOISE_FLOOR_MARGIN_DB"] = f"{float(noise_floor_margin_db):.6g}"
+        if noise_floor_spread_db is not None:
+            tags["NOISE_FLOOR_SPREAD_DB"] = f"{float(noise_floor_spread_db):.6g}"
     if rtc_model is not None and rtc_reference_deg is not None:
         tags["RTC_REFERENCE_DEG"] = f"{float(rtc_reference_deg):.6g}"
     if geocoded:
@@ -1082,7 +1304,8 @@ def sicd_to_amplitude_geotiff(
         ``Radiometric.NoiseLevel`` and raises when the product declares no
         absolute level — ask :func:`sicd_noise_level` first to check;
         ``"estimated"`` infers one constant floor from the scene's own pixels
-        and needs no metadata. Ignored when ``noise_subtract`` is false.
+        and needs no metadata; ``"estimated-range"`` infers one per range line
+        and fits it against range. Ignored when ``noise_subtract`` is false.
     """
     _require("sarpy")
     _require("rasterio")
@@ -2443,14 +2666,30 @@ def sicd_to_geocoded_cog(
         the receiver. It needs no metadata, which is the whole point: Umbra's
         open products generally ship without a ``Radiometric`` block, so
         ``"measured"`` refuses on most of the archive this library exists for.
-        The trade is real and is why the two are named separately — the estimate
-        is one scalar, so it cannot follow the swath, and it assumes the scene
-        contains dark ground at all (over imagery that is bright everywhere it
-        removes signal). The raster records which one ran
-        (``UMBRA_NOISE_SUBTRACTION`` of ``"absolute"`` vs ``"estimated"``, plus
-        ``UMBRA_NOISE_FLOOR_DB`` for the estimate), and
+        The trade is real and is why the models are named separately — the
+        estimate is one scalar, so it cannot follow the swath, and it assumes the
+        scene contains dark ground at all (over imagery that is bright everywhere
+        it removes signal).
+
+        ``"estimated-range"`` answers the first half of that trade. It takes the
+        same low-tail read *per range line* — SICD stores range along the image
+        rows — and fits those per-line floors against range
+        (:func:`_estimate_noise_profile`), so the subtracted floor follows the
+        swath the way the measured one does while still needing no metadata. The
+        fit is what makes it work on real imagery: it interpolates over the lines
+        that had no dark ground to read, and it drops the lines whose tail sits
+        far above it, since bright ground can only push a line's low tail up. It
+        remains an inference and assumes the scene has dark ground *somewhere*
+        along range, so it is recorded as its own value rather than as a better
+        ``"estimated"``, and it reports the swing it found in
+        ``UMBRA_NOISE_FLOOR_SPREAD_DB`` — near zero means there was nothing here
+        the constant model was missing.
+
+        The raster records which one ran (``UMBRA_NOISE_SUBTRACTION`` of
+        ``"absolute"``, ``"estimated"`` or ``"estimated-range"``, plus
+        ``UMBRA_NOISE_FLOOR_DB`` for the inferred ones), and
         :func:`umbra_py.load.to_stack` refuses to difference a series that mixes
-        them.
+        any two of them.
     bbox:
         Optional area of interest ``(min_lon, min_lat, max_lon, max_lat)`` in
         WGS-84 degrees. Only the image window covering that ground is read,

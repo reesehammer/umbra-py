@@ -251,6 +251,24 @@ floor drove to the sensor's limit, and `UMBRA_NOISE_FLOOR_MARGIN_DB` how far the
 scene's median sat above an inferred floor — the estimator's own assumption
 turned into a number, since the model works exactly to the degree that a scene's
 dark surfaces are a different population from its backscatter.
+~~**Open:** the estimate is one constant, so it cannot follow the swath — which
+is the artefact the subtraction exists to remove, put back by the model that made
+it usable on the open archive.~~ **shipped** — `umbra convert --noise-model
+estimated-range` takes the same low-tail read *per range line* (SICD stores range
+along the image rows) and **fits** those floors against range, so an inferred
+floor follows the swath the way the measured one does with no metadata at all.
+The fit is what makes a per-line read survive a real scene: it interpolates over
+the lines that had no dark ground, and drops the lines whose tail sits more than
+3 dB *above* it — a one-sided trim, because bright ground can only push a line's
+low tail up. The claim is narrow and stated as such: what it adds is the *shape*,
+since a percentile of speckled noise sits conservatively below that population's
+mean by nearly the same decibel offset on every line, so the bias lowers the
+curve without bending it — and it is the gradient, not the offset, that a scalar
+floor leaves in a scene. It is a *third* provenance value, not a better
+`"estimated"`, so `to_stack` refuses to difference a fitted profile against a
+constant guess, `stack_stats` says which limit went away and which did not, and
+`UMBRA_NOISE_FLOOR_SPREAD_DB` reports the swing found — the number that says
+whether the constant model was missing anything at all.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -554,6 +572,31 @@ from:
   of a scene rather than claims about a pixel, so they stay out of
   `MEASUREMENT_PROVENANCE_KEYS` by design: no two real passes agree on them, and
   refusing over them would have ended every series. See the CHANGELOG.
+- ~~The inferred floor was one constant for a whole scene, so it could not follow
+  the across-swath variation the measured polynomial exists to describe — leaving
+  a gradient that tracks the geometry rather than the ground, which is the
+  artefact the subtraction exists to remove.~~ **shipped** — `umbra convert
+  --noise-model estimated-range` reads the same low tail *per range line* (SICD
+  stores range along the image rows) and fits those per-line floors against range,
+  so the subtracted floor follows the swath while still needing no metadata. The
+  profile is a degree-2 fit rather than a lookup precisely so a real scene cannot
+  defeat it: lines with no dark ground are interpolated over, and lines whose tail
+  sits more than 3 dB *above* the curve are dropped and the fit redone — one-sided
+  because ground contamination can only raise a line's low tail, so a line far
+  below the curve is noise-only and is exactly what to believe. What it adds is
+  the *shape*, and only that: a percentile of speckled noise sits conservatively
+  below that population's mean by nearly the same offset on every line, so the
+  bias moves the whole curve down without bending it, and under-subtraction is the
+  safe direction. Because it is a different estimator with its own failure mode it
+  is recorded as a third value (`"estimated-range"`) rather than quietly changing
+  what `"estimated"` means — which is what makes `to_stack` refuse a series that
+  mixes a fitted profile with a constant guess, gives `stack_stats` its own caveat
+  (one limit gone, the other not), and makes the new
+  `UMBRA_NOISE_FLOOR_SPREAD_DB` — the swing of the fitted floor, i.e. what the
+  constant model was missing — meaningful by its presence. `umbra chips
+  --noise-model estimated-range` carries it to a training set, where a flat floor
+  showed up as an offset between chips cut from opposite edges of one swath. See
+  the CHANGELOG.
 - ~~Nothing *consumed* those tags (they were written and read back, but no code
   acted on them, so a stack could still mix two conversions and report the
   difference between them as change).~~ **shipped** — `to_stack` reads every

@@ -3343,3 +3343,233 @@ def test_cli_convert_stays_quiet_about_a_subtraction_that_did_not_run(tmp_path, 
 
     assert result.exit_code == 0, result.output
     assert "sensor's limit" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+# The range-varying estimated floor (``noise_model="estimated-range"``).
+#
+# The constant estimate's first documented limit was that one scalar cannot
+# follow the swath -- which is not a rounding error but the very artefact the
+# subtraction exists to remove, since a receiver's sensitivity varies with range
+# and a scalar therefore under-subtracts at one edge and over-subtracts at the
+# other. These tests pin the fit that follows it, the two ways a real scene
+# defeats a per-line read (a line with no dark ground, a line with almost no
+# samples), and the part that keeps it honest: a fitted profile is recorded,
+# reported and refused as a *third* thing, not as a better "estimated".
+# --------------------------------------------------------------------------- #
+
+
+def _range_varying_noise_scene(
+    rows=64, cols=100, *, near_db=-30.0, far_db=-20.0, signal_db=-25.0, water=20
+):
+    """A scene whose *noise* varies across range and whose ground does not.
+
+    The first ``water`` columns of every range line return nothing, so what is
+    recorded there is the floor at that range; the rest carry a constant
+    backscatter on top of it. That separation is what makes the two estimators
+    distinguishable at all: any residual gradient left in the land population
+    after the subtraction came from the floor model, not from the scene.
+    """
+    np = pytest.importorskip("numpy")
+
+    floor = 10.0 ** (np.linspace(near_db, far_db, rows) / 10.0)[:, None]
+    power = np.tile(floor, (1, cols))
+    power[:, water:] += 10.0 ** (signal_db / 10.0)
+    return np.sqrt(power).astype("float32"), floor[:, 0]
+
+
+def test_estimate_noise_profile_follows_the_floor_across_range():
+    np = pytest.importorskip("numpy")
+
+    amp, floor = _range_varying_noise_scene()
+    profile, median, level_db, spread_db = convert._estimate_noise_profile(amp, decibels=False)
+
+    # One floor per range line, shaped to broadcast across that line's azimuth
+    # samples -- SICD stores range along the rows, so a row is one range.
+    assert profile.shape == (amp.shape[0], 1)
+    assert np.allclose(10.0 * np.log10(profile[:, 0]), 10.0 * np.log10(floor), atol=1e-4)
+    # The profile's median stands for it, and its swing is the number that says
+    # whether there was anything here for a constant floor to have missed.
+    assert level_db == pytest.approx(-25.0, abs=1e-4)
+    assert spread_db == pytest.approx(10.0, abs=1e-4)
+    assert median > 0.0
+
+
+def test_estimate_noise_profile_reads_the_same_tail_in_either_scale():
+    np = pytest.importorskip("numpy")
+
+    amp, _ = _range_varying_noise_scene()
+    linear = convert._estimate_noise_profile(amp, decibels=False)[0]
+    decibel = convert._estimate_noise_profile(20.0 * np.log10(amp), decibels=True)[0]
+    assert np.allclose(linear, decibel, rtol=1e-4)
+
+
+def test_estimate_noise_profile_interpolates_across_lines_with_no_dark_ground():
+    """The fit is what makes a per-line read usable on a real scene."""
+    np = pytest.importorskip("numpy")
+
+    amp, floor = _range_varying_noise_scene()
+    # A band of range lines crossing nothing but city: their low tail is dim
+    # *backscatter*, well above the receiver. Contamination can only push a
+    # line's tail up, which is why the trim is one-sided -- these lines are
+    # dropped and the curve carries over them.
+    amp[20:32, :] = math.sqrt(10.0 ** (0.0 / 10.0))
+    profile, _, _, spread_db = convert._estimate_noise_profile(amp, decibels=False)
+
+    assert np.allclose(10.0 * np.log10(profile[:, 0]), 10.0 * np.log10(floor), atol=0.2)
+    assert spread_db == pytest.approx(10.0, abs=0.2)
+
+
+def test_estimate_noise_profile_drops_lines_with_too_few_samples_to_read():
+    np = pytest.importorskip("numpy")
+
+    amp, floor = _range_varying_noise_scene()
+    # Mostly-nodata lines (the edge of a clipped window): a low-tail percentile
+    # over a handful of pixels is not a floor, so they are dropped rather than
+    # believed -- even though the few pixels they do carry are dark.
+    amp[40:48, convert._NOISE_PROFILE_MIN_SAMPLES - 1 :] = np.nan
+    amp[40:48, : convert._NOISE_PROFILE_MIN_SAMPLES - 1] = math.sqrt(1e-9)
+    profile, _, _, _ = convert._estimate_noise_profile(amp, decibels=False)
+
+    # Believing them would have dragged the curve down toward -90 dB.
+    assert np.allclose(10.0 * np.log10(profile[:, 0]), 10.0 * np.log10(floor), atol=0.5)
+
+
+def test_estimate_noise_profile_refuses_when_too_few_lines_qualify():
+    """It names the model that needs only one line, rather than fitting noise."""
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="too few to fit"):
+        convert._estimate_noise_profile(np.ones((2, 40), dtype="float32"), decibels=False)
+
+    # A wide scene whose every line is too short to read is the same refusal.
+    with pytest.raises(ValueError, match="estimated"):
+        convert._estimate_noise_profile(np.ones((40, 4), dtype="float32"), decibels=False)
+
+
+def test_estimate_noise_profile_rejects_input_it_cannot_fit_across():
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(ValueError, match="between 0 and 100"):
+        convert._estimate_noise_profile(np.ones((40, 40)), decibels=False, percentile=0.0)
+    with pytest.raises(ValueError, match="needs a 2-D image"):
+        convert._estimate_noise_profile(np.ones(40), decibels=False)
+    with pytest.raises(ValueError, match="no pixel carries a finite value"):
+        convert._estimate_noise_profile(np.full((40, 40), np.nan), decibels=False)
+
+
+def test_estimated_range_removes_the_gradient_the_constant_floor_leaves():
+    """The whole claim of the model, measured rather than asserted."""
+    np = pytest.importorskip("numpy")
+
+    amp, _ = _range_varying_noise_scene()
+    sicd = _FakeSicd()  # no Radiometric block: only the inferred models can run
+
+    fitted, profile = convert._denoise_amplitude(sicd, amp, decibels=False, model="estimated-range")
+    constant, scalar = convert._denoise_amplitude(sicd, amp, decibels=False, model="estimated")
+
+    def land_gradient_db(corrected):
+        # The ground under the swath is constant by construction, so whatever
+        # gradient survives in it across range came from the floor model.
+        land = np.square(np.asarray(corrected, dtype="float64"))[:, 20:].mean(axis=1)
+        return float(10.0 * np.log10(land.max() / land.min()))
+
+    assert land_gradient_db(fitted) < 0.1
+    # One scalar over a floor that spans 10 dB leaves most of that span behind.
+    assert land_gradient_db(constant) > 5.0
+
+    # And the fitted model says how much variation it found, which is exactly
+    # what the constant model was missing. The scalar reports no spread: its
+    # spread is zero by construction, so recording it would say nothing.
+    assert profile.floor_spread_db == pytest.approx(10.0, abs=1e-4)
+    assert scalar.floor_spread_db is None
+
+
+def test_denoise_estimated_range_ignores_the_clip_origin_like_the_constant_one():
+    """A clip's floor is fitted over the clip's own rows: it sees no others."""
+    np = pytest.importorskip("numpy")
+
+    amp, _ = _range_varying_noise_scene()
+    at_origin = convert._denoise_amplitude(
+        _FakeSicd(), amp, decibels=False, model="estimated-range"
+    )
+    displaced = convert._denoise_amplitude(
+        _FakeSicd(), amp, decibels=False, origin=(4096, 512), model="estimated-range"
+    )
+    assert np.array_equal(at_origin[0], displaced[0])
+    assert at_origin[1] == displaced[1]
+
+
+def test_geocoded_cog_records_the_range_profile_as_its_own_third_thing(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(24, 32), _FakeSicd()))
+    out = convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "profiled.tif",
+        gcp_grid=6,
+        resampling="nearest",
+        noise_subtract=True,
+        noise_model="estimated-range",
+    )
+    tags = convert.read_conversion_tags(out)
+
+    # Deliberately neither "absolute" nor "estimated": noise_subtraction is in
+    # load.MEASUREMENT_PROVENANCE_KEYS, so this value is what makes to_stack
+    # refuse to difference a fitted profile against a constant guess.
+    assert tags["noise_subtraction"] == "estimated-range"
+    # This fixture's brightness ramps along the rows, so there is a real swing
+    # across range for the fit to find and report.
+    assert float(tags["noise_floor_spread_db"]) > 0.0
+    # The level is reported like the constant estimate's, so an inferred number
+    # is always readable back off the file that carries it.
+    assert math.isfinite(float(tags["noise_floor_db"]))
+
+
+def test_conversion_tags_omit_the_spread_when_the_floor_could_not_vary():
+    # The constant estimate and the measured polynomial both leave it off: one
+    # has no spread by construction, the other's variation is the product's own
+    # metadata rather than something this module inferred.
+    estimated = convert.conversion_tags(
+        source="scene.ntf", geocoded=True, noise_subtraction="estimated", noise_floor_db=-31.4
+    )
+    assert "UMBRA_NOISE_FLOOR_SPREAD_DB" not in estimated
+    nothing_subtracted = convert.conversion_tags(
+        source="scene.ntf", geocoded=True, noise_subtraction=None, noise_floor_spread_db=9.0
+    )
+    assert "UMBRA_NOISE_FLOOR_SPREAD_DB" not in nothing_subtracted
+
+
+def test_cli_convert_noise_model_estimated_range_reports_the_swing(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(24, 32), _FakeSicd()))
+    src = tmp_path / "scene.ntf"
+    src.write_bytes(b"not-a-real-nitf")
+    dst = tmp_path / "geo.tif"
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "convert",
+            str(src),
+            str(dst),
+            "--subtract-noise",
+            "--noise-model",
+            "estimated-range",
+            "--resampling",
+            "nearest",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The three models are named apart on the way out as they are in the tags.
+    assert "noise-profiled" in result.output
+    assert "across the swath" in result.output
+    # The profile has no single level, so the line says which number it quotes.
+    assert "Fitted floor of median" in result.output
+    assert convert.read_conversion_tags(dst)["noise_subtraction"] == "estimated-range"

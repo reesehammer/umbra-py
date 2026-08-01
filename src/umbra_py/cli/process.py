@@ -24,16 +24,21 @@ from ..viz import (
 from . import _shared
 from ._root import cli
 
+#: What each ``--noise-model`` calls the product it writes. The models are named
+#: apart everywhere else -- in the provenance tags, in the refusal ``umbra
+#: stack`` raises on a mixed series -- so the line that says what was written
+#: names them apart too. A measured floor, a constant guess and a fitted profile
+#: are not the same claim about the pixels.
+_NOISE_LABELS = {
+    "measured": "noise-subtracted",
+    "estimated": "noise-estimated",
+    "estimated-range": "noise-profiled",
+}
+
 
 def _noise_label(noise_model: str) -> str:
-    """How a noise-subtracted product describes itself on the way out.
-
-    The two models are named apart everywhere else -- in the provenance tags, in
-    the refusal ``umbra stack`` raises on a mixed series -- so the line that says
-    what was written names them apart too. A measured floor and an inferred one
-    are not the same claim about the pixels.
-    """
-    return "noise-subtracted" if noise_model.lower() == "measured" else "noise-estimated"
+    """How a noise-subtracted product describes itself on the way out."""
+    return _NOISE_LABELS.get(noise_model.lower(), "noise-estimated")
 
 
 def _echo_noise_report(path: Path) -> None:
@@ -62,12 +67,23 @@ def _echo_noise_report(path: Path) -> None:
             f"  {float(floored):.1%} of the image is at the sensor's limit after the "
             "subtraction (UMBRA_NOISE_FLOORED_FRACTION)"
         )
+    spread = tags.get("noise_floor_spread_db")
+    if spread is not None:
+        click.echo(
+            f"  The fitted floor swings {float(spread):.1f} dB across the swath "
+            "(UMBRA_NOISE_FLOOR_SPREAD_DB) -- that is what one constant floor would "
+            "have left behind as a gradient"
+        )
     margin = tags.get("noise_floor_margin_db")
     if margin is None:
         return
     floor_db = tags.get("noise_floor_db")
-    level = f" of {float(floor_db):.1f} dB" if floor_db is not None else ""
-    click.echo(f"  Estimated floor{level} sits {float(margin):.1f} dB below the scene median")
+    kind = "Fitted floor" if spread is not None else "Estimated floor"
+    # The range profile has no single level, so what is quoted is its median --
+    # say which, rather than let a reader take it for the number subtracted.
+    qualifier = "median " if spread is not None else ""
+    level = f" of {qualifier}{float(floor_db):.1f} dB" if floor_db is not None else ""
+    click.echo(f"  {kind}{level} sits {float(margin):.1f} dB below the scene median")
     if float(margin) < NOISE_MARGIN_WARN_DB:
         click.echo(
             f"  Note: that is under {NOISE_MARGIN_WARN_DB:g} dB, so this scene had little "
@@ -588,9 +604,12 @@ def stack(
     "'estimated' infers one constant floor from the scene's own darkest pixels "
     "(a SAR image's water, shadow and smooth ground return essentially nothing, "
     "so the low tail of its power distribution is the receiver), needs no "
-    "metadata, and is recorded as an inference: UMBRA_NOISE_SUBTRACTION reads "
-    "'estimated' rather than 'absolute', and 'umbra stack' refuses to difference "
-    "a series that mixes the two.",
+    "metadata, and is recorded as an inference. 'estimated-range' takes that same "
+    "read per range line and fits it against range, so an inferred floor follows "
+    "the swath instead of leaving a gradient behind, and reports the swing it "
+    "found in UMBRA_NOISE_FLOOR_SPREAD_DB. All three record themselves apart in "
+    "UMBRA_NOISE_SUBTRACTION, and 'umbra stack' refuses to difference a series "
+    "that mixes any two of them.",
 )
 @click.option(
     "--clip-bbox",
@@ -656,11 +675,14 @@ def convert(
     where noise actually adds. By default the floor is the product's own stated
     one; --noise-model estimated infers it from the scene's own darkest pixels
     instead, which is what works on Umbra's open products, since they generally
-    carry no noise metadata to read. Either way the conversion then reports what
-    the subtraction did to this scene: how much of the image it drove to the
-    sensor's sensitivity limit, and -- for the estimate, which assumes the scene
-    contained dark ground to read -- how far the scene's median sat above the
-    floor it inferred. A narrow margin says that assumption did not hold here.
+    carry no noise metadata to read, and --noise-model estimated-range infers one
+    per range line and fits it against range, so an inferred floor follows the
+    swath rather than leaving a gradient the constant one could not. Whichever
+    floor ran, the conversion then reports what the subtraction did to this
+    scene: how much of the image it drove to the sensor's sensitivity limit, and
+    -- for an inferred floor, which assumes the scene contained dark ground to
+    read -- how far the scene's median sat above it, plus the swing a fitted
+    profile found. A narrow margin says that assumption did not hold here.
 
     Every raster written here records how it was made -- the calibration, the
     terrain model and its reference angle, the DEM/geoid, the projection and the
@@ -868,9 +890,11 @@ def convert(
     help="SICD only: where --subtract-noise gets the floor. 'measured' reads the "
     "product's own Radiometric.NoiseLevel and fails clearly without an ABSOLUTE "
     "level -- which is most of Umbra's open archive; 'estimated' infers one "
-    "constant floor per scene from its own darkest pixels and needs no metadata. "
-    "Each chip's manifest entry records which ran, so a training set never mixes "
-    "a measured floor with an inferred one without saying so.",
+    "constant floor per scene from its own darkest pixels and needs no metadata; "
+    "'estimated-range' infers one per range line and fits it against range, so "
+    "chips cut from opposite edges of a swath are not offset by the floor the "
+    "constant model left behind. Each chip's manifest entry records which ran, so "
+    "a training set never mixes two floors without saying so.",
 )
 @click.option(
     "--convert-resolution",

@@ -2035,6 +2035,42 @@ def test_to_stack_refuses_an_inferred_floor_differenced_against_a_measured_one(t
     assert "'estimated' (acq-2)" in str(exc.value)
 
 
+def test_to_stack_refuses_a_fitted_profile_differenced_against_a_constant_guess(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Both floors were inferred from the pixels rather than read, so "was it
+    # estimated?" agrees -- but one is a scalar and the other follows the swath,
+    # and over a dark cell near the edge of a scene that difference is most of
+    # the value. It is a third provenance value for exactly this reason.
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "noise_subtraction": "estimated"},
+        {**settings, "noise_subtraction": "estimated-range"},
+    )
+    with pytest.raises(ValueError, match="noise_subtraction disagrees") as exc:
+        to_stack(items, max_size=32)
+    assert "'estimated' (acq-1)" in str(exc.value)
+    assert "'estimated-range' (acq-2)" in str(exc.value)
+
+
+def test_stack_stats_says_a_fitted_floor_followed_the_swath_but_was_still_inferred(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    settings = {"calibration": "sigma0", "noise_subtraction": "estimated-range"}
+    stats = stack_stats(to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32))
+    caveats = " ".join(stats["caveats"])
+    assert "thermal-noise floor was subtracted" in caveats
+    # The constant model's first limit is gone and its second is not, so reusing
+    # that model's wording would have understated one and overstated the other.
+    assert "fitted across range so it follows the swath" in caveats
+    assert "it cannot follow the across-swath variation" not in caveats
+
+
 def test_stack_stats_says_when_the_subtracted_floor_was_only_estimated(tmp_path):
     pytest.importorskip("xarray")
     pytest.importorskip("numpy")

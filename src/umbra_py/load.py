@@ -1779,6 +1779,18 @@ def stack_stats(
             "scene contained dark ground to measure -- over uniformly bright imagery "
             "it takes real backscatter off."
         )
+    if noise_subtraction == "estimated-range":
+        # Same inference, fitted across range rather than taken once: the first
+        # limit of the constant estimate is gone, the second is not, and a caveat
+        # that reused the constant model's wording would understate one and
+        # overstate the other.
+        caveats.append(
+            "That floor was estimated from each scene's own darkest pixels rather "
+            "than read from the products' noise metadata, fitted across range so it "
+            "follows the swath -- but it is still an inference, and it assumes every "
+            "pass contained dark ground somewhere along range to read: over uniformly "
+            "bright imagery it takes real backscatter off."
+        )
     if area is None:
         caveats.append(
             f"The cube's grid is geographic ({crs_name}), whose cells are not "

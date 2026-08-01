@@ -7,6 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Let the inferred noise floor follow the swath: `umbra convert --noise-model
+  estimated-range` / `sicd_to_geocoded_cog(noise_model="estimated-range")`.** The
+  entry below shipped an estimated floor with two named limits, and the first of
+  them — *one constant, so it cannot follow the across-swath variation* — is not
+  a rounding error. A receiver's sensitivity varies with range; the measured
+  floor is a polynomial for exactly that reason. Subtracting a scalar from a
+  scene whose floor spans several decibels therefore under-subtracts at one edge
+  of the swath and over-subtracts at the other, leaving behind a gradient that
+  tracks the geometry rather than the ground — which is the artefact the
+  subtraction exists to remove, reintroduced by the model that made it usable on
+  Umbra's open archive.
+
+  `"estimated-range"` takes the same low-tail read **per range line**. SICD
+  stores range along the image rows (`Grid.Row` is the range direction), so a row
+  is a set of azimuth samples at one range and its own fifth percentile is the
+  receiver at that range. What makes a per-line read usable on a real scene is
+  that the profile is a **fit** rather than a lookup: a degree-2 polynomial in
+  the row coordinate, which interpolates over the lines that had no dark ground
+  to read, and which is then redone without the lines sitting more than 3 dB
+  *above* it. That trim is deliberately one-sided — ground contamination can only
+  push a line's low tail up, never down, so a line far above the curve is one the
+  estimator could not read while a line far below it is noise-only and is exactly
+  what should be believed.
+
+  What it adds is the *shape*, and the entry is careful to claim only that. A
+  percentile of a speckled noise-only population sits below that population's
+  mean by an amount the percentile sets, so both inferred models read a floor
+  that is conservatively low — and because that bias is very nearly the same
+  decibel offset on every line, it lowers the fitted curve without bending it.
+  Under-subtraction is the safe direction (it leaves a little of the receiver in
+  rather than taking real backscatter out), and it is the gradient, not the
+  offset, that a constant floor puts into a scene.
+
+  It is recorded as a **third** thing rather than as a better `"estimated"`:
+  `UMBRA_NOISE_SUBTRACTION` reads `"estimated-range"`, which — since that key is
+  in `load.MEASUREMENT_PROVENANCE_KEYS` — is what makes `to_stack` refuse to
+  difference a fitted profile against a constant guess, exactly as it already
+  refuses an inferred floor against a measured one. `stack_stats` gets its own
+  caveat, because reusing the constant model's wording would understate one limit
+  (it *does* follow the swath now) and overstate the other (it still assumes each
+  pass contained dark ground somewhere along range). The new
+  `UMBRA_NOISE_FLOOR_SPREAD_DB` reports the peak-to-peak swing of the fitted
+  floor — the number that answers "was there anything here for the constant model
+  to have missed?", and the one `umbra convert` prints beside the existing two
+  diagnostics. It stays off the constant estimate (whose spread is zero by
+  construction) and off the measured floor (whose variation is the product's own
+  metadata), so a tag's presence means something. `umbra chips --noise-model
+  estimated-range` carries the same to a training set, where the flat floor was
+  visible as an offset between chips cut from opposite edges of one swath; the
+  chip cache key already covers the model, so a re-run cannot reuse the constant
+  model's product.
 - **Make the noise subtraction say what it did to the scene:
   `UMBRA_NOISE_FLOORED_FRACTION` and `UMBRA_NOISE_FLOOR_MARGIN_DB`.** The two
   entries below shipped a correction with two honestly-stated limits — it clamps
