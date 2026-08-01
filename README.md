@@ -1482,6 +1482,34 @@ an instance without `--stack-chunk-size` there are no windows to walk, so it is
 refused with a `400` naming the flag rather than answered with worse
 percentiles for the same memory.
 
+The other request field that moves a number is the one that decides whether a
+hosted measurement is worth quoting at all. **Speckle** — the interference
+pattern coherent illumination makes on rough ground, whose standard deviation
+equals its mean on a single look — is the largest uncertainty in a per-cell
+decibel delta, so an unfiltered measurement of a quiet site reports mostly
+interference. `"speckle_filter"` averages it down on the shared grid before
+anything is measured (`umbra stack --speckle-filter`):
+
+```bash
+curl -X POST http://127.0.0.1:8000/artifacts/stats \
+  -H 'content-type: application/json' \
+  -d '{"ids": [...], "blocks": 6, "speckle_filter": "lee", "speckle_window": 5}'
+# -> {..., "caveats": ["Every pass was speckle-filtered (lee, 5x5 window), …"]}
+```
+
+`boxcar` is the multilook — most variance removed for a window, blind to the
+edges it averages across — and `lee` averages only where a window is no more
+variable than speckle alone explains, so edges and bright points survive. What
+it spends is resolution: a cell reports ground `speckle_window` cells across,
+which the response's `caveats` state rather than the client having to remember.
+That is why it is a request field in the cache key rather than a server policy,
+and why it is off by default. It needs the pass whole, which makes it the exact
+complement of `windowed`: a `400` on an instance started with
+`--stack-chunk-size`, where `windowed` is a `400` on one without — so the two
+are refused together at the request. The same pair reaches the agent tools
+(`stack_stats(urls=[...], speckle_filter="lee")` on MCP / LangChain /
+LlamaIndex).
+
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
 and a job id back immediately, then poll `GET /jobs/{id}` and fetch the finished

@@ -434,11 +434,29 @@ of looks before and after. Follow-ons, none a blocker:
     than made approximately right. A halo plus an explicit `looks=` on
     `_filter_speckle` would lift it; nothing needs it yet, since `lazy=True`
     alone (one chunk per pass) already filters at any length of series.
-  - **`POST /artifacts/stats` cannot ask for it.** `umbra serve` builds its cube
-    without the option, so a hosted measurement is always unfiltered. Unlike
-    `--stack-lazy` this one *moves the numbers*, so it belongs in the request body
-    and in the artifact cache key — the shape `"windowed": true` already
-    established. The agent tools are the same call and the same question.
+  - ~~**`POST /artifacts/stats` cannot ask for it.**~~ **shipped** —
+    `"speckle_filter": "boxcar" | "lee"` (plus an optional odd
+    `"speckle_window"`) is a request field on the stats endpoint and a parameter
+    on the `stack_stats` agent tool, passed straight to
+    `to_stack(speckle_filter=…)`. It is in the artifact cache key, as
+    `"windowed"` established, because it moves the numbers; and it turned out to
+    be that option's exact complement — filtering needs each pass whole, so it is
+    a `400` on a `--stack-chunk-size` instance where `"windowed"` is a `400` on
+    one without, which makes the pair unsatisfiable everywhere and so refused
+    together at the request. `umbra serve` echoes which of the two an instance
+    can honour. What is still open, and smaller:
+    - **The landing page still doesn't advertise either capability.** A client
+      discovers whether an instance can filter (or measure in windows) by asking
+      and reading the `400`; the startup echo tells the *operator*, not the
+      caller. This is the same gap the datacube section's "only the refusal
+      advertises the windowed capability" entry names, now with two options
+      behind it rather than one — which is the evidence that would justify a
+      field on the landing page's `stats` link.
+    - **`umbra serve` has no `--stack-speckle-*` default.** Every request that
+      wants a filter must name it, because a server-set default would be exactly
+      the invisible flag the cache key rule exists to prevent. Worth revisiting
+      only as a *documented advertised* default (one the landing page states and
+      the cache key hashes), not as a policy.
 - **The filter runs on the whole window in memory.** `_box_sum`'s summed-area
   table makes the cost independent of the window size but holds a scene-sized
   float64 table, on top of the scene-sized power array `_detected_power` already
@@ -688,11 +706,15 @@ none a blocker:
   there is no ceiling to lift — so `windowed` there would be a model-facing knob
   whose only effect is making the percentiles approximate. Wire it only if those
   tools ever grow the lazy/chunked build that would make it mean something; the
-  server was the front door with the memory problem.
-- **Only the refusal advertises the windowed capability.** A client discovers
-  that an instance can measure in windows by asking and reading the `400`;
-  nothing in the landing page or `/healthz` says so up front. Cheapest fix if it
-  matters: a field on the landing page's `stats` link.
+  server was the front door with the memory problem. (They *do* take
+  `speckle_filter`, which is the opposite case: it changes the answer's quality
+  rather than the memory, so it means something at any cube size.)
+- **Only the refusal advertises an instance's stats capabilities.** A client
+  discovers that an instance can measure in windows — or speckle-filter, the
+  complementary option a chunked instance *cannot* honour — by asking and reading
+  the `400`; nothing in the landing page or `/healthz` says so up front. Cheapest
+  fix if it matters: a field on the landing page's `stats` link, now naming two
+  options rather than one.
 - **The quantile histogram is a Python dict of bin → count.** Fine at the sizes
   this sees (a few thousand occupied bins per pass), but a pass spanning hundreds
   of decibels holds proportionally more. If that ever matters, cap the axis or

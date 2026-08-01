@@ -826,6 +826,9 @@ def test_stats_options_defaults_to_a_utm_decibel_grid():
     # Exact percentiles unless a request asks to trade them for the memory.
     assert opts["windowed"] is False
     assert opts["clip_bbox"] is None
+    # And the pixels as the archive published them: averaging speckle down
+    # spends resolution, so it is asked for rather than assumed.
+    assert opts["speckle_filter"] is None and opts["speckle_window"] is None
 
 
 def test_stats_options_reads_the_stacking_parameters():
@@ -854,6 +857,8 @@ def test_stats_options_reads_the_stacking_parameters():
         "block_series": True,
         "windowed": True,
         "change_threshold_db": 1.5,
+        "speckle_filter": None,
+        "speckle_window": None,
     }
     # An explicit null CRS is the opt-in to the lon/lat grid.
     assert serve.stats_options({"crs": None})["crs"] is None
@@ -1213,6 +1218,123 @@ def test_windowed_is_part_of_the_cache_key(art_client, recorder):
     assert [c[2]["windowed"] for c in recorder.calls] == [False, True]
 
 
+# ---- the per-request correction (``"speckle_filter": "boxcar" | "lee"``) ----
+
+
+def test_stats_options_reads_the_speckle_filter():
+    """The other request field that moves a number, normalised the same way."""
+    opts = serve.stats_options({"speckle_filter": "Lee", "speckle_window": 7})
+    assert opts["speckle_filter"] == "lee" and opts["speckle_window"] == 7
+    # The window has one default, shared with `umbra convert` rather than
+    # respelled here, so a filtered artifact means the same thing everywhere.
+    assert serve.stats_options({"speckle_filter": "boxcar"})["speckle_window"] == (
+        serve.SPECKLE_WINDOW_DEFAULT
+    )
+
+
+def test_stats_options_rejects_an_unknown_filter_or_an_uncentred_window():
+    """Both are the client's mistake and are caught at the request, so they cost
+    a 400 naming the name rather than an error from inside a datacube build."""
+    with pytest.raises(ValueError, match="speckle_filter must be one of"):
+        serve.stats_options({"speckle_filter": "frost"})
+    # Even windows have no centre pixel; 1 filters nothing.
+    for window in (4, 1):
+        with pytest.raises(ValueError, match="odd integer"):
+            serve.stats_options({"speckle_filter": "boxcar", "speckle_window": window})
+
+
+def test_an_unapplied_window_does_not_split_the_cache():
+    """A window nobody filtered with is not a property of the artifact, so it is
+    dropped rather than hashed -- two unfiltered requests are one cache entry."""
+    plain = serve.stats_options({})
+    with_window = serve.stats_options({"speckle_window": 9})
+    assert with_window["speckle_window"] is None
+    assert serve.artifact_cache_key("stats", ["item-0"], plain) == (
+        serve.artifact_cache_key("stats", ["item-0"], with_window)
+    )
+
+
+def test_windowed_and_speckle_filter_are_refused_together():
+    """Unsatisfiable on *every* instance -- windowed needs a chunked build and
+    the filter needs an unchunked one -- so the refusal is at the request rather
+    than repeated per instance."""
+    with pytest.raises(ValueError, match="cannot be combined"):
+        serve.stats_options({"windowed": True, "speckle_filter": "boxcar"})
+
+
+def test_speckle_filter_reaches_to_stack(monkeypatch):
+    """It is the cube that filters, on the shared grid, so the option rides
+    through the build rather than the reduction."""
+    seen = _record_stack(monkeypatch)
+    serve.default_renderers().stats(
+        [_StatsItem("a"), _StatsItem("b")],
+        serve.stats_options({"speckle_filter": "lee", "speckle_window": 7}),
+    )
+    assert seen["to_stack"]["speckle_filter"] == "lee"
+    assert seen["to_stack"]["speckle_window"] == 7
+
+
+def test_an_unfiltered_request_still_passes_a_usable_window(monkeypatch):
+    """``speckle_window`` is ``None`` in the options (so it cannot split the
+    cache) but ``to_stack`` takes an int, so the default fills in -- and with no
+    filter named it changes nothing."""
+    seen = _record_stack(monkeypatch)
+    serve.default_renderers().stats([_StatsItem("a"), _StatsItem("b")], serve.stats_options({}))
+    assert seen["to_stack"]["speckle_filter"] is None
+    assert seen["to_stack"]["speckle_window"] == serve.SPECKLE_WINDOW_DEFAULT
+
+
+def test_speckle_filter_needs_an_unchunked_instance(monkeypatch):
+    """The mirror image of the windowed refusal: a filter window near a chunk
+    edge needs cells the neighbouring chunk holds, so a chunked instance refuses
+    rather than filtering each window on its own."""
+    monkeypatch.setattr(
+        "umbra_py.load._require_dask",
+        lambda: pytest.fail("the refusal must land before any stacking work"),
+    )
+    options = serve.stats_options({"speckle_filter": "boxcar"})
+    execution = serve.StackExecution(lazy=True, chunk_size=128)
+    with pytest.raises(ValueError, match="--stack-chunk-size"):
+        serve.default_renderers(execution).stats([_StatsItem("a"), _StatsItem("b")], options)
+
+
+def test_speckle_filter_on_a_chunked_instance_maps_to_400(index_path, tmp_path):
+    """And it is the client's mistake, not a 500: the option is well-formed,
+    this instance just builds the cube in windows the filter cannot straddle."""
+    pytest.importorskip("dask.array")
+    app = serve.build_app(
+        index_path,
+        stack_execution=serve.StackExecution(lazy=True, chunk_size=64),
+        cache_dir=tmp_path / "cache",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/artifacts/stats", json={"ids": ["item-0", "item-1"], "speckle_filter": "boxcar"}
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "--stack-chunk-size" in detail and "64px windows" in detail
+
+
+def test_speckle_filter_is_part_of_the_cache_key(art_client, recorder):
+    """It changes what the cells *are*, so a filtered measurement is a distinct
+    artifact -- and so is one filtered over a different window."""
+    plain = serve.stats_options({})
+    boxcar5 = serve.stats_options({"speckle_filter": "boxcar"})
+    boxcar9 = serve.stats_options({"speckle_filter": "boxcar", "speckle_window": 9})
+    lee5 = serve.stats_options({"speckle_filter": "lee"})
+    keys = {
+        serve.artifact_cache_key("stats", ["item-0", "item-1"], o)
+        for o in (plain, boxcar5, boxcar9, lee5)
+    }
+    assert len(keys) == 4
+
+    body = {"ids": ["item-0", "item-1"]}
+    art_client.post("/artifacts/stats", json=body)
+    art_client.post("/artifacts/stats", json={**body, "speckle_filter": "boxcar"})
+    assert [c[2]["speckle_filter"] for c in recorder.calls] == [None, "boxcar"]
+
+
 def _stats_scenes(tmp_path):
     """Three same-footprint passes (fills 2/4/8) as items the renderer can read."""
     rasterio = pytest.importorskip("rasterio")
@@ -1283,6 +1405,87 @@ def test_windowed_stats_render_keeps_the_exact_numbers_exact(tmp_path):
         assert abs(b["median"] - a["median"]) <= _QUANTILE_BIN_DB
 
 
+def _speckled_stats_scenes(tmp_path):
+    """Three passes of one site, each a constant surface under single-look speckle.
+
+    Exponentially-distributed *power* about a fixed mean is what a single look
+    of a rough surface actually is (its standard deviation equals its mean), so
+    a filter's effect on these rasters is the effect it has on real imagery
+    rather than on a smooth synthetic one. The surface is constant, so every
+    decibel of spread a pass reports is speckle and nothing else.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    profile = {
+        "driver": "GTiff",
+        "height": 96,
+        "width": 96,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    rng = np.random.default_rng(20260801)
+    items = []
+    for n, mean_power in ((1, 4.0), (2, 8.0), (3, 16.0)):
+        path = tmp_path / f"speckled-{n}.tif"
+        power = rng.exponential(mean_power, size=(96, 96))
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(np.sqrt(power).astype("float32"), 1)
+        item = UmbraItem(id=f"acq-{n}", properties={"datetime": f"2024-0{n}-08T12:00:00Z"})
+        item.asset_href = lambda asset="GEC", _p=str(path): _p  # type: ignore[method-assign]
+        items.append(item)
+    return items
+
+
+def test_speckle_filtered_stats_render_averages_the_variance_down(tmp_path):
+    """What the option is *for*, measured through the endpoint's own renderer:
+    the surface is constant, so a pass's spread is pure speckle, and the filter
+    is the only thing in the chain that removes it."""
+    pytest.importorskip("xarray")
+    items = _speckled_stats_scenes(tmp_path)
+    body = {"max_size": 96}
+    renderers = serve.default_renderers()
+
+    plain = json.loads(renderers.stats(items, serve.stats_options(body)))
+    filtered = json.loads(
+        renderers.stats(items, serve.stats_options({**body, "speckle_filter": "boxcar"}))
+    )
+
+    # Every pass is measurably less noisy, and the ground it measures is the
+    # same ground: a boxcar averages power, so the mean survives the smoothing.
+    for before, after in zip(plain["passes"], filtered["passes"], strict=True):
+        assert after["std"] < before["std"] / 2
+        assert abs(after["mean"] - before["mean"]) < 3.0
+
+    # And the document says what that cost, unasked -- the filter's own record
+    # riding the cube into the reduction.
+    assert not any("speckle-filtered" in c for c in plain["caveats"])
+    assert any("speckle-filtered (boxcar, 5x5 window)" in c for c in filtered["caveats"])
+    assert any("effective resolution" in c for c in filtered["caveats"])
+
+
+def test_lee_keeps_more_than_boxcar_through_the_endpoint(tmp_path):
+    """The two filters are offered because they are a real choice: ``lee``
+    averages only where a window is no more variable than speckle explains, so
+    it leaves more of the original spread than the unconditional multilook."""
+    pytest.importorskip("xarray")
+    items = _speckled_stats_scenes(tmp_path)
+    body = {"max_size": 96}
+    renderers = serve.default_renderers()
+
+    spreads = {
+        name: json.loads(
+            renderers.stats(items, serve.stats_options({**body, "speckle_filter": name}))
+        )["passes"][0]["std"]
+        for name in ("boxcar", "lee")
+    }
+    plain = json.loads(renderers.stats(items, serve.stats_options(body)))["passes"][0]["std"]
+    assert spreads["boxcar"] < spreads["lee"] < plain
+
+
 def test_build_app_hands_the_policy_to_the_default_renderers(index_path, tmp_path, monkeypatch):
     seen: list = []
 
@@ -1314,6 +1517,23 @@ def test_serve_cli_forwards_the_stacking_flags(monkeypatch):
     )
     # The policy is echoed at startup, so an operator can confirm it took.
     assert "lazy (512px windows, threads scheduler)" in result.output
+    # …along with the request field it enables, and not the one it rules out.
+    assert '"windowed": true' in result.output
+    assert "speckle_filter" not in result.output
+
+
+def test_serve_cli_advertises_the_filter_on_an_unchunked_instance(monkeypatch):
+    """The complement: with no windows to straddle, the filter that needs each
+    pass whole is the option this instance can honour."""
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: None)
+    result = CliRunner().invoke(cli, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert '"speckle_filter"' in result.output
+    assert "windowed" not in result.output
 
 
 def test_serve_cli_rejects_a_chunk_size_without_lazy(monkeypatch):

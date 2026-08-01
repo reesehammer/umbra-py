@@ -128,6 +128,9 @@ def serve(
     request may also send ``"windowed": true`` to be *measured* in those windows
     (``umbra stack --stats-windowed``), which is a request field rather than a
     policy because it estimates the percentiles it no longer holds a pass for.
+    An *unchunked* instance honours the complementary field: ``"speckle_filter":
+    "boxcar" | "lee"`` (``umbra stack --speckle-filter``) averages speckle down
+    on the shared grid before anything is measured, which needs each pass whole.
     Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``).
     """
     from ..exceptions import MissingDependencyError
@@ -144,10 +147,13 @@ def serve(
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if artifacts:
         click.echo(f"  /artifacts/stats datacube: {execution.describe()}")
+        # The client-visible consequence of the policy, and it cuts both ways:
+        # with windows to walk a request may ask to be measured in them, and
+        # without them it may ask for the filter that needs a pass whole.
         if execution.chunk_size:
-            # The one client-visible consequence of the policy: with windows to
-            # walk, a request may ask to be measured in them.
             click.echo('    requests may send "windowed": true (estimated percentiles)')
+        else:
+            click.echo('    requests may send "speckle_filter": "boxcar" | "lee"')
     try:
         run_stac_server(
             host=host,

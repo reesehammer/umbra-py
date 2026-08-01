@@ -322,7 +322,14 @@ that already carries a filter is refused rather than composed (two averagings
 leave a resolution neither window names), and the one combination that cannot be
 made exact — a filter window straddling the independently-read windows
 `chunk_size` cuts, with `lee`'s scene-read looks parameter differing per window —
-is refused rather than approximated.
+is refused rather than approximated. And the filter now reaches the surfaces that
+*answer* rather than compute: `POST /artifacts/stats` takes `"speckle_filter"` as
+a request field (in the artifact cache key, since it moves the numbers — the rule
+`"windowed"` established) and the `stack_stats` agent tools take the same pair, so
+a hosted or model-driven measurement stops being the noisiest one the chain can
+produce. It turned out to be `"windowed"`'s exact complement — filtering needs a
+pass whole, windowed measurement needs it chunked — so each is a `400` on the
+instance the other needs, and the two are refused together at the request.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -751,6 +758,20 @@ from:
   averagings leave a resolution neither window names), and so is pairing the
   filter with `--chunk-size`, whose independently-read windows a filter window
   would straddle. See the CHANGELOG.
+  ~~**Open:** it reached the library and the CLI and stopped there, so every
+  measurement made through `umbra serve` or an agent tool — the front doors built
+  so nobody has to install anything — was unfiltered with no way to ask
+  otherwise.~~ **shipped** — `"speckle_filter": "boxcar" | "lee"` is a request
+  field on `POST /artifacts/stats` and a parameter on the `stack_stats` MCP /
+  LangChain / LlamaIndex tools, passed straight to `to_stack` so the caveats, the
+  provenance keys and the refusals all work unchanged. It is in the artifact cache
+  key rather than in the instance policy for the reason `"windowed"` set: it moves
+  the numbers, and a cached artifact whose values depend on an invisible server
+  flag is the failure mode. What the implementation *found* is that the two are
+  complementary — filtering needs each pass whole, windowed measurement needs the
+  cube chunked — so each is refused on the instance the other requires, which
+  makes the pair unsatisfiable everywhere and refusable at the request itself.
+  **This closes the speckle group bar the chip-side loader.**
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`
