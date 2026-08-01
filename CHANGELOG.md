@@ -7,6 +7,77 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Subtract the sensor before measuring the ground: `umbra convert
+  --subtract-noise` / `sicd_to_geocoded_cog(noise_subtract=True)`.** A
+  calibrated pixel was a physical number and, over a dark surface, the wrong
+  one. What a radar records is the ground's echo **plus** its own receiver
+  thermal noise, and the two add in power; over calm water, radar shadow, wet
+  snow or dry sand the second term is most of the total. Scaling that sum by the
+  product's calibration polynomial produced a value that was precise, physical
+  and a report of the *sensor's sensitivity* rather than of the scene — and
+  because the noise floor varies across the swath, it put a gradient in the
+  answer that tracked the geometry instead of the ground. Every low-backscatter
+  measurement the pipeline could make was floor-limited, silently.
+
+  Now the floor comes off first. `_noise_coefficients` reads the SICD's own
+  `Radiometric.NoiseLevel.NoisePoly` — the thermal-noise power in dB as a
+  function of image coordinates — `_noise_power` evaluates it per pixel and
+  converts to the linear domain, and `_subtract_noise` takes it off the detected
+  power. Placement is the whole design: the flattening and the calibration are
+  multiplicative power-domain factors, so they commute with each other and with
+  the warp, while this one is *subtractive* and is therefore applied first, in
+  image space, on raw detected power, before either scales what is left. Getting
+  that order wrong (`scale × power − noise` instead of `scale × (power −
+  noise)`) yields another plausible-looking raster, which is why a test pins the
+  result against both expressions and asserts it is the first.
+
+  The polynomial is evaluated at the image coordinates the pixels actually came
+  from (`origin=` on `_denoise_amplitude`, exactly as for the scale factors), so
+  a `--clip-bbox` window gets the floor its own part of the swath had. Where the
+  estimated noise meets or exceeds the measured power the residual is floored
+  rather than driven negative: those pixels are at the sensor's limit, which is
+  a statement about the radar and not a measurement of the ground, and the floor
+  is the same "as dark as this raster goes" value the log scale already clamps
+  at. Nodata stays nodata.
+
+  A subtraction is only as real as the metadata behind it, so the refusals are
+  the other half of the feature. Only an `ABSOLUTE` `NoiseLevelType` can be
+  subtracted; a `RELATIVE` one describes how the floor *varies* without stating
+  what it is, and subtracting it would mean inventing the absolute offset —
+  invisible in the output and indistinguishable from a real correction. That,
+  a missing `NoiseLevel`, a missing `NoisePoly` and a product with no
+  `Radiometric` block at all each raise a self-describing error naming what the
+  product does carry, and `sicd_noise_level(path)` answers the same question
+  ahead of time (the role `sicd_calibration_types` plays for the scale factors).
+  As with calibration, Umbra's open products generally carry none of this, so
+  the honest answer there is the error rather than a number.
+
+  It composes with everything already in the pipeline: `--rtc-model facet
+  --calibrate gamma0 --subtract-noise` is a terrain-flattened gamma-nought
+  coefficient with the receiver's own floor removed. It reaches the ML on-ramp
+  too — `umbra chips --subtract-noise` (`SicdConversion.noise_subtract`, part of
+  the conversion's cache key) — so a training set over water or shadow teaches a
+  model the ground rather than the sensor.
+
+  And it is recorded, because a noise-subtracted raster and a raw one are
+  pixel-for-pixel indistinguishable after the fact: `UMBRA_NOISE_SUBTRACTION` is
+  written into every raster the module emits (`"absolute"` or `"none"`, read
+  back by `read_conversion_tags` / `umbra convert --provenance` / `gdalinfo`),
+  chips carry it into both the manifest (`ChipRecord.noise_subtraction`) and the
+  tile's own tags, and it is now one of `load.MEASUREMENT_PROVENANCE_KEYS` — so
+  `to_stack` refuses a series that subtracted the floor from some passes and not
+  others, the same way it already refuses a mixed calibration. Over a dark cell
+  that mix *is* the difference between the two passes, so it would have been
+  reported as change on the ground. A cube that did subtract it says so in
+  `stack_stats`' caveats.
+
+  One compatibility rule came with that new key: a raster carrying umbra-py
+  provenance but no `NOISE_SUBTRACTION` tag — converted by an earlier version,
+  which had no such step and therefore did not run it — now reads as `"none"`
+  rather than as the `(unrecorded)` sentinel, so adding a measurement key does
+  not retroactively split a series that agrees. A raster with *no* umbra-py
+  record at all (every published GEC) is still `(unrecorded)`: there the silence
+  is about the whole conversion rather than one step of it.
 - **Convert (and chip) the area of interest, not the whole collect:
   `umbra convert --clip-bbox` / `sicd_to_geocoded_cog(bbox=…)`.** The SICD
   pipeline was all-or-nothing. `sicd_to_geocoded_cog` opened the product, read

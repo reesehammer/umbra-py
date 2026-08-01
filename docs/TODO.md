@@ -197,15 +197,52 @@ terrain-orthorectifies, radiometrically flattens and calibrates a SICD, and
 stamps what actually ran into `UMBRA_*` GeoTIFF tags. Follow-ons, none a
 blocker:
 
-- **Noise-level subtraction.** SICD's `Radiometric.NoiseLevel` describes the
-  noise-equivalent floor; subtracting it in the power domain before the scale
-  factor would make low-backscatter surfaces (calm water, shadow) honest rather
-  than floor-limited. Left out because it needs the `NoisePoly` /
-  `NoiseLevelType` handling (absolute vs. relative) that no Umbra product
-  currently exercises.
 - **MultiRTC interop.** Interop with
   [MultiRTC](https://github.com/MultiSAR/MultiRTC) is a heavier,
   research-oriented job and remains deferred.
+
+---
+
+## Noise-floor subtraction follow-ons (`umbra convert --subtract-noise` shipped)
+
+- **Surfaced in:** the noise-subtraction PR (`STRATEGY.md` 5.5, which the DEM
+  entry above named).
+- **Code:** `src/umbra_py/convert.py` (`_noise_level_type`,
+  `_noise_coefficients`, `_noise_power`, `_subtract_noise`, `_denoise_amplitude`,
+  `sicd_noise_level`, the `NOISE_SUBTRACTION` tag), `src/umbra_py/load.py`
+  (`MEASUREMENT_PROVENANCE_KEYS`, `_STEP_NOT_RUN`), `src/umbra_py/chips.py`
+  (`SicdConversion.noise_subtract`, `ChipRecord.noise_subtraction`),
+  `umbra convert --subtract-noise` / `umbra chips --subtract-noise` in
+  `cli/process.py`.
+
+The receiver's own thermal-noise floor is subtracted from detected power before
+any multiplicative correction scales it, from the product's own
+`Radiometric.NoiseLevel.NoisePoly`; only an `ABSOLUTE` level is accepted, the
+result is recorded in `UMBRA_NOISE_SUBTRACTION` and `to_stack` refuses a series
+that mixes subtracted and unsubtracted passes. Follow-ons, none a blocker:
+
+- **Nothing reports how much of the scene the floor swallowed.** The fraction of
+  pixels driven to `_NOISE_RESIDUAL_FLOOR` is exactly the "how much of this image
+  is at the sensor's limit?" number, and it is computed and thrown away. A count
+  on the non-JSON output (or a `UMBRA_NOISE_FLOORED_FRACTION` tag) would make the
+  answer visible where the decision is made; left out because it means either a
+  return-value change or a tag whose value varies with the clip window.
+- **A `RELATIVE` noise level is refused rather than used.** It carries real
+  information — the *shape* of the floor across the swath — which could flatten
+  the noise-induced gradient without claiming an absolute level. That is a
+  different product (a relative correction, not a subtraction), so it wants its
+  own name and its own provenance value rather than a quiet reinterpretation of
+  this flag.
+- **The floor is subtracted, not estimated.** A product with no `NoiseLevel`
+  gets an error, which is the honest answer; estimating the floor from the
+  scene's own darkest percentile is a well-known alternative that would make the
+  correction available on Umbra's open products. It would also be an *inferred*
+  number wearing the same tag as a measured one, so it needs a distinct
+  provenance value (`estimated`) before it would be safe to add.
+- **`umbra chips` exposes the flag but not the check.** There is no chip-side
+  equivalent of `sicd_noise_level`, so a batch over acquisitions whose metadata
+  varies fails on the first product that cannot support it rather than reporting
+  which ones can. Worth doing if a mixed-metadata archive turns up.
 
 ---
 

@@ -1845,6 +1845,18 @@ def _tag_scene(path, **settings):
     return path
 
 
+def _tag_scene_omitting(path, tag, **settings):
+    """Stamp provenance with one tag left out -- an older umbra-py's record."""
+    rasterio = pytest.importorskip("rasterio")
+    from umbra_py.convert import conversion_tags
+
+    tags = conversion_tags(source=f"{path.name}.nitf", geocoded=True, **settings)
+    del tags[tag]
+    with rasterio.open(path, "r+") as ds:
+        ds.update_tags(**tags)
+    return path
+
+
 def _converted_scenes(tmp_path, *per_scene):
     """Same-footprint passes, each converted with its own settings dict."""
     return [
@@ -1939,6 +1951,66 @@ def test_to_stack_refuses_to_mix_flattened_and_unflattened_passes(tmp_path):
     items = _converted_scenes(tmp_path, {"rtc_model": "facet"}, {})
     with pytest.raises(ValueError, match="rtc_model disagrees"):
         to_stack(items, max_size=32)
+
+
+def test_to_stack_refuses_to_mix_a_noise_subtracted_pass_with_a_raw_one(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # Subtracting the sensor's own floor from one pass and not the next puts
+    # that floor on the time axis: over a dark cell it is most of the value, so
+    # the "change" would be the correction rather than the ground.
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(
+        tmp_path,
+        {**settings, "noise_subtraction": "absolute"},
+        settings,
+    )
+    with pytest.raises(ValueError, match="noise_subtraction disagrees") as exc:
+        to_stack(items, max_size=32)
+    assert "'absolute' (acq-1)" in str(exc.value)
+    assert "'none' (acq-2)" in str(exc.value)
+
+
+def test_to_stack_reads_a_record_that_predates_a_step_as_not_having_run_it(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import to_stack
+
+    # A raster converted by an older umbra-py has no tag for a step that did not
+    # exist yet -- and did not run it either. Reading that as "none" rather than
+    # as "(unrecorded)" is what keeps a new key from retroactively splitting a
+    # series that agrees; the sentinel stays for a raster with no record at all.
+    older = _stack_item(
+        _tag_scene_omitting(
+            _stack_scene(tmp_path / "older.tif", value=2.0),
+            "UMBRA_NOISE_SUBTRACTION",
+            calibration="sigma0",
+        ),
+        "acq-old",
+        "2024-01-08T12:00:00Z",
+    )
+    newer = _converted_scenes(tmp_path, {"calibration": "sigma0"})
+
+    cube = to_stack([older, *newer], max_size=32)
+    assert cube.attrs["provenance"]["calibration"] == "sigma0"
+    # The key only survives into the cube's record when every source carries it.
+    assert "noise_subtraction" not in cube.attrs["provenance"]
+
+
+def test_stack_stats_says_when_the_noise_floor_was_subtracted(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_stats, to_stack
+
+    settings = {"calibration": "sigma0", "noise_subtraction": "absolute"}
+    stats = stack_stats(to_stack(_converted_scenes(tmp_path, settings, settings), max_size=32))
+    assert "thermal-noise floor was subtracted" in " ".join(stats["caveats"])
+
+    # And says nothing when it wasn't: the default summary is unchanged.
+    plain = stack_stats(to_stack(_three_scenes(tmp_path), max_size=32))
+    assert "thermal-noise floor" not in " ".join(plain["caveats"])
 
 
 def test_to_stack_allows_the_per_scene_keys_to_differ(tmp_path):

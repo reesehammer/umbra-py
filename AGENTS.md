@@ -50,7 +50,7 @@ src/umbra_py/
     explore.py       #   `mcp | serve | demo | tiles | showcase`: the commands that stand something up
     indexes.py       #   `index | semantic | embed`: the local SQLite sidecars
   constants.py       # bucket, STAC root URL, canonical product types
-  convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened, radiometrically calibrated and clipped to an area of interest (behind [convert] extra)
+  convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened, radiometrically calibrated, noise-floor-subtracted and clipped to an area of interest (behind [convert] extra)
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call); --asset SICD geocodes each complex product via convert.py first ([convert]); --clip-bbox tiles (and converts) one area of interest
   viz/               # rendering package; every name re-exported from `umbra_py.viz` (see its __init__ docstring)
     geojson.py       #   items -> GeoJSON features / FeatureCollections (no dependencies)

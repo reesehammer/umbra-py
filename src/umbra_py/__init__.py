@@ -32,6 +32,7 @@ from .convert import (
     conversion_tags,
     read_conversion_tags,
     sicd_calibration_types,
+    sicd_noise_level,
     sicd_to_amplitude_geotiff,
     sicd_to_geocoded_cog,
 )
@@ -176,6 +177,7 @@ __all__ = [
     "sicd_to_amplitude_geotiff",
     "sicd_to_geocoded_cog",
     "sicd_calibration_types",
+    "sicd_noise_level",
     "conversion_provenance",
     "conversion_tags",
     "read_conversion_tags",

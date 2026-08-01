@@ -128,6 +128,7 @@ class SicdConversion:
     rtc_model: str = "cosine"
     rtc_reference_deg: float | None = None
     calibration: str | None = None
+    noise_subtract: bool = False
     resolution: float | None = None
     resampling: str = "bilinear"
     gcp_grid: int = 15
@@ -287,6 +288,7 @@ def _prepare_sicd(
         rtc_reference_deg=conversion.rtc_reference_deg,
         rtc_model=conversion.rtc_model,
         calibration=conversion.calibration,
+        noise_subtract=conversion.noise_subtract,
         bbox=conversion.bbox,
     )
 
@@ -304,11 +306,11 @@ class ChipRecord:
     with every record.
 
     A chip cut from a complex product also carries what the conversion did to
-    its pixels -- ``calibration`` and ``rtc_model``, read back from the geocoded
-    raster's own provenance tags rather than from the request, so the record
-    reports the processing that actually ran. Both are ``None`` for a chip read
-    straight from an amplitude raster, and the full tag set travels in the chip
-    GeoTIFF itself.
+    its pixels -- ``calibration``, ``noise_subtraction`` and ``rtc_model``, read
+    back from the geocoded raster's own provenance tags rather than from the
+    request, so the record reports the processing that actually ran. All three
+    are ``None`` for a chip read straight from an amplitude raster, and the full
+    tag set travels in the chip GeoTIFF itself.
     """
 
     path: str
@@ -331,6 +333,7 @@ class ChipRecord:
     resolution_range_m: float | None = None
     resolution_azimuth_m: float | None = None
     calibration: str | None = None
+    noise_subtraction: str | None = None
     rtc_model: str | None = None
     license: str = DATA_LICENSE
     attribution: str = ATTRIBUTION
@@ -357,6 +360,7 @@ class ChipRecord:
             "resolution_range_m": self.resolution_range_m,
             "resolution_azimuth_m": self.resolution_azimuth_m,
             "calibration": self.calibration,
+            "noise_subtraction": self.noise_subtraction,
             "rtc_model": self.rtc_model,
             "license": self.license,
             "attribution": self.attribution,
@@ -598,6 +602,7 @@ def chip_item(
         crs_str = crs.to_string() if crs else None
         provenance = _provenance_tags(src)
         calibration = _reported_step(provenance, "CALIBRATION")
+        noise_subtraction = _reported_step(provenance, "NOISE_SUBTRACTION")
         rtc_model = _reported_step(provenance, "RTC_MODEL")
         if bbox is None:
             row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
@@ -672,6 +677,7 @@ def chip_item(
                         resolution_range_m=rng,
                         resolution_azimuth_m=azi,
                         calibration=calibration,
+                        noise_subtraction=noise_subtraction,
                         rtc_model=rtc_model,
                     )
                 )

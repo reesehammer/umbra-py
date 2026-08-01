@@ -414,6 +414,28 @@ def test_sicd_records_report_the_processing_that_actually_ran(tmp_path):
     assert records[0].to_dict()["calibration"] == "gamma0"
 
 
+def test_sicd_records_report_a_subtracted_noise_floor(tmp_path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    # Whether the sensor's own floor came off decides what a dark chip teaches a
+    # model, so it rides in the manifest beside the calibration that scaled it.
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif", calibration="gamma0", noise_subtraction="absolute"
+    )
+    records = chip_item(
+        _item_for(tmp_path / "unused.tif"),
+        tmp_path / "chips",
+        asset="SICD",
+        chip_size=10,
+        preparer=_fake_preparer(cog),
+    )
+
+    assert {r.noise_subtraction for r in records} == {"absolute"}
+    assert records[0].to_dict()["noise_subtraction"] == "absolute"
+
+
 def test_steps_that_did_not_run_are_null_not_the_string_none(tmp_path):
     pytest.importorskip("numpy")
     pytest.importorskip("rasterio")
@@ -431,6 +453,7 @@ def test_steps_that_did_not_run_are_null_not_the_string_none(tmp_path):
     )
     assert records[0].calibration is None
     assert records[0].rtc_model is None
+    assert records[0].noise_subtraction is None
 
 
 def test_sicd_chips_carry_the_conversion_provenance_in_the_file(tmp_path):
@@ -525,6 +548,7 @@ def test_conversion_cache_key_tracks_every_setting():
     # re-run with different processing never chips the previous product.
     for field_name, value in [
         ("calibration", "sigma0"),
+        ("noise_subtract", True),
         ("rtc", True),
         ("rtc_model", "facet"),
         ("dem", "glo30.tif"),
@@ -637,6 +661,7 @@ def test_cli_chips_sicd_builds_the_conversion(tmp_path, monkeypatch):
             "facet",
             "--calibrate",
             "gamma0",
+            "--subtract-noise",
             "--json",
         ],
     )
@@ -647,6 +672,7 @@ def test_cli_chips_sicd_builds_the_conversion(tmp_path, monkeypatch):
     assert conversion.rtc is True
     assert conversion.rtc_model == "facet"
     assert conversion.calibration == "gamma0"
+    assert conversion.noise_subtract is True
     payload = json.loads(result.output)
     assert payload["conversion"]["calibration"] == "gamma0"
 
