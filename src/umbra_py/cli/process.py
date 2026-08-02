@@ -1350,7 +1350,8 @@ def convert(
     is_flag=True,
     help="Carry on past an acquisition whose own metadata cannot support the "
     "measurement asked of it (no Radiometric block for --calibrate, no stated "
-    "noise floor for --noise-model measured) instead of ending the run on it, "
+    "noise floor for --noise-model measured, no stated collection geometry for "
+    "--rtc) instead of ending the run on it, "
     "and report which ones were left out. Without it the first such product "
     "costs the whole batch; with it the dataset says where its holes are.",
 )
@@ -1360,7 +1361,8 @@ def convert(
     help="With --asset SICD, read each product's metadata over the wire first "
     "(two HTTP range requests, tens of kilobytes) and drop the acquisitions that "
     "cannot support the request before downloading any of them -- so discovering "
-    "that a pass carries no Radiometric block costs its header rather than the "
+    "that a pass carries no Radiometric block (or, under --rtc, no collection "
+    "geometry) costs its header rather than the "
     "whole multi-gigabyte product. The dropped passes are reported exactly as "
     "--skip-unsupported reports them. Worth passing both: this asks only what "
     "the metadata answers.",
@@ -1644,8 +1646,12 @@ def _preflight_line(result) -> str:
         return f"  {result.item_id}: could not be read -- {result.error}"
     cals = ", ".join(caps.calibrations) if caps.calibrations else "none"
     noise = caps.noise_level or "none"
+    geometry = "none" if caps.look_geometry is None else f"{caps.look_geometry[0]:.1f} deg"
     verdict = "yes" if result.supported else "no"
-    return f"  {result.item_id}: calibrations {cals}; noise level {noise} -> {verdict}"
+    return (
+        f"  {result.item_id}: calibrations {cals}; noise level {noise}; "
+        f"look geometry {geometry} -> {verdict}"
+    )
 
 
 @cli.command()
@@ -1670,6 +1676,13 @@ def _preflight_line(result) -> str:
     default="measured",
     show_default=True,
     help="Which floor --subtract-noise would use (see convert --noise-model).",
+)
+@click.option(
+    "--rtc",
+    is_flag=True,
+    help="Ask whether each product states the collection geometry radiometric "
+    "terrain flattening needs (SCPCOA). Most do; the ones that do not refuse a "
+    "--rtc run only after the download, the DEM fetch and the warp.",
 )
 @click.option(
     "--workers",
@@ -1707,6 +1720,7 @@ def preflight(
     calibrate,
     subtract_noise,
     noise_model,
+    rtc,
     workers,
     area,
     bbox,
@@ -1730,8 +1744,10 @@ def preflight(
     Radiometric calibration and a measured noise floor both read polynomials out
     of the SICD's own Radiometric metadata, which Umbra's open products generally
     do not carry -- so `umbra convert --calibrate` and `umbra chips --calibrate`
-    refuse on them, by design. Finding out which passes those are used to cost one
-    whole-product download each: a SICD's metadata lives inside the NITF.
+    refuse on them, by design. Terrain flattening (--rtc) reads the collection
+    geometry out of the same file's SCPCOA block. Finding out which passes can
+    answer used to cost one whole-product download each: a SICD's metadata lives
+    inside the NITF.
 
     This reads it over the wire instead. A NITF states its own layout, so the SICD
     XML is located and fetched with two HTTP range requests -- tens of kilobytes of
@@ -1801,6 +1817,7 @@ def preflight(
             calibration=calibrate.lower() if calibrate else None,
             noise_subtract=subtract_noise,
             noise_model=noise_model.lower(),
+            rtc=rtc,
             progress=None if as_json else _report,
             workers=workers,
         )
@@ -1814,6 +1831,8 @@ def preflight(
         asked.append(f"--calibrate {calibrate.lower()}")
     if subtract_noise:
         asked.append(f"--subtract-noise --noise-model {noise_model.lower()}")
+    if rtc:
+        asked.append("--rtc")
     what = " ".join(asked) if asked else "conversion"
     click.echo(f"{len(report.supported)} of {len(report.results)} acquisition(s) support {what}.")
     click.echo(

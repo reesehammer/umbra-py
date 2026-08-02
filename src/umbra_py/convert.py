@@ -1133,23 +1133,25 @@ def _check_measurement_support(
     calibration: str | None,
     noise_subtract: bool,
     noise_model: str,
+    rtc: bool = False,
 ) -> None:
     """Raise if this product's own metadata cannot support what was asked of it.
 
-    The two corrections that depend on a product describing itself —
-    ``calibration=`` and a ``"measured"`` noise floor — read polynomials out of
-    the SICD's ``Radiometric`` block, which Umbra's open products generally do
-    not carry. Asking here, off the metadata alone, is what makes that refusal
-    cost the *header* rather than the scene: the checks used to happen where the
-    polynomials are first evaluated, which is after a multi-gigabyte complex
-    product has been read and detected, so a conversion that could never have
-    succeeded still spent the whole read finding out. It is the ordering
-    :func:`_check_speckle_window` already has, applied to the two settings whose
+    The corrections that depend on a product describing itself —
+    ``calibration=`` and a ``"measured"`` noise floor, which read polynomials out
+    of the SICD's ``Radiometric`` block, and ``rtc=``, which reads the collection
+    geometry out of its ``SCPCOA`` block — are asked about here, off the metadata
+    alone. That is what makes the refusal cost the *header* rather than the
+    scene: the checks used to happen where the values are first used, which is
+    after a multi-gigabyte complex product has been read and detected (and, for
+    the flattening, after it has been warped), so a conversion that could never
+    have succeeded still spent the whole read finding out. It is the ordering
+    :func:`_check_speckle_window` already has, applied to every setting whose
     answer is in the file rather than in the request.
 
     The evaluations downstream stay exactly where they are — that is where the
     image coordinates they are functions of exist — so what is duplicated is a
-    handful of coefficient lookups, and the checks themselves are the same
+    handful of metadata lookups, and the checks themselves are the same
     functions, not a second opinion about them.
     """
     if calibration is not None:
@@ -1158,6 +1160,8 @@ def _check_measurement_support(
     if noise_subtract and noise_model == "measured":
         _noise_coefficients(sicd)
         _image_grid_geometry(sicd)
+    if rtc:
+        _scene_look_geometry(sicd)
 
 
 # --------------------------------------------------------------------------- #
@@ -3006,16 +3010,28 @@ def _scene_look_geometry(sicd: Any) -> tuple[float, float]:
     Reads ``SCPCOA.IncidenceAng`` (angle from vertical) and ``SCPCOA.AzimAng``
     (azimuth clockwise from north of the ground-to-sensor line of sight), the
     scene-centre geometry every SICD carries. A scene-constant look vector is the
-    standard approximation for a scene-scale flattening. Raises if the fields are
-    absent, since the correction has no meaning without them.
+    standard approximation for a scene-scale flattening.
+
+    A product that does not state it raises
+    :class:`~umbra_py.exceptions.UnsupportedMeasurementError` — the same family
+    as the ``Radiometric`` refusals, because it is the same kind of fact: what
+    the flattening needs is in the file or it is not, and the honest responses
+    are a different setting or a different scene rather than a fix the caller
+    can make to the request. Naming it is what lets ``umbra chips
+    --skip-unsupported`` carry a batch past it and ``umbra preflight --rtc`` find
+    it out over the wire.
     """
     scpcoa = getattr(sicd, "SCPCOA", None)
     inc = getattr(scpcoa, "IncidenceAng", None)
     az = getattr(scpcoa, "AzimAng", None)
     if inc is None or az is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD is missing SCPCOA.IncidenceAng / SCPCOA.AzimAng, which "
-            "radiometric terrain flattening (--rtc) needs for the look geometry."
+            "radiometric terrain flattening (--rtc) needs for the look geometry: "
+            "the local incidence angle is the scene-centre geometry tilted by the "
+            "DEM's own slope, so without the first there is nothing to tilt.",
+            hint="Convert without --rtc for the unflattened amplitude image, or "
+            "pick a product whose metadata states its collection geometry.",
         )
     return float(inc), float(az)
 
@@ -3625,12 +3641,15 @@ def sicd_to_geocoded_cog(
     sicd = reader.get_sicds_as_tuple()[0]
     # Before the read, for the same reason the speckle window is checked before
     # it: a product that cannot support the measurement should say so without
-    # first being pulled through the amplitude detection whole.
+    # first being pulled through the amplitude detection whole. `rtc` is asked
+    # here rather than at the warp for the stronger version of the same reason --
+    # the flattening runs after the read *and* after the reprojection.
     _check_measurement_support(
         sicd,
         calibration=calibration,
         noise_subtract=noise_subtract,
         noise_model=noise_model,
+        rtc=rtc,
     )
     if bbox is None:
         origin = (0, 0)

@@ -1007,14 +1007,43 @@ def test_apply_terrain_flattening_db_and_linear_preserve_nan():
 
 
 def test_scene_look_geometry_reads_scpcoa_and_errors_when_absent():
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
     sicd = _FakeSicd(incidence=42.0, azimuth=170.0)
     assert convert._scene_look_geometry(sicd) == (42.0, 170.0)
 
     class _Bare:
         SCPCOA = None
 
-    with pytest.raises(ValueError, match="SCPCOA"):
+    # A product that does not state its geometry is the same *kind* of refusal as
+    # a product that carries no Radiometric block: a fact about the file, which is
+    # what `--skip-unsupported` may skip and `umbra preflight --rtc` may find over
+    # the wire. It stays a ValueError, so any caller that caught one still does.
+    with pytest.raises(UnsupportedMeasurementError, match="SCPCOA") as excinfo:
         convert._scene_look_geometry(_Bare())
+    assert isinstance(excinfo.value, ValueError)
+    assert excinfo.value.hint and "--rtc" in excinfo.value.hint
+
+
+def test_check_measurement_support_asks_the_geometry_only_when_rtc_is_asked_for():
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    class _Bare:
+        SCPCOA = None
+
+    # Not asked for: nothing about the geometry is checked, so a product that
+    # states none converts exactly as it did.
+    convert._check_measurement_support(
+        _Bare(), calibration=None, noise_subtract=False, noise_model="measured"
+    )
+    with pytest.raises(UnsupportedMeasurementError, match="SCPCOA"):
+        convert._check_measurement_support(
+            _Bare(), calibration=None, noise_subtract=False, noise_model="measured", rtc=True
+        )
+    # And a product that does state it passes the same check.
+    convert._check_measurement_support(
+        _FakeSicd(), calibration=None, noise_subtract=False, noise_model="measured", rtc=True
+    )
 
 
 def test_sicd_to_geocoded_cog_rtc_flat_dem_leaves_values_unchanged(tmp_path, monkeypatch):

@@ -453,15 +453,30 @@ carries into every manifest record and rolls up across the batch
       `[convert]` extra the conversion needs anyway. Splitting the presence check
       from the coefficient parse would remove that, at the cost of the shared
       code path that is the whole reason the two cannot disagree.
-    - **Only the two `Radiometric` questions are asked.** The view carries the
-      whole SICD XML, so `--rtc`'s `SCPCOA` geometry (still a bare `ValueError`,
-      see below) or a polarization/looks read would be a few lines each — they
-      wait for the same evidence the untyped refusal does.
-  - **Only the two metadata-dependent corrections are typed.** `--rtc` needs a
-    DEM and `SCPCOA` geometry, and a product missing the latter still raises a
-    bare `ValueError`, so a batch cannot skip it. Type it the same way if a
-    product without `SCPCOA` turns up in practice; it was left alone here
-    because nothing has hit it.
+    - ~~**Only the two `Radiometric` questions are asked.**~~ **shipped** —
+      `umbra preflight --rtc` / `preflight_items(rtc=True)` asks the third
+      metadata-dependent correction's question too, and
+      `SicdCapabilities.look_geometry` reports the scene-centre
+      `(incidence, azimuth)` a product states. `umbra chips --preflight` picks it
+      up from the run's own `SicdConversion.rtc`. What is still open, and
+      smaller:
+      - **A polarization / looks read is still not asked.** The view carries the
+        whole SICD XML, so either is a few lines — they wait for a caller that
+        wants to *select* on them, which is a different question from "can this
+        product answer?" and would want its own place in the report.
+      - **`--rtc` also needs a DEM, which no preflight can check.** The
+        geometry half is a fact about the product and is now asked; the DEM half
+        is a fact about the request (a path, or `auto`'s network fetch), so a
+        cleared pass can still fail for want of terrain. Nothing pretends
+        otherwise, but the report says "supports --rtc" where it means "states
+        the geometry --rtc needs".
+  - ~~**Only the two metadata-dependent corrections are typed.**~~ **shipped** —
+    `_scene_look_geometry` raises `UnsupportedMeasurementError` rather than a
+    bare `ValueError`, so a missing `SCPCOA` is skippable by `umbra chips
+    --skip-unsupported`, reaches the `--json` error envelope with a hint, and is
+    asked off the metadata (`_check_measurement_support(rtc=True)`) before the
+    complex read, the DEM fetch and the warp it would otherwise have refused
+    after. It stays a `ValueError` too, so no existing caller changed.
 
 ---
 

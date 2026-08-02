@@ -460,6 +460,21 @@ cheaply-found hole is still a hole: a dropped pass is the same
 field, and `ChipDataset.preflight` reports what asking cost against the download
 it removed. An acquisition whose metadata cannot be *read* is kept rather than
 dropped — a failed read is not a product declaring it cannot answer.
+~~**Open:** all of that machinery covered two of the three corrections that
+depend on a product describing itself — `--rtc` reads the collection geometry out
+of the same file and refused with a bare `ValueError`, so a batch could not skip
+it, an agent could not branch on it, and no preflight could see it coming.~~
+**shipped** — `_scene_look_geometry` raises `UnsupportedMeasurementError`, which
+is not a new mechanism but the *existing* one becoming applicable: the skip, the
+JSON envelope and the hint all work unchanged the moment the refusal has the
+right name. The question also moved twice — off the metadata rather than after
+the warp (`_check_measurement_support(rtc=True)`), and then over the wire
+(`umbra preflight --rtc`, `SicdCapabilities.look_geometry`, and
+`umbra chips --preflight` asking it from the run's own settings) — which matters
+most for exactly this correction, since flattening is the one whose refusal
+otherwise arrives after a complex read, a DEM fetch *and* a reprojection. Most
+products state the geometry, which is why it was worth asking rather than
+assuming: the absent case is the one nobody plans for.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -976,8 +991,24 @@ from:
   once per acquisition, in that order, from the calling thread, so a CLI callback
   never becomes thread-safety-sensitive. `workers=1` runs no pool at all and the
   lane count is capped by the selection, so a one-scene preflight is byte-for-byte
-  the path that shipped before. **This closes the preflight group.** See the
-  CHANGELOG.
+  the path that shipped before. See the CHANGELOG.
+  ~~**Open:** every bit of that — the name, the skip, the JSON envelope, the
+  metadata-first ordering, the preflight — covered two of the *three* corrections
+  that depend on a product describing itself. `--rtc` reads the collection
+  geometry out of the same SICD and refused with a bare `ValueError` raised after
+  the warp, so a batch died on it, an agent could not branch on it, and no
+  preflight could see it coming.~~ **shipped** — `_scene_look_geometry` raises
+  `UnsupportedMeasurementError` (still a `ValueError`, so nothing that caught one
+  changed), which is what makes the whole existing machinery apply with no new
+  vocabulary; `_check_measurement_support(rtc=True)` asks it off the metadata
+  before the complex read, the DEM fetch and the reprojection; and `umbra
+  preflight --rtc` / `preflight_items(rtc=True)` asks it over the wire, with
+  `umbra chips --preflight` taking it from the run's own `SicdConversion.rtc` so
+  the preflight's question stays the conversion's by construction. What a product
+  *does* state is reported beside the calibrations and the noise level
+  (`SicdCapabilities.look_geometry`). **This closes the preflight group**: every
+  correction whose answer is in the file is now named, skippable and askable
+  ahead of the download. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`
