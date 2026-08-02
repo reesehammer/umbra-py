@@ -60,6 +60,18 @@ _CALIBRATED = _UNCALIBRATED.replace(
 
 _RELATIVE_NOISE = _CALIBRATED.replace("ABSOLUTE", "RELATIVE")
 
+#: Most products *do* state their collection geometry, which is why the sample
+#: above (which does not) is the interesting case: a `--rtc` run refuses on it
+#: only after the download, the DEM fetch and the warp.
+_WITH_GEOMETRY = _UNCALIBRATED.replace(
+    "</SICD>",
+    """  <SCPCOA>
+    <IncidenceAng>32.5</IncidenceAng>
+    <AzimAng>190.0</AzimAng>
+  </SCPCOA>
+</SICD>""",
+)
+
 
 def build_nitf(
     xml: str,
@@ -250,6 +262,47 @@ def test_a_declared_product_clears_the_check(tmp_path):
     assert caps.refusal(calibration="sigma0") is None
     assert caps.refusal(noise_subtract=True, noise_model="measured") is None
     assert caps.refusal(calibration="gamma0") is not None
+
+
+def test_a_product_reports_the_collection_geometry_it_states(tmp_path):
+    """The third metadata-dependent correction: `--rtc` tilts the scene-centre
+    look geometry by the DEM's slope, so a product that states none cannot be
+    flattened."""
+    stated = sicd_capabilities(write_nitf(tmp_path, _WITH_GEOMETRY))
+    assert stated.look_geometry == (32.5, 190.0)
+    assert stated.to_dict()["look_geometry"] == [32.5, 190.0]
+    assert stated.refusal(rtc=True) is None
+
+    silent = sicd_capabilities(write_nitf(tmp_path, _UNCALIBRATED))
+    assert silent.look_geometry is None
+    assert silent.to_dict()["look_geometry"] is None
+
+
+def test_the_geometry_is_refused_only_when_flattening_is_asked_for(tmp_path):
+    """A missing SCPCOA is not a refusal of a conversion that does not flatten,
+    which is why it is a question rather than a property of the product."""
+    caps = sicd_capabilities(write_nitf(tmp_path, _UNCALIBRATED))
+
+    assert caps.refusal() is None
+    refusal = caps.refusal(rtc=True)
+    assert isinstance(refusal, UnsupportedMeasurementError)
+    assert "SCPCOA" in str(refusal)
+    assert "--rtc" in (refusal.hint or "")
+
+
+@responses.activate
+def test_preflight_items_can_ask_the_geometry_question(sample_item_dict):
+    from umbra_py.models import UmbraItem
+
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example.com/x.stac.v2.json")
+    serve_ranges(item.asset_href("SICD"), build_nitf(_UNCALIBRATED))
+
+    report = preflight_items([item], rtc=True)
+
+    assert report.rtc is True
+    assert report.to_dict()["rtc"] is True
+    assert report.results[0].supported is False
+    assert "SCPCOA" in (report.results[0].reason or "")
 
 
 def test_the_dense_coefficients_match_the_sparse_xml(tmp_path):
@@ -453,6 +506,26 @@ def test_cli_preflight_says_what_the_answer_cost(monkeypatch, sample_item_dict):
     assert "0 of 1 acquisition(s) support --calibrate gamma0" in result.output
     assert "instead of" in result.output
     assert "hint:" in result.output
+
+
+@responses.activate
+def test_cli_preflight_asks_about_terrain_flattening(monkeypatch, sample_item_dict):
+    """`--rtc` is the third question, and the per-scene line names the geometry
+    the way it names the calibrations and the noise level."""
+    from umbra_py import cli as cli_mod
+    from umbra_py.models import UmbraItem
+
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example.com/x.stac.v2.json")
+    serve_ranges(item.asset_href("SICD"), build_nitf(_WITH_GEOMETRY, images=((512, 5_000_000),)))
+    monkeypatch.setattr("umbra_py.cli._shared._item_from_url", lambda url: item)
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["preflight", "https://example.com/x.stac.v2.json", "--rtc"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "look geometry 32.5 deg -> yes" in result.output
+    assert "1 of 1 acquisition(s) support --rtc" in result.output
 
 
 @responses.activate

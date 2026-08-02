@@ -7,6 +7,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Name the refusal terrain flattening forces, and ask it over the wire
+  (`umbra preflight --rtc`, `SicdCapabilities.look_geometry`).** Three of
+  `umbra convert`'s corrections depend on the product describing itself, and
+  until now only two of them were treated that way. `--calibrate` and
+  `--noise-model measured` read the SICD's `Radiometric` block, raise
+  `UnsupportedMeasurementError` when it cannot answer, are skippable
+  (`umbra chips --skip-unsupported`), reach the `--json` error envelope with a
+  hint, and are answerable ahead of a download (`umbra preflight`). The third,
+  `--rtc`, reads the collection geometry out of the same file's `SCPCOA` block —
+  and did none of it. A product that stated no geometry raised a bare
+  `ValueError`, so a chip batch could not carry on past it, an agent could not
+  branch on it, and nothing could see it coming.
+
+  It is the same *kind* of fact as the other two — what the flattening needs is
+  in the file or it is not, and the honest responses are a different setting or a
+  different scene rather than a fix to the request — so it is now the same type.
+  `_scene_look_geometry` raises `UnsupportedMeasurementError` (still a
+  `ValueError`, so every caller that caught one still does), which makes the
+  whole existing machinery apply with no new vocabulary: `--skip-unsupported`
+  records the pass on `ChipDataset.skipped` in the product's own words and moves
+  on, and the refusal renders into the JSON envelope with a hint pointing at the
+  unflattened conversion.
+
+  And the question moved to where it can be asked cheaply, twice over.
+  `_check_measurement_support` takes `rtc=`, so a product that cannot be
+  flattened says so from its **header** rather than after a multi-gigabyte
+  complex read, a DEM fetch and a warp — the strongest version of the ordering
+  argument the `Radiometric` checks already made, because `--rtc` is the most
+  expensive thing to discover late. `umbra preflight --rtc` /
+  `preflight_items(rtc=True)` then asks it over the wire, before anything is
+  downloaded at all, through the conversion's own check applied to the
+  range-read XML — so a preflight that says yes still cannot be contradicted by
+  the conversion it clears. `umbra chips --preflight` picks it up from the run's
+  own `SicdConversion.rtc`, which is what keeps the preflight's question the
+  conversion's question by construction.
+
+  What a product *does* state is reported beside the calibrations and the noise
+  level: `SicdCapabilities.look_geometry` is the scene-centre
+  `(incidence, azimuth)`, in `--json` and on the per-scene report line. Most
+  products carry it — which is exactly why it was worth wiring up rather than
+  assuming. The absent case is the one nobody plans for, and it was the one that
+  cost the most to find.
 - **Stop the check that runs before a batch from being the batch's slowest part
   (`umbra preflight --workers`, `umbra chips --preflight-workers`,
   `preflight_items(workers=…)`).** The header-only preflight replaced a

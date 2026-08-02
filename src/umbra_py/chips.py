@@ -1528,8 +1528,9 @@ def write_chips(
 
     ``skip_unsupported`` decides what a batch does when one acquisition's own
     metadata cannot support the measurement asked of it -- a product with no
-    ``Radiometric`` block under ``calibration=``, or no stated noise floor under
-    ``noise_model="measured"``. The default raises, which is right for a run
+    ``Radiometric`` block under ``calibration=``, no stated noise floor under
+    ``noise_model="measured"``, or no stated collection geometry under ``rtc=``.
+    The default raises, which is right for a run
     over one product's worth of scenes: if the archive cannot answer, the answer
     is not a smaller dataset. Over a mixed archive it is the wrong default,
     because the twenty scenes already chipped are lost to the twenty-first, so
@@ -1694,6 +1695,7 @@ def _preflight_filter(
         calibration=conversion.calibration,
         noise_subtract=conversion.noise_subtract,
         noise_model=conversion.noise_model,
+        rtc=conversion.rtc,
         progress=progress,
         workers=workers,
     )

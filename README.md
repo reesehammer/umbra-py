@@ -1252,8 +1252,9 @@ in it has to say so however cheaply the hole was found. An acquisition whose
 metadata cannot be *read* — a missing asset, an HTTP failure — is **kept**: a
 failed read is not a product declaring it cannot answer, so the run finds out the
 expensive way rather than dropping a scene over something transient. Pass both
-flags: the preflight asks only the two questions the metadata answers, so
-anything else still refuses at conversion time. The headers are read several at a
+flags: the preflight asks only the three questions the metadata answers
+(`--calibrate`, `--noise-model measured`, `--rtc`'s geometry), so anything else —
+`--rtc`'s DEM among them — still refuses at conversion time. The headers are read several at a
 time (`--preflight-workers`, default 8), so the check that runs in front of the
 batch does not become a stall that grows with the number of passes.
 
@@ -1294,11 +1295,15 @@ manifest logic. Requires the load extra (`pip install "umbra-py[load]"`).
 
 ### Ask before you download (`umbra preflight`)
 
-Two of the conversion's corrections depend on the product describing itself:
-`--calibrate` reads the SICD's `Radiometric` scale-factor polynomials, and
-`--noise-model measured` reads its stated noise floor. Umbra's open products
-generally carry neither, so those runs refuse — correctly, because a scaling by
-an invented number is indistinguishable in the output from a measured one.
+Three of the conversion's corrections depend on the product describing itself:
+`--calibrate` reads the SICD's `Radiometric` scale-factor polynomials,
+`--noise-model measured` reads its stated noise floor, and `--rtc` reads the
+collection geometry it tilts by the terrain's slope. Umbra's open products
+generally carry neither of the first two, so those runs refuse — correctly,
+because a scaling by an invented number is indistinguishable in the output from a
+measured one. Most products *do* state their geometry, which is what makes the
+ones that don't worth asking about: a `--rtc` run refuses on them only after the
+download, the DEM fetch and the warp.
 
 The problem was never the refusal; it was *finding out*. A SICD's metadata lives
 inside the NITF, so learning that a pass cannot be calibrated meant downloading
@@ -1315,11 +1320,14 @@ umbra preflight --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
 
 # Or ask about a measured noise floor, on one acquisition or a whole selection.
 umbra preflight <item-json-url> --subtract-noise --noise-model measured --json
+
+# Or whether a pass states the geometry terrain flattening needs.
+umbra preflight --area "Centerfield" --rtc
 ```
 
 ```text
-  2024-02-08-01-02-03_UMBRA-05: calibrations none; noise level none -> no
-  2024-03-11-04-05-06_UMBRA-05: calibrations none; noise level none -> no
+  2024-02-08-01-02-03_UMBRA-05: calibrations none; noise level none; look geometry 32.5 deg -> no
+  2024-03-11-04-05-06_UMBRA-05: calibrations none; noise level none; look geometry 28.1 deg -> no
 0 of 2 acquisition(s) support --calibrate gamma0.
   Read 41.2 KB of product headers instead of 7.4 GB of product.
   hint: Convert without --calibrate; this product states no scale factors.
@@ -1330,7 +1338,8 @@ The verdict is not a second opinion: the parsed metadata is handed to the same
 readers, so a preflight that says yes and a conversion that then refuses cannot
 disagree. What differs is only where the metadata came from. `sicd_capabilities`
 also reports what the product *does* declare — which calibrations, which noise
-level, and the scene's identity — so `umbra chips --asset SICD --calibrate
+level, its scene-centre look geometry, and the scene's identity — so `umbra chips
+--asset SICD --calibrate
 gamma0` over the survivors is a run with no refusals in it. That last step is
 wired in rather than left to you: `umbra chips --preflight` runs this check over
 the selection itself and drops the passes that cannot answer before downloading

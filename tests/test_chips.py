@@ -1951,6 +1951,43 @@ def test_preflight_drops_the_unanswerable_passes_before_downloading_them(tmp_pat
     assert dataset.skipped[0].datetime == "2024-02-08T12:00:00+00:00"
 
 
+def test_a_flattening_run_preflights_the_collection_geometry(tmp_path):
+    """`--rtc` is a metadata-dependent correction too, so the run's own settings
+    put it in the question the preflight asks -- and a pass that states no
+    SCPCOA is dropped before the download, the DEM fetch and the warp it would
+    otherwise have refused after."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    from .test_preflight import _UNCALIBRATED, _WITH_GEOMETRY, build_nitf
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    paths = {}
+    for name, xml in (("acq-geo", _WITH_GEOMETRY), ("acq-bare", _UNCALIBRATED)):
+        path = tmp_path / f"{name}.nitf"
+        path.write_bytes(build_nitf(xml))
+        paths[name] = path
+    items = [_nitf_item(name, path) for name, path in paths.items()]
+    prepared: list[str] = []
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        # `rtc` needs a DEM at conversion time; the preflight asks only what the
+        # metadata answers, which is the point -- the geometry question is free.
+        conversion=SicdConversion(rtc=True, dem="dem.tif"),
+        preparer=_recording_preparer(cog, prepared),
+        preflight=True,
+    )
+
+    assert prepared == ["acq-geo"]
+    assert [s.item_id for s in dataset.skipped] == ["acq-bare"]
+    assert "SCPCOA" in dataset.skipped[0].reason
+    assert dataset.skipped[0].stage == "preflight"
+
+
 def test_the_preflight_summary_reports_what_the_check_cost_and_saved(tmp_path):
     pytest.importorskip("numpy")
     from umbra_py.chips import SicdConversion, write_chips

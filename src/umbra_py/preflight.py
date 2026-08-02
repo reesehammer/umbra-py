@@ -1,11 +1,15 @@
 """Ask a complex product what it can support, without downloading it.
 
-Two of ``umbra convert``'s corrections depend on the product describing itself:
-radiometric calibration reads the SICD's ``Radiometric`` scale-factor
-polynomials, and ``--noise-model measured`` reads its
-``Radiometric.NoiseLevel.NoisePoly``. Umbra's open products generally carry
-neither, and refusing is the point — a scaling by an invented number is
-indistinguishable in the output from a measured one.
+Three of ``umbra convert``'s corrections depend on the product describing
+itself: radiometric calibration reads the SICD's ``Radiometric`` scale-factor
+polynomials, ``--noise-model measured`` reads its
+``Radiometric.NoiseLevel.NoisePoly``, and ``--rtc`` reads the collection
+geometry out of its ``SCPCOA`` block. Umbra's open products generally carry
+neither of the first two, and refusing is the point — a scaling by an invented
+number is indistinguishable in the output from a measured one. The third is
+usually present, which is what makes it worth asking about rather than
+assuming: the run it refuses is the expensive one (a DEM fetch and a warp on top
+of the complex read), and its absence is the case nobody plans for.
 
 :class:`~umbra_py.exceptions.UnsupportedMeasurementError` already made that
 refusal *survivable* (``umbra chips --skip-unsupported`` records the pass and
@@ -364,6 +368,13 @@ class SicdCapabilities:
     noise_level:
         ``"ABSOLUTE"`` (a floor that can be subtracted), ``"RELATIVE"`` (its
         variation is described but not its level) or ``None``.
+    look_geometry:
+        ``(incidence_deg, azimuth_deg)`` from the product's ``SCPCOA`` block, or
+        ``None`` where it states neither — the scene-centre geometry radiometric
+        terrain flattening (``--rtc``) tilts by the DEM's own slope. Unlike the
+        two ``Radiometric`` answers this is present on most products, which is
+        precisely why it is worth reporting: a *missing* one is the exception,
+        and the run it would have refused is an expensive one.
     core_name / rows / cols / polarization:
         Identity, for a report that names the scene rather than only its URL.
     bytes_read:
@@ -376,6 +387,7 @@ class SicdCapabilities:
     source: str
     calibrations: tuple[str, ...]
     noise_level: str | None
+    look_geometry: tuple[float, float] | None = None
     core_name: str | None = None
     rows: int | None = None
     cols: int | None = None
@@ -390,6 +402,7 @@ class SicdCapabilities:
         calibration: str | None = None,
         noise_subtract: bool = False,
         noise_model: str = "measured",
+        rtc: bool = False,
     ) -> UnsupportedMeasurementError | None:
         """The refusal a conversion with these settings would raise, or ``None``.
 
@@ -405,6 +418,7 @@ class SicdCapabilities:
                 calibration=calibration,
                 noise_subtract=noise_subtract,
                 noise_model=noise_model,
+                rtc=rtc,
             )
         except UnsupportedMeasurementError as exc:
             return exc
@@ -416,6 +430,7 @@ class SicdCapabilities:
             "source": self.source,
             "calibrations": list(self.calibrations),
             "noise_level": self.noise_level,
+            "look_geometry": None if self.look_geometry is None else list(self.look_geometry),
             "core_name": self.core_name,
             "rows": self.rows,
             "cols": self.cols,
@@ -430,6 +445,24 @@ def _declared_calibrations(sicd: Any) -> tuple[str, ...]:
     from .convert import _available_calibrations  # noqa: PLC0415
 
     return _available_calibrations(sicd)
+
+
+def _declared_look_geometry(sicd: Any) -> tuple[float, float] | None:
+    """The scene-centre ``(incidence, azimuth)`` this product states, if any.
+
+    Read through :mod:`umbra_py.convert`'s own ``_scene_look_geometry`` for the
+    same reason the calibrations are read through ``_available_calibrations``:
+    what the report says a product carries and what the conversion will accept
+    have to be one answer. The refusal is the *absence*, so it is turned back
+    into ``None`` here — :meth:`SicdCapabilities.refusal` is where a refusal is
+    a refusal.
+    """
+    from .convert import _scene_look_geometry  # noqa: PLC0415
+
+    try:
+        return _scene_look_geometry(sicd)
+    except UnsupportedMeasurementError:
+        return None
 
 
 def _optional(sicd: Any, *path: str) -> Any:
@@ -463,6 +496,7 @@ def sicd_capabilities(
         source=str(src),
         calibrations=_declared_calibrations(sicd),
         noise_level=_noise_level_type(sicd),
+        look_geometry=_declared_look_geometry(sicd),
         core_name=_optional(sicd, "CollectionInfo", "CoreName"),
         rows=_optional(sicd, "ImageData", "NumRows"),
         cols=_optional(sicd, "ImageData", "NumCols"),
@@ -513,6 +547,7 @@ class PreflightReport:
     calibration: str | None
     noise_subtract: bool
     noise_model: str
+    rtc: bool = False
     workers: int = 1
     """How many acquisitions were read at once -- the *effective* lane count,
     never more than there were products to read. It says how the answer was
@@ -546,6 +581,7 @@ class PreflightReport:
             "calibration": self.calibration,
             "noise_subtract": self.noise_subtract,
             "noise_model": self.noise_model,
+            "rtc": self.rtc,
             "count": len(self.results),
             "supported_count": len(self.supported),
             "bytes_read": self.bytes_read,
@@ -595,6 +631,7 @@ def preflight_items(
     calibration: str | None = None,
     noise_subtract: bool = False,
     noise_model: str = "measured",
+    rtc: bool = False,
     session: requests.Session | None = None,
     progress: Any = None,
     workers: int | None = None,
@@ -605,6 +642,9 @@ def preflight_items(
     :func:`sicd_capabilities`) and applies the conversion's own support check, so
     ``umbra chips --asset SICD --calibrate gamma0`` over the survivors is a run
     with no refusals in it — decided before a single product is downloaded.
+    ``rtc=True`` adds the third metadata-dependent correction to the question:
+    whether the product states the collection geometry the flattening tilts by
+    the terrain's slope.
 
     An acquisition whose metadata cannot be read at all (a missing asset, an
     unreadable NITF, an HTTP failure) is recorded as unsupported with the error
@@ -638,6 +678,7 @@ def preflight_items(
             calibration=calibration,
             noise_subtract=noise_subtract,
             noise_model=noise_model,
+            rtc=rtc,
             session=sess,
         )
 
@@ -652,6 +693,7 @@ def preflight_items(
         calibration=calibration,
         noise_subtract=noise_subtract,
         noise_model=noise_model,
+        rtc=rtc,
         workers=lanes,
     )
 
@@ -663,6 +705,7 @@ def _preflight_item(
     calibration: str | None,
     noise_subtract: bool,
     noise_model: str,
+    rtc: bool = False,
     session: requests.Session | None,
 ) -> PreflightResult:
     """One acquisition's verdict, with every read failure captured rather than raised."""
@@ -682,6 +725,7 @@ def _preflight_item(
         calibration=calibration,
         noise_subtract=noise_subtract,
         noise_model=noise_model,
+        rtc=rtc,
     )
     return PreflightResult(
         item_id=item.id,
