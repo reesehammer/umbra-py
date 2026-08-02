@@ -344,23 +344,28 @@ def test_the_verdicts_come_back_in_the_order_they_were_asked(sample_item_dict):
     """The chip run pairs verdicts against its own selection positionally, so a
     concurrent read that returned them in completion order would silently attach
     one pass's refusal to another."""
-    # Alternating so a shuffle shows up in the verdicts themselves, not only in
-    # the URLs they came from.
+    # Alternating products that refuse a measured noise floor for *different*
+    # reasons, so a shuffle shows up in the verdicts themselves rather than only
+    # in the URLs they came from. (Both refusals are metadata-only, so this reads
+    # the same on a core install as it does with the convert extra.)
     items = [
-        sicd_item(sample_item_dict, name, _CALIBRATED if n % 2 else _UNCALIBRATED)
+        sicd_item(sample_item_dict, name, _RELATIVE_NOISE if n % 2 else _UNCALIBRATED)
         for n, name in enumerate("abcdef")
     ]
 
     seen: list[tuple[int, int, str]] = []
     report = preflight_items(
         items,
-        calibration="sigma0",
+        noise_subtract=True,
+        noise_model="measured",
         workers=4,
         progress=lambda index, total, item, result: seen.append((index, total, item.id)),
     )
 
     assert [r.href for r in report.results] == [i.asset_href("SICD") for i in items]
-    assert [r.supported for r in report.results] == [False, True] * 3
+    assert [r.capabilities.noise_level for r in report.results] == [None, "RELATIVE"] * 3
+    assert all(r.supported is False for r in report.results)
+    assert ["RELATIVE" in (r.reason or "") for r in report.results] == [False, True] * 3
     # The progress callback is the serial walk's contract unchanged: one call per
     # acquisition, in selection order, counting up, from the calling thread.
     assert seen == [(n + 1, len(items), item.id) for n, item in enumerate(items)]
@@ -389,10 +394,13 @@ def test_an_unreadable_acquisition_is_recorded_rather_than_fatal(sample_item_dic
     it is for, so a read failure is a per-item verdict."""
     from umbra_py.models import UmbraItem
 
-    first = UmbraItem.from_dict(sample_item_dict, href="https://example.com/a.stac.v2.json")
-    second = UmbraItem.from_dict(sample_item_dict, href="https://example.com/b.stac.v2.json")
+    # Each product gets its own URL, so which one 404s is a property of the
+    # fixture rather than of the order the reads happen to be issued in.
+    missing = copy.deepcopy(sample_item_dict)
+    missing["assets"]["SICD"]["href"] = "https://example.com/gone_SICD.nitf"
+    first = UmbraItem.from_dict(missing, href="https://example.com/a.stac.v2.json")
     responses.add(responses.GET, first.asset_href("SICD"), status=404)
-    serve_ranges(second.asset_href("SICD"), build_nitf(_CALIBRATED))
+    second = sicd_item(sample_item_dict, "b", _CALIBRATED)
 
     report = preflight_items([first, second])
 
