@@ -7,6 +7,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Ask whether a series is one measurement before stacking it
+  (`stack_provenance`, `umbra stack --provenance`).** `to_stack` refuses to
+  co-register passes whose conversions disagree — a calibrated pass differenced
+  against an uncalibrated one puts the difference between two *conversions* on
+  the time axis and reports it as change on the ground. That refusal is right,
+  and it had two gaps. It was discoverable only by hitting it: the check runs
+  inside `to_stack`, so a caller learned a selection was mixed by asking for the
+  cube. And its own advice — "use only the acquisitions that share one" — named
+  a subset it did not identify, which on a forty-pass site is not advice.
+
+  `stack_provenance(items)` answers both. It reads each acquisition's `UMBRA_*`
+  record straight from its raster header, groups the selection by
+  `MEASUREMENT_PROVENANCE_KEYS`, and returns a `StackProvenance`: whether the
+  series `agrees`, the `refusal` if it does not, the `shared` record if it does,
+  the `groups` largest-first, and `largest` — the biggest set of acquisitions
+  that *do* agree, with the item URLs to re-run on. The subset the refusal could
+  only gesture at is now a command.
+
+  What it costs is the opens a stack performs anyway: one COG header per
+  acquisition, a range request of kilobytes, and no pixels at all (a test spies
+  on `DatasetReader.read` to keep that true). What it saves is everything after
+  them — the shared grid, the warp, and every decimated read. It is the move
+  `umbra preflight` makes for a chip run, one layer up.
+
+  The verdict is not a second opinion: `_shared_provenance` — the function that
+  raises — is called on the same records, so `report.refusal` is verbatim the
+  `ValueError` a stack of that selection would raise, and `report.shared` is
+  verbatim the record it would carry. The grouping runs on
+  `_comparable_record`, factored out of that same function, so a preflight
+  cannot group by one rule while the refusal compares by another.
+
+  A source that cannot be *read* is reported apart, on `report.unreadable`,
+  rather than grouped: an item listing no such asset, an href with nothing
+  behind it, bytes that are not a raster. That is the line
+  `PreflightResult.error_scope` draws in the chip preflight — a failed read is
+  not a product declaring its pixels are something else — and here it means such
+  a pass does not make the series *mixed*, it makes the answer *incomplete*, and
+  the report says which.
+
+  On the CLI, `umbra stack --provenance` prints the grouping, the largest
+  agreeing subset and a ready-to-run `umbra stack` line for it; `--json` emits
+  the same report as one object. It is refused alongside `--out` / `--stats`
+  rather than combined with them, because the point of the flag is to ask before
+  paying and pairing it with the work would hide which of the two answered. The
+  common case reads as what it is — a series of published GECs prints "no
+  umbra-py conversion (a published product as Umbra ships it)" rather than seven
+  `none`s.
 - **Tell a failed read that is a verdict apart from one that is a hiccup
   (`UnreadableProductError`, `PreflightResult.error_scope`,
   `PreflightSummary.missing`).** `umbra chips --preflight` reads each

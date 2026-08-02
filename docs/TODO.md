@@ -747,8 +747,12 @@ conversion's clip. Follow-ons, none a blocker:
 - **Surfaced in:** the provenance-consumption PR (`STRATEGY.md` 5.5, which the
   DEM entry above named).
 - **Code:** `src/umbra_py/load.py` (`MEASUREMENT_PROVENANCE_KEYS`,
-  `_source_provenance`, `_shared_provenance`, `_as_geotiff_tags`, the
+  `_source_provenance`, `_comparable_record`, `_shared_provenance`,
+  `_as_geotiff_tags`, `stack_provenance` / `StackProvenance` /
+  `ProvenanceGroup` / `UnreadableSource`, the
   `provenance` attr on `to_xarray` / `to_stack` and key on `stack_stats`),
+  `umbra stack --provenance` + `_echo_stack_provenance` / `_provenance_label`
+  in `src/umbra_py/cli/process.py`,
   `src/umbra_py/convert.py` (`conversion_provenance`),
   `src/umbra_py/viz/composites.py` (`_coregister_bands`),
   `src/umbra_py/narrate.py` (`ChangeStats.provenance`, `render_change_png`,
@@ -789,11 +793,36 @@ blocker:
   re-grids everything anyway. A series orthorectified against two different DEMs
   therefore stacks. Add them to `MEASUREMENT_PROVENANCE_KEYS` if a DEM mix ever
   produces misregistration worth failing on.
-- **The refusal is discovered by hitting it.** Nothing enumerates a selection's
-  conversions ahead of the call — no `umbra stack --provenance`-style preflight,
-  and `POST /artifacts/stats` reports the mix only as the text of its `400`.
-  Cheapest fix if it matters: have the search-side commands report the distinct
-  `UMBRA_CALIBRATION` values in a selection the way they report polarizations.
+- ~~**The refusal is discovered by hitting it.**~~ **shipped** —
+  `stack_provenance` / `umbra stack --provenance` reads each source's `UMBRA_*`
+  record from its raster header, groups the selection by
+  `MEASUREMENT_PROVENANCE_KEYS` and reports whether `to_stack` would accept it,
+  before the grid, the warp or a single pixel. The shape this entry sketched is
+  the shape that shipped, plus the half it did not ask for: the refusal's own
+  advice ("use only the acquisitions that share one") is now a subset with URLs
+  attached (`StackProvenance.largest`), so it is a command rather than a
+  diagnosis. The verdict is `_shared_provenance`'s own, called on the same
+  records, and the grouping runs on `_comparable_record` factored out of it — so
+  a cleared selection cannot then be refused by the stack it cleared. What is
+  still open, and smaller:
+  - **`POST /artifacts/stats` still reports the mix only as its `400`.** The
+    endpoint has no provenance preflight, so a hosted client discovers a mixed
+    selection by spending the request. The natural shape is not a new endpoint
+    but the one the landing page established: report a selection's conversions
+    where it already reports what the instance supports. It waits for a hosted
+    instance to exist (`umbra serve`'s own follow-on) to be worth the surface.
+  - **The search-side commands still don't report conversions.** This entry's
+    original suggestion — list the distinct `UMBRA_CALIBRATION` values in a
+    selection the way `umbra search` reports polarizations — is orthogonal to
+    the preflight and still not done. It would cost a header read per result on
+    a command whose whole promise is that search is metadata-only, which is why
+    the preflight lives on the command that was going to open them anyway.
+  - **Nothing preflights the *composite* path.** `render_change_png` applies the
+    same refusal to the pair it quotes decibels between, and pays the
+    co-registration first (see below). `stack_provenance` would answer for a
+    pair as readily as for a series; wiring it into `umbra change --narrate`
+    would need the pair in hand before `_coregister_bands` opens them, which is
+    the same ordering question that entry already describes.
 - **A cube's provenance reaches the render manifest only inside `stats`.**
   `umbra stack --json` emits the shared `{output, items_used, parameters}`
   manifest (`docs/schemas/render-manifest.schema.json`), which has no provenance

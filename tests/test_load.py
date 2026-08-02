@@ -2647,3 +2647,325 @@ def test_cli_stack_speckle_filter_reaches_the_cube_and_the_manifest(tmp_path, mo
         assert ds.tags()["UMBRA_SPECKLE_FILTER"] == "boxcar"
         assert ds.tags()["UMBRA_SPECKLE_WINDOW"] == "5"
         assert np.nanstd(ds.read(1)) > 0
+
+
+# --- The provenance preflight (`stack_provenance` / `umbra stack --provenance`)
+#
+# The refusal above is correct and was only ever discoverable by hitting it, and
+# its advice ("use only the acquisitions that share one") named a subset it could
+# not identify. These check that asking first gives the same verdict, and says
+# which acquisitions those are.
+
+
+def _linked(item, href):
+    """The same test item, carrying the item-JSON URL `umbra stack` takes."""
+    item.href = href
+    return item
+
+
+def test_stack_provenance_reports_a_series_that_agrees(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    settings = {"calibration": "sigma0", "rtc_model": "gamma"}
+    report = stack_provenance(_converted_scenes(tmp_path, settings, settings))
+
+    assert report.agrees
+    assert report.refusal is None
+    assert len(report.groups) == 1
+    assert report.groups[0].item_ids == ("acq-1", "acq-2")
+    # Verbatim what to_stack would carry, so the two answers cannot drift.
+    assert report.shared["calibration"] == "sigma0"
+    assert report.shared["rtc_model"] == "gamma"
+
+
+def test_stack_provenance_agrees_on_a_series_of_published_products(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    # The ordinary case: untagged GECs agree on being untagged, so one group,
+    # no refusal, and nothing claimed about what their pixels are.
+    report = stack_provenance(_three_scenes(tmp_path))
+    assert report.agrees
+    assert len(report.groups) == 1
+    assert report.shared == {}
+    assert report.groups[0].record["calibration"] == "(unrecorded)"
+
+
+def test_stack_provenance_groups_a_mixed_selection_and_names_the_largest(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    gamma = {"calibration": "gamma0"}
+    items = _converted_scenes(tmp_path, gamma, {"calibration": "sigma0"}, gamma)
+    report = stack_provenance(items)
+
+    assert not report.agrees
+    assert [len(g.item_ids) for g in report.groups] == [2, 1]
+    assert report.largest.item_ids == ("acq-1", "acq-3")
+    assert report.largest.record["calibration"] == "gamma0"
+    # Nothing is carried from a selection that disagrees.
+    assert report.shared == {}
+
+
+def test_stack_provenance_gives_the_refusal_the_stack_itself_would(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_provenance, to_stack
+
+    items = _converted_scenes(tmp_path, {"calibration": "gamma0"}, {"calibration": "sigma0"})
+    report = stack_provenance(items)
+
+    with pytest.raises(ValueError) as exc:
+        to_stack(items, max_size=32)
+    # The same function produced both, which is what stops a preflight becoming
+    # a second opinion about what stacks.
+    assert report.refusal == str(exc.value)
+
+
+def test_stack_provenance_clears_the_subset_it_named(tmp_path):
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import stack_provenance, to_stack
+
+    gamma = {"calibration": "gamma0"}
+    items = _converted_scenes(tmp_path, gamma, {"calibration": "sigma0"}, gamma)
+    report = stack_provenance(items)
+
+    keep = {i.id: i for i in items}
+    subset = [keep[item_id] for item_id in report.largest.item_ids]
+    # The advice is actionable rather than abstract: stacking what it named works.
+    cube = to_stack(subset, max_size=32)
+    assert cube.attrs["provenance"]["calibration"] == "gamma0"
+
+
+def test_stack_provenance_splits_on_every_measurement_key(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    # Two passes calibrated identically but filtered differently: the smoothing
+    # would read as change, so they are two conversions, not one.
+    base = {"calibration": "sigma0"}
+    report = stack_provenance(
+        _converted_scenes(
+            tmp_path,
+            {**base, "speckle_filter": "lee", "speckle_window": 5},
+            base,
+        )
+    )
+    assert not report.agrees
+    assert "speckle_filter disagrees" in report.refusal
+    assert len(report.groups) == 2
+
+
+def test_stack_provenance_carries_the_urls_to_re_run_on(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    gamma = {"calibration": "gamma0"}
+    items = _converted_scenes(tmp_path, gamma, {"calibration": "sigma0"}, gamma)
+    for item in items:
+        _linked(item, f"https://example.com/{item.id}.json")
+
+    report = stack_provenance(items)
+    assert report.largest.hrefs == (
+        "https://example.com/acq-1.json",
+        "https://example.com/acq-3.json",
+    )
+
+
+def test_stack_provenance_leaves_an_unreadable_source_undecided(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(tmp_path, settings, settings)
+    items.append(_stack_item(tmp_path / "never-written.tif", "acq-9", "2024-09-08T12:00:00Z"))
+
+    report = stack_provenance(items)
+    # A failed read is not a product saying its pixels are something else, so it
+    # does not make the series mixed -- it makes the answer incomplete.
+    assert report.agrees
+    assert [g.item_ids for g in report.groups] == [("acq-1", "acq-2")]
+    assert [u.item_id for u in report.unreadable] == ["acq-9"]
+    assert "never-written.tif" in report.unreadable[0].error
+
+
+def test_stack_provenance_reports_an_item_with_no_such_asset(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    settings = {"calibration": "sigma0"}
+    items = _converted_scenes(tmp_path, settings, settings)
+    # An item that lists no GEC at all, and one that lists it with an href
+    # nothing can resolve: two ways to have no product, one place to report it.
+    items.append(UmbraItem(id="acq-8", properties={"datetime": "2024-08-08T12:00:00Z"}))
+    items.append(
+        UmbraItem(
+            id="acq-9",
+            properties={"datetime": "2024-09-08T12:00:00Z"},
+            assets={"GEC": {"href": ""}},
+        )
+    )
+
+    report = stack_provenance(items)
+    assert report.agrees
+    assert [u.item_id for u in report.unreadable] == ["acq-8", "acq-9"]
+    assert all(u.href is None for u in report.unreadable)
+    assert "no asset 'GEC'" in report.unreadable[0].error
+    assert "no resolvable URL" in report.unreadable[1].error
+
+
+def test_stack_provenance_reads_no_pixels(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    import rasterio
+
+    from umbra_py import stack_provenance
+
+    reads = []
+    original = rasterio.DatasetReader.read
+
+    def _spy(self, *args, **kwargs):
+        reads.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(rasterio.DatasetReader, "read", _spy)
+    settings = {"calibration": "sigma0"}
+    stack_provenance(_converted_scenes(tmp_path, settings, settings))
+
+    # The whole claim: it costs the headers a stack pays for anyway and saves
+    # the grid, the warp and every pixel after them.
+    assert reads == []
+
+
+def test_stack_provenance_refuses_a_selection_that_is_not_a_time_series(tmp_path):
+    pytest.importorskip("rasterio")
+    from umbra_py import stack_provenance
+
+    with pytest.raises(ValueError, match="needs at least one acquisition"):
+        stack_provenance([])
+
+    undated = UmbraItem(id="acq-0", properties={})
+    with pytest.raises(ValueError, match="no datetime"):
+        stack_provenance([undated])
+
+
+def test_stack_provenance_to_dict_is_json_safe(tmp_path):
+    pytest.importorskip("rasterio")
+    import json
+
+    from umbra_py import stack_provenance
+
+    items = _converted_scenes(tmp_path, {"calibration": "gamma0"}, {"calibration": "sigma0"})
+    payload = json.loads(json.dumps(stack_provenance(items).to_dict()))
+
+    assert payload["asset"] == "GEC"
+    assert payload["agrees"] is False
+    assert [g["count"] for g in payload["groups"]] == [1, 1]
+    assert "calibration disagrees" in payload["refusal"]
+    # Nothing is claimed to be shared by a selection that disagrees.
+    assert "shared" not in payload
+
+
+def _stack_cli_stubs(monkeypatch, paths):
+    """Serve `umbra stack` two STAC item URLs backed by local rasters."""
+    stac = {
+        f"http://example.com/{name}.json": {
+            "id": name,
+            "properties": {"datetime": f"2024-0{n}-08T12:00:00Z"},
+            "assets": {},
+        }
+        for n, name in enumerate(paths, start=1)
+    }
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.UmbraItem.asset_href", lambda self, asset="GEC": str(paths[self.id])
+    )
+    return list(stac)
+
+
+def test_cli_stack_provenance_reports_a_mix_before_stacking(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _tag_scene(_stack_scene(tmp_path / "one.tif"), calibration="gamma0"),
+        "two": _tag_scene(_stack_scene(tmp_path / "two.tif"), calibration="sigma0"),
+    }
+    urls = _stack_cli_stubs(monkeypatch, paths)
+
+    result = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--provenance"])
+    assert result.exit_code == 0, result.output
+    assert "2 conversions" in result.output
+    assert "calibration=gamma0" in result.output
+    assert "calibration=sigma0" in result.output
+    # The subset is a command, not a diagnosis.
+    assert "Re-run on those alone:" in result.output
+    assert "umbra stack 'http://example.com/one.json'" in result.output
+
+
+def test_cli_stack_provenance_says_a_series_agrees(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif"),
+        "two": _stack_scene(tmp_path / "two.tif"),
+    }
+    urls = _stack_cli_stubs(monkeypatch, paths)
+
+    result = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--provenance"])
+    assert result.exit_code == 0, result.output
+    assert "2 acquisition(s) agree" in result.output
+    # The common case reads as what it is rather than as seven "none"s.
+    assert "no umbra-py conversion" in result.output
+
+
+def test_cli_stack_provenance_json(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    import json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _tag_scene(_stack_scene(tmp_path / "one.tif"), calibration="gamma0"),
+        "two": _tag_scene(_stack_scene(tmp_path / "two.tif"), calibration="gamma0"),
+    }
+    urls = _stack_cli_stubs(monkeypatch, paths)
+
+    result = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--provenance", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["agrees"] is True
+    assert payload["shared"]["calibration"] == "gamma0"
+    assert payload["groups"][0]["hrefs"] == urls
+
+
+def test_cli_stack_provenance_is_asked_instead_of_the_work_not_beside_it(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    paths = {
+        "one": _stack_scene(tmp_path / "one.tif"),
+        "two": _stack_scene(tmp_path / "two.tif"),
+    }
+    urls = _stack_cli_stubs(monkeypatch, paths)
+
+    refused = CliRunner().invoke(
+        cli_mod.cli, ["stack", *urls, "--provenance", "--out", str(tmp_path / "cube.tif")]
+    )
+    assert refused.exit_code != 0
+    assert "reads the sources and writes nothing" in refused.output
+
+    # And the command still insists on being asked for *something*.
+    bare = CliRunner().invoke(cli_mod.cli, ["stack", *urls])
+    assert bare.exit_code != 0
+    assert "--provenance to check the sources agree first" in bare.output

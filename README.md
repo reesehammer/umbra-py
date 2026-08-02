@@ -372,6 +372,46 @@ amplitude. The commands that only draw (`umbra change` without `--narrate`,
 `timescan`, `swipe`) don't check: a mixed composite is confusing to look at, a
 mixed number is wrong.
 
+That refusal used to be discoverable only by hitting it, and its advice — "use
+only the acquisitions that share one" — named a subset it couldn't identify.
+`stack_provenance` asks first:
+
+```python
+from umbra_py import stack_provenance
+
+report = stack_provenance(passes)
+report.agrees                  # False: this selection is two conversions
+report.refusal                 # verbatim the ValueError to_stack would raise
+report.largest.item_ids        # ...and the biggest set that *does* agree
+report.largest.hrefs           # the URLs to re-run on
+```
+
+It reads each source's `UMBRA_*` record straight from the raster header, so it
+costs the opens a stack pays for anyway — one range request of kilobytes per
+acquisition — and saves everything after them: the shared grid, the warp and
+every decimated pixel read. The verdict is `to_stack`'s own function called on
+the same records, so a cleared selection can't then be turned away by the stack
+it cleared. A source that can't be *read* lands on `report.unreadable` rather
+than in a group, because a failed read isn't a product saying its pixels are
+something else — it makes the answer incomplete, not the series mixed.
+
+```console
+$ umbra stack --area Centerfield --start 2024-01 --provenance
+3 acquisition(s) fall into 2 conversions, so this series is not one measurement.
+  2x calibration=gamma0, rtc_model=facet, scale=decibels, units=dB (gamma0)
+      2024-01-08T12:04:11Z_UMBRA-04
+      2024-02-11T11:58:02Z_UMBRA-05
+  1x calibration=sigma0, scale=decibels, units=dB (sigma0)
+      2024-03-02T12:01:44Z_UMBRA-04
+  Largest agreeing subset: 2 of 3.
+  Re-run on those alone:
+    umbra stack 'https://.../2024-01-08...json' 'https://.../2024-02-11...json'
+```
+
+`--json` emits the same report as one object. It's the move `umbra preflight`
+makes for a chip run, one layer up: ask the cheap question first, and ask it
+with the function that would refuse.
+
 Every number above carries one uncertainty none of those corrections touch.
 Coherent illumination of a rough surface interferes with itself, so a
 single-look pixel's power scatters about its surface's true backscatter with a
