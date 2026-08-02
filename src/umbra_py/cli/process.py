@@ -403,7 +403,9 @@ def _echo_chip_speckle_report(dataset: ChipDataset) -> None:
     help="With --lazy, cut each pass into CHUNK_SIZE-square windows read (and "
     "written) independently, so a single pass no longer has to fit in memory "
     "either. Costs one read per window instead of one per pass, so keep it a "
-    "decent fraction of --max-size (e.g. 1024). Same output.",
+    "decent fraction of --max-size (e.g. 1024). Same output -- including under "
+    "--speckle-filter, where each window is read with a half-window halo so the "
+    "filter never sees a truncated window at a chunk edge.",
 )
 @_shared._local_index_options
 @_shared._token_option

@@ -128,9 +128,10 @@ def serve(
     request may also send ``"windowed": true`` to be *measured* in those windows
     (``umbra stack --stats-windowed``), which is a request field rather than a
     policy because it estimates the percentiles it no longer holds a pass for.
-    An *unchunked* instance honours the complementary field: ``"speckle_filter":
-    "boxcar" | "lee"`` (``umbra stack --speckle-filter``) averages speckle down
-    on the shared grid before anything is measured, which needs each pass whole.
+    Any instance honours ``"speckle_filter": "boxcar" | "lee"`` (``umbra stack
+    --speckle-filter``), which averages speckle down on the shared grid before
+    anything is measured -- so a chunked instance takes both, and answers the
+    largest cube it can build with the interference averaged out of it.
     Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``).
     """
     from ..exceptions import MissingDependencyError

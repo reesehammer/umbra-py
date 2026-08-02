@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Average the speckle down on the largest cube that can be built
+  (`to_stack(speckle_filter=…, chunk_size=N)`).** The two options that lift this
+  library's measurement ceiling were mutually exclusive, and the refusal was
+  load-bearing: `chunk_size` is what lets a cube be stacked sharper than one
+  scene fits in memory, `speckle_filter` is what stops a per-cell decibel delta
+  from being mostly interference, and asking for both raised. So the sharpest
+  cube the library could build was also the noisiest one it could measure — and
+  on a hosted instance the pair was worse than inconvenient: `"windowed": true`
+  *requires* a chunked server, so **every** `umbra serve` honoured exactly one of
+  the two, and a client that wanted a filtered measurement of a large series had
+  nowhere to send it.
+
+  The two obstacles that made a window the hard place to filter are answered
+  rather than approximated — the same pair `umbra chips` answered tile by tile,
+  and the pair the old refusal named as what it would take.
+
+  A filter window straddling a chunk edge: every window is now read with a
+  half-window **halo** and cropped after filtering, so the cells that survive
+  were averaged over the neighbours they have on the pass rather than over a
+  truncated window. A filtered chunked cube is therefore the whole-pass filter's
+  own answer — to within one `float32` ulp, since a summed-area table reaches a
+  window total by a different order of additions when it was accumulated over 12
+  cells than over the pass. That is the difference between a window edge and a
+  *seam*, and a seam here is not cosmetic: a discontinuity in the smoothing lands
+  in `stack_stats` as change, strongest wherever the ground has the most
+  structure.
+
+  And `lee`'s speckle parameter, which is a property of the product's processing
+  rather than of the few hundred cells one window covers: it is resolved once per
+  pass (`_pass_looks`) as a single deferred task every window of that pass depends
+  on, so one part of a scene is never smoothed harder than the part beside it. It
+  is a *sample* of the pass — a fixed 3×3 grid of 512-cell windows whose blocks
+  are pooled before the percentile, exactly as `umbra chips` reads it once per
+  acquisition — because a chunked build is by definition the case where the pass
+  does not fit in memory. A pass small enough to sample whole gives the identical
+  number, and `boxcar` needs no such parameter, so a chunked `boxcar` cube is
+  cell-for-cell the unchunked one and costs no extra read at all.
+
+  What this buys is one request. `POST /artifacts/stats` now takes `"windowed":
+  true` **and** `"speckle_filter"` together on a chunked instance, so a hosted
+  measurement of a series too large to hold can also be the one with the
+  interference averaged out of it. The exclusivity is gone from all three places
+  it was stated rather than only from the library: `to_stack` no longer refuses
+  the pair, `stats_options` no longer refuses it at the request (it was refused
+  there precisely because it was unsatisfiable *everywhere*), and
+  `stats_option_refusal` has no `speckle_filter` condition left — which the
+  landing page's `umbra:options` reports as `supported: true` on every instance,
+  by the same one function that raises the refusals, so the advertisement still
+  cannot drift from what the endpoint does.
 - **Say what a hosted instance can be asked for (`umbra:options` on the landing
   page's `stats` link).** `POST /artifacts/stats` takes two request options
   whose availability is not the request's to decide: `"windowed": true` needs

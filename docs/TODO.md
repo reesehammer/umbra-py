@@ -455,29 +455,50 @@ of looks before and after. Follow-ons, none a blocker:
     would make a cube's diagnostics depend on how it was read, which is worse
     than not having them; a per-slice coordinate on the cube (like `item_id`) is
     the shape that would work if someone wants the number.
-  - **`chunk_size` and the filter are mutually exclusive.** A window straddling
-    two independently-read windows would need a halo, and `"lee"`'s scene-read
-    looks parameter would still differ per window — so the pair is refused rather
-    than made approximately right. Both halves of the fix now *exist*: `umbra
-    chips` reads a halo per tile and `_filter_speckle` takes an explicit
-    `looks=`, so lifting this is wiring rather than design — give `_read_slab` a
-    halo sized to the window (`_sub_grid` would have to grow the chunk and crop
-    after) and resolve the looks once per pass rather than per chunk, as
-    `_scene_speckle` does per acquisition. Still nothing needs it: `lazy=True`
-    alone (one chunk per pass) already filters at any length of series, and the
-    chunked path exists for a *single scene* too large to hold, where the halo
-    read is a second range request per window.
+  - ~~**`chunk_size` and the filter are mutually exclusive.**~~ **shipped** —
+    `to_stack(speckle_filter=…, chunk_size=N)` composes. `_halo_grid` grows each
+    window by half a filter window and `_open_slab(crop=…)` throws the margin
+    away after filtering, so a filtered chunked cube is the whole-pass filter's
+    own answer; and `_pass_looks` resolves `"lee"`'s speckle parameter once per
+    pass — a fixed 3×3 grid of 512-cell sample windows, blocks pooled before the
+    percentile, the same shape `chips._scene_speckle` uses per acquisition — as
+    one deferred task every window of that pass depends on. `boxcar` needs no
+    such parameter and so costs no such read. What it bought is on the server:
+    `"windowed": true` and `"speckle_filter"` are now one request on a chunked
+    instance. What is still open, and smaller:
+    - **A chunked `"lee"` samples the pass; an unchunked one reads it whole.**
+      The sample is why: a chunked build is by definition the case where the pass
+      does not fit. A pass no wider than one sample window is read whole, so the
+      two agree exactly at the sizes where they can — but a genuinely large pass
+      gives a looks estimate from ~9 windows rather than from all of it, and
+      nothing records which. `_LOOKS_SAMPLE_GRID` / `_LOOKS_SAMPLE_SIZE` are
+      where a denser read would go; it wants a real product whose looks vary
+      enough for the difference to show.
+    - **The halo costs a wider read, and nothing says so.** Each window reads
+      `(chunk + window − 1)²` cells to return `chunk²`, which at the window sizes
+      this is for (512–2048 cells against a 5-cell filter) is under 1%. It is
+      still a cost the `--chunk-size` help does not quantify; a line on the
+      non-JSON output would make it visible if anyone ever picks a chunk small
+      enough for it to matter.
+    - **Equality with the unchunked cube is to one `float32` ulp, not
+      bit-for-bit.** The summed-area table reaches a window's total by a
+      different order of additions when accumulated over a halo-sized read than
+      over a whole pass. The windows themselves are the same cells, so this is
+      float rounding rather than a seam — `tests/test_load.py` asserts it at
+      `np.finfo("float32").eps`. Nothing to fix; worth knowing before someone
+      writes `assert_array_equal`.
   - ~~**`POST /artifacts/stats` cannot ask for it.**~~ **shipped** —
     `"speckle_filter": "boxcar" | "lee"` (plus an optional odd
     `"speckle_window"`) is a request field on the stats endpoint and a parameter
     on the `stack_stats` agent tool, passed straight to
     `to_stack(speckle_filter=…)`. It is in the artifact cache key, as
-    `"windowed"` established, because it moves the numbers; and it turned out to
-    be that option's exact complement — filtering needs each pass whole, so it is
-    a `400` on a `--stack-chunk-size` instance where `"windowed"` is a `400` on
-    one without, which makes the pair unsatisfiable everywhere and so refused
-    together at the request. `umbra serve` echoes which of the two an instance
-    can honour. What is still open, and smaller:
+    `"windowed"` established, because it moves the numbers. It was that option's
+    exact complement for a while — filtering needed each pass whole, so it was a
+    `400` on the `--stack-chunk-size` instance `"windowed"` requires, and the
+    pair was unsatisfiable everywhere — until the halo read above made the two
+    compose: a chunked instance honours both, `speckle_filter` has no instance
+    condition left, and the request-level pair refusal is gone. What is still
+    open, and smaller:
     - ~~**The landing page still doesn't advertise either capability.**~~
       **shipped** — the `stats` link's `umbra:options` reports both, with the
       would-be `400`'s own text as the `reason` on the unsupported one (see the
@@ -756,12 +777,11 @@ none a blocker:
     own — the same scope the policy itself already has (it "applies only to the
     default renderers"). A `capabilities=` override on `build_app` is the shape
     if an embedder ever needs one.
-  - **Nothing advertises the always-refused pair.** `windowed` *and*
-    `speckle_filter` together is a `400` on every instance, refused in
-    `stats_options` rather than per instance, so it is a fact about the API and
-    not about the server — it lives in the docs and the OpenAPI description. A
-    client that reads `umbra:options` sees one option unsupported anyway, so the
-    combination is unreachable in practice.
+  - ~~**Nothing advertises the always-refused pair.**~~ **moot** — `windowed`
+    *and* `speckle_filter` together is no longer refused anywhere: the halo read
+    (`to_stack(speckle_filter=…, chunk_size=N)`) made the two compose, so the
+    request-level check is gone and a chunked instance honours both. There is no
+    always-refused pair left to advertise.
 - **The quantile histogram is a Python dict of bin → count.** Fine at the sizes
   this sees (a few thousand occupied bins per pass), but a pass spanning hundreds
   of decibels holds proportionally more. If that ever matters, cap the axis or

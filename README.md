@@ -400,8 +400,10 @@ halves in the same `provenance` keys `umbra convert` writes — `stack_stats`
 states the trade, a written GeoTIFF carries it, and stacking a filtered cube
 against an unfiltered pass is refused by the rule above. Sources that already
 record a filter are refused rather than filtered twice (two averagings leave a
-resolution neither window names), and the filter can't be combined with
-`chunk_size`, whose independently-read windows a filter window would straddle.
+resolution neither window names). It composes with `chunk_size`: each window is
+read with a half-window halo and cropped after filtering, so a filtered window
+holds the cells the whole-pass filter would have put there, and `lee`'s speckle
+parameter is read once per pass rather than per window.
 `umbra stack --speckle-filter lee --speckle-window 5` is the same on the CLI.
 
 Measuring reads a whole slice per pass, so a cube `chunk_size` let you *write*
@@ -1525,30 +1527,35 @@ variable than speckle alone explains, so edges and bright points survive. What
 it spends is resolution: a cell reports ground `speckle_window` cells across,
 which the response's `caveats` state rather than the client having to remember.
 That is why it is a request field in the cache key rather than a server policy,
-and why it is off by default. It needs the pass whole, which makes it the exact
-complement of `windowed`: a `400` on an instance started with
-`--stack-chunk-size`, where `windowed` is a `400` on one without — so the two
-are refused together at the request. The same pair reaches the agent tools
-(`stack_stats(urls=[...], speckle_filter="lee")` on MCP / LangChain /
-LlamaIndex).
+and why it is off by default. It used to be the exact complement of `windowed` —
+filtering needed each pass whole, so it was a `400` on exactly the
+`--stack-chunk-size` instance `windowed` requires, and the pair was
+unsatisfiable everywhere. The cube reads a half-window halo per window now, so
+**a chunked instance answers both**: the largest cube the server can build,
+measured with the interference averaged out of it. The same options reach the
+agent tools (`stack_stats(urls=[...], speckle_filter="lee")` on MCP / LangChain
+/ LlamaIndex).
 
-Since exactly one of that pair works on any given instance, the landing page
-says **which**, so a client picks before it asks rather than by reading a `400`:
+Which options an instance takes is still worth knowing before asking, so the
+landing page says, and an unsupported one carries the reason it *would* be
+refused with:
 
 ```bash
 curl -s http://127.0.0.1:8000/ | jq '.links[] | select(.rel=="stats")."umbra:options"'
 # {
 #   "stacking": "lazy (1024px windows, synchronous scheduler)",
 #   "windowed": {"supported": true},
-#   "speckle_filter": {"supported": false, "reason": "speckle filtering needs an
-#      unchunked instance: this server stacks lazy (1024px windows, …"}
+#   "speckle_filter": {"supported": true}
 # }
+# ...and on an eager instance, where there are no windows to measure in:
+#   "windowed": {"supported": false, "reason": "windowed measurement needs a
+#      chunked instance: this server stacks eager (whole series in memory), …"}
 ```
 
-The unsupported option carries the reason it *would* be refused with — the same
-string the endpoint raises, so the advertisement cannot drift from the refusal
-it predicts — and `stacking` is the policy line the server echoes at startup, so
-a client can tell the operator which flag to change.
+The reason is the same string the endpoint raises, so the advertisement cannot
+drift from the refusal it predicts — and `stacking` is the policy line the
+server echoes at startup, so a client can tell the operator which flag to
+change.
 
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
