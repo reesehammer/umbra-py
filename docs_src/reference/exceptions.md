@@ -15,6 +15,8 @@ class or a specific subclass.
 
 ::: umbra_py.MissingDependencyError
 
+::: umbra_py.UnsupportedMeasurementError
+
 ::: umbra_py.GeocodeError
 
 ::: umbra_py.AskError

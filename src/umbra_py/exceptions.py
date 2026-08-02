@@ -66,5 +66,31 @@ class MissingDependencyError(UmbraError):
     """Raised when an optional dependency (e.g. an extra) is not installed."""
 
 
+class UnsupportedMeasurementError(UmbraError, ValueError):
+    """Raised when a product's own metadata cannot support a requested measurement.
+
+    Radiometric calibration needs the SICD's ``Radiometric`` scale-factor
+    polynomials, and a ``measured`` noise floor needs its
+    ``Radiometric.NoiseLevel.NoisePoly``. Umbra's open products generally carry
+    neither, so refusing is the whole point: a scaling or a subtraction by an
+    invented number is indistinguishable in the output from a real one. What was
+    missing was the *name*. The refusal was a bare :class:`ValueError`, so
+    nothing could tell "this product cannot support that" apart from "you asked
+    for something that is not a calibration", and a batch had no safe way to
+    carry on past a scene whose metadata came up short.
+
+    It is a :class:`ValueError` as well as an :class:`UmbraError` because that is
+    what it was before it had a name: every ``except ValueError`` around a
+    conversion keeps working, and the new type is something to catch *more*
+    narrowly rather than instead.
+
+    It never covers a malformed *request* -- an unknown calibration name, a
+    percentile outside the distribution, an even filter window. Those stay bare
+    :class:`ValueError`\\ s, because the caller can fix them; this one is a fact
+    about the product, and the honest responses to it are a different setting
+    (``--noise-model estimated``) or a different scene.
+    """
+
+
 class GeocodeError(UmbraError):
     """Raised when a place name cannot be resolved to a location."""

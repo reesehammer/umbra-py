@@ -4328,3 +4328,113 @@ def test_slant_plane_conversion_refuses_an_unknown_speckle_filter(tmp_path, monk
             tmp_path / "in.ntf", tmp_path / "amp.tif", speckle_filter="frost"
         )
     assert reader.reads == []
+
+
+# --------------------------------------------------------------------------- #
+# A product that cannot support the measurement says so before its pixels are
+# read (and says it with a type a caller can catch narrowly).
+# --------------------------------------------------------------------------- #
+
+
+def test_unsupported_measurement_is_still_a_value_error():
+    """Naming the refusal is not a breaking change for anyone catching one."""
+    from umbra_py.exceptions import UmbraError, UnsupportedMeasurementError
+
+    exc = UnsupportedMeasurementError("no Radiometric block", hint="drop --calibrate")
+    assert isinstance(exc, ValueError)
+    assert isinstance(exc, UmbraError)
+    assert exc.to_dict() == {
+        "error": "UnsupportedMeasurementError",
+        "message": "no Radiometric block",
+        "hint": "drop --calibrate",
+    }
+
+
+def test_an_uncalibratable_product_is_refused_before_the_scene_is_read(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    # The default fake scene carries no Radiometric block -- an Umbra open
+    # product, and the case the refusal exists for.
+    reader = _FakeReader(_fake_complex(8, 10), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+
+    with pytest.raises(UnsupportedMeasurementError, match="no Radiometric metadata"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf", tmp_path / "out.tif", calibration="sigma0"
+        )
+
+    # The point: no slice of the complex product was ever asked for. On a real
+    # scene that is gigabytes of NITF pulled through amplitude detection to
+    # learn something the header already knew.
+    assert reader.reads == []
+
+
+def test_a_measured_noise_floor_is_refused_before_the_scene_is_read(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    reader = _FakeReader(_fake_complex(8, 10), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+
+    with pytest.raises(UnsupportedMeasurementError, match="noise floor cannot be subtracted"):
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf",
+            tmp_path / "out.tif",
+            noise_subtract=True,
+            noise_model="measured",
+        )
+    assert reader.reads == []
+
+
+def test_an_inferred_noise_floor_needs_no_metadata_and_still_reads(tmp_path, monkeypatch):
+    """The check is scoped to the models that depend on the product saying so."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    reader = _FakeReader(_fake_complex(8, 10), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+
+    convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "out.tif",
+        noise_subtract=True,
+        noise_model="estimated",
+    )
+    assert reader.reads  # the estimate reads the scene, which is where its floor is
+
+
+def test_the_slant_plane_writer_refuses_before_the_read_too(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    reader = _FakeReader(_fake_complex(8, 10), _FakeSicd())
+    _patch_open_complex(monkeypatch, reader)
+
+    with pytest.raises(UnsupportedMeasurementError, match="no Radiometric metadata"):
+        convert.sicd_to_amplitude_geotiff(
+            tmp_path / "in.ntf", tmp_path / "out.tif", calibration="beta0"
+        )
+    assert reader.reads == []
+
+
+def test_a_malformed_request_stays_a_plain_value_error(tmp_path, monkeypatch):
+    """An unknown calibration name is the caller's mistake, not the product's."""
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(8, 10), _FakeSicd()))
+
+    with pytest.raises(ValueError, match="Unknown calibration") as caught:
+        convert.sicd_to_geocoded_cog(
+            tmp_path / "in.ntf", tmp_path / "out.tif", calibration="nonesuch"
+        )
+    assert not isinstance(caught.value, UnsupportedMeasurementError)

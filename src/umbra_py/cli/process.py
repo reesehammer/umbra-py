@@ -150,6 +150,28 @@ def _echo_speckle_report(path: Path) -> None:
         )
 
 
+def _echo_chip_skipped_report(dataset: ChipDataset) -> None:
+    """Say which acquisitions a run left out, and in whose words.
+
+    Unlike the noise and speckle roll-ups below, this one prints a line *per*
+    acquisition rather than a count: a skipped scene is not a diagnostic about a
+    scene that is in the dataset, it is a scene that is not, and the reason
+    differs per product (one carries no ``Radiometric`` block at all, another
+    carries scale factors but no noise level). Silent when nothing was skipped,
+    which is every run that did not ask for the flag.
+    """
+    if not dataset.skipped:
+        return
+    click.echo(
+        f"  Skipped {len(dataset.skipped)} acquisition(s) whose metadata cannot "
+        "support the request:"
+    )
+    for skip in dataset.skipped:
+        click.echo(f"    {skip.item_id}: {skip.reason}")
+        if skip.hint:
+            click.echo(f"      hint: {skip.hint}")
+
+
 def _echo_chip_noise_report(dataset: ChipDataset) -> None:
     """Say what the noise subtraction did across a chip run's scenes.
 
@@ -1284,6 +1306,15 @@ def convert(
     "DuckDB / geopandas can query at scale (needs the [export] extra).",
 )
 @click.option(
+    "--skip-unsupported",
+    is_flag=True,
+    help="Carry on past an acquisition whose own metadata cannot support the "
+    "measurement asked of it (no Radiometric block for --calibrate, no stated "
+    "noise floor for --noise-model measured) instead of ending the run on it, "
+    "and report which ones were left out. Without it the first such product "
+    "costs the whole batch; with it the dataset says where its holes are.",
+)
+@click.option(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
 )
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
@@ -1330,6 +1361,7 @@ def chips(
     min_valid,
     clip_bbox,
     manifest,
+    skip_unsupported,
     area,
     bbox,
     place,
@@ -1492,6 +1524,7 @@ def chips(
             progress=None if as_json else _report,
             conversion=conversion,
             work_dir=work_dir,
+            skip_unsupported=skip_unsupported,
         )
 
     if as_json:
@@ -1503,5 +1536,6 @@ def chips(
     )
     if dataset.manifest_path:
         click.echo(f"  manifest -> {dataset.manifest_path}")
+    _echo_chip_skipped_report(dataset)
     _echo_chip_noise_report(dataset)
     _echo_chip_speckle_report(dataset)

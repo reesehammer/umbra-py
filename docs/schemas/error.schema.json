@@ -10,7 +10,7 @@
     "error": {
       "type": "string",
       "description": "The exception class name (e.g. \"CatalogError\", \"MissingDependencyError\"). Stable identifier a caller can branch on without parsing the message.",
-      "examples": ["CatalogError", "MissingDependencyError", "GeocodeError"]
+      "examples": ["CatalogError", "MissingDependencyError", "GeocodeError", "UnsupportedMeasurementError"]
     },
     "message": {
       "type": "string",

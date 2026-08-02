@@ -1688,3 +1688,184 @@ def test_cli_chips_rejects_an_even_speckle_window(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "--speckle-window" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Carrying on past an acquisition whose metadata cannot support the request.
+# --------------------------------------------------------------------------- #
+# A batch over a mixed archive used to die on the first product that carries no
+# `Radiometric` block, taking every scene already chipped with it. The refusal
+# is right -- an invented scale factor is indistinguishable from a real one --
+# so what changed is that it now has a type a batch can act on.
+
+
+def _refusing_preparer(cog_path, *, refuse, message="SICD carries no Radiometric metadata."):
+    """A `SicdPreparer` that refuses the named acquisitions the way convert does."""
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    def prepare(item, asset, work_dir, conversion):
+        if item.id in refuse:
+            raise UnsupportedMeasurementError(message, hint="Try --noise-model estimated.")
+        return cog_path
+
+    return prepare
+
+
+def test_a_batch_stops_on_an_unsupported_product_by_default(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    items = [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog), _sicd_item("acq-c", cog)]
+
+    with pytest.raises(UnsupportedMeasurementError):
+        write_chips(
+            items,
+            tmp_path / "ds",
+            asset="SICD",
+            chip_size=10,
+            preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        )
+
+
+def test_skip_unsupported_keeps_the_rest_and_says_what_it_left_out(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    items = [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog), _sicd_item("acq-c", cog)]
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        skip_unsupported=True,
+    )
+
+    # The two acquisitions that could answer are in the dataset...
+    assert sorted({r.item_id for r in dataset.records}) == ["acq-a", "acq-c"]
+    assert dataset.chip_count == 8
+    # ...and the one that could not is in the result rather than only in a log.
+    assert [s.item_id for s in dataset.skipped] == ["acq-b"]
+    skipped = dataset.skipped[0]
+    assert "Radiometric" in skipped.reason
+    assert skipped.hint == "Try --noise-model estimated."
+    assert skipped.datetime == "2024-02-08T12:00:00+00:00"
+    # The manifest is still written, for the scenes that made it.
+    assert dataset.manifest_path is not None
+    lines = Path(dataset.manifest_path).read_text().strip().splitlines()
+    assert len(lines) == dataset.chip_count
+
+
+def test_the_skipped_block_is_absent_from_a_run_that_skipped_nothing(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse=set()),
+        skip_unsupported=True,
+    )
+
+    assert dataset.skipped == ()
+    assert "skipped" not in dataset.to_dict()
+
+
+def test_skipped_acquisitions_reach_the_json_summary(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        skip_unsupported=True,
+    )
+
+    payload = dataset.to_dict()
+    assert payload["skipped_count"] == 1
+    assert payload["skipped"][0]["item_id"] == "acq-b"
+    assert "Radiometric" in payload["skipped"][0]["reason"]
+    # The chips that were written are counted as usual, so a consumer reading
+    # only `chip_count` is not silently told about a smaller dataset.
+    assert payload["chip_count"] == 4
+    assert payload["items"] == ["acq-a"]
+
+
+def test_a_batch_still_stops_on_an_error_that_is_not_about_the_product(tmp_path):
+    """`skip_unsupported` is not a blanket `except Exception`."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+    from umbra_py.exceptions import DownloadError
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+
+    def prepare(item, asset, work_dir, conversion):
+        if item.id == "acq-b":
+            raise DownloadError("connection reset")
+        return cog
+
+    with pytest.raises(DownloadError):
+        write_chips(
+            [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)],
+            tmp_path / "ds",
+            asset="SICD",
+            chip_size=10,
+            preparer=prepare,
+            skip_unsupported=True,
+        )
+
+
+def test_cli_chips_skip_unsupported_reports_the_acquisitions_it_left_out(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json", lambda url: {"id": "cli-acq", "assets": {}}
+    )
+    real_write_chips = chips_mod.write_chips
+
+    def _spy(items, out_dir, **kwargs):
+        return real_write_chips(
+            items,
+            out_dir,
+            preparer=_refusing_preparer(cog, refuse={"cli-acq"}),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    args = [
+        "chips",
+        "http://example.com/item.json",
+        "--out",
+        str(tmp_path / "ds"),
+        "--asset",
+        "SICD",
+        "--chip-size",
+        "10",
+        "--calibrate",
+        "sigma0",
+    ]
+    refused = CliRunner().invoke(cli_mod.cli, args)
+    assert refused.exit_code != 0
+
+    result = CliRunner().invoke(cli_mod.cli, [*args, "--skip-unsupported"])
+    assert result.exit_code == 0, result.output
+    assert "Skipped 1 acquisition(s)" in result.output
+    assert "cli-acq" in result.output
+    assert "hint:" in result.output

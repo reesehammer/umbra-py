@@ -356,10 +356,36 @@ carries into every manifest record and rolls up across the batch
   until the warning goes away, which is the opposite of the point. The number is
   reported unconditionally, so anyone who disagrees with the threshold can read
   the margin itself.
-- **`umbra chips` exposes the flag but not the check.** There is no chip-side
-  equivalent of `sicd_noise_level`, so a batch over acquisitions whose metadata
-  varies fails on the first product that cannot support it rather than reporting
-  which ones can. Worth doing if a mixed-metadata archive turns up.
+- ~~**`umbra chips` exposes the flag but not the check.**~~ **shipped** —
+  `umbra chips --skip-unsupported` / `write_chips(skip_unsupported=True)` carries
+  on past an acquisition whose own metadata cannot support the request and
+  records it on `ChipDataset.skipped` (a `SkippedAcquisition`: which pass, when,
+  the product's own words for why, and the refusal's hint), so a batch over a
+  mixed archive reports which ones could rather than dying on the first that
+  could not. What made it safe to do at all is the *type*: the five
+  product-metadata refusals in `convert.py` now raise
+  `UnsupportedMeasurementError` (an `UmbraError` **and** a `ValueError`, so no
+  existing caller changed), which is the only exception the skip catches — a
+  download failure or a corrupt product still ends the run. The check also moved
+  ahead of the pixel read (`_check_measurement_support`, called where
+  `_check_speckle_window` already was), so a scene that cannot answer costs its
+  header rather than a whole complex read. What is still open, and smaller:
+  - **The skips are in the summary, not in the manifest.** A loader reading only
+    `manifest.jsonl` sees a dataset with fewer scenes and no statement that
+    others were considered; the roll-up lives on `ChipDataset` and in `--json`.
+    A `.jsonl` row per skip would break the one-row-per-chip schema, so the
+    natural shape is a sidecar (`skipped.jsonl`) if someone needs it from the
+    files rather than from the run.
+  - **The check is per acquisition, discovered one at a time.** It still costs
+    each product's download to find out, because a SICD's metadata lives in the
+    NITF a range read would have to know how to parse. A true preflight — "which
+    of these twenty can be calibrated?" before any bytes — wants a header-only
+    read of the XML DES, which is a different job from this one.
+  - **Only the two metadata-dependent corrections are typed.** `--rtc` needs a
+    DEM and `SCPCOA` geometry, and a product missing the latter still raises a
+    bare `ValueError`, so a batch cannot skip it. Type it the same way if a
+    product without `SCPCOA` turns up in practice; it was left alone here
+    because nothing has hit it.
 
 ---
 

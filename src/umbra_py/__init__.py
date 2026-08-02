@@ -21,6 +21,7 @@ from .chips import (
     ChipRecord,
     NoiseSummary,
     SicdConversion,
+    SkippedAcquisition,
     chip_item,
     write_chips,
     write_manifest,
@@ -73,6 +74,7 @@ from .exceptions import (
     IndexSchemaError,
     MissingDependencyError,
     UmbraError,
+    UnsupportedMeasurementError,
 )
 from .export import export_geoparquet
 from .fuzzy import matching_tasks, task_matches
@@ -211,6 +213,7 @@ __all__ = [
     "ChipRecord",
     "ChipDataset",
     "NoiseSummary",
+    "SkippedAcquisition",
     "SicdConversion",
     "CHIPPABLE_ASSETS",
     "RASTER_ASSETS",
@@ -264,6 +267,7 @@ __all__ = [
     "AssetNotFoundError",
     "DownloadError",
     "MissingDependencyError",
+    "UnsupportedMeasurementError",
     "GeocodeError",
     "geocode_place",
     "item_to_feature",

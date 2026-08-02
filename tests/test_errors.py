@@ -180,3 +180,35 @@ def test_main_prints_json_error_when_requested(monkeypatch, capsys):
         "message": "kaboom",
         "hint": "retry",
     }
+
+
+def test_an_unsupported_measurement_reaches_the_json_envelope(monkeypatch, capsys):
+    """The refusal a product's metadata forces is part of the machine contract.
+
+    It used to be a bare ``ValueError``, wrapped by ``umbra convert`` into a
+    ``ClickException`` with no ``UmbraError`` behind it, so an agent got a prose
+    line and no stable name to branch on. Naming the family is what puts it in
+    the envelope, hint included.
+    """
+    import click
+
+    from umbra_py.exceptions import UnsupportedMeasurementError
+
+    monkeypatch.setenv("UMBRA_JSON", "1")
+    monkeypatch.setattr(sys, "argv", ["umbra", "convert", "scene.ntf", "out.tif"])
+    original = UnsupportedMeasurementError(
+        "SICD carries no Radiometric metadata", hint="Convert without --calibrate."
+    )
+    wrapped = click.ClickException(str(original))
+    wrapped.__cause__ = original
+    _force_cli_error(monkeypatch, wrapped)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    assert json.loads(capsys.readouterr().err.strip()) == {
+        "error": "UnsupportedMeasurementError",
+        "message": "SICD carries no Radiometric metadata",
+        "hint": "Convert without --calibrate.",
+    }
