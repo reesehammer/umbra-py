@@ -326,3 +326,225 @@ def test_cli_describe_reports_a_bad_reply_cleanly(monkeypatch, sample_item_dict)
     result = CliRunner().invoke(cli, ["describe", "https://example/item.json"])
     assert result.exit_code != 0
     assert "did not contain a JSON object" in result.output
+
+
+# --- The baked preview: reading the picture this machine already has --------
+
+
+def _png(width, height, tail=b""):
+    """Minimal but real PNG header bytes, so ``_png_size`` measures a picture."""
+    import struct
+
+    return (
+        b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height)
+    ) + tail
+
+
+def _previews(png=None, seen=None):
+    """A `BakedPreviews` stand-in returning ``png`` (or nothing baked)."""
+
+    def lookup(item_id):
+        if seen is not None:
+            seen.append(item_id)
+        return png
+
+    return lookup
+
+
+def test_png_size_reads_the_header_and_shrugs_at_anything_else():
+    assert describe_mod._png_size(_png(256, 200)) == (256, 200)
+    # A stub PNG from an injected renderer is not measurable -- that is provenance
+    # missing, not an error.
+    assert describe_mod._png_size(PNG) is None
+    assert describe_mod._png_size(b"") is None
+
+
+def test_baked_preview_refusal_names_what_the_bake_cannot_answer():
+    from umbra_py.describe import baked_preview_refusal
+
+    assert baked_preview_refusal() is None
+    assert "GEC" in (baked_preview_refusal(asset="CSI") or "")
+    assert "decibel" in (baked_preview_refusal(db=False) or "")
+
+
+def test_default_preview_never_looks_at_the_index(sample_item_dict):
+    """The default is unchanged by this option's existence: a fresh render, and
+    not even a lookup against the cache."""
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    seen = []
+    desc = describe(
+        item,
+        describer=_fake_describer('{"summary": "Farmland."}'),
+        render=_stub_render(),
+        previews=_previews(_png(256, 256), seen),
+    )
+    assert seen == []
+    assert desc.image.source == "rendered"
+    assert desc.caveats == []
+
+
+def test_auto_preview_reads_the_baked_picture_and_says_so(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    describer = _fake_describer('{"summary": "A harbor."}')
+    baked = _png(256, 256, tail=b"-baked")
+
+    def boom(_item):
+        raise AssertionError("rendered a scene that was already baked")
+
+    desc = describe(
+        item,
+        describer=describer,
+        render=boom,
+        previews=_previews(baked),
+        preview="auto",
+    )
+    # The model was handed the cached bytes, not a render.
+    assert describer.seen["messages"]["image_png"] == baked
+    assert desc.image.source == "baked"
+    assert (desc.image.width, desc.image.height) == (256, 256)
+    assert desc.image.max_size == 1024
+    # ... and the description says the picture was smaller than the one asked for.
+    assert any("256x256 px preview" in c for c in desc.caveats)
+    assert desc.to_dict()["image"]["source"] == "baked"
+
+
+def test_a_preview_at_least_as_big_as_the_render_needs_no_caveat(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    desc = describe(
+        item,
+        describer=_fake_describer('{"summary": "A harbor."}'),
+        previews=_previews(_png(256, 256)),
+        preview="auto",
+        max_size=256,
+    )
+    assert desc.image.source == "baked"
+    assert desc.caveats == []
+
+
+def test_auto_preview_renders_what_is_not_baked(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    desc = describe(
+        item,
+        describer=_fake_describer('{"summary": "Farmland."}'),
+        render=_stub_render(),
+        previews=_previews(None),
+        preview="auto",
+    )
+    assert desc.image.source == "rendered"
+    assert desc.caveats == []
+
+
+def test_auto_preview_renders_rather_than_substituting_a_different_picture(sample_item_dict):
+    """A CSI request or a linear stretch is not a smaller version of the baked
+    picture -- it is a different one, so ``auto`` renders instead of substituting."""
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    seen = []
+    desc = describe(
+        item,
+        describer=_fake_describer('{"summary": "Farmland."}'),
+        render=_stub_render(),
+        previews=_previews(_png(256, 256), seen),
+        preview="auto",
+        asset="CSI",
+    )
+    assert seen == []  # the cache was not even consulted
+    assert desc.image.source == "rendered"
+
+
+def test_baked_preview_refuses_a_request_it_cannot_answer(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    with pytest.raises(DescribeError, match="GEC quicklook"):
+        describe(
+            item,
+            describer=_fake_describer("{}"),
+            previews=_previews(_png(256, 256)),
+            preview="baked",
+            asset="CSI",
+        )
+
+
+def test_baked_preview_tells_no_index_apart_from_nothing_baked(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    with pytest.raises(DescribeError, match="index fetch"):
+        describe(item, describer=_fake_describer("{}"), preview="baked")
+    with pytest.raises(DescribeError, match="bake-thumbnails"):
+        describe(
+            item,
+            describer=_fake_describer("{}"),
+            previews=_previews(None),
+            preview="baked",
+        )
+
+
+def test_unknown_preview_source_is_rejected(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    with pytest.raises(DescribeError, match="Unknown preview source"):
+        describe(item, describer=_fake_describer("{}"), preview="cached")
+
+
+def test_cli_describe_reads_a_baked_preview_from_the_index(monkeypatch, tmp_path, sample_item_dict):
+    """End to end: `umbra describe --preview baked --index-db` describes a scene
+    from local bytes -- no S3 overview stream, no viz extra."""
+    from umbra_py.index import CatalogIndex
+
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        idx.add(item)
+        idx.commit()
+        idx.bake_thumbnails(renderer=lambda _it: _png(128, 128, tail=b"-from-index"))
+        idx.commit()
+
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
+    monkeypatch.setattr(
+        describe_mod,
+        "default_describer",
+        lambda **k: lambda m: json.dumps({"summary": "A quiet estuary.", "confidence": "low"}),
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("streamed a quicklook that was already baked")
+
+    monkeypatch.setattr(describe_mod, "render_quicklook_png", boom)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "describe",
+            "https://example/item.json",
+            "--preview",
+            "baked",
+            "--index-db",
+            str(tmp_path / "catalog.db"),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["image"] == {
+        "source": "baked",
+        "asset": "GEC",
+        "width": 128,
+        "height": 128,
+        "max_size": 1024,
+        "db": True,
+    }
+    assert any("128x128 px preview" in c for c in data["caveats"])
+
+
+def test_cli_describe_baked_without_an_index_says_which_fetch_is_missing(
+    monkeypatch, tmp_path, sample_item_dict
+):
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "describe",
+            "https://example/item.json",
+            "--preview",
+            "baked",
+            "--index-db",
+            str(tmp_path / "absent.db"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "umbra index fetch" in result.output

@@ -38,6 +38,7 @@ from ._shared import (
     _acquisition_filter_manifest,
     _acquisition_filter_options,
     _area_option,
+    _baked_previews,
     _baked_thumbnails,
     _built_note,
     _check_token_not_local,

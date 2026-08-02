@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -909,6 +910,42 @@ def test_describe_scene_without_key_raises_setup_error(sample_item_dict, monkeyp
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(MissingDependencyError, match="vision model API key"):
         ms.describe_scene(ITEM_URL)
+
+
+@responses.activate
+def test_describe_scene_reads_the_servers_baked_preview(sample_item_dict, monkeypatch, tmp_path):
+    """``preview="auto"`` describes from the index this server already holds, so a
+    hosted reading costs no COG range read per call."""
+    import umbra_py.describe  # noqa: F401  (ensure the submodule is imported)
+    from umbra_py.index import CatalogIndex
+
+    dsc = sys.modules["umbra_py.describe"]
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+
+    # A 128 px PNG header is enough for the size to be readable without Pillow.
+    baked = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 128, 128)
+    db_path = tmp_path / "catalog.db"
+    with CatalogIndex(db_path) as index:
+        index.add(UmbraItem.from_dict(sample_item_dict, href=ITEM_URL))
+        index.commit()
+        index.bake_thumbnails(renderer=lambda _item: baked)
+        index.commit()
+    monkeypatch.setattr(ms, "default_index_path", lambda: db_path)
+
+    def boom(*_a, **_k):  # streaming a picture the server already has is the bug
+        raise AssertionError("rendered a quicklook that was already baked")
+
+    monkeypatch.setattr(dsc, "render_quicklook_png", boom)
+    monkeypatch.setattr(
+        dsc, "default_describer", lambda **k: lambda m: json.dumps({"summary": "A quiet river."})
+    )
+
+    out = ms.describe_scene(ITEM_URL, preview="auto")
+    assert out["summary"] == "A quiet river."
+    assert out["image"]["source"] == "baked"
+    assert out["image"]["width"] == 128
+    # The reading says the picture was smaller than the render it stood in for.
+    assert any("128x128 px preview" in caveat for caveat in out["caveats"])
 
 
 # --------------------------------------------------------------------------

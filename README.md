@@ -1054,6 +1054,25 @@ caveats[]}` object, `--asset` / `--no-db` / `--max-size` to control the render,
 or `--model` to pick the model. Like `umbra ask`, it stays behind the `[ai]`
 extra and never runs implicitly.
 
+**Describe from the preview you already have.** By default each reading streams a
+fresh cloud-optimized overview from S3. If the local index carries baked previews
+(`umbra index fetch-thumbnails`, or your own `umbra index bake-thumbnails`),
+`--preview` reads one of those instead — no range read, and no `viz` extra at all:
+
+```bash
+umbra index fetch && umbra index fetch-thumbnails   # metadata + the pictures
+pip install "umbra-py[ai]"                          # no rasterio needed
+umbra describe https://.../<item>/<id>.json --preview baked
+```
+
+`baked` fails if the scene has no cached preview (saying which command bakes or
+fetches it); `auto` renders the ones that are missing. A cached preview is a
+128–256 px `GEC` quicklook, so it is smaller than `--max-size` asks for and is
+not a stand-in for another asset or a linear stretch: the reading records which
+picture it read (`"image"` in `--json`) and carries a caveat about the detail
+that was not in it, and a request the cache cannot answer is refused rather than
+quietly substituted.
+
 ### Monitor a site for new passes (`umbra watch`)
 
 SAR re-images a site pass after pass, so the natural way to monitor one is to run

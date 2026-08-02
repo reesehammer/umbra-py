@@ -52,7 +52,7 @@ from .dem import (
     tile_ids_for_bbox,
 )
 from .demo import build_demo, save_demo
-from .describe import DescribeError, SceneDescription, describe, parse_description
+from .describe import DescribeError, SceneDescription, SceneImage, describe, parse_description
 from .download import download_asset, download_item, download_url
 from .embed import (
     EmbedError,
@@ -229,6 +229,7 @@ __all__ = [
     "describe",
     "parse_description",
     "SceneDescription",
+    "SceneImage",
     "DescribeError",
     "narrate",
     "parse_narration",

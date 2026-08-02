@@ -7,6 +7,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Read a scene from the preview this machine already has (`umbra describe
+  --preview {render,baked,auto}`).** Every description streamed a fresh
+  cloud-optimized GeoTIFF overview from S3, once per call, forever — including
+  on the surfaces built so nobody has to install anything (the MCP / LangChain /
+  LlamaIndex `describe_scene`), where a hosted server re-read the same handful of
+  popular scenes for every client. Meanwhile the picture was already here: the
+  thumbnail bake landed, the weekly publish ships a whole-catalog
+  `catalog.thumbs.db`, and `umbra index fetch-thumbnails` puts it a command away.
+  Nothing connected the two, so the AI reading path spent the one budget this
+  project's guardrails single out (Umbra's egress) on bytes it had a local copy
+  of.
+
+  `--preview baked` / `auto` (`describe(preview=…, previews=…)`) reads the cached
+  quicklook instead. What that buys is not only the range read: the render is the
+  *only* reason the C2 capability needed `rasterio`, so a description from a baked
+  preview runs on an install carrying nothing but the `[ai]` extra — and runs
+  offline.
+
+  It is opt-in, and the reason is the same one the noise and speckle work keeps
+  arriving at: it changes the evidence. A baked preview is a 128–256 px
+  decibel-stretched `GEC` quicklook where `--max-size` defaults to 1024, so a
+  reading of one is not the reading of the other, and a description that does not
+  say which cannot be compared with a description that read the other. So the
+  default is unchanged (`render`, byte-identical to before), the picture is
+  recorded rather than assumed — `SceneDescription.image` / the `"image"` key of
+  `--json`: the source, the asset, and the PNG's *real* pixel dimensions, read
+  from its header, so it is what the model saw rather than what was asked for —
+  and a preview smaller than the render it stood in for adds a caveat saying so,
+  deterministically, after the model's own and never asked of it.
+
+  And the cases where the cached picture is not a smaller version of the
+  requested one but a *different* one — a non-`GEC` asset, a linear stretch — are
+  refused rather than substituted, because the index stores a preview's bytes and
+  nothing about how they were made. `baked_preview_refusal` is one function with
+  two uses, the shape `umbra serve`'s `stats_option_refusal` established: under
+  `--preview baked` its string is the error, under `auto` it is the reason that
+  scene gets rendered instead. Each refusal names the fix, and tells the two
+  apart that need different ones — no index here (`umbra index fetch` +
+  `fetch-thumbnails`) versus this scene not baked in it (`umbra index
+  bake-thumbnails`, or `--preview auto`).
 - **Average the speckle down on the largest cube that can be built
   (`to_stack(speckle_filter=…, chunk_size=N)`).** The two options that lift this
   library's measurement ceiling were mutually exclusive, and the refusal was
