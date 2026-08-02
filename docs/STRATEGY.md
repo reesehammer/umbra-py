@@ -430,6 +430,25 @@ envelope with a stable name and an actionable hint, which is what an agent
 branches on. It is also asked *before* the read now, off the metadata, the way
 the speckle window already was: a scene that could never have answered costs its
 header rather than a multi-gigabyte complex read.
+~~**Open:** that made the refusal cheap per scene but not cheap to *discover* — a
+SICD's metadata lives inside the NITF, so a batch still learned which of twenty
+passes could be calibrated by downloading twenty passes.~~ **shipped** — `umbra
+preflight` / `sicd_capabilities` read the metadata over the wire: a NITF states
+its own layout in a fixed-width file header, so the SICD XML data extension
+segment is located by arithmetic on ~30 bytes of segment table and fetched with
+two HTTP range requests — tens of kilobytes of a multi-gigabyte product, and the
+command reports both numbers, because the download it did not do is the whole
+claim. What makes it a preflight rather than a lookalike is that the verdict is
+the conversion's own: the parsed XML is presented through an attribute view
+shaped like a `sarpy` SICD (a polynomial's exponent-addressed coefficients
+densified into the grid the conversion reads), so
+`_check_measurement_support` — the same function, calling the same coefficient
+readers — produces the answer, and a preflight that says yes cannot be
+contradicted by the conversion it cleared. The whole path is stdlib plus the
+already-core `requests`, so "can this archive answer my question?" is answerable
+from a core install, and every way a product can fail to answer (not a NITF,
+NITF 2.0's different header layout, a truncated field, no XML segment) is
+refused by name rather than misread.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -904,6 +923,20 @@ from:
   the `--json` envelope with a hint. The same change moved the check ahead of the
   pixel read, so an uncalibratable scene costs its header rather than a whole
   complex read and an amplitude detection. See the CHANGELOG.
+  ~~**Open:** the header it cost was the header of a product already downloaded,
+  so *discovering* which of a site's twenty passes could be calibrated still cost
+  twenty whole-product downloads — the refusal was survivable and cheap per
+  scene, and its discovery was neither.~~ **shipped** — `umbra preflight` /
+  `sicd_capabilities` / `preflight_items` read the metadata by HTTP range
+  request: the NITF's own fixed-width file header states every segment's length,
+  so the SICD XML data extension segment is located without reading anything
+  between, and two range requests answer for a multi-gigabyte product. The
+  answer is `_check_measurement_support` run against an attribute view over the
+  parsed XML — the conversion's own check, not a restatement of it — so the
+  survivors of a preflight are exactly the passes `umbra chips --asset SICD
+  --calibrate gamma0` will not refuse. It needs no extra (stdlib NITF walk,
+  stdlib XML), and an acquisition whose metadata cannot be read is its own
+  verdict rather than the end of the walk. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

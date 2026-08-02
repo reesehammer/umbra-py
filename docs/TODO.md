@@ -376,11 +376,40 @@ carries into every manifest record and rolls up across the batch
     A `.jsonl` row per skip would break the one-row-per-chip schema, so the
     natural shape is a sidecar (`skipped.jsonl`) if someone needs it from the
     files rather than from the run.
-  - **The check is per acquisition, discovered one at a time.** It still costs
-    each product's download to find out, because a SICD's metadata lives in the
-    NITF a range read would have to know how to parse. A true preflight — "which
-    of these twenty can be calibrated?" before any bytes — wants a header-only
-    read of the XML DES, which is a different job from this one.
+  - ~~**The check is per acquisition, discovered one at a time.**~~ **shipped** —
+    `umbra preflight` / `sicd_capabilities` / `preflight_items`
+    (`src/umbra_py/preflight.py`) walk the NITF's own fixed-width file header to
+    locate the XML data extension segment and fetch it with two HTTP range
+    requests, so "which of these twenty can be calibrated?" costs tens of
+    kilobytes per acquisition instead of the product. The verdict is
+    `convert._check_measurement_support` applied to an attribute view over the
+    parsed XML, so it cannot become a second opinion about what a product
+    supports. Stdlib + `requests`: no `sarpy`, no `numpy`, no extra. What is still
+    open, and smaller:
+    - **Nothing wires the preflight into the batch.** `write_chips` still
+      discovers a refusal by attempting the conversion (with
+      `--skip-unsupported` to survive it); a `preflight=True` that dropped the
+      unsupported passes before any download would make the saving automatic
+      rather than a separate command. It was left as a question the user asks
+      because a batch that silently drops scenes is the failure mode
+      `--skip-unsupported` was careful to avoid — the roll-up would have to say
+      what it skipped and why, which is the same design decision made twice.
+    - **The reader knows NITF 2.1 only.** NITF 2.0's security fields are a
+      different length, so every subsequent offset would land somewhere
+      arbitrary; it is refused by name rather than guessed at. SICD mandates 2.1,
+      so nothing in this archive needs the older layout — add the second field
+      table if a product ever turns up that does.
+    - **A `yes` on a product that carries the polynomials needs `numpy`.** Every
+      metadata gate runs first (so every *refusal* is answerable from a core
+      install, which is the case the open archive is), but confirming support
+      reads the coefficients through `convert`'s own reader, which requires the
+      `[convert]` extra the conversion needs anyway. Splitting the presence check
+      from the coefficient parse would remove that, at the cost of the shared
+      code path that is the whole reason the two cannot disagree.
+    - **Only the two `Radiometric` questions are asked.** The view carries the
+      whole SICD XML, so `--rtc`'s `SCPCOA` geometry (still a bare `ValueError`,
+      see below) or a polarization/looks read would be a few lines each — they
+      wait for the same evidence the untyped refusal does.
   - **Only the two metadata-dependent corrections are typed.** `--rtc` needs a
     DEM and `SCPCOA` geometry, and a product missing the latter still raises a
     bare `ValueError`, so a batch cannot skip it. Type it the same way if a

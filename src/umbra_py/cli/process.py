@@ -1539,3 +1539,192 @@ def chips(
     _echo_chip_skipped_report(dataset)
     _echo_chip_noise_report(dataset)
     _echo_chip_speckle_report(dataset)
+
+
+def _human_bytes(count: int | None) -> str:
+    """A byte count as the largest unit it reads cleanly in."""
+    if count is None:
+        return "unknown"
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} TB"  # pragma: no cover - unreachable, the loop returns
+
+
+def _preflight_line(result) -> str:
+    """One acquisition's verdict, as the report prints it."""
+    caps = result.capabilities
+    if caps is None:
+        return f"  {result.item_id}: could not be read -- {result.error}"
+    cals = ", ".join(caps.calibrations) if caps.calibrations else "none"
+    noise = caps.noise_level or "none"
+    verdict = "yes" if result.supported else "no"
+    return f"  {result.item_id}: calibrations {cals}; noise level {noise} -> {verdict}"
+
+
+@cli.command()
+@click.argument("item_urls", nargs=-1)
+@click.option(
+    "--calibrate",
+    type=click.Choice(list(CALIBRATION_TYPES), case_sensitive=False),
+    default=None,
+    help="Ask whether each product could be radiometrically calibrated this way "
+    "(the same choice --calibrate takes on convert/chips).",
+)
+@click.option(
+    "--subtract-noise",
+    is_flag=True,
+    help="Ask whether each product's noise floor could be subtracted. Only "
+    "--noise-model measured depends on the metadata; the inferred models read the "
+    "scene's own pixels and so need nothing from a preflight.",
+)
+@click.option(
+    "--noise-model",
+    type=click.Choice(list(NOISE_MODELS), case_sensitive=False),
+    default="measured",
+    show_default=True,
+    help="Which floor --subtract-noise would use (see convert --noise-model).",
+)
+@click.option(
+    "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
+)
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@_shared._place_option
+@_shared._geometry_option
+@click.option(
+    "--start",
+    help="Earliest acquisition date (YYYY-MM-DD or a relative expression).",
+)
+@click.option("--end", help="Latest acquisition date (same formats as --start).")
+@click.option(
+    "--max-search",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Max acquisitions to gather when searching (ignored with item URLs).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@_shared._fuzzy_option
+@_shared._acquisition_filter_options
+@_shared._local_index_options
+@_shared._token_option
+def preflight(
+    item_urls,
+    calibrate,
+    subtract_noise,
+    noise_model,
+    area,
+    bbox,
+    place,
+    intersects,
+    start,
+    end,
+    max_search,
+    as_json,
+    fuzzy,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
+    local,
+    db_path,
+    token,
+) -> None:
+    """Ask which complex acquisitions can support a measurement, before downloading any.
+
+    Radiometric calibration and a measured noise floor both read polynomials out
+    of the SICD's own Radiometric metadata, which Umbra's open products generally
+    do not carry -- so `umbra convert --calibrate` and `umbra chips --calibrate`
+    refuse on them, by design. Finding out which passes those are used to cost one
+    whole-product download each: a SICD's metadata lives inside the NITF.
+
+    This reads it over the wire instead. A NITF states its own layout, so the SICD
+    XML is located and fetched with two HTTP range requests -- tens of kilobytes of
+    a multi-gigabyte product -- and the verdict is the conversion's own support
+    check applied to it. Over a site's twenty passes that is the difference between
+    a few hundred kilobytes and tens of gigabytes.
+
+    \b
+    Two ways to choose what to ask about:
+    - Pass STAC JSON URLs directly.
+    - Or search: give --area (or --bbox / --place / --intersects) with
+      --start/--end.
+
+    Needs no extra: the parse is stdlib, so "can this archive answer my question?"
+    is answerable from a core install.
+    """
+    from ..preflight import PREFLIGHT_ASSET, preflight_items
+
+    _shared._check_token_not_local(token, local, db_path)
+    search_mode = any(v for v in (area, bbox, place, intersects, start, end))
+    if item_urls and search_mode:
+        raise click.UsageError(
+            "Pass item URLs OR search criteria "
+            "(--area/--bbox/--place/--intersects/--start/--end), not both."
+        )
+    if item_urls:
+        items = [_shared._item_from_url(url) for url in item_urls]
+    else:
+        if not (area or bbox or place or intersects):
+            raise click.UsageError(
+                "Give --area, --bbox, --place or --intersects (optionally with "
+                "--start/--end) to search, or pass item URLs directly."
+            )
+        search_bbox, search_geometry = _shared._resolve_geography(bbox, place, intersects)
+        items = _shared._gather_items(
+            local=local,
+            db_path=db_path,
+            token=token,
+            bbox=search_bbox,
+            intersects=search_geometry,
+            start=start,
+            end=end,
+            area=area,
+            fuzzy=fuzzy,
+            product_types=[PREFLIGHT_ASSET],
+            limit=max_search,
+            **_shared._acquisition_filter_kwargs(
+                polarizations, min_incidence, max_incidence, max_resolution
+            ),
+        )
+        if not items:
+            raise click.ClickException(
+                f"Search found no {PREFLIGHT_ASSET} acquisitions. Widen the date range or area."
+            )
+
+    def _report(index: int, total: int, item, result) -> None:
+        click.echo(_preflight_line(result))
+
+    with OrbitSpinner(f"Reading {len(items)} product header(s)"):
+        report = preflight_items(
+            items,
+            calibration=calibrate.lower() if calibrate else None,
+            noise_subtract=subtract_noise,
+            noise_model=noise_model.lower(),
+            progress=None if as_json else _report,
+        )
+
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+
+    asked = []
+    if calibrate:
+        asked.append(f"--calibrate {calibrate.lower()}")
+    if subtract_noise:
+        asked.append(f"--subtract-noise --noise-model {noise_model.lower()}")
+    what = " ".join(asked) if asked else "conversion"
+    click.echo(f"{len(report.supported)} of {len(report.results)} acquisition(s) support {what}.")
+    click.echo(
+        f"  Read {_human_bytes(report.bytes_read)} of product headers"
+        + (
+            f" instead of {_human_bytes(report.product_bytes)} of product."
+            if report.product_bytes
+            else "."
+        )
+    )
+    hints = {r.hint for r in report.unsupported if r.hint}
+    for hint in sorted(hints):
+        click.echo(f"  hint: {hint}")

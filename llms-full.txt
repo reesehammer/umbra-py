@@ -75,6 +75,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra load` — Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
 - `umbra map` — Render search results as an interactive map or GeoJSON file.
 - `umbra mcp` — Run the umbra Model Context Protocol server (stdio transport).
+- `umbra preflight` — Ask which complex acquisitions can support a measurement, before downloading any.
 - `umbra quicklook` — Render a standalone SAR quicklook image from a STAC item URL.
 - `umbra search` — Search the catalog by area, date and product type.
 - `umbra semantic` — Semantic (embedding-based) task-name search -- the model-backed layer of natural-language search.

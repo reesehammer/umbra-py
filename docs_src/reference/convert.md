@@ -98,3 +98,44 @@ a fault in the filter.
 ::: umbra_py.NoiseModelComparison
 
 ::: umbra_py.NoiseModelAgreement
+
+## Preflight: ask before downloading
+
+`sicd_calibration_types()` and `sicd_noise_level()` answer "can this product
+support that?" from a file you already have. The expensive half was getting the
+file: a SICD's metadata lives inside the NITF, so learning that a pass cannot be
+calibrated meant downloading the pass, and learning it about a site's twenty
+passes meant downloading twenty.
+
+`sicd_capabilities()` (`umbra preflight`) asks the same question over the wire. A
+NITF states its own layout in a fixed-width file header, so the SICD XML — a data
+extension segment near the end of the file — is located by arithmetic on the
+segment table and fetched with two HTTP range requests: tens of kilobytes of a
+multi-gigabyte product. It reports what the product declares (which calibrations,
+which noise level, the scene's identity), what the answer cost, and the product
+size it did not download.
+
+The verdict is not a second opinion. `SicdCapabilities.refusal()` hands the
+parsed metadata to the conversion's own support check, calling the same
+coefficient readers, so a preflight that clears a product and a conversion that
+then refuses it cannot disagree — only where the metadata came from differs.
+`preflight_items()` asks it of a whole search result, recording an unreadable
+acquisition as its own verdict rather than ending the walk.
+
+The NITF walk and the XML parse are stdlib, so this needs no extra at all —
+including no `[convert]`. Only confirming a *positive* answer on a product that
+does carry the scale factors reads their coefficients, which needs `numpy`; every
+refusal, which is what most of Umbra's open archive returns, is answerable from a
+core install.
+
+::: umbra_py.sicd_capabilities
+
+::: umbra_py.preflight_items
+
+::: umbra_py.SicdCapabilities
+
+::: umbra_py.PreflightResult
+
+::: umbra_py.PreflightReport
+
+::: umbra_py.read_sicd_xml

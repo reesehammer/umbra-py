@@ -120,6 +120,15 @@ from .pmtiles import (
     save_viewer,
     write_pmtiles,
 )
+from .preflight import (
+    PREFLIGHT_ASSET,
+    PreflightReport,
+    PreflightResult,
+    SicdCapabilities,
+    preflight_items,
+    read_sicd_xml,
+    sicd_capabilities,
+)
 from .semantic import (
     SemanticError,
     SemanticMatch,
@@ -198,6 +207,13 @@ __all__ = [
     "conversion_provenance",
     "conversion_tags",
     "read_conversion_tags",
+    "sicd_capabilities",
+    "read_sicd_xml",
+    "preflight_items",
+    "SicdCapabilities",
+    "PreflightResult",
+    "PreflightReport",
+    "PREFLIGHT_ASSET",
     "fetch_dem_for_bbox",
     "copernicus_tile_id",
     "tile_ids_for_bbox",
