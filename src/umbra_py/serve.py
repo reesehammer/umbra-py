@@ -29,9 +29,12 @@ site straight from HTTP, not just a curated set baked at build time
 - ``POST /artifacts/change``   -- a 2--3 date change composite over a query;
 - ``POST /artifacts/timescan`` -- a temporal-statistics composite over a series;
 - ``POST /artifacts/swipe``    -- an interactive before/after swipe map (HTML);
-- ``POST /artifacts/stats``    -- the same change question answered in *numbers*.
+- ``POST /artifacts/stats``    -- the same change question answered in *numbers*;
+- ``POST /artifacts/provenance`` -- whether that selection is one measurement at
+  all, asked (and answered with the largest subset that is) before the numbers
+  are spent on it.
 
-The last one is the odd one out on purpose. Every other artifact is a picture,
+The stats endpoint is the odd one out on purpose. Every other artifact is a picture,
 which a human reads and a program cannot; ``/artifacts/stats`` runs the
 :func:`~umbra_py.load.to_stack` + :func:`~umbra_py.load.stack_stats` reduction
 behind the same request shape and returns JSON -- per-pass decibel statistics,
@@ -43,6 +46,19 @@ the reduction the CLI (``umbra stack --stats``) and the agent front doors
 (``stack_stats`` on MCP / LangChain / LlamaIndex) already expose, finally
 reachable over HTTP -- so a QGIS user, a browser front end or an OpenAPI-driven
 agent can *measure* a site without installing the ``load`` extra locally.
+
+``/artifacts/provenance`` is the preflight for it, and the one endpoint that
+neither renders nor caches. ``/artifacts/stats`` refuses a selection whose
+rasters were made by different ``umbra convert`` settings, because differencing
+two conversions puts their difference on the time axis; that refusal used to be
+discoverable only by spending the request, and named a subset it could not
+identify. This endpoint asks the same question first
+(:func:`~umbra_py.load.stack_provenance`, one COG header per pass and no
+pixels), reports a mix as a ``200`` rather than a ``400`` -- the mix *is* the
+answer -- and returns the largest agreeing subset with the hrefs to re-run on.
+It is the move ``umbra preflight`` makes for a chip run and ``umbra stack
+--provenance`` for a local one, on the front door that answers for people who
+installed nothing.
 
 These wrap the existing :mod:`umbra_py.viz` and :mod:`umbra_py.load` functions
 unchanged and cache every result to disk keyed by its inputs, so a repeat
@@ -156,7 +172,7 @@ from .constants import (
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
-from .load import STACK_AUTO_CRS, STACK_EXTENTS
+from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -560,6 +576,13 @@ def landing_page(
                 method="POST",
                 title="On-demand change statistics over a site's passes (JSON)",
                 **{STATS_CAPABILITY_FIELD: stats_capabilities(stack_execution)},
+            ),
+            _link(
+                "provenance",
+                f"{base}/artifacts/provenance",
+                type="application/json",
+                method="POST",
+                title="Whether a selection is one measurement, before /artifacts/stats",
             ),
         ]
     return {
@@ -2296,6 +2319,65 @@ def build_app(
                 suffix="json",
                 make_options=stats_options,
             )
+
+        @app.post("/artifacts/provenance", tags=["Artifacts"])
+        def post_provenance(body: dict[str, Any] = Body(default={})) -> Response:
+            """Say whether a selection is one measurement, before stats is spent on it.
+
+            ``/artifacts/stats`` refuses a selection whose rasters were made by
+            different ``umbra convert`` settings -- a calibrated pass
+            differenced against an uncalibrated one puts the difference between
+            two *conversions* on the time axis and reports it as change on the
+            ground. That refusal arrives as a ``400`` after the request has been
+            spent, and its advice ("use only the acquisitions that share one")
+            names a subset it cannot identify. This is the same question asked
+            first, and answered with that subset.
+
+            Send the body you would send to ``/artifacts/stats`` -- the same
+            ``ids`` or ``bbox``/``datetime`` query, normalised by the same
+            :func:`stats_options`, vetted into the same frames by
+            :func:`stats_frames` -- so the answer is about the selection that
+            endpoint would actually stack, and a bad option costs a ``400``
+            here rather than there. The body's stacking options are read only
+            for ``asset``: which raster to read the record from is the one
+            choice that changes the answer.
+
+            The response is :meth:`~umbra_py.load.StackProvenance.to_dict`,
+            byte-for-byte the document ``umbra stack --provenance --json``
+            emits: ``agrees``, the ``groups`` largest-first with the ``hrefs``
+            to re-run on, ``shared`` when they agree, ``refusal`` (verbatim what
+            ``/artifacts/stats`` would have answered) when they do not, and
+            ``unreadable`` for sources that could not be opened at all.
+
+            A mixed selection is a ``200``, not a ``400``: reporting the mix is
+            what was asked for. Only a selection that could not be measured at
+            all -- fewer than two passes, or mixed polarizations -- is a
+            ``400``, because there is no stack to preflight.
+
+            It costs the header reads a stack pays for anyway (kilobytes per
+            pass by range request, no pixels) and nothing after them, so it is
+            answered synchronously and is not cached: a re-converted source is
+            exactly the case where a content-addressed answer would be stale,
+            and a question asked to avoid spending a render should not need a
+            job document of its own.
+            """
+            items = _resolve_for_composite(body)
+            try:
+                frames = stats_frames(items)
+                options = stats_options(body)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            try:
+                # Deliberately not routed through ``renderers``: the report is
+                # not a render, and its whole claim is that the verdict is
+                # ``to_stack``'s own. An injectable provenance would be exactly
+                # the second opinion that construction exists to rule out.
+                report = stack_provenance(frames, asset=options["asset"])
+            except MissingDependencyError as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(content=report.to_dict())
 
         @app.get("/jobs/{job_id}", tags=["Artifacts"])
         def get_job(job_id: str, request: Request) -> JSONResponse:

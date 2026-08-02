@@ -928,6 +928,23 @@ from:
   cannot be read is reported apart rather than grouped — the line
   `PreflightResult.error_scope` already draws — because a failed read does not
   make a series mixed, it makes the answer incomplete.
+  ~~**Still open:** it was a library function and a CLI flag, which covers
+  everyone with a checkout — so the two surfaces built so nobody needs one still
+  learned a selection was two conversions by *spending* the measurement.~~
+  **shipped** — `POST /artifacts/provenance` and the `stack_provenance` agent
+  tool (MCP → LangChain → LlamaIndex, the shared roster, one callable) ask it
+  from the hosted and model-driven front doors. The endpoint takes the body
+  `/artifacts/stats` takes and vets it into the same frames, so the preflight is
+  about the request it precedes rather than about a lookalike selection — the
+  same "cannot be a second opinion" construction, one layer out. A mix answers
+  `200` carrying the refusal *and* the largest agreeing subset with the hrefs to
+  re-run on, because reporting the mix is what was asked for; only a selection
+  that could not be measured at all is a `400`. It is the one artifact route
+  that neither renders nor caches (the read is kilobytes, and a re-converted
+  source is exactly the case a content-addressed answer would get wrong) and the
+  one that is deliberately not injectable, since an injectable provenance is the
+  second opinion the design forbids. All three surfaces emit the same
+  `to_dict()`, so a shell, an HTTP client and a model read one schema.
   **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
 - ~~Nothing removed **speckle**, the one uncertainty in a calibrated pixel that is

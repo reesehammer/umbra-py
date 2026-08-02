@@ -36,6 +36,7 @@ _EXPECTED_NAMES = {
     "geocode_place",
     "index_stats",
     "stack_stats",
+    "stack_provenance",
     "download_asset",
     "watch_site",
     "find_similar",
@@ -94,6 +95,9 @@ def test_json_tools_are_the_same_callables_as_mcp():
     # stack_stats is deterministic arithmetic returning JSON, so it needs no
     # native reimplementation the way the image tools do.
     assert li.stack_stats is ms.stack_stats
+    # ...and so does its preflight, which reads raster headers and returns the
+    # same report document the CLI and the HTTP endpoint emit.
+    assert li.stack_provenance is ms.stack_provenance
     # narrate_change is the C2 change-narration tool -- the last MCP tool to reach
     # the agent surfaces; it is the same callable here (no drift), not re-wrapped.
     assert li.narrate_change is ms.narrate_change

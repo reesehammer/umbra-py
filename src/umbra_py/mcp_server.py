@@ -588,6 +588,47 @@ def stack_stats(
     )
 
 
+def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
+    """Check whether a site's passes are one measurement, before measuring them.
+
+    ``stack_stats`` refuses a selection whose rasters were made by *different*
+    ``umbra convert`` settings — a calibrated pass differenced against an
+    uncalibrated one puts the difference between two conversions on the time
+    axis and reports it as change on the ground. This is the question that
+    refusal answers, asked ahead of it: it reads each acquisition's ``UMBRA_*``
+    conversion record straight from its raster header (kilobytes per pass, no
+    pixels, no co-registration) and groups the selection by what its pixel
+    values *are*.
+
+    Returns ``agrees`` (whether ``stack_stats`` would accept the selection),
+    ``groups`` largest-first — each with the conversion ``record`` its members
+    share, their ``item_ids`` and the ``hrefs`` to re-run on — plus ``shared``
+    (the record they all agree on) when they agree, ``refusal`` (verbatim the
+    error ``stack_stats`` would raise) when they do not, and ``unreadable`` for
+    any source that could not be opened at all, which is an incomplete answer
+    rather than a mixed one.
+
+    Reach for it in two situations. **After** a ``stack_stats`` call fails with
+    a provenance refusal: ``groups[0]["hrefs"]`` is the largest set of passes
+    that *do* agree, so re-running ``stack_stats`` on those is a measurement
+    rather than a guess — the refusal itself cannot name that subset. And
+    **before** measuring a long series you did not assemble yourself, since the
+    check costs a header read per pass and saves the whole cube when the answer
+    is no.
+
+    A series of Umbra's published products as they ship (the common case) agrees
+    trivially: every pass reads as ``"(unrecorded)"``, which is one value, so
+    ``agrees`` is true and ``shared`` is empty. **No model is called.**
+    """
+    from .load import stack_provenance as _stack_provenance
+
+    items = [_fetch_item(u) for u in urls]
+    if len(items) < 2:
+        raise ValueError("stack_provenance needs at least two item URLs.")
+    _require_same_polarization(items)
+    return _stack_provenance(items, asset=asset).to_dict()
+
+
 def download_asset(
     url: str, asset: str = "GEC", dest_dir: str = ".", confirm: bool = False
 ) -> dict[str, Any]:
@@ -992,7 +1033,10 @@ def build_server() -> MCPServer:
             "change_composite / timescan to see the radar imagery. stack_stats "
             "answers the same change question in numbers (per-pass decibel "
             "statistics and how much ground moved, in km²; with blocks=N it "
-            "also says which part of the site moved and when). describe_scene "
+            "also says which part of the site moved and when), and "
+            "stack_provenance says whether a selection is one measurement "
+            "before stack_stats is spent on it — and names the largest subset "
+            "that is, when it is not. describe_scene "
             "returns a SAR-literate model reading of a scene, and narrate_change "
             "reads what changed between passes grounded in a per-block decibel grid "
             "(the two tools that consult a model, and only when an [ai] key is "
@@ -1010,6 +1054,7 @@ def build_server() -> MCPServer:
         change_composite,
         timescan,
         stack_stats,
+        stack_provenance,
         download_asset,
         watch_site,
         find_similar,

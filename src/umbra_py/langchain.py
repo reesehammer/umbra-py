@@ -67,6 +67,7 @@ from .mcp_server import (  # noqa: F401 - re-exported for direct use
     index_stats,
     narrate_change,
     search_catalog,
+    stack_provenance,
     stack_stats,
     watch_site,
 )
@@ -159,7 +160,8 @@ def timescan(urls: list[str], asset: str = "GEC", db: bool = False, max_size: in
 
 
 # The JSON-returning tools, shared verbatim with the MCP server (compact context
-# cards, geocoding, index status, time-series statistics, downloads, standing
+# cards, geocoding, index status, time-series statistics and the provenance
+# preflight that says whether a series is one measurement, downloads, standing
 # watch, similarity search, and the two opt-in VLM readings). Each gates its own
 # optional key/index at call time with a helpful error, so all are safe to
 # register unconditionally.
@@ -169,6 +171,7 @@ _JSON_TOOLS = (
     geocode_place,
     index_stats,
     stack_stats,
+    stack_provenance,
     download_asset,
     watch_site,
     find_similar,
@@ -216,6 +219,7 @@ __all__ = [
     "geocode_place",
     "index_stats",
     "stack_stats",
+    "stack_provenance",
     "download_asset",
     "watch_site",
     "find_similar",

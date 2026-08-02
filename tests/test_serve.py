@@ -1337,6 +1337,155 @@ def test_speckle_filter_is_part_of_the_cache_key(art_client, recorder):
     assert [c[2]["speckle_filter"] for c in recorder.calls] == [None, "boxcar"]
 
 
+# ---- the preflight for it (POST /artifacts/provenance) -------------------
+
+
+def _provenance_report(*, agrees: bool = True):
+    """A real :class:`~umbra_py.load.StackProvenance`, built without rasterio.
+
+    The dataclasses are core; only :func:`~umbra_py.load.stack_provenance`
+    itself needs the extra, so a route test can assert on the *document* the
+    CLI emits rather than on a stand-in for it.
+    """
+    from umbra_py.load import ProvenanceGroup, StackProvenance
+
+    calibrated = ProvenanceGroup(
+        record={"calibration": "gamma0", "rtc_model": "facet"},
+        item_ids=("item-0",),
+        hrefs=(_href(0),),
+    )
+    if agrees:
+        return StackProvenance(
+            asset="GEC",
+            groups=(calibrated,),
+            unreadable=(),
+            shared=dict(calibrated.record),
+            refusal=None,
+        )
+    plain = ProvenanceGroup(
+        record={"calibration": "(unrecorded)", "rtc_model": "(unrecorded)"},
+        item_ids=("item-1", "item-2"),
+        hrefs=(_href(1), _href(2)),
+    )
+    return StackProvenance(
+        asset="GEC",
+        groups=(plain, calibrated),
+        unreadable=(),
+        shared={},
+        refusal="Refusing to stack rasters whose calibration disagrees (...)",
+    )
+
+
+@pytest.fixture
+def provenance_client(index_path, recorder, tmp_path, monkeypatch):
+    """An artifacts client whose provenance read is stubbed, and the calls it saw."""
+    seen: list[tuple[list[str], str]] = []
+    reports: list = [_provenance_report()]
+
+    def fake(items, *, asset="GEC"):
+        seen.append(([it.id for it in items], asset))
+        return reports[-1]
+
+    monkeypatch.setattr(serve, "stack_provenance", fake)
+    app = serve.build_app(
+        index_path, renderers=recorder.as_renderers(), cache_dir=tmp_path / "artifacts"
+    )
+    return TestClient(app), seen, reports
+
+
+def test_provenance_endpoint_emits_the_cli_document(provenance_client):
+    """The response *is* ``StackProvenance.to_dict()`` -- byte-for-byte what
+    ``umbra stack --provenance --json`` writes, so one reader serves both."""
+    client, _, reports = provenance_client
+    resp = client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/json"
+    assert resp.json() == reports[-1].to_dict()
+    assert resp.json()["agrees"] is True
+
+
+def test_provenance_answers_for_the_frames_stats_would_stack(provenance_client):
+    """The preflight is asked about the selection ``/artifacts/stats`` resolves
+    and vets, so a cleared report cannot be contradicted by the stats call it
+    cleared -- the same construction that keeps the verdict ``to_stack``'s own."""
+    client, seen, _ = provenance_client
+    client.post("/artifacts/provenance", json={"bbox": [-69, 10, -67, 11], "asset": "CSI"})
+    ids, asset = seen[0]
+    assert ids == ["item-0", "item-1", "item-2"]
+    assert asset == "CSI"
+
+
+def test_provenance_reports_a_mix_as_an_answer_not_an_error(provenance_client):
+    """A mixed selection is a 200: reporting the mix is what was asked for.
+    The same mix at ``/artifacts/stats`` is the 400 this endpoint quotes."""
+    client, _, reports = provenance_client
+    reports.append(_provenance_report(agrees=False))
+    resp = client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["agrees"] is False
+    assert "calibration disagrees" in body["refusal"]
+    # The half the refusal could not give: the biggest agreeing subset, with
+    # the hrefs to re-run on.
+    assert body["groups"][0]["item_ids"] == ["item-1", "item-2"]
+    assert body["groups"][0]["hrefs"] == [_href(1), _href(2)]
+
+
+def test_provenance_is_not_cached(provenance_client):
+    """A re-converted source is exactly the case a content-addressed answer
+    would get wrong, and the read is kilobytes -- so it is asked every time."""
+    client, seen, _ = provenance_client
+    first = client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]})
+    again = client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]})
+    assert first.status_code == again.status_code == 200
+    assert "x-umbra-cache" not in {k.lower() for k in again.headers}
+    assert len(seen) == 2
+
+
+def test_provenance_needs_a_selection_that_could_be_measured(provenance_client):
+    """Fewer than two passes is a 400: there is no stack to preflight."""
+    client, seen, _ = provenance_client
+    resp = client.post("/artifacts/provenance", json={"ids": ["item-0"]})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+    assert not seen
+
+
+def test_provenance_rejects_the_same_bad_options_stats_would(provenance_client):
+    """It takes the stats body, so a bad option costs a 400 here rather than
+    surviving the preflight and failing the request it was meant to save."""
+    client, seen, _ = provenance_client
+    resp = client.post(
+        "/artifacts/provenance", json={"ids": ["item-0", "item-1"], "extent": "everything"}
+    )
+    assert resp.status_code == 400
+    assert "extent" in resp.json()["detail"]
+    assert not seen
+
+
+def test_provenance_missing_load_extra_maps_to_501(index_path, tmp_path, recorder, monkeypatch):
+    from umbra_py.exceptions import MissingDependencyError
+
+    def boom(items, *, asset="GEC"):
+        raise MissingDependencyError("needs the 'load' extra")
+
+    monkeypatch.setattr(serve, "stack_provenance", boom)
+    app = serve.build_app(index_path, renderers=recorder.as_renderers(), cache_dir=tmp_path / "art")
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 501
+    assert "load" in resp.json()["detail"]
+
+
+def test_landing_advertises_the_provenance_preflight():
+    page = serve.landing_page("http://localhost:8000/", artifacts=True)
+    link = next(link for link in page["links"] if link["rel"] == "provenance")
+    assert link["href"].endswith("/artifacts/provenance")
+    assert link["method"] == "POST"
+    off = serve.landing_page("http://localhost:8000/", artifacts=False)
+    assert not [link for link in off["links"] if link["rel"] == "provenance"]
+
+
 # ---- what an instance says it can be asked for (the landing page) ---------
 
 
@@ -1655,6 +1804,9 @@ def test_artifacts_can_be_disabled(index_path, tmp_path):
     assert client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]}).status_code == 404
     assert client.post("/artifacts/swipe", json={"ids": ["item-0", "item-1"]}).status_code == 404
     assert client.post("/artifacts/stats", json={"ids": ["item-0", "item-1"]}).status_code == 404
+    assert (
+        client.post("/artifacts/provenance", json={"ids": ["item-0", "item-1"]}).status_code == 404
+    )
     rels = {link["rel"] for link in client.get("/").json()["links"]}
     assert not ({"quicklook", "change", "timescan", "swipe", "stats"} & rels)
 

@@ -7,6 +7,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Ask it from the front doors that answer for people who installed nothing
+  (`POST /artifacts/provenance`, the `stack_provenance` agent tool).** The
+  provenance preflight shipped as a library function and a CLI flag, which
+  covers everyone with a checkout. The two surfaces built so nobody needs one —
+  `umbra serve` and the MCP / LangChain / LlamaIndex tools — still learned that
+  a selection was two conversions by *spending* the measurement: the mix came
+  back as `POST /artifacts/stats`'s `400`, carrying advice ("use only the
+  acquisitions that share one") about a subset it could not name. A hosted
+  client had no cheaper way to ask, and an agent had nothing to do with the
+  answer but guess.
+
+  `POST /artifacts/provenance` takes the body you would send to
+  `/artifacts/stats` — the same `ids` or `bbox`/`datetime` query, normalised by
+  the same `stats_options`, vetted into the same frames by `stats_frames` — and
+  returns `StackProvenance.to_dict()`: `agrees`, the `groups` largest-first with
+  the `hrefs` to re-run on, `shared` when they agree, `refusal` when they do
+  not, and `unreadable` for sources that could not be opened. Taking the stats
+  body is what makes the answer *about* the request it precedes: the preflight
+  is asked about the frames that endpoint would actually stack, so a cleared
+  report cannot be contradicted by the stats call it cleared — the same
+  construction that keeps the verdict `to_stack`'s own.
+
+  A mixed selection is a `200`. Reporting the mix is what was asked for, and the
+  same mix at `/artifacts/stats` is still the `400` this response quotes
+  verbatim. Only a selection that could not be measured at all — fewer than two
+  passes, or mixed polarizations — is a `400` here, because there is no stack to
+  preflight.
+
+  It is the one artifact route that neither renders nor caches. Not cached
+  because a re-converted source is exactly the case a content-addressed answer
+  would get wrong, and because the read is kilobytes: a question asked to avoid
+  spending a render should not need a job document of its own. Not routed
+  through the injectable `renderers` because the report is not a render, and an
+  injectable provenance would be precisely the second opinion the design rules
+  out. The landing page advertises it as a `provenance` link beside `stats`.
+
+  `stack_provenance(urls, asset="GEC")` is the same question as an agent tool,
+  registered on the MCP server and carried to LangChain and LlamaIndex by the
+  shared `_JSON_TOOLS` roster (the same callable on all three — no drift). It
+  shares `stack_stats`' two preconditions, so anything that tool would accept is
+  something this one answers for, and its docstring tells a model the two moments
+  to reach for it: after a provenance refusal, where `groups[0]["hrefs"]` is the
+  subset to retry on, and before a long series it did not assemble itself.
+
+  All three surfaces emit one document. The CLI's `--json`, the endpoint's body
+  and the tool's return value are the same `to_dict()`, so a shell, an HTTP
+  client and a model read one schema.
 - **Ask whether a series is one measurement before stacking it
   (`stack_provenance`, `umbra stack --provenance`).** `to_stack` refuses to
   co-register passes whose conversions disagree — a calibrated pass differenced
