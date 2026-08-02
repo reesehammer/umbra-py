@@ -7,6 +7,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Name the refusal a product forces, so a batch can survive it and an agent
+  can branch on it (`UnsupportedMeasurementError`, `umbra chips
+  --skip-unsupported`).** Two of the conversion's corrections depend on the
+  product describing itself: radiometric calibration reads the SICD's
+  `Radiometric` scale-factor polynomials, and `--noise-model measured` reads its
+  `Radiometric.NoiseLevel.NoisePoly`. Umbra's open products generally carry
+  neither, and refusing has always been the point — a scaling or a subtraction
+  by an invented number is indistinguishable in the output from a measured one.
+
+  What the refusal lacked was a *name*. It was a bare `ValueError`, which made
+  it indistinguishable from "you asked for a calibration that does not exist",
+  and that had two costs.
+
+  The first was a batch. `umbra chips --asset SICD --calibrate gamma0` over a
+  site's twenty passes ended on the first product whose metadata came up short
+  and took the nineteen already chipped with it — the expensive path, one
+  whole-product download per scene. `write_chips(skip_unsupported=True)` /
+  `umbra chips --skip-unsupported` now catches exactly `UnsupportedMeasurementError`,
+  records the pass on `ChipDataset.skipped` as a `SkippedAcquisition` (which
+  acquisition, when, and the product's own words for why, plus the hint the
+  refusal named) and moves on. So the dataset **states** its hole rather than
+  having one: the skips print at the end of a run, ride out in `--json` as
+  `skipped_count` / `skipped`, and are absent entirely from a run that skipped
+  nothing. Nothing else is caught — a download failure, a missing asset, a
+  corrupt product still ends the run, because a batch that swallows unknown
+  errors is a batch whose output nobody can trust.
+
+  The second was the error contract. `umbra convert` wraps a `ValueError` as a
+  `ClickException`, and `cli.main` only recovers an `UmbraError` from its cause,
+  so the most common failure a complex conversion has — "this product cannot be
+  calibrated" — was the one that never reached the `--json` error envelope. It
+  does now, with a stable `error` name and an actionable `hint` (`Use
+  --noise-model estimated ...`, `Ask for one of: sigma0 ...`) on each of the
+  five product-metadata refusals.
+
+  The type is a `ValueError` as well as an `UmbraError`, because that is what it
+  was before it had a name: every `except ValueError` around a conversion keeps
+  working, and the new class is something to catch *more* narrowly rather than
+  instead. And it is scoped: a malformed request — an unknown calibration name,
+  a percentile outside the distribution, an even filter window — stays a bare
+  `ValueError`, since the caller can fix that one where this one is a fact about
+  the file.
+
+  Both entry points also now ask the question **before** they read. The checks
+  used to happen where the polynomials are first evaluated, which is after a
+  multi-gigabyte complex product has been pulled through amplitude detection, so
+  a conversion that could never have succeeded still spent the whole read
+  finding out. `_check_measurement_support` runs off the metadata immediately
+  after the reader opens — the ordering `_check_speckle_window` already had —
+  and it calls the same coefficient readers the conversion will, so it cannot
+  drift into a second opinion about what a product supports. The inferred noise
+  models are deliberately not covered: their floor comes from the scene's own
+  pixels, so reading them is exactly what they need to do.
 - **Record what a baked preview *is*, so it stops having to be assumed (index
   schema v4: `items.thumbnail_asset` / `items.thumbnail_size`).** The bake stored
   a preview's bytes and nothing about how they were made, which was fine while

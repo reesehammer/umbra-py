@@ -38,6 +38,25 @@ filter the manifest instead of opening rasters, and `ChipDataset.noise`
 an advisory, never a refusal — a uniformly bright scene is legitimate imagery, and
 the honest fix where the margin matters is `--noise-model measured`.
 
+Some acquisitions cannot support the measurement at all. Radiometric calibration
+needs the SICD's `Radiometric` scale factors and `--noise-model measured` needs
+its stated noise floor, and Umbra's open products generally carry neither — so a
+batch over a mixed archive used to end on the first product that came up short,
+losing every scene already chipped. The refusal itself is right (an invented
+scale factor is indistinguishable in the output from a measured one), so what it
+gained is a *type*: `UnsupportedMeasurementError`, the family of refusals that
+are facts about a product rather than about the request.
+
+`write_chips(skip_unsupported=True)` (`umbra chips --skip-unsupported`) catches
+exactly that type, records it on `ChipDataset.skipped` as a
+`SkippedAcquisition` — which pass, and in the product's own words why — and
+moves to the next acquisition, so the dataset *states* its hole instead of
+having one. Nothing else is caught: a download failure or a corrupt product
+still ends the run, because a batch that swallows unknown errors is a batch
+whose output nobody can trust. The check now also runs off the product's
+metadata *before* its pixels are read, so a scene that cannot answer costs its
+header rather than a full complex read.
+
 ## Chips
 
 ::: umbra_py.chip_item
@@ -53,6 +72,8 @@ the honest fix where the margin matters is `--noise-model measured`.
 ::: umbra_py.ChipDataset
 
 ::: umbra_py.NoiseSummary
+
+::: umbra_py.SkippedAcquisition
 
 ::: umbra_py.SicdConversion
 

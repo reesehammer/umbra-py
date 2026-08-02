@@ -415,6 +415,21 @@ there. `umbra chips --clip-bbox` is the same decision one level up: it tiles onl
 that window for every asset, and on `--asset SICD` it is the conversion's clip
 too, so the expensive step costs what the site costs rather than what the collect
 does.
+~~**Open:** the two corrections that depend on a product describing itself
+(`--calibrate`, `--noise-model measured`) refused as a bare `ValueError` raised
+after the scene had been read, so a chip batch over a mixed archive lost every
+pass already cut to the first product whose metadata came up short.~~
+**shipped** — `UnsupportedMeasurementError` names that family (an `UmbraError`
+*and* a `ValueError`, so nothing that caught one before changed), which does two
+things a nameless refusal could not: `umbra chips --skip-unsupported` catches
+exactly it, records the pass on `ChipDataset.skipped` and carries on, so the
+dataset **states** its hole rather than having one — while a download failure or
+a corrupt product still ends the run, because a batch that swallows unknown
+errors is one nobody can trust; and the refusal now reaches the `--json` error
+envelope with a stable name and an actionable hint, which is what an agent
+branches on. It is also asked *before* the read now, off the metadata, the way
+the speckle window already was: a scene that could never have answered costs its
+header rather than a multi-gigabyte complex read.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -879,6 +894,16 @@ from:
   / `_after` / `_looks` beside `speckle_filter` / `speckle_window` on either path,
   and a `ChipDataset.speckle` roll-up counted per acquisition like the noise one.
   **This closes the speckle group.**
+- ~~A product's own metadata could refuse a measurement, but the refusal had no
+  name — so a chip batch could only die on the first scene that could not answer,
+  and the most common failure a complex conversion has never reached the
+  machine-readable error envelope.~~ **shipped** — the five product-metadata
+  refusals raise `UnsupportedMeasurementError`, which `umbra chips
+  --skip-unsupported` catches (and only it) to keep the run going while recording
+  every left-out pass on `ChipDataset.skipped`, and which `cli.main` renders into
+  the `--json` envelope with a hint. The same change moved the check ahead of the
+  pixel read, so an uncalibratable scene costs its header rather than a whole
+  complex read and an amplitude detection. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

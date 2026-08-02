@@ -1159,6 +1159,13 @@ umbra chips --area "Centerfield" --out chips/ --speckle-filter lee
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --calibrate gamma0 --speckle-filter lee --work-dir scenes/
 
+# Carry on past a scene whose own metadata cannot support the request (no
+# Radiometric block for --calibrate, no stated floor for --noise-model
+# measured), and say which ones were left out, instead of losing the batch to
+# the first one.
+umbra chips --area "Centerfield" --out chips/ --asset SICD \
+    --calibrate gamma0 --skip-unsupported --work-dir scenes/
+
 # Chip one site out of every pass rather than every scene whole. --clip-bbox
 # tiles only that window -- and for --asset SICD it is the *conversion's* clip
 # too, so the geocoding step costs what the site costs, not what the scene does.
@@ -1191,7 +1198,23 @@ advisory: filter the manifest on the margin, or use `--noise-model measured`
 where the products state their own floor. The cost is honest:
 unlike the GEC path this downloads each product whole, so it is opt-in, one scene
 is on disk at a time, and `--work-dir` keeps the geocoded scenes so a re-run
-reuses them instead of fetching and warping again. `--clip-bbox` is what makes
+reuses them instead of fetching and warping again.
+
+**A mixed archive no longer costs the batch.** Radiometric calibration needs the
+SICD's own `Radiometric` scale factors and `--noise-model measured` needs its
+stated noise floor — and Umbra's open products generally carry neither, so a run
+over twenty scenes could end on the twenty-first and take the twenty with it.
+The refusal is right (a scaling by an invented number is indistinguishable in
+the output from a measured one); what it lacked was a name. It has one now —
+`UnsupportedMeasurementError` — which is what lets `--skip-unsupported` carry on
+past exactly that family, record each left-out pass on `ChipDataset.skipped`
+(which acquisition, and in the product's own words why) and print it at the end,
+so the dataset *states* its hole rather than having one. Nothing else is
+swallowed: a download failure or a corrupt product still ends the run. And the
+check now happens off the metadata *before* the pixels are read, so a scene that
+could never have answered costs its header rather than a full complex read.
+
+`--clip-bbox` is what makes
 that path affordable when the subject is a *site*: it tiles only the window you
 name, and on the SICD path it becomes the conversion's own clip, so each pass is
 geocoded over the area of interest rather than over the whole collect (the same

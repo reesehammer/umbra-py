@@ -89,7 +89,7 @@ from .constants import ATTRIBUTION, DATA_LICENSE
 # shared constant prevents. `convert`'s module level is stdlib-only (its heavy
 # dependencies are behind `_require`), so this pulls in no extra.
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import AssetNotFoundError
+from .exceptions import AssetNotFoundError, UnsupportedMeasurementError
 from .load import _open_path, _require
 from .models import UmbraItem
 
@@ -845,6 +845,38 @@ def _summarise_speckle(records: Iterable[ChipRecord]) -> SpeckleSummary | None:
     )
 
 
+@dataclass(frozen=True)
+class SkippedAcquisition:
+    """One acquisition left out of a run because it could not support the request.
+
+    A dataset built with ``skip_unsupported=True`` is a dataset with a hole in
+    it, so the hole is part of the result rather than a line on a console
+    somebody may not have been watching: ``item_id`` and ``datetime`` say which
+    pass is missing, ``reason`` is the refusal's own words (the product's
+    metadata, not a paraphrase), and ``hint`` carries the recovery step where
+    the refusal named one.
+
+    Only a :class:`~umbra_py.exceptions.UnsupportedMeasurementError` produces
+    one. That is the point of the type: it is the family of refusals that are
+    facts about a *product*, so carrying on to the next scene is a defensible
+    response to it, where carrying on past an unknown error would be a way of
+    hiding one.
+    """
+
+    item_id: str
+    reason: str
+    datetime: str | None = None
+    hint: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "item_id": self.item_id,
+            "datetime": self.datetime,
+            "reason": self.reason,
+            "hint": self.hint,
+        }
+
+
 @dataclass
 class ChipDataset:
     """The result of a chipping run: the written chips plus their manifest.
@@ -852,6 +884,12 @@ class ChipDataset:
     ``records`` are the :class:`ChipRecord` entries (also written to
     ``manifest_path``); the summary fields describe the run for a ``--json``
     caller or an agent deciding what to train on.
+
+    ``skipped`` is what the run could *not* include: the acquisitions whose own
+    metadata could not support the measurement that was asked for, present only
+    when ``write_chips(skip_unsupported=True)`` let the run carry on past them.
+    An empty tuple is the default and means what it says -- every acquisition
+    offered was chipped.
     """
 
     out_dir: str
@@ -863,6 +901,7 @@ class ChipDataset:
     units: str
     fmt: str
     conversion: SicdConversion | None = None
+    skipped: tuple[SkippedAcquisition, ...] = ()
 
     @property
     def chip_count(self) -> int:
@@ -899,6 +938,11 @@ class ChipDataset:
         speckle = self.speckle
         if speckle is not None:
             extra["speckle"] = speckle.to_dict()
+        # Absent from a run that skipped nothing, so the payload of a dataset
+        # with no hole in it is unchanged by this field existing.
+        if self.skipped:
+            extra["skipped_count"] = len(self.skipped)
+            extra["skipped"] = [s.to_dict() for s in self.skipped]
         return {
             "out_dir": self.out_dir,
             "manifest": self.manifest_path,
@@ -1389,6 +1433,7 @@ def write_chips(
     conversion: SicdConversion | None = None,
     work_dir: str | os.PathLike | None = None,
     preparer: SicdPreparer | None = None,
+    skip_unsupported: bool = False,
 ) -> ChipDataset:
     """Chip a whole search result into a training dataset with a manifest.
 
@@ -1415,6 +1460,22 @@ def write_chips(
     complex product (see :func:`chip_item`). Each acquisition is prepared and
     chipped in turn, so a run over many SICDs holds one scene on disk at a time
     unless ``work_dir`` is set to keep them.
+
+    ``skip_unsupported`` decides what a batch does when one acquisition's own
+    metadata cannot support the measurement asked of it -- a product with no
+    ``Radiometric`` block under ``calibration=``, or no stated noise floor under
+    ``noise_model="measured"``. The default raises, which is right for a run
+    over one product's worth of scenes: if the archive cannot answer, the answer
+    is not a smaller dataset. Over a mixed archive it is the wrong default,
+    because the twenty scenes already chipped are lost to the twenty-first, so
+    ``True`` records the refusal on :attr:`ChipDataset.skipped` and moves to the
+    next acquisition. The dataset then *states* its hole rather than having one:
+    which passes are missing, and in each product's own words why.
+
+    Only :class:`~umbra_py.exceptions.UnsupportedMeasurementError` is skipped.
+    Everything else -- a download failure, a missing asset, a corrupt product --
+    still ends the run, because a batch that swallows unknown errors is a batch
+    whose output nobody can trust.
     """
     out_path = Path(out_dir)
     items = list(items)
@@ -1431,23 +1492,42 @@ def write_chips(
     else:
         conversion = None
     records: list[ChipRecord] = []
+    skipped: list[SkippedAcquisition] = []
     for i, item in enumerate(items):
-        recs = chip_item(
-            item,
-            out_path,
-            asset=asset,
-            chip_size=chip_size,
-            stride=stride,
-            db=db,
-            fmt=fmt,
-            min_valid=min_valid,
-            bbox=bbox,
-            speckle_filter=None if requested is None else requested[0],
-            speckle_window=speckle_window if requested is None else requested[1],
-            conversion=conversion,
-            work_dir=work_dir,
-            preparer=preparer,
-        )
+        try:
+            recs = chip_item(
+                item,
+                out_path,
+                asset=asset,
+                chip_size=chip_size,
+                stride=stride,
+                db=db,
+                fmt=fmt,
+                min_valid=min_valid,
+                bbox=bbox,
+                speckle_filter=None if requested is None else requested[0],
+                speckle_window=speckle_window if requested is None else requested[1],
+                conversion=conversion,
+                work_dir=work_dir,
+                preparer=preparer,
+            )
+        except UnsupportedMeasurementError as exc:
+            if not skip_unsupported:
+                raise
+            # Only this one type, and only when asked: it is the refusal that is
+            # a fact about the product rather than about the run, so the next
+            # acquisition can still be the answer.
+            skipped.append(
+                SkippedAcquisition(
+                    item_id=item.id,
+                    reason=str(exc),
+                    # The same ISO string a ChipRecord carries, so a skipped
+                    # pass and a chipped one are comparable in the same payload.
+                    datetime=item.datetime.isoformat() if item.datetime else None,
+                    hint=exc.hint,
+                )
+            )
+            recs = []
         records.extend(recs)
         if progress is not None:
             progress(i + 1, len(items), item, len(recs))
@@ -1467,4 +1547,5 @@ def write_chips(
         units="dB" if db else "amplitude",
         fmt=fmt.lower(),
         conversion=conversion,
+        skipped=tuple(skipped),
     )

@@ -191,7 +191,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from . import __version__
 from .constants import ATTRIBUTION, DATA_LICENSE
-from .exceptions import MissingDependencyError
+from .exceptions import MissingDependencyError, UnsupportedMeasurementError
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     import numpy as np
@@ -276,10 +276,12 @@ def _calibration_coefficients(sicd: Any, kind: str):
 
     Reads ``Radiometric.<Kind>SFPoly`` and returns its coefficient array (the
     ``Coefs`` of a sarpy ``Poly2DType``, or a bare array/scalar so the pure core
-    is testable without sarpy). Raises a self-describing :class:`ValueError`
-    when the product cannot support the requested calibration — the whole point
-    of the feature is that an uncalibrated product says so rather than emitting
-    a number that looks calibrated.
+    is testable without sarpy). Raises a self-describing
+    :class:`~umbra_py.exceptions.UnsupportedMeasurementError` when the product
+    cannot support the requested calibration — the whole point of the feature is
+    that an uncalibrated product says so rather than emitting a number that
+    looks calibrated. An unknown *calibration name* stays a bare
+    :class:`ValueError`: that is a fact about the request, not about the file.
 
     Every metadata check here runs before ``numpy`` is required, so "this
     product cannot be calibrated" is answerable without the ``convert`` extra.
@@ -290,26 +292,33 @@ def _calibration_coefficients(sicd: Any, kind: str):
         )
     radiometric = getattr(sicd, "Radiometric", None)
     if radiometric is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD carries no Radiometric metadata, so it cannot be radiometrically "
             "calibrated: the scale factors that turn detected power into a "
             "backscatter coefficient have to come from the product. Umbra's open "
             "products are typically uncalibrated -- convert without calibration for "
-            "the usual (relative) amplitude image."
+            "the usual (relative) amplitude image.",
+            hint="Convert without --calibrate, or use a product whose Radiometric "
+            "block states its scale factors.",
         )
     poly = getattr(radiometric, _CALIBRATION_POLYS[kind], None)
     if poly is None:
         available = _available_calibrations(sicd)
         offer = ", ".join(available) if available else "none"
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             f"SICD Radiometric metadata carries no {_CALIBRATION_POLYS[kind]}, so "
             f"{kind} calibration is unavailable for this product "
-            f"(available: {offer})."
+            f"(available: {offer}).",
+            hint=(
+                f"Ask for one of: {offer}."
+                if available
+                else "Convert without --calibrate; this product states no scale factors."
+            ),
         )
     np = _require("numpy")
     coefs = np.atleast_2d(np.asarray(getattr(poly, "Coefs", poly), dtype="float64"))
     if coefs.size == 0:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             f"SICD {_CALIBRATION_POLYS[kind]} has no coefficients, so the "
             f"{kind} scale factor is undefined."
         )
@@ -334,7 +343,7 @@ def _image_grid_geometry(sicd: Any) -> dict[str, float]:
     scp_row = getattr(scp, "Row", None)
     scp_col = getattr(scp, "Col", None)
     if row_ss is None or col_ss is None or scp_row is None or scp_col is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD is missing Grid.Row.SS / Grid.Col.SS / ImageData.SCPPixel, which "
             "radiometric calibration needs: the scale-factor polynomials are "
             "functions of image coordinates in metres from the scene centre point."
@@ -650,9 +659,10 @@ def _noise_level_type(sicd: Any) -> str | None:
 def _noise_coefficients(sicd: Any):
     """The 2-D ``NoisePoly`` coefficients (noise power in dB), off a SICD.
 
-    Raises a self-describing :class:`ValueError` for each way a product can fail
-    to support the subtraction — no ``Radiometric`` block, no ``NoiseLevel``, a
-    ``RELATIVE`` level, or an empty polynomial. The point of the feature is that
+    Raises a self-describing
+    :class:`~umbra_py.exceptions.UnsupportedMeasurementError` for each way a
+    product can fail to support the subtraction — no ``Radiometric`` block, no
+    ``NoiseLevel``, a ``RELATIVE`` level, or an empty polynomial. The point of the feature is that
     a noise floor is either measured or absent, never assumed: a subtraction of
     a guessed floor is indistinguishable from a real one in the output and would
     make dark surfaces confidently wrong.
@@ -663,36 +673,44 @@ def _noise_coefficients(sicd: Any):
     """
     radiometric = getattr(sicd, "Radiometric", None)
     if radiometric is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD carries no Radiometric metadata, so its noise floor cannot be "
             "subtracted: the noise level has to come from the product. Umbra's open "
             "products are typically uncalibrated -- convert without --subtract-noise "
-            "for the usual (noise-inclusive) amplitude image."
+            "for the usual (noise-inclusive) amplitude image.",
+            hint="Use --noise-model estimated (or estimated-range) to infer the floor "
+            "from the scene's own dark ground, which needs no metadata.",
         )
     level = getattr(radiometric, "NoiseLevel", None)
     if level is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD Radiometric metadata carries no NoiseLevel block, so there is no "
-            "noise floor to subtract for this product."
+            "noise floor to subtract for this product.",
+            hint="Use --noise-model estimated (or estimated-range) to infer the floor "
+            "from the scene itself.",
         )
     kind = _noise_level_type(sicd)
     if kind != _SUBTRACTABLE_NOISE_LEVEL:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             f"SICD NoiseLevelType is {kind or 'unset'!r}, not "
             f"{_SUBTRACTABLE_NOISE_LEVEL!r}: a relative noise level describes how the "
             "floor varies across the image without stating what it is, so it cannot "
-            "be subtracted from pixel power without inventing the absolute offset."
+            "be subtracted from pixel power without inventing the absolute offset.",
+            hint="Use --noise-model estimated-range, which infers a floor that follows "
+            "the swath from the scene's own pixels.",
         )
     poly = getattr(level, "NoisePoly", None)
     if poly is None:
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             "SICD NoiseLevel carries no NoisePoly, so the noise power is undefined "
             "even though the level is declared absolute."
         )
     np = _require("numpy")
     coefs = np.atleast_2d(np.asarray(getattr(poly, "Coefs", poly), dtype="float64"))
     if coefs.size == 0:
-        raise ValueError("SICD NoisePoly has no coefficients, so the noise power is undefined.")
+        raise UnsupportedMeasurementError(
+            "SICD NoisePoly has no coefficients, so the noise power is undefined."
+        )
     return coefs
 
 
@@ -733,7 +751,7 @@ def _noise_power(
     )
     bad = ~np.isfinite(noise_db)
     if bool(bad.any()):
-        raise ValueError(
+        raise UnsupportedMeasurementError(
             f"The SICD noise polynomial is non-finite over {int(bad.sum())} of "
             f"{bad.size} pixels, so it cannot be evaluated on this image grid. The "
             "product's NoiseLevel metadata is inconsistent with its image geometry."
@@ -1107,6 +1125,39 @@ def sicd_noise_level(src: str | os.PathLike) -> str | None:
 
     reader = open_complex(str(src))
     return _noise_level_type(reader.get_sicds_as_tuple()[0])
+
+
+def _check_measurement_support(
+    sicd: Any,
+    *,
+    calibration: str | None,
+    noise_subtract: bool,
+    noise_model: str,
+) -> None:
+    """Raise if this product's own metadata cannot support what was asked of it.
+
+    The two corrections that depend on a product describing itself —
+    ``calibration=`` and a ``"measured"`` noise floor — read polynomials out of
+    the SICD's ``Radiometric`` block, which Umbra's open products generally do
+    not carry. Asking here, off the metadata alone, is what makes that refusal
+    cost the *header* rather than the scene: the checks used to happen where the
+    polynomials are first evaluated, which is after a multi-gigabyte complex
+    product has been read and detected, so a conversion that could never have
+    succeeded still spent the whole read finding out. It is the ordering
+    :func:`_check_speckle_window` already has, applied to the two settings whose
+    answer is in the file rather than in the request.
+
+    The evaluations downstream stay exactly where they are — that is where the
+    image coordinates they are functions of exist — so what is duplicated is a
+    handful of coefficient lookups, and the checks themselves are the same
+    functions, not a second opinion about them.
+    """
+    if calibration is not None:
+        _calibration_coefficients(sicd, calibration)
+        _image_grid_geometry(sicd)
+    if noise_subtract and noise_model == "measured":
+        _noise_coefficients(sicd)
+        _image_grid_geometry(sicd)
 
 
 # --------------------------------------------------------------------------- #
@@ -2101,6 +2152,14 @@ def sicd_to_amplitude_geotiff(
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
+    # Before the read: whether this product can be calibrated, or state the floor
+    # it is asked to have subtracted, is answerable from its metadata alone.
+    _check_measurement_support(
+        sicd,
+        calibration=calibration,
+        noise_subtract=noise_subtract,
+        noise_model=noise_model,
+    )
     amplitude = _amplitude(reader[:, :], decibels=decibels)
     noise: NoiseSubtraction | None = None
     if noise_subtract:
@@ -3564,6 +3623,15 @@ def sicd_to_geocoded_cog(
 
     reader = open_complex(str(src))
     sicd = reader.get_sicds_as_tuple()[0]
+    # Before the read, for the same reason the speckle window is checked before
+    # it: a product that cannot support the measurement should say so without
+    # first being pulled through the amplitude detection whole.
+    _check_measurement_support(
+        sicd,
+        calibration=calibration,
+        noise_subtract=noise_subtract,
+        noise_model=noise_model,
+    )
     if bbox is None:
         origin = (0, 0)
         amplitude = _amplitude(reader[:, :], decibels=decibels)

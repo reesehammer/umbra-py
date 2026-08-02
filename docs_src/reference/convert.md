@@ -15,6 +15,16 @@ given file supports — products that carry no scale factors, which includes mos
 of Umbra's open data, raise rather than returning an uncalibrated number that
 looks calibrated.
 
+That refusal — and the matching one for `noise_model="measured"` on a product
+that states no floor — is a
+[`UnsupportedMeasurementError`](exceptions.md), the family of errors that are
+facts about a *product* rather than about the request, and it is raised off the
+metadata **before** any pixels are read. A scene that could never have been
+calibrated therefore costs its header rather than a multi-gigabyte complex read
+followed by an amplitude detection. A malformed request — an unknown
+calibration name, an even filter window — stays a plain `ValueError`, because
+the caller can fix that one.
+
 `sicd_to_geocoded_cog` also takes `bbox=` (`umbra convert --clip-bbox`) — a
 lon/lat rectangle to convert *instead of the whole scene*. A SICD is tens of
 square kilometres at 16–25 cm, and every step above is proportional to it, so
