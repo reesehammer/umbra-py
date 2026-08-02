@@ -449,6 +449,17 @@ already-core `requests`, so "can this archive answer my question?" is answerable
 from a core install, and every way a product can fail to answer (not a NITF,
 NITF 2.0's different header layout, a truncated field, no XML segment) is
 refused by name rather than misread.
+~~**Open:** it was a command you ran *beside* a chip run rather than part of one,
+so the batch it exists to save still discovered a refusal by downloading the
+product that would have refused.~~ **shipped** — `umbra chips --preflight` reads
+every pass's metadata over the wire first and drops the ones that cannot answer
+before a single product is fetched, asking the run's *own* conversion settings so
+the question is the conversion's by construction. The design point is that a
+cheaply-found hole is still a hole: a dropped pass is the same
+`SkippedAcquisition` a survived refusal produces, distinguished only by a `stage`
+field, and `ChipDataset.preflight` reports what asking cost against the download
+it removed. An acquisition whose metadata cannot be *read* is kept rather than
+dropped — a failed read is not a product declaring it cannot answer.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)
@@ -937,6 +948,19 @@ from:
   --calibrate gamma0` will not refuse. It needs no extra (stdlib NITF walk,
   stdlib XML), and an acquisition whose metadata cannot be read is its own
   verdict rather than the end of the walk. See the CHANGELOG.
+  ~~**Open:** the survivors had to be carried across by hand — the preflight was
+  a separate command, so the batch it exists to save still learned which of
+  twenty passes could be calibrated by downloading twenty passes.~~ **shipped** —
+  `umbra chips --preflight` / `write_chips(preflight=True)` makes the check part
+  of the run: each pass's metadata is read by range request, the conversion's own
+  support check is applied with the run's *own* settings, and the passes that
+  cannot answer never reach a download. A cheaply-found hole is still a hole, so
+  a dropped pass is the same `SkippedAcquisition` `--skip-unsupported` produces
+  (plus a `stage` field, the one thing the two routes do not share), and
+  `ChipDataset.preflight` reports what asking cost against the download it
+  removed — counting only the *dropped* products as saved, since a supported pass
+  is downloaded anyway. A pass whose metadata cannot be read is kept, because a
+  failed read is not a product declaring it cannot answer. See the CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

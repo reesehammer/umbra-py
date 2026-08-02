@@ -1173,6 +1173,13 @@ umbra chips --area "Centerfield" --out chips/ --asset SICD \
 umbra chips --area "Centerfield" --out chips/ --asset SICD \
     --calibrate gamma0 --skip-unsupported --work-dir scenes/
 
+# Better still: ask each product's metadata over the wire *first* (two range
+# requests, tens of kilobytes) and drop the passes that cannot answer before
+# downloading any of them. The dataset reports the same hole -- and what not
+# downloading them saved.
+umbra chips --area "Centerfield" --out chips/ --asset SICD \
+    --calibrate gamma0 --preflight --work-dir scenes/
+
 # Chip one site out of every pass rather than every scene whole. --clip-bbox
 # tiles only that window -- and for --asset SICD it is the *conversion's* clip
 # too, so the geocoding step costs what the site costs, not what the scene does.
@@ -1219,8 +1226,34 @@ past exactly that family, record each left-out pass on `ChipDataset.skipped`
 so the dataset *states* its hole rather than having one. Nothing else is
 swallowed: a download failure or a corrupt product still ends the run. And the
 check now happens off the metadata *before* the pixels are read, so a scene that
-could never have answered costs its header rather than a full complex read — or,
-with `umbra preflight` below, before it is downloaded at all.
+could never have answered costs its header rather than a full complex read.
+
+**`--preflight` moves that check ahead of the download.** `--skip-unsupported`
+makes a refusal survivable, but it is still discovered by fetching the product:
+a batch learns which of twenty passes can be calibrated by downloading twenty
+passes. With `--preflight` each acquisition's SICD XML is read over the wire
+first (the same two range requests `umbra preflight` uses, tens of kilobytes of
+a multi-gigabyte product), the conversion's own support check is run against it,
+and the passes that cannot answer never reach the download at all:
+
+```text
+Preflighting 22 product header(s) ...
+  Preflight read 452.6 KB of product headers from 22 acquisition(s) and dropped 9,
+    saving 31.4 GB of download.
+  Skipped 9 acquisition(s) whose metadata cannot support the request:
+    2024-02-08-01-02-03_UMBRA-05 [preflight]: SICD carries no Radiometric block.
+```
+
+The question it asks is the conversion's own — the settings come from the same
+request, so a pass it clears cannot then be refused for a reason it could have
+seen — and a dropped pass lands in the same `ChipDataset.skipped` block a
+survived refusal does (with `stage="preflight"`), because a dataset with a hole
+in it has to say so however cheaply the hole was found. An acquisition whose
+metadata cannot be *read* — a missing asset, an HTTP failure — is **kept**: a
+failed read is not a product declaring it cannot answer, so the run finds out the
+expensive way rather than dropping a scene over something transient. Pass both
+flags: the preflight asks only the two questions the metadata answers, so
+anything else still refuses at conversion time.
 
 `--clip-bbox` is what makes
 that path affordable when the subject is a *site*: it tiles only the window you
@@ -1296,7 +1329,10 @@ readers, so a preflight that says yes and a conversion that then refuses cannot
 disagree. What differs is only where the metadata came from. `sicd_capabilities`
 also reports what the product *does* declare — which calibrations, which noise
 level, and the scene's identity — so `umbra chips --asset SICD --calibrate
-gamma0` over the survivors is a run with no refusals in it.
+gamma0` over the survivors is a run with no refusals in it. That last step is
+wired in rather than left to you: `umbra chips --preflight` runs this check over
+the selection itself and drops the passes that cannot answer before downloading
+any of them (see above).
 
 Reading it needs no extra at all (the NITF walk and the XML parse are stdlib), so
 "can this archive answer my question?" is answerable from a core install. An
