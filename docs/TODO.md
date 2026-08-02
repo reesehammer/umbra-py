@@ -113,7 +113,10 @@ build on that, none a blocker:
   local bake and the fetched sidecar therefore differ in size, and a merge keeps
   whichever arrived first (`--overwrite` replaces). Recording the bake size in
   the sidecar would let a merge prefer the larger preview rather than the
-  earlier one.
+  earlier one — and, since `umbra describe --preview` began reading these bytes
+  as the picture a vision model is shown, the same record (size *and* asset)
+  would let a description quote the bake instead of inferring what it must have
+  been. See the C2 entry below.
 
 ---
 
@@ -709,12 +712,40 @@ CHANGELOG). Optional follow-on that builds on them, not a blocker:
 
 `umbra describe` (scene description) and `umbra change --narrate` (change
 narration grounded in a deterministic per-block dB grid) are shipped on the CLI,
-MCP, LangChain and LlamaIndex surfaces. Open follow-on:
+MCP, LangChain and LlamaIndex surfaces. Open follow-ons:
 
-- **A `describe` render is a fresh S3 read every call.** The thumbnail bake has
-  since landed (`umbra index bake-thumbnails` / `CatalogIndex.get_thumbnail`), so
-  feed the cached quicklook into `describe` via its injectable `render=` hook
-  instead of re-streaming the COG.
+- ~~**A `describe` render is a fresh S3 read every call.**~~ **shipped** —
+  `umbra describe --preview {render,baked,auto}` / `describe(preview=…,
+  previews=…)` reads the quicklook already baked into the local index
+  (`CatalogIndex.get_thumbnail`, fed in as a `BakedPreviews` callable so the
+  module stays stdlib-only) instead of re-streaming the COG, on the CLI and on
+  the MCP surface the LangChain / LlamaIndex tools derive from. It also drops the
+  `viz` extra from the path entirely, so a description can run on an `[ai]`-only
+  install. The decision this entry left implicit was made explicitly: because a
+  preview is smaller (and `GEC`, and dB) it is *evidence*, not an implementation
+  detail, so the default stays `render`, the picture is recorded
+  (`SceneDescription.image`), a smaller one adds a deterministic caveat, and a
+  request the bake cannot answer is refused by `baked_preview_refusal` rather
+  than substituted. What is still open, and smaller:
+  - **The index records a preview's bytes, not how they were made.** So
+    `baked_preview_refusal` trusts a cached preview for exactly the request
+    `bake_thumbnails` defaults to (`GEC`, decibel stretch) and refuses the rest,
+    including a `--asset CSI` bake someone made deliberately. Recording the asset
+    and the size beside the thumbnail — the same column the sidecar entry above
+    wants for preferring the larger preview on merge — would lift the restriction
+    to what the bake actually is rather than what it is assumed to be. That is a
+    schema migration (v4) plus a sidecar column, so it waits for a caller who
+    bakes a non-default asset.
+  - **`umbra change --narrate` still renders both passes.** The composite is a
+    co-registered difference of two full reads, not a single quicklook, so a
+    128 px preview per pass is not the same object at all — there is no cached
+    artifact to substitute. The natural equivalent is a cache of the *composite*,
+    which is what `umbra serve`'s artifact cache already is; a CLI-side one would
+    be a new store rather than a reuse.
+  - **Nothing reports what the substitution saved.** As with `--clip-bbox`, the
+    command says what it read, not that it skipped an overview stream to read it.
+    A line on the non-JSON output would make the flag's value visible where
+    someone is deciding whether to use it.
 
 ---
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from ._geometry import parse_geometry as _parse_geometry
@@ -817,12 +818,33 @@ def find_similar_text(
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 
+def _baked_previews() -> Callable[[str], bytes | None] | None:
+    """A reader over the local index's baked quicklooks, or ``None`` if absent.
+
+    The server's own :data:`~umbra_py.describe.BakedPreviews`, shaped like the
+    CLI's ``_shared._baked_previews``: it is what lets ``describe_scene`` read a
+    picture this machine already has instead of streaming a cloud-optimized
+    overview per call. ``None`` means "no index here", which the describe path
+    turns into a refusal naming the fetch that would fix it.
+    """
+    path = default_index_path()
+    if not path.exists():
+        return None
+
+    def lookup(item_id: str) -> bytes | None:
+        with CatalogIndex(path) as index:
+            return index.get_thumbnail(item_id)
+
+    return lookup
+
+
 def describe_scene(
     url: str,
     asset: str = "GEC",
     db: bool = True,
     max_size: int = 1024,
     model: str | None = None,
+    preview: str = "render",
 ) -> dict[str, Any]:
     """Return a grounded, plain-language reading of the SAR scene at ``url``.
 
@@ -853,6 +875,15 @@ def describe_scene(
     correct SAR look; ``asset`` picks which product's quicklook to read (default
     ``GEC``); ``model`` overrides the configured model. To *see* the same scene the
     reading is of, call :func:`quicklook` on the same ``url``.
+
+    ``preview`` says where the picture comes from: ``"render"`` (the default)
+    streams a fresh quicklook from S3, while ``"baked"`` and ``"auto"`` read the
+    small preview already cached in this server's catalog index (``umbra index
+    fetch-thumbnails``) -- no range read per call, and no ``[viz]`` extra needed
+    on the server at all. It is a smaller picture than ``max_size`` asks for, so
+    the returned ``image`` record says which was read and the reading carries a
+    caveat about the detail it could not have seen; ``"baked"`` refuses (naming
+    the fix) rather than silently rendering, ``"auto"`` renders what is missing.
     """
     # Import the function directly: ``umbra_py.describe`` the attribute is the
     # re-exported function, not the submodule, so ``from . import describe`` would
@@ -861,7 +892,15 @@ def describe_scene(
     from .describe import describe as _describe_scene
 
     item = _fetch_item(url)
-    description = _describe_scene(item, model=model, asset=asset, max_size=max_size, db=db)
+    description = _describe_scene(
+        item,
+        model=model,
+        asset=asset,
+        max_size=max_size,
+        db=db,
+        preview=preview,
+        previews=_baked_previews() if preview != "render" else None,
+    )
     return description.to_dict()
 
 

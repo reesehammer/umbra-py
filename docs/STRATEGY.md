@@ -603,7 +603,17 @@ from:
   bake *incremental* — the weekly run re-imports the previous sidecar and then
   streams only the acquisitions added since, bounded by `--limit` and spent
   newest-first — so the archive is re-listed weekly but never re-streamed. See
-  the CHANGELOG. **This closes the demo / hosting polish group.**
+  the CHANGELOG. **This closes the demo / hosting polish group.** Those published
+  pixels have since gained a consumer beyond the pictures: `umbra describe
+  --preview {baked,auto}` reads one as the picture a vision model is *shown*, so
+  the C2 reading costs no S3 overview stream per call and needs no `viz` extra at
+  all — a description from an `[ai]`-only install. It is opt-in and self-describing
+  rather than automatic, because a 128 px preview is different evidence from a
+  1024 px render: every description records the picture it read
+  (`SceneDescription.image`), a smaller one carries a caveat naming what it could
+  not have seen, and a request the bake cannot answer (a non-`GEC` asset, a linear
+  stretch) is refused by the one function that also explains it rather than
+  silently substituted. See the CHANGELOG.
 
 **SAR-processing depth (was workstream 5.5)**
 

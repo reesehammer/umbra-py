@@ -14,6 +14,7 @@ import click
 
 from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
+from ..describe import PREVIEW_SOURCES
 from ..download import download_item
 from ..exceptions import UmbraError
 from ..viz import (
@@ -57,8 +58,28 @@ from ._root import cli
     help="Use a decibel (log-amplitude) stretch — the radiometrically-correct "
     "SAR look the model reads best. --no-db uses a linear stretch.",
 )
+@click.option(
+    "--preview",
+    type=click.Choice(PREVIEW_SOURCES, case_sensitive=False),
+    default="render",
+    show_default=True,
+    help="Where the picture the model reads comes from. 'render' streams a fresh "
+    "quicklook from S3; 'baked' reads the preview already cached in the local "
+    "index ('umbra index bake-thumbnails' / 'fetch-thumbnails') — no range read, "
+    "no viz extra — and fails if there is none; 'auto' prefers the cached one and "
+    "renders when it is missing. A cached preview is smaller than --max-size, "
+    "which the description records and caveats.",
+)
+@click.option(
+    "--index-db",
+    "db_path",
+    default=None,
+    help="Path to the local index database holding the baked previews (default: "
+    "$UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db). Only read when --preview "
+    "is 'baked' or 'auto'. Named --index-db because --db means the decibel stretch.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the structured description as JSON.")
-def describe(item_url, asset, model, max_size, db, as_json) -> None:
+def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) -> None:
     """Describe a SAR scene in plain language with a vision model.
 
     Renders the item's quicklook, sends that picture plus the library's metadata
@@ -67,6 +88,12 @@ def describe(item_url, asset, model, max_size, db, as_json) -> None:
     caveats. The model *only* interprets the imagery — every description is
     stamped as an AI interpretation and carries the mandatory CC-BY attribution,
     and nothing the model says becomes a filter, a URL, or a coordinate.
+
+    With --preview baked (or auto) the picture comes from the quicklook already
+    cached in the local index instead of a fresh S3 overview stream, so a
+    description costs no range read and needs no viz extra at all. It is a
+    smaller picture than --max-size asks for, so the reading says which it read
+    and carries a caveat about the detail it could not have seen.
 
     Requires the ``ai`` extra for the model call and ``viz`` for the render
     (``pip install 'umbra-py[ai,viz]'``) plus a vision model API key: set
@@ -79,9 +106,18 @@ def describe(item_url, asset, model, max_size, db, as_json) -> None:
     from ..describe import describe as describe_scene
 
     item = _shared._item_from_url(item_url)
+    previews = _shared._baked_previews(db_path) if preview != "render" else None
     try:
         with OrbitSpinner(f"Describing {item.id}"):
-            description = describe_scene(item, model=model, asset=asset, max_size=max_size, db=db)
+            description = describe_scene(
+                item,
+                model=model,
+                asset=asset,
+                max_size=max_size,
+                db=db,
+                preview=preview,
+                previews=previews,
+            )
     except (DescribeError, UmbraError) as exc:
         raise click.ClickException(str(exc)) from exc
 
