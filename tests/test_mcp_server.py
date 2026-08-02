@@ -60,6 +60,7 @@ def test_build_server_registers_expected_surface():
         "change_composite",
         "timescan",
         "stack_stats",
+        "stack_provenance",
         "download_asset",
         "watch_site",
         "find_similar",
@@ -298,7 +299,7 @@ def test_json_tools_keep_structured_output():
 
     for name in ("quicklook", "change_composite", "timescan"):
         assert schemas[name] is None, name
-    for name in ("search_catalog", "get_item", "stack_stats"):
+    for name in ("search_catalog", "get_item", "stack_stats", "stack_provenance"):
         assert schemas[name] is not None, name
 
 
@@ -502,6 +503,68 @@ def test_stack_stats_refuses_mixed_polarization_and_a_single_pass(sample_item_di
         ms.stack_stats([vv_url, hh_url])
     with pytest.raises(ValueError, match="at least two item URLs"):
         ms.stack_stats([vv_url])
+
+
+@responses.activate
+def test_stack_provenance_reports_the_mix_stack_stats_would_refuse(sample_item_dict, monkeypatch):
+    """The preflight for ``stack_stats``: a model that hits the provenance
+    refusal can ask which passes *do* agree instead of guessing a subset."""
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+
+    seen: dict = {}
+    report = load.StackProvenance(
+        asset="GEC",
+        groups=(
+            load.ProvenanceGroup(
+                record={"calibration": "(unrecorded)"},
+                item_ids=("a", "b"),
+                hrefs=(ITEM_URL, second_url),
+            ),
+        ),
+        unreadable=(),
+        shared={},
+        refusal="Refusing to stack rasters whose calibration disagrees (...)",
+    )
+
+    def fake(items, *, asset="GEC"):
+        seen["items"] = list(items)
+        seen["asset"] = asset
+        return report
+
+    monkeypatch.setattr(load, "stack_provenance", fake)
+    out = ms.stack_provenance([ITEM_URL, second_url], asset="CSI")
+
+    assert len(seen["items"]) == 2
+    assert seen["asset"] == "CSI"
+    # The tool answers with the report's own document -- the same one
+    # ``umbra stack --provenance --json`` and ``POST /artifacts/provenance``
+    # emit, so a model, a shell and an HTTP client read one schema.
+    assert out == report.to_dict()
+    assert out["agrees"] is False
+    assert out["groups"][0]["hrefs"] == [ITEM_URL, second_url]
+
+
+@responses.activate
+def test_stack_provenance_shares_stack_stats_preconditions(sample_item_dict):
+    """Same two refusals as ``stack_stats``, so anything that tool would accept
+    is something this one answers for -- a selection that cannot be measured at
+    all has no measurement to preflight."""
+    vv_url = ITEM_URL
+    hh_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, hh_url, json=_with_polarization(sample_item_dict, "HH"), status=200
+    )
+    with pytest.raises(ValueError, match="polarization"):
+        ms.stack_provenance([vv_url, hh_url])
+    with pytest.raises(ValueError, match="at least two item URLs"):
+        ms.stack_provenance([vv_url])
 
 
 @responses.activate

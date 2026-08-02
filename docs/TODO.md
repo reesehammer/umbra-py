@@ -805,12 +805,37 @@ blocker:
   records, and the grouping runs on `_comparable_record` factored out of it — so
   a cleared selection cannot then be refused by the stack it cleared. What is
   still open, and smaller:
-  - **`POST /artifacts/stats` still reports the mix only as its `400`.** The
-    endpoint has no provenance preflight, so a hosted client discovers a mixed
-    selection by spending the request. The natural shape is not a new endpoint
-    but the one the landing page established: report a selection's conversions
-    where it already reports what the instance supports. It waits for a hosted
-    instance to exist (`umbra serve`'s own follow-on) to be worth the surface.
+  - ~~**`POST /artifacts/stats` still reports the mix only as its `400`.**~~
+    **shipped** — `POST /artifacts/provenance` (and the `stack_provenance` agent
+    tool beside it) asks the question from the surfaces that answer for people
+    who installed nothing. The shape this entry predicted is *not* the shape
+    that shipped, and for a reason worth recording: the landing page reports
+    what an **instance** supports, which is a fact about the server and belongs
+    in a document fetched once, whereas a selection's conversions are a fact
+    about the request and can only be answered per request. So it is a route
+    rather than a field — but a route that takes `/artifacts/stats`'s own body
+    and vets it through the same `stats_frames`, which is what makes it a
+    preflight *of that request* rather than of a lookalike selection. Three
+    decisions it made: a mix answers `200` (reporting the mix is the point; the
+    `400` it quotes is still what `/artifacts/stats` gives), it is uncached (the
+    read is kilobytes, and a re-converted source is exactly where a
+    content-addressed answer goes stale), and it is not routed through the
+    injectable `renderers` (an injectable provenance would be the second opinion
+    the whole construction rules out). What is still open, and smaller:
+    - **A hosted instance is still the missing half.** The endpoint makes the
+      preflight free for a client with nothing installed, which is only worth
+      something once a public `umbra serve` exists — the follow-on the
+      `umbra serve` section below tracks. Nothing here waits on it.
+    - **`/artifacts/change`, `timescan` and `swipe` have no preflight.** They
+      draw rather than measure, so they never refuse a mix in the first place
+      (the tolerance `_shared_provenance`'s `action` argument records). The one
+      composite-path caller that *does* quote decibels is
+      `render_change_png`, and it has no HTTP surface — see the composite entry
+      below.
+    - **The response is not in `docs/schemas/`.** `StackProvenance.to_dict()` is
+      pinned by tests on all three surfaces, but the render-manifest schema has
+      no sibling for it. Worth writing if a non-umbra-py client starts parsing
+      the report.
   - **The search-side commands still don't report conversions.** This entry's
     original suggestion — list the distinct `UMBRA_CALIBRATION` values in a
     selection the way `umbra search` reports polarizations — is orthogonal to
@@ -860,8 +885,10 @@ The read-only STAC API is shipped (landing / conformance / collections / items /
 pagination), renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`,
 `GET /artifacts/thumbnail/{id}.png`, `POST /artifacts/change`, `.../timescan`,
 `.../swipe`, and the one that is numbers rather than a picture, `POST
-/artifacts/stats`) with an async job flow for long renders, and exposes the
-index's Umbra-specific filters through the STAC Query extension. Open follow-on:
+/artifacts/stats` — with `POST /artifacts/provenance` as its preflight, the one
+route that neither renders nor caches) with an async job flow for long renders,
+and exposes the index's Umbra-specific filters through the STAC Query extension.
+Open follow-on:
 
 - **A hosted community instance.** The local-first server has no operational
   cost; a public instance is a policy decision (COG-streaming egress) that would

@@ -412,6 +412,15 @@ $ umbra stack --area Centerfield --start 2024-01 --provenance
 makes for a chip run, one layer up: ask the cheap question first, and ask it
 with the function that would refuse.
 
+The same question reaches the front doors built so nobody has to install
+anything. `POST /artifacts/provenance` on `umbra serve` takes the body you would
+send to `POST /artifacts/stats` and answers with that report — a mixed selection
+is a `200` carrying the refusal and the largest agreeing subset, not the `400`
+the stats call would have spent — and `stack_provenance(urls=[...])` is an agent
+tool on MCP / LangChain / LlamaIndex, so a model that hits the refusal can ask
+which passes *do* agree instead of guessing a subset. All three emit the same
+document.
+
 Every number above carries one uncertainty none of those corrections touch.
 Coherent illumination of a rough surface interferes with itself, so a
 single-look pixel's power scatters about its surface's true backscatter with a
@@ -1493,7 +1502,8 @@ The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `stack_stats` (the same change
 question in numbers: per-pass decibel statistics and how much ground moved, in
 km² — and with `blocks=N`, which part of the site moved and between which two
-passes), `download_asset`, `watch_site`
+passes), `stack_provenance` (whether those passes are one measurement at all,
+and which of them are when they aren't), `download_asset`, `watch_site`
 (report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
 index), `describe_scene` (a SAR-literate model reading of one scene) and
@@ -1536,7 +1546,8 @@ agent = create_react_agent(my_chat_model, umbra_tools())
 ```
 
 `umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
-`index_stats`, `stack_stats`, `download_asset`, `watch_site`, `find_similar` /
+`index_stats`, `stack_stats`, `stack_provenance`, `download_asset`,
+`watch_site`, `find_similar` /
 `find_similar_text`, `describe_scene`, `narrate_change` and the `quicklook` /
 `change_composite` / `timescan` render tools — the full MCP inventory, each
 schema inferred from the function signature and each description from its
@@ -1572,7 +1583,7 @@ agent = ReActAgent.from_tools(tools, llm=my_llm)
 
 `umbra_tools()` returns the same inventory as the LangChain adapter
 (`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `stack_stats`,
-`download_asset`,
+`stack_provenance`, `download_asset`,
 `watch_site`, `find_similar` / `find_similar_text`, `describe_scene`,
 `narrate_change` and the `quicklook` / `change_composite` / `timescan` render
 tools) — each name and description inferred from the function's docstring and each
@@ -1780,6 +1791,30 @@ The reason is the same string the endpoint raises, so the advertisement cannot
 drift from the refusal it predicts — and `stacking` is the policy line the
 server echoes at startup, so a client can tell the operator which flag to
 change.
+
+One refusal is about the *selection* rather than the instance, and it has its
+own preflight. `/artifacts/stats` will not measure passes whose rasters were made
+by different `umbra convert` settings, because differencing two conversions puts
+their difference on the time axis. `POST /artifacts/provenance` asks that first,
+with the same request body:
+
+```bash
+curl -X POST http://127.0.0.1:8000/artifacts/provenance \
+  -H 'content-type: application/json' -d '{"ids": [...]}'
+# {"asset": "GEC", "agrees": false,
+#  "groups": [{"record": {"calibration": "gamma0", …}, "count": 2,
+#              "item_ids": [...], "hrefs": ["https://….json", …]}, …],
+#  "unreadable": [],
+#  "refusal": "Refusing to stack rasters whose calibration disagrees (…)"}
+```
+
+A mix is a `200`, not a `400`: reporting the mix is what was asked for, and
+`groups[0].hrefs` is the subset to send to `/artifacts/stats` instead. Only a
+selection that couldn't be measured at all — fewer than two passes, or mixed
+polarizations — is a `400`, because there is no stack to preflight. It renders
+nothing and caches nothing: the cost is one COG header per pass, and a
+re-converted source is exactly the case a content-addressed answer would get
+wrong. The document is `umbra stack --provenance --json`'s, verbatim.
 
 A long render (a large `max_size`, a many-frame timescan) needn't hold the
 request: add `"async": true` to any composite (or `stats`) request body to get a `202 Accepted`
