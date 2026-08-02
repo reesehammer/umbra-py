@@ -83,6 +83,7 @@ from .geoid import (
     geoid_grid_url,
 )
 from .index import (
+    BakedPreview,
     CatalogIndex,
     UpdateResult,
     default_index_path,
@@ -168,6 +169,7 @@ __all__ = [
     "UmbraCatalog",
     "CatalogIndex",
     "UpdateResult",
+    "BakedPreview",
     "default_index_path",
     "default_thumbs_path",
     "fetch_prebuilt_thumbnails",

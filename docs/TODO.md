@@ -109,14 +109,25 @@ build on that, none a blocker:
   by `href` unless asked, to keep an existing caller's batching stable. If no
   caller depends on that order, making newest-first the default would be one
   fewer flag to remember on the path where a cap actually matters.
-- **The published thumbnails are 128 px; `bake-thumbnails` defaults to 256.** A
-  local bake and the fetched sidecar therefore differ in size, and a merge keeps
-  whichever arrived first (`--overwrite` replaces). Recording the bake size in
-  the sidecar would let a merge prefer the larger preview rather than the
-  earlier one — and, since `umbra describe --preview` began reading these bytes
-  as the picture a vision model is shown, the same record (size *and* asset)
-  would let a description quote the bake instead of inferring what it must have
-  been. See the C2 entry below.
+- ~~**The published thumbnails are 128 px; `bake-thumbnails` defaults to 256.**~~
+  **shipped** — schema v4 records the asset and the size beside every baked
+  preview (`items.thumbnail_asset` / `items.thumbnail_size`, and the matching
+  sidecar columns), so `import_thumbnails` keeps a local bake unless the incoming
+  one is a *larger* preview of the *same* product instead of keeping whichever
+  arrived first. Where either side is unrecorded the two are not comparable and
+  the local bake stays, which is what makes the change invisible until the
+  published sidecar is republished with the record. The same record is what let
+  the C2 entry below stop inferring what a preview must have been. What is still
+  open, and smaller:
+  - **The published sidecar has no record until the next weekly run.** Until
+    `publish-index.yml` re-exports, every fetched preview reads as "unknown", so
+    a merge behaves exactly as it did before and `umbra describe --preview` still
+    falls back to assuming `GEC`. Nothing to do but wait for a run — noted
+    because it is the same silent-until-rebuild lag the PMTiles entry below has.
+  - **The bake's *stretch* is still assumed, not recorded.** `bake_thumbnails`
+    has no `db` parameter — every preview is the decibel one — so `--no-db` is
+    refused without a lookup. If a linear bake is ever wanted, it is a third
+    column and a parameter, not a reinterpretation of the two that exist.
 
 ---
 
@@ -727,15 +738,24 @@ MCP, LangChain and LlamaIndex surfaces. Open follow-ons:
   (`SceneDescription.image`), a smaller one adds a deterministic caveat, and a
   request the bake cannot answer is refused by `baked_preview_refusal` rather
   than substituted. What is still open, and smaller:
-  - **The index records a preview's bytes, not how they were made.** So
-    `baked_preview_refusal` trusts a cached preview for exactly the request
-    `bake_thumbnails` defaults to (`GEC`, decibel stretch) and refuses the rest,
-    including a `--asset CSI` bake someone made deliberately. Recording the asset
-    and the size beside the thumbnail — the same column the sidecar entry above
-    wants for preferring the larger preview on merge — would lift the restriction
-    to what the bake actually is rather than what it is assumed to be. That is a
-    schema migration (v4) plus a sidecar column, so it waits for a caller who
-    bakes a non-default asset.
+  - ~~**The index records a preview's bytes, not how they were made.**~~
+    **shipped** — schema v4's `items.thumbnail_asset` / `.thumbnail_size` (see
+    the index entry above) let `baked_preview_refusal` check the request against
+    the bake rather than against an assumption about it: a `--asset CSI` bake
+    answers a `--asset CSI` reading, a bake of another product is refused *naming
+    what it is*, and `SceneDescription.image.asset` reports the product actually
+    read. `BakedPreviews` returns a `BakedPreview` record rather than bytes, and
+    the lookup moved ahead of the refusal, since which product a preview is of is
+    a fact about the scene rather than about the request. A preview with no
+    record reads as unknown and keeps the old assumed rule — absence is not a
+    claim. What is still open, and smaller:
+    - **`--preview auto` now costs one index read on a request it will refuse.**
+      It used to skip the lookup entirely for a non-`GEC` asset, because the
+      answer was knowable from the request alone; it no longer is. The read is a
+      local point query against an indexed column and the alternative is
+      refusing bakes that would have answered, so this is the right trade — but
+      it is a trade, and it is the reason a `--preview auto` run over many scenes
+      touches the index once per scene.
   - **`umbra change --narrate` still renders both passes.** The composite is a
     co-registered difference of two full reads, not a single quicklook, so a
     128 px preview per pass is not the same object at all — there is no cached

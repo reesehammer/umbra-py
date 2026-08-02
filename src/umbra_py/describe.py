@@ -51,14 +51,18 @@ quicklook instead: no range read, no ``rasterio``, and the whole C2 capability
 becomes available from local bytes on an install that has only the ``[ai]`` extra.
 
 It is opt-in rather than automatic because it changes *what the model was shown*:
-a baked preview is a 128--256 px decibel-stretched ``GEC`` quicklook, where a
-render defaults to 1024 px of whichever asset was asked for. Two consequences,
-both handled here rather than left to the caller:
+a baked preview is a 128--256 px decibel-stretched quicklook, where a render
+defaults to 1024 px of whichever asset was asked for. Two consequences, both
+handled here rather than left to the caller:
 
-- A request a baked preview cannot answer (a non-``GEC`` asset, ``db=False``) is
-  **refused** by :func:`baked_preview_refusal` under ``"baked"`` and quietly
-  rendered under ``"auto"``. Advertisement and refusal are one function, so the
-  reason a substitution is unsafe is the same string either way.
+- A request a baked preview cannot answer (a picture of another product,
+  ``db=False``) is **refused** by :func:`baked_preview_refusal` under ``"baked"``
+  and quietly rendered under ``"auto"``. Advertisement and refusal are one
+  function, so the reason a substitution is unsafe is the same string either way.
+  Which product a preview *is* comes from the index's own record of the bake
+  (:class:`~umbra_py.index.BakedPreview`) where there is one, so a deliberate
+  ``--asset CSI`` bake answers a ``--asset CSI`` reading; only a preview with no
+  record falls back to assuming the default bake.
 - Every description records the picture it was read from (:class:`SceneImage`, on
   ``SceneDescription.image``), and a preview smaller than the render that was
   asked for adds a deterministic caveat saying so -- the library's own, never the
@@ -76,11 +80,16 @@ import re
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .constants import AI_PROVENANCE, ATTRIBUTION, POLARIZATION_CAVEAT
 from .exceptions import MissingDependencyError, UmbraError
 from .models import UmbraItem
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Typing only, so this module keeps its runtime independence from the index
+    # (and from `requests`, which the index's import graph pulls in eagerly).
+    from .index import BakedPreview
 
 __all__ = [
     "BAKED_PREVIEW_ASSET",
@@ -109,13 +118,15 @@ Describer = Callable[[dict[str, Any]], str]
 #: is :func:`render_quicklook_png`.
 Renderer = Callable[[UmbraItem], bytes]
 
-#: A baked-preview reader: a STAC item id in, the PNG bytes already cached for it
-#: out, or ``None`` for "nothing baked for this one -- render it instead" (the
-#: contract of :meth:`~umbra_py.index.CatalogIndex.get_thumbnail`, which is what
-#: the CLI and the MCP server pass in). A plain callable rather than an index
-#: object so this module stays stdlib-only and offline-testable, exactly as
-#: :data:`Describer` and :data:`Renderer` do for the model and the render.
-BakedPreviews = Callable[[str], bytes | None]
+#: A baked-preview reader: a STAC item id in, the cached picture *and what it is
+#: a picture of* out, or ``None`` for "nothing baked for this one -- render it
+#: instead" (the contract of :meth:`~umbra_py.index.CatalogIndex.get_preview`,
+#: which is what the CLI and the MCP server pass in). A plain callable rather
+#: than an index object so this module stays stdlib-only and offline-testable,
+#: exactly as :data:`Describer` and :data:`Renderer` do for the model and the
+#: render; the record it returns is what lets a substitution be checked against
+#: the bake rather than against an assumption about it.
+BakedPreviews = Callable[[str], "BakedPreview | None"]
 
 #: Where the picture handed to the model may come from. ``"render"`` (the
 #: default) always streams a fresh quicklook, so a default description is
@@ -124,12 +135,13 @@ BakedPreviews = Callable[[str], bytes | None]
 #: one and renders when there is none.
 PREVIEW_SOURCES = ("render", "baked", "auto")
 
-#: The product a baked preview is of. :meth:`~umbra_py.index.CatalogIndex.bake_thumbnails`
-#: defaults to ``GEC`` and the published ``catalog.thumbs.db`` sidecar is baked
-#: that way, but the index records only the bytes -- not which asset or stretch
-#: produced them. So a preview is trusted for exactly the request the bake is
-#: known to answer (see :func:`baked_preview_refusal`) rather than assumed to
-#: stand in for any of them.
+#: What a baked preview is assumed to be a picture of when it carries no record
+#: of its own. :meth:`~umbra_py.index.CatalogIndex.bake_thumbnails` defaults to
+#: ``GEC`` and the published ``catalog.thumbs.db`` sidecar is baked that way, so
+#: this is the safe reading of a preview from an index that predates the
+#: ``thumbnail_asset`` column -- not a claim about every preview. One that *does*
+#: carry a record is checked against that instead (see
+#: :func:`baked_preview_refusal`).
 BAKED_PREVIEW_ASSET = "GEC"
 
 
@@ -470,16 +482,25 @@ def _png_size(png: bytes) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
-def baked_preview_refusal(*, asset: str = "GEC", db: bool = True) -> str | None:
+def baked_preview_refusal(
+    *, asset: str = "GEC", db: bool = True, baked: BakedPreview | None = None
+) -> str | None:
     """Why a baked preview cannot answer this request, or ``None`` if it can.
 
-    The index stores a preview's *bytes* and nothing about how they were made, so
-    a substitution is only safe for the request the bake is known to answer:
-    :meth:`~umbra_py.index.CatalogIndex.bake_thumbnails` renders a
-    :data:`BAKED_PREVIEW_ASSET` quicklook with the decibel stretch, and that is
-    what the published ``catalog.thumbs.db`` carries. Ask for a different product
-    or a linear stretch and the cached picture is *a different picture* -- not a
-    smaller version of the one requested.
+    A substitution is only safe when the cached picture is a *smaller* version of
+    the one asked for rather than a different one, so this compares the request
+    against what the bake actually was: ``baked.asset``, recorded beside the
+    bytes by :meth:`~umbra_py.index.CatalogIndex.bake_thumbnails`. A deliberate
+    ``--asset CSI`` bake therefore answers a ``CSI`` reading, which it could not
+    when the index stored pixels and nothing else.
+
+    Two cases keep the older, assumed rule. A preview with no record (baked
+    before the index kept one, or published in a sidecar that predates it) is
+    trusted only for :data:`BAKED_PREVIEW_ASSET`, since that is what the default
+    bake renders. And the *stretch* is assumed either way: every bake is the
+    decibel one -- :meth:`~umbra_py.index.CatalogIndex.bake_thumbnails` has no
+    say in it -- so ``db=False`` is refused without needing a record, and without
+    needing a lookup.
 
     One function, two uses, so they cannot drift: ``preview="baked"`` raises the
     string it returns, and ``preview="auto"`` reads it as "render this one
@@ -487,12 +508,20 @@ def baked_preview_refusal(*, asset: str = "GEC", db: bool = True) -> str | None:
     :func:`~umbra_py.serve.stats_option_refusal`, where the refusal and the
     advertisement of what an instance supports are also the same function.
     """
-    if asset.upper() != BAKED_PREVIEW_ASSET:
+    recorded = (baked.asset or "").upper() if baked is not None else ""
+    if recorded and asset.upper() != recorded:
         return (
-            f"A baked preview is a {BAKED_PREVIEW_ASSET} quicklook (what 'umbra index "
-            f"bake-thumbnails' renders and what the published thumbnail sidecar "
-            f"carries), but asset={asset.upper()} was asked for. Use --preview render "
-            f"(or --asset {BAKED_PREVIEW_ASSET})."
+            f"The baked preview for this scene is a {recorded} quicklook, but "
+            f"asset={asset.upper()} was asked for. Use --preview render (or "
+            f"--asset {recorded})."
+        )
+    if not recorded and asset.upper() != BAKED_PREVIEW_ASSET:
+        return (
+            f"A baked preview that carries no record of what it is is assumed to be a "
+            f"{BAKED_PREVIEW_ASSET} quicklook (what 'umbra index bake-thumbnails' "
+            f"renders and what the published thumbnail sidecar carries), but "
+            f"asset={asset.upper()} was asked for. Use --preview render (or "
+            f"--asset {BAKED_PREVIEW_ASSET})."
         )
     if not db:
         return (
@@ -662,6 +691,13 @@ def _obtain_image(
     reason the cache cannot answer as "render it instead". Each refusal names the
     command that would fix it, because a caller who asked for a cached read and
     got nothing needs to know whether to bake, to fetch, or to stop asking.
+
+    The cache is consulted *before* the refusal is computed, because since the
+    index began recording what it baked, which product a preview is of is a fact
+    about that scene rather than about the request -- so it cannot be known
+    without the lookup. The cost is one point read on a request that then goes on
+    to render anyway; what it buys is that a bake of the asset being asked for is
+    used instead of refused.
     """
     if preview not in PREVIEW_SOURCES:
         raise DescribeError(
@@ -669,13 +705,13 @@ def _obtain_image(
         )
 
     if preview != "render":
-        refusal = baked_preview_refusal(asset=asset, db=db)
-        png = None if refusal is not None or previews is None else previews(item.id)
-        if png is not None:
-            size = _png_size(png)
-            return png, SceneImage(
+        baked = previews(item.id) if previews is not None else None
+        refusal = baked_preview_refusal(asset=asset, db=db, baked=baked)
+        if baked is not None and refusal is None:
+            size = _png_size(baked.png)
+            return baked.png, SceneImage(
                 source="baked",
-                asset=BAKED_PREVIEW_ASSET,
+                asset=(baked.asset or BAKED_PREVIEW_ASSET).upper(),
                 max_size=max_size,
                 db=db,
                 width=size[0] if size else None,
@@ -738,7 +774,7 @@ def describe(
     The default ``"render"`` streams a fresh quicklook, so nothing about a
     description changes unless this is asked for; ``"baked"`` and ``"auto"`` read
     the cached preview through ``previews`` -- a
-    :meth:`~umbra_py.index.CatalogIndex.get_thumbnail`-shaped callable -- which
+    :meth:`~umbra_py.index.CatalogIndex.get_preview`-shaped callable -- which
     costs no S3 range read and needs no ``viz`` extra. What was read is recorded
     on :attr:`SceneDescription.image`, and a preview smaller than the requested
     ``max_size`` adds a deterministic caveat (:func:`_baked_preview_caveat`) after

@@ -27,6 +27,7 @@ from ..constants import CANOPY_TOKEN_ENV
 from ..exceptions import GeocodeError
 from ..geocode import geocode_place
 from ..index import (
+    BakedPreview,
     CatalogIndex,
     default_index_path,
 )
@@ -180,24 +181,26 @@ def _baked_thumbnails(items: list[UmbraItem], db_path: str | None) -> dict[str, 
     return baked
 
 
-def _baked_previews(db_path: str | None) -> Callable[[str], bytes | None] | None:
-    """Return an ``(item_id) -> PNG bytes | None`` reader over the index's baked
+def _baked_previews(db_path: str | None) -> Callable[[str], BakedPreview | None] | None:
+    """Return an ``(item_id) -> BakedPreview | None`` reader over the index's baked
     previews, or ``None`` when there is no index file to read.
 
     The single-item counterpart of :func:`_baked_thumbnails` (which maps a whole
     search result at once), shaped as
-    :data:`~umbra_py.describe.BakedPreviews` for ``umbra describe --preview``. The
-    ``None`` return is load-bearing: it is how ``--preview baked`` tells "this
-    machine has no index" (fetch one) apart from "this scene is not baked in it"
-    (bake it), which are different fixes.
+    :data:`~umbra_py.describe.BakedPreviews` for ``umbra describe --preview``. It
+    reads :meth:`~umbra_py.index.CatalogIndex.get_preview` rather than the bytes
+    alone, because the describe path has to decide whether the cached picture is
+    of the product it was asked for. The ``None`` return is load-bearing: it is
+    how ``--preview baked`` tells "this machine has no index" (fetch one) apart
+    from "this scene is not baked in it" (bake it), which are different fixes.
     """
     path = _index_path(db_path)
     if not path.exists():
         return None
 
-    def lookup(item_id: str) -> bytes | None:
+    def lookup(item_id: str) -> BakedPreview | None:
         with CatalogIndex(path) as idx:
-            return idx.get_thumbnail(item_id)
+            return idx.get_preview(item_id)
 
     return lookup
 

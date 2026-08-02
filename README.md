@@ -568,7 +568,10 @@ umbra index fetch-thumbnails         # + the baked previews (opt-in)
 
 On an index you baked yourself, `umbra index export-thumbnails` writes the same
 sidecar to share — the bake is the one derived artifact worth moving rather than
-recomputing.
+recomputing. Every preview carries what it is a picture of (the asset and the
+size it was baked at), so a merge keeps your local bake unless the incoming one
+is a *larger* preview of the same product, rather than keeping whichever
+happened to arrive first.
 
 Once you have an index, `umbra index update` freshens it *cheaply* instead of
 re-fetching or re-crawling the whole bucket: it reads the newest acquisition date
@@ -1067,11 +1070,13 @@ umbra describe https://.../<item>/<id>.json --preview baked
 
 `baked` fails if the scene has no cached preview (saying which command bakes or
 fetches it); `auto` renders the ones that are missing. A cached preview is a
-128–256 px `GEC` quicklook, so it is smaller than `--max-size` asks for and is
-not a stand-in for another asset or a linear stretch: the reading records which
-picture it read (`"image"` in `--json`) and carries a caveat about the detail
-that was not in it, and a request the cache cannot answer is refused rather than
-quietly substituted.
+128–256 px quicklook, so it is smaller than `--max-size` asks for: the reading
+records which picture it read (`"image"` in `--json`) and carries a caveat about
+the detail that was not in it. And it is only substituted for a picture of the
+*same* product — the index records which asset each preview was baked from, so
+`umbra index bake-thumbnails --asset CSI` answers `umbra describe --asset CSI`,
+while a request the cache holds a different picture for is refused (naming what
+that picture is) rather than quietly answered with it.
 
 ### Monitor a site for new passes (`umbra watch`)
 

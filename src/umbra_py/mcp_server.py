@@ -44,7 +44,7 @@ from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import MissingDependencyError
 from .geocode import geocode_place as _geocode_place
-from .index import CatalogIndex, default_index_path
+from .index import BakedPreview, CatalogIndex, default_index_path
 from .models import UmbraItem
 from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
@@ -818,22 +818,24 @@ def find_similar_text(
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 
-def _baked_previews() -> Callable[[str], bytes | None] | None:
+def _baked_previews() -> Callable[[str], BakedPreview | None] | None:
     """A reader over the local index's baked quicklooks, or ``None`` if absent.
 
     The server's own :data:`~umbra_py.describe.BakedPreviews`, shaped like the
     CLI's ``_shared._baked_previews``: it is what lets ``describe_scene`` read a
     picture this machine already has instead of streaming a cloud-optimized
-    overview per call. ``None`` means "no index here", which the describe path
-    turns into a refusal naming the fetch that would fix it.
+    overview per call, and it returns the index's record of *what* was baked so
+    that path can tell a smaller version of the requested picture from a
+    different one. ``None`` means "no index here", which the describe path turns
+    into a refusal naming the fetch that would fix it.
     """
     path = default_index_path()
     if not path.exists():
         return None
 
-    def lookup(item_id: str) -> bytes | None:
+    def lookup(item_id: str) -> BakedPreview | None:
         with CatalogIndex(path) as index:
-            return index.get_thumbnail(item_id)
+            return index.get_preview(item_id)
 
     return lookup
 
