@@ -44,13 +44,14 @@ src/umbra_py/
     _shared.py       #   shared option groups (geography / task name / acquisition properties / token / manifest) + how a command gets its items (`_gather_items`, `_item_from_url`)
     discover.py      #   `search | watch | info | context | llms-txt | ask`: which acquisitions exist
     scenes.py        #   `describe | download | quicklook | view | load`: one acquisition at a time
-    process.py       #   `stack | convert | chips`: data products rather than pictures
+    process.py       #   `stack | convert | chips | preflight`: data products rather than pictures
     composites.py    #   `change | timescan | swipe`: multi-pass pictures of one site
     atlas.py         #   `map | gallery`: where the archive has imagery
     explore.py       #   `mcp | serve | demo | tiles | showcase`: the commands that stand something up
     indexes.py       #   `index | semantic | embed`: the local SQLite sidecars
   constants.py       # bucket, STAC root URL, canonical product types
   convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened, radiometrically calibrated, noise-floor-subtracted, speckle-filtered and clipped to an area of interest (behind [convert] extra)
+  preflight.py       # umbra preflight: read a SICD's XML metadata out of the NITF by HTTP range request (stdlib NITF header walk, no sarpy) and answer whether a product can support --calibrate / --noise-model measured, before downloading it
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call); --asset SICD geocodes each complex product via convert.py first ([convert]); --clip-bbox tiles (and converts) one area of interest
   viz/               # rendering package; every name re-exported from `umbra_py.viz` (see its __init__ docstring)
     geojson.py       #   items -> GeoJSON features / FeatureCollections (no dependencies)

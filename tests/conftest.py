@@ -20,6 +20,7 @@ GATHER_COMMANDS = [
     ["demo", "--out", "d.html"],
     ["tiles", "--out", "t.pmtiles"],
     ["chips", "--out", "chips_out"],
+    ["preflight"],
     ["showcase", "--out", "site"],
     ["watch"],
     ["index", "build"],

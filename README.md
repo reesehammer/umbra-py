@@ -819,6 +819,13 @@ umbra timescan --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out ti
 # Chip a site's passes into fixed-size georeferenced ML tiles + a manifest.
 umbra chips --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --out chips/ --chip-size 512 --db
 
+# Before spending the downloads: ask which complex passes can support the
+# measurement at all. Reads each SICD's metadata out of the NITF by range
+# request -- tens of kilobytes of a multi-gigabyte product -- and applies the
+# conversion's own support check, so a calibrated chip run is decided before a
+# single scene is fetched.
+umbra preflight --area "Centerfield" --start 2024-01-01 --end 2024-12-31 --calibrate gamma0
+
 # Geocode a downloaded SICD (complex) product to a north-up EPSG:4326 COG that
 # opens straight on a map / in QGIS / via umbra_py.to_xarray. --slant-plane
 # instead writes the raw, ungeoreferenced amplitude for quick inspection.
@@ -1212,7 +1219,8 @@ past exactly that family, record each left-out pass on `ChipDataset.skipped`
 so the dataset *states* its hole rather than having one. Nothing else is
 swallowed: a download failure or a corrupt product still ends the run. And the
 check now happens off the metadata *before* the pixels are read, so a scene that
-could never have answered costs its header rather than a full complex read.
+could never have answered costs its header rather than a full complex read — or,
+with `umbra preflight` below, before it is downloaded at all.
 
 `--clip-bbox` is what makes
 that path affordable when the subject is a *site*: it tiles only the window you
@@ -1248,6 +1256,53 @@ mostly-nodata corners of a rotated footprint. The manifest format follows the
 or `.parquet` (stac-geoparquet, queryable at scale via DuckDB / geopandas; needs
 the `export` extra). **No model is called** — chipping is pure raster iteration +
 manifest logic. Requires the load extra (`pip install "umbra-py[load]"`).
+
+### Ask before you download (`umbra preflight`)
+
+Two of the conversion's corrections depend on the product describing itself:
+`--calibrate` reads the SICD's `Radiometric` scale-factor polynomials, and
+`--noise-model measured` reads its stated noise floor. Umbra's open products
+generally carry neither, so those runs refuse — correctly, because a scaling by
+an invented number is indistinguishable in the output from a measured one.
+
+The problem was never the refusal; it was *finding out*. A SICD's metadata lives
+inside the NITF, so learning that a pass cannot be calibrated meant downloading
+it. Over a site's twenty passes that is tens of gigabytes spent to be told no.
+
+`umbra preflight` asks over the wire instead. A NITF states its own layout in a
+fixed-width header, so the SICD XML — a data extension segment near the end of
+the file — is located and fetched with two HTTP range requests:
+
+```bash
+# Which of this site's complex passes could carry a gamma-nought coefficient?
+umbra preflight --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
+  --calibrate gamma0
+
+# Or ask about a measured noise floor, on one acquisition or a whole selection.
+umbra preflight <item-json-url> --subtract-noise --noise-model measured --json
+```
+
+```text
+  2024-02-08-01-02-03_UMBRA-05: calibrations none; noise level none -> no
+  2024-03-11-04-05-06_UMBRA-05: calibrations none; noise level none -> no
+0 of 2 acquisition(s) support --calibrate gamma0.
+  Read 41.2 KB of product headers instead of 7.4 GB of product.
+  hint: Convert without --calibrate; this product states no scale factors.
+```
+
+The verdict is not a second opinion: the parsed metadata is handed to the same
+`_check_measurement_support` the conversion runs, calling the same coefficient
+readers, so a preflight that says yes and a conversion that then refuses cannot
+disagree. What differs is only where the metadata came from. `sicd_capabilities`
+also reports what the product *does* declare — which calibrations, which noise
+level, and the scene's identity — so `umbra chips --asset SICD --calibrate
+gamma0` over the survivors is a run with no refusals in it.
+
+Reading it needs no extra at all (the NITF walk and the XML parse are stdlib), so
+"can this archive answer my question?" is answerable from a core install. An
+acquisition whose metadata cannot be read — a missing asset, an HTTP failure — is
+recorded as its own verdict rather than ending the walk, because a preflight that
+dies on the nineteenth scene has failed at the one thing it is for.
 
 ### Find scenes that *look alike* (`umbra embed`)
 

@@ -7,6 +7,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Ask a complex product what it can support before downloading it (`umbra
+  preflight`, `umbra_py.sicd_capabilities`).** The two corrections that depend on
+  a product describing itself — radiometric calibration and a `measured` noise
+  floor — refuse on most of Umbra's open archive, and refusing is the point. What
+  was expensive was *finding out*: a SICD's metadata lives inside the NITF, so
+  learning that a pass cannot be calibrated meant downloading the pass. Over a
+  site's twenty passes that is tens of gigabytes spent to be told no. The previous
+  change made that refusal survivable (`--skip-unsupported`) and cheap per scene
+  (the check moved ahead of the pixel read); it could not make the *discovery*
+  cheap, and named the header-only read as the different job it would take.
+
+  This is that job. A NITF states its own layout in a fixed-width file header, so
+  the SICD XML — a data extension segment near the end of the file — can be
+  located by arithmetic on ~30 bytes of segment table and fetched with two HTTP
+  range requests. `sicd_capabilities(url)` returns what the product declares
+  (which of `sigma0` / `beta0` / `gamma0` / `rcs` its `Radiometric` block carries,
+  whether its noise level is `ABSOLUTE`, `RELATIVE` or absent, plus the scene's
+  identity), what reading it cost, and — from the range response's
+  `Content-Range` — the download it did not do. `preflight_items` asks it of a
+  whole selection.
+
+  The verdict is not a second opinion about what a product supports. The parsed
+  XML is presented through an attribute view shaped like a `sarpy` SICD (a
+  polynomial's exponent-addressed `<Coef>` children densified into the `Coefs`
+  grid the conversion reads), so `convert._check_measurement_support` — the same
+  function the conversion runs, calling the same coefficient readers — produces
+  the answer. A preflight that says yes and a conversion that then refuses cannot
+  disagree; what differs is only where the metadata came from.
+
+  `umbra preflight` puts it on the CLI with the shared search options every
+  gather command has, so it takes the same `--area` / `--bbox` / `--place` /
+  `--intersects` selection as the `umbra chips --asset SICD` run it clears the way
+  for, and reports the cost it saved: *"0 of 20 acquisition(s) support --calibrate
+  gamma0. Read 412.0 KB of product headers instead of 61.3 GB of product."* An
+  acquisition whose metadata cannot be read at all — a missing asset, an HTTP
+  failure, a file that is not a NITF — is recorded as its own verdict rather than
+  ending the walk, because a preflight that dies on the nineteenth scene has
+  failed at the one thing it is for.
+
+  The whole path is stdlib plus the already-core `requests`: no `sarpy`, no
+  `numpy`, no `[convert]` extra, so "can this archive answer my question?" is
+  answerable from a core install. NITF 2.0 is refused by name rather than misread
+  (its security fields are a different length, so every offset would land
+  somewhere arbitrary), as are a truncated header, a non-numeric length field, a
+  product with no XML segment and unparseable XML.
 - **Name the refusal a product forces, so a batch can survive it and an agent
   can branch on it (`UnsupportedMeasurementError`, `umbra chips
   --skip-unsupported`).** Two of the conversion's corrections depend on the
