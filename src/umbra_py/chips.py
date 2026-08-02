@@ -64,6 +64,12 @@ or pyarrow can query without loading every line, the format a *large* chip set
 wants (the same plumbing :mod:`umbra_py.export` uses for the catalog snapshot).
 It needs the ``[export]`` extra alongside ``[load]``.
 
+Whatever the manifest's format, a run that could not include every acquisition
+it was offered writes a ``skipped.jsonl`` sidecar beside it -- one line per
+left-out pass, in the product's own words. The manifest describes the tiles that
+exist; the sidecar is the only thing in the directory that says which ones were
+meant to and do not, and it is written only when there is something to say.
+
 Install with: ``pip install "umbra-py[load]"`` (add ``[export]`` for
 ``.parquet`` manifests).
 """
@@ -77,7 +83,7 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -947,6 +953,12 @@ class ChipDataset:
 
     ``preflight`` is the roll-up of that pre-download check when one ran: what
     reading the archive's headers cost, and the download it removed.
+
+    ``skipped_path`` is where that hole was *written*, when there was one --
+    the sidecar beside the manifest (see :func:`write_skipped_manifest`), so a
+    loader reading the directory rather than the run can see it too. ``None``
+    when nothing was skipped, which is the same thing the empty ``skipped``
+    tuple says.
     """
 
     out_dir: str
@@ -960,6 +972,7 @@ class ChipDataset:
     conversion: SicdConversion | None = None
     skipped: tuple[SkippedAcquisition, ...] = ()
     preflight: PreflightSummary | None = None
+    skipped_path: str | None = None
 
     @property
     def chip_count(self) -> int:
@@ -1001,6 +1014,11 @@ class ChipDataset:
         if self.skipped:
             extra["skipped_count"] = len(self.skipped)
             extra["skipped"] = [s.to_dict() for s in self.skipped]
+            # Only when the sidecar was actually written: a run that collected
+            # its records without a manifest has the hole in the payload and
+            # nowhere on disk, and saying otherwise would point at no file.
+            if self.skipped_path is not None:
+                extra["skipped_manifest"] = self.skipped_path
         # Likewise absent from a run that did not preflight, so no existing
         # payload gains a field by this option existing.
         if self.preflight is not None:
@@ -1477,6 +1495,35 @@ def write_manifest(records: list[ChipRecord], path: str | os.PathLike) -> Path:
     return path
 
 
+def write_skipped_manifest(skipped: Sequence[SkippedAcquisition], path: str | os.PathLike) -> Path:
+    """Write the acquisitions a run left out to a ``.jsonl`` sidecar.
+
+    One JSON object per skipped acquisition -- :meth:`SkippedAcquisition.to_dict`
+    verbatim, so which pass is missing, when it was taken, the product's own
+    words for why, the recovery hint and the ``stage`` it was found at all read
+    the same from the file as from :attr:`ChipDataset.skipped`.
+
+    It is a *sidecar* rather than rows in the manifest because the manifest's
+    schema is one row per chip, and a skipped acquisition has no chip: writing it
+    there would mean a record with no path, no bbox and no transform, which every
+    consumer of that schema would then have to learn to ignore. A separate file
+    with its own one-row-per-acquisition schema costs a loader one ``open()`` and
+    costs a chip reader nothing.
+
+    Always ``.jsonl``, whatever format the manifest beside it is. The three
+    manifest formats are three ways of describing *tiles* -- footprint polygons
+    for QGIS, a column-oriented table for DuckDB -- and none of them is what a
+    missing acquisition is. The one thing a caller does with this file is read it
+    line by line to find out what is not in the dataset.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for skip in skipped:
+            fh.write(json.dumps(skip.to_dict()) + "\n")
+    return path
+
+
 def write_chips(
     items: Iterable[UmbraItem],
     out_dir: str | os.PathLike,
@@ -1491,6 +1538,7 @@ def write_chips(
     speckle_filter: str | None = None,
     speckle_window: int = SPECKLE_WINDOW_DEFAULT,
     manifest: str | None = "manifest.jsonl",
+    skipped_manifest: str | None = "skipped.jsonl",
     progress: ProgressFn | None = None,
     conversion: SicdConversion | None = None,
     work_dir: str | os.PathLike | None = None,
@@ -1511,6 +1559,21 @@ def write_chips(
     pass ``None`` to skip writing it and just collect the records. ``progress``
     is called ``(index, total, item, chips_written)`` after each item, for a CLI
     progress line.
+
+    ``skipped_manifest`` is the filename of the sidecar that states what the run
+    could *not* include (see :func:`write_skipped_manifest`), written beside the
+    manifest and **only when there is something to record** -- so a dataset with
+    no hole in it is exactly the set of files it was before, and the file's
+    presence is itself the statement that there is a hole. It follows
+    ``manifest``: ``manifest=None`` means "collect the records, write nothing",
+    and that stays true. Pass ``None`` to suppress the sidecar on its own.
+
+    Writing it at all is the difference between a run that knows what it left
+    out and a *dataset* that does. :attr:`ChipDataset.skipped` and the ``--json``
+    payload describe the hole to whoever watched the run; a training loader
+    reading ``out_dir`` months later sees only the files, and without the sidecar
+    a dataset that dropped half its passes is indistinguishable from one that was
+    only ever offered half.
 
     ``bbox`` restricts every acquisition to one area of interest (see
     :func:`chip_item`) -- the usual shape of a dataset build, where the site is
@@ -1642,9 +1705,16 @@ def write_chips(
             progress(i + 1, len(items), item, len(recs))
 
     manifest_path: str | None = None
+    skipped_path: str | None = None
     if manifest is not None:
         written = write_manifest(records, out_path / manifest)
         manifest_path = str(written)
+        # Absent from a run that skipped nothing, for the same reason the
+        # `skipped` block is absent from that run's payload: a file that says
+        # "no holes" and a missing file mean the same thing, and only one of
+        # them changes what a clean run leaves on disk.
+        if skipped and skipped_manifest is not None:
+            skipped_path = str(write_skipped_manifest(skipped, out_path / skipped_manifest))
 
     return ChipDataset(
         out_dir=str(out_path),
@@ -1658,6 +1728,7 @@ def write_chips(
         conversion=conversion,
         skipped=tuple(skipped),
         preflight=preflight_summary,
+        skipped_path=skipped_path,
     )
 
 

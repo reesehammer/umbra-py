@@ -475,6 +475,24 @@ most for exactly this correction, since flattening is the one whose refusal
 otherwise arrives after a complex read, a DEM fetch *and* a reprojection. Most
 products state the geometry, which is why it was worth asking rather than
 assuming: the absent case is the one nobody plans for.
+~~**Open:** every one of those reports — the summary, the `--json` payload, the
+console lines — is a report to somebody *watching the run*, and the thing a chip
+run produces is a directory somebody opens later. `manifest.jsonl` described the
+tiles that existed and nothing in the directory said which ones were meant
+to.~~ **shipped** — a run that could not include every acquisition it was
+offered writes a `skipped.jsonl` sidecar beside the manifest, one line per
+left-out pass with the product's own words, its `hint` and the `stage` the
+refusal was found at, so a dataset that dropped nine of twenty-two passes stops
+being indistinguishable on disk from one that was only ever offered thirteen —
+which is the difference between a gap in a time series being the archive's or
+the pipeline's. A sidecar rather than manifest rows (a skipped acquisition has
+no chip, so it would be a record with no path, bbox or transform in a
+one-row-per-chip schema), always `.jsonl` whatever the manifest's format, and
+written only when there is something to record — so a clean run leaves exactly
+the files it left before and the file's presence is itself the statement.
+**This closes the batch-survivability group**: a refusal is named, survivable,
+askable ahead of the download, read several at a time, and now *recorded in the
+artifact* rather than only in the run.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)

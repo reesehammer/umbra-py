@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Write the hole into the dataset, not only into the run that built it
+  (`skipped.jsonl`, `write_skipped_manifest`, `ChipDataset.skipped_path`).**
+  Five changes now stand between a chip batch and an archive that cannot answer
+  every question asked of it: the refusal has a name
+  (`UnsupportedMeasurementError`), `--skip-unsupported` survives it,
+  `--preflight` sees it coming, a worker pool keeps that check from becoming the
+  stall, and `--rtc` joined the two corrections that were already treated this
+  way. Every one of them ends the same place — `ChipDataset.skipped`, the
+  `--json` payload, and a line on the console naming the pass and quoting the
+  product's own words for why.
+
+  All three of those are reports to somebody who was *watching*. The artifact a
+  chip run exists to produce is a directory, and a training loader opens it
+  months later, on another machine, and sees files. `manifest.jsonl` describes
+  the tiles that exist; nothing in the directory said which ones were meant to
+  and do not. A dataset that dropped nine of twenty-two passes was
+  indistinguishable on disk from one that was only ever offered thirteen — and
+  the difference between those two is whether a gap in a time series is the
+  archive's or the pipeline's.
+
+  So a run that could not include every acquisition it was offered now writes a
+  `skipped.jsonl` sidecar beside the manifest: one JSON object per left-out
+  pass, `SkippedAcquisition.to_dict()` verbatim, so `item_id`, `datetime`, the
+  refusal's own words, the recovery `hint` and the `stage` it was found at read
+  identically from the file and from the run. `stage` is the field that earns
+  its place here — `"preflight"` versus `"conversion"` is the one thing the two
+  routes to a hole do not share, and it is what tells a reader whether a pass
+  was never downloaded or downloaded and refused.
+
+  Three decisions, each the same one this chain has made before. It is a
+  **sidecar** rather than rows in the manifest because the manifest's schema is
+  one row per chip and a skipped acquisition has no chip: putting it there means
+  a record with no path, no bbox and no transform that every consumer of that
+  schema must then learn to ignore. It is always `.jsonl`, whatever format the
+  manifest beside it is, because the three manifest formats are three ways of
+  describing *tiles* and none of them is what a missing acquisition is. And it
+  is written **only when there is something to record**, so a run with no hole in
+  it leaves exactly the files it left before — the file's presence is itself the
+  statement, the same rule that keeps the `skipped` block out of a clean run's
+  `--json` payload.
+
+  `write_chips(skipped_manifest=…)` names or suppresses it and follows
+  `manifest`, so `manifest=None` still means "collect the records, write
+  nothing". `ChipDataset.skipped_path` and the `--json` payload's
+  `skipped_manifest` report where it went, and `umbra chips` prints the path
+  under the per-acquisition report — because the console is the one place that
+  report reaches somebody who is watching, and the file is the only place it
+  reaches somebody who is not.
 - **Name the refusal terrain flattening forces, and ask it over the wire
   (`umbra preflight --rtc`, `SicdCapabilities.look_geometry`).** Three of
   `umbra convert`'s corrections depend on the product describing itself, and

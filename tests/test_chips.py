@@ -1802,6 +1802,115 @@ def test_skipped_acquisitions_reach_the_json_summary(tmp_path):
     assert payload["items"] == ["acq-a"]
 
 
+def test_the_skipped_acquisitions_are_written_beside_the_manifest(tmp_path):
+    """The dataset on disk states its hole, not just the run that built it."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        skip_unsupported=True,
+    )
+
+    sidecar = tmp_path / "ds" / "skipped.jsonl"
+    assert dataset.skipped_path == str(sidecar)
+    rows = [json.loads(line) for line in sidecar.read_text().strip().splitlines()]
+    assert len(rows) == 1
+    # The file says the same thing `ChipDataset.skipped` does, in the product's
+    # own words -- which is the whole point of writing it.
+    assert rows[0]["item_id"] == "acq-b"
+    assert "Radiometric" in rows[0]["reason"]
+    assert rows[0]["hint"] == "Try --noise-model estimated."
+    assert rows[0]["datetime"] == "2024-02-08T12:00:00+00:00"
+    assert rows[0]["stage"] == "conversion"
+    # And it is a sidecar: the chip manifest keeps its one-row-per-chip schema.
+    manifest_rows = Path(dataset.manifest_path).read_text().strip().splitlines()
+    assert len(manifest_rows) == dataset.chip_count
+    assert all(json.loads(line)["item_id"] == "acq-a" for line in manifest_rows)
+    assert dataset.to_dict()["skipped_manifest"] == str(sidecar)
+
+
+def test_a_run_that_skipped_nothing_writes_no_sidecar(tmp_path):
+    """A clean run leaves exactly the files it left before this existed."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse=set()),
+        skip_unsupported=True,
+    )
+
+    assert dataset.skipped_path is None
+    assert not (tmp_path / "ds" / "skipped.jsonl").exists()
+    assert "skipped_manifest" not in dataset.to_dict()
+
+
+def test_a_preflighted_drop_reaches_the_sidecar_naming_the_stage(tmp_path):
+    """A cheaply-found hole is written like an expensively-found one."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    products = _write_products(tmp_path)
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_nitf_item(name, path) for name, path in products.items()],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=lambda item, asset, work_dir, conversion: cog,
+        conversion=SicdConversion(calibration="sigma0"),
+        preflight=True,
+    )
+
+    rows = [
+        json.loads(line) for line in Path(dataset.skipped_path).read_text().strip().splitlines()
+    ]
+    assert [r["item_id"] for r in rows] == ["acq-b"]
+    # `stage` is the one field the two routes to a hole do not share, so it is
+    # the one a loader needs to tell "never downloaded" from "downloaded and
+    # refused" -- and it survives into the file.
+    assert rows[0]["stage"] == "preflight"
+
+
+def test_the_sidecar_can_be_suppressed_and_follows_the_manifest(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    items = [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)]
+    kwargs = {
+        "asset": "SICD",
+        "chip_size": 10,
+        "preparer": _refusing_preparer(cog, refuse={"acq-b"}),
+        "skip_unsupported": True,
+    }
+
+    off = write_chips(items, tmp_path / "off", skipped_manifest=None, **kwargs)
+    assert off.skipped_path is None
+    assert not (tmp_path / "off" / "skipped.jsonl").exists()
+    # The hole is still in the result -- only the file was declined.
+    assert [s.item_id for s in off.skipped] == ["acq-b"]
+
+    # `manifest=None` means "collect the records, write nothing", and that is
+    # still true: the sidecar is a description of the dataset, not of the run.
+    none = write_chips(items, tmp_path / "none", manifest=None, **kwargs)
+    assert none.skipped_path is None
+    assert list((tmp_path / "none").glob("*.jsonl")) == []
+
+    named = write_chips(items, tmp_path / "named", skipped_manifest="holes.jsonl", **kwargs)
+    assert named.skipped_path == str(tmp_path / "named" / "holes.jsonl")
+
+
 def test_a_batch_still_stops_on_an_error_that_is_not_about_the_product(tmp_path):
     """`skip_unsupported` is not a blanket `except Exception`."""
     pytest.importorskip("numpy")
@@ -1869,6 +1978,11 @@ def test_cli_chips_skip_unsupported_reports_the_acquisitions_it_left_out(tmp_pat
     assert "Skipped 1 acquisition(s)" in result.output
     assert "cli-acq" in result.output
     assert "hint:" in result.output
+    # And the run points at the file that will still say so when nobody is
+    # watching the console.
+    sidecar = tmp_path / "ds" / "skipped.jsonl"
+    assert f"skipped -> {sidecar}" in result.output
+    assert json.loads(sidecar.read_text().strip())["item_id"] == "cli-acq"
 
 
 # --------------------------------------------------------------------------- #

@@ -1251,8 +1251,23 @@ survived refusal does (with `stage="preflight"`), because a dataset with a hole
 in it has to say so however cheaply the hole was found. An acquisition whose
 metadata cannot be *read* — a missing asset, an HTTP failure — is **kept**: a
 failed read is not a product declaring it cannot answer, so the run finds out the
-expensive way rather than dropping a scene over something transient. Pass both
-flags: the preflight asks only the three questions the metadata answers
+expensive way rather than dropping a scene over something transient.
+
+**And the dataset says so, not just the run.** Both routes to a hole reported it
+to whoever was watching the console — `ChipDataset.skipped`, the `--json`
+payload, the lines above — and a training loader reading `out_dir` months later
+sees none of that. It sees files. So a run that could not include every
+acquisition it was offered writes a `skipped.jsonl` sidecar beside the manifest:
+one line per left-out pass, carrying the same `item_id` / `datetime` / `reason` /
+`hint` / `stage` the summary does. It is a sidecar rather than manifest rows
+because the manifest's schema is one row per *chip* and a skipped acquisition has
+none, and it is written **only when there is something to record**, so a dataset
+with no hole in it is exactly the set of files it was before — and the file's
+presence is itself the statement. Without it, a dataset that dropped nine of
+twenty-two passes is indistinguishable on disk from one that was only ever
+offered thirteen.
+
+Pass both flags: the preflight asks only the three questions the metadata answers
 (`--calibrate`, `--noise-model measured`, `--rtc`'s geometry), so anything else —
 `--rtc`'s DEM among them — still refuses at conversion time. The headers are read several at a
 time (`--preflight-workers`, default 8), so the check that runs in front of the
