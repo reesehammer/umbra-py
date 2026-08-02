@@ -961,6 +961,23 @@ from:
   removed — counting only the *dropped* products as saved, since a supported pass
   is downloaded anyway. A pass whose metadata cannot be read is kept, because a
   failed read is not a product declaring it cannot answer. See the CHANGELOG.
+  ~~**Open:** the walk was serial, so the check that runs *in front of* a batch
+  was itself a stall that grew with the number of passes — 40 sequential round
+  trips before the first chip, on the one command whose argument is that you
+  should not pay twice.~~ **shipped** — `preflight_items(workers=…)` /
+  `umbra preflight --workers` / `umbra chips --preflight-workers` read the
+  selection through a small pool (8 by default, the catalog walk's own sidecar
+  fan-out), which is the whole of what was left: once a verdict costs kilobytes,
+  the round trip is the only part that still scales with the selection. The
+  widening is a *schedule* and not an answer, and the design is what keeps it
+  one: the reads are independent, the verdicts are consumed in the order they
+  were asked in — the chip run pairs them against its own selection positionally,
+  since two passes of a task can share an id — and `progress` is still called
+  once per acquisition, in that order, from the calling thread, so a CLI callback
+  never becomes thread-safety-sensitive. `workers=1` runs no pool at all and the
+  lane count is capped by the selection, so a one-scene preflight is byte-for-byte
+  the path that shipped before. **This closes the preflight group.** See the
+  CHANGELOG.
 - ~~The ML on-ramp reached only the *derived* products (`umbra chips` cut tiles
   from GEC/CSI, so a model trained on Umbra data was never trained on the
   full-resolution complex archive).~~ **shipped** — `umbra chips --asset SICD`

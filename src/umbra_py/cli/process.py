@@ -26,6 +26,7 @@ from ..convert import (
     SPECKLE_WINDOW_DEFAULT,
 )
 from ..load import STACK_EXTENTS
+from ..preflight import DEFAULT_PREFLIGHT_WORKERS, PREFLIGHT_ASSET
 from ..viz import (
     select_change_frames,
 )
@@ -1365,6 +1366,13 @@ def convert(
     "the metadata answers.",
 )
 @click.option(
+    "--preflight-workers",
+    type=int,
+    default=DEFAULT_PREFLIGHT_WORKERS,
+    show_default=True,
+    help="How many product headers --preflight reads in parallel (1 to read them one at a time).",
+)
+@click.option(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
 )
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
@@ -1413,6 +1421,7 @@ def chips(
     manifest,
     skip_unsupported,
     preflight,
+    preflight_workers,
     area,
     bbox,
     place,
@@ -1514,6 +1523,11 @@ def chips(
             f"--asset {asset} is an amplitude raster, which carries no SICD metadata to "
             "ask and is streamed tile by tile rather than downloaded."
         )
+    if preflight_workers < 1:
+        raise click.BadParameter(
+            "must be 1 or more (1 reads the product headers one at a time).",
+            param_hint="--preflight-workers",
+        )
     speckle = speckle_filter.lower() if speckle_filter else None
     if speckle:
         # Checked here so an even window is a parameter error naming the flag,
@@ -1593,6 +1607,7 @@ def chips(
             skip_unsupported=skip_unsupported,
             preflight=preflight,
             preflight_progress=None if as_json else _report_preflight,
+            preflight_workers=preflight_workers,
         )
 
     if as_json:
@@ -1657,6 +1672,14 @@ def _preflight_line(result) -> str:
     help="Which floor --subtract-noise would use (see convert --noise-model).",
 )
 @click.option(
+    "--workers",
+    type=int,
+    default=DEFAULT_PREFLIGHT_WORKERS,
+    show_default=True,
+    help="How many product headers to read in parallel (1 to read them one at a "
+    "time). The verdicts and their order are the same at any width.",
+)
+@click.option(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
 )
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
@@ -1684,6 +1707,7 @@ def preflight(
     calibrate,
     subtract_noise,
     noise_model,
+    workers,
     area,
     bbox,
     place,
@@ -1724,9 +1748,14 @@ def preflight(
     Needs no extra: the parse is stdlib, so "can this archive answer my question?"
     is answerable from a core install.
     """
-    from ..preflight import PREFLIGHT_ASSET, preflight_items
+    from ..preflight import preflight_items
 
     _shared._check_token_not_local(token, local, db_path)
+    if workers < 1:
+        raise click.BadParameter(
+            "must be 1 or more (1 reads the product headers one at a time).",
+            param_hint="--workers",
+        )
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -1773,6 +1802,7 @@ def preflight(
             noise_subtract=subtract_noise,
             noise_model=noise_model.lower(),
             progress=None if as_json else _report,
+            workers=workers,
         )
 
     if as_json:

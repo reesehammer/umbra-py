@@ -22,7 +22,11 @@ layout in a fixed-width file header, so the SICD XML — a data extension segmen
 requests and a few tens of kilobytes, off the same anonymous HTTPS the rest of
 the library uses. :func:`sicd_capabilities` returns what the product declares;
 :func:`preflight_items` asks it of a whole selection and says which passes a
-measurement can be made from *before* any of them is downloaded.
+measurement can be made from *before* any of them is downloaded — several
+products at a time (:data:`DEFAULT_PREFLIGHT_WORKERS`), because once the answer
+costs kilobytes the only thing left that scales with the number of passes is the
+round trip, and a check that runs in front of a batch should not be the batch's
+slowest part.
 
 The verdict is not a second opinion about what a product supports: the parsed
 XML is presented to :mod:`umbra_py.convert`'s own
@@ -41,6 +45,8 @@ it clears the way for needs anyway.)
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree
@@ -55,6 +61,19 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
 #: The complex product this reads. ``CPHD`` is phase history rather than a
 #: focused image and carries no ``Radiometric`` block to ask about.
 PREFLIGHT_ASSET = "SICD"
+
+#: How many acquisitions :func:`preflight_items` reads at once.
+#:
+#: A preflight spends almost nothing but *waiting*: two small range requests per
+#: product, each a round trip to S3, so a serial walk over a site's forty passes
+#: is forty round trips of latency in front of a batch whose whole point is not
+#: paying for things twice. Reading a few at a time collapses that toward
+#: ``N / workers`` without changing a single byte of what is transferred.
+#:
+#: Eight matches the catalog walk's own sidecar fan-out (``catalog._SIDECAR_WORKERS``)
+#: and sits inside the shared session's connection pool, so the concurrency costs
+#: no reconnections.
+DEFAULT_PREFLIGHT_WORKERS = 8
 
 # --------------------------------------------------------------------------- #
 # NITF 2.1 file header (MIL-STD-2500C).
@@ -494,6 +513,11 @@ class PreflightReport:
     calibration: str | None
     noise_subtract: bool
     noise_model: str
+    workers: int = 1
+    """How many acquisitions were read at once -- the *effective* lane count,
+    never more than there were products to read. It says how the answer was
+    obtained rather than what it is: the verdicts, their order and the bytes
+    read are identical at any width."""
 
     @property
     def supported(self) -> tuple[PreflightResult, ...]:
@@ -526,8 +550,42 @@ class PreflightReport:
             "supported_count": len(self.supported),
             "bytes_read": self.bytes_read,
             "product_bytes": self.product_bytes,
+            "workers": self.workers,
             "results": [r.to_dict() for r in self.results],
         }
+
+
+@contextmanager
+def _verdicts_in_order(
+    check: Callable[[UmbraItem], PreflightResult],
+    items: list[UmbraItem],
+    lanes: int,
+) -> Iterator[Iterator[PreflightResult]]:
+    """Yield an iterator of ``check(item)`` results, in ``items`` order.
+
+    The order is the contract, not an accident of the implementation: the chip
+    run pairs the verdicts against its own selection positionally
+    (``zip(items, report.results, strict=True)``), because two passes of one task
+    can share an id and a lookup would collide. So the reads are *issued*
+    concurrently and *consumed* in the order they were asked in — every lane is
+    busy, and the answer is the serial walk's answer.
+
+    ``lanes == 1`` runs no pool at all, so a one-product preflight (and any
+    caller that asks for the serial walk back) is the code that shipped before
+    this, thread and all.
+    """
+    if lanes == 1:
+        yield map(check, items)
+        return
+
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    with ThreadPoolExecutor(max_workers=lanes) as pool:
+        # Submitted up front rather than in windows: the pool bounds how many run
+        # at once, so there is no barrier where the fast lanes wait on the slowest
+        # read of a batch before the next one starts.
+        futures = [pool.submit(check, item) for item in items]
+        yield (future.result() for future in futures)
 
 
 def preflight_items(
@@ -539,6 +597,7 @@ def preflight_items(
     noise_model: str = "measured",
     session: requests.Session | None = None,
     progress: Any = None,
+    workers: int | None = None,
 ) -> PreflightReport:
     """Ask a whole selection which passes can support a measurement.
 
@@ -552,14 +611,28 @@ def preflight_items(
     on :attr:`PreflightResult.error` rather than ending the walk: a preflight
     that dies on the nineteenth scene has failed at the one thing it is for.
 
+    ``workers`` is how many products are read at once
+    (:data:`DEFAULT_PREFLIGHT_WORKERS`; ``None`` takes that default, ``1`` walks
+    serially). What the check costs is two range requests per acquisition, so
+    what a selection spends is round trips rather than bytes — and that is the
+    one part of the preflight that scaled with the number of passes rather than
+    with the answer. Reading several at once removes it without moving a single
+    verdict: the reads are independent, the shared session's connection pool is
+    sized for the fan-out, and the results are consumed in the order they were
+    asked in.
+
     ``progress`` is called ``(index, total, item, result)`` after each
-    acquisition, for a CLI progress line.
+    acquisition, in selection order, from the calling thread — so a CLI progress
+    line stays one line per pass in the order they were given, and a callback
+    never has to be thread-safe.
     """
     sess = session or default_session()
     results: list[PreflightResult] = []
     items = list(items)
-    for index, item in enumerate(items):
-        result = _preflight_item(
+    lanes = max(1, min(DEFAULT_PREFLIGHT_WORKERS if workers is None else int(workers), len(items)))
+
+    def check(item: UmbraItem) -> PreflightResult:
+        return _preflight_item(
             item,
             asset=asset,
             calibration=calibration,
@@ -567,15 +640,19 @@ def preflight_items(
             noise_model=noise_model,
             session=sess,
         )
-        results.append(result)
-        if progress is not None:
-            progress(index + 1, len(items), item, result)
+
+    with _verdicts_in_order(check, items, lanes) as verdicts:
+        for index, (item, result) in enumerate(zip(items, verdicts, strict=True)):
+            results.append(result)
+            if progress is not None:
+                progress(index + 1, len(items), item, result)
     return PreflightReport(
         results=tuple(results),
         asset=asset,
         calibration=calibration,
         noise_subtract=noise_subtract,
         noise_model=noise_model,
+        workers=lanes,
     )
 
 

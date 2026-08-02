@@ -122,6 +122,7 @@ from .pmtiles import (
     write_pmtiles,
 )
 from .preflight import (
+    DEFAULT_PREFLIGHT_WORKERS,
     PREFLIGHT_ASSET,
     PreflightReport,
     PreflightResult,
@@ -215,6 +216,7 @@ __all__ = [
     "PreflightResult",
     "PreflightReport",
     "PREFLIGHT_ASSET",
+    "DEFAULT_PREFLIGHT_WORKERS",
     "fetch_dem_for_bbox",
     "copernicus_tile_id",
     "tile_ids_for_bbox",

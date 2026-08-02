@@ -2036,6 +2036,46 @@ def test_a_preflight_asks_the_settings_the_conversion_will_use(tmp_path):
     assert dataset.preflight.supported == 3
 
 
+def test_the_batchs_preflight_reads_the_headers_concurrently(tmp_path, monkeypatch):
+    """The check runs *in front of* the batch, so a serial walk over a large site
+    is a stall that grows with the number of passes. Every read waits for all
+    three here: a one-at-a-time preflight cannot clear that barrier."""
+    import threading
+
+    pytest.importorskip("numpy")
+    from umbra_py import preflight as preflight_mod
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    items = [_nitf_item(name, path) for name, path in products.items()]
+
+    gate = threading.Barrier(len(items), timeout=30)
+    real = preflight_mod.sicd_capabilities
+
+    def gated(src, **kwargs):
+        gate.wait()
+        return real(src, **kwargs)
+
+    monkeypatch.setattr(preflight_mod, "sicd_capabilities", gated)
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, []),
+        preflight=True,
+        preflight_workers=len(items),
+    )
+
+    assert dataset.preflight is not None
+    # Concurrency is a schedule, not an answer: the same pass is dropped, for the
+    # same reason, as the serial walk above found.
+    assert [s.item_id for s in dataset.skipped] == ["acq-b"]
+    assert dataset.preflight.checked == len(items)
+
+
 def test_preflight_is_refused_on_an_asset_that_carries_no_metadata_to_ask(tmp_path):
     pytest.importorskip("numpy")
     from umbra_py.chips import write_chips
@@ -2169,3 +2209,27 @@ def test_cli_chips_preflight_is_refused_on_a_raster_asset(tmp_path):
 
     assert result.exit_code != 0
     assert "--preflight applies to the complex products" in result.output
+
+
+def test_cli_chips_refuses_a_preflight_lane_count_below_one(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--preflight",
+            "--preflight-workers",
+            "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--preflight-workers" in result.output

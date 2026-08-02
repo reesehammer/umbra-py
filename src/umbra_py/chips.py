@@ -1498,6 +1498,7 @@ def write_chips(
     skip_unsupported: bool = False,
     preflight: bool = False,
     preflight_progress: PreflightProgressFn | None = None,
+    preflight_workers: int | None = None,
 ) -> ChipDataset:
     """Chip a whole search result into a training dataset with a manifest.
 
@@ -1567,6 +1568,12 @@ def write_chips(
     which stays worth passing: the preflight only asks the two questions the
     metadata answers (calibration and a measured noise floor), so a refusal from
     anywhere else still arrives at conversion time.
+
+    ``preflight_workers`` is how many of those metadata reads run at once
+    (``None`` takes :data:`umbra_py.preflight.DEFAULT_PREFLIGHT_WORKERS`). The
+    check costs round trips rather than bytes, so a serial one puts a stall in
+    front of the batch that grows with the number of passes -- which is the one
+    cost the preflight would otherwise have added to a run over a large site.
     """
     out_path = Path(out_dir)
     items = list(items)
@@ -1591,6 +1598,7 @@ def write_chips(
             asset=asset,
             conversion=conversion,
             progress=preflight_progress,
+            workers=preflight_workers,
         )
         skipped.extend(dropped)
     for i, item in enumerate(items):
@@ -1658,6 +1666,7 @@ def _preflight_filter(
     asset: str,
     conversion: SicdConversion | None,
     progress: PreflightProgressFn | None = None,
+    workers: int | None = None,
 ) -> tuple[list[UmbraItem], list[SkippedAcquisition], PreflightSummary]:
     """Drop the acquisitions that declare they cannot answer, before downloading any.
 
@@ -1686,6 +1695,7 @@ def _preflight_filter(
         noise_subtract=conversion.noise_subtract,
         noise_model=conversion.noise_model,
         progress=progress,
+        workers=workers,
     )
     kept: list[UmbraItem] = []
     dropped: list[SkippedAcquisition] = []

@@ -10,6 +10,7 @@ and the assertions are about what was *read* as much as what was returned.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 
@@ -17,6 +18,7 @@ import pytest
 import responses
 from click.testing import CliRunner
 
+from umbra_py import preflight as preflight_mod
 from umbra_py.exceptions import UmbraError, UnsupportedMeasurementError
 from umbra_py.preflight import (
     preflight_items,
@@ -294,6 +296,93 @@ def test_preflight_items_answers_for_a_selection(sample_item_dict):
     assert report.to_dict()["supported_count"] == 0
 
 
+def sicd_item(sample_item_dict, name: str, xml: str = _UNCALIBRATED):
+    """An acquisition whose SICD asset is its own URL, served from ``xml``.
+
+    The sample item's asset hrefs are absolute, so two items built from it share
+    a product URL — which is exactly what a test about *which* verdict belongs to
+    *which* pass cannot have.
+    """
+    from umbra_py.models import UmbraItem
+
+    doc = copy.deepcopy(sample_item_dict)
+    doc["id"] = f"{doc['id']}-{name}"
+    doc["assets"]["SICD"]["href"] = f"https://example.com/{name}_SICD.nitf"
+    item = UmbraItem.from_dict(doc, href=f"https://example.com/{name}.stac.v2.json")
+    serve_ranges(item.asset_href("SICD"), build_nitf(xml))
+    return item
+
+
+@responses.activate
+def test_the_selection_is_read_several_products_at_a_time(monkeypatch, sample_item_dict):
+    """The reads are issued concurrently: a lane cannot start only once the one
+    before it has finished, which is the whole saving over a serial walk."""
+    import threading
+
+    items = [sicd_item(sample_item_dict, name) for name in "abcd"]
+
+    # Every read waits for all four to arrive before doing anything. A serial
+    # walk cannot clear that barrier, so the claim is stated rather than timed:
+    # the test either passes because the lanes really do overlap, or it hangs
+    # until the timeout and fails.
+    gate = threading.Barrier(len(items), timeout=30)
+    real = preflight_mod.sicd_capabilities
+
+    def gated(src, **kwargs):
+        gate.wait()
+        return real(src, **kwargs)
+
+    monkeypatch.setattr(preflight_mod, "sicd_capabilities", gated)
+    report = preflight_items(items, workers=len(items))
+
+    assert report.workers == len(items)
+    assert len(report.results) == len(items)
+
+
+@responses.activate
+def test_the_verdicts_come_back_in_the_order_they_were_asked(sample_item_dict):
+    """The chip run pairs verdicts against its own selection positionally, so a
+    concurrent read that returned them in completion order would silently attach
+    one pass's refusal to another."""
+    # Alternating so a shuffle shows up in the verdicts themselves, not only in
+    # the URLs they came from.
+    items = [
+        sicd_item(sample_item_dict, name, _CALIBRATED if n % 2 else _UNCALIBRATED)
+        for n, name in enumerate("abcdef")
+    ]
+
+    seen: list[tuple[int, int, str]] = []
+    report = preflight_items(
+        items,
+        calibration="sigma0",
+        workers=4,
+        progress=lambda index, total, item, result: seen.append((index, total, item.id)),
+    )
+
+    assert [r.href for r in report.results] == [i.asset_href("SICD") for i in items]
+    assert [r.supported for r in report.results] == [False, True] * 3
+    # The progress callback is the serial walk's contract unchanged: one call per
+    # acquisition, in selection order, counting up, from the calling thread.
+    assert seen == [(n + 1, len(items), item.id) for n, item in enumerate(items)]
+
+
+@responses.activate
+def test_a_serial_preflight_is_still_available(sample_item_dict):
+    """``workers=1`` runs no pool at all -- the walk that shipped before this."""
+    items = [sicd_item(sample_item_dict, name, _CALIBRATED) for name in "ab"]
+
+    report = preflight_items(items, workers=1)
+
+    assert report.workers == 1
+    assert [r.supported for r in report.results] == [True, True]
+    assert report.to_dict()["workers"] == 1
+
+
+def test_the_lane_count_never_exceeds_the_selection():
+    """An empty or tiny selection does not start eight threads to read nothing."""
+    assert preflight_items([], workers=32).workers == 1
+
+
 @responses.activate
 def test_an_unreadable_acquisition_is_recorded_rather_than_fatal(sample_item_dict):
     """A preflight that dies on the nineteenth scene has failed at the one thing
@@ -356,6 +445,34 @@ def test_cli_preflight_says_what_the_answer_cost(monkeypatch, sample_item_dict):
     assert "0 of 1 acquisition(s) support --calibrate gamma0" in result.output
     assert "instead of" in result.output
     assert "hint:" in result.output
+
+
+@responses.activate
+def test_cli_preflight_reports_how_wide_it_read(monkeypatch, sample_item_dict):
+    """``--workers`` reaches the walk, and the report says how the answer was
+    obtained -- the lane count is capped by the selection, not by the flag."""
+    from umbra_py import cli as cli_mod
+
+    item = sicd_item(sample_item_dict, "x")
+    monkeypatch.setattr("umbra_py.cli._shared._item_from_url", lambda url: item)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["preflight", "https://example.com/x.stac.v2.json", "--workers", "4", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["workers"] == 1
+
+
+def test_cli_preflight_refuses_a_lane_count_below_one():
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["preflight", "https://example.com/x.stac.v2.json", "--workers", "0"]
+    )
+    assert result.exit_code != 0
+    assert "--workers" in result.output
 
 
 def test_cli_preflight_needs_something_to_look_at():
