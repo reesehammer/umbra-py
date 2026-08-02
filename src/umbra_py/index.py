@@ -51,11 +51,13 @@ from .models import BBox, UmbraItem
 #: Version 2 added the ``items.place`` column (a baked reverse-geocoded place
 #: label; see :meth:`CatalogIndex.bake_places`). Version 3 added the
 #: ``items.thumbnail`` column (a baked SAR quicklook PNG; see
-#: :meth:`CatalogIndex.bake_thumbnails`). Both are purely additive, so a
-#: lower-version (or legacy version-0) database is migrated in place by adding
-#: the missing columns -- exercising the migration path versioning was landed
-#: to enable.
-_SCHEMA_VERSION = 3
+#: :meth:`CatalogIndex.bake_thumbnails`). Version 4 added
+#: ``items.thumbnail_asset`` / ``items.thumbnail_size`` -- *what* that PNG is a
+#: picture of, which the index used to leave to be assumed. All are purely
+#: additive, so a lower-version (or legacy version-0) database is migrated in
+#: place by adding the missing columns -- exercising the migration path
+#: versioning was landed to enable.
+_SCHEMA_VERSION = 4
 
 #: How long (milliseconds) a connection waits for a lock held by another
 #: connection before raising ``sqlite3.OperationalError: database is locked``.
@@ -73,22 +75,24 @@ _BUSY_TIMEOUT_MS = 5000
 #: place. Every step so far is additive (a new nullable column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1, 2})
+_MIGRATABLE_FROM = frozenset({0, 1, 2, 3})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
-    href      TEXT PRIMARY KEY,
-    id        TEXT NOT NULL,
-    task      TEXT,
-    datetime  TEXT,
-    acq_date  TEXT,
-    min_lon   REAL,
-    min_lat   REAL,
-    max_lon   REAL,
-    max_lat   REAL,
-    doc       TEXT NOT NULL,
-    place     TEXT,
-    thumbnail BLOB
+    href            TEXT PRIMARY KEY,
+    id              TEXT NOT NULL,
+    task            TEXT,
+    datetime        TEXT,
+    acq_date        TEXT,
+    min_lon         REAL,
+    min_lat         REAL,
+    max_lon         REAL,
+    max_lat         REAL,
+    doc             TEXT NOT NULL,
+    place           TEXT,
+    thumbnail       BLOB,
+    thumbnail_asset TEXT,
+    thumbnail_size  INTEGER
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -112,15 +116,51 @@ CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
 #: acquisition dwarfs the metadata it hangs off, and every ``umbra index fetch``
 #: would then pay for pixels most callers never look at. Keyed by ``href`` (the
 #: index's own primary key, so a merge back is exact) and carrying the STAC
-#: ``id`` beside it, so the file is also readable on its own.
+#: ``id`` beside it, so the file is also readable on its own. ``asset`` and
+#: ``size`` say what each PNG is a picture of, which is what lets a merge prefer
+#: the larger preview of a product over the one that happened to arrive first
+#: (see :meth:`CatalogIndex.import_thumbnails`); a sidecar written before they
+#: existed simply lacks the columns and is read without them.
 _THUMBS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS thumbnails (
-    href TEXT PRIMARY KEY,
-    id   TEXT NOT NULL,
-    png  BLOB NOT NULL
+    href  TEXT PRIMARY KEY,
+    id    TEXT NOT NULL,
+    png   BLOB NOT NULL,
+    asset TEXT,
+    size  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_thumbnails_id ON thumbnails(id);
 """
+
+#: The sidecar columns :data:`_THUMBS_SCHEMA` gained after the first published
+#: ``catalog.thumbs.db``. ``CREATE TABLE IF NOT EXISTS`` cannot retrofit them
+#: onto a file that already exists, so both sides check the live column set --
+#: :meth:`CatalogIndex.export_thumbnails` adds what is missing before writing,
+#: :meth:`CatalogIndex.import_thumbnails` selects only what is there.
+_THUMBS_PROVENANCE_COLUMNS = {"asset": "TEXT", "size": "INTEGER"}
+
+#: The default merge rule of :meth:`CatalogIndex.import_thumbnails`: fill a gap,
+#: and otherwise keep the local bake unless the incoming one is a bigger preview
+#: of the same product. SQL's three-valued logic carries the "only when both say
+#: what they are" half for free -- a comparison against an unrecorded size is
+#: ``NULL``, so it does not replace anything -- while ``IS`` compares the assets
+#: without tripping over the same ``NULL``.
+_KEEP_UNLESS_LARGER = " AND (thumbnail IS NULL OR (? > thumbnail_size AND thumbnail_asset IS ?))"
+
+
+def _widen_thumbs_sidecar(conn: sqlite3.Connection) -> None:
+    """Add any :data:`_THUMBS_PROVENANCE_COLUMNS` an existing sidecar lacks.
+
+    The index's own :meth:`CatalogIndex._migrate` for the transportable half:
+    ``CREATE TABLE IF NOT EXISTS`` leaves a file written by an older umbra-py
+    alone, so exporting into one would otherwise fail on the new columns.
+    Idempotent, and a no-op on the fresh file the schema just created complete.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(thumbnails)")}
+    for name, sql_type in _THUMBS_PROVENANCE_COLUMNS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE thumbnails ADD COLUMN {name} {sql_type}")
+
 
 #: Grid cell, in degrees, used to group one *site's* acquisitions when baking
 #: place labels with ``by_site=True``. Umbra files every pass over a site under
@@ -178,6 +218,26 @@ class UpdateResult:
     added: int
     refreshed: int
     start: date | None
+
+
+@dataclass(frozen=True)
+class BakedPreview:
+    """A cached quicklook and what it is a picture of.
+
+    :meth:`CatalogIndex.get_thumbnail` returns bytes, which is all a gallery tile
+    or a ``GET /artifacts/thumbnail/{id}.png`` needs. A reader that has to decide
+    whether the cached picture answers *its* request needs more than the pixels:
+    ``asset`` is the product the bake rendered from and ``max_size`` the longest
+    edge it asked for, both recorded by :meth:`CatalogIndex.bake_thumbnails`.
+
+    Either may be ``None`` -- a preview baked (or published) before the index
+    recorded them. That is "unknown", not "GEC": a consumer should fall back to
+    whatever it may safely assume rather than read the absence as a claim.
+    """
+
+    png: bytes
+    asset: str | None = None
+    max_size: int | None = None
 
 
 def default_index_path() -> Path:
@@ -371,6 +431,9 @@ class CatalogIndex:
             self._conn.execute("ALTER TABLE items ADD COLUMN place TEXT")
         if "thumbnail" not in columns:  # v2 -> v3: baked SAR quicklook PNG
             self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail BLOB")
+        if "thumbnail_asset" not in columns:  # v3 -> v4: what that PNG is a picture of
+            self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail_asset TEXT")
+            self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail_size INTEGER")
 
     @classmethod
     def from_release(
@@ -705,6 +768,14 @@ class CatalogIndex:
         *priority* rather than a lottery. Items with no acquisition date sort
         last, as they carry no claim to being recent.
 
+        ``asset`` and ``max_size`` are recorded beside the bytes
+        (``thumbnail_asset`` / ``thumbnail_size``, read back by
+        :meth:`get_preview`), because a preview is only interchangeable with the
+        picture a caller asked for when the two are of the same product: without
+        the record every consumer had to *assume* the default bake. They describe
+        what this call was asked to render, so an injected ``renderer`` that
+        ignores them records a claim it did not honour.
+
         ``renderer`` is an injectable ``(UmbraItem) -> bytes | None`` callable
         returning PNG bytes (or ``None`` to skip); the default wraps
         :func:`umbra_py.viz._thumbnail_png`, which streams only the overview for
@@ -743,7 +814,9 @@ class CatalogIndex:
             png = renderer(item)
             if png:
                 self._conn.execute(
-                    "UPDATE items SET thumbnail = ? WHERE href = ?", (sqlite3.Binary(png), href)
+                    "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, "
+                    "thumbnail_size = ? WHERE href = ?",
+                    (sqlite3.Binary(png), asset.upper(), max_size, href),
                 )
                 baked += 1
                 if baked % 25 == 0:
@@ -773,6 +846,26 @@ class CatalogIndex:
             return None
         return bytes(row[0])
 
+    def get_preview(self, item_id: str) -> BakedPreview | None:
+        """Return the baked quicklook *and what it is a picture of*, or ``None``.
+
+        The provenance-carrying form of :meth:`get_thumbnail`, for the one
+        consumer that cannot treat a preview as interchangeable pixels:
+        ``umbra describe --preview`` hands the picture to a vision model, so a
+        reading of a ``CSI`` bake is not a reading of the ``GEC`` one that was
+        asked for. It reads the same row, so the extra provenance costs nothing;
+        a preview baked before the index recorded it reports ``None`` for both
+        fields (see :class:`BakedPreview`) rather than claiming the default.
+        """
+        row = self._conn.execute(
+            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
+            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return BakedPreview(png=bytes(row[0]), asset=row[1], max_size=row[2])
+
     def export_thumbnails(self, dest: str | os.PathLike) -> int:
         """Write every baked thumbnail to a transportable sidecar database.
 
@@ -790,22 +883,28 @@ class CatalogIndex:
         published ``catalog.db`` carrying its ``thumbnail`` column) because the
         pixels are far larger than the metadata and not every caller wants them.
         Writing is an upsert into an existing file, so exporting twice is safe.
-        Returns the number of thumbnails written.
+        Each row carries the bake's ``asset`` and ``size`` beside the bytes, so
+        the receiving index knows what it merged rather than assuming it (an
+        older sidecar is widened in place before writing). Returns the number of
+        thumbnails written.
         """
         target = Path(dest)
         target.parent.mkdir(parents=True, exist_ok=True)
         out = sqlite3.connect(str(target))
         try:
             out.executescript(_THUMBS_SCHEMA)
+            _widen_thumbs_sidecar(out)
             rows = self._conn.execute(
-                "SELECT href, id, thumbnail FROM items WHERE thumbnail IS NOT NULL ORDER BY href"
+                "SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size FROM items "
+                "WHERE thumbnail IS NOT NULL ORDER BY href"
             )
             written = 0
-            for href, item_id, png in rows:
+            for href, item_id, png, asset, size in rows:
                 out.execute(
-                    "INSERT INTO thumbnails (href, id, png) VALUES (?, ?, ?) "
-                    "ON CONFLICT(href) DO UPDATE SET id = excluded.id, png = excluded.png",
-                    (href, item_id, sqlite3.Binary(png)),
+                    "INSERT INTO thumbnails (href, id, png, asset, size) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(href) DO UPDATE SET id = excluded.id, png = excluded.png, "
+                    "asset = excluded.asset, size = excluded.size",
+                    (href, item_id, sqlite3.Binary(png), asset, size),
                 )
                 written += 1
             out.commit()
@@ -821,10 +920,18 @@ class CatalogIndex:
         ``umbra serve``'s ``GET /artifacts/thumbnail/{id}.png``, the ``umbra
         demo`` preview and a ``--local`` gallery all read local bytes without a
         single COG range read. Rows the index does not hold are ignored (a
-        sidecar built from a newer crawl is not an error), and by default a
-        thumbnail already baked here is kept -- pass ``overwrite=True`` to
-        replace it, e.g. after re-baking at a different size. Returns the number
-        of thumbnails applied.
+        sidecar built from a newer crawl is not an error).
+
+        A local bake is kept rather than clobbered -- with one exception the
+        sidecar's own record makes safe: when both sides say what they are and
+        the incoming preview is a *larger* bake of the *same* product, it wins.
+        That is the case the published sidecar creates, since it is baked at
+        128 px where ``umbra index bake-thumbnails`` defaults to 256: a merge
+        used to keep whichever arrived first, which made the resolution of a
+        preview a fact about the order two commands were run in. Where either
+        side is unrecorded the two are not comparable and the local bake stays.
+        ``overwrite=True`` replaces unconditionally, as before. Returns the
+        number of thumbnails applied.
         """
         source = Path(src)
         if not source.exists():
@@ -832,18 +939,27 @@ class CatalogIndex:
         conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
         try:
             try:
-                rows = conn.execute("SELECT href, png FROM thumbnails")
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(thumbnails)")}
+                # A sidecar published before the provenance columns existed reads
+                # as "unknown", which is what keeps it merging exactly as it did.
+                recorded = ", ".join(
+                    col if col in columns else f"NULL AS {col}" for col in ("asset", "size")
+                )
+                rows = conn.execute(f"SELECT href, png, {recorded} FROM thumbnails")
             except sqlite3.DatabaseError as exc:  # not a sidecar, or unreadable
                 raise IndexSchemaError(
                     f"{source} is not an umbra-py thumbnail sidecar "
                     f"(no readable 'thumbnails' table): {exc}"
                 ) from exc
-            clause = "" if overwrite else " AND thumbnail IS NULL"
             applied = 0
-            for href, png in rows:
+            for href, png, asset, size in rows:
+                params: tuple[object, ...] = (sqlite3.Binary(png), asset, size, href)
+                if not overwrite:
+                    params += (size, asset)
                 cur = self._conn.execute(
-                    f"UPDATE items SET thumbnail = ? WHERE href = ?{clause}",
-                    (sqlite3.Binary(png), href),
+                    "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, thumbnail_size = ? "
+                    f"WHERE href = ?{'' if overwrite else _KEEP_UNLESS_LARGER}",
+                    params,
                 )
                 applied += cur.rowcount
         finally:

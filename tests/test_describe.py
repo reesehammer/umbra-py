@@ -28,6 +28,7 @@ from umbra_py.describe import (
     render_quicklook_png,
 )
 from umbra_py.exceptions import MissingDependencyError
+from umbra_py.index import BakedPreview
 from umbra_py.models import UmbraItem
 
 # ``from umbra_py import describe`` (the function) shadows the ``umbra_py.describe``
@@ -340,13 +341,18 @@ def _png(width, height, tail=b""):
     ) + tail
 
 
-def _previews(png=None, seen=None):
-    """A `BakedPreviews` stand-in returning ``png`` (or nothing baked)."""
+def _previews(png=None, seen=None, asset=None, max_size=None):
+    """A `BakedPreviews` stand-in returning the record for ``png``, or nothing baked.
+
+    ``asset`` left as ``None`` is the unrecorded preview an index baked before it
+    kept track of what it rendered -- the case that still falls back to assuming
+    the default bake.
+    """
 
     def lookup(item_id):
         if seen is not None:
             seen.append(item_id)
-        return png
+        return None if png is None else BakedPreview(png=png, asset=asset, max_size=max_size)
 
     return lookup
 
@@ -365,6 +371,20 @@ def test_baked_preview_refusal_names_what_the_bake_cannot_answer():
     assert baked_preview_refusal() is None
     assert "GEC" in (baked_preview_refusal(asset="CSI") or "")
     assert "decibel" in (baked_preview_refusal(db=False) or "")
+
+
+def test_baked_preview_refusal_reads_the_bake_rather_than_assuming_it():
+    """With a record of what was baked, the check is against that -- so a CSI bake
+    answers a CSI request, and a GEC one is refused naming what it actually is."""
+    from umbra_py.describe import baked_preview_refusal
+
+    csi = BakedPreview(png=PNG, asset="CSI", max_size=256)
+    assert baked_preview_refusal(asset="CSI", baked=csi) is None
+    assert "CSI quicklook" in (baked_preview_refusal(asset="GEC", baked=csi) or "")
+    # The stretch is a property of every bake, so it is refused with a record too.
+    assert "decibel" in (baked_preview_refusal(asset="CSI", baked=csi, db=False) or "")
+    # An unrecorded preview keeps the assumed rule.
+    assert "GEC" in (baked_preview_refusal(asset="CSI", baked=BakedPreview(png=PNG)) or "")
 
 
 def test_default_preview_never_looks_at_the_index(sample_item_dict):
@@ -438,17 +458,49 @@ def test_auto_preview_renders_rather_than_substituting_a_different_picture(sampl
     """A CSI request or a linear stretch is not a smaller version of the baked
     picture -- it is a different one, so ``auto`` renders instead of substituting."""
     item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
-    seen = []
     desc = describe(
         item,
         describer=_fake_describer('{"summary": "Farmland."}'),
         render=_stub_render(),
-        previews=_previews(_png(256, 256), seen),
+        previews=_previews(_png(256, 256), asset="GEC"),
         preview="auto",
         asset="CSI",
     )
-    assert seen == []  # the cache was not even consulted
     assert desc.image.source == "rendered"
+
+
+def test_a_bake_of_the_asset_asked_for_is_used_rather_than_refused(sample_item_dict):
+    """The record is what lifts the restriction: a deliberate CSI bake answers a
+    CSI reading, where an index that stored only pixels had to refuse it."""
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+
+    def boom(_item):
+        raise AssertionError("rendered a scene that was already baked")
+
+    desc = describe(
+        item,
+        describer=_fake_describer('{"summary": "A harbor."}'),
+        render=boom,
+        previews=_previews(_png(256, 256), asset="CSI"),
+        preview="baked",
+        asset="CSI",
+    )
+    assert desc.image.source == "baked"
+    # The description reports the product it was actually read from.
+    assert desc.image.asset == "CSI"
+    assert desc.asset == "CSI"
+
+
+def test_a_bake_of_another_asset_is_refused_naming_what_it_is(sample_item_dict):
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example/item.json")
+    with pytest.raises(DescribeError, match="CSI quicklook"):
+        describe(
+            item,
+            describer=_fake_describer("{}"),
+            previews=_previews(_png(256, 256), asset="CSI"),
+            preview="baked",
+            asset="GEC",
+        )
 
 
 def test_baked_preview_refuses_a_request_it_cannot_answer(sample_item_dict):

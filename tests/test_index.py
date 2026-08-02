@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from umbra_py.index import CatalogIndex, default_index_path
+from umbra_py.index import BakedPreview, CatalogIndex, default_index_path
 from umbra_py.models import UmbraItem
 
 _BUCKET = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog"
@@ -1244,6 +1244,18 @@ def test_bake_thumbnails_stores_and_returns_png(tmp_path):
         assert idx.get_thumbnail("nope") is None
 
 
+def test_bake_thumbnails_records_what_it_rendered(tmp_path):
+    """The index used to store a preview's bytes and nothing about how they were
+    made, so every consumer had to assume the default bake."""
+    with _index(tmp_path) as idx:
+        idx.bake_thumbnails(lambda item: b"png", asset="gec", max_size=128)
+        assert idx.get_preview("a") == BakedPreview(png=b"png", asset="GEC", max_size=128)
+        # The bytes-only reader is unchanged for the callers that only want pixels.
+        assert idx.get_thumbnail("a") == b"png"
+        # An unbaked or unknown scene is a clean None on both.
+        assert idx.get_preview("nope") is None
+
+
 def test_bake_thumbnails_is_idempotent(tmp_path):
     with _index(tmp_path) as idx:
         render, rendered = _counting_renderer()
@@ -1326,6 +1338,47 @@ def test_thumbnail_column_migration_from_v2(tmp_path):
         assert "thumbnail" in cols  # migration added the column
         assert idx.bake_thumbnails(lambda item: b"png") == 1
         assert idx.get_thumbnail("old") == b"png"
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_thumbnail_provenance_migration_from_v3(tmp_path):
+    """A version-3 index (thumbnails, but no record of what they are) is migrated
+    in place: the columns are added, the baked pixels are preserved, and a
+    preview from before the record reads as "unknown" rather than as the default.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    # The version-3 schema: today's `items` table minus the two v4 columns.
+    v3_schema = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL, place TEXT, thumbnail BLOB
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v3.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v3_schema)
+    conn.execute(
+        "INSERT INTO items (href, id, doc, thumbnail) VALUES (?, ?, ?, ?)",
+        ("h", "old", '{"id": "old", "assets": {}}', b"already-baked"),
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
+        assert {"thumbnail_asset", "thumbnail_size"} <= cols
+        assert idx.get_thumbnail("old") == b"already-baked"  # pixels preserved
+        assert idx.get_preview("old") == BakedPreview(png=b"already-baked")
 
     version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
     assert version == _SCHEMA_VERSION
@@ -1424,6 +1477,105 @@ def test_export_thumbnails_is_an_upsert(tmp_path):
     conn = sqlite3.connect(str(out))
     counts = conn.execute("SELECT COUNT(*), COUNT(DISTINCT href) FROM thumbnails").fetchone()
     assert counts == (3, 3)
+
+
+def test_export_thumbnails_carries_what_each_preview_is(tmp_path):
+    """The sidecar moves the bake's record, not only its pixels."""
+    import sqlite3
+
+    out = tmp_path / "catalog.thumbs.db"
+    with _index(tmp_path) as idx:
+        idx.bake_thumbnails(lambda item: b"png", asset="GEC", max_size=128)
+        assert idx.export_thumbnails(out) == 3
+    rows = sqlite3.connect(str(out)).execute("SELECT asset, size FROM thumbnails").fetchall()
+    assert set(rows) == {("GEC", 128)}
+
+
+def test_import_thumbnails_prefers_the_larger_bake_of_the_same_product(tmp_path):
+    """A merge used to keep whichever preview arrived first, which made a scene's
+    preview resolution a fact about the order two commands were run in. With both
+    sides recorded, the bigger bake of the same product wins."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    sidecar = tmp_path / "catalog.thumbs.db"
+    with _index(src_dir) as src:
+        src.bake_thumbnails(lambda item: b"big", asset="GEC", max_size=512)
+        src.export_thumbnails(sidecar)
+
+    dst_dir = tmp_path / "dst"
+    dst_dir.mkdir()
+    with _index(dst_dir) as dst:
+        dst.bake_thumbnails(lambda item: b"small", asset="GEC", max_size=128)
+        assert dst.import_thumbnails(sidecar) == 3
+        assert dst.get_thumbnail("a") == b"big"
+        preview = dst.get_preview("a")
+        assert (preview.asset, preview.max_size) == ("GEC", 512)
+        # ...and the reverse merge leaves the bigger one alone.
+        assert dst.export_thumbnails(sidecar) == 3  # the sidecar now holds 512 px
+        assert dst.import_thumbnails(sidecar) == 0
+
+
+def test_import_thumbnails_keeps_a_local_bake_it_cannot_compare(tmp_path):
+    """A smaller incoming preview, one of another product, and one from a sidecar
+    that predates the record are all "not obviously better" -- so the local bake
+    stays, exactly as it did before the columns existed."""
+    # One acquisition, carrying both products so either can be baked from it.
+    both = _make_item(
+        "SiteA",
+        "2024-01-15-10-00-00_UMBRA-04",
+        "a",
+        "2024-01-15T10:00:00Z",
+        (0, 0, 1, 1),
+        products=("GEC", "CSI"),
+    )
+
+    def sidecar(name, **bake):
+        src_dir = tmp_path / f"src-{name}"
+        src_dir.mkdir()
+        path = tmp_path / f"{name}.thumbs.db"
+        with _index(src_dir, items=(both,)) as src:
+            src.bake_thumbnails(lambda item: b"incoming", **bake)
+            src.export_thumbnails(path)
+        return path
+
+    smaller = sidecar("smaller", asset="GEC", max_size=128)
+    other = sidecar("other", asset="CSI", max_size=512)
+
+    dst_dir = tmp_path / "dst"
+    dst_dir.mkdir()
+    with _index(dst_dir, items=(both,)) as dst:
+        dst.bake_thumbnails(lambda item: b"local", asset="GEC", max_size=256)
+        assert dst.import_thumbnails(smaller) == 0
+        assert dst.import_thumbnails(other) == 0
+        assert dst.get_thumbnail("a") == b"local"
+
+
+def test_thumbnail_sidecar_without_the_record_still_round_trips(tmp_path):
+    """The published catalog.thumbs.db predates the asset/size columns: it must
+    still import (as "unknown", so it fills gaps and clobbers nothing), and an
+    export into it must widen the file rather than fail on the new columns."""
+    import sqlite3
+
+    legacy = tmp_path / "legacy.thumbs.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.executescript(
+        "CREATE TABLE thumbnails (href TEXT PRIMARY KEY, id TEXT NOT NULL, png BLOB NOT NULL);"
+    )
+    conn.execute("INSERT INTO thumbnails (href, id, png) VALUES (?, ?, ?)", (_A.href, "a", b"old"))
+    conn.commit()
+    conn.close()
+
+    with _index(tmp_path) as idx:
+        assert idx.import_thumbnails(legacy) == 1
+        assert idx.get_thumbnail("a") == b"old"
+        # Nothing is claimed about a preview the sidecar said nothing about.
+        assert idx.get_preview("a") == BakedPreview(png=b"old", asset=None, max_size=None)
+        # A local bake of the other two, then an export back into the old file.
+        idx.bake_thumbnails(lambda item: b"png", asset="GEC", max_size=256)
+        assert idx.export_thumbnails(legacy) == 3
+
+    cols = {r[1] for r in sqlite3.connect(str(legacy)).execute("PRAGMA table_info(thumbnails)")}
+    assert {"asset", "size"} <= cols
 
 
 def test_import_thumbnails_rejects_a_file_that_is_not_a_sidecar(tmp_path):

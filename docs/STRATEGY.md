@@ -611,9 +611,22 @@ from:
   rather than automatic, because a 128 px preview is different evidence from a
   1024 px render: every description records the picture it read
   (`SceneDescription.image`), a smaller one carries a caveat naming what it could
-  not have seen, and a request the bake cannot answer (a non-`GEC` asset, a linear
-  stretch) is refused by the one function that also explains it rather than
-  silently substituted. See the CHANGELOG.
+  not have seen, and a request the bake cannot answer is refused by the one
+  function that also explains it rather than silently substituted. See the
+  CHANGELOG. ~~**Open:** what the bake *was* had to be assumed, since the index
+  stored a preview's bytes and nothing else — so the refusal covered every asset
+  but `GEC`, including a `--asset CSI` bake made deliberately, and a sidecar merge
+  kept whichever preview arrived first rather than the better one.~~ **shipped** —
+  schema v4 records the asset and the size each preview was baked at
+  (`CatalogIndex.get_preview` / `BakedPreview` beside the unchanged bytes-only
+  `get_thumbnail`), which turns both assumptions into reads: a `CSI` bake now
+  answers a `CSI` reading and a `GEC` one is refused *naming what it is*, and
+  `umbra index fetch-thumbnails` keeps a local bake unless the incoming one is a
+  larger preview of the same product — because the published sidecar is 128 px
+  where a local bake defaults to 256, which had made a scene's preview resolution
+  a fact about the order two commands were run in. Absence stays absence: a
+  preview from an older index reads as *unknown* and falls back to the assumed
+  default rather than being treated as a claim.
 
 **SAR-processing depth (was workstream 5.5)**
 

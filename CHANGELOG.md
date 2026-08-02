@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Record what a baked preview *is*, so it stops having to be assumed (index
+  schema v4: `items.thumbnail_asset` / `items.thumbnail_size`).** The bake stored
+  a preview's bytes and nothing about how they were made, which was fine while
+  the pixels were only ever *shown* — a gallery tile, a `demo` popup, a
+  `/artifacts/thumbnail/{id}.png`. It stopped being fine the moment something had
+  to decide whether the cached picture was the *same picture* as the one being
+  asked for, and that happened twice.
+
+  `umbra describe --preview baked` hands the preview to a vision model, so it had
+  to refuse every asset but `GEC` — including a `umbra index bake-thumbnails
+  --asset CSI` someone baked deliberately, which was exactly the picture the
+  request wanted. And a sidecar merge had to keep whichever preview arrived
+  first, which made the resolution of a scene's preview a fact about the order
+  two commands were run in: the published `catalog.thumbs.db` is baked at 128 px
+  where `bake-thumbnails` defaults to 256, so `fetch-thumbnails` either kept your
+  256 px bake or (with `--overwrite`) replaced it with the smaller published one,
+  and neither is what anybody meant.
+
+  So `bake_thumbnails` now records the asset and the size it was asked to render,
+  and both halves read it:
+
+  - `CatalogIndex.get_preview()` returns a `BakedPreview` (the bytes *and* what
+    they are a picture of) beside the unchanged bytes-only `get_thumbnail()`, and
+    `baked_preview_refusal` checks the request against that record. A `CSI` bake
+    answers a `CSI` reading, a `GEC` one is refused *naming what it actually is*,
+    and `SceneDescription.image.asset` reports the product read rather than the
+    one assumed. The `BakedPreviews` seam accordingly returns a record rather
+    than bytes, and the preview lookup now happens *before* the refusal is
+    computed — which product a preview is of is a fact about that scene, so it
+    cannot be known without the read.
+  - `import_thumbnails` keeps a local bake unless the incoming one is a larger
+    preview of the same product. Where either side is unrecorded the two are not
+    comparable and the local bake stays, so nothing about the published sidecar's
+    current behaviour changes until it is republished with the record.
+
+  Two things are deliberately left assumed. The *stretch* is not recorded because
+  the bake has no say in it — every preview is the decibel one — so `--no-db` is
+  still refused without a lookup. And a preview with no record is read as
+  "unknown", which falls back to `BAKED_PREVIEW_ASSET`: absence is not a claim,
+  and treating it as one is what would let a `v3` index quietly answer a `CSI`
+  request with a `GEC` picture.
+
+  The schema step is additive and migrated in place (`v3 -> v4`), so an existing
+  index keeps its baked pixels and reports them as unrecorded; the sidecar's two
+  new columns are added to a file that lacks them on export and read as absent on
+  import. As with every version bump, an index written by this build is refused
+  by an older umbra-py with the message that says to upgrade — which is what the
+  `PRAGMA user_version` stamp exists to do.
 - **Read a scene from the preview this machine already has (`umbra describe
   --preview {render,baked,auto}`).** Every description streamed a fresh
   cloud-optimized GeoTIFF overview from S3, once per call, forever — including
