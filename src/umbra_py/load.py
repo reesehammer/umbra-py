@@ -46,7 +46,11 @@ Umbra's published GEC rasters, already geocoded and never converted here --
 carried the dominant uncertainty in every number this module reports, with
 nothing able to remove it. Filtering here is the same power-domain averaging one
 step further down the chain: it is what makes a *cube* a less noisy measurement,
-rather than what makes its inputs one.
+rather than what makes its inputs one. It composes with ``chunk_size``, so the
+sharpest cube this module can build is also the least noisy one it can measure:
+each window is read with a half-window halo and cropped after filtering, and
+``"lee"``'s speckle parameter -- a property of the pass, not of one window -- is
+resolved once per acquisition.
 
 Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 """
@@ -672,7 +676,9 @@ class _Speckle(NamedTuple):
     window: int
 
 
-def _filter_slab(slab: Any, speckle: _Speckle | None, *, db: bool) -> Any:
+def _filter_slab(
+    slab: Any, speckle: _Speckle | None, *, db: bool, looks: float | None = None
+) -> Any:
     """Speckle-filter one slab, or hand it back untouched.
 
     The same power-domain averaging ``umbra convert --speckle-filter`` applies in
@@ -681,6 +687,14 @@ def _filter_slab(slab: Any, speckle: _Speckle | None, *, db: bool) -> Any:
     are then filtered by the identical arithmetic (and recorded in the identical
     vocabulary) as a converted raster's pixels, so the two cannot drift on what
     ``boxcar`` or ``lee`` means.
+
+    ``looks`` supplies ``"lee"``'s speckle parameter from a wider scope than this
+    array. It arrives only on the chunked path, where "this array" is a window of
+    a pass rather than the pass: :func:`_pass_looks` reads it once for the whole
+    acquisition, so every window of one pass is filtered by the same parameter
+    and two neighbouring windows cannot disagree about the ground they share.
+    Without it -- the unchunked path, where the slab *is* the pass -- the filter
+    reads the parameter off the slab itself, as it always has.
 
     What the filter *achieved* on this slab -- the equivalent looks either side
     of it -- is computed and dropped. It is a per-scene diagnostic, and a lazy
@@ -693,12 +707,20 @@ def _filter_slab(slab: Any, speckle: _Speckle | None, *, db: bool) -> Any:
     from .convert import _filter_speckle  # noqa: PLC0415
 
     filtered, _achieved = _filter_speckle(
-        slab, decibels=db, name=speckle.name, window=speckle.window
+        slab, decibels=db, name=speckle.name, window=speckle.window, looks=looks
     )
     return filtered
 
 
-def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool, speckle: _Speckle | None) -> Any:
+def _read_slab(
+    np: Any,
+    vrt: Any,
+    grid: _StackGrid,
+    *,
+    db: bool,
+    speckle: _Speckle | None,
+    looks: float | None = None,
+) -> Any:
     """One scene, read onto the shared grid: the unit of work a stack is made of.
 
     Ground the scene doesn't cover stays ``NaN``, so a ``"union"`` cube's
@@ -743,7 +765,7 @@ def _read_slab(np: Any, vrt: Any, grid: _StackGrid, *, db: bool, speckle: _Speck
                 resampling=Resampling.average,
             )[0].astype("float32")
             slab[row0:row1, col0:col1] = _mask_slice(np, data, vrt.nodata, db=db)
-    return _filter_slab(slab, speckle, db=db)
+    return _filter_slab(slab, speckle, db=db, looks=looks)
 
 
 def _chunk_spans(total: int, size: int) -> list[tuple[int, int]]:
@@ -774,12 +796,27 @@ def _sub_grid(grid: _StackGrid, rows: tuple[int, int], cols: tuple[int, int]) ->
     )
 
 
-def _open_slab(url: str, grid: _StackGrid, *, db: bool, speckle: _Speckle | None = None) -> Any:
+def _open_slab(
+    url: str,
+    grid: _StackGrid,
+    *,
+    db: bool,
+    speckle: _Speckle | None = None,
+    looks: float | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+) -> Any:
     """Open one source and read its slab -- the deferred task of a lazy cube.
 
     Self-contained on purpose: a dask task runs long after :func:`to_stack`
     returned and closed the datasets it resolved the grid from, so this re-opens
     (metadata only, over range requests) rather than capturing an open handle.
+
+    ``crop`` is the ``(row0, row1, col0, col1)`` sub-rectangle of ``grid`` to
+    return, and exists for the **halo** a speckle-filtered window is read with:
+    ``grid`` is then the window grown by half a filter window, and the crop
+    throws that margin away *after* filtering, so the cells that survive were
+    averaged over the neighbours they have on the pass rather than over a
+    truncated window (see :func:`_halo_grid`).
     """
     rasterio = _require("rasterio")
     np = _require("numpy")
@@ -788,7 +825,115 @@ def _open_slab(url: str, grid: _StackGrid, *, db: bool, speckle: _Speckle | None
 
     with rasterio.open(_open_path(url)) as ds:
         with WarpedVRT(ds, crs=grid.crs, resampling=Resampling.average) as vrt:
-            return _read_slab(np, vrt, grid, db=db, speckle=speckle)
+            slab = _read_slab(np, vrt, grid, db=db, speckle=speckle, looks=looks)
+    if crop is None:
+        return slab
+    row0, row1, col0, col1 = crop
+    return slab[row0:row1, col0:col1]
+
+
+def _halo_grid(
+    grid: _StackGrid, rows: tuple[int, int], cols: tuple[int, int], pad: int
+) -> tuple[_StackGrid, tuple[int, int, int, int]]:
+    """One window grown by ``pad`` cells, plus where the window sits inside it.
+
+    A filter window centred on a cell near a chunk edge needs cells the
+    neighbouring chunk holds. Read the chunk alone and those cells are missing,
+    so its edge averages a truncated window and the chunked cube stops equalling
+    the unchunked one it is documented to equal. Growing the read by half a
+    filter window on every side and cropping *after* the filter is the fix
+    ``umbra chips`` uses tile by tile, and it makes the result identical rather
+    than merely better: every cell that survives the crop had its whole window
+    inside the array that was filtered.
+
+    The growth is clamped at the pass's own edges, where there is nothing to grow
+    into and the whole-pass filter clips its windows in exactly the same way.
+    """
+    row0, row1 = rows
+    col0, col1 = cols
+    top, bottom = max(row0 - pad, 0), min(row1 + pad, grid.height)
+    left, right = max(col0 - pad, 0), min(col1 + pad, grid.width)
+    return (
+        _sub_grid(grid, (top, bottom), (left, right)),
+        (row0 - top, row1 - top, col0 - left, col1 - left),
+    )
+
+
+#: Edge of the square grid of sample windows :func:`_pass_looks` reads a pass's
+#: speckle statistics from, and the edge of each window in cells. The same shape
+#: (and the same reasoning) as :data:`umbra_py.chips._SPECKLE_SAMPLE_GRID`: a
+#: chunked build exists because the pass does not fit in memory, so its looks are
+#: read from a sample of it. A pass no wider than one window is sampled *whole*
+#: (:func:`_sample_starts` collapses), which is why a cube small enough to hold
+#: gives the identical number either way.
+_LOOKS_SAMPLE_GRID = 3
+_LOOKS_SAMPLE_SIZE = 512
+
+
+def _sample_starts(total: int, size: int, count: int) -> list[int]:
+    """Up to ``count`` evenly spread window origins covering ``total`` cells.
+
+    Collapses to a single origin where the span is no wider than one window, and
+    de-duplicates where the spread would repeat one -- so a small grid is sampled
+    once, whole, rather than ``count`` times over.
+    """
+    if total <= size or count < 2:
+        return [0]
+    last = total - size
+    return sorted({round(i * last / (count - 1)) for i in range(count)})
+
+
+def _pass_looks(url: str, grid: _StackGrid, *, db: bool, window: int) -> float:
+    """One pass's equivalent number of looks, read once for all of its windows.
+
+    ``"lee"`` compares each window's variability against what speckle alone would
+    explain, and *what speckle alone explains* is a property of the product's
+    processing -- of the pass -- not of the few hundred cells one chunk covers.
+    Read per chunk it would differ across a pass, so one part of a scene would be
+    smoothed harder than the part beside it and two neighbouring windows would
+    disagree about the ground they share. So it is resolved here, once, and
+    handed to every window of that pass (:func:`_filter_slab`) -- the same move
+    :func:`umbra_py.chips._scene_speckle` makes once per acquisition.
+
+    It is a *sample* for the reason the chunking exists at all: the pass does not
+    fit in memory. Up to :data:`_LOOKS_SAMPLE_GRID`² windows of
+    :data:`_LOOKS_SAMPLE_SIZE` cells are read on a fixed grid and their blocks
+    are **pooled** before the percentile is taken
+    (:func:`umbra_py.convert._block_enl_ratios`), which is what makes the answer
+    an estimate of the pass rather than an average of nine estimates -- and one
+    window at a time, since only the blocks are kept. A pass that fits inside a
+    single sample window is read whole, so the number is then exactly the one the
+    unchunked path reads off the slab.
+
+    Clamped at single-look for the reason :func:`umbra_py.convert._filter_speckle`
+    clamps it: no product has fewer looks than one, so a lower read is the
+    estimator meeting texture, and believing it is licence to smooth structure
+    away.
+    """
+    np = _require("numpy")
+    from .convert import (  # noqa: PLC0415
+        _ENL_BLOCK,
+        _ENL_BLOCK_WINDOWS,
+        _ENL_PERCENTILE,
+        _block_enl_ratios,
+        _detected_power,
+    )
+
+    # The block size `_filter_speckle` would use for this window, so the number
+    # is comparable with the one an unchunked pass reads rather than differently
+    # biased.
+    block = max(_ENL_BLOCK, _ENL_BLOCK_WINDOWS * window)
+    ratios = []
+    for row0 in _sample_starts(grid.height, _LOOKS_SAMPLE_SIZE, _LOOKS_SAMPLE_GRID):
+        for col0 in _sample_starts(grid.width, _LOOKS_SAMPLE_SIZE, _LOOKS_SAMPLE_GRID):
+            rows = (row0, min(row0 + _LOOKS_SAMPLE_SIZE, grid.height))
+            cols = (col0, min(col0 + _LOOKS_SAMPLE_SIZE, grid.width))
+            sample = _open_slab(url, _sub_grid(grid, rows, cols), db=db)
+            ratios.append(_block_enl_ratios(_detected_power(sample, decibels=db), block=block))
+    pooled = np.concatenate(ratios) if ratios else np.empty(0, dtype="float64")
+    if pooled.size == 0:
+        return 1.0
+    return max(float(np.percentile(pooled, _ENL_PERCENTILE)), 1.0)
 
 
 def _lazy_slab(
@@ -810,24 +955,45 @@ def _lazy_slab(
     price is request count: each window opens the source and issues its own
     range requests, so a pass costs one read per window instead of one in total.
 
-    ``speckle`` therefore only ever arrives without ``chunk_size``
-    (:func:`to_stack` refuses the pair): a filter window that straddled two
-    windows would have to be reconciled across them, and ``"lee"`` reads its
-    speckle parameter off the array it is handed, which a window is not.
+    ``speckle`` composes with either shape, and the two things that made a window
+    the hard place to filter are answered rather than approximated. A filter
+    window straddling a chunk edge: each window is read with a half-window halo
+    and cropped after filtering (:func:`_halo_grid`), so a filtered chunk is the
+    same cells the whole-pass filter would have produced there. And ``"lee"``'s
+    speckle parameter, which is a property of the pass rather than of one window:
+    it is resolved once per pass (:func:`_pass_looks`) as a single deferred task
+    every window of that pass depends on, so the parameter is read once however
+    many windows use it.
     """
+    looks: Any = None
+    if speckle is not None and chunk_size is not None:
+        # "lee" needs the pass's own speckle parameter, read once as a task every
+        # window depends on. "boxcar" takes none -- but supplying one still says
+        # "do not measure this array's looks", which on the chunked path saves a
+        # per-window ENL estimate whose result `_filter_slab` discards anyway.
+        looks = (
+            dask.delayed(_pass_looks)(url, grid, db=db, window=speckle.window)
+            if speckle.name == "lee"
+            else 1.0
+        )
 
-    def task(part: _StackGrid) -> Any:
+    def task(part: _StackGrid, crop: tuple[int, int, int, int] | None = None) -> Any:
+        height = part.height if crop is None else crop[1] - crop[0]
+        width = part.width if crop is None else crop[3] - crop[2]
         return dask_array.from_delayed(
-            dask.delayed(_open_slab)(url, part, db=db, speckle=speckle),
-            shape=(part.height, part.width),
+            dask.delayed(_open_slab)(url, part, db=db, speckle=speckle, looks=looks, crop=crop),
+            shape=(height, width),
             dtype="float32",
         )
 
     if chunk_size is None:
         return task(grid)
+    pad = speckle.window // 2 if speckle is not None else 0
     rows = _chunk_spans(grid.height, chunk_size)
     cols = _chunk_spans(grid.width, chunk_size)
-    return dask_array.block([[task(_sub_grid(grid, r, c)) for c in cols] for r in rows])
+    if pad == 0:
+        return dask_array.block([[task(_sub_grid(grid, r, c)) for c in cols] for r in rows])
+    return dask_array.block([[task(*_halo_grid(grid, r, c, pad)) for c in cols] for r in rows])
 
 
 def _filtered_provenance(provenance: dict[str, str], speckle: _Speckle) -> dict[str, str]:
@@ -860,7 +1026,7 @@ def _filtered_provenance(provenance: dict[str, str], speckle: _Speckle) -> dict[
     return {**provenance, "speckle_filter": speckle.name, "speckle_window": str(speckle.window)}
 
 
-def _resolve_speckle(name: str | None, window: int, *, chunk_size: int | None) -> _Speckle | None:
+def _resolve_speckle(name: str | None, window: int) -> _Speckle | None:
     """Check a requested speckle filter at the call, before any bytes are read.
 
     A lazy cube defers its reads into ``dask`` tasks that run whenever something
@@ -873,19 +1039,6 @@ def _resolve_speckle(name: str | None, window: int, *, chunk_size: int | None) -
     if name not in SPECKLE_FILTERS:
         raise ValueError(
             f"Unknown speckle_filter {name!r}; choose one of {', '.join(SPECKLE_FILTERS)}."
-        )
-    if chunk_size is not None:
-        # Not a limitation to route around: a window centred on a cell near a
-        # chunk edge needs cells the neighbouring chunk holds, and "lee" reads
-        # its speckle parameter off the array it filters, which under chunking
-        # is a window rather than the pass. Either would make a chunked cube
-        # differ from the unchunked one it is documented to equal.
-        raise ValueError(
-            "speckle_filter cannot be combined with chunk_size: the filter window "
-            "would straddle two windows read independently, and 'lee' reads its "
-            "speckle parameter off the whole pass. Stack with lazy=True alone (one "
-            "chunk per pass, which the filter sees whole), or filter the sources "
-            "themselves with 'umbra convert --speckle-filter'."
         )
     from .convert import _check_speckle_window  # noqa: PLC0415
 
@@ -978,7 +1131,9 @@ def to_stack(
         It costs range requests -- each window opens the source and reads its
         own bytes, so a pass costs ⌈h/c⌉ × ⌈w/c⌉ reads rather than one -- which
         is why it is opt-in and why the window wants to be a decent fraction of
-        the grid (512–2048), not a tile. The values are unchanged.
+        the grid (512–2048), not a tile. The values are unchanged (including
+        under ``speckle_filter``, which reads each window with a halo -- see it
+        below for the one number a chunked ``"lee"`` estimates rather than reads).
     speckle_filter:
         Average **speckle** down before the series is assembled: one of
         :data:`~umbra_py.convert.SPECKLE_FILTERS` (``"boxcar"``, the multilook,
@@ -1006,7 +1161,15 @@ def to_stack(
         earlier, in the radar's image space where speckle is one independent
         sample per pixel, is ``umbra convert --speckle-filter``'s job; sources
         that already record one are refused here rather than filtered twice.
-        Incompatible with ``chunk_size`` (see it above).
+
+        Composes with ``chunk_size``: each window is read with a half-window halo
+        and cropped after filtering, so a filtered window holds the cells the
+        whole-pass filter would have put there, and ``"lee"``'s speckle parameter
+        is resolved once per pass rather than per window (from a fixed sample of
+        it, since a chunked build is the case where the pass does not fit in
+        memory -- a pass small enough to sample whole gives the identical
+        number). ``boxcar`` needs no such parameter, so a chunked ``boxcar`` cube
+        is cell-for-cell the unchunked one.
     speckle_window:
         Edge of the odd, centred window ``speckle_filter`` averages over, in
         cells of the shared grid. Wider removes more speckle and more detail; it
@@ -1066,7 +1229,7 @@ def to_stack(
             raise ValueError("chunk_size needs lazy=True; an eager cube is read a slab at a time.")
         if int(chunk_size) < 1:
             raise ValueError(f"chunk_size must be a positive pixel count; got {chunk_size!r}.")
-    speckle = _resolve_speckle(speckle_filter, speckle_window, chunk_size=chunk_size)
+    speckle = _resolve_speckle(speckle_filter, speckle_window)
     if lazy:
         # Fail on the missing extra before any bytes are streamed, not after.
         dask, dask_array = _require_dask()

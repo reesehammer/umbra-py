@@ -2450,21 +2450,134 @@ def test_to_stack_refuses_to_filter_an_already_filtered_series(tmp_path):
     assert to_stack(items, max_size=32).attrs["provenance"]["speckle_filter"] == "boxcar"
 
 
-def test_to_stack_refuses_a_speckle_filter_on_a_chunked_cube(tmp_path):
-    """A window that straddles two independently-read windows is not one window."""
+@pytest.mark.parametrize("name", ["boxcar", "lee"])
+def test_to_stack_speckle_filter_on_a_chunked_cube_matches_the_unchunked_one(tmp_path, name):
+    """The halo claim, which is what lets a cube be filtered window by window.
+
+    A filter window centred near a chunk edge needs cells the neighbouring chunk
+    holds. Read the chunk alone and those cells are missing, so its edge averages
+    a truncated window and two neighbouring windows disagree about the ground
+    they share -- a seam, right where a change measurement would read it as
+    change. Reading each window with a half-window halo and cropping after the
+    filter makes it the whole-pass filter's own answer, which is what this
+    asserts, on a grid whose last window is a partial one.
+
+    "Own answer" to within one ``float32`` ulp rather than bit-for-bit: the
+    filters sum a window out of a summed-area table, and a table accumulated over
+    a 12-cell read reaches a given window total by a different order of additions
+    than one accumulated over the pass. That moves the last bit of a few cells
+    and nothing else -- the windows themselves are the same cells.
+    """
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+
+    items = _spread_scenes(tmp_path, count=2)
+    kwargs = {"max_size": 24, "crs": "utm", "speckle_filter": name, "speckle_window": 5}
+    whole = _dask_cube(items, **kwargs)
+    # 24 is not a multiple of 10, so the last window of each row is partial and
+    # its halo is clamped at the pass edge exactly as the whole-pass filter is.
+    windowed = _dask_cube(items, chunk_size=10, **kwargs)
+
+    assert windowed.chunks[2] == (10, 10, 4)
+    assert windowed.attrs == whole.attrs
+    np.testing.assert_allclose(
+        np.asarray(windowed.compute().values),
+        np.asarray(whole.compute().values),
+        rtol=float(np.finfo("float32").eps),
+        atol=1e-5,
+    )
+
+
+def test_to_stack_chunked_lee_reads_its_speckle_parameter_once_per_pass(tmp_path):
+    """A window's variability is judged against the *pass*, not against itself.
+
+    ``lee`` compares each window against what speckle alone would explain, and
+    that is a property of the product's processing. Read per chunk it would
+    differ across one pass, so half a scene would be smoothed harder than the
+    half beside it.
+    """
     pytest.importorskip("xarray")
     pytest.importorskip("numpy")
-    from umbra_py import to_stack
+    from umbra_py import load as load_mod
 
-    with pytest.raises(ValueError, match="cannot be combined with chunk_size") as exc:
-        to_stack(
-            _spread_scenes(tmp_path, count=2),
-            max_size=32,
-            lazy=True,
-            chunk_size=16,
-            speckle_filter="boxcar",
+    calls = []
+    original = load_mod._pass_looks
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            load_mod,
+            "_pass_looks",
+            lambda url, grid, **kw: (calls.append(url), original(url, grid, **kw))[1],
         )
-    assert "lazy=True alone" in str(exc.value)
+        cube = _dask_cube(
+            _spread_scenes(tmp_path, count=2),
+            max_size=24,
+            chunk_size=10,
+            speckle_filter="lee",
+        )
+        assert calls == []  # deferred like every other read
+        cube.compute()
+
+    # Nine windows per pass, two passes -- and one looks read for each pass.
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+
+    # ``boxcar`` needs no such parameter, so it costs no such read.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(load_mod, "_pass_looks", lambda *a, **kw: pytest.fail("boxcar read looks"))
+        _dask_cube(
+            _spread_scenes(tmp_path, count=2),
+            max_size=24,
+            chunk_size=10,
+            speckle_filter="boxcar",
+        ).compute()
+
+
+def test_the_looks_sample_grid_spreads_and_collapses():
+    """A pass wider than one sample window is read at several places; one no
+    wider is read once, whole -- which is why a small cube's ``lee`` parameter is
+    exactly the one the unchunked path reads off the slab."""
+    from umbra_py.load import _sample_starts
+
+    assert _sample_starts(400, 512, 3) == [0]  # narrower than a window: read whole
+    assert _sample_starts(512, 512, 3) == [0]  # exactly one window: still once
+    assert _sample_starts(1024, 512, 3) == [0, 256, 512]
+    # De-duplicated where the spread would repeat an origin.
+    assert _sample_starts(514, 512, 3) == [0, 1, 2]
+    assert _sample_starts(2048, 512, 1) == [0]
+
+
+def test_to_stack_chunked_filter_reads_the_halo_and_returns_the_window(tmp_path):
+    """The read is grown by half a window; what lands in the cube is not."""
+    pytest.importorskip("xarray")
+    pytest.importorskip("numpy")
+    from umbra_py import load as load_mod
+
+    shapes = []
+    original = load_mod._open_slab
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            load_mod,
+            "_open_slab",
+            lambda url, grid, **kw: (
+                shapes.append(((grid.width, grid.height), kw.get("crop"))),
+                original(url, grid, **kw),
+            )[1],
+        )
+        cube = _dask_cube(
+            _spread_scenes(tmp_path, count=2),
+            max_size=24,
+            chunk_size=10,
+            speckle_filter="boxcar",
+            speckle_window=5,
+        )
+        block = cube.data.blocks[0, 0, 0].compute()
+
+    assert block.shape[1:] == (10, 10)
+    # The top-left window has no ground above or left of it, so its halo grows on
+    # two sides only: 12 cells read, the 10 asked for cropped out of them.
+    assert shapes == [((12, 12), (0, 10, 0, 10))]
 
 
 def test_to_stack_checks_the_filter_at_the_call_not_at_compute(tmp_path):

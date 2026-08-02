@@ -319,17 +319,19 @@ averaged over an N-cell window *is* an N-window-filtered raster: which means the
 caveat, the written GeoTIFF's tags and the refusal to difference a filtered pass
 against an unfiltered one all apply with no new machinery. Filtering a series
 that already carries a filter is refused rather than composed (two averagings
-leave a resolution neither window names), and the one combination that cannot be
-made exact — a filter window straddling the independently-read windows
+leave a resolution neither window names), while the combination that once could
+not be made exact — a filter window straddling the independently-read windows
 `chunk_size` cuts, with `lee`'s scene-read looks parameter differing per window —
-is refused rather than approximated. And the filter now reaches the surfaces that
+is now made exact rather than refused (a halo per window, the looks read once per
+pass; see below). And the filter now reaches the surfaces that
 *answer* rather than compute: `POST /artifacts/stats` takes `"speckle_filter"` as
 a request field (in the artifact cache key, since it moves the numbers — the rule
 `"windowed"` established) and the `stack_stats` agent tools take the same pair, so
 a hosted or model-driven measurement stops being the noisiest one the chain can
-produce. It turned out to be `"windowed"`'s exact complement — filtering needs a
-pass whole, windowed measurement needs it chunked — so each is a `400` on the
-instance the other needs, and the two are refused together at the request.
+produce. It turned out to be `"windowed"`'s exact complement at the time —
+filtering needed a pass whole, windowed measurement needed it chunked — so each
+was a `400` on the instance the other needs, and the two were refused together at
+the request.
 ~~**Open:** which of the two a given instance honours was discoverable only by
 sending a request and reading the `400`.~~ **shipped** — the landing page's
 `stats` link carries `umbra:options`, where each option reports whether this
@@ -338,6 +340,28 @@ have given, so a client that installed nothing locally picks the option that
 works before spending a request. Advertisement and refusal are one function, and
 the suite drives the renderer against the page rather than trusting the pair to
 stay in step.
+~~**Open:** advertising the choice is not the same as not having to make it — the
+sharpest cube the chain could build was still the noisiest one it could measure,
+and a hosted client that wanted a filtered measurement of a large series had
+nowhere to send it.~~ **shipped** — `to_stack(speckle_filter=…, chunk_size=N)`
+composes, so the exclusivity is gone rather than better documented. The two
+obstacles are answered the way `umbra chips` answered them tile by tile, which is
+what the old refusal named as what it would take: each window is read with a
+half-window **halo** and cropped after filtering, so a filtered chunked cube is
+the whole-pass filter's own answer (to a `float32` ulp — a summed-area table adds
+in a different order over 12 cells than over a pass) rather than one carrying a
+seam `stack_stats` would report as change; and `lee`'s speckle parameter, being a
+property of the product's processing rather than of the cells one window covers,
+is resolved **once per pass** as a single deferred task every window depends on,
+from a fixed sample of it, since a chunked build is by definition the case where
+the pass does not fit. `boxcar` needs no such parameter, so a chunked `boxcar`
+cube is cell-for-cell the unchunked one at no extra read. The payoff is one
+request: `POST /artifacts/stats` takes `"windowed"` **and** `"speckle_filter"`
+together on a chunked instance, so a hosted measurement of a series too large to
+hold is also the one with the interference averaged out of it — and the refusal
+is gone from all three places it was stated (`to_stack`, the request-level pair
+check, and the per-instance one the landing page advertises, which now reports
+`supported: true` everywhere).
 ~~**Open:** it reached every surface that renders a picture or returns a number,
 and stopped at the one whose output is a *dataset* — `umbra chips` took
 `--speckle-filter` only on the complex path, so a training set cut from the
@@ -786,9 +810,11 @@ from:
   `stack_stats` caveat, the written cube's `UMBRA_*` tags and the refusal to
   difference a filtered pass against an unfiltered one all work unchanged on a
   cube that filtered itself. Filtering an already-filtered series is refused (two
-  averagings leave a resolution neither window names), and so is pairing the
-  filter with `--chunk-size`, whose independently-read windows a filter window
-  would straddle. See the CHANGELOG.
+  averagings leave a resolution neither window names). Pairing the filter with
+  `--chunk-size` was refused too, and is not any more: each window is read with a
+  half-window halo and cropped after filtering, and `lee`'s looks parameter is
+  read once per pass, so the sharpest cube the library can build is also the
+  least noisy one it can measure. See the CHANGELOG.
   ~~**Open:** it reached the library and the CLI and stopped there, so every
   measurement made through `umbra serve` or an agent tool — the front doors built
   so nobody has to install anything — was unfiltered with no way to ask
@@ -800,8 +826,18 @@ from:
   the numbers, and a cached artifact whose values depend on an invisible server
   flag is the failure mode. What the implementation *found* is that the two are
   complementary — filtering needs each pass whole, windowed measurement needs the
-  cube chunked — so each is refused on the instance the other requires, which
-  makes the pair unsatisfiable everywhere and refusable at the request itself.
+  cube chunked — so each was refused on the instance the other requires, which
+  made the pair unsatisfiable everywhere and refusable at the request itself.
+  ~~**Open:** which meant the front doors could advertise the choice but never
+  remove it, so a hosted measurement of a series too large to hold was
+  necessarily the noisiest one.~~ **shipped** — the pair composes now: each
+  window is read with a half-window halo (so a filtered chunked cube is the
+  whole-pass filter's own answer to a `float32` ulp, not one carrying a seam
+  `stack_stats` would report as change) and `lee`'s looks parameter is resolved
+  once per pass instead of per window, exactly as `umbra chips` resolves it once
+  per acquisition. So `"windowed": true` and `"speckle_filter"` are one request
+  on a chunked instance, the request-level refusal is gone, and the landing page
+  reports `speckle_filter` as supported everywhere.
   ~~**Open:** the chip-side loader, the one surface whose output is a *dataset*
   rather than a picture or a number — `umbra chips` took `--speckle-filter` only
   on the complex path, so a training set cut from the published GEC rasters could

@@ -87,17 +87,21 @@ anything is measured, the cube records what it did in ``umbra convert``'s own
 record into the caveat that states the trade: the window that removed the
 variance also spent the resolution, so a cell reports ground several cells
 across. That is a number *and* a caveat moving, so it is in the cache key.
-It is the exact complement of ``windowed``: filtering needs the pass whole, so
-it is refused (``400``) on an instance started with ``--stack-chunk-size``,
-while ``windowed`` is refused on one without -- which makes the two mutually
-exclusive on every instance, and so refused together at the request.
+It used to be the exact complement of ``windowed`` -- filtering needed each pass
+whole, so it was refused on exactly the chunked instance ``windowed`` requires,
+which made the pair unsatisfiable everywhere. ``to_stack`` now reads each window
+with a half-window halo and resolves ``"lee"``'s speckle parameter once per pass,
+so the two compose: a chunked instance answers both, and the sharpest cube this
+server can build is also the least noisy one it can measure. ``speckle_filter``
+is honoured on every instance.
 
-Because exactly one of that pair works on any given instance, *which* one is a
-fact a client needs before it asks. The landing page's ``stats`` link carries
-it (:data:`STATS_CAPABILITY_FIELD` -> :func:`stats_capabilities`): each option
-reports whether this server supports it and, when it does not, the reason it
-would be refused with -- the same string :func:`stats_option_refusal` gives the
-renderer, so the advertisement cannot drift from the ``400`` it predicts.
+*Which* options an instance takes is still a fact a client needs before it asks:
+``windowed`` remains a property of how the server builds its cube. The landing
+page's ``stats`` link carries it (:data:`STATS_CAPABILITY_FIELD` ->
+:func:`stats_capabilities`): each option reports whether this server supports it
+and, when it does not, the reason it would be refused with -- the same string
+:func:`stats_option_refusal` gives the renderer, so the advertisement cannot
+drift from the ``400`` it predicts.
 
 Renders are synchronous by default -- a single composite streams a downsampled
 overview per pass and returns in seconds -- but a composite request can opt in
@@ -486,8 +490,9 @@ def landing_page(
     options *this* instance can honour. ``stack_execution`` is the instance's
     :class:`StackExecution` (the eager default when omitted), and the link's
     :data:`STATS_CAPABILITY_FIELD` reports :func:`stats_capabilities` for it, so
-    a client picks between ``windowed`` and ``speckle_filter`` by reading the
-    landing page rather than by sending a request and parsing the ``400``.
+    a client learns whether ``windowed`` (and, historically, ``speckle_filter``)
+    is available by reading the landing page rather than by sending a request and
+    parsing the ``400``.
     """
     base = base_url.rstrip("/")
     geojson = "application/geo+json"
@@ -926,8 +931,12 @@ class StackExecution:
 
 
 #: The ``POST /artifacts/stats`` request options whose availability is a property
-#: of the *instance* rather than of the request: each needs the cube built a
+#: of the *instance* rather than of the request: they need the cube built a
 #: particular way, and :class:`StackExecution` decides that once per server.
+#: ``speckle_filter`` is now honoured whatever the policy (:func:`to_stack` reads
+#: a halo per window), and stays here so one document answers "what can I ask
+#: this server for?" for both stacking options rather than only the constrained
+#: one.
 STATS_INSTANCE_OPTIONS = ("windowed", "speckle_filter")
 
 #: The landing-page link field that carries :func:`stats_capabilities`. Namespaced
@@ -962,37 +971,35 @@ def stats_option_refusal(execution: StackExecution, option: str) -> str | None:
             "estimate the percentiles without lowering the memory. Ask the operator "
             "for 'umbra serve --stack-lazy --stack-chunk-size N', or drop 'windowed'."
         )
-    # The mirror image, and for a reason of substance rather than of cost: a
-    # filter window centred near a chunk edge averages cells the neighbouring
-    # chunk holds, and "lee" reads its speckle parameter off the array it is
-    # handed -- so on a chunked instance the filtered cube would differ from the
-    # unchunked one it is documented to equal. ``to_stack`` refuses the pair
-    # itself; refusing here names the server flag that caused it instead of a
-    # library keyword the client never passed.
-    if option == "speckle_filter" and execution.chunk_size:
-        return (
-            "speckle filtering needs an unchunked instance: this server stacks "
-            f"{execution.describe()}, and a filter window near a chunk edge needs "
-            "cells the neighbouring chunk holds. Ask the operator for 'umbra serve "
-            "--stack-lazy' without '--stack-chunk-size' (one chunk per pass, which "
-            "the filter sees whole), or drop 'speckle_filter'."
-        )
+    # ``speckle_filter`` has no instance condition left. It used to be refused on
+    # a chunked instance, because a filter window centred near a chunk edge
+    # averages cells the neighbouring chunk holds and "lee" read its speckle
+    # parameter off the array it was handed. ``to_stack`` now reads each window
+    # with a half-window halo and resolves that parameter once per pass, so a
+    # chunked cube filters to the unchunked one's answer -- and the pair that was
+    # unsatisfiable on every instance is satisfiable on the chunked one. It stays
+    # in :data:`STATS_INSTANCE_OPTIONS` so the landing page keeps advertising
+    # both stacking options in one place, now saying yes to this one everywhere.
     return None
 
 
 def stats_capabilities(execution: StackExecution | None = None) -> dict[str, Any]:
     """What ``POST /artifacts/stats`` will accept on an instance, as a document.
 
-    The two options in :data:`STATS_INSTANCE_OPTIONS` are exact complements --
-    ``windowed`` needs the cube built in windows and ``speckle_filter`` needs
-    each pass whole -- so every instance honours exactly one of them, and which
-    one was previously discoverable only by sending a request and reading the
-    ``400``. This is that answer up front: each option reports ``supported``,
-    and an unsupported one carries the ``reason`` it would have been refused
-    with (the same string, from :func:`stats_option_refusal`). ``stacking`` is
-    the operator-facing policy line the CLI echoes at startup, so a client
-    debugging a refusal sees the shape of the instance rather than only the
-    verdict.
+    Each option in :data:`STATS_INSTANCE_OPTIONS` reports ``supported``, and an
+    unsupported one carries the ``reason`` it would have been refused with (the
+    same string, from :func:`stats_option_refusal`) -- so a client picks options
+    that work before spending a request instead of discovering them by reading a
+    ``400``. ``stacking`` is the operator-facing policy line the CLI echoes at
+    startup, so a client debugging a refusal sees the shape of the instance
+    rather than only the verdict.
+
+    Today only ``windowed`` has an instance condition: it needs the cube built in
+    windows, so it is refused on a server without ``--stack-chunk-size``.
+    ``speckle_filter`` reports supported everywhere, and the two are no longer
+    mutually exclusive -- a chunked instance answers both, which is the
+    combination that measures a cube too large to hold with the speckle averaged
+    out of it.
     """
     execution = execution or StackExecution()
     capabilities: dict[str, Any] = {"stacking": execution.describe()}
@@ -1202,14 +1209,14 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
     artifact rather than two cache entries.
 
     Raises ``ValueError`` for an unknown ``extent``, a non-positive threshold, a
-    ``block_series`` asked for without a ``blocks`` grid to hang it on, an
-    unknown ``speckle_filter`` or a window that cannot be centred, and for
-    ``windowed`` together with ``speckle_filter`` — each of which the route maps
-    to a ``400``. That last pair is refused here rather than per instance because
-    it is unsatisfiable on *every* instance: windowed measurement needs a chunked
-    build and the filter needs an unchunked one (see :class:`StackExecution` and
-    the renderer's own two refusals). Whether a particular instance can honour
-    either alone is not knowable here, so those refusals live in the renderer.
+    ``block_series`` asked for without a ``blocks`` grid to hang it on, and an
+    unknown ``speckle_filter`` or a window that cannot be centred — each of which
+    the route maps to a ``400``. ``windowed`` together with ``speckle_filter``
+    used to be refused here as unsatisfiable on *every* instance; it no longer is
+    (:func:`~umbra_py.load.to_stack` reads a halo per window, so a chunked build
+    filters too), and the pair is now exactly as available as ``windowed`` alone.
+    Whether a particular instance can honour that is not knowable here, so it
+    stays in the renderer (:func:`stats_option_refusal`).
     """
     body = body or {}
     # ``db`` defaults to True here (radiometric scale), unlike the composites.
@@ -1241,13 +1248,6 @@ def stats_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
     )
     if options["block_series"] and not options["blocks"]:
         raise ValueError("block_series needs a blocks grid; send blocks: N as well.")
-    if options["windowed"] and options["speckle_filter"]:
-        raise ValueError(
-            "windowed and speckle_filter cannot be combined: measuring window by window "
-            "needs an instance that builds the cube in windows, and the filter needs one "
-            "that does not (a window centred near a chunk edge averages cells the "
-            "neighbouring chunk holds). Ask for whichever the instance supports, not both."
-        )
     return options
 
 
@@ -2282,9 +2282,9 @@ def build_app(
             ``lee`` averages only where a window is no more variable than speckle
             alone explains, so edges and bright points survive. What it spends is
             resolution, which the response's ``caveats`` state rather than the
-            request having to remember. It needs the pass whole, so it is the
-            complement of ``windowed``: a ``400`` on an instance started with
-            ``--stack-chunk-size``, and the two are refused together.
+            request having to remember. Every instance honours it -- a chunked
+            build reads each window with a half-window halo -- so it composes
+            with ``"windowed": true`` rather than excluding it.
             """
             return _composite(
                 request,

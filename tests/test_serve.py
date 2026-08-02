@@ -1254,12 +1254,29 @@ def test_an_unapplied_window_does_not_split_the_cache():
     )
 
 
-def test_windowed_and_speckle_filter_are_refused_together():
-    """Unsatisfiable on *every* instance -- windowed needs a chunked build and
-    the filter needs an unchunked one -- so the refusal is at the request rather
-    than repeated per instance."""
-    with pytest.raises(ValueError, match="cannot be combined"):
-        serve.stats_options({"windowed": True, "speckle_filter": "boxcar"})
+def test_windowed_and_speckle_filter_are_one_request(monkeypatch):
+    """The pair used to be unsatisfiable on every instance -- windowed needed a
+    chunked build and the filter an unchunked one. ``to_stack`` reads a halo per
+    window now, so a chunked instance answers both: the sharpest cube this server
+    can build, measured with the speckle averaged out of it."""
+    pytest.importorskip("dask")
+    seen = _record_stack(monkeypatch)
+    captured: dict = {}
+
+    from umbra_py import load
+
+    monkeypatch.setattr(
+        load,
+        "stack_stats",
+        lambda cube, **kwargs: (captured.update(kwargs), {"count": 2, "units": "dB"})[1],
+    )
+    options = serve.stats_options({"windowed": True, "speckle_filter": "boxcar"})
+    execution = serve.StackExecution(lazy=True, chunk_size=128)
+    serve.default_renderers(execution).stats([_StatsItem("a"), _StatsItem("b")], options)
+
+    assert seen["to_stack"]["chunk_size"] == 128
+    assert seen["to_stack"]["speckle_filter"] == "boxcar"
+    assert captured["windowed"] is True
 
 
 def test_speckle_filter_reaches_to_stack(monkeypatch):
@@ -1284,36 +1301,21 @@ def test_an_unfiltered_request_still_passes_a_usable_window(monkeypatch):
     assert seen["to_stack"]["speckle_window"] == serve.SPECKLE_WINDOW_DEFAULT
 
 
-def test_speckle_filter_needs_an_unchunked_instance(monkeypatch):
-    """The mirror image of the windowed refusal: a filter window near a chunk
-    edge needs cells the neighbouring chunk holds, so a chunked instance refuses
-    rather than filtering each window on its own."""
-    monkeypatch.setattr(
-        "umbra_py.load._require_dask",
-        lambda: pytest.fail("the refusal must land before any stacking work"),
+@pytest.mark.parametrize(
+    "execution",
+    [None, serve.StackExecution(lazy=True), serve.StackExecution(lazy=True, chunk_size=128)],
+)
+def test_speckle_filter_has_no_instance_condition_left(execution, monkeypatch):
+    """It used to be refused on a chunked instance, on the argument that a filter
+    window near a chunk edge needs cells the neighbouring chunk holds. The cube
+    reads that halo now, so every shape of instance honours the option."""
+    pytest.importorskip("dask")
+    seen = _record_stack(monkeypatch)
+    serve.default_renderers(execution).stats(
+        [_StatsItem("a"), _StatsItem("b")], serve.stats_options({"speckle_filter": "boxcar"})
     )
-    options = serve.stats_options({"speckle_filter": "boxcar"})
-    execution = serve.StackExecution(lazy=True, chunk_size=128)
-    with pytest.raises(ValueError, match="--stack-chunk-size"):
-        serve.default_renderers(execution).stats([_StatsItem("a"), _StatsItem("b")], options)
-
-
-def test_speckle_filter_on_a_chunked_instance_maps_to_400(index_path, tmp_path):
-    """And it is the client's mistake, not a 500: the option is well-formed,
-    this instance just builds the cube in windows the filter cannot straddle."""
-    pytest.importorskip("dask.array")
-    app = serve.build_app(
-        index_path,
-        stack_execution=serve.StackExecution(lazy=True, chunk_size=64),
-        cache_dir=tmp_path / "cache",
-    )
-    client = TestClient(app, raise_server_exceptions=False)
-    resp = client.post(
-        "/artifacts/stats", json={"ids": ["item-0", "item-1"], "speckle_filter": "boxcar"}
-    )
-    assert resp.status_code == 400
-    detail = resp.json()["detail"]
-    assert "--stack-chunk-size" in detail and "64px windows" in detail
+    assert seen["to_stack"]["speckle_filter"] == "boxcar"
+    assert serve.stats_option_refusal(execution or serve.StackExecution(), "speckle_filter") is None
 
 
 def test_speckle_filter_is_part_of_the_cache_key(art_client, recorder):
@@ -1338,13 +1340,14 @@ def test_speckle_filter_is_part_of_the_cache_key(art_client, recorder):
 # ---- what an instance says it can be asked for (the landing page) ---------
 
 
-#: The two instance shapes, and which of the complementary stats options each
-#: honours. Every instance is one or the other: ``windowed`` needs the cube built
-#: in windows, ``speckle_filter`` needs each pass whole.
+#: The three instance shapes and which stats options each honours. Only
+#: ``windowed`` is conditional now -- it needs the cube built in windows;
+#: ``speckle_filter`` is honoured whatever the policy, so a chunked instance is
+#: the one that takes both.
 _INSTANCE_SHAPES = (
-    (None, "speckle_filter", "windowed"),
-    (serve.StackExecution(lazy=True), "speckle_filter", "windowed"),
-    (serve.StackExecution(lazy=True, chunk_size=128), "windowed", "speckle_filter"),
+    (None, ("speckle_filter",), ("windowed",)),
+    (serve.StackExecution(lazy=True), ("speckle_filter",), ("windowed",)),
+    (serve.StackExecution(lazy=True, chunk_size=128), ("windowed", "speckle_filter"), ()),
 )
 
 
@@ -1352,18 +1355,19 @@ _INSTANCE_SHAPES = (
 def test_landing_page_advertises_which_stats_options_an_instance_honours(
     execution, supported, refused
 ):
-    """The pair is complementary, so which one works is a property of the
-    instance -- and was previously discoverable only by sending a request and
-    reading the ``400``."""
+    """Whether ``windowed`` works is a property of the instance, and was
+    previously discoverable only by sending a request and reading the ``400``."""
     page = serve.landing_page("http://localhost:8000/", artifacts=True, stack_execution=execution)
     (link,) = [ln for ln in page["links"] if ln["rel"] == "stats"]
     capabilities = link[serve.STATS_CAPABILITY_FIELD]
 
-    assert capabilities[supported] == {"supported": True}
-    assert capabilities[refused]["supported"] is False
-    # The unsupported one says *why*, so a client can tell the operator what to
-    # change rather than only that it was told no.
-    assert "umbra serve" in capabilities[refused]["reason"]
+    for option in supported:
+        assert capabilities[option] == {"supported": True}
+    for option in refused:
+        assert capabilities[option]["supported"] is False
+        # The unsupported one says *why*, so a client can tell the operator what
+        # to change rather than only that it was told no.
+        assert "umbra serve" in capabilities[option]["reason"]
     # And the shape of the instance, which is what makes the reason legible.
     assert capabilities["stacking"] == (execution or serve.StackExecution()).describe()
 
@@ -1385,13 +1389,15 @@ def test_the_advertisement_is_the_refusal(monkeypatch):
         capabilities = link[serve.STATS_CAPABILITY_FIELD]
         render = serve.default_renderers(execution).stats
 
-        with pytest.raises(ValueError) as excinfo:
-            render(items, serve.stats_options(asked[refused]))
-        assert str(excinfo.value) == capabilities[refused]["reason"]
+        for option in refused:
+            with pytest.raises(ValueError) as excinfo:
+                render(items, serve.stats_options(asked[option]))
+            assert str(excinfo.value) == capabilities[option]["reason"]
 
         # The other half: what the page advertises actually renders. Without it
         # a page that refused everything would pass the check above.
-        assert json.loads(render(items, serve.stats_options(asked[supported])))["units"] == "dB"
+        for option in supported:
+            assert json.loads(render(items, serve.stats_options(asked[option])))["units"] == "dB"
 
 
 def test_the_advertisement_reaches_the_running_server(index_path, tmp_path):
@@ -1405,8 +1411,11 @@ def test_the_advertisement_reaches_the_running_server(index_path, tmp_path):
     client = TestClient(app)
     (link,) = [ln for ln in client.get("/").json()["links"] if ln["rel"] == "stats"]
     capabilities = link[serve.STATS_CAPABILITY_FIELD]
+    # The chunked instance is the one that takes both, which is what the halo
+    # read bought: measure a cube too large to hold, with the speckle averaged
+    # out of it.
     assert capabilities["windowed"]["supported"] is True
-    assert capabilities["speckle_filter"]["supported"] is False
+    assert capabilities["speckle_filter"]["supported"] is True
     assert "64px windows" in capabilities["stacking"]
 
 
