@@ -92,5 +92,32 @@ class UnsupportedMeasurementError(UmbraError, ValueError):
     """
 
 
+class UnreadableProductError(UmbraError):
+    """Raised when what is at an asset href is not a product this can read.
+
+    The sibling of :class:`UnsupportedMeasurementError`, and its complement. That
+    one is a product *declaring* it cannot answer — the metadata was read and
+    what it says is no. This one is the metadata never being read at all because
+    there is nothing there to read: the object the item points at is absent, or
+    what is at it is not a NITF, or is a NITF whose header layout this does not
+    know, or carries no SICD XML segment, or carries one that does not parse.
+
+    The distinction is the whole reason for the name, because it is the one a
+    preflight has to make. A read that fails because the *network* failed says
+    nothing about the product — retry it, or keep the pass and let the run find
+    out — but a read that fails because the href holds no readable SICD is a
+    verdict as final as any refusal: no later download can change it. Before
+    this type existed both arrived as the same captured exception, so a batch
+    could only take the cautious branch for both and keep a pass it already knew
+    would fail.
+
+    It is an :class:`UmbraError` and nothing more specific, so every
+    ``except UmbraError`` around a read keeps working and this is something to
+    catch *more* narrowly rather than instead. :class:`AssetNotFoundError` is
+    deliberately left as itself: "the item lists no such asset" is the same kind
+    of fact, found one step earlier and already named.
+    """
+
+
 class GeocodeError(UmbraError):
     """Raised when a place name cannot be resolved to a location."""

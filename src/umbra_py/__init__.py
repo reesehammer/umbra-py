@@ -76,6 +76,7 @@ from .exceptions import (
     IndexSchemaError,
     MissingDependencyError,
     UmbraError,
+    UnreadableProductError,
     UnsupportedMeasurementError,
 )
 from .export import export_geoparquet
@@ -290,6 +291,7 @@ __all__ = [
     "DownloadError",
     "MissingDependencyError",
     "UnsupportedMeasurementError",
+    "UnreadableProductError",
     "GeocodeError",
     "geocode_place",
     "item_to_feature",

@@ -7,6 +7,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Tell a failed read that is a verdict apart from one that is a hiccup
+  (`UnreadableProductError`, `PreflightResult.error_scope`,
+  `PreflightSummary.missing`).** `umbra chips --preflight` reads each
+  acquisition's SICD metadata over the wire and drops the passes that declare
+  they cannot answer, before a single product is downloaded. Some of those reads
+  do not produce a declaration at all, and the rule for those was one line:
+  *keep the pass* — a failed read is not a product saying it cannot answer, and
+  dropping a scene over something transient would put a hole in a dataset that
+  the archive never had.
+
+  That is the right rule for a timeout. It is the wrong rule for the case it was
+  mostly hitting, because "could not be read" was covering two different pieces
+  of news. A connection that drops says nothing about the product. An item that
+  lists no `SICD` asset, an href with nothing behind it, bytes that are not a
+  NITF, a NITF carrying no SICD XML — those say everything, and say it as
+  finally as any refusal does. No later attempt changes the answer.
+
+  Keeping *those* was not the cautious choice it looked like. A pass with no
+  readable product fails inside `chip_item` as a plain read error, and
+  `--skip-unsupported` catches `UnsupportedMeasurementError` and nothing else,
+  on purpose — a batch that swallows unknown errors is one nobody can trust. So
+  the sequence was: the preflight establishes that an acquisition cannot be
+  chipped, keeps it out of caution, hands it to the chipper, and the run ends on
+  it. A check that had already found the answer was not allowed to use it.
+
+  The fix is the same move `UnsupportedMeasurementError` was: give the family a
+  name. `UnreadableProductError` is raised by every path in `preflight.py` where
+  what is at an href is not a product this can read — the magic bytes, the NITF
+  version, a truncated or non-numeric header field, a missing XML segment, XML
+  that does not parse, plus an HTTP 404/410 and a local file that is not there,
+  which are the same statement made by the source rather than by the bytes. It
+  is an `UmbraError` and nothing narrower, so every `except UmbraError` around a
+  read is unchanged; `AssetNotFoundError` is left as itself, since "the item
+  lists no such asset" is the same kind of fact already named.
+
+  `PreflightResult.error_scope` reports the classification (`"product"` /
+  `"transport"`, with `.readable` and `.final` as the two questions a caller
+  actually asks), and `_error_scope` sorts by type: the two named errors are the
+  product's, and **everything else is transport**, so an unforeseen failure
+  takes the cautious branch by construction and the worst a new error mode can
+  do is cost a download rather than silently remove a pass from a dataset. The
+  403 that could be a proxy problem stays transport for the same reason; only
+  404 and 410 mean "there is nothing here".
+
+  What a chip run does with each is then just the classification. A transport
+  failure is kept and counted `unreadable`, exactly as before. A product failure
+  is dropped and counted `missing`, recorded as the same `SkippedAcquisition`
+  with `stage="preflight"` a refusal produces, carrying the reader's own words —
+  because the dataset's hole is the same shape however the pass came to be
+  absent. The two counts are separate on `PreflightSummary` and named separately
+  by `umbra chips` and `umbra preflight`, since only one of them is worth asking
+  about again: "no readable product" is a verdict about the archive, "could not
+  be reached" is a verdict about the attempt.
 - **Write the hole into the dataset, not only into the run that built it
   (`skipped.jsonl`, `write_skipped_manifest`, `ChipDataset.skipped_path`).**
   Five changes now stand between a chip batch and an archive that cannot answer

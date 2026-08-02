@@ -19,7 +19,11 @@ import responses
 from click.testing import CliRunner
 
 from umbra_py import preflight as preflight_mod
-from umbra_py.exceptions import UmbraError, UnsupportedMeasurementError
+from umbra_py.exceptions import (
+    UmbraError,
+    UnreadableProductError,
+    UnsupportedMeasurementError,
+)
 from umbra_py.preflight import (
     preflight_items,
     read_sicd_xml,
@@ -463,6 +467,146 @@ def test_an_unreadable_acquisition_is_recorded_rather_than_fatal(sample_item_dic
 
 
 # --------------------------------------------------------------------------- #
+# Which failures are verdicts.
+#
+# A read that does not answer is not one thing. The bucket saying "there is
+# nothing here" is as final as any refusal; a connection dropping is not an
+# answer at all. Everything a caller can do about a failed read follows from
+# telling those two apart, so the classification is asserted at each of the
+# ways a read can fail rather than only through its effect on a batch.
+# --------------------------------------------------------------------------- #
+
+
+@responses.activate
+def test_an_absent_object_is_a_fact_about_the_product(sample_item_dict):
+    """A 404 is the archive answering, and what it says is final."""
+    from umbra_py.models import UmbraItem
+
+    doc = copy.deepcopy(sample_item_dict)
+    doc["assets"]["SICD"]["href"] = "https://example.com/gone_SICD.nitf"
+    item = UmbraItem.from_dict(doc, href="https://example.com/a.stac.v2.json")
+    responses.add(responses.GET, item.asset_href("SICD"), status=404)
+
+    report = preflight_items([item])
+    result = report.results[0]
+
+    assert result.error_scope == preflight_mod.SCOPE_PRODUCT
+    assert result.final is True
+    assert result.readable is False
+    assert report.missing == (result,)
+    assert report.unreadable == ()
+    assert report.to_dict()["missing_count"] == 1
+    # The href that failed is kept, so the failure can be checked by hand.
+    assert result.href == item.asset_href("SICD")
+
+
+@responses.activate
+def test_a_dropped_connection_is_a_fact_about_the_wire(sample_item_dict):
+    """The complement, and the reason the classification exists: this one says
+    nothing about the product, so it must not be allowed to remove a pass."""
+    import requests
+
+    from umbra_py.models import UmbraItem
+
+    doc = copy.deepcopy(sample_item_dict)
+    doc["assets"]["SICD"]["href"] = "https://example.com/flaky_SICD.nitf"
+    item = UmbraItem.from_dict(doc, href="https://example.com/a.stac.v2.json")
+    responses.add(responses.GET, item.asset_href("SICD"), body=requests.ConnectionError("reset"))
+
+    report = preflight_items([item])
+    result = report.results[0]
+
+    assert result.error_scope == preflight_mod.SCOPE_TRANSPORT
+    assert result.final is False
+    assert report.unreadable == (result,)
+    assert report.missing == ()
+    assert report.to_dict()["unreadable_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"body": b"GeoTIFF or anything else"}, "NITF file header"),
+        ({"version": b"02.00"}, "02.10"),
+        ({"desid": "TRE_OVERFLOW"}, "no SICD XML"),
+    ],
+)
+def test_every_way_the_bytes_can_fail_to_be_a_sicd_is_named(tmp_path, kwargs, match):
+    """One type covers all of them, which is what lets a caller act on any.
+
+    Each is a different malformation, and every one means the same thing: there
+    is no product here to ask. A caller that had to enumerate them would be
+    guessing at the next one.
+    """
+    body = kwargs.pop("body", None)
+    if body is not None:
+        path = tmp_path / "not.nitf"
+        path.write_bytes(body)
+    else:
+        path = write_nitf(tmp_path, _UNCALIBRATED, **kwargs)
+
+    with pytest.raises(UnreadableProductError, match=match) as excinfo:
+        read_sicd_xml(path)
+    assert preflight_mod._error_scope(excinfo.value) == preflight_mod.SCOPE_PRODUCT
+    # Still an UmbraError, so nothing that caught one before this changed.
+    assert isinstance(excinfo.value, UmbraError)
+
+
+def test_a_segment_that_does_not_parse_is_named_the_same_way(tmp_path):
+    """The last of them, one step further in: the XML was found and is not XML."""
+    path = write_nitf(tmp_path, "<SICD>never closed")
+    with pytest.raises(UnreadableProductError, match="could not be parsed") as excinfo:
+        sicd_capabilities(path)
+    assert preflight_mod._error_scope(excinfo.value) == preflight_mod.SCOPE_PRODUCT
+
+
+def test_a_source_that_is_not_there_at_all_is_the_same_fact(tmp_path):
+    """A missing local file is the 404's twin, and is classified with it."""
+    with pytest.raises(UnreadableProductError, match="does not exist"):
+        read_sicd_xml(tmp_path / "never-written.nitf")
+
+
+def test_an_item_that_lists_no_such_asset_is_decided_without_a_request(sample_item_dict):
+    """No network is involved: the item itself already answered."""
+    from umbra_py.models import UmbraItem
+
+    doc = copy.deepcopy(sample_item_dict)
+    doc["assets"].pop("SICD", None)
+    item = UmbraItem.from_dict(doc, href="https://example.com/a.stac.v2.json")
+
+    report = preflight_items([item])
+
+    assert report.results[0].error_scope == preflight_mod.SCOPE_PRODUCT
+    assert report.results[0].href == ""
+
+
+def test_an_unforeseen_failure_takes_the_cautious_branch():
+    """The default has to be "undecided": the worst an unrecognised error can do
+    is cost a download, never silently remove a pass from a dataset."""
+    assert preflight_mod._error_scope(RuntimeError("something new")) == (
+        preflight_mod.SCOPE_TRANSPORT
+    )
+
+
+def test_a_read_that_answered_has_no_scope_at_all(tmp_path):
+    """A refusal is not a failed read: it carries a reason, not an error."""
+    from umbra_py.models import UmbraItem
+
+    path = write_nitf(tmp_path, _UNCALIBRATED)
+    item = UmbraItem(id="acq", properties={"datetime": "2024-02-08T12:00:00Z"})
+    item.asset_href = lambda asset="SICD": str(path)  # type: ignore[method-assign]
+
+    report = preflight_items([item], calibration="gamma0")
+    result = report.results[0]
+
+    assert result.supported is False
+    assert result.error_scope is None
+    assert result.readable is True
+    assert result.final is True
+    assert report.missing == () and report.unreadable == ()
+
+
+# --------------------------------------------------------------------------- #
 # The CLI.
 # --------------------------------------------------------------------------- #
 
@@ -506,6 +650,42 @@ def test_cli_preflight_says_what_the_answer_cost(monkeypatch, sample_item_dict):
     assert "0 of 1 acquisition(s) support --calibrate gamma0" in result.output
     assert "instead of" in result.output
     assert "hint:" in result.output
+
+
+@responses.activate
+def test_cli_preflight_separates_a_missing_product_from_an_unreachable_one(
+    monkeypatch, sample_item_dict
+):
+    """Both read as "no answer" on the console, and only one is worth re-asking,
+    so the report says which is which rather than counting them together."""
+    import requests
+
+    from umbra_py import cli as cli_mod
+    from umbra_py.models import UmbraItem
+
+    def _item(name, href):
+        doc = copy.deepcopy(sample_item_dict)
+        doc["id"] = name
+        doc["assets"]["SICD"]["href"] = href
+        return UmbraItem.from_dict(doc, href=f"https://example.com/{name}.stac.v2.json")
+
+    gone = _item("acq-gone", "https://example.com/gone_SICD.nitf")
+    flaky = _item("acq-flaky", "https://example.com/flaky_SICD.nitf")
+    responses.add(responses.GET, gone.asset_href("SICD"), status=404)
+    responses.add(responses.GET, flaky.asset_href("SICD"), body=requests.ConnectionError("reset"))
+    items = iter([gone, flaky])
+    monkeypatch.setattr("umbra_py.cli._shared._item_from_url", lambda url: next(items))
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["preflight", "https://example.com/a.json", "https://example.com/b.json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "acq-gone: no readable product" in result.output
+    assert "acq-flaky: could not be reached" in result.output
+    assert "1 had no readable product behind them" in result.output
+    assert "1 could not be reached, so they are undecided" in result.output
 
 
 @responses.activate
