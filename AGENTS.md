@@ -52,7 +52,7 @@ src/umbra_py/
   constants.py       # bucket, STAC root URL, canonical product types
   convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened, radiometrically calibrated, noise-floor-subtracted, speckle-filtered and clipped to an area of interest (behind [convert] extra)
   preflight.py       # umbra preflight: read a SICD's XML metadata out of the NITF by HTTP range request (stdlib NITF header walk, no sarpy) and answer whether a product can support --calibrate / --noise-model measured, before downloading it
-  chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call); --asset SICD geocodes each complex product via convert.py first ([convert]); --clip-bbox tiles (and converts) one area of interest
+  chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call); --asset SICD geocodes each complex product via convert.py first ([convert]); --clip-bbox tiles (and converts) one area of interest; --preflight drops the passes whose metadata cannot support the request before downloading any of them (preflight.py)
   viz/               # rendering package; every name re-exported from `umbra_py.viz` (see its __init__ docstring)
     geojson.py       #   items -> GeoJSON features / FeatureCollections (no dependencies)
     raster.py        #   range-request COG reads, amplitude stretches, quicklooks, thumbnails ([viz])

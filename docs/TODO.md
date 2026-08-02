@@ -386,14 +386,39 @@ carries into every manifest record and rolls up across the batch
     parsed XML, so it cannot become a second opinion about what a product
     supports. Stdlib + `requests`: no `sarpy`, no `numpy`, no extra. What is still
     open, and smaller:
-    - **Nothing wires the preflight into the batch.** `write_chips` still
-      discovers a refusal by attempting the conversion (with
-      `--skip-unsupported` to survive it); a `preflight=True` that dropped the
-      unsupported passes before any download would make the saving automatic
-      rather than a separate command. It was left as a question the user asks
-      because a batch that silently drops scenes is the failure mode
-      `--skip-unsupported` was careful to avoid — the roll-up would have to say
-      what it skipped and why, which is the same design decision made twice.
+    - ~~**Nothing wires the preflight into the batch.**~~ **shipped** — `umbra
+      chips --preflight` / `write_chips(preflight=True)` reads each acquisition's
+      metadata by range request before anything is downloaded and drops the
+      passes that cannot answer. The design question this entry deferred — a
+      batch that silently drops scenes is the failure mode `--skip-unsupported`
+      avoided — was answered by making a preflighted drop *the same object* as a
+      survived refusal: a `SkippedAcquisition` on `ChipDataset.skipped` with the
+      product's own words and its hint, plus one new field, `stage`
+      (`"conversion"` / `"preflight"`), since when the refusal was found is the
+      only thing the two routes do not share. The settings come from the run's
+      own `SicdConversion`, so the preflight asks the conversion's question by
+      construction. `ChipDataset.preflight` (`chips.PreflightSummary`) reports
+      what asking cost against the download it removed, counting only the dropped
+      products as saved. What is still open, and smaller:
+      - **A read failure is kept, and that is a policy rather than a fact.** An
+        acquisition whose metadata cannot be read (missing asset, HTTP failure,
+        not a NITF) stays in the run and is counted as `unreadable`, on the
+        argument that a failed read is not a product saying it cannot answer.
+        That is right for a transient failure and wasteful for a permanent one
+        (a selection whose SICD assets are all missing preflights every pass and
+        then attempts every pass). Nothing retries and nothing distinguishes the
+        two; a `strict` mode that dropped unreadable passes too would need to say
+        so in the summary, which is the same decision this entry already made
+        once.
+      - **The preflight is serial.** `preflight_items` walks the selection one
+        acquisition at a time, so a 40-pass site spends 40 round trips before the
+        first chip is written. Each is two small range requests, so it is latency
+        rather than bytes; a thread pool over the reads is the obvious fix if a
+        large selection makes the wait visible.
+      - **Only `umbra chips` has it.** `umbra convert` operates on one product,
+        where the preflight's saving is one download and the refusal is already
+        cheap, so it was left alone. The other batch-shaped consumer is
+        `umbra serve`'s artifact endpoints, which do not convert.
     - **The reader knows NITF 2.1 only.** NITF 2.0's security fields are a
       different length, so every subsequent offset would land somewhere
       arbitrary; it is refused by name rather than guessed at. SICD mandates 2.1,

@@ -167,9 +167,48 @@ def _echo_chip_skipped_report(dataset: ChipDataset) -> None:
         "support the request:"
     )
     for skip in dataset.skipped:
-        click.echo(f"    {skip.item_id}: {skip.reason}")
+        # The stage is named only where it changes what the line means: a
+        # preflighted pass was never downloaded, which is the whole saving.
+        where = " [preflight]" if skip.stage == "preflight" else ""
+        click.echo(f"    {skip.item_id}{where}: {skip.reason}")
         if skip.hint:
             click.echo(f"      hint: {skip.hint}")
+
+
+def _echo_chip_preflight_report(dataset: ChipDataset) -> None:
+    """Say what asking the archive first cost, and what it saved.
+
+    The dropped acquisitions themselves are :func:`_echo_chip_skipped_report`'s
+    job -- they are holes in the dataset however they were found. This line is
+    the other half, and the one that says whether the flag earned its place: the
+    headers read against the products not downloaded. Silent when no preflight
+    ran, which is every run that did not ask for it.
+    """
+    summary = dataset.preflight
+    if summary is None:
+        return
+    if not summary.skipped:
+        tail = ": every one can support the request."
+    elif summary.product_bytes_skipped:
+        tail = (
+            f" and dropped {summary.skipped}, saving "
+            f"{_human_bytes(summary.product_bytes_skipped)} of download."
+        )
+    else:
+        # A source that states no size (a local path with none, a server with no
+        # Content-Range) still saved the download; only the number is unknown.
+        tail = f" and dropped {summary.skipped} before downloading them."
+    click.echo(
+        f"  Preflight read {_human_bytes(summary.bytes_read)} of product headers "
+        f"from {summary.checked} acquisition(s)" + tail
+    )
+    if summary.unreadable:
+        # Kept in the run rather than dropped, so say so: the batch will find out
+        # the expensive way, which is the right response to a failed read.
+        click.echo(
+            f"    {summary.unreadable} acquisition(s) could not be read ahead of time "
+            "and were chipped anyway."
+        )
 
 
 def _echo_chip_noise_report(dataset: ChipDataset) -> None:
@@ -1315,6 +1354,17 @@ def convert(
     "costs the whole batch; with it the dataset says where its holes are.",
 )
 @click.option(
+    "--preflight",
+    is_flag=True,
+    help="With --asset SICD, read each product's metadata over the wire first "
+    "(two HTTP range requests, tens of kilobytes) and drop the acquisitions that "
+    "cannot support the request before downloading any of them -- so discovering "
+    "that a pass carries no Radiometric block costs its header rather than the "
+    "whole multi-gigabyte product. The dropped passes are reported exactly as "
+    "--skip-unsupported reports them. Worth passing both: this asks only what "
+    "the metadata answers.",
+)
+@click.option(
     "--area", default=None, help="Search an Umbra task/site by name (e.g. 'Centerfield')."
 )
 @click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
@@ -1362,6 +1412,7 @@ def chips(
     clip_bbox,
     manifest,
     skip_unsupported,
+    preflight,
     area,
     bbox,
     place,
@@ -1454,6 +1505,15 @@ def chips(
             resolution=convert_resolution,
             resampling=resampling,
         )
+    if preflight and asset.upper() not in COMPLEX_ASSETS:
+        # Checked before anything is fetched, for the reason the speckle window
+        # below is: a flag that cannot apply is a parameter error, not a
+        # discovery to make after a search has already run.
+        raise click.UsageError(
+            f"--preflight applies to the complex products ({', '.join(COMPLEX_ASSETS)}); "
+            f"--asset {asset} is an amplitude raster, which carries no SICD metadata to "
+            "ask and is streamed tile by tile rather than downloaded."
+        )
     speckle = speckle_filter.lower() if speckle_filter else None
     if speckle:
         # Checked here so an even window is a parameter error naming the flag,
@@ -1507,6 +1567,12 @@ def chips(
     def _report(index: int, total: int, item, written: int) -> None:
         click.echo(f"  [{index}/{total}] {item.id}: {written} chip(s)")
 
+    def _report_preflight(index: int, total: int, item, result) -> None:
+        click.echo(_preflight_line(result))
+
+    if preflight and not as_json:
+        click.echo(f"Preflighting {len(items)} product header(s) ...")
+
     with OrbitSpinner(f"Chipping into {out_dir}"):
         dataset = write_chips(
             items,
@@ -1525,6 +1591,8 @@ def chips(
             conversion=conversion,
             work_dir=work_dir,
             skip_unsupported=skip_unsupported,
+            preflight=preflight,
+            preflight_progress=None if as_json else _report_preflight,
         )
 
     if as_json:
@@ -1536,6 +1604,7 @@ def chips(
     )
     if dataset.manifest_path:
         click.echo(f"  manifest -> {dataset.manifest_path}")
+    _echo_chip_preflight_report(dataset)
     _echo_chip_skipped_report(dataset)
     _echo_chip_noise_report(dataset)
     _echo_chip_speckle_report(dataset)

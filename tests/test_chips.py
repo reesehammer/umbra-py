@@ -1869,3 +1869,303 @@ def test_cli_chips_skip_unsupported_reports_the_acquisitions_it_left_out(tmp_pat
     assert "Skipped 1 acquisition(s)" in result.output
     assert "cli-acq" in result.output
     assert "hint:" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Asking the archive before paying for it (`write_chips(preflight=True)`).
+#
+# The fixtures are real NITF bytes from `test_preflight`, so what is under test
+# is the same range-read the standalone command does -- wired into the batch it
+# exists to save.
+# --------------------------------------------------------------------------- #
+
+
+def _nitf_item(item_id, nitf_path, when="2024-02-08T12:00:00Z"):
+    """An item whose SICD asset is a real (small) NITF the preflight can read."""
+    item = UmbraItem(
+        id=item_id,
+        properties={
+            "datetime": when,
+            "platform": "Umbra-08",
+            "sar:polarizations": ["VV"],
+            "sar:product_type": "SICD",
+        },
+    )
+    item.asset_href = lambda asset="SICD": str(nitf_path)  # type: ignore[method-assign]
+    return item
+
+
+def _write_products(tmp_path):
+    """Two products that declare a calibration and one that declares nothing."""
+    from .test_preflight import _CALIBRATED, _UNCALIBRATED, build_nitf
+
+    paths = {}
+    for name, xml in (
+        ("acq-a", _CALIBRATED),
+        ("acq-b", _UNCALIBRATED),
+        ("acq-c", _CALIBRATED),
+    ):
+        path = tmp_path / f"{name}.nitf"
+        path.write_bytes(build_nitf(xml))
+        paths[name] = path
+    return paths
+
+
+def _recording_preparer(cog_path, seen):
+    """A `SicdPreparer` that records which acquisitions were actually prepared."""
+
+    def prepare(item, asset, work_dir, conversion):
+        seen.append(item.id)
+        return cog_path
+
+    return prepare
+
+
+def test_preflight_drops_the_unanswerable_passes_before_downloading_them(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    items = [_nitf_item(name, path) for name, path in products.items()]
+    prepared: list[str] = []
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, prepared),
+        preflight=True,
+    )
+
+    # The product that could not answer never reached the preparer -- which is
+    # the whole claim: the refusal cost its header, not a download.
+    assert prepared == ["acq-a", "acq-c"]
+    assert sorted({r.item_id for r in dataset.records}) == ["acq-a", "acq-c"]
+    # ...and the dataset states its hole, the way a survived refusal does.
+    assert [s.item_id for s in dataset.skipped] == ["acq-b"]
+    assert dataset.skipped[0].stage == "preflight"
+    assert "Radiometric" in dataset.skipped[0].reason
+    assert dataset.skipped[0].datetime == "2024-02-08T12:00:00+00:00"
+
+
+def test_the_preflight_summary_reports_what_the_check_cost_and_saved(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    items = [_nitf_item(name, path) for name, path in products.items()]
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, []),
+        preflight=True,
+    )
+
+    summary = dataset.preflight
+    assert summary is not None
+    assert (summary.checked, summary.supported, summary.skipped) == (3, 2, 0 + 1)
+    assert summary.unreadable == 0
+    # Only the dropped product is a saving -- the two that were kept get
+    # downloaded anyway, so their header reads are overhead rather than avoided.
+    assert summary.product_bytes_skipped == products["acq-b"].stat().st_size
+    # And asking cost a fraction of the one product it removed.
+    assert 0 < summary.bytes_read < sum(p.stat().st_size for p in products.values())
+
+
+def test_an_unreadable_acquisition_is_chipped_rather_than_silently_dropped(tmp_path):
+    """A failed read is not a product saying it cannot answer."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    items = [
+        _nitf_item("acq-a", products["acq-a"]),
+        _nitf_item("acq-gone", tmp_path / "does-not-exist.nitf"),
+    ]
+    prepared: list[str] = []
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, prepared),
+        preflight=True,
+    )
+
+    assert prepared == ["acq-a", "acq-gone"]
+    assert dataset.skipped == ()
+    assert dataset.preflight is not None
+    assert dataset.preflight.unreadable == 1
+    assert dataset.preflight.supported == 1
+
+
+def test_a_preflight_asks_the_settings_the_conversion_will_use(tmp_path):
+    """A pass the preflight clears cannot then be refused for a reason it saw."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    products = _write_products(tmp_path)
+    items = [_nitf_item(name, path) for name, path in products.items()]
+
+    # No calibration asked for, so the uncalibrated product answers fine and
+    # nothing is dropped: the question follows the request rather than a default.
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(),
+        preparer=_recording_preparer(cog, []),
+        preflight=True,
+    )
+
+    assert dataset.skipped == ()
+    assert dataset.preflight is not None
+    assert dataset.preflight.supported == 3
+
+
+def test_preflight_is_refused_on_an_asset_that_carries_no_metadata_to_ask(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", nodata_corner=False)
+    with pytest.raises(ValueError, match="complex asset"):
+        write_chips(
+            [_item_for(tif)],
+            tmp_path / "ds",
+            asset="GEC",
+            chip_size=10,
+            preflight=True,
+        )
+
+
+def test_the_preflight_block_is_absent_from_a_run_that_did_not_ask(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse=set()),
+    )
+
+    assert dataset.preflight is None
+    assert "preflight" not in dataset.to_dict()
+
+
+def test_the_preflight_roll_up_reaches_the_json_summary(tmp_path):
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    items = [_nitf_item(name, path) for name, path in products.items()]
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, []),
+        preflight=True,
+    )
+
+    payload = dataset.to_dict()
+    assert payload["preflight"]["checked"] == 3
+    assert payload["preflight"]["skipped"] == 1
+    assert payload["preflight"]["product_bytes_skipped"] > 0
+    # The dropped pass is in the same `skipped` block a survived refusal uses,
+    # so a consumer needs no second vocabulary to find the dataset's holes.
+    assert payload["skipped_count"] == 1
+    assert payload["skipped"][0]["stage"] == "preflight"
+
+
+def test_cli_chips_preflight_says_what_it_dropped_and_what_that_saved(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    hrefs = {
+        "http://example.com/a.json": ("acq-a", products["acq-a"]),
+        "http://example.com/b.json": ("acq-b", products["acq-b"]),
+    }
+
+    def _get_json(url):
+        item_id, path = hrefs[url]
+        return {
+            "id": item_id,
+            "properties": {"datetime": "2024-02-08T12:00:00Z", "sar:product_type": "SICD"},
+            "assets": {"SICD": {"href": str(path)}},
+        }
+
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", _get_json)
+    real_write_chips = chips_mod.write_chips
+
+    def _spy(items, out_dir, **kwargs):
+        return real_write_chips(items, out_dir, preparer=_recording_preparer(cog, []), **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            *hrefs,
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--chip-size",
+            "10",
+            "--calibrate",
+            "sigma0",
+            "--preflight",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Preflight read" in result.output
+    assert "dropped 1" in result.output
+    assert "acq-b [preflight]" in result.output
+
+
+def test_cli_chips_preflight_is_refused_on_a_raster_asset(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "GEC",
+            "--preflight",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--preflight applies to the complex products" in result.output

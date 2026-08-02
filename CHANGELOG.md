@@ -7,6 +7,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Spend the preflight on the batch it was built for (`umbra chips
+  --preflight`, `write_chips(preflight=True)`).** The header-only read shipped as
+  a command you run *beside* a chip run: `umbra preflight` told you which of a
+  site's passes could be calibrated, and then you re-typed the selection into
+  `umbra chips`. The batch itself still discovered a refusal by attempting the
+  conversion — which for a complex asset means downloading the whole
+  multi-gigabyte NITF to read the header that would have said no. So the saving
+  existed and was manual: the two commands knew the same thing and only one of
+  them was paying for it.
+
+  `--preflight` wires them together. Each acquisition's SICD XML is read over the
+  wire first (the same two range requests, tens of kilobytes), the conversion's
+  own support check is run against it, and the passes that cannot answer are
+  dropped before a single product is fetched. The settings asked about come from
+  the run's own `SicdConversion` rather than from separate parameters, so the
+  question the preflight asks is by construction the one the conversion will ask:
+  a pass it clears cannot then be refused for a reason it could have seen.
+
+  What made this a design decision rather than a flag is what a batch that
+  silently drops scenes would be — exactly the failure mode `--skip-unsupported`
+  was careful to avoid. So a preflighted drop is recorded the same way a survived
+  refusal is: a `SkippedAcquisition` on `ChipDataset.skipped`, carrying which
+  pass, when, the product's own words for why, and the recovery hint. The one
+  thing the two routes do not share is *when* the refusal was found, and that is
+  the one field added — `stage` (`"conversion"` or `"preflight"`) — because a
+  preflighted pass was never downloaded, which is the whole saving. A dataset's
+  hole is described identically either way.
+
+  That saving is reported rather than asserted. `ChipDataset.preflight` (a
+  `PreflightSummary`, in the `--json` payload and on the way out) is what asking
+  cost against what it removed: *"Preflight read 452.6 KB of product headers from
+  22 acquisition(s) and dropped 9, saving 31.4 GB of download."* The claim is
+  deliberately narrow — a supported pass is downloaded anyway, so its header read
+  is overhead rather than something avoided, and only the dropped products are
+  counted as saved.
+
+  An acquisition whose metadata cannot be *read* — a missing asset, an HTTP
+  failure, a product that is not a NITF — is **kept** in the run and counted as
+  `unreadable`. A failed read is not a product declaring it cannot answer, so it
+  does not get to remove a scene from a dataset; the batch finds out the
+  expensive way instead, which is the right response to something that may be
+  transient. `--preflight` composes with `--skip-unsupported` and both are worth
+  passing: the metadata answers only two of the questions a conversion asks, so
+  anything else still refuses at conversion time. Asking for it on a `GEC`/`CSI`
+  asset is refused rather than ignored — those carry no SICD metadata to ask and
+  are streamed tile by tile rather than downloaded — and the refusal is a
+  parameter error raised before any search runs.
 - **Ask a complex product what it can support before downloading it (`umbra
   preflight`, `umbra_py.sicd_capabilities`).** The two corrections that depend on
   a product describing itself — radiometric calibration and a `measured` noise

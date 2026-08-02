@@ -109,6 +109,11 @@ CHIPPABLE_ASSETS = (*RASTER_ASSETS, *COMPLEX_ASSETS)
 #: Progress callback: ``(item_index, item_total, item, chips_written)``.
 ProgressFn = Callable[[int, int, UmbraItem, int], None]
 
+#: Progress callback for the pre-download check: ``(index, total, item, result)``,
+#: where ``result`` is a :class:`umbra_py.preflight.PreflightResult`. Typed loosely
+#: so importing this module never pulls :mod:`umbra_py.preflight` in.
+PreflightProgressFn = Callable[[int, int, UmbraItem, Any], None]
+
 #: Edge of the grid of full-resolution windows :func:`_scene_speckle` samples to
 #: establish a scene's speckle statistics: 3 means up to nine windows spread
 #: evenly over the area being chipped. It is a *sample* because the alternative
@@ -861,12 +866,21 @@ class SkippedAcquisition:
     facts about a *product*, so carrying on to the next scene is a defensible
     response to it, where carrying on past an unknown error would be a way of
     hiding one.
+
+    ``stage`` says *when* the refusal was discovered, because that is the one
+    thing the two routes to it do not share. ``"conversion"`` means the product
+    was downloaded and then refused (``skip_unsupported=True``);
+    ``"preflight"`` means its metadata was read over the wire and it was never
+    downloaded at all (``preflight=True``). The reason is the same refusal's own
+    words either way -- it is the conversion's own check in both cases -- so the
+    dataset's hole is described identically and only its cost differs.
     """
 
     item_id: str
     reason: str
     datetime: str | None = None
     hint: str | None = None
+    stage: str = "conversion"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -874,6 +888,45 @@ class SkippedAcquisition:
             "datetime": self.datetime,
             "reason": self.reason,
             "hint": self.hint,
+            "stage": self.stage,
+        }
+
+
+@dataclass(frozen=True)
+class PreflightSummary:
+    """What asking the archive first cost a chip run, and what it saved.
+
+    A preflight is only worth wiring into a batch if the saving is visible, so
+    the two numbers that make the case are part of the result rather than a line
+    on a console: ``bytes_read`` is what the whole check cost (product headers
+    and SICD XML, a few tens of kilobytes each) and ``product_bytes_skipped`` is
+    the download it removed -- the products that were dropped, summed, as their
+    own sources declared them.
+
+    The claim is deliberately narrow. A supported pass is downloaded anyway, so
+    its header read is pure overhead; only the *dropped* passes are a saving, and
+    that is the number reported. ``unreadable`` counts the acquisitions whose
+    metadata could not be read at all (a missing asset, an HTTP failure, a
+    product that is not a NITF): those are **kept** in the run, because a failed
+    read is not a product saying it cannot answer, and dropping a scene over a
+    transient error would be exactly the silent hole this design avoids.
+    """
+
+    checked: int
+    supported: int
+    skipped: int
+    unreadable: int
+    bytes_read: int
+    product_bytes_skipped: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "checked": self.checked,
+            "supported": self.supported,
+            "skipped": self.skipped,
+            "unreadable": self.unreadable,
+            "bytes_read": self.bytes_read,
+            "product_bytes_skipped": self.product_bytes_skipped,
         }
 
 
@@ -886,10 +939,14 @@ class ChipDataset:
     caller or an agent deciding what to train on.
 
     ``skipped`` is what the run could *not* include: the acquisitions whose own
-    metadata could not support the measurement that was asked for, present only
-    when ``write_chips(skip_unsupported=True)`` let the run carry on past them.
-    An empty tuple is the default and means what it says -- every acquisition
+    metadata could not support the measurement that was asked for, present when
+    ``write_chips(skip_unsupported=True)`` let the run carry on past them or when
+    ``write_chips(preflight=True)`` dropped them before downloading them. An
+    empty tuple is the default and means what it says -- every acquisition
     offered was chipped.
+
+    ``preflight`` is the roll-up of that pre-download check when one ran: what
+    reading the archive's headers cost, and the download it removed.
     """
 
     out_dir: str
@@ -902,6 +959,7 @@ class ChipDataset:
     fmt: str
     conversion: SicdConversion | None = None
     skipped: tuple[SkippedAcquisition, ...] = ()
+    preflight: PreflightSummary | None = None
 
     @property
     def chip_count(self) -> int:
@@ -943,6 +1001,10 @@ class ChipDataset:
         if self.skipped:
             extra["skipped_count"] = len(self.skipped)
             extra["skipped"] = [s.to_dict() for s in self.skipped]
+        # Likewise absent from a run that did not preflight, so no existing
+        # payload gains a field by this option existing.
+        if self.preflight is not None:
+            extra["preflight"] = self.preflight.to_dict()
         return {
             "out_dir": self.out_dir,
             "manifest": self.manifest_path,
@@ -1434,6 +1496,8 @@ def write_chips(
     work_dir: str | os.PathLike | None = None,
     preparer: SicdPreparer | None = None,
     skip_unsupported: bool = False,
+    preflight: bool = False,
+    preflight_progress: PreflightProgressFn | None = None,
 ) -> ChipDataset:
     """Chip a whole search result into a training dataset with a manifest.
 
@@ -1476,6 +1540,33 @@ def write_chips(
     Everything else -- a download failure, a missing asset, a corrupt product --
     still ends the run, because a batch that swallows unknown errors is a batch
     whose output nobody can trust.
+
+    ``preflight`` asks the same question *before* any product is downloaded.
+    ``skip_unsupported`` makes a refusal survivable, but it is still discovered
+    by attempting the conversion, and for a complex asset that means the whole
+    multi-gigabyte NITF is fetched to learn that its metadata cannot answer --
+    twenty times over a site's twenty passes. With ``preflight=True`` each
+    acquisition's SICD XML is read over the wire instead (see
+    :mod:`umbra_py.preflight`: a NITF states its own layout, so two range
+    requests and a few tens of kilobytes locate and fetch it), the conversion's
+    own support check is run against it, and the passes that positively cannot
+    answer never reach the download at all. They are recorded on
+    :attr:`ChipDataset.skipped` exactly as a survived refusal is -- because a
+    dataset with a hole in it has to say so however cheaply the hole was found --
+    with ``stage="preflight"`` and a :class:`PreflightSummary` roll-up saying
+    what the check cost and what it saved.
+
+    An acquisition whose metadata cannot be *read* (a missing asset, an HTTP
+    failure, a product that is not a NITF) is **kept**: a failed read is not a
+    product declaring it cannot answer, so the run proceeds to find out the
+    expensive way rather than dropping a scene over something transient.
+
+    ``preflight`` is only meaningful for a complex ``asset`` -- a GEC or CSI
+    carries no SICD metadata to ask -- and asking for it on a raster asset is
+    refused rather than quietly ignored. It composes with ``skip_unsupported``,
+    which stays worth passing: the preflight only asks the two questions the
+    metadata answers (calibration and a measured noise floor), so a refusal from
+    anywhere else still arrives at conversion time.
     """
     out_path = Path(out_dir)
     items = list(items)
@@ -1493,6 +1584,15 @@ def write_chips(
         conversion = None
     records: list[ChipRecord] = []
     skipped: list[SkippedAcquisition] = []
+    preflight_summary: PreflightSummary | None = None
+    if preflight:
+        items, dropped, preflight_summary = _preflight_filter(
+            items,
+            asset=asset,
+            conversion=conversion,
+            progress=preflight_progress,
+        )
+        skipped.extend(dropped)
     for i, item in enumerate(items):
         try:
             recs = chip_item(
@@ -1548,4 +1648,85 @@ def write_chips(
         fmt=fmt.lower(),
         conversion=conversion,
         skipped=tuple(skipped),
+        preflight=preflight_summary,
+    )
+
+
+def _preflight_filter(
+    items: list[UmbraItem],
+    *,
+    asset: str,
+    conversion: SicdConversion | None,
+    progress: PreflightProgressFn | None = None,
+) -> tuple[list[UmbraItem], list[SkippedAcquisition], PreflightSummary]:
+    """Drop the acquisitions that declare they cannot answer, before downloading any.
+
+    Reads each product's metadata by range request and applies the conversion's
+    own support check (see :mod:`umbra_py.preflight`), returning the passes to
+    keep, the ones dropped as :class:`SkippedAcquisition` records, and the
+    roll-up of what asking cost.
+
+    The settings asked about come from ``conversion`` rather than from separate
+    parameters, so the question the preflight asks is by construction the one the
+    conversion will ask: a pass this clears cannot then be refused for a reason
+    this could have seen.
+    """
+    from .preflight import preflight_items  # noqa: PLC0415 - keeps `requests` off the import path
+
+    if asset.upper() not in COMPLEX_ASSETS or conversion is None:
+        raise ValueError(
+            f"preflight=True needs a complex asset ({', '.join(COMPLEX_ASSETS)}); "
+            f"{asset!r} is an amplitude raster, which carries no SICD metadata to "
+            "ask. Drop the flag, or chip the complex product."
+        )
+    report = preflight_items(
+        items,
+        asset=asset.upper(),
+        calibration=conversion.calibration,
+        noise_subtract=conversion.noise_subtract,
+        noise_model=conversion.noise_model,
+        progress=progress,
+    )
+    kept: list[UmbraItem] = []
+    dropped: list[SkippedAcquisition] = []
+    unreadable = 0
+    saved: list[int] = []
+    # `preflight_items` returns one result per item in order, so pairing them is
+    # exact -- no lookup by id, which two passes of one task could collide on.
+    for item, result in zip(items, report.results, strict=True):
+        if result.capabilities is None:
+            # The metadata could not be read. That is a fact about the request or
+            # the network, not about the product, so it does not get to remove a
+            # scene from the dataset: the run finds out the expensive way.
+            unreadable += 1
+            kept.append(item)
+            continue
+        if result.supported:
+            kept.append(item)
+            continue
+        dropped.append(
+            SkippedAcquisition(
+                item_id=item.id,
+                reason=result.reason or "the product's metadata cannot support the request",
+                datetime=item.datetime.isoformat() if item.datetime else None,
+                hint=result.hint,
+                stage="preflight",
+            )
+        )
+        if result.capabilities.product_bytes:
+            saved.append(result.capabilities.product_bytes)
+    return (
+        kept,
+        dropped,
+        PreflightSummary(
+            checked=len(report.results),
+            supported=len(kept) - unreadable,
+            skipped=len(dropped),
+            unreadable=unreadable,
+            bytes_read=report.bytes_read,
+            # Only the dropped products are a saving: a supported one is
+            # downloaded anyway, so its header read is overhead rather than
+            # something avoided.
+            product_bytes_skipped=sum(saved) if saved else None,
+        ),
     )
