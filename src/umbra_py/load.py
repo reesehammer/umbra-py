@@ -58,6 +58,7 @@ Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -437,6 +438,24 @@ def _as_geotiff_tags(provenance: dict[str, str]) -> dict[str, str]:
     return {f"{PROVENANCE_TAG_PREFIX}{key.upper()}": value for key, value in provenance.items()}
 
 
+def _comparable_record(record: dict[str, str]) -> dict[str, str]:
+    """A source's measurement keys, filled in the way the refusal compares them.
+
+    One function so the refusal (:func:`_shared_provenance`) and the *preflight*
+    that reports a selection's mix ahead of it (:func:`stack_provenance`) group
+    rasters by the same rule -- a preflight that says a series agrees must not be
+    contradicted by the stack it cleared, which is the same construction
+    :mod:`umbra_py.preflight` uses to keep its verdict the conversion's own.
+
+    The two absences are different claims, so they get different values: a raster
+    with *no* umbra-py provenance is :data:`_UNRECORDED` (nothing is known about
+    how it was made), while a converted raster that is merely silent about one
+    step did not run it, :data:`_STEP_NOT_RUN`.
+    """
+    missing = _STEP_NOT_RUN if record else _UNRECORDED
+    return {key: record.get(key, missing) for key in MEASUREMENT_PROVENANCE_KEYS}
+
+
 def _shared_provenance(
     records: list[dict[str, str]], ids: list[str], *, action: str = "stack"
 ) -> dict[str, str]:
@@ -464,11 +483,11 @@ def _shared_provenance(
     to the pair of passes it quotes decibels between. Only the verb differs --
     why a mix is not a measurement is identical either way.
     """
+    comparable = [_comparable_record(record) for record in records]
     for key in MEASUREMENT_PROVENANCE_KEYS:
         seen: dict[str, str] = {}
-        for record, item_id in zip(records, ids, strict=True):
-            missing = _STEP_NOT_RUN if record else _UNRECORDED
-            seen.setdefault(record.get(key, missing), item_id)
+        for record, item_id in zip(comparable, ids, strict=True):
+            seen.setdefault(record[key], item_id)
         if len(seen) > 1:
             listed = ", ".join(f"{value!r} ({item_id})" for value, item_id in sorted(seen.items()))
             raise ValueError(
@@ -509,6 +528,227 @@ def _stack_items(items: Iterable[UmbraItem]) -> list[UmbraItem]:
             + ", ".join(undated)
         )
     return sorted(ordered, key=lambda i: i.datetime)  # type: ignore[arg-type,return-value]
+
+
+@dataclass(frozen=True)
+class ProvenanceGroup:
+    """The acquisitions of a selection whose sources agree on what a pixel *is*.
+
+    A group is what :func:`to_stack` would accept on its own: every member's
+    raster carries the same :data:`MEASUREMENT_PROVENANCE_KEYS`, so differencing
+    them along a time axis measures the ground rather than the difference
+    between two conversions. ``hrefs`` is the actionable half -- the item JSON
+    URLs ``umbra stack`` takes as arguments, so a mixed selection's largest
+    group is a command rather than a diagnosis.
+    """
+
+    #: Every measurement key, filled by :func:`_comparable_record` -- so a group
+    #: of published GECs reads ``"(unrecorded)"`` throughout rather than as gaps.
+    record: dict[str, str]
+    item_ids: tuple[str, ...]
+    #: The item JSON URL of each member, ``None`` where the item did not carry
+    #: one (an item built from a dict rather than fetched from the catalog).
+    hrefs: tuple[str | None, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form, for ``umbra stack --provenance --json``."""
+        return {
+            "record": dict(self.record),
+            "count": len(self.item_ids),
+            "item_ids": list(self.item_ids),
+            "hrefs": [href for href in self.hrefs if href],
+        }
+
+
+@dataclass(frozen=True)
+class UnreadableSource:
+    """An acquisition whose raster could not be read, so it has no verdict.
+
+    Distinct from a group of one: a source that could not be opened says nothing
+    about what its pixels are, which is not the same as saying they are
+    unrecorded. It is reported apart for the reason
+    :class:`umbra_py.preflight.PreflightResult` separates the two -- one is news
+    about the archive, the other about the attempt.
+    """
+
+    item_id: str
+    href: str | None
+    error: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form, for ``umbra stack --provenance --json``."""
+        return {"item_id": self.item_id, "href": self.href, "error": self.error}
+
+
+@dataclass(frozen=True)
+class StackProvenance:
+    """What a selection's sources say their pixel values are, before stacking.
+
+    The preflight half of the refusal in :func:`_shared_provenance`. That check
+    exists because two rasters converted with different settings are
+    pixel-for-pixel indistinguishable, so a cube could otherwise put the
+    difference between two *conversions* on the time axis and report it as change
+    on the ground -- but it was only ever discoverable by hitting it, and the
+    refusal's advice ("use only the acquisitions that share one") named a subset
+    it could not identify. This says which acquisitions those are.
+
+    What it costs is the opens :func:`to_stack` performs anyway -- one COG header
+    per acquisition, a range request of kilobytes -- and what it saves is
+    everything after them: the shared grid, the warp, and every decimated pixel
+    read. It is the same move ``umbra preflight`` makes for a chip run, one layer
+    up: ask the cheap question first, and ask it with the *same function* that
+    would refuse, so a cleared selection cannot be turned away by the stack.
+    """
+
+    asset: str
+    #: Largest group first; ties keep the selection's own (oldest-first) order.
+    groups: tuple[ProvenanceGroup, ...]
+    unreadable: tuple[UnreadableSource, ...]
+    #: What every readable source agrees on, exactly as ``to_stack`` would carry
+    #: it into ``attrs["provenance"]``. Empty when they disagree, and also for
+    #: the ordinary case of a series of untagged published products.
+    shared: dict[str, str]
+    #: :func:`to_stack`'s own refusal text, or ``None`` when the series stacks.
+    refusal: str | None
+
+    @property
+    def agrees(self) -> bool:
+        """Whether :func:`to_stack` would accept this selection's provenance.
+
+        Only the provenance: a series can agree here and still fail to stack for
+        an unrelated reason (a footprint that does not overlap, a source that
+        could not be read -- see :attr:`unreadable`).
+        """
+        return self.refusal is None
+
+    @property
+    def largest(self) -> ProvenanceGroup | None:
+        """The biggest set of acquisitions that *do* agree, or ``None`` if empty.
+
+        On a mixed selection this is the answer the refusal asks for: re-run with
+        these and the stack is a measurement.
+        """
+        return self.groups[0] if self.groups else None
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form, for ``umbra stack --provenance --json``."""
+        return {
+            "asset": self.asset,
+            "agrees": self.agrees,
+            "groups": [group.to_dict() for group in self.groups],
+            "unreadable": [source.to_dict() for source in self.unreadable],
+            **({"shared": dict(self.shared)} if self.shared else {}),
+            **({"refusal": self.refusal} if self.refusal else {}),
+        }
+
+
+def stack_provenance(
+    items: Iterable[UmbraItem], *, asset: str = "GEC", action: str = "stack"
+) -> StackProvenance:
+    """Group a selection by what its sources say their pixel values are.
+
+    Reads each acquisition's ``UMBRA_*`` conversion record -- the tags ``umbra
+    convert`` stamps -- straight from its raster's header, groups the selection
+    by :data:`MEASUREMENT_PROVENANCE_KEYS`, and reports whether
+    :func:`to_stack` would accept it. Nothing is warped and no pixels are read,
+    so a 40-pass site costs 40 header range requests rather than a cube.
+
+    The verdict is :func:`_shared_provenance`'s own, called on the same records:
+    :attr:`StackProvenance.refusal` is verbatim the ``ValueError`` a stack of
+    this selection would raise, and :attr:`StackProvenance.shared` is verbatim
+    the record it would carry. A preflight cannot become a second opinion about
+    what stacks.
+
+    An acquisition whose raster cannot be opened -- no such asset, nothing behind
+    the href, a source that is not a readable raster -- is reported on
+    :attr:`StackProvenance.unreadable` rather than grouped, because a failed read
+    is not a statement about a product's pixels. It does not make the selection
+    disagree; it makes the answer incomplete, and the report says so.
+
+    Args:
+        items: The acquisitions a stack would be built from.
+        asset: Which product's raster to read, matching ``to_stack(asset=…)``.
+        action: The verb the refusal names, matching ``_shared_provenance``.
+
+    Returns:
+        A :class:`StackProvenance` report.
+
+    Raises:
+        ValueError: If the selection is empty or an acquisition has no
+            ``datetime`` -- the same two refusals :func:`to_stack` opens with,
+            since a preflight of a selection that cannot be a time series at all
+            would be answering the wrong question.
+
+    Example:
+        >>> report = stack_provenance(items)  # doctest: +SKIP
+        >>> if not report.agrees:  # doctest: +SKIP
+        ...     print(report.refusal)
+        ...     print("largest agreeing subset:", report.largest.item_ids)
+    """
+    rasterio = _require("rasterio")
+    ordered = _stack_items(items)
+
+    records: list[dict[str, str]] = []
+    read: list[UmbraItem] = []
+    unreadable: list[UnreadableSource] = []
+    for item in ordered:
+        try:
+            url = item.asset_href(asset)
+        except AssetNotFoundError as exc:
+            # The item does not list the product at all -- final, and the same
+            # news as an href with nothing behind it, so it lands in one place.
+            unreadable.append(UnreadableSource(item.id, None, str(exc)))
+            continue
+        if not url:
+            unreadable.append(
+                UnreadableSource(
+                    item.id,
+                    None,
+                    f"Item {item.id!r} has no resolvable URL for asset {asset!r}.",
+                )
+            )
+            continue
+        try:
+            with rasterio.open(_open_path(url)) as ds:
+                record = _source_provenance(ds)
+        except Exception as exc:  # noqa: BLE001 - any read failure is one verdict
+            unreadable.append(UnreadableSource(item.id, url, f"{type(exc).__name__}: {exc}"))
+            continue
+        records.append(record)
+        read.append(item)
+
+    grouped: dict[tuple[str, ...], list[UmbraItem]] = {}
+    keyed: dict[tuple[str, ...], dict[str, str]] = {}
+    for record, item in zip(records, read, strict=True):
+        comparable = _comparable_record(record)
+        key = tuple(comparable[name] for name in MEASUREMENT_PROVENANCE_KEYS)
+        grouped.setdefault(key, []).append(item)
+        keyed.setdefault(key, comparable)
+    # Stable, so a tie between two equal-sized groups keeps the oldest-first
+    # order the selection arrived in rather than an arbitrary one.
+    groups = tuple(
+        ProvenanceGroup(
+            record=keyed[key],
+            item_ids=tuple(i.id for i in members),
+            hrefs=tuple(i.href for i in members),
+        )
+        for key, members in sorted(grouped.items(), key=lambda kv: -len(kv[1]))
+    )
+
+    refusal: str | None = None
+    shared: dict[str, str] = {}
+    try:
+        shared = _shared_provenance(records, [i.id for i in read], action=action)
+    except ValueError as exc:
+        refusal = str(exc)
+
+    return StackProvenance(
+        asset=asset,
+        groups=groups,
+        unreadable=tuple(unreadable),
+        shared=shared,
+        refusal=refusal,
+    )
 
 
 def _utm_epsg(lon: float, lat: float) -> str:

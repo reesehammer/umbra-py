@@ -907,6 +907,27 @@ from:
   line `POST /artifacts/stats` already draws for polarization — and what the
   passes agree on rides out on `ChangeStats.provenance`, into the sidecar and
   into the model's ground-truth block, so a quoted dB delta can be attributed.
+  ~~**Still open:** that refusal was discoverable only by *hitting* it — the
+  check runs inside `to_stack`, so a caller learned a selection was not a
+  measurement by asking for the cube, and the refusal's own advice ("use only
+  the acquisitions that share one") named a subset it could not identify.~~
+  **shipped** — `stack_provenance` / `umbra stack --provenance` reads each
+  source's `UMBRA_*` record straight from its raster header, groups the selection
+  by `MEASUREMENT_PROVENANCE_KEYS` and says whether the series stacks — before
+  the shared grid, the warp or a single pixel. It costs the opens a stack pays
+  for anyway (one COG header per acquisition, kilobytes by range request) and
+  saves everything after them, which is the same trade `umbra preflight` makes
+  for a chip run, one layer up. Two things keep it a preflight rather than a
+  lookalike: the verdict is `_shared_provenance`'s own, called on the same
+  records, so `refusal` is verbatim the `ValueError` the stack would raise and a
+  cleared selection cannot be turned away by the stack it cleared; and the
+  grouping runs on `_comparable_record` factored out of that same function, so
+  the two cannot compare by different rules. What it *adds* is the half the
+  refusal could not give: `StackProvenance.largest` is the biggest agreeing
+  subset with the URLs to re-run on, so the advice is a command. A source that
+  cannot be read is reported apart rather than grouped — the line
+  `PreflightResult.error_scope` already draws — because a failed read does not
+  make a series mixed, it makes the answer incomplete.
   **Still open:** MultiRTC interop — heavy, research-oriented,
   deferred. **This closes the SAR-processing-depth group bar that interop.**
 - ~~Nothing removed **speckle**, the one uncertainty in a calibrated pixel that is

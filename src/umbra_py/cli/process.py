@@ -305,6 +305,63 @@ def _echo_chip_speckle_report(dataset: ChipDataset) -> None:
         )
 
 
+def _provenance_label(record: dict[str, str]) -> str:
+    """One group's conversion, as a line: only the steps that ran.
+
+    A record states every measurement key, and on the common case -- published
+    GEC rasters nothing converted -- every one of them is the same sentinel.
+    Printing that in full would bury the one fact worth reading, so a group whose
+    steps all read "did not run" is named for what it is instead.
+    """
+    # From the module that writes them, so the two cannot drift apart: these are
+    # the values that mean the *absence* of a step -- a raster with no umbra-py
+    # tags at all, and a converted one that skipped it.
+    from ..load import _STEP_NOT_RUN, _UNRECORDED  # noqa: PLC0415
+
+    absent = (_UNRECORDED, _STEP_NOT_RUN)
+    ran = {key: value for key, value in record.items() if value not in absent}
+    if not ran:
+        return "no umbra-py conversion (a published product as Umbra ships it)"
+    return ", ".join(f"{key}={value}" for key, value in ran.items())
+
+
+def _echo_stack_provenance(report) -> None:
+    """The `umbra stack --provenance` report, as the command prints it."""
+    total = sum(len(group.item_ids) for group in report.groups)
+    if report.agrees:
+        shared = _provenance_label(report.groups[0].record) if report.groups else "nothing to read"
+        click.echo(f"{total} acquisition(s) agree -- this series stacks as a measurement.")
+        click.echo(f"  {shared}")
+    else:
+        click.echo(
+            f"{total} acquisition(s) fall into {len(report.groups)} conversions, "
+            "so this series is not one measurement."
+        )
+        for group in report.groups:
+            click.echo(f"  {len(group.item_ids)}x {_provenance_label(group.record)}")
+            for item_id in group.item_ids:
+                click.echo(f"      {item_id}")
+        largest = report.largest
+        if largest is not None:
+            # The record is already on its group's line above; what this adds is
+            # which group to take, which is the half the refusal cannot give.
+            click.echo(f"  Largest agreeing subset: {len(largest.item_ids)} of {total}.")
+            if largest.hrefs and all(largest.hrefs):
+                click.echo("  Re-run on those alone:")
+                click.echo("    umbra stack " + " ".join(f"'{href}'" for href in largest.hrefs))
+        click.echo(f"  {report.refusal}", err=True)
+
+    if report.unreadable:
+        # Undecided rather than disagreeing: a source that could not be opened
+        # makes the answer incomplete, it does not make the series mixed.
+        click.echo(
+            f"  {len(report.unreadable)} source(s) could not be read, so they have no "
+            "verdict here and the stack will meet them itself:"
+        )
+        for source in report.unreadable:
+            click.echo(f"      {source.item_id}: {source.error}")
+
+
 @cli.command()
 @click.argument("item_urls", nargs=-1)
 @click.option(
@@ -353,6 +410,15 @@ def _echo_chip_speckle_report(dataset: ChipDataset) -> None:
     show_default=True,
     help="With --stats: how many decibels a cell must move between two passes "
     "to count as changed (3 dB is a doubling of backscatter power).",
+)
+@click.option(
+    "--provenance",
+    is_flag=True,
+    help="Don't stack: read each acquisition's conversion record from its "
+    "raster header and group the selection by what its pixel values are, so a "
+    "series that cannot be measured says so before anything is warped or "
+    "streamed. Names the largest agreeing subset (with URLs to re-run on) when "
+    "the selection is mixed.",
 )
 @click.option(
     "--area",
@@ -496,6 +562,7 @@ def stack(
     block_series,
     stats_windowed,
     change_threshold_db,
+    provenance,
     area,
     fuzzy,
     bbox,
@@ -581,6 +648,15 @@ def stack(
     pass's median/p5/p95 become histogram estimates, since a percentile is the
     one statistic that needs the whole pass at once.
 
+    --provenance answers, before anything is streamed, the question a stack
+    otherwise answers by failing: a series whose passes were converted with
+    different settings is not a measurement, because a cell-to-cell difference
+    between them is partly the difference between the two conversions. It reads
+    each source's UMBRA_* record straight from the raster header, groups the
+    selection by what its pixel values are, and -- when they disagree -- names
+    the largest agreeing subset and the URLs to re-run on, which is the advice
+    the refusal could only give in the abstract.
+
     Two ways to choose what to stack:
 
     \b
@@ -595,7 +671,12 @@ def stack(
     """
     # The private writer, not stack_to_geotiff: --stats needs the cube itself,
     # and stacking a series twice would double the bytes streamed.
-    from ..load import _write_stack_geotiff, stack_stats, to_stack  # noqa: PLC0415
+    from ..load import (  # noqa: PLC0415
+        _write_stack_geotiff,
+        stack_provenance,
+        stack_stats,
+        to_stack,
+    )
 
     _shared._check_token_not_local(token, local, db_path)
     if blocks < 0:
@@ -610,8 +691,18 @@ def stack(
         if chunk_size < 1:
             raise click.BadParameter("--chunk-size must be a positive pixel count.")
     stats = stats or bool(blocks) or stats_windowed
-    if not (out_path or stats):
-        raise click.UsageError("Give --out to write the datacube, --stats to measure it, or both.")
+    if provenance and (out_path or stats):
+        # The point of the flag is to ask before paying; pairing it with the
+        # work it precedes would only hide which of the two answered.
+        raise click.UsageError(
+            "--provenance reads the sources and writes nothing; drop --out/--stats "
+            "(run it first, then stack the acquisitions it says agree)."
+        )
+    if not (out_path or stats or provenance):
+        raise click.UsageError(
+            "Give --out to write the datacube, --stats to measure it, "
+            "--provenance to check the sources agree first, or both of the first two."
+        )
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
         raise click.UsageError(
@@ -664,6 +755,15 @@ def stack(
             span = f"{items[0].datetime:%Y-%m-%d} → {items[-1].datetime:%Y-%m-%d}"
             # To stderr when --stats will print JSON, so stdout stays one object.
             click.echo(f"Selected {len(items)} of {len(found)} acquisition(s) ({span}).", err=stats)
+
+    if provenance:
+        with OrbitSpinner(f"Reading {len(items)} raster header(s)"):
+            report = stack_provenance(items, asset=asset)
+        if as_json:
+            click.echo(json.dumps(report.to_dict(), indent=2))
+        else:
+            _echo_stack_provenance(report)
+        return
 
     with OrbitSpinner(f"Stacking {len(items)} acquisitions"):
         cube = to_stack(
