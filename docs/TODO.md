@@ -410,11 +410,33 @@ carries into every manifest record and rolls up across the batch
         two; a `strict` mode that dropped unreadable passes too would need to say
         so in the summary, which is the same decision this entry already made
         once.
-      - **The preflight is serial.** `preflight_items` walks the selection one
-        acquisition at a time, so a 40-pass site spends 40 round trips before the
-        first chip is written. Each is two small range requests, so it is latency
-        rather than bytes; a thread pool over the reads is the obvious fix if a
-        large selection makes the wait visible.
+      - ~~**The preflight is serial.**~~ **shipped** — `preflight_items(workers=…)`
+        (`DEFAULT_PREFLIGHT_WORKERS`, 8) reads the selection through a small thread
+        pool, with `umbra preflight --workers` and `umbra chips
+        --preflight-workers` on the two front doors. The check spends round trips
+        rather than bytes, so a 40-pass site was 40 sequential latencies in front
+        of a batch whose whole point is not paying twice — the one cost the
+        preflight itself added. What makes it safe to widen is that the
+        concurrency is a *schedule*, not an answer: the reads are independent, the
+        verdicts are consumed in the order they were asked in (the chip run pairs
+        them against its own selection positionally, so completion order would
+        attach one pass's refusal to another), and `progress` is still called once
+        per acquisition, in that order, from the calling thread — so a CLI
+        callback never has to be thread-safe. `workers=1` runs no pool at all, and
+        the lane count is capped at the number of products, so a one-scene
+        preflight is the code that shipped before. `PreflightReport.workers`
+        records the width it actually used. What is still open, and smaller:
+        - **The lane count is not bounded by the session's connection pool.**
+          Eight matches the catalog walk's fan-out and sits inside
+          `_http._POOL_SIZE` (16), but nothing stops `--workers 64`, which would
+          churn connections rather than reuse them. Clamp it against the pool
+          size, or grow the pool with the request, if anyone finds a reason to ask
+          for that many.
+        - **A slow read still holds up the progress lines behind it.** Consuming
+          in selection order is what keeps the verdicts pairable, so the line for
+          pass 3 waits on pass 2 even when it finished first. The reads
+          themselves do not wait — only the printing does — so this is cosmetic
+          until someone wants a live counter rather than a roster.
       - **Only `umbra chips` has it.** `umbra convert` operates on one product,
         where the preflight's saving is one download and the refusal is already
         cheap, so it was left alone. The other batch-shaped consumer is

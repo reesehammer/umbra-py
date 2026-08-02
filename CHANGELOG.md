@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Stop the check that runs before a batch from being the batch's slowest part
+  (`umbra preflight --workers`, `umbra chips --preflight-workers`,
+  `preflight_items(workers=…)`).** The header-only preflight replaced a
+  whole-product download per acquisition with two small range requests, which
+  answered the cost question completely: a forty-pass site went from tens of
+  gigabytes to a few hundred kilobytes. What it did not answer is the *other*
+  cost, the one that only appeared once the bytes were gone. The walk was serial,
+  so a forty-pass site was forty sequential round trips — latency, not bandwidth
+  — standing in front of a run whose entire argument is that you should not pay
+  for the same thing twice. On the command built to make a batch cheap, the check
+  had become the batch's slowest part.
+
+  The reads are independent, so they are now issued through a small thread pool:
+  `workers=` on `preflight_items` (`DEFAULT_PREFLIGHT_WORKERS`, 8 — the catalog
+  walk's own sidecar fan-out, and inside the shared session's connection pool, so
+  the concurrency costs no reconnections), `--workers` on `umbra preflight` and
+  `--preflight-workers` on `umbra chips`. Wall time follows `N / workers`; not one
+  byte of what is transferred changes.
+
+  What makes it safe to widen is that the concurrency is a **schedule and not an
+  answer**, and the design is what holds that line. The verdicts are *consumed* in
+  the order they were asked in, not in the order they arrive: `write_chips` pairs
+  them against its own selection positionally (`zip(items, report.results,
+  strict=True)`) precisely because two passes of one task can share an id, so a
+  completion-ordered result would silently attach one pass's refusal to another —
+  the quietest possible way for a dataset to be wrong. The futures are submitted
+  up front and read in sequence, so every lane is busy and the answer is the
+  serial walk's answer. `progress` keeps its contract exactly: one call per
+  acquisition, in selection order, counting up, from the calling thread — a CLI
+  callback that echoes a line never has to become thread-safe.
+
+  The old path is still reachable and still the default where it is the right one:
+  `workers=1` runs no pool at all, and the effective lane count is capped at the
+  number of products, so a one-scene preflight is the code that shipped before
+  this, thread and all. `PreflightReport.workers` records the width actually used
+  — a fact about how the answer was obtained rather than about the answer, which
+  is why it is reported and not part of any cache key.
 - **Spend the preflight on the batch it was built for (`umbra chips
   --preflight`, `write_chips(preflight=True)`).** The header-only read shipped as
   a command you run *beside* a chip run: `umbra preflight` told you which of a

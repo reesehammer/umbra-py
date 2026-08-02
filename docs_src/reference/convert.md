@@ -120,7 +120,13 @@ parsed metadata to the conversion's own support check, calling the same
 coefficient readers, so a preflight that clears a product and a conversion that
 then refuses it cannot disagree — only where the metadata came from differs.
 `preflight_items()` asks it of a whole search result, recording an unreadable
-acquisition as its own verdict rather than ending the walk.
+acquisition as its own verdict rather than ending the walk, and reads several
+products at once (`workers=`, default `DEFAULT_PREFLIGHT_WORKERS`) — because once
+the answer costs kilobytes, the round trip is the only part left that scales with
+the number of passes. The concurrency is a schedule and not an answer: the reads
+are independent, the verdicts come back in the order they were asked in (the chip
+run pairs them against its own selection positionally), and `progress` is called
+from the calling thread in that same order.
 
 The NITF walk and the XML parse are stdlib, so this needs no extra at all —
 including no `[convert]`. Only confirming a *positive* answer on a product that

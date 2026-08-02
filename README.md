@@ -1253,7 +1253,9 @@ metadata cannot be *read* — a missing asset, an HTTP failure — is **kept**: 
 failed read is not a product declaring it cannot answer, so the run finds out the
 expensive way rather than dropping a scene over something transient. Pass both
 flags: the preflight asks only the two questions the metadata answers, so
-anything else still refuses at conversion time.
+anything else still refuses at conversion time. The headers are read several at a
+time (`--preflight-workers`, default 8), so the check that runs in front of the
+batch does not become a stall that grows with the number of passes.
 
 `--clip-bbox` is what makes
 that path affordable when the subject is a *site*: it tiles only the window you
@@ -1339,6 +1341,14 @@ Reading it needs no extra at all (the NITF walk and the XML parse are stdlib), s
 acquisition whose metadata cannot be read — a missing asset, an HTTP failure — is
 recorded as its own verdict rather than ending the walk, because a preflight that
 dies on the nineteenth scene has failed at the one thing it is for.
+
+Once the answer costs kilobytes, the only thing left that grows with the number
+of passes is the round trip — so the selection is read several products at a time
+(`--workers`, default 8; `umbra chips --preflight-workers`). Nothing about the
+answer changes: each read is independent, the verdicts come back in the order they
+were asked in, and the progress lines print one per pass in that order. What
+changes is that the check in front of a forty-pass batch stops being the batch's
+slowest part.
 
 ### Find scenes that *look alike* (`umbra embed`)
 
