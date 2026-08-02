@@ -418,16 +418,45 @@ carries into every manifest record and rolls up across the batch
       construction. `ChipDataset.preflight` (`chips.PreflightSummary`) reports
       what asking cost against the download it removed, counting only the dropped
       products as saved. What is still open, and smaller:
-      - **A read failure is kept, and that is a policy rather than a fact.** An
-        acquisition whose metadata cannot be read (missing asset, HTTP failure,
-        not a NITF) stays in the run and is counted as `unreadable`, on the
-        argument that a failed read is not a product saying it cannot answer.
-        That is right for a transient failure and wasteful for a permanent one
-        (a selection whose SICD assets are all missing preflights every pass and
-        then attempts every pass). Nothing retries and nothing distinguishes the
-        two; a `strict` mode that dropped unreadable passes too would need to say
-        so in the summary, which is the same decision this entry already made
-        once.
+      - ~~**A read failure is kept, and that is a policy rather than a fact.**~~
+        **shipped** — and the shape it took is not the `strict` mode this entry
+        sketched. A flag would have made the caller choose between two policies;
+        what was actually missing is that "could not be read" named two
+        different pieces of news, and only one of them is a policy question at
+        all. `UnreadableProductError` names the other: the item lists no such
+        asset, nothing is at the href (HTTP 404/410, or a local path that is not
+        there), what is there is not a NITF, is a NITF this cannot lay out, or
+        carries no SICD XML that parses. Each is final, and dropping such a pass
+        needs no flag because keeping it was never the cautious choice — it fails
+        inside `chip_item` as a plain read error, which `skip_unsupported`
+        deliberately does not catch, so a preflighted run ended on an
+        acquisition its own preflight had ruled out. `PreflightResult.error_scope`
+        (`"product"` / `"transport"`, plus `.readable` / `.final`) carries the
+        classification, `_error_scope` sorts by type with everything
+        unrecognised counted as transport, and `PreflightSummary.missing`
+        counts the drops apart from the kept `unreadable`. What is still open,
+        and smaller:
+        - **Nothing retries a transport failure beyond the session's own.**
+          `_http.default_session` retries 429/5xx and connect/read errors three
+          times with backoff, so a blip is already ridden out before the
+          preflight sees it; what is left is a failure that outlived those, and
+          a per-item retry on top would be a second policy over the same wire.
+          The pass is kept, so the cost of not retrying is a download rather
+          than a hole. Worth adding only if a real selection turns out to have
+          a failure mode the session's retries systematically miss.
+        - **`403` is transport, deliberately.** It can be a proxy, a signing or
+          a bucket-policy problem as easily as an absent object, and the two are
+          not distinguishable from the status alone. Guessing "product" there
+          would drop a real pass, which is the one error this design will not
+          make; guessing "transport" costs a download. If the open bucket ever
+          starts answering `403` for objects that genuinely do not exist, the
+          fix is a probe rather than a reclassification.
+        - **`umbra preflight --json` reports the scope, nothing consumes it but
+          the chipper.** `error_scope` / `missing_count` / `unreadable_count`
+          are in the payload for an agent to branch on, but no other surface
+          reads them — `POST /artifacts/*` does not preflight, and `umbra
+          convert` operates on one product where the distinction is the
+          difference between two error messages.
       - ~~**The preflight is serial.**~~ **shipped** — `preflight_items(workers=…)`
         (`DEFAULT_PREFLIGHT_WORKERS`, 8) reads the selection through a small thread
         pool, with `umbra preflight --workers` and `umbra chips

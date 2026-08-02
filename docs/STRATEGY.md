@@ -490,9 +490,32 @@ no chip, so it would be a record with no path, bbox or transform in a
 one-row-per-chip schema), always `.jsonl` whatever the manifest's format, and
 written only when there is something to record — so a clean run leaves exactly
 the files it left before and the file's presence is itself the statement.
-**This closes the batch-survivability group**: a refusal is named, survivable,
-askable ahead of the download, read several at a time, and now *recorded in the
-artifact* rather than only in the run.
+~~That closed the batch-survivability group — a refusal named, survivable,
+askable ahead of the download, read several at a time and recorded in the
+artifact — for every read that produced a *refusal*. The reads that produced no
+answer at all were governed by one rule, keep the pass, on the argument that a
+failed read is not a product declaring it cannot answer.~~ **shipped** — that
+argument covers a timeout and nothing else, because "could not be read" was two
+pieces of news wearing one name. A dropped connection says nothing about the
+product. An item listing no `SICD` asset, an href with nothing behind it, bytes
+that are not a NITF, a NITF carrying no SICD XML — those say everything, as
+finally as any refusal. And keeping *them* was not the cautious half of the
+choice it resembled: such a pass fails inside `chip_item` as a plain read error,
+which `--skip-unsupported` deliberately does not catch, so the sequence was that
+the preflight established an acquisition could not be chipped, kept it out of
+caution, handed it to the chipper and the run died on it. A check that had
+already found the answer was not allowed to use it. The fix is the move
+`UnsupportedMeasurementError` was, applied one layer out: `UnreadableProductError`
+names the family, `PreflightResult.error_scope` reports which side of the line a
+failure fell (with `.final` as the question a caller actually asks), and the
+sorting is by type with **everything unrecognised counted as transport**, so the
+cautious branch is the default by construction and the worst a new error mode can
+do is cost a download rather than silently thin a dataset. A chip run then drops
+the product failures as the same `SkippedAcquisition` a refusal produces, keeps
+the transport ones, and counts them apart (`PreflightSummary.missing` against
+`unreadable`) because only one of the two is worth asking about again.
+**This closes the batch-survivability group** for every way a pass can fail to
+be included.
 **Open:** MultiRTC interop, which stays deferred.
 
 ### 5.6 Then actually talk to Umbra — **not started** (maintainer/relationship)

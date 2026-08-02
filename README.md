@@ -1248,10 +1248,22 @@ The question it asks is the conversion's own — the settings come from the same
 request, so a pass it clears cannot then be refused for a reason it could have
 seen — and a dropped pass lands in the same `ChipDataset.skipped` block a
 survived refusal does (with `stage="preflight"`), because a dataset with a hole
-in it has to say so however cheaply the hole was found. An acquisition whose
-metadata cannot be *read* — a missing asset, an HTTP failure — is **kept**: a
-failed read is not a product declaring it cannot answer, so the run finds out the
-expensive way rather than dropping a scene over something transient.
+in it has to say so however cheaply the hole was found.
+
+An acquisition whose metadata cannot be *read* divides in two, and which half it
+falls in decides what the run does with it. A read that fails on the **wire** — a
+timeout, a dropped connection — says nothing about the product, so the pass is
+**kept** and the run finds out the expensive way rather than losing a scene to a
+blip. A read that fails on the **product** — the item lists no such asset,
+nothing is at the href, what is there is not a NITF or carries no SICD XML — is
+as final as any refusal, and is dropped like one (`UnreadableProductError`,
+recorded on `ChipDataset.skipped` with the reader's own words). Keeping those was
+never the cautious half of the choice it resembled: such a pass fails inside the
+chipper as a plain read error, which `--skip-unsupported` deliberately does not
+catch, so a run that preflighted still ended on an acquisition its own preflight
+had already ruled out. `PreflightSummary` counts the two apart (`missing` against
+`unreadable`) and both `umbra preflight` and `umbra chips` name which is which,
+because only one of them is worth asking about again.
 
 **And the dataset says so, not just the run.** Both routes to a hole reported it
 to whoever was watching the console — `ChipDataset.skipped`, the `--json`

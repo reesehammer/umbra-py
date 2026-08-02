@@ -867,19 +867,22 @@ class SkippedAcquisition:
     metadata, not a paraphrase), and ``hint`` carries the recovery step where
     the refusal named one.
 
-    Only a :class:`~umbra_py.exceptions.UnsupportedMeasurementError` produces
-    one. That is the point of the type: it is the family of refusals that are
-    facts about a *product*, so carrying on to the next scene is a defensible
-    response to it, where carrying on past an unknown error would be a way of
-    hiding one.
+    What produces one is a fact about a *product*, and only that: a
+    :class:`~umbra_py.exceptions.UnsupportedMeasurementError` (the metadata was
+    read, and it cannot support the request) or, from a preflight, an
+    :class:`~umbra_py.exceptions.UnreadableProductError` (there is no readable
+    product at the acquisition's href to ask). Both are final, which is what
+    makes carrying on to the next scene a defensible response, where carrying on
+    past an unknown error -- a download failure, a corrupt file, a transport
+    hiccup -- would be a way of hiding one.
 
-    ``stage`` says *when* the refusal was discovered, because that is the one
-    thing the two routes to it do not share. ``"conversion"`` means the product
-    was downloaded and then refused (``skip_unsupported=True``);
-    ``"preflight"`` means its metadata was read over the wire and it was never
-    downloaded at all (``preflight=True``). The reason is the same refusal's own
-    words either way -- it is the conversion's own check in both cases -- so the
-    dataset's hole is described identically and only its cost differs.
+    ``stage`` says *when* it was discovered, because that is the one thing the
+    routes to it do not share. ``"conversion"`` means the product was downloaded
+    and then refused (``skip_unsupported=True``); ``"preflight"`` means its
+    metadata was read over the wire and it was never downloaded at all
+    (``preflight=True``). The reason is the product's own words either way -- the
+    conversion's own check, or the reader's -- so the dataset's hole is described
+    the same and only its cost differs.
     """
 
     item_id: str
@@ -911,11 +914,21 @@ class PreflightSummary:
 
     The claim is deliberately narrow. A supported pass is downloaded anyway, so
     its header read is pure overhead; only the *dropped* passes are a saving, and
-    that is the number reported. ``unreadable`` counts the acquisitions whose
-    metadata could not be read at all (a missing asset, an HTTP failure, a
-    product that is not a NITF): those are **kept** in the run, because a failed
-    read is not a product saying it cannot answer, and dropping a scene over a
-    transient error would be exactly the silent hole this design avoids.
+    that is the number reported.
+
+    The two error counts are the two things a failed read can mean, and they are
+    counted apart because the run does different things with them.
+    ``unreadable`` is a read that failed on the *wire* — those passes are
+    **kept**, because a transport failure is not a product saying it cannot
+    answer, and dropping a scene over a blip would be exactly the silent hole
+    this design avoids. ``missing`` is a read that failed on the *product*:
+    nothing at the href, or something at it that is not a SICD. Those are
+    dropped, and are part of ``skipped``. Keeping them was never the cautious
+    choice it looked like — a pass with no readable product fails inside
+    ``chip_item`` as a plain read error rather than an
+    :class:`~umbra_py.exceptions.UnsupportedMeasurementError`, so
+    ``skip_unsupported`` does not catch it and a run that preflighted ends on a
+    pass the preflight had already ruled out.
     """
 
     checked: int
@@ -924,6 +937,7 @@ class PreflightSummary:
     unreadable: int
     bytes_read: int
     product_bytes_skipped: int | None = None
+    missing: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -931,6 +945,7 @@ class PreflightSummary:
             "supported": self.supported,
             "skipped": self.skipped,
             "unreadable": self.unreadable,
+            "missing": self.missing,
             "bytes_read": self.bytes_read,
             "product_bytes_skipped": self.product_bytes_skipped,
         }
@@ -1621,10 +1636,17 @@ def write_chips(
     with ``stage="preflight"`` and a :class:`PreflightSummary` roll-up saying
     what the check cost and what it saved.
 
-    An acquisition whose metadata cannot be *read* (a missing asset, an HTTP
-    failure, a product that is not a NITF) is **kept**: a failed read is not a
-    product declaring it cannot answer, so the run proceeds to find out the
-    expensive way rather than dropping a scene over something transient.
+    An acquisition whose metadata read fails *on the wire* is **kept**: a
+    transport failure is not a product declaring anything, so the run proceeds to
+    find out the expensive way rather than dropping a scene over a blip. One
+    whose read fails on the *product* -- the item lists no such asset, nothing is
+    at the href, what is there is not a NITF or carries no SICD XML -- is dropped
+    like a refusal, because that is what it is. Keeping those was never the
+    cautious half of the choice: such a pass fails inside :func:`chip_item` as a
+    plain read error, which ``skip_unsupported`` deliberately does not catch, so
+    the run ends on an acquisition its own preflight had already ruled out. The
+    two are counted apart on :class:`PreflightSummary` (``missing`` against
+    ``unreadable``) so the summary says which kind of hole a dataset has.
 
     ``preflight`` is only meaningful for a complex ``asset`` -- a GEC or CSI
     carries no SICD metadata to ask -- and asking for it on a raster asset is
@@ -1773,30 +1795,42 @@ def _preflight_filter(
     kept: list[UmbraItem] = []
     dropped: list[SkippedAcquisition] = []
     unreadable = 0
+    missing = 0
     saved: list[int] = []
     # `preflight_items` returns one result per item in order, so pairing them is
     # exact -- no lookup by id, which two passes of one task could collide on.
     for item, result in zip(items, report.results, strict=True):
-        if result.capabilities is None:
-            # The metadata could not be read. That is a fact about the request or
-            # the network, not about the product, so it does not get to remove a
-            # scene from the dataset: the run finds out the expensive way.
+        if not result.final:
+            # The read failed on the wire. That is a fact about the moment, not
+            # about the product, so it does not get to remove a scene from the
+            # dataset: the run keeps the pass and finds out the expensive way.
             unreadable += 1
             kept.append(item)
             continue
         if result.supported:
             kept.append(item)
             continue
+        if result.capabilities is None:
+            # No readable product behind this acquisition -- nothing at the href,
+            # or something that is not a SICD. Dropping it is not the cautious
+            # branch's opposite but its point: keeping it only defers the same
+            # failure to `chip_item`, where it is a plain read error rather than
+            # an `UnsupportedMeasurementError`, so `--skip-unsupported` does not
+            # catch it and the whole run dies on a pass the preflight had
+            # already decided.
+            missing += 1
         dropped.append(
             SkippedAcquisition(
                 item_id=item.id,
-                reason=result.reason or "the product's metadata cannot support the request",
+                reason=result.reason
+                or result.error
+                or "the product's metadata cannot support the request",
                 datetime=item.datetime.isoformat() if item.datetime else None,
                 hint=result.hint,
                 stage="preflight",
             )
         )
-        if result.capabilities.product_bytes:
+        if result.capabilities and result.capabilities.product_bytes:
             saved.append(result.capabilities.product_bytes)
     return (
         kept,
@@ -1806,6 +1840,7 @@ def _preflight_filter(
             supported=len(kept) - unreadable,
             skipped=len(dropped),
             unreadable=unreadable,
+            missing=missing,
             bytes_read=report.bytes_read,
             # Only the dropped products are a saving: a supported one is
             # downloaded anyway, so its header read is overhead rather than

@@ -32,6 +32,15 @@ costs kilobytes the only thing left that scales with the number of passes is the
 round trip, and a check that runs in front of a batch should not be the batch's
 slowest part.
 
+Not every read produces a verdict, and the ones that do not divide in two. A
+read can fail because the wire failed, which says nothing about the product; or
+it can fail because there is nothing at the href to read, or what is there is
+not a SICD — which says everything, and says it as finally as any refusal does.
+:class:`~umbra_py.exceptions.UnreadableProductError` is what separates them (see
+:data:`SCOPE_PRODUCT` / :data:`SCOPE_TRANSPORT`), and the separation is what
+lets a batch act: a check that has already established a pass cannot be chipped
+should not then hand it to the chipper.
+
 The verdict is not a second opinion about what a product supports: the parsed
 XML is presented to :mod:`umbra_py.convert`'s own
 ``_check_measurement_support`` — the same function the conversion runs, calling
@@ -56,7 +65,11 @@ from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree
 
 from ._http import DEFAULT_TIMEOUT, default_session
-from .exceptions import UmbraError, UnsupportedMeasurementError
+from .exceptions import (
+    AssetNotFoundError,
+    UnreadableProductError,
+    UnsupportedMeasurementError,
+)
 from .models import UmbraItem
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
@@ -106,20 +119,24 @@ _MAX_XML_BYTES = 32 << 20
 #: ``DESID`` values that carry SICD XML. ``XML_DATA_CONTENT`` is what SICD 1.x
 #: mandates; the older label is accepted because reading it costs nothing.
 _XML_DES_IDS = ("XML_DATA_CONTENT", "SICD_XML")
+#: HTTP statuses that mean "there is nothing at this href", as opposed to
+#: "ask again later". Only these two: a 403 can be a proxy or a signing problem
+#: rather than an absent object, and guessing wrong here drops a real pass.
+_ABSENT_STATUSES = frozenset({404, 410})
 
 
 def _digits(buf: bytes, offset: int, length: int) -> int:
     """Read a fixed-width ASCII integer field out of a NITF header."""
     raw = buf[offset : offset + length]
     if len(raw) < length:
-        raise UmbraError(
+        raise UnreadableProductError(
             f"NITF header ends inside a field at byte {offset}: the file is "
             "truncated or is not a NITF product."
         )
     try:
         return int(raw.decode("ascii").strip() or 0)
     except (UnicodeDecodeError, ValueError) as exc:
-        raise UmbraError(
+        raise UnreadableProductError(
             f"NITF header field at byte {offset} is not a number ({raw!r}), so the "
             "file's segment layout cannot be read."
         ) from exc
@@ -190,9 +207,18 @@ class _RangeReader:
         return data
 
     def _read_local(self, offset: int, length: int) -> bytes:
-        with open(self.src, "rb") as fh:
-            fh.seek(offset)
-            return fh.read(length)
+        try:
+            with open(self.src, "rb") as fh:
+                fh.seek(offset)
+                return fh.read(length)
+        except FileNotFoundError as exc:
+            # The local twin of the 404 below, and the same kind of fact: there
+            # is nothing at this source to read. Every other OSError (a
+            # permission, a bad disk) is left as itself, because those are about
+            # the machine rather than about the product.
+            raise UnreadableProductError(
+                f"{self.src} does not exist, so there is no product metadata to read."
+            ) from exc
 
     def _read_remote(self, offset: int, length: int) -> bytes:
         session = self._session or default_session()
@@ -203,6 +229,20 @@ class _RangeReader:
             headers={"Range": f"bytes={offset}-{end}"},
             timeout=DEFAULT_TIMEOUT,
         )
+        if resp.status_code in _ABSENT_STATUSES:
+            # Not a transport failure to retry or wait out: the bucket answered,
+            # and what it said is that there is nothing at this href. That is the
+            # same kind of fact as "these bytes are not a NITF", so it is raised
+            # as the same kind of error -- the shared session already retries the
+            # statuses that *are* transient (429, 5xx) before this sees them.
+            raise UnreadableProductError(
+                f"{self.src} does not exist (HTTP {resp.status_code}), so there is "
+                "no product metadata to read.",
+                hint=(
+                    "Check what the acquisition actually offers (`umbra info <item-url>`): "
+                    "the STAC entry may reference a product the bucket does not hold."
+                ),
+            )
         resp.raise_for_status()
         content_range = resp.headers.get("Content-Range", "")
         if "/" in content_range:
@@ -233,13 +273,13 @@ def read_sicd_xml(
     reader = _RangeReader(src, session=session)
     head = reader.read(0, _HEADER_PROBE)
     if head[:4] != _MAGIC:
-        raise UmbraError(
+        raise UnreadableProductError(
             f"{reader.src} does not start with a NITF file header, so it is not a "
             "SICD product this can read.",
             hint="Pass a SICD asset href (item.asset_href('SICD')) or a local .nitf file.",
         )
     if head[4:9] != _VERSION:
-        raise UmbraError(
+        raise UnreadableProductError(
             f"NITF version {head[4:9].decode('ascii', 'replace')!r} is not 02.10; "
             "only NITF 2.1 (what SICD mandates) has the header layout this reads.",
         )
@@ -261,7 +301,7 @@ def read_sicd_xml(
             continue
         return body.decode("utf-8", "replace"), reader.bytes_read, reader.size
 
-    raise UmbraError(
+    raise UnreadableProductError(
         f"{reader.src} carries no SICD XML data extension segment, so it states "
         "nothing about what it can support.",
         hint="Check the asset is a SICD rather than a GEC/CSI raster.",
@@ -344,7 +384,7 @@ def parse_sicd_xml(xml: str) -> _SicdView:
     try:
         root = ElementTree.fromstring(xml)
     except ElementTree.ParseError as exc:
-        raise UmbraError(f"SICD XML metadata could not be parsed: {exc}") from exc
+        raise UnreadableProductError(f"SICD XML metadata could not be parsed: {exc}") from exc
     return _SicdView(root)
 
 
@@ -507,9 +547,54 @@ def sicd_capabilities(
     )
 
 
+#: :attr:`PreflightResult.error_scope` when the metadata was read and answered.
+SCOPE_NONE = None
+#: The read failed on a fact about the *product*: nothing is at the href, or what
+#: is there is not a SICD this can read. Final — no later attempt changes it, so
+#: a caller may drop the pass exactly as it drops a refusal.
+SCOPE_PRODUCT = "product"
+#: The read failed on a fact about the *network*: a timeout, a dropped
+#: connection, a server fault the session's own retries could not ride out. It
+#: says nothing about the product, so a caller should keep the pass.
+SCOPE_TRANSPORT = "transport"
+
+
+def _error_scope(exc: BaseException) -> str:
+    """Whether a failed metadata read was the product's fault or the wire's.
+
+    The two are already distinguished by type, because the read path raises
+    :class:`~umbra_py.exceptions.UnreadableProductError` for every way the bytes
+    at an href can fail to be a readable SICD and
+    :class:`~umbra_py.exceptions.AssetNotFoundError` when the item lists no such
+    asset at all. Everything else — ``requests`` exceptions, and anything
+    unforeseen — is the cautious branch by construction: an unrecognised failure
+    is treated as transient, so the worst a new error mode can do is cost a
+    download rather than silently remove a pass from a dataset.
+    """
+    return (
+        SCOPE_PRODUCT
+        if isinstance(exc, AssetNotFoundError | UnreadableProductError)
+        else SCOPE_TRANSPORT
+    )
+
+
 @dataclass(frozen=True)
 class PreflightResult:
-    """Whether one acquisition can support the measurement being planned."""
+    """Whether one acquisition can support the measurement being planned.
+
+    ``supported`` is false in two quite different situations, and
+    ``error_scope`` is what tells them apart. A product that was *read* and
+    refused carries a ``reason`` (its own metadata's words) and no error. A
+    product that could not be read carries an ``error`` and an ``error_scope`` of
+    :data:`SCOPE_PRODUCT` (there is nothing readable at that href — final) or
+    :data:`SCOPE_TRANSPORT` (the wire failed — says nothing about the product).
+
+    That distinction is the whole reason a caller can act on a failed read at
+    all. Without it every read failure had to take the cautious branch, so a
+    selection whose SICD assets are simply absent was preflighted pass by pass
+    and then downloaded pass by pass anyway — a check that had already found the
+    answer and was not allowed to use it.
+    """
 
     item_id: str
     datetime: str | None
@@ -519,6 +604,22 @@ class PreflightResult:
     hint: str | None = None
     capabilities: SicdCapabilities | None = None
     error: str | None = None
+    error_scope: str | None = SCOPE_NONE
+
+    @property
+    def readable(self) -> bool:
+        """Whether the product's metadata was read at all."""
+        return self.error_scope is SCOPE_NONE
+
+    @property
+    def final(self) -> bool:
+        """Whether this verdict is one no later attempt can change.
+
+        True for a refusal (the product answered, and the answer is no) and for
+        an unreadable *product*; false for a transport failure, which is the one
+        outcome that is about the moment rather than about the archive.
+        """
+        return self.error_scope is not SCOPE_TRANSPORT
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -529,6 +630,7 @@ class PreflightResult:
             "reason": self.reason,
             "hint": self.hint,
             "error": self.error,
+            "error_scope": self.error_scope,
             "capabilities": None if self.capabilities is None else self.capabilities.to_dict(),
         }
 
@@ -563,6 +665,27 @@ class PreflightReport:
         return tuple(r for r in self.results if not r.supported)
 
     @property
+    def missing(self) -> tuple[PreflightResult, ...]:
+        """Acquisitions with no readable product behind them.
+
+        A verdict, not a mishap: nothing is at the href, or what is there is not
+        a SICD. Grouped separately from :attr:`unreadable` because only these two
+        groups differ in what a batch should *do*, and this is the group it can
+        act on.
+        """
+        return tuple(r for r in self.results if r.error_scope == SCOPE_PRODUCT)
+
+    @property
+    def unreadable(self) -> tuple[PreflightResult, ...]:
+        """Acquisitions whose metadata read failed on the wire.
+
+        No verdict at all — the pass is undecided, so a batch keeps it and finds
+        out the expensive way. Separated from :attr:`missing` for exactly that
+        reason.
+        """
+        return tuple(r for r in self.results if r.error_scope == SCOPE_TRANSPORT)
+
+    @property
     def bytes_read(self) -> int:
         return sum(r.capabilities.bytes_read for r in self.results if r.capabilities)
 
@@ -584,6 +707,8 @@ class PreflightReport:
             "rtc": self.rtc,
             "count": len(self.results),
             "supported_count": len(self.supported),
+            "missing_count": len(self.missing),
+            "unreadable_count": len(self.unreadable),
             "bytes_read": self.bytes_read,
             "product_bytes": self.product_bytes,
             "workers": self.workers,
@@ -646,10 +771,17 @@ def preflight_items(
     whether the product states the collection geometry the flattening tilts by
     the terrain's slope.
 
-    An acquisition whose metadata cannot be read at all (a missing asset, an
-    unreadable NITF, an HTTP failure) is recorded as unsupported with the error
-    on :attr:`PreflightResult.error` rather than ending the walk: a preflight
-    that dies on the nineteenth scene has failed at the one thing it is for.
+    An acquisition whose metadata cannot be read at all is recorded as
+    unsupported with the error on :attr:`PreflightResult.error` rather than
+    ending the walk: a preflight that dies on the nineteenth scene has failed at
+    the one thing it is for. :attr:`PreflightResult.error_scope` then says which
+    kind of failure it was, because the two are not the same news. A missing
+    asset, an object that is not there, bytes that are not a NITF and a NITF with
+    no SICD XML in it are all facts about the *product* (:data:`SCOPE_PRODUCT`) —
+    final, and grounds to drop the pass exactly as a refusal is. A timeout or a
+    dropped connection is a fact about the *wire* (:data:`SCOPE_TRANSPORT`) —
+    no verdict at all, so a caller should keep the pass. Anything unforeseen
+    counts as transport, so the cautious branch is the default one.
 
     ``workers`` is how many products are read at once
     (:data:`DEFAULT_PREFLIGHT_WORKERS`; ``None`` takes that default, ``1`` walks
@@ -710,6 +842,7 @@ def _preflight_item(
 ) -> PreflightResult:
     """One acquisition's verdict, with every read failure captured rather than raised."""
     when = item.datetime.isoformat() if item.datetime else None
+    href = ""
     try:
         href = item.asset_href(asset)
         capabilities = sicd_capabilities(href, session=session)
@@ -717,9 +850,13 @@ def _preflight_item(
         return PreflightResult(
             item_id=item.id,
             datetime=when,
-            href="",
+            # Kept where it is known: a href that resolved and then failed to read
+            # is what a person needs to check the failure by hand.
+            href=href,
             supported=False,
             error=f"{type(exc).__name__}: {exc}",
+            hint=getattr(exc, "hint", None),
+            error_scope=_error_scope(exc),
         )
     refusal = capabilities.refusal(
         calibration=calibration,

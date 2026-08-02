@@ -209,12 +209,20 @@ def _echo_chip_preflight_report(dataset: ChipDataset) -> None:
         f"  Preflight read {_human_bytes(summary.bytes_read)} of product headers "
         f"from {summary.checked} acquisition(s)" + tail
     )
+    if summary.missing:
+        # Dropped, and part of the count above -- named here because "cannot
+        # support the request" and "there is no product to ask" are different
+        # news about an archive even though the dataset's hole is the same shape.
+        click.echo(
+            f"    {summary.missing} of those had no readable product to ask "
+            "(a missing asset, or bytes that are not a SICD)."
+        )
     if summary.unreadable:
         # Kept in the run rather than dropped, so say so: the batch will find out
-        # the expensive way, which is the right response to a failed read.
+        # the expensive way, which is the right response to a failure on the wire.
         click.echo(
-            f"    {summary.unreadable} acquisition(s) could not be read ahead of time "
-            "and were chipped anyway."
+            f"    {summary.unreadable} acquisition(s) could not be reached ahead of "
+            "time and were chipped anyway."
         )
 
 
@@ -1649,7 +1657,11 @@ def _preflight_line(result) -> str:
     """One acquisition's verdict, as the report prints it."""
     caps = result.capabilities
     if caps is None:
-        return f"  {result.item_id}: could not be read -- {result.error}"
+        # Whether the answer will be different tomorrow is the useful half of a
+        # failed read, so it leads: "no product" is a verdict about the archive,
+        # "unreachable" is a verdict about the attempt.
+        what = "no readable product" if result.final else "could not be reached"
+        return f"  {result.item_id}: {what} -- {result.error}"
     cals = ", ".join(caps.calibrations) if caps.calibrations else "none"
     noise = caps.noise_level or "none"
     geometry = "none" if caps.look_geometry is None else f"{caps.look_geometry[0]:.1f} deg"
@@ -1849,6 +1861,17 @@ def preflight(
             else "."
         )
     )
+    if report.missing:
+        click.echo(
+            f"  {len(report.missing)} had no readable product behind them "
+            "(a missing asset, or bytes that are not a SICD) -- a chip run "
+            "preflighting the same selection drops those."
+        )
+    if report.unreadable:
+        click.echo(
+            f"  {len(report.unreadable)} could not be reached, so they are undecided "
+            "rather than unsupported -- ask again."
+        )
     hints = {r.hint for r in report.unsupported if r.hint}
     for hint in sorted(hints):
         click.echo(f"  hint: {hint}")

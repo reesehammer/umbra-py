@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 
 import pytest
+import responses
 
 from umbra_py.models import UmbraItem
 
@@ -2131,8 +2132,59 @@ def test_the_preflight_summary_reports_what_the_check_cost_and_saved(tmp_path):
     assert 0 < summary.bytes_read < sum(p.stat().st_size for p in products.values())
 
 
-def test_an_unreadable_acquisition_is_chipped_rather_than_silently_dropped(tmp_path):
-    """A failed read is not a product saying it cannot answer."""
+@responses.activate
+def test_an_unreachable_acquisition_is_chipped_rather_than_silently_dropped(tmp_path):
+    """A read that failed on the *wire* is not a product saying anything.
+
+    It is the one failure a preflight cannot turn into a verdict, so the pass
+    stays in the run and the batch finds out the expensive way -- the cautious
+    branch, deliberately, because dropping a scene over a blip would put a hole
+    in a dataset that the archive never had.
+    """
+    pytest.importorskip("numpy")
+    import requests
+
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    url = "https://example.com/flaky_SICD.nitf"
+    # The session's own retries ride out a 5xx, so the failure under test is the
+    # one that outlives them: a connection that never completes.
+    responses.add(responses.GET, url, body=requests.ConnectionError("connection reset"))
+    items = [
+        _nitf_item("acq-a", products["acq-a"]),
+        _nitf_item("acq-flaky", url),
+    ]
+    prepared: list[str] = []
+
+    dataset = write_chips(
+        items,
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, prepared),
+        preflight=True,
+    )
+
+    assert prepared == ["acq-a", "acq-flaky"]
+    assert dataset.skipped == ()
+    assert dataset.preflight is not None
+    assert dataset.preflight.unreadable == 1
+    assert dataset.preflight.missing == 0
+    assert dataset.preflight.supported == 1
+
+
+def test_an_acquisition_with_no_readable_product_is_dropped_like_a_refusal(tmp_path):
+    """The failure a preflight *can* decide, and the one keeping was worst for.
+
+    Nothing is at this acquisition's href. That is as final as any refusal, and
+    keeping the pass was never the cautious choice it resembled: `chip_item`
+    would have raised a plain read error, which `skip_unsupported` does not catch
+    by design, so the run would have ended on a pass its own preflight had
+    already ruled out.
+    """
     pytest.importorskip("numpy")
     from umbra_py.chips import SicdConversion, write_chips
 
@@ -2152,13 +2204,64 @@ def test_an_unreadable_acquisition_is_chipped_rather_than_silently_dropped(tmp_p
         conversion=SicdConversion(calibration="sigma0"),
         preparer=_recording_preparer(cog, prepared),
         preflight=True,
+        skip_unsupported=True,
     )
 
-    assert prepared == ["acq-a", "acq-gone"]
-    assert dataset.skipped == ()
+    assert prepared == ["acq-a"]
+    # Recorded as the hole it is, in the reader's own words, at the stage it was
+    # found -- the same object a survived refusal produces.
+    assert [s.item_id for s in dataset.skipped] == ["acq-gone"]
+    assert dataset.skipped[0].stage == "preflight"
+    assert "does not exist" in dataset.skipped[0].reason
     assert dataset.preflight is not None
-    assert dataset.preflight.unreadable == 1
+    assert dataset.preflight.missing == 1
+    assert dataset.preflight.unreadable == 0
+    assert dataset.preflight.skipped == 1
     assert dataset.preflight.supported == 1
+
+
+def test_keeping_an_unreadable_pass_is_what_would_have_ended_the_run(tmp_path):
+    """The reason the drop above is right, stated as the failure it avoids.
+
+    `skip_unsupported` catches `UnsupportedMeasurementError` and nothing else, on
+    purpose -- a batch that swallows unknown errors is one nobody can trust. So a
+    pass with no product behind it is fatal at conversion time even to a run that
+    asked to survive refusals, which is exactly the run a preflight is for.
+    """
+    pytest.importorskip("numpy")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    products = _write_products(tmp_path)
+    items = [_nitf_item("acq-gone", tmp_path / "does-not-exist.nitf")]
+
+    def _prepare(item, asset, work_dir, conversion):
+        raise FileNotFoundError(item.asset_href("SICD"))
+
+    with pytest.raises(FileNotFoundError):
+        write_chips(
+            items,
+            tmp_path / "ds",
+            asset="SICD",
+            chip_size=10,
+            conversion=SicdConversion(calibration="sigma0"),
+            preparer=_prepare,
+            skip_unsupported=True,
+        )
+
+    # Same selection, same settings, with the check in front of it: the run
+    # completes and says what it left out.
+    dataset = write_chips(
+        [*items, _nitf_item("acq-a", products["acq-a"])],
+        tmp_path / "ds2",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(),
+        preparer=lambda item, asset, work_dir, conversion: cog,
+        preflight=True,
+        skip_unsupported=True,
+    )
+    assert [s.item_id for s in dataset.skipped] == ["acq-gone"]
 
 
 def test_a_preflight_asks_the_settings_the_conversion_will_use(tmp_path):
@@ -2338,6 +2441,61 @@ def test_cli_chips_preflight_says_what_it_dropped_and_what_that_saved(tmp_path, 
     assert "Preflight read" in result.output
     assert "dropped 1" in result.output
     assert "acq-b [preflight]" in result.output
+    # Nothing was missing here, so the console says nothing about it: the line
+    # exists to distinguish two kinds of hole, not to report the absence of one.
+    assert "no readable product" not in result.output
+
+
+def test_cli_chips_preflight_names_the_passes_it_had_no_product_for(tmp_path, monkeypatch):
+    """`--calibrate` was not even asked for here: the drop is not a refusal but
+    the absence of anything to refuse, and the report keeps the two apart."""
+    pytest.importorskip("numpy")
+    from click.testing import CliRunner
+
+    from umbra_py import chips as chips_mod
+    from umbra_py import cli as cli_mod
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif")
+    products = _write_products(tmp_path)
+    hrefs = {
+        "http://example.com/a.json": ("acq-a", products["acq-a"]),
+        "http://example.com/gone.json": ("acq-gone", tmp_path / "never-written.nitf"),
+    }
+
+    def _get_json(url):
+        item_id, path = hrefs[url]
+        return {
+            "id": item_id,
+            "properties": {"datetime": "2024-02-08T12:00:00Z", "sar:product_type": "SICD"},
+            "assets": {"SICD": {"href": str(path)}},
+        }
+
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", _get_json)
+    real_write_chips = chips_mod.write_chips
+
+    def _spy(items, out_dir, **kwargs):
+        return real_write_chips(items, out_dir, preparer=_recording_preparer(cog, []), **kwargs)
+
+    monkeypatch.setattr(chips_mod, "write_chips", _spy)
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            *hrefs,
+            "--out",
+            str(tmp_path / "ds"),
+            "--asset",
+            "SICD",
+            "--chip-size",
+            "10",
+            "--preflight",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 of those had no readable product to ask" in result.output
+    assert "acq-gone [preflight]" in result.output
 
 
 def test_cli_chips_preflight_is_refused_on_a_raster_asset(tmp_path):
