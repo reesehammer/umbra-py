@@ -27,6 +27,7 @@ from .chips import (
     write_chips,
     write_manifest,
     write_manifest_parquet,
+    write_skipped_manifest,
 )
 from .constants import AI_PROVENANCE, ATTRIBUTION, DATA_LICENSE, PRODUCT_ASSETS
 from .context import llm_context
@@ -229,6 +230,7 @@ __all__ = [
     "write_chips",
     "write_manifest",
     "write_manifest_parquet",
+    "write_skipped_manifest",
     "ChipRecord",
     "ChipDataset",
     "NoiseSummary",

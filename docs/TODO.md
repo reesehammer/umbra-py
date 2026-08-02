@@ -370,12 +370,30 @@ carries into every manifest record and rolls up across the batch
   ahead of the pixel read (`_check_measurement_support`, called where
   `_check_speckle_window` already was), so a scene that cannot answer costs its
   header rather than a whole complex read. What is still open, and smaller:
-  - **The skips are in the summary, not in the manifest.** A loader reading only
-    `manifest.jsonl` sees a dataset with fewer scenes and no statement that
-    others were considered; the roll-up lives on `ChipDataset` and in `--json`.
-    A `.jsonl` row per skip would break the one-row-per-chip schema, so the
-    natural shape is a sidecar (`skipped.jsonl`) if someone needs it from the
-    files rather than from the run.
+  - ~~**The skips are in the summary, not in the manifest.**~~ **shipped** — a
+    run that left anything out writes a `skipped.jsonl` sidecar beside the
+    manifest (`write_skipped_manifest`, `write_chips(skipped_manifest=…)`,
+    `ChipDataset.skipped_path`, and `skipped_manifest` in the `--json` payload):
+    one JSON object per left-out pass, `SkippedAcquisition.to_dict()` verbatim,
+    so a training loader reading `out_dir` sees what the run reported to whoever
+    was watching it. The shape this entry predicted is the shape that shipped —
+    a sidecar rather than manifest rows, since a skipped acquisition has no chip
+    and would be a record with no path, bbox or transform in a one-row-per-chip
+    schema — plus two decisions it did not make: it is always `.jsonl` whatever
+    format the manifest is (the three manifest formats describe *tiles*), and it
+    is written only when there is something to record, so a clean run leaves
+    exactly the files it left before and the file's presence is itself the
+    statement. What is still open, and smaller:
+    - **The sidecar carries no footprint.** `SkippedAcquisition` records which
+      pass is missing but not *where* it was, so a loader can tell a series has
+      a hole but not whether the hole is over the site it cares about. The item
+      is in hand at both skip points, so a `bbox` field is a few lines; it waits
+      for a consumer, since the natural question ("which passes over my area?")
+      is one the search that produced the selection already answered.
+    - **Nothing reads it back.** There is no `read_skipped_manifest` to pair
+      with the writer, because the file is one JSON object per line and a
+      loader's own `json.loads` is the whole reader. Add one only if a
+      `ChipDataset` ever needs to be reconstituted from a directory.
   - ~~**The check is per acquisition, discovered one at a time.**~~ **shipped** —
     `umbra preflight` / `sicd_capabilities` / `preflight_items`
     (`src/umbra_py/preflight.py`) walk the NITF's own fixed-width file header to

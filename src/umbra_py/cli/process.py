@@ -160,6 +160,10 @@ def _echo_chip_skipped_report(dataset: ChipDataset) -> None:
     differs per product (one carries no ``Radiometric`` block at all, another
     carries scale factors but no noise level). Silent when nothing was skipped,
     which is every run that did not ask for the flag.
+
+    The last line names the sidecar those same acquisitions were written to,
+    because the console is the one place this report reaches somebody who is
+    watching and the file is the only place it reaches somebody who is not.
     """
     if not dataset.skipped:
         return
@@ -174,6 +178,8 @@ def _echo_chip_skipped_report(dataset: ChipDataset) -> None:
         click.echo(f"    {skip.item_id}{where}: {skip.reason}")
         if skip.hint:
             click.echo(f"      hint: {skip.hint}")
+    if dataset.skipped_path:
+        click.echo(f"    skipped -> {dataset.skipped_path}")
 
 
 def _echo_chip_preflight_report(dataset: ChipDataset) -> None:
