@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/chip-dataset.schema.json",
+  "title": "Chip dataset summary",
+  "description": "What a chipping run produced, as printed by `umbra chips --json` (`umbra_py.chips.ChipDataset.to_dict`): where the tiles and their manifest are, how the grid was cut, which acquisitions are in it, what the conversion did, and — where a run had them to report — the roll-ups that say which scenes a correction should not be trusted on, which passes were left out, and what asking the archive first cost. The per-chip records live in the manifest this names, one `chip-record.schema.json` each.",
+  "type": "object",
+  "required": [
+    "out_dir",
+    "manifest",
+    "chip_count",
+    "chip_size",
+    "stride",
+    "asset",
+    "units",
+    "format",
+    "item_count",
+    "items",
+    "license",
+    "attribution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "out_dir": {
+      "type": "string",
+      "description": "The directory the chips and manifest were written to."
+    },
+    "manifest": {
+      "type": ["string", "null"],
+      "description": "The manifest file, or null when the run collected its records without writing one. Its extension chooses the format: `.jsonl` (one record per line), `.geojson` (a `FeatureCollection` of chip footprints) or `.parquet` (a stac-geoparquet table). Every one of them carries the same `chip-record.schema.json` record."
+    },
+    "chip_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many tiles were written — the length of the manifest."
+    },
+    "chip_size": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The tile edge in pixels. Partial edge tiles are dropped, so every chip is exactly this square."
+    },
+    "stride": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The step between tile origins in pixels. Equal to `chip_size` for a non-overlapping grid, smaller for overlapping tiles."
+    },
+    "asset": {
+      "type": "string",
+      "description": "Which product was chipped.",
+      "examples": ["GEC", "CSI", "SICD"]
+    },
+    "units": {
+      "type": "string",
+      "description": "What a pixel value is on the scale the chips were written at.",
+      "examples": ["amplitude", "dB"]
+    },
+    "format": {
+      "type": "string",
+      "description": "The chip file format. `npy` is a bare float32 array, so its geo metadata lives only in the manifest.",
+      "examples": ["geotiff", "npy"]
+    },
+    "item_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many acquisitions contributed chips — the length of `items`. Lower than the selection when tiles were dropped by `--min-valid` or a pass was skipped."
+    },
+    "items": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The acquisition ids present in the manifest, sorted. The unit to split a train/test set on: two chips of one scene are not independent samples."
+    },
+    "license": {
+      "type": "string",
+      "description": "The source data's licence (design principle 4: attribution survives every transformation, including into a training set).",
+      "examples": ["CC-BY-4.0"]
+    },
+    "attribution": { "type": "string" },
+    "conversion": {
+      "$ref": "#/$defs/conversion",
+      "description": "Present only when a complex product was geocoded for this run (`--asset SICD`), so an ordinary raster run's payload does not carry the key at all."
+    },
+    "noise": {
+      "$ref": "#/$defs/noise",
+      "description": "Present only when some scene in the run had a noise floor subtracted."
+    },
+    "speckle": {
+      "$ref": "#/$defs/speckle",
+      "description": "Present only when some scene in the run was speckle-filtered."
+    },
+    "skipped_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many acquisitions were left out. Present only with `skipped`, and only when there was a hole: a run that included everything it was offered is unchanged by this key existing."
+    },
+    "skipped": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "chip-skipped.schema.json" },
+      "description": "The passes the run could not include, each in the product's own words. Present only when there was one, which is what makes its absence a statement rather than a default."
+    },
+    "skipped_manifest": {
+      "type": "string",
+      "description": "Where that hole was also written — the `skipped.jsonl` sidecar beside the manifest, so a loader reading the directory sees it too. Present only when the sidecar was actually written, since a run that kept its records without a manifest has the hole in this payload and nowhere on disk."
+    },
+    "preflight": {
+      "$ref": "#/$defs/preflight",
+      "description": "Present only when the run read the archive's headers before downloading anything (`--preflight`)."
+    }
+  },
+  "$defs": {
+    "conversion": {
+      "type": "object",
+      "title": "SICD conversion settings",
+      "description": "How each complex product was geocoded before it was chipped (`umbra_py.chips.SicdConversion`). Every field is passed straight to `umbra_py.convert.sicd_to_geocoded_cog` and means what it means there. These are the settings *requested*; what actually ran is read back per chip from the converted raster's own tags into `chip-record.schema.json`.",
+      "required": [
+        "dem",
+        "geoid",
+        "rtc",
+        "rtc_model",
+        "rtc_reference_deg",
+        "calibration",
+        "noise_subtract",
+        "noise_model",
+        "speckle_filter",
+        "speckle_window",
+        "resolution",
+        "resampling",
+        "gcp_grid",
+        "projection_type",
+        "bbox"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dem": {
+          "type": ["string", "null"],
+          "description": "The elevation model used for orthorectification, `auto` to fetch the window's tiles, or null for the flat-earth geocoding."
+        },
+        "geoid": { "type": ["string", "null"] },
+        "rtc": {
+          "type": "boolean",
+          "description": "Whether radiometric terrain flattening ran."
+        },
+        "rtc_model": {
+          "type": "string",
+          "description": "Which flattening model. Only `facet` measures layover.",
+          "examples": ["cosine", "area", "gamma", "facet"]
+        },
+        "rtc_reference_deg": { "type": ["number", "null"] },
+        "calibration": {
+          "type": ["string", "null"],
+          "description": "The radiometric calibration asked for, or null for relative amplitude. Composes with the flattening, both being power-domain factors, so `facet` + `gamma0` is a terrain-flattened gamma-nought product.",
+          "examples": ["sigma0", "beta0", "gamma0", "rcs"]
+        },
+        "noise_subtract": {
+          "type": "boolean",
+          "description": "Whether the receiver's own noise floor was taken off detected power before anything scaled it."
+        },
+        "noise_model": {
+          "type": "string",
+          "description": "Where that floor came from. `measured` reads the product's own `NoisePoly` and is the only one that can be refused for want of metadata; the two inferred models read the scene's dark tail instead.",
+          "examples": ["measured", "estimated", "estimated-range"]
+        },
+        "speckle_filter": {
+          "type": ["string", "null"],
+          "description": "The speckle filter applied in image space before geocoding, or null when none was.",
+          "examples": ["boxcar", "lee"]
+        },
+        "speckle_window": { "type": "integer", "minimum": 1 },
+        "resolution": {
+          "type": ["number", "null"],
+          "description": "The output pixel size in metres, or null to take it from the product."
+        },
+        "resampling": { "type": "string", "examples": ["bilinear", "nearest"] },
+        "gcp_grid": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "The edge of the control-point grid the geocoding is fitted through."
+        },
+        "projection_type": { "type": "string", "examples": ["HAE", "PLANE"] },
+        "bbox": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 4,
+              "maxItems": 4
+            },
+            { "type": "null" }
+          ],
+          "description": "The area of interest as `[min_lon, min_lat, max_lon, max_lat]`, or null for the whole collect. A clip chooses *which* ground is written rather than how finely it is sampled — the pixel size still comes from the whole input."
+        }
+      }
+    },
+    "noise": {
+      "type": "object",
+      "title": "Noise-subtraction roll-up",
+      "description": "What the noise subtraction did across the run (`umbra_py.chips.NoiseSummary`). The question it answers is not 'what was the floor' but **were any of these scenes ones the estimator should not have been used on** — the inferred floors work because a scene's dark surfaces are a different population from its backscatter, and where they are not, the subtraction takes real backscatter off. Counted per *acquisition*, since the numbers describe the scene a chip was cut from; counting chips would weight a wide scene more heavily for no reason.",
+      "required": [
+        "scenes",
+        "models",
+        "margin_scenes",
+        "low_margin_scenes",
+        "margin_warn_db",
+        "min_margin_db",
+        "max_floored_fraction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scenes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Acquisitions in the run whose chips carry a noise subtraction."
+        },
+        "models": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The distinct floors used, sorted — normally one, since a run converts every scene the same way. More than one means the dataset mixes measurements that must not be differenced against each other.",
+          "examples": [["estimated"]]
+        },
+        "margin_scenes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of `scenes` reported a margin at all. Only the inferred floors do: a measured floor assumes nothing about the scene, so it has nothing to report."
+        },
+        "low_margin_scenes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of `margin_scenes` sat below `margin_warn_db` — the scenes with too little dark ground to read. This is the number the roll-up exists for. Never a refusal: a uniformly bright scene is legitimate imagery, and the honest fix there is a measured floor."
+        },
+        "margin_warn_db": {
+          "type": "number",
+          "description": "The advisory threshold applied (`umbra_py.convert.NOISE_MARGIN_WARN_DB`), so a consumer can re-apply its own without knowing the constant."
+        },
+        "min_margin_db": {
+          "type": ["number", "null"],
+          "description": "The narrowest margin in the batch — the worst scene. Null when no scene reported one."
+        },
+        "max_floored_fraction": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest fraction of a scene the floor drove to the sensor's sensitivity limit. Reported by both models."
+        }
+      }
+    },
+    "speckle": {
+      "type": "object",
+      "title": "Speckle-filtering roll-up",
+      "description": "What the speckle filter did across the run (`umbra_py.chips.SpeckleSummary`) — the same shape as the noise roll-up, for the same reason. The question is **did the window buy anything, and on how many of these scenes did it not**: a filter's job is to raise the equivalent number of looks, and the honest report of that is the ratio, since both levels read low on a textured scene. Counted per acquisition. Never a refusal — a small gain on a textured scene is the outcome rather than a fault.",
+      "required": [
+        "scenes",
+        "filters",
+        "windows",
+        "gain_scenes",
+        "low_gain_scenes",
+        "gain_warn",
+        "min_gain",
+        "median_gain"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scenes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Acquisitions in the run whose chips were speckle-filtered."
+        },
+        "filters": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The distinct filters used, sorted — normally one.",
+          "examples": [["lee"]]
+        },
+        "windows": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "The distinct window edges used, sorted. With `filters` this is what says the dataset's resolution as opposed to its pixel size.",
+          "examples": [[5]]
+        },
+        "gain_scenes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of `scenes` reported an equivalent number of looks either side of the filter, so a gain could be computed at all. A scene smaller than one measuring block, or with too little finite ground, reports neither."
+        },
+        "low_gain_scenes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of `gain_scenes` came out below `gain_warn` — where the resolution the window spent bought little. This is the number the roll-up exists for."
+        },
+        "gain_warn": {
+          "type": "number",
+          "description": "The advisory threshold applied (`umbra_py.convert.SPECKLE_ENL_GAIN_WARN`)."
+        },
+        "min_gain": {
+          "type": ["number", "null"],
+          "description": "The worst `enl_after / enl_before` in the batch. Null when no scene reported a pair."
+        },
+        "median_gain": {
+          "type": ["number", "null"],
+          "description": "The typical one. Null on the same condition."
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "title": "Preflight roll-up",
+      "description": "What asking the archive first cost this run, and what it saved (`umbra_py.chips.PreflightSummary`). The per-acquisition verdicts behind it are `preflight.schema.json`; this is the batch's summary of them.",
+      "required": [
+        "checked",
+        "supported",
+        "skipped",
+        "unreadable",
+        "missing",
+        "bytes_read",
+        "product_bytes_skipped"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "checked": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many acquisitions' metadata was read over the wire."
+        },
+        "supported": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many cleared the run's own conversion settings and went on to be downloaded."
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many were dropped before a download — the refusals plus `missing`. They appear in the payload's `skipped` array with `stage` = `preflight`."
+        },
+        "unreadable": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many reads failed on the *wire*. Those passes are **kept**: a transport failure is not a product saying it cannot answer, and dropping a scene over a blip would be exactly the silent hole this design avoids."
+        },
+        "missing": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many reads failed on the *product*: nothing at the href, or something at it that is not a readable SICD. Final, so those passes are dropped and counted in `skipped`. Counted apart from `unreadable` because only one of the two is worth asking about again."
+        },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "What the whole check cost: product headers and SICD XML, tens of kilobytes each."
+        },
+        "product_bytes_skipped": {
+          "type": ["integer", "null"],
+          "description": "The download the check removed — the dropped products, summed, as their own sources declared them. Deliberately narrow: a supported pass is downloaded anyway, so its header read is pure overhead and only the dropped passes are a saving. Null when no dropped source stated a size."
+        }
+      }
+    }
+  }
+}

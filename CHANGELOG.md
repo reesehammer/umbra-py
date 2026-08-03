@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Publish the chip dataset as a contract, and check it (`docs/schemas/chip-dataset`,
+  `chip-record`, `chip-skipped`).** The previous entry closed the *measurement*
+  documents and named the surface to do next: `umbra chips`, on the argument that
+  a training loader is the consumer most likely to parse a payload it never
+  printed. That is literally true of a chip run — the file a loader opens is
+  `manifest.jsonl`, written by one process and read by another, quite possibly
+  months later — and it had no contract at all.
+
+  Three schemas, because a chip run has three consumers reading three different
+  things. `chip-dataset.schema.json` is what `umbra chips --json` prints
+  (`ChipDataset.to_dict`): the grid, the acquisitions in it, the conversion
+  settings, and the roll-ups. `chip-record.schema.json` is one training tile
+  (`ChipRecord.to_dict`) — where it is, what the acquisition was, how usable the
+  tile is, and what the processing chain did to its pixels. The record rather
+  than the manifest *file* is the contract, because all three manifest formats
+  carry the same one: a `.geojson` feature's `properties` and a `.parquet` row
+  are the `.jsonl` line, and the suite validates the first two against the same
+  schema to keep that true. `chip-skipped.schema.json` is one left-out pass,
+  which is both a line of the `skipped.jsonl` sidecar and an entry of the
+  summary's `skipped` array — so the summary `$ref`s it rather than restating
+  it, the rule `render-manifest` already follows for `stack-stats`.
+
+  What the contract had to get right is the *conditional* half, since a chip
+  payload is mostly optional blocks: `conversion` appears only when a complex
+  product was geocoded, `noise` only when a floor came off, `speckle` only when a
+  window ran, `skipped` / `skipped_count` / `skipped_manifest` only when a pass
+  was left out, and `preflight` only when the archive was asked first. That is
+  the design — a plain GEC run's payload is unchanged by any of those features
+  existing, so the *absence* of `skipped` states "every acquisition offered was
+  chipped" rather than defaulting — and it is now stated in the schema rather
+  than implied by a docstring. Both ends are pinned against real runs: a plain
+  raster run that carries none of the five, and a converted one that carries all
+  of them.
+
+  The nullable half is in the contract for the same reason it was for
+  `stack-stats`: `noise_floor_margin_db` is null for a *measured* floor, which
+  assumes nothing about the scene and so has nothing to report;
+  `speckle_looks` is null for `boxcar`, which needs no such parameter; the
+  per-scene diagnostics repeat across every chip of one acquisition by design,
+  because they describe the scene the tile was cut from. A consumer that read
+  those as per-chip numbers, or a null as a zero, would draw the wrong
+  conclusion from a correct file.
+
+  `tests/test_schemas.py` validates the *emitted* document rather than the
+  Python dict — the conversion's `bbox` is a tuple in the dataclass and an array
+  on stdout, and it is the array a schema describes, so the round-trip is part
+  of the check. Every schema stays strict, so a field added to a chip record and
+  not to its contract fails the build rather than somebody's data loader.
+  `umbra chips --json`'s `--help` names both schemas it produces.
 - **Publish the measurement documents as contracts, and check them
   (`docs/schemas/stack-stats`, `stack-provenance`, `preflight`).** "Agents are
   users; users are agents" is the design principle the JSON surfaces were built

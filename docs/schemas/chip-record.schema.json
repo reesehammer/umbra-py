@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/chip-record.schema.json",
+  "title": "Chip manifest record",
+  "description": "One training tile, as written to a chip run's manifest (`umbra_py.chips.ChipRecord.to_dict`). It is one line of a `.jsonl` manifest, the `properties` of a feature in a `.geojson` one, and one row of a `.parquet` one — the same record in all three, which is why the contract is the record rather than the file. Says where the chip is, what the acquisition was, how usable the tile is, and what the processing chain did to its pixels.",
+  "type": "object",
+  "required": [
+    "path",
+    "item_id",
+    "asset",
+    "row",
+    "col",
+    "window",
+    "crs",
+    "transform",
+    "bbox",
+    "units",
+    "valid_fraction",
+    "datetime",
+    "place",
+    "platform",
+    "product_type",
+    "polarizations",
+    "incidence_angle_deg",
+    "resolution_range_m",
+    "resolution_azimuth_m",
+    "calibration",
+    "noise_subtraction",
+    "noise_floored_fraction",
+    "noise_floor_margin_db",
+    "speckle_filter",
+    "speckle_window",
+    "speckle_enl_before",
+    "speckle_enl_after",
+    "speckle_looks",
+    "rtc_model",
+    "license",
+    "attribution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "The chip file, relative to the run's output directory.",
+      "examples": ["test-acq_GEC_r00_c01.tif"]
+    },
+    "item_id": {
+      "type": "string",
+      "description": "The acquisition this tile was cut from. Every chip of one scene repeats it, which is what makes a train/test split by scene possible."
+    },
+    "asset": {
+      "type": "string",
+      "description": "The product the pixels came from. `SICD` means the complex product was geocoded through `umbra_py.convert.sicd_to_geocoded_cog` first and the identical window loop then read the result.",
+      "examples": ["GEC", "CSI", "SICD"]
+    },
+    "row": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The tile's row in the scene's chip grid."
+    },
+    "col": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The tile's column in the scene's chip grid."
+    },
+    "window": {
+      "type": "array",
+      "description": "`[col_off, row_off, width, height]`, in the source raster's own pixels.",
+      "items": { "type": "integer" },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "crs": {
+      "type": ["string", "null"],
+      "description": "The chip's coordinate reference system, or null for a source that stated none.",
+      "examples": ["EPSG:32633"]
+    },
+    "transform": {
+      "type": "array",
+      "description": "This chip's own affine transform, as the 6-tuple `[a, b, c, d, e, f]` — so a `.npy` chip, which carries no geo metadata of its own, is still placeable from the manifest alone.",
+      "items": { "type": "number" },
+      "minItems": 6,
+      "maxItems": 6
+    },
+    "bbox": {
+      "type": "array",
+      "description": "The tile's geographic footprint in EPSG:4326: `[min_lon, min_lat, max_lon, max_lat]`.",
+      "items": { "type": "number" },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "units": {
+      "type": "string",
+      "description": "What a pixel value is on the scale the run wrote. `dB` is the log-amplitude scale (`--db`), where a backscatter ratio becomes a subtraction.",
+      "examples": ["amplitude", "dB"]
+    },
+    "valid_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "The fraction of the tile's pixels that are finite and positive. A run's `--min-valid` drops the tiles below it, so this is what survived that filter rather than an unfiltered statistic."
+    },
+    "datetime": {
+      "type": ["string", "null"],
+      "description": "The acquisition's timestamp, or null when the source item stated none."
+    },
+    "place": {
+      "type": ["string", "null"],
+      "description": "The baked place label for the acquisition, when a local index carried one (`umbra index bake`). Null otherwise — no lookup happens per chip."
+    },
+    "platform": { "type": ["string", "null"], "examples": ["Umbra-08"] },
+    "product_type": { "type": ["string", "null"], "examples": ["GEC", "SICD"] },
+    "polarizations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The acquisition's polarizations. Empty when the source item stated none.",
+      "examples": [["VV"]]
+    },
+    "incidence_angle_deg": { "type": ["number", "null"] },
+    "resolution_range_m": { "type": ["number", "null"] },
+    "resolution_azimuth_m": { "type": ["number", "null"] },
+    "calibration": {
+      "type": ["string", "null"],
+      "description": "The radiometric calibration applied to the scene, read back from the converted raster's own `UMBRA_CALIBRATION` tag rather than from the request — so it reports the processing that ran. Null on a chip cut straight from an amplitude raster, where the step needs a complex product and did not run.",
+      "examples": ["sigma0", "beta0", "gamma0", "rcs"]
+    },
+    "noise_subtraction": {
+      "type": ["string", "null"],
+      "description": "Where the subtracted noise floor came from, or null when none was subtracted. `absolute` is the product's own stated floor; `estimated` is one constant inferred from the scene's dark tail; `estimated-range` is that read per range line and fitted against range, so it follows the swath. The three are different measurements and are named apart, which is what lets `to_stack` refuse to difference one against another.",
+      "examples": ["absolute", "estimated", "estimated-range"]
+    },
+    "noise_floored_fraction": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "How much of the *scene* the floor drove to the sensor's sensitivity limit. A diagnostic of the acquisition, so every chip of one scene carries the same value; null where no floor came off."
+    },
+    "noise_floor_margin_db": {
+      "type": ["number", "null"],
+      "description": "How far the scene's own median power sat above an *inferred* floor — the estimator's assumption (that dark surfaces are a different population from backscatter) turned into a number a loader can filter on. Null for a measured floor, which assumes nothing about the scene and so has nothing to report."
+    },
+    "speckle_filter": {
+      "type": ["string", "null"],
+      "description": "The speckle filter averaged over this chip, or null when none was. Filled in on either path: on `GEC`/`CSI` the tiles are averaged (with a halo, so a tile is bit-for-bit that region of the whole-scene filter), on `SICD` the scene is, in image space before geocoding.",
+      "examples": ["boxcar", "lee"]
+    },
+    "speckle_window": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "The filter window's edge in pixels. With `speckle_filter` it is what says the chip's *resolution* as opposed to its pixel size: an N-filtered chip resolves ground N pixels across, which is what a model trained on it can learn to see."
+    },
+    "speckle_enl_before": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "The scene's equivalent number of looks before the filter. A per-acquisition diagnostic, so every chip of one scene repeats it; it reads low on a textured scene, so it is a floor on the looks present rather than a claim about them."
+    },
+    "speckle_enl_after": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "The same measured after the filter. The *ratio* of the pair is what says whether the resolution the window spent bought anything."
+    },
+    "speckle_looks": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "The looks `lee` read off the scene for the speckle it was separating from structure, clamped at single-look. Null for `boxcar`, which needs no such parameter."
+    },
+    "rtc_model": {
+      "type": ["string", "null"],
+      "description": "The radiometric terrain flattening applied, or null when none was. `facet` is the only one that measures layover, where several ground facets image into one radar cell.",
+      "examples": ["cosine", "area", "gamma", "facet"]
+    },
+    "license": {
+      "type": "string",
+      "description": "The source data's licence, carried on every record (design principle 4: attribution survives every transformation).",
+      "examples": ["CC-BY-4.0"]
+    },
+    "attribution": { "type": "string" }
+  }
+}
