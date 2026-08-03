@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/task-matches.schema.json",
+  "title": "Ranked task-name matches",
+  "description": "Umbra task/site names ranked by how well they match a plain-language query, emitted by `umbra semantic search --json`. The semantic answer to a site you can describe but cannot name: the query is embedded and scored against the stored task-name embeddings, and what comes back is a list of names that *exist in the catalog* — a model contributes the ranking, never the name. Empty `matches` means nothing cleared the score threshold, which is an answer rather than a failure.",
+  "type": "object",
+  "required": ["query", "matches"],
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The plain-language query, echoed so a stored result says what it was searching for.",
+      "examples": ["a copper mine in the desert"]
+    },
+    "matches": {
+      "type": "array",
+      "description": "The candidates that cleared the threshold, closest first. `matches[0].task` is what `umbra search --area` would be run with.",
+      "items": { "$ref": "#/$defs/taskMatch" }
+    }
+  },
+  "$defs": {
+    "taskMatch": {
+      "type": "object",
+      "required": ["task", "score"],
+      "additionalProperties": false,
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "The Umbra task/site name, verbatim from the catalog — the argument `umbra search --area` takes."
+        },
+        "score": {
+          "type": "number",
+          "description": "Cosine similarity to the query, rounded to six places: 1.0 identical, 0.0 unrelated, higher is closer. A measurement a test can recompute, not a model's opinion of its own answer."
+        }
+      }
+    }
+  }
+}

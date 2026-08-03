@@ -18,6 +18,12 @@ with a `CHANGELOG.md` entry.
 | [`chip-dataset.schema.json`](chip-dataset.schema.json) | What a chipping run produced: the grid, the acquisitions in it, the conversion, and the noise / speckle / skipped / preflight roll-ups. | `umbra chips --json` (`umbra_py.chips.ChipDataset.to_dict`). |
 | [`chip-record.schema.json`](chip-record.schema.json) | One training tile: where it is, what the acquisition was, and what the processing did to its pixels. | Every record of a chip run's manifest — one `.jsonl` line, one `.geojson` feature's `properties`, one `.parquet` row. |
 | [`chip-skipped.schema.json`](chip-skipped.schema.json) | One acquisition a chip run could not include, in the product's own words. | Each line of the `skipped.jsonl` sidecar, and each entry of the dataset summary's `skipped` array. |
+| [`item-context.schema.json`](item-context.schema.json) | One acquisition as a model reads it: metadata, the SAR literacy a reader needs spelled out, and the download URLs. | `umbra_py.UmbraItem.to_llm_context()`; `umbra info --json`; each entry of a watch delta's `new_items`; the `search_catalog` / `get_item` agent tools. |
+| [`scene-description.schema.json`](scene-description.schema.json) | A vision model's reading of one rendered scene, with the picture it was shown and the provenance it cannot overwrite. | `umbra describe --json` (`umbra_py.describe.SceneDescription.to_dict`); the `describe_scene` agent tool. |
+| [`search-plan.schema.json`](search-plan.schema.json) | The deterministic search a plain-language question resolved to, auditable before it is run. | `umbra ask --json` (`umbra_py.planner.SearchPlan.to_dict`); the `plan_search` agent tool. |
+| [`watch-delta.schema.json`](watch-delta.schema.json) | What one run of a standing watch found new since the last run. | `umbra watch --json` (`umbra_py.watch.WatchResult.to_dict`). |
+| [`task-matches.schema.json`](task-matches.schema.json) | Umbra task/site names ranked against a plain-language query. | `umbra semantic search --json`. |
+| [`scene-matches.schema.json`](scene-matches.schema.json) | Acquisitions ranked by visual similarity to a scene or to a text query. | `umbra embed similar --json` / `umbra embed search --json`. |
 
 ## Structured success output
 
@@ -105,6 +111,40 @@ was subtracted), `speckle` (a filter ran), `skipped` / `skipped_count` /
 first). That is deliberate, and it is in the contract: a plain GEC run's payload
 is unchanged by any of those features existing, so the *absence* of `skipped` is
 the statement "every acquisition offered was chipped" rather than a default.
+
+## The agent-facing documents
+
+Five of the schemas describe surfaces whose reader is a model or a scheduler
+rather than a person, which is what makes their shape a contract rather than a
+formatting choice:
+
+| Document | Read by | Emitted by |
+| --- | --- | --- |
+| [`item-context`](item-context.schema.json) | a model deciding which product to ask for | `umbra info --json`, the agent tools, and every `new_items` entry of a watch delta |
+| [`scene-description`](scene-description.schema.json) | whoever quotes a model's reading of a scene | `umbra describe --json` |
+| [`search-plan`](search-plan.schema.json) | a person or an agent auditing a plan before running it | `umbra ask --json` |
+| [`watch-delta`](watch-delta.schema.json) | a cron job or an agent acting on new acquisitions | `umbra watch --json` |
+| [`task-matches`](task-matches.schema.json) / [`scene-matches`](scene-matches.schema.json) | whoever turns a ranked list into a search | `umbra semantic search --json` / `umbra embed similar\|search --json` |
+
+Two rules run through all five, and both are in the contracts rather than only
+in the docstrings. **The deterministic fields are marked as deterministic**: a
+scene description's `attribution` and `provenance` are stamped on by the
+library and cannot be set by a reply, a search plan's `rationale` is the one
+model-authored string and never becomes a filter, and a match's `score` is a
+number a test can recompute. And **the licence travels**: `item-context`,
+`watch-delta` and `scene-description` each carry the CC-BY line, because it has
+to survive into anything derived from the data — including model-generated text
+about it (design principle 4).
+
+`watch-delta` `$ref`s `item-context` for its `new_items` rather than restating
+the card, which is the same rule `render-manifest` follows for `stack-stats`
+and `chip-dataset` for `chip-skipped`: one question, one schema, wherever it is
+emitted from.
+
+`umbra download`'s URL argument is the *source STAC item*, whose contract is
+STAC's own rather than this project's — so nothing here describes it. The
+context card is a different document: a compact, explained reading of that item
+which this project does own.
 
 ## They are checked, not just described
 

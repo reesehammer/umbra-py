@@ -860,15 +860,18 @@ blocker:
 
 - **Surfaced in:** the schema-contract PR (`STRATEGY.md` §8, design principle 5).
 - **Code:** `docs/schemas/` (`stack-stats`, `stack-provenance`, `preflight`,
-  `chip-dataset`, `chip-record`, `chip-skipped`, and the `$ref`s from
-  `render-manifest` and `chip-dataset`), `tests/test_schemas.py`, the
-  `jsonschema` entry in `[dev]`, the `--help` pointers on `umbra stack --stats /
-  --provenance`, `umbra preflight --json` and `umbra chips --json`.
+  `chip-dataset`, `chip-record`, `chip-skipped`, `item-context`,
+  `scene-description`, `search-plan`, `watch-delta`, `task-matches`,
+  `scene-matches`, and the `$ref`s from `render-manifest`, `chip-dataset` and
+  `watch-delta`), `tests/test_schemas.py`, the `jsonschema` entry in `[dev]`, the
+  `--help` pointers on `umbra stack --stats / --provenance`, `umbra preflight
+  --json`, `umbra chips --json`, `umbra info / describe / ask / watch --json` and
+  `umbra semantic search / embed similar / embed search --json`.
 
-Ten schemas now, each strict and each validated against a payload from the
+Sixteen schemas now, each strict and each validated against a payload from the
 surface that emits it, plus the meta checks (valid draft 2020-12, `$id` matches
-filename, the README table names every file and no file it does not). Follow-ons,
-none a blocker:
+filename, the README table names every file and no file it does not). Every
+`--json` shape the CLI emits is published. Follow-ons, none a blocker:
 
 - ~~**`umbra chips --json` has no schema.**~~ **shipped** — `chip-dataset`,
   `chip-record` and `chip-skipped`, three documents because a chip run has three
@@ -887,13 +890,35 @@ none a blocker:
     stac-geoparquet's rather than this project's — but the mapping from
     `ChipRecord` fields to Item `properties` is this project's, and it is
     described only by `_chip_to_stac_item`.
-- **Several smaller `--json` surfaces still have no schema.** `umbra describe
-  --json` (`SceneDescription`), `umbra ask --json` (`SearchPlan`), `umbra watch
-  --json` (the delta) and the ranked-match lists of `umbra semantic` / `embed`.
-  Each is the same three moves as the ones that shipped: write the contract, add
-  the README row, validate a real payload. They were left out to keep one PR one
-  claim, not because they are different work. (`umbra info --json` needs none: it
-  emits the source STAC item, whose contract is STAC's.)
+- ~~**Several smaller `--json` surfaces still have no schema.**~~ **shipped** —
+  `item-context`, `scene-description`, `search-plan`, `watch-delta`,
+  `task-matches` and `scene-matches`. Six rather than the four this entry listed,
+  because the entry's own parenthetical was wrong: `umbra info --json` does *not*
+  emit the source STAC item, it emits `UmbraItem.to_llm_context()` — an explained
+  reading of one, and the single most-read document in the library, since the
+  agent tools return it and a watch delta carries one per new acquisition. So it
+  is this project's contract rather than STAC's, and `watch-delta` `$ref`s it
+  instead of restating the card. What is still open, and smaller:
+  - **A `SceneImage` records the request's `max_size`, not the render's own
+    ceiling.** A rendered quicklook is capped by what the COG's overviews can
+    supply, so `width` can come in under `max_size` for a reason that has nothing
+    to do with a baked preview being small — and a consumer reading the pair as
+    "rendered means full size" would mis-attribute it. Both numbers are in the
+    document, so this is a caveat on interpreting them rather than a missing
+    field; recording *why* they differ would mean the renderer reporting what it
+    was capped by.
+  - **The watch delta's `query` is open by construction.** Unset filters are
+    dropped rather than emitted as nulls, so the object carries whichever of the
+    search's parameters the run actually used and the schema cannot close it
+    without freezing the search signature into a contract. Naming the known keys
+    as optional properties while staying open would document them without
+    constraining them — worth doing if a consumer starts branching on the echo
+    rather than on `new_items`.
+  - **`umbra ask --json` emits a plan and then, with `--run`, a raw STAC item per
+    line.** Only the plan is schema'd; the item lines are the source documents,
+    whose contract is STAC's. That the stream is a plan object followed by
+    newline-delimited items is a shape nothing describes, because it is a
+    concatenation rather than a document. Same for `umbra semantic search --run`.
 - **`umbra serve` has an OpenAPI document and the schemas do not appear in it.**
   FastAPI generates `/openapi.json` from the route annotations, so the artifact
   routes describe their *response* as a bare object while `docs/schemas/`

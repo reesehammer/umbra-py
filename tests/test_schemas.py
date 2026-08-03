@@ -685,3 +685,263 @@ def test_the_chip_schemas_reject_a_key_and_a_type_that_drifted(tmp_path):
     record = _emitted(dataset.records[0].to_dict())
     record["valid_fraction"] = "1.0"  # the drift a key-set comparison cannot see
     assert list(_validator("chip-record.schema.json").iter_errors(record))
+
+
+# --- The agent-facing surfaces (`umbra info` / `describe` / `ask` / `watch`) ---
+#
+# Each of these is read by a model or a scheduler rather than by a person, which
+# is what makes the shape a contract rather than a formatting choice. The
+# acquisition context card is the one they share: `umbra info --json` emits it
+# alone, and a watch delta carries one per new acquisition, so `watch-delta`
+# `$ref`s it rather than restating it.
+
+
+def test_item_context_card_validates(sample_item_dict):
+    from umbra_py.models import UmbraItem
+
+    item = UmbraItem.from_dict(sample_item_dict, href="https://example.com/item.json")
+    _check("item-context.schema.json", item.to_llm_context())
+
+
+def test_item_context_card_validates_from_the_cli(monkeypatch, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
+    result = CliRunner().invoke(cli_mod.cli, ["info", "https://example.com/item.json", "--json"])
+
+    assert result.exit_code == 0, result.output
+    _check("item-context.schema.json", json.loads(result.stdout))
+
+
+def test_item_context_card_validates_with_nothing_populated():
+    # An item built from a bare dict: no geometry, no properties, no assets, no
+    # href -- every nullable field of the card at once, which a catalog item
+    # never exercises.
+    from umbra_py.models import UmbraItem
+
+    card = UmbraItem.from_dict({"id": "bare"}).to_llm_context()
+
+    assert card["bbox"] is None and card["products"] == []
+    _check("item-context.schema.json", card)
+
+
+def test_scene_description_validates(monkeypatch, sample_item_dict):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    from .test_describe import PNG, describe_mod
+
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: sample_item_dict)
+    reply = json.dumps(
+        {
+            "summary": "A bright industrial site surrounded by dark fields.",
+            "observed_features": ["bright rectangular structures"],
+            "confidence": "medium",
+            "caveats": ["dark fields could be low-backscatter crops or bare soil"],
+        }
+    )
+    monkeypatch.setattr(describe_mod, "default_describer", lambda **k: lambda _m: reply)
+    monkeypatch.setattr(describe_mod, "render_quicklook_png", lambda *a, **k: PNG)
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["describe", "https://example.com/item.json", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["image"]["source"] == "rendered"
+    _check("scene-description.schema.json", payload)
+
+
+def test_scene_description_validates_when_the_model_hedged_nothing():
+    # `confidence` null and both lists empty -- the reply a terse model gives,
+    # and the half of the schema the CLI fixture above never reaches.
+    from umbra_py.describe import parse_description
+
+    description = parse_description({"summary": "A quiet estuary."})
+
+    assert description.confidence is None and description.image is None
+    _check("scene-description.schema.json", description.to_dict())
+
+
+def test_search_plan_validates(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import planner as planner_mod
+
+    reply = json.dumps(
+        {
+            "area": "Centerfield, Utah",
+            "fuzzy": True,
+            "start": "2024-03-01",
+            "end": "2024-05-31",
+            "product_types": ["GEC"],
+            "polarizations": ["VV"],
+            "min_incidence": 20,
+            "max_incidence": 45,
+            "max_resolution": 0.5,
+            "limit": 3,
+            "rationale": "named site over spring",
+        }
+    )
+    monkeypatch.setattr(planner_mod, "default_planner", lambda **k: lambda _m: reply)
+
+    result = CliRunner().invoke(cli_mod.cli, ["ask", "what changed at centerfield?", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["command"].startswith("umbra search")
+    _check("search-plan.schema.json", payload)
+
+
+def test_search_plan_validates_with_a_selected_area_of_interest(tmp_path, monkeypatch):
+    # The `aoi` block: the geometry half of the determinism boundary, where the
+    # model chose a caller-supplied polygon by name rather than authoring one.
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import planner as planner_mod
+
+    aoi = tmp_path / "delta.geojson"
+    aoi.write_text(
+        json.dumps(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        planner_mod,
+        "default_planner",
+        lambda **k: lambda _m: json.dumps({"aoi": "delta", "rationale": "the named area"}),
+    )
+
+    result = CliRunner().invoke(
+        cli_mod.cli, ["ask", "scenes over the delta", "--aoi", f"delta={aoi}", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["aoi"]["name"] == "delta" and payload["aoi"]["bbox"] == [0.0, 0.0, 1.0, 1.0]
+    _check("search-plan.schema.json", payload)
+
+
+def test_watch_delta_validates(tmp_path):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    from .test_watch import _seed_index
+
+    db = tmp_path / "catalog.db"
+    _seed_index(db)
+    args = [
+        "watch",
+        "--local",
+        "--index-db",
+        str(db),
+        "--state-db",
+        str(db),
+        "--area",
+        "SiteA",
+        "--json",
+    ]
+
+    first = CliRunner().invoke(cli_mod.cli, args)
+    assert first.exit_code == 0, first.output
+    payload = json.loads(first.stdout)
+    assert payload["first_run"] is True and payload["new_count"] == 2
+    _check("watch-delta.schema.json", payload)
+    # Each new acquisition is a full context card, so the `$ref` has to hold.
+    for card in payload["new_items"]:
+        _check("item-context.schema.json", card)
+
+    # And the quiet case a scheduler sees on every run after the first.
+    second = json.loads(CliRunner().invoke(cli_mod.cli, args).stdout)
+    assert second["new_items"] == [] and second["first_run"] is False
+    _check("watch-delta.schema.json", second)
+
+
+# --- The ranked-match lists (`umbra semantic` / `umbra embed`) ------------------
+
+
+def test_task_matches_validate(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import semantic as semantic_mod
+
+    from .test_semantic import _TASKS, _catalog_with_tasks, concept_embedder
+
+    monkeypatch.setattr(semantic_mod, "default_embedder", lambda *, model=None: concept_embedder)
+    catalog = _catalog_with_tasks(tmp_path, _TASKS)
+    sem_db = tmp_path / "sem.db"
+    runner = CliRunner()
+    built = runner.invoke(
+        cli_mod.cli, ["semantic", "build", "--db", str(catalog), "--semantic-db", str(sem_db)]
+    )
+    assert built.exit_code == 0, built.output
+
+    result = runner.invoke(
+        cli_mod.cli,
+        ["semantic", "search", "grain storage nd", "--semantic-db", str(sem_db), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["matches"]
+    _check("task-matches.schema.json", payload)
+
+
+def test_scene_matches_validate(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import embed as embed_mod
+
+    from .test_embed import _build, _item, image_embedder, scene_renderer, text_embedder
+
+    monkeypatch.setattr(embed_mod, "default_image_embedder", lambda **k: image_embedder)
+    monkeypatch.setattr(embed_mod, "default_text_embedder", lambda **k: text_embedder)
+    monkeypatch.setattr(embed_mod, "_render_quicklook_asset", lambda it, **k: scene_renderer(it))
+
+    edb = tmp_path / "e.db"
+    _build(edb)
+
+    # A query acquisition ...
+    query = _item("flood", 9)
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda _url: query.raw)
+    similar = CliRunner().invoke(
+        cli_mod.cli, ["embed", "similar", query.href, "--embed-db", str(edb), "--json"]
+    )
+    assert similar.exit_code == 0, similar.output
+    payload = json.loads(similar.stdout)
+    assert payload["query"] == "flood-9" and payload["matches"]
+    _check("scene-matches.schema.json", payload)
+
+    # ... and a text query, which differs only in what `query` holds.
+    searched = CliRunner().invoke(
+        cli_mod.cli, ["embed", "search", "a flooded field", "--embed-db", str(edb), "--json"]
+    )
+    assert searched.exit_code == 0, searched.output
+    _check("scene-matches.schema.json", json.loads(searched.stdout))
+
+
+def test_the_agent_surface_schemas_reject_drift(sample_item_dict):
+    """Strictness on the two shapes an agent is most likely to read: a key added
+    to a context card, and a confidence level that is not one of the three."""
+    from umbra_py.describe import parse_description
+    from umbra_py.models import UmbraItem
+
+    card = UmbraItem.from_dict(sample_item_dict).to_llm_context()
+    card["cloud_cover"] = 0  # a plausible-looking field SAR does not have
+    assert list(_validator("item-context.schema.json").iter_errors(card))
+
+    description = parse_description({"summary": "A quiet estuary."}).to_dict()
+    description["confidence"] = "pretty sure"
+    assert list(_validator("scene-description.schema.json").iter_errors(description))

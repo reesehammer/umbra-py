@@ -7,6 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Publish the surfaces an agent reads as contracts, and check them
+  (`docs/schemas/item-context`, `scene-description`, `search-plan`,
+  `watch-delta`, `task-matches`, `scene-matches`).** The two previous entries
+  covered the documents that carry a *measurement* and the ones that describe a
+  *dataset*. What was left were the surfaces read by a model or a scheduler
+  rather than by a person — the ones design principle 5 ("agents are users") is
+  actually about — and none of them had a contract. Six schemas closes that set:
+  every `--json` shape this project emits is now published, except the raw STAC
+  item behind `umbra info`'s argument, whose contract is STAC's own.
+
+  `item-context.schema.json` is the one they share, and the reason it went
+  first: `UmbraItem.to_llm_context()` is the single most-read document in the
+  library — `umbra info --json` prints one, the `search_catalog` / `get_item`
+  agent tools return them, and a watch delta carries one per new acquisition —
+  and it is not the source STAC item but a compact, *explained* reading of one,
+  which makes it this project's contract rather than STAC's. So `watch-delta`
+  `$ref`s it for its `new_items` instead of restating the card, the rule
+  `render-manifest` already follows for `stack-stats` and `chip-dataset` for
+  `chip-skipped`: one question, one schema, wherever it is emitted from.
+
+  What these documents had to get right is different from what the measurement
+  ones did, and it is the same thing in all five of the rest: **which fields a
+  model wrote**. A scene description's `summary`, `observed_features`,
+  `confidence` and `caveats` are model-authored; its `attribution` and
+  `provenance` are stamped on by the library and *cannot* be set by a reply,
+  which is the entire reason the document exists rather than the prose the model
+  returned. A search plan's `rationale` is the one model-authored string in it
+  and never becomes a filter, while its `aoi` names a polygon the caller
+  supplied — the geometry half of the determinism boundary, where a
+  hallucination can pick the wrong area but cannot move one. A match's `score`
+  is a number a test can recompute. That distinction was true before and
+  documented only in docstrings; it is now in the contracts a consumer parses.
+
+  The nullable and conditional halves are in the contract for the same reason
+  they were for `stack-stats`, because they are what a consumer gets wrong: a
+  `confidence` of null (the model hedged nothing, or hedged in a word this does
+  not recognise — an off-menu level is dropped rather than passed through), a
+  `SceneImage` whose `width` disagrees with the `max_size` that was asked for
+  (a baked preview is 128–256 px where a render defaults to 1024, and that
+  disagreement is *evidence* rather than a detail), a watch delta's `query`
+  object being open by construction because unset filters are dropped rather
+  than emitted as nulls, and an empty `matches` list being an answer — nothing
+  cleared the threshold — rather than a failure.
+
+  Each is validated against a payload from the surface that emits it, through
+  the CLI where there is one, with the model step injected so no test calls one.
+  Every schema stays strict, so a key added to a context card and not to its
+  contract fails the build rather than somebody's agent. The seven `--json`
+  flags involved (`info`, `describe`, `ask`, `watch`, `semantic search`,
+  `embed similar`, `embed search`) name their schema in `--help`, and each
+  `to_dict()` names it in its docstring.
 - **Publish the chip dataset as a contract, and check it (`docs/schemas/chip-dataset`,
   `chip-record`, `chip-skipped`).** The previous entry closed the *measurement*
   documents and named the surface to do next: `umbra chips`, on the argument that

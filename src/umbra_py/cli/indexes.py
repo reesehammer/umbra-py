@@ -679,7 +679,12 @@ def semantic_build(db_path, sem_db, model) -> None:
     help="Embedding model for the query -- must match the model the index was "
     "built with (default: $UMBRA_EMBED_MODEL, else text-embedding-3-small).",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the ranked matches as JSON (see docs/schemas/task-matches.schema.json).",
+)
 @click.option(
     "--run",
     "-r",
@@ -1015,7 +1020,12 @@ def _print_scene_matches(matches, as_json: bool, query_label: str) -> None:
     help="Embedding model for the query -- must match the model the index was "
     "built with (default: $UMBRA_SCENE_EMBED_MODEL, else clip).",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the ranked matches as JSON (see docs/schemas/scene-matches.schema.json).",
+)
 def embed_similar(item_url, embed_db, top_k, min_score, asset, model, as_json) -> None:
     """Find archived scenes that look like the acquisition at ITEM_URL.
 
@@ -1067,7 +1077,12 @@ def embed_similar(item_url, embed_db, top_k, min_score, asset, model, as_json) -
     "space with the model the index was built with (default: $UMBRA_SCENE_EMBED_MODEL, "
     "else clip).",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the ranked matches as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the ranked matches as JSON (see docs/schemas/scene-matches.schema.json).",
+)
 def embed_search(query, embed_db, top_k, min_score, model, as_json) -> None:
     """Find archived scenes matching a plain-language QUERY ("ships at a berth").
 

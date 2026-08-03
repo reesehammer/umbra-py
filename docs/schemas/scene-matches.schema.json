@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/scene-matches.schema.json",
+  "title": "Ranked scene matches",
+  "description": "Acquisitions ranked by visual similarity, emitted by `umbra embed similar --json` (an acquisition as the query) and `umbra embed search --json` (a text query), which differ only in what `query` holds. Every field of a match except `score` was recorded at build time from the deterministic item, so a match is a pointer back to a real acquisition rather than a model-authored fact. Empty `matches` means nothing cleared the score threshold.",
+  "type": "object",
+  "required": ["query", "matches"],
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "What was searched for: the query text for `umbra embed search`, or the query acquisition's item id for `umbra embed similar`.",
+      "examples": ["a harbour with container cranes", "2d1827a2-d04c-4e15-9319-3810d011540b"]
+    },
+    "matches": {
+      "type": "array",
+      "description": "The acquisitions that cleared the threshold, closest first.",
+      "items": { "$ref": "#/$defs/sceneMatch" }
+    }
+  },
+  "$defs": {
+    "sceneMatch": {
+      "type": "object",
+      "required": ["item_id", "score", "task", "datetime", "href"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "description": "The matched acquisition's STAC item id."
+        },
+        "score": {
+          "type": "number",
+          "description": "Cosine similarity to the query, rounded to six places: 1.0 identical, 0.0 unrelated, higher is closer."
+        },
+        "task": {
+          "type": ["string", "null"],
+          "description": "The task/site the acquisition belongs to, recorded when the embedding was built. Null when the indexed item carried none."
+        },
+        "datetime": {
+          "type": ["string", "null"],
+          "description": "When it was acquired, ISO 8601, recorded at build time. Null when the indexed item carried none."
+        },
+        "href": {
+          "type": ["string", "null"],
+          "description": "The acquisition's STAC item URL — what every `umbra` command that takes a scene accepts, so a match can be acted on directly. Null when the indexed item carried none."
+        }
+      }
+    }
+  }
+}

@@ -95,7 +95,11 @@ class SemanticError(UmbraError):
 @dataclass(frozen=True)
 class SemanticMatch:
     """One ranked candidate: an Umbra ``task`` name and its cosine ``score``
-    against the query (``1.0`` identical, ``0.0`` unrelated, higher is closer)."""
+    against the query (``1.0`` identical, ``0.0`` unrelated, higher is closer).
+
+    ``umbra semantic search --json`` emits these as
+    ``docs/schemas/task-matches.schema.json``.
+    """
 
     task: str
     score: float

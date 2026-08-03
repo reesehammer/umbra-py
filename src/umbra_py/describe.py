@@ -216,7 +216,12 @@ class SceneDescription:
     image: SceneImage | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """A plain JSON-serialisable view of the description (for ``--json``)."""
+        """A plain JSON-serialisable view of the description (for ``--json``).
+
+        Published as ``docs/schemas/scene-description.schema.json``. The contract
+        marks which fields a model wrote and which the library stamped on, since
+        that distinction is the whole reason the document exists.
+        """
         return {
             "item_id": self.item_id,
             "summary": self.summary,

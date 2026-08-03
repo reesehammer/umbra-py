@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/search-plan.schema.json",
+  "title": "Search plan",
+  "description": "The deterministic search a natural-language question was resolved to (`umbra_py.planner.SearchPlan.to_dict`), emitted by `umbra ask --json` and by the `plan_search` agent tool. Every field has already passed through `parse_plan`, so nothing here is raw model output: dates are ISO `YYYY-MM-DD`, product types are canonical, the bbox is range-checked, and an `aoi` names a polygon the *caller* supplied rather than coordinates a model authored. `rationale` is the one field kept purely to show the user — it never becomes a filter. The document exists so a plan can be audited before it is run: `command` is the same search as a line you could have typed.",
+  "type": "object",
+  "required": [
+    "question",
+    "area",
+    "fuzzy",
+    "place",
+    "bbox",
+    "aoi",
+    "start",
+    "end",
+    "product_types",
+    "polarizations",
+    "min_incidence",
+    "max_incidence",
+    "max_resolution",
+    "limit",
+    "max_per_task",
+    "rationale",
+    "command"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "The plain-language question the plan came from, kept so a stored plan says what it was answering.",
+      "examples": ["scenes over the port of Rotterdam last spring"]
+    },
+    "area": {
+      "type": ["string", "null"],
+      "description": "An Umbra task/site name to restrict the walk to, or null. Matched exactly unless `fuzzy` is set."
+    },
+    "fuzzy": {
+      "type": "boolean",
+      "description": "Whether `area` is matched loosely (the deterministic matcher in `umbra_py.fuzzy`) rather than exactly."
+    },
+    "place": {
+      "type": ["string", "null"],
+      "description": "A free-text place name to be geocoded at execution time, or null. The geocode happens in the deterministic layer, never in the model: a name is a request, not a coordinate. Mutually exclusive with `bbox` and `aoi`."
+    },
+    "bbox": {
+      "type": ["array", "null"],
+      "description": "`[west, south, east, north]` in WGS84 degrees, range-checked, or null. Mutually exclusive with `place` and `aoi`.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" }
+    },
+    "aoi": {
+      "description": "The caller-supplied area of interest the plan selected, or null. This is the geometry half of the determinism boundary: the model chooses a polygon *by name* from the ones passed in with `--aoi`, so a hallucination can pick the wrong area but cannot move one. Mutually exclusive with `place` and `bbox`.",
+      "oneOf": [{ "$ref": "#/$defs/areaOfInterest" }, { "type": "null" }]
+    },
+    "start": {
+      "type": ["string", "null"],
+      "description": "Inclusive start date, ISO `YYYY-MM-DD`, or null for no lower bound. Relative phrasing in the question ('last spring') is resolved deterministically before it reaches this field.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "end": {
+      "type": ["string", "null"],
+      "description": "Inclusive end date, ISO `YYYY-MM-DD`, or null for no upper bound.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "product_types": {
+      "type": "array",
+      "description": "Canonical product types to keep, checked against `umbra_py.PRODUCT_ASSETS`. Empty means every type.",
+      "items": { "enum": ["GEC", "CSI", "SIDD", "SICD", "CPHD"] }
+    },
+    "polarizations": {
+      "type": "array",
+      "description": "Keep only scenes exposing at least one of these polarizations. Upper-cased and de-duplicated but not checked against a closed set — polarization is a small open vocabulary, and refusing an unknown one would refuse a future product. Empty means every polarization.",
+      "items": { "type": "string" },
+      "examples": [["VV"]]
+    },
+    "min_incidence": {
+      "type": ["number", "null"],
+      "description": "Lower bound on scene-centre incidence angle in degrees, or null."
+    },
+    "max_incidence": {
+      "type": ["number", "null"],
+      "description": "Upper bound on scene-centre incidence angle in degrees, or null."
+    },
+    "max_resolution": {
+      "type": ["number", "null"],
+      "description": "Upper bound on ground resolution in metres (smaller is sharper), or null."
+    },
+    "limit": {
+      "type": ["integer", "null"],
+      "description": "Maximum acquisitions to return, or null for the command's own default.",
+      "minimum": 1
+    },
+    "max_per_task": {
+      "type": ["integer", "null"],
+      "description": "At most this many acquisitions from any one task, or null. What keeps a broad question from returning one site's whole time series.",
+      "minimum": 1
+    },
+    "rationale": {
+      "type": ["string", "null"],
+      "description": "The model's one-line explanation of the plan, kept only to show the user. It is the one model-authored string in the document and it never becomes a filter."
+    },
+    "command": {
+      "type": "string",
+      "description": "The plan as a copy-pasteable shell command — the same search `--run` would execute, so the audit and the execution cannot diverge.",
+      "examples": ["umbra search --place Rotterdam --start 2025-03-01 --end 2025-05-31"]
+    }
+  },
+  "$defs": {
+    "areaOfInterest": {
+      "type": "object",
+      "description": "A named polygon the caller supplied. The rings themselves are deliberately not in the document — they are the user's own input, unchanged, and can be arbitrarily large; `source` says where to find them and `bbox` makes the plan auditable without them.",
+      "required": ["name", "source", "bbox"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The label the caller gave the area, and the only part of it the model contributed — by copying it out of the prompt.",
+          "examples": ["delta"]
+        },
+        "source": {
+          "type": ["string", "null"],
+          "description": "How the area was spelled on the command line (a path, or inline GeoJSON), so the audited command is the one the user would have typed rather than an inlined ring dump. Null when the caller passed a parsed geometry directly.",
+          "examples": ["delta.geojson"]
+        },
+        "bbox": {
+          "type": ["array", "null"],
+          "description": "The area's bounding box, `[west, south, east, north]` in WGS84 degrees. Null for a geometry with no computable bounds.",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "number" }
+        }
+      }
+    }
+  }
+}

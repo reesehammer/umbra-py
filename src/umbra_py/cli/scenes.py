@@ -78,7 +78,13 @@ from ._root import cli
     "$UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db). Only read when --preview "
     "is 'baked' or 'auto'. Named --index-db because --db means the decibel stretch.",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the structured description as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the structured description as JSON "
+    "(see docs/schemas/scene-description.schema.json).",
+)
 def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) -> None:
     """Describe a SAR scene in plain language with a vision model.
 

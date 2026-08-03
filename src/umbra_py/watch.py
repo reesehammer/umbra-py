@@ -219,6 +219,9 @@ class WatchResult:
         card (id, datetime, place, bbox, products with URLs), so a downstream
         step can search/download/describe it with no extra fetch. Carries the
         CC-BY attribution, like every data-bearing surface in the library.
+
+        Published as ``docs/schemas/watch-delta.schema.json``, which ``$ref``s
+        ``item-context.schema.json`` for the cards rather than restating them.
         """
         return {
             "watch": self.name,

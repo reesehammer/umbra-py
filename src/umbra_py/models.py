@@ -476,6 +476,10 @@ class UmbraItem:
         needs spelled out and a human already knows — so an agent can reason
         about the scene, and cite the right product, with no external SAR
         literacy. Deterministic and offline (no network, no model call).
+
+        Published as ``docs/schemas/item-context.schema.json`` -- the same card
+        ``umbra info --json`` prints, the agent tools return, and a watch delta
+        carries one of per new acquisition.
         """
         rng, azi = self.resolution
         return {

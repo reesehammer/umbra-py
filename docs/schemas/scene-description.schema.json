@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/scene-description.schema.json",
+  "title": "Scene description",
+  "description": "A vision model's reading of one rendered SAR scene, validated and provenance-stamped (`umbra_py.describe.SceneDescription.to_dict`). Emitted by `umbra describe --json` and by the `describe_scene` agent tool (MCP / LangChain / LlamaIndex). Everything a model wrote is in `summary`, `observed_features`, `confidence` and `caveats`; everything else is filled in deterministically and cannot be overridden by a reply — which is the whole point of the document. A reader that quotes the text must carry `attribution` and `provenance` with it.",
+  "type": "object",
+  "required": [
+    "item_id",
+    "summary",
+    "observed_features",
+    "confidence",
+    "caveats",
+    "model",
+    "asset",
+    "attribution",
+    "provenance",
+    "image"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "item_id": {
+      "type": ["string", "null"],
+      "description": "Which acquisition was read. Null when the description was produced from bytes rather than from a catalog item."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The model's short plain-language paragraph about the scene. Model-authored: it is an interpretation of a picture, not a measurement."
+    },
+    "observed_features": {
+      "type": "array",
+      "description": "Short phrases naming what the model says it saw. Model-authored, and empty when it named nothing.",
+      "items": { "type": "string" }
+    },
+    "confidence": {
+      "description": "The model's own hedge on the reading, or null when it gave none (or gave one this does not recognise — an unrecognised level is dropped rather than passed through).",
+      "enum": ["low", "medium", "high", null]
+    },
+    "caveats": {
+      "type": "array",
+      "description": "Short phrases qualifying the reading. Model-authored, plus the deterministic one a smaller picture adds: a baked preview is 128–256 px where a render defaults to 1024, and that caveat names what the model could not have seen at that size.",
+      "items": { "type": "string" }
+    },
+    "model": {
+      "type": ["string", "null"],
+      "description": "Which model produced the text, so a description can be attributed to it. Null when the caller injected its own describer (a test, or a local model with no identifier)."
+    },
+    "asset": {
+      "type": "string",
+      "description": "The product the picture was made from.",
+      "enum": ["GEC", "CSI", "SIDD", "SICD", "CPHD"]
+    },
+    "attribution": {
+      "type": "string",
+      "description": "The CC-BY line, which must survive into anything quoting the description (design principle 4: licence propagation is non-negotiable, including for model-generated text about the data).",
+      "examples": ["Contains Umbra open data, licensed under CC BY 4.0."]
+    },
+    "provenance": {
+      "type": "string",
+      "description": "The fixed note saying this text is an AI interpretation rather than a measurement. Set by the library, never by the model, so it cannot be argued away by a reply."
+    },
+    "image": {
+      "description": "Which picture the model was actually shown. Null only when no image record was captured (an injected renderer in a test).",
+      "oneOf": [{ "$ref": "#/$defs/sceneImage" }, { "type": "null" }]
+    }
+  },
+  "$defs": {
+    "sceneImage": {
+      "type": "object",
+      "description": "The picture as evidence: where it came from and how big it really was. `width`/`height` are read from the PNG header, so they are what the model saw rather than what the call asked for — and they can disagree with `max_size`, which is exactly why both are recorded.",
+      "required": ["source", "asset", "width", "height", "max_size", "db"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "description": "`rendered` — a fresh quicklook streamed from the COG for this call; `baked` — the cached preview from the local index (`umbra describe --preview baked|auto`), which costs no S3 read and no `[viz]` extra.",
+          "enum": ["rendered", "baked"]
+        },
+        "asset": {
+          "type": "string",
+          "description": "The product the picture is of. For a baked preview this is what the index recorded the bake as, not what the request assumed — a bake of another product is refused by name rather than substituted.",
+          "enum": ["GEC", "CSI", "SIDD", "SICD", "CPHD"]
+        },
+        "width": {
+          "type": ["integer", "null"],
+          "description": "The picture's real pixel width. Null only when the bytes are not a PNG this can measure; `source` is still recorded, since which cache a picture came from is the part a reader cannot recover afterwards.",
+          "minimum": 1
+        },
+        "height": {
+          "type": ["integer", "null"],
+          "description": "The picture's real pixel height, null under the same condition as `width`.",
+          "minimum": 1
+        },
+        "max_size": {
+          "type": "integer",
+          "description": "The longest edge the call asked for. A baked preview will normally be smaller than this.",
+          "minimum": 1
+        },
+        "db": {
+          "type": "boolean",
+          "description": "Whether the amplitude was stretched in decibels (the default) rather than linearly."
+        }
+      }
+    }
+  }
+}
