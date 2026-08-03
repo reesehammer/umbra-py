@@ -686,6 +686,8 @@ of looks before and after. Follow-ons, none a blocker:
       the invisible flag the cache key rule exists to prevent. Worth revisiting
       only as a *documented advertised* default (one the landing page states and
       the cache key hashes), not as a policy.
+- ~~**Nothing says how much speckle is *left*.**~~ **shipped** — see the
+  detection-floor entry below, which is where its follow-ons live.
 - **The filter runs on the whole window in memory.** `_box_sum`'s summed-area
   table makes the cost independent of the window size but holds a scene-sized
   float64 table, on top of the scene-sized power array `_detected_power` already
@@ -693,6 +695,77 @@ of looks before and after. Follow-ons, none a blocker:
   `--clip-bbox` is the answer for a scene too large to hold; a tiled
   implementation (overlapping windows, one strip at a time) is the fix if the
   whole-scene path becomes the common one.
+
+---
+
+## Speckle detection-floor follow-ons (`stack_stats`'s `detection` shipped)
+
+- **Surfaced in:** the detection-floor PR (`STRATEGY.md` 5.5, which the
+  speckle-filtering entry above named).
+- **Code:** `src/umbra_py/_specfun.py` (`trigamma`,
+  `regularized_incomplete_beta`), `src/umbra_py/load.py`
+  (`DETECTION_FALSE_ALARM_TARGET`, `DETECTION_EXCESS_WARN`,
+  `_DETECTION_MAX_LOOKS`, `_DETECTION_MAX_THRESHOLD_DB`, `_DB_PER_NEPER`,
+  `_speckle_change_sigma_db`, `_speckle_false_alarm`, `_detection_threshold_db`,
+  `_LooksAccum`, `_detection_floor`, the two caveats and the `looks` field on
+  both measurement walks), `docs/schemas/stack-stats.schema.json`
+  (`$defs/detection`, `$defs/pass.looks`), `tests/test_specfun.py`.
+
+`stack_stats` reports what speckle alone would have done to the change it just
+measured: each pass's `looks` read off the cube's own blocks, and a `detection`
+block giving an unchanged cell's decibel spread, the false-alarm fraction at the
+requested threshold, and the threshold that would hold it to 5 %. Both figures
+are exact rather than approximated — the gamma/beta forms, computed in stdlib
+`math` — and the whole thing is validated against simulated speckle and against a
+cube of two realisations of one unchanged surface. Follow-ons, none a blocker:
+
+- **The floor is per cell, and the observed fraction is over correlated cells.**
+  `false_alarm_fraction` is an exact per-cell probability, so it is the right
+  expectation for the observed share whatever the spatial correlation — but the
+  *scatter* of the observed share around it is not, because neighbouring cells of
+  an oversampled product are not independent. That is why the advisory uses a
+  stated margin (`DETECTION_EXCESS_WARN`) rather than a significance test: a
+  proper one needs an independent-cell count nothing here measures. An
+  autocorrelation read (the ratio of a block's variance to its decimated
+  variance) would supply it, and would also sharpen `looks`; it wants a real
+  product to calibrate against rather than an argument.
+- **One floor per cube, not one per interval.** The representative `looks` is the
+  median of the passes that gave a reading, so a series whose passes genuinely
+  differ (one filtered, one not — which `to_stack` would refuse — or simply one
+  much noisier) is described by a middle value. Every pass keeps its own `looks`,
+  so the disagreement is visible; a per-interval floor would use the pair's two
+  looks in the unequal-shape form `regularized_incomplete_beta` already supports.
+  It waits for a consumer, since the threshold it would be reported against is
+  one number for the whole cube.
+- **The floor does not reach `spatial`.** A block's `changed_fraction` is
+  measured over far fewer cells than the scene's, so the same floor applies but
+  the observed share is much noisier around it — quoting the scene's floor per
+  block would invite reading a block's excess as a finding when it is sampling.
+  The natural form is the floor plus that block's cell count; it wants someone
+  asking which *block* stands clear rather than which cube.
+- **Nothing reports the floor on the composite path.** `umbra change --narrate`
+  quotes a signed dB delta per block and grounds a model on it, which is the
+  other surface where "is this bigger than speckle?" is the reader's first
+  question. `narrate.ChangeStats` has the two co-registered passes in hand, so
+  the same reduction would apply; it was left out here because this change's
+  claim is about the datacube reduction and adding a second consumer would have
+  put the arithmetic in two places before it had one caller asking for it.
+- **`_DETECTION_MAX_LOOKS` is a numerical guard doing a physical job.** A cube
+  whose blocks are numerically uniform (a synthetic raster, a heavily quantised
+  one) reads unbounded looks, and the cap keeps the beta integral inside double
+  precision. It changes no answer that was ever meaningful — the false-alarm
+  fraction is already below `1e-50` there — but a cube pinned at the cap reports
+  `looks: 1024`, which is a true statement about its cells and a strange-looking
+  one. Reporting "no measurable speckle" instead would mean a fourth state in the
+  block; it waits for someone to hit it on real data.
+- **The looks read is a median over blocks, so the two measurement walks can
+  disagree in the last decimal.** Blocks are cut from whatever array is in hand,
+  and `windowed=True` hands it windows — so a window narrower than the 16-cell
+  block finds none where a whole slice finds several. `looks` is a read of the
+  scene rather than one of the exact sums beside it (the same status
+  `umbra convert`'s ENL pair has), and the docstring says so. Aligning the blocks
+  to the shared grid rather than to the array would remove it, at the cost of a
+  block-offset argument threaded through `_block_enl_ratios`.
 
 ---
 

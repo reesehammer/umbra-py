@@ -350,6 +350,30 @@ because counting geographic cells measures nothing. `umbra stack --stats` prints
 the same object, and the `stack_stats` agent tool returns it over MCP /
 LangChain / LlamaIndex.
 
+A summary also says **what speckle alone would have done**, because on SAR that
+is the number that decides how to read every other one. Speckle is not an error
+bar on a mean: it is the dominant variation in a single cell, and on single-look
+imagery of ground that did *not* change it moves two cells in three past a 3 dB
+threshold. So every multi-pass summary carries a `detection` block:
+
+```python
+stats["detection"]["looks"]                 # 1.02  — measured off the cube's own blocks
+stats["detection"]["cell_sigma_db"]         # 7.76  — an unchanged cell's pass-to-pass spread
+stats["detection"]["false_alarm_fraction"]  # 0.664 — read this against changed_fraction
+stats["detection"]["target_threshold_db"]   # 15.7  — what a 5 % false-alarm rate costs
+stats["passes"][0]["looks"]                 # each pass's own reading
+```
+
+The rates are exact rather than approximated (an L-look intensity is a gamma
+variate, and a normal approximation on the decibel axis is badly wrong near one
+look), the looks are read off the *cube* — `to_stack` decimates onto a shared
+grid, and decimation averages speckle down — and scene structure biases that read
+low, so the floor is an upper bound on the false alarms rather than a flattering
+estimate. A caveat quotes it on every multi-pass cube, and says so outright when
+the observed change does not stand clear of it. It is also what prices
+`speckle_filter=` in the units of the answer: a filtered cube reads more looks,
+so its floor, its spread and its 5 % threshold all come down.
+
 A summary also says **what it measured**. Rasters `umbra convert` produced carry
 their calibration, noise-floor subtraction, terrain model and amplitude scale in
 `UMBRA_*` GeoTIFF tags

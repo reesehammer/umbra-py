@@ -223,6 +223,43 @@ def test_stack_stats_default_summary_validates(stack):
     _check("stack-stats.schema.json", stack_stats(to_stack(stack, max_size=32, crs="utm")))
 
 
+def test_stack_stats_speckle_detection_floor_validates(tmp_path):
+    """The `detection` block, which a constant-valued series never produces.
+
+    A block's looks are `mean**2 / variance`, so the flat fixture above has no
+    variance to read and reports `looks: null` with no floor at all -- which is
+    the nullable half of the contract. Speckled scenes exercise the other half.
+    """
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    from umbra_py import stack_stats, to_stack
+
+    items = []
+    for n in (1, 2):
+        path = tmp_path / f"speckle{n}.tif"
+        rng = np.random.default_rng(n)
+        profile = {
+            "driver": "GTiff",
+            "height": 128,
+            "width": 128,
+            "count": 1,
+            "dtype": "float32",
+            "crs": "EPSG:32633",
+            "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+        }
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(np.sqrt(rng.gamma(1.0, 1.0, (128, 128))).astype("float32"), 1)
+        items.append(_item(path, f"acq-{n}", f"2024-0{n}-08T12:00:00Z"))
+
+    summary = stack_stats(to_stack(items, max_size=128, crs="utm"))
+    assert summary["detection"]["looks"] > 0
+    assert all(record["looks"] is not None for record in summary["passes"])
+    _check("stack-stats.schema.json", summary)
+
+
 def test_stack_stats_with_a_spatial_breakdown_validates(stack):
     from umbra_py import stack_stats, to_stack
 

@@ -1574,17 +1574,28 @@ def _spread_scenes(tmp_path, count=3):
     ]
 
 
-def _without_quantiles(summary):
-    """A summary stripped of everything ``windowed=True`` reports approximately."""
+def _without_estimates(summary):
+    """A summary stripped of everything the two walks don't report identically.
+
+    The percentiles, because ``windowed=True`` estimates them from a histogram;
+    and ``looks`` (with the ``detection`` floor derived from it, and the caveat
+    quoting both), because it is a median over 16-cell measuring blocks cut from
+    whatever array is in hand -- so a window narrower than a block finds none
+    where a whole slice finds several. Everything left is a count or a sum, and
+    those are exact either way.
+    """
     import json
 
     trimmed = json.loads(json.dumps(summary))
     for record in trimmed["passes"]:
-        for key in ("median", "p5", "p95"):
+        for key in ("median", "p5", "p95", "looks"):
             record.pop(key)
     trimmed.pop("quantile_method", None)
     trimmed.pop("quantile_bin_db", None)
-    trimmed["caveats"] = [c for c in trimmed["caveats"] if "window by window" not in c]
+    trimmed.pop("detection", None)
+    trimmed["caveats"] = [
+        c for c in trimmed["caveats"] if "window by window" not in c and "Speckle alone" not in c
+    ]
     return trimmed
 
 
@@ -1606,7 +1617,7 @@ def test_stack_stats_windowed_matches_the_whole_slice_walk(tmp_path):
         windowed=True,
     )
 
-    assert _without_quantiles(windowed) == _without_quantiles(whole)
+    assert _without_estimates(windowed) == _without_estimates(whole)
     # ...and the percentiles land about one histogram bin from the exact value
     # (a bin, plus wherever the neighbouring cells sit inside it).
     from umbra_py.load import _QUANTILE_BIN_DB
@@ -1637,7 +1648,7 @@ def test_stack_stats_windowed_matches_across_unobserved_ground_too(tmp_path):
         to_stack(items, lazy=True, chunk_size=6, **kwargs), blocks=4, windowed=True
     )
 
-    assert _without_quantiles(windowed) == _without_quantiles(whole)
+    assert _without_estimates(windowed) == _without_estimates(whole)
     # The blocks only one pass covers stay gaps rather than becoming zeros.
     assert any(b["net_change"] is None for b in windowed["spatial"]["blocks"])
 
@@ -1659,7 +1670,7 @@ def test_stack_stats_windowed_reports_nothing_for_a_pass_with_no_valid_cell(tmp_
     assert blank["valid_cells"] == 0
     assert all(blank[key] is None for key in ("mean", "median", "std", "p5", "p95"))
     assert windowed["net_change"] is None
-    assert _without_quantiles(windowed) == _without_quantiles(
+    assert _without_estimates(windowed) == _without_estimates(
         stack_stats(to_stack(items, max_size=24))
     )
 
@@ -1718,7 +1729,7 @@ def test_stack_stats_windowed_on_an_unchunked_cube_is_one_window(tmp_path):
     cube = to_stack(_spread_scenes(tmp_path), max_size=24, crs="utm")
     windowed = stack_stats(cube, windowed=True, blocks=2)
 
-    assert _without_quantiles(windowed) == _without_quantiles(stack_stats(cube, blocks=2))
+    assert _without_estimates(windowed) == _without_estimates(stack_stats(cube, blocks=2))
 
 
 def test_cli_stack_stats_windowed_measures_a_chunked_cube(tmp_path, monkeypatch):
@@ -2969,3 +2980,177 @@ def test_cli_stack_provenance_is_asked_instead_of_the_work_not_beside_it(tmp_pat
     bare = CliRunner().invoke(cli_mod.cli, ["stack", *urls])
     assert bare.exit_code != 0
     assert "--provenance to check the sources agree first" in bare.output
+
+
+# --- The speckle detection floor (``stack_stats``'s ``detection`` block) ------
+
+
+def _speckled_scene(path, seed, *, looks=1.0, mean=1.0, size=256, bright=None):
+    """A speckled amplitude scene: ``Gamma(looks, mean/looks)`` intensity, rooted.
+
+    This is what a SAR image of uniform ground *is* -- the interference pattern,
+    not a constant with noise on it -- so a cube of two of these is unchanged
+    ground, and every cell the change detector flags in one is a false alarm.
+    ``bright`` brightens the lower-right quadrant by that many decibels, which is
+    change that did happen.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    np = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    rng = np.random.default_rng(seed)
+    surface = np.full((size, size), float(mean))
+    if bright is not None:
+        surface[size // 2 :, size // 2 :] *= 10.0 ** (bright / 10.0)
+    intensity = rng.gamma(looks, surface / looks)
+    profile = {
+        "driver": "GTiff",
+        "height": size,
+        "width": size,
+        "count": 1,
+        "dtype": "float32",
+        "crs": "EPSG:32633",
+        "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(np.sqrt(intensity).astype("float32"), 1)
+    return path
+
+
+def _speckled_pair(tmp_path, *, looks=1.0, bright=None, size=256):
+    """Two passes over the same ground, independently speckled."""
+    return [
+        _stack_item(
+            _speckled_scene(tmp_path / f"sp{n}.tif", seed=n, looks=looks, size=size, bright=bright),
+            f"acq-{n}",
+            f"2024-0{n}-08T12:00:00Z",
+        )
+        for n in (1, 2)
+    ]
+
+
+def test_the_speckle_false_alarm_rate_matches_simulated_speckle():
+    """The claim the whole floor rests on, checked against the physics it models."""
+    np = pytest.importorskip("numpy")
+    from umbra_py.load import _speckle_change_sigma_db, _speckle_false_alarm
+
+    rng = np.random.default_rng(11)
+    for looks in (1.0, 2.0, 4.0):
+        delta_db = 10.0 * np.log10(
+            rng.gamma(looks, 1.0 / looks, 400_000) / rng.gamma(looks, 1.0 / looks, 400_000)
+        )
+        assert _speckle_change_sigma_db(looks) == pytest.approx(float(delta_db.std()), rel=0.01)
+        for threshold in (1.0, 3.0, 6.0):
+            simulated = float(np.mean(np.abs(delta_db) > threshold))
+            assert _speckle_false_alarm(threshold, looks) == pytest.approx(simulated, abs=0.005)
+
+
+def test_the_reported_threshold_is_the_one_its_own_false_alarm_rate_answers_for():
+    """Bisected against the same function, so the pair cannot disagree."""
+    from umbra_py.load import (
+        DETECTION_FALSE_ALARM_TARGET,
+        _detection_threshold_db,
+        _speckle_false_alarm,
+    )
+
+    for looks in (1.0, 1.7, 6.0, 40.0):
+        threshold = _detection_threshold_db(DETECTION_FALSE_ALARM_TARGET, looks)
+        assert _speckle_false_alarm(threshold, looks) == pytest.approx(
+            DETECTION_FALSE_ALARM_TARGET, abs=1e-6
+        )
+    # More looks is a lower bar: averaging speckle down is what buys sensitivity.
+    thresholds = [_detection_threshold_db(0.05, n) for n in (1.0, 4.0, 16.0)]
+    assert thresholds == sorted(thresholds, reverse=True)
+
+
+def test_stack_stats_predicts_the_false_alarms_unchanged_ground_produces(tmp_path):
+    """The end-to-end claim: on ground that did not change, every flag is a false one.
+
+    Two independent single-look realisations of the *same* surface, so the true
+    changed fraction is zero and whatever ``net_change`` reports is exactly what
+    the detection floor exists to predict. The two numbers have to agree.
+    """
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_speckled_pair(tmp_path), max_size=256, crs="utm"))
+
+    detection = stats["detection"]
+    assert detection["looks"] == pytest.approx(1.0, abs=0.15)
+    assert detection["cell_sigma_db"] == pytest.approx(7.9, abs=0.6)
+    assert detection["false_alarm_fraction"] == pytest.approx(
+        stats["net_change"]["changed_fraction"], abs=0.05
+    )
+    # A 3 dB threshold on single-look imagery is mostly counting interference, and
+    # holding the false alarms to 5 % takes a far wider bar than the default.
+    assert detection["false_alarm_fraction"] > 0.5
+    assert detection["target_threshold_db"] > 12.0
+    assert all(record["looks"] == pytest.approx(1.0, abs=0.2) for record in stats["passes"])
+
+
+def test_stack_stats_says_when_the_change_does_not_clear_the_speckle_floor(tmp_path):
+    """Unchanged ground earns the finding; genuinely changed ground does not."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    def caveats(items):
+        return stack_stats(to_stack(items, max_size=256, crs="utm"))["caveats"]
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    unchanged = caveats(_speckled_pair(flat))
+    assert any("Speckle alone moves an unchanged cell" in c for c in unchanged)
+    assert any("does not stand clear of that speckle floor" in c for c in unchanged)
+
+    # The whole scene 25 dB brighter is change no amount of interference accounts
+    # for, so the floor is context rather than the headline. It takes that much on
+    # single-look imagery: at one look the floor already flags two cells in three,
+    # which is the finding rather than a defect of the test.
+    changed = caveats(
+        [
+            _stack_item(
+                _speckled_scene(tmp_path / "a.tif", seed=1),
+                "acq-1",
+                "2024-01-08T12:00:00Z",
+            ),
+            _stack_item(
+                _speckled_scene(tmp_path / "b.tif", seed=2, mean=10.0**2.5),
+                "acq-2",
+                "2024-02-08T12:00:00Z",
+            ),
+        ]
+    )
+    assert any("Speckle alone moves an unchanged cell" in c for c in changed)
+    assert not any("does not stand clear of that speckle floor" in c for c in changed)
+
+
+def test_speckle_filtering_lowers_the_floor_it_is_measured_against(tmp_path):
+    """What the filter bought, in the units of the answer rather than of the window."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = _speckled_pair(tmp_path)
+    plain = stack_stats(to_stack(items, max_size=256, crs="utm"))["detection"]
+    filtered = stack_stats(
+        to_stack(items, max_size=256, crs="utm", speckle_filter="boxcar", speckle_window=5)
+    )["detection"]
+
+    assert filtered["looks"] > plain["looks"]
+    assert filtered["cell_sigma_db"] < plain["cell_sigma_db"]
+    assert filtered["false_alarm_fraction"] < plain["false_alarm_fraction"]
+    assert filtered["target_threshold_db"] < plain["target_threshold_db"]
+
+
+def test_detection_is_absent_rather_than_null_when_there_is_nothing_to_weigh(tmp_path):
+    """A single pass has no comparison; a cube under one block has no reading."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = _speckled_pair(tmp_path)
+    single = stack_stats(to_stack(items[:1], max_size=256, crs="utm"))
+    assert "detection" not in single
+    assert single["passes"][0]["looks"] is not None
+
+    tiny = stack_stats(to_stack(items, max_size=8, crs="utm"))
+    assert "detection" not in tiny
+    assert all(record["looks"] is None for record in tiny["passes"])
