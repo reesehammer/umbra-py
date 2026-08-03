@@ -32,9 +32,8 @@
       "examples": [{ "narration": "change.narration.json" }]
     },
     "stats": {
-      "type": "object",
-      "description": "A measurement of the artifact the command also computed, carried inline so stdout stays a single object. Present only for 'umbra stack --stats --json', where it is the umbra_py.stack_stats summary: per-pass distribution statistics, the signed decibel change between consecutive passes, and the net first-to-last change. With 'umbra stack --blocks N' it also carries a 'spatial' key: the same change broken down over an N x N grid of the scene, one record per block (compass label, bounds, lon/lat centre, its own net change and the pair of passes it moved most between) plus 'peak_block' and an ASCII 'grid_text' map. With '--block-series' each block additionally carries a 'series' array: every consecutive pass-to-pass record, oldest first, in the same shape as 'peak_interval'.",
-      "additionalProperties": true
+      "$ref": "stack-stats.schema.json",
+      "description": "A measurement of the artifact the command also computed, carried inline so stdout stays a single object. Present only for 'umbra stack --stats --json', where it is the umbra_py.stack_stats summary described in full by stack-stats.schema.json: per-pass distribution statistics, the signed decibel change between consecutive passes, the net first-to-last change, and -- with 'umbra stack --blocks N' -- the 'spatial' breakdown saying which part of the site moved and between which two passes."
     }
   }
 }

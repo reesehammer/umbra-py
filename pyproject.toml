@@ -94,6 +94,11 @@ dev = [
     # responses; declared here because the suite imports it directly, and a
     # transitive dependency is not a promise.
     "pyyaml>=6",
+    # `tests/test_schemas.py` validates a real payload from each `--json` surface
+    # against the committed contract in `docs/schemas/`. Floor at 4.18 for the
+    # `referencing` registry, which is how the render manifest's `stats` key
+    # resolves its cross-file `$ref` to the stats schema without a network fetch.
+    "jsonschema>=4.18",
     # Capped below 0.16: ruff 0.16.0 began formatting fenced code blocks inside
     # Markdown, which reformats the snippets in `examples/*.md` (and other .md)
     # that were written against earlier ruff, turning `ruff format --check .`

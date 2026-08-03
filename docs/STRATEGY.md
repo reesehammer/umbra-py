@@ -1180,6 +1180,29 @@ from:
   lift and `windowed` would only make a model's percentiles approximate. See the
   CHANGELOG.
 
+**Machine-readable contracts (design principle 5, "agents are users")**
+
+- ~~The JSON surfaces an agent is invited to depend on were described rather
+  than checked: four schemas existed (error, download, index-info, render
+  manifest), the three *measurement* documents had none, and the two that were
+  tested were tested by comparing key sets — which catches a renamed field and
+  nothing else.~~ **shipped** — `docs/schemas/stack-stats`,
+  `stack-provenance` and `preflight` publish the documents an agent actually
+  parses, one schema per *question* rather than per surface (each is one
+  `to_dict()` that the CLI, an `umbra serve` route and an agent tool emit
+  unchanged), with `render-manifest`'s `stats` key `$ref`ing the stats schema
+  instead of restating it. `tests/test_schemas.py` validates a real payload from
+  the emitting surface against every schema in the directory with a real
+  validator, and each schema is strict — so a field added to a payload and not
+  to its contract fails the build rather than a consumer. The nullable and
+  conditional halves are in the contract rather than implied, because those are
+  what a consumer gets wrong: a single-pass cube's null `net_change`, a
+  geographic grid's null areas, `provenance` whose *absence* is a statement, and
+  the two keys `windowed` adds when the percentiles stop being exact. See the
+  CHANGELOG. **Open:** the remaining unschema'd `--json` surfaces (`umbra
+  chips` first), and wiring the committed schemas into `umbra serve`'s generated
+  OpenAPI document — see `TODO.md`.
+
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 
 - ~~A SessionStart hook / permission allowlist for remote coding-agent sessions.~~

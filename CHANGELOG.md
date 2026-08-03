@@ -7,6 +7,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Publish the measurement documents as contracts, and check them
+  (`docs/schemas/stack-stats`, `stack-provenance`, `preflight`).** "Agents are
+  users; users are agents" is the design principle the JSON surfaces were built
+  on, and `docs/schemas/README.md` calls those shapes public API — but only four
+  existed, for the error object, the download manifest, the index summary and
+  the render manifest. The three documents an agent is most likely to *parse*
+  rather than glance at had none. `stack_stats` in particular is the library's
+  largest payload and its only one that is a measurement: per-pass distribution,
+  the signed decibel change between consecutive passes, the net first-to-last
+  change, the spatial breakdown naming which block moved and between which two
+  passes, and the caveats that say what those numbers do and do not mean. A
+  consumer had the docstring and the examples, which is not a contract.
+
+  Three schemas now describe them, each pinned against a real payload:
+  `stack-stats.schema.json` (`umbra_py.stack_stats`, `umbra stack --stats
+  --json`, `POST /artifacts/stats`, the `stack_stats` agent tool),
+  `stack-provenance.schema.json` (`umbra_py.stack_provenance`, `umbra stack
+  --provenance --json`, `POST /artifacts/provenance`, the `stack_provenance`
+  agent tool) and `preflight.schema.json` (`umbra preflight --json`, and the
+  same verdicts `umbra chips --preflight` acts on). One schema per *question*
+  rather than per surface, which is the shape the code already had: each
+  document is one `to_dict()` that three front doors emit unchanged, so a shell,
+  an HTTP client and a model read one contract. `render-manifest.schema.json`
+  stops describing its `stats` key as a free-form object and `$ref`s the stats
+  schema instead — the same rule applied between two schemas.
+
+  The nullable and conditional halves are in the contract rather than implied,
+  because they are exactly what a consumer gets wrong: `net_change` is null for
+  a single-pass cube, `changed_area_km2` and `cell_area_m2` are null on a
+  geographic grid (counting cells there measures nothing), a pass with no valid
+  cell reports null statistics, `provenance` is present only when the sources
+  recorded one — so its *absence* means "the published products as delivered"
+  rather than "unknown" — and `quantile_method` / `quantile_bin_db` appear only
+  under `windowed`, where the percentiles are histogram estimates. A schema that
+  described only the happy payload would have been a worse promise than none.
+
+  `tests/test_schemas.py` is what makes them contracts rather than
+  documentation. Every schema here is now validated with a real JSON Schema
+  validator (`jsonschema`, a new `[dev]` dependency) against a payload from the
+  surface that emits it — including the two that previously had only a key-set
+  comparison, which catches a renamed field and nothing else: not a type that
+  changed, not a value that went null, not a key that appeared. Every schema is
+  strict (`additionalProperties: false`), so a field added to a payload and not
+  to its contract fails the build instead of a consumer. The suite also holds
+  the parts that rot quietly: each file is a valid draft 2020-12 schema, each
+  `$id` matches its filename (a cross-file `$ref` resolves against it), and the
+  README table names every file and no file it does not.
+
+  The claim that three surfaces emit one document is not re-tested here — it is
+  already pinned per surface in `tests/test_serve.py` and
+  `tests/test_mcp_server.py`, so validating the one `to_dict()` validates all
+  three. `umbra stack --stats --json`, `--provenance` and `umbra preflight
+  --json` now name their schema in `--help`, as the download and index-info
+  commands already did.
 - **Ask it from the front doors that answer for people who installed nothing
   (`POST /artifacts/provenance`, the `stack_provenance` agent tool).** The
   provenance preflight shipped as a library function and a CLI flag, which

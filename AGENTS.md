@@ -82,10 +82,12 @@ tests/
   test_download.py   # uses `responses` to mock HTTP
   test_live.py       # marked `network`, skipped by default
   test_workflows.py  # every `umbra ...` call in .github/workflows/ must parse
+  test_schemas.py    # every docs/schemas/*.json validated against a real payload from the surface that emits it
   data/sample_item.json
 examples/            # planned notebooks (v0.2); see examples/README.md
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
+docs/schemas/        # the published JSON contracts for every `--json` surface (public API)
 docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged PRs
 ```
 
@@ -309,6 +311,19 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
    exactly how the `catalog-index` release came not to exist. →
    verify: `pytest tests/test_workflows.py`, which parses every workflow
    invocation against the real command tree.
+
+### Add (or change) a `--json` output shape
+1. The shape is public API. Write or amend the contract in `docs/schemas/` and
+   add a row to `docs/schemas/README.md`'s table — `tests/test_schemas.py`
+   fails on a file that no row names, and on a row that names no file.
+2. Validate a payload from the surface that emits it in
+   `tests/test_schemas.py`. Every schema is strict
+   (`additionalProperties: false`), so a field added to the payload and not to
+   the contract fails there rather than in a consumer. → verify:
+   `pytest tests/test_schemas.py`.
+3. If the same document is emitted by more than one front door (the CLI's
+   `--json`, an `umbra serve` route, an agent tool), keep it one `to_dict()`
+   and one schema — validating the document once then covers all three.
 
 ### Add a new optional dependency
 1. Put it under the right extra in `pyproject.toml`

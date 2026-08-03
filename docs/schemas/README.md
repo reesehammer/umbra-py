@@ -12,6 +12,9 @@ with a `CHANGELOG.md` entry.
 | [`download.schema.json`](download.schema.json) | The `[{asset, path, bytes, sha256}, …]` array printed to stdout on success. | `umbra download --json`. |
 | [`index-info.schema.json`](index-info.schema.json) | The index-stats object (path, size, item/task counts, date span, build date) printed to stdout. | `umbra index info --json`. |
 | [`render-manifest.schema.json`](render-manifest.schema.json) | The `{output, items_used, parameters}` manifest printed to stdout on success. | `umbra change` / `timescan` / `swipe` / `gallery` / `map` / `stack`, each with `--json`. |
+| [`stack-stats.schema.json`](stack-stats.schema.json) | The datacube measurement: per-pass distribution, pass-to-pass and net change, the optional spatial breakdown. | `umbra_py.stack_stats`; `umbra stack --stats --json` (as the manifest's `stats`); `POST /artifacts/stats`; the `stack_stats` agent tool. |
+| [`stack-provenance.schema.json`](stack-provenance.schema.json) | What a selection's sources say their pixel values are, and whether the series stacks. | `umbra_py.stack_provenance`; `umbra stack --provenance --json`; `POST /artifacts/provenance`; the `stack_provenance` agent tool. |
+| [`preflight.schema.json`](preflight.schema.json) | Which acquisitions can support a measurement, read from product metadata over the wire. | `umbra_py.preflight.preflight_items`; `umbra preflight --json`. |
 
 ## Structured success output
 
@@ -55,3 +58,31 @@ $ UMBRA_JSON=1 umbra map ...
 The `hint` is `null` when no single recovery step applies. See
 [`STRATEGY.md` §7](../STRATEGY.md#7-design-principles-to-hold-onto) for the
 rationale ("agents are users; users are agents").
+
+## The measurement documents
+
+Three of the schemas describe a *measurement* rather than an artifact, and each
+is emitted by more than one front door from a single `to_dict()` — the CLI's
+`--json`, an `umbra serve` route, and the MCP / LangChain / LlamaIndex agent
+tool of the same name:
+
+| Document | CLI | HTTP | Agent tool |
+| --- | --- | --- | --- |
+| [`stack-stats`](stack-stats.schema.json) | `umbra stack --stats --json` | `POST /artifacts/stats` | `stack_stats` |
+| [`stack-provenance`](stack-provenance.schema.json) | `umbra stack --provenance --json` | `POST /artifacts/provenance` | `stack_provenance` |
+| [`preflight`](preflight.schema.json) | `umbra preflight --json` | — | — |
+
+So a shell, an HTTP client and a model read one schema per question, not three.
+`render-manifest.schema.json` references `stack-stats.schema.json` for its
+inline `stats` key rather than restating it, which is the same rule applied
+between two schemas.
+
+## They are checked, not just described
+
+`tests/test_schemas.py` validates a payload produced by a real surface against
+every schema here, with a real JSON Schema validator (`jsonschema`, a `[dev]`
+dependency). Each schema is strict — `additionalProperties: false` — so a field
+added to a payload and not to its contract fails the build rather than a
+consumer. The suite also checks that every schema is valid draft 2020-12, that
+its `$id` matches its filename (a cross-file `$ref` resolves against it), and
+that the table above names every file and no file it does not.

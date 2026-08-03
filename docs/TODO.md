@@ -832,10 +832,10 @@ blocker:
       composite-path caller that *does* quote decibels is
       `render_change_png`, and it has no HTTP surface — see the composite entry
       below.
-    - **The response is not in `docs/schemas/`.** `StackProvenance.to_dict()` is
-      pinned by tests on all three surfaces, but the render-manifest schema has
-      no sibling for it. Worth writing if a non-umbra-py client starts parsing
-      the report.
+    - ~~**The response is not in `docs/schemas/`.**~~ **shipped** —
+      `docs/schemas/stack-provenance.schema.json`, beside the two other
+      measurement documents (`stack-stats`, `preflight`) the same PR published.
+      See the schema-contract entry below for what is still open there.
   - **The search-side commands still don't report conversions.** This entry's
     original suggestion — list the distinct `UMBRA_CALIBRATION` values in a
     selection the way `umbra search` reports polarizations — is orthogonal to
@@ -853,6 +853,49 @@ blocker:
   manifest (`docs/schemas/render-manifest.schema.json`), which has no provenance
   field; the record is present only when `--stats` was also asked for. Adding it
   to the manifest would mean a schema revision, so it waits for a consumer.
+
+---
+
+## Published JSON-contract follow-ons (`docs/schemas/` + `tests/test_schemas.py`)
+
+- **Surfaced in:** the schema-contract PR (`STRATEGY.md` §8, design principle 5).
+- **Code:** `docs/schemas/` (`stack-stats`, `stack-provenance`, `preflight`, and
+  the `$ref` from `render-manifest`), `tests/test_schemas.py`, the `jsonschema`
+  entry in `[dev]`, the `--help` pointers on `umbra stack --stats /
+  --provenance` and `umbra preflight --json`.
+
+Seven schemas now, each strict and each validated against a payload from the
+surface that emits it, plus the meta checks (valid draft 2020-12, `$id` matches
+filename, the README table names every file and no file it does not). Follow-ons,
+none a blocker:
+
+- **Several `--json` surfaces still have no schema.** `umbra chips --json`
+  (`ChipDataset.to_dict`, the largest remaining one — manifest counts, the
+  noise / speckle roll-ups, `skipped`, `preflight`), `umbra describe --json`
+  (`SceneDescription`), `umbra ask --json` (`SearchPlan`), `umbra watch --json`
+  (the delta) and the ranked-match lists of `umbra semantic` / `embed`. Each is
+  the same three moves as the three that shipped: write the contract, add the
+  README row, validate a real payload. They were left out to keep one PR one
+  claim, not because they are different work — and `chips` is the one to do
+  next, since a training loader is the consumer most likely to parse a payload
+  it did not print. (`umbra info --json` needs none: it emits the source STAC
+  item, whose contract is STAC's.)
+- **`umbra serve` has an OpenAPI document and the schemas do not appear in it.**
+  FastAPI generates `/openapi.json` from the route annotations, so the artifact
+  routes describe their *response* as a bare object while `docs/schemas/`
+  describes it exactly. Wiring the committed schema into the route's
+  `responses=` would make the HTTP surface self-describing to a generated
+  client; it needs the schemas loadable at import time (they are data files, so
+  a package-data decision) rather than only from a checkout.
+- **The schemas live in `docs/`, so a wheel does not carry them.** Fine for a
+  contract read on GitHub, and it is why nothing in `src/` loads them at
+  runtime. If a consumer ever wants to validate against the version it
+  installed, they would have to ship as package data with a `Path`-based
+  accessor.
+- **Nothing checks that a schema's `examples` validate against its own schema.**
+  Several carry `examples` for the reader; they are prose as far as the suite is
+  concerned. A loop asserting each example validates would keep them honest — a
+  few lines, worth it once an example is more than a one-line value.
 
 ---
 

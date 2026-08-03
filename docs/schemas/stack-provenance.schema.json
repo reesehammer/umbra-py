@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/stack-provenance.schema.json",
+  "title": "Stack provenance report",
+  "description": "What a selection's sources say their pixel values are, before anything is stacked. Emitted identically by `umbra stack --provenance --json` (umbra_py.StackProvenance.to_dict), `POST /artifacts/provenance` on `umbra serve`, and the `stack_provenance` agent tool (MCP / LangChain / LlamaIndex).",
+  "type": "object",
+  "required": ["asset", "agrees", "groups", "unreadable"],
+  "additionalProperties": false,
+  "properties": {
+    "asset": {
+      "type": "string",
+      "description": "Which product's raster was read, matching `to_stack(asset=...)`.",
+      "examples": ["GEC"]
+    },
+    "agrees": {
+      "type": "boolean",
+      "description": "Whether `to_stack` would accept this selection's provenance. Only the provenance: a series can agree here and still fail to stack for an unrelated reason (footprints that do not overlap, a source that could not be read)."
+    },
+    "groups": {
+      "type": "array",
+      "description": "The acquisitions grouped by what their sources say a pixel is, largest group first. When `agrees` is false, `groups[0].hrefs` is the subset to re-run on.",
+      "items": { "$ref": "#/$defs/group" }
+    },
+    "unreadable": {
+      "type": "array",
+      "description": "Sources that could not be opened, reported apart rather than grouped: a failed read does not make the selection disagree, it makes the answer incomplete.",
+      "items": { "$ref": "#/$defs/unreadableSource" }
+    },
+    "shared": {
+      "$ref": "#/$defs/provenanceRecord",
+      "description": "What every readable source agrees on, exactly as `to_stack` carries it into `attrs[\"provenance\"]`. Absent when they disagree, and also for the ordinary case of a series of untagged published products."
+    },
+    "refusal": {
+      "type": "string",
+      "description": "Verbatim the ValueError a stack of this selection would raise. Absent when `agrees` is true."
+    }
+  },
+  "$defs": {
+    "provenanceRecord": {
+      "type": "object",
+      "description": "A raster's `UMBRA_*` conversion record, keys lowercased and de-prefixed. `\"(unrecorded)\"` is a raster with no umbra-py conversion provenance, such as a published GEC; `\"none\"` is a step that ran nothing.",
+      "additionalProperties": { "type": "string" },
+      "examples": [
+        {
+          "calibration": "gamma0",
+          "noise_subtraction": "estimated",
+          "rtc_model": "facet",
+          "scale": "amplitude",
+          "speckle_filter": "lee",
+          "speckle_window": "5",
+          "units": "amplitude"
+        }
+      ]
+    },
+    "group": {
+      "type": "object",
+      "required": ["record", "count", "item_ids", "hrefs"],
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "$ref": "#/$defs/provenanceRecord",
+          "description": "Every measurement key, so a group of published GECs reads `\"(unrecorded)\"` throughout rather than as gaps."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many acquisitions are in the group (the length of `item_ids`)."
+        },
+        "item_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The group's acquisitions, in the selection's own oldest-first order."
+        },
+        "hrefs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The item JSON URL of each member, the arguments `umbra stack` takes. Shorter than `item_ids` when an item carried no URL (one built from a dict rather than fetched from the catalog)."
+        }
+      }
+    },
+    "unreadableSource": {
+      "type": "object",
+      "required": ["item_id", "href", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": { "type": "string" },
+        "href": {
+          "type": ["string", "null"],
+          "description": "The raster URL that could not be opened, or null when the item lists no such asset at all."
+        },
+        "error": {
+          "type": "string",
+          "description": "The read failure, `TypeName: message`."
+        }
+      }
+    }
+  }
+}
