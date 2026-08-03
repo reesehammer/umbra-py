@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/chip-skipped.schema.json",
+  "title": "Skipped acquisition",
+  "description": "One acquisition a chip run could not include, in the product's own words (`umbra_py.chips.SkippedAcquisition.to_dict`). It is one line of the `skipped.jsonl` sidecar written beside the manifest, and one entry of the `skipped` array in a chip dataset summary — the same record either way, so a loader reading the directory and an agent reading stdout learn the same thing. Only a *final* fact about a product produces one: metadata that cannot support the request, or no readable product behind the href. A transport failure does not, because a dropped connection says nothing about the archive.",
+  "type": "object",
+  "required": ["item_id", "datetime", "reason", "hint", "stage"],
+  "additionalProperties": false,
+  "properties": {
+    "item_id": {
+      "type": "string",
+      "description": "Which pass is missing."
+    },
+    "datetime": {
+      "type": ["string", "null"],
+      "description": "When it was acquired, so a gap in a time series can be located. Null when the source item stated none."
+    },
+    "reason": {
+      "type": "string",
+      "description": "The refusal's own words — verbatim from the `UnsupportedMeasurementError` or `UnreadableProductError` that produced it, naming what the product does carry rather than paraphrasing what it does not."
+    },
+    "hint": {
+      "type": ["string", "null"],
+      "description": "The single recovery step the refusal named, or null when no one step applies.",
+      "examples": ["Try --noise-model estimated."]
+    },
+    "stage": {
+      "description": "When the hole was found, which is the one thing the two routes to it do not share. `conversion` means the product was downloaded and then refused (`--skip-unsupported`); `preflight` means its metadata was read over the wire and it was never downloaded at all (`--preflight`). The reason is the product's own either way, so only the cost differs.",
+      "enum": ["conversion", "preflight"]
+    }
+  }
+}

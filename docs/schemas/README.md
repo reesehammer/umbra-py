@@ -15,6 +15,9 @@ with a `CHANGELOG.md` entry.
 | [`stack-stats.schema.json`](stack-stats.schema.json) | The datacube measurement: per-pass distribution, pass-to-pass and net change, the optional spatial breakdown. | `umbra_py.stack_stats`; `umbra stack --stats --json` (as the manifest's `stats`); `POST /artifacts/stats`; the `stack_stats` agent tool. |
 | [`stack-provenance.schema.json`](stack-provenance.schema.json) | What a selection's sources say their pixel values are, and whether the series stacks. | `umbra_py.stack_provenance`; `umbra stack --provenance --json`; `POST /artifacts/provenance`; the `stack_provenance` agent tool. |
 | [`preflight.schema.json`](preflight.schema.json) | Which acquisitions can support a measurement, read from product metadata over the wire. | `umbra_py.preflight.preflight_items`; `umbra preflight --json`. |
+| [`chip-dataset.schema.json`](chip-dataset.schema.json) | What a chipping run produced: the grid, the acquisitions in it, the conversion, and the noise / speckle / skipped / preflight roll-ups. | `umbra chips --json` (`umbra_py.chips.ChipDataset.to_dict`). |
+| [`chip-record.schema.json`](chip-record.schema.json) | One training tile: where it is, what the acquisition was, and what the processing did to its pixels. | Every record of a chip run's manifest — one `.jsonl` line, one `.geojson` feature's `properties`, one `.parquet` row. |
+| [`chip-skipped.schema.json`](chip-skipped.schema.json) | One acquisition a chip run could not include, in the product's own words. | Each line of the `skipped.jsonl` sidecar, and each entry of the dataset summary's `skipped` array. |
 
 ## Structured success output
 
@@ -76,6 +79,32 @@ So a shell, an HTTP client and a model read one schema per question, not three.
 `render-manifest.schema.json` references `stack-stats.schema.json` for its
 inline `stats` key rather than restating it, which is the same rule applied
 between two schemas.
+
+## The chip-dataset trio
+
+A chipping run has three consumers reading three different things, so it has
+three contracts rather than one:
+
+| Document | Read by | Where it lives |
+| --- | --- | --- |
+| [`chip-dataset`](chip-dataset.schema.json) | an agent or a script deciding what to train on | stdout, from `umbra chips --json` |
+| [`chip-record`](chip-record.schema.json) | a training loader, line by line | the manifest (`.jsonl` / `.geojson` / `.parquet`) |
+| [`chip-skipped`](chip-skipped.schema.json) | whoever opens the directory later | the `skipped.jsonl` sidecar |
+
+The record is the contract rather than the manifest *file*, because all three
+manifest formats carry the same record — a `.geojson` feature's `properties`
+and a `.parquet` row are the `.jsonl` line. And the summary `$ref`s
+`chip-skipped.schema.json` for its own `skipped` entries instead of restating
+them, so the payload and the sidecar cannot describe one left-out pass
+differently.
+
+Five of the summary's keys are **present only when the run had something to say
+with them** — `conversion` (a complex product was geocoded), `noise` (a floor
+was subtracted), `speckle` (a filter ran), `skipped` / `skipped_count` /
+`skipped_manifest` (a pass was left out) and `preflight` (the archive was asked
+first). That is deliberate, and it is in the contract: a plain GEC run's payload
+is unchanged by any of those features existing, so the *absence* of `skipped` is
+the statement "every acquisition offered was chipped" rather than a default.
 
 ## They are checked, not just described
 

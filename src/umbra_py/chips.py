@@ -573,6 +573,13 @@ class ChipRecord:
     ``rtc_model`` are ``None`` for a chip read straight from an amplitude raster
     -- those steps need a complex product -- and the full tag set travels in the
     chip GeoTIFF itself.
+
+    The shape is public API and published as
+    ``docs/schemas/chip-record.schema.json``: it is what a training loader parses
+    without ever having printed it, in whichever of the three manifest formats it
+    reads (one ``.jsonl`` line, one ``.geojson`` feature's ``properties``, one
+    ``.parquet`` row -- the same record).
+
     The speckle pair is the one that says what a chip's *resolution* is as
     opposed to its pixel size: a 5x5-filtered chip resolves ground five pixels
     across, which is what a model trained on it can learn to see. It is filled in
@@ -883,6 +890,10 @@ class SkippedAcquisition:
     (``preflight=True``). The reason is the product's own words either way -- the
     conversion's own check, or the reader's -- so the dataset's hole is described
     the same and only its cost differs.
+
+    Published as ``docs/schemas/chip-skipped.schema.json`` -- one line of the
+    ``skipped.jsonl`` sidecar and one entry of the dataset summary's ``skipped``
+    array, which is one contract because it is one record.
     """
 
     item_id: str
@@ -974,6 +985,13 @@ class ChipDataset:
     loader reading the directory rather than the run can see it too. ``None``
     when nothing was skipped, which is the same thing the empty ``skipped``
     tuple says.
+
+    :meth:`to_dict` is what ``umbra chips --json`` prints, and its shape is
+    published as ``docs/schemas/chip-dataset.schema.json``. Its conditional keys
+    are part of that contract: ``conversion``, ``noise``, ``speckle``,
+    ``skipped`` and ``preflight`` appear only when the run had something to say
+    with them, so an ordinary raster run's payload is unchanged by any of those
+    features existing.
     """
 
     out_dir: str

@@ -68,7 +68,7 @@ def _check(name: str, payload: dict) -> None:
 
 def test_the_suite_is_not_empty():
     # A glob that matched nothing would make every test below vacuously green.
-    assert len(SCHEMA_PATHS) >= 7
+    assert len(SCHEMA_PATHS) >= 10
 
 
 @pytest.mark.parametrize("path", SCHEMA_PATHS, ids=lambda p: p.name)
@@ -467,3 +467,221 @@ def test_preflight_report_of_a_clean_selection_validates(tmp_path):
     assert payload["supported_count"] == 1
     assert payload["calibration"] is None
     _check("preflight.schema.json", payload)
+
+
+# --- The chip dataset, its manifest records and its sidecar --------------------
+#
+# Three documents for one run, because a chip run has three consumers: an agent
+# reading `umbra chips --json`, a training loader reading `manifest.jsonl` line
+# by line, and whatever opens the directory later and finds `skipped.jsonl`. The
+# summary `$ref`s the sidecar's schema for its own `skipped` entries rather than
+# restating it, so the two cannot describe the same record differently.
+
+
+def _emitted(payload: dict) -> dict:
+    """``payload`` as a consumer receives it, rather than as Python holds it.
+
+    ``ChipDataset.to_dict`` is printed, so the document under contract is the
+    JSON one: the conversion's ``bbox`` is a tuple in the dataclass and an array
+    on stdout, and it is the array a schema describes. Round-tripping also makes
+    a value that could not be serialised at all fail here rather than in the
+    command that prints it.
+    """
+    return json.loads(json.dumps(payload))
+
+
+def _chip_run(tmp_path, **kwargs):
+    """A real chipping run over a synthetic raster, returning the dataset."""
+    from umbra_py.chips import write_chips
+
+    from .test_chips import _item_for, _make_geotiff
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    return write_chips([_item_for(tif)], tmp_path / "ds", chip_size=10, **kwargs)
+
+
+def test_chip_dataset_summary_validates(tmp_path):
+    """The plain case: a published GEC chipped with nothing else asked for.
+
+    None of the five conditional blocks is present, which is the half of the
+    contract a converted run never exercises -- and the half a consumer is most
+    likely to meet.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    payload = _emitted(_chip_run(tmp_path).to_dict())
+
+    assert not {"conversion", "noise", "speckle", "skipped", "preflight"} & set(payload)
+    _check("chip-dataset.schema.json", payload)
+
+
+def test_every_chip_manifest_record_validates(tmp_path):
+    """The manifest is the payload a training loader parses without printing it,
+    so every line of a real one is checked rather than the summary that names it."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    dataset = _chip_run(tmp_path)
+    lines = Path(dataset.manifest_path).read_text().strip().splitlines()
+
+    assert len(lines) == dataset.chip_count == 4
+    for line in lines:
+        _check("chip-record.schema.json", json.loads(line))
+
+
+def test_a_geojson_manifests_feature_properties_are_the_same_record(tmp_path):
+    """`.geojson` is a different file, not a different record -- the contract is
+    the record, so the feature's `properties` validate against it too."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    dataset = _chip_run(tmp_path, manifest="manifest.geojson")
+    collection = json.loads(Path(dataset.manifest_path).read_text())
+
+    assert collection["type"] == "FeatureCollection"
+    for feature in collection["features"]:
+        _check("chip-record.schema.json", feature["properties"])
+
+
+def _converted_run(tmp_path, *, refuse=frozenset()):
+    """A SICD run whose scenes carry a full set of conversion provenance tags."""
+    from umbra_py.chips import SicdConversion, write_chips
+
+    from .test_chips import _make_converted_cog, _refusing_preparer, _sicd_item
+
+    cog = _make_converted_cog(
+        tmp_path / "geocoded.tif",
+        calibration="sigma0",
+        noise_subtraction="estimated",
+        noise_floor_db=-21.5,
+        noise_floored_fraction=0.031,
+        noise_floor_margin_db=4.25,
+        speckle_filter="lee",
+        speckle_window=5,
+        speckle_enl_before=1.02,
+        speckle_enl_after=8.4,
+        speckle_looks=1.0,
+        rtc_model="facet",
+    )
+    return write_chips(
+        [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(
+            calibration="sigma0",
+            noise_subtract=True,
+            noise_model="estimated",
+            speckle_filter="lee",
+            rtc=True,
+            rtc_model="facet",
+            bbox=(11.9, 36.0, 12.1, 36.2),
+        ),
+        preparer=_refusing_preparer(cog, refuse=refuse),
+        skip_unsupported=True,
+    )
+
+
+def test_a_converted_chip_run_validates_with_every_conditional_block(tmp_path):
+    """The other end: a complex run that converted, subtracted a floor, filtered
+    speckle and could not include one of its passes -- so `conversion`, `noise`,
+    `speckle`, `skipped`, `skipped_count` and `skipped_manifest` are all present.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    payload = _emitted(_converted_run(tmp_path, refuse={"acq-b"}).to_dict())
+
+    assert payload["conversion"]["calibration"] == "sigma0"
+    assert payload["noise"]["models"] == ["estimated"]
+    assert payload["speckle"]["windows"] == [5]
+    assert payload["skipped_count"] == 1
+    assert payload["skipped_manifest"].endswith("skipped.jsonl")
+    _check("chip-dataset.schema.json", payload)
+
+
+def test_a_converted_chip_records_validate(tmp_path):
+    """A chip cut from a complex product carries the conversion's own record,
+    which is the half of the record schema an amplitude chip leaves null."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    dataset = _converted_run(tmp_path)
+    record = _emitted(dataset.records[0].to_dict())
+
+    assert record["calibration"] == "sigma0"
+    assert record["noise_subtraction"] == "estimated"
+    assert record["speckle_filter"] == "lee"
+    assert record["rtc_model"] == "facet"
+    for chip in dataset.records:
+        _check("chip-record.schema.json", _emitted(chip.to_dict()))
+
+
+def test_every_skipped_sidecar_line_validates(tmp_path):
+    """The sidecar is what says a dataset has a hole rather than having been
+    offered less, so it is read off disk rather than from the run that wrote it."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    dataset = _converted_run(tmp_path, refuse={"acq-b"})
+    lines = Path(dataset.skipped_path).read_text().strip().splitlines()
+
+    assert len(lines) == 1
+    for line in lines:
+        row = json.loads(line)
+        assert row["stage"] == "conversion"
+        _check("chip-skipped.schema.json", row)
+        # And the same record inside the summary, which `$ref`s this schema.
+        _check("chip-skipped.schema.json", _emitted(dataset.to_dict())["skipped"][0])
+
+
+def test_a_preflighted_chip_run_validates(tmp_path):
+    """The `preflight` block, and the `"preflight"` stage its drops are recorded
+    under -- the one field that distinguishes a hole found before the download."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import SicdConversion, write_chips
+
+    from .test_chips import (
+        _make_converted_cog,
+        _nitf_item,
+        _recording_preparer,
+        _write_products,
+    )
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    products = _write_products(tmp_path)
+    dataset = write_chips(
+        [_nitf_item(name, path) for name, path in products.items()],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        conversion=SicdConversion(calibration="sigma0"),
+        preparer=_recording_preparer(cog, []),
+        preflight=True,
+    )
+    payload = _emitted(dataset.to_dict())
+
+    assert payload["preflight"]["checked"] == 3
+    assert payload["preflight"]["skipped"] == 1
+    assert payload["skipped"][0]["stage"] == "preflight"
+    _check("chip-dataset.schema.json", payload)
+    _check("chip-skipped.schema.json", payload["skipped"][0])
+
+
+def test_the_chip_schemas_reject_a_key_and_a_type_that_drifted(tmp_path):
+    """The strictness is the check, on the two documents most likely to grow a
+    field: a new roll-up key on the summary, a new column on the record."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    dataset = _chip_run(tmp_path)
+
+    payload = _emitted(dataset.to_dict())
+    payload["chips_per_scene"] = 4  # a plausible-looking field that is not in the contract
+    assert list(_validator("chip-dataset.schema.json").iter_errors(payload))
+
+    record = _emitted(dataset.records[0].to_dict())
+    record["valid_fraction"] = "1.0"  # the drift a key-set comparison cannot see
+    assert list(_validator("chip-record.schema.json").iter_errors(record))

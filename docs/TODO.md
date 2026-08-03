@@ -859,27 +859,41 @@ blocker:
 ## Published JSON-contract follow-ons (`docs/schemas/` + `tests/test_schemas.py`)
 
 - **Surfaced in:** the schema-contract PR (`STRATEGY.md` §8, design principle 5).
-- **Code:** `docs/schemas/` (`stack-stats`, `stack-provenance`, `preflight`, and
-  the `$ref` from `render-manifest`), `tests/test_schemas.py`, the `jsonschema`
-  entry in `[dev]`, the `--help` pointers on `umbra stack --stats /
-  --provenance` and `umbra preflight --json`.
+- **Code:** `docs/schemas/` (`stack-stats`, `stack-provenance`, `preflight`,
+  `chip-dataset`, `chip-record`, `chip-skipped`, and the `$ref`s from
+  `render-manifest` and `chip-dataset`), `tests/test_schemas.py`, the
+  `jsonschema` entry in `[dev]`, the `--help` pointers on `umbra stack --stats /
+  --provenance`, `umbra preflight --json` and `umbra chips --json`.
 
-Seven schemas now, each strict and each validated against a payload from the
+Ten schemas now, each strict and each validated against a payload from the
 surface that emits it, plus the meta checks (valid draft 2020-12, `$id` matches
 filename, the README table names every file and no file it does not). Follow-ons,
 none a blocker:
 
-- **Several `--json` surfaces still have no schema.** `umbra chips --json`
-  (`ChipDataset.to_dict`, the largest remaining one — manifest counts, the
-  noise / speckle roll-ups, `skipped`, `preflight`), `umbra describe --json`
-  (`SceneDescription`), `umbra ask --json` (`SearchPlan`), `umbra watch --json`
-  (the delta) and the ranked-match lists of `umbra semantic` / `embed`. Each is
-  the same three moves as the three that shipped: write the contract, add the
-  README row, validate a real payload. They were left out to keep one PR one
-  claim, not because they are different work — and `chips` is the one to do
-  next, since a training loader is the consumer most likely to parse a payload
-  it did not print. (`umbra info --json` needs none: it emits the source STAC
-  item, whose contract is STAC's.)
+- ~~**`umbra chips --json` has no schema.**~~ **shipped** — `chip-dataset`,
+  `chip-record` and `chip-skipped`, three documents because a chip run has three
+  consumers (the `--json` summary, the manifest a loader reads line by line, the
+  `skipped.jsonl` sidecar in the directory), with the summary `$ref`ing the
+  sidecar's schema for its own `skipped` entries. What is still open there:
+  - **The `.geojson` manifest's envelope is unschema'd.** Its feature
+    `properties` are validated against `chip-record.schema.json`, but the
+    `FeatureCollection` around them carries two non-standard top-level keys
+    (`license`, `attribution`). GeoJSON allows foreign members, so nothing is
+    wrong; a consumer reading the *file* rather than the records simply has no
+    contract for the wrapper. One small schema `$ref`ing the record, if a
+    consumer ever wants it.
+  - **The `.parquet` manifest is a schema nothing describes.** It is
+    stac-geoparquet (each chip as a STAC Item row), so its contract is
+    stac-geoparquet's rather than this project's — but the mapping from
+    `ChipRecord` fields to Item `properties` is this project's, and it is
+    described only by `_chip_to_stac_item`.
+- **Several smaller `--json` surfaces still have no schema.** `umbra describe
+  --json` (`SceneDescription`), `umbra ask --json` (`SearchPlan`), `umbra watch
+  --json` (the delta) and the ranked-match lists of `umbra semantic` / `embed`.
+  Each is the same three moves as the ones that shipped: write the contract, add
+  the README row, validate a real payload. They were left out to keep one PR one
+  claim, not because they are different work. (`umbra info --json` needs none: it
+  emits the source STAC item, whose contract is STAC's.)
 - **`umbra serve` has an OpenAPI document and the schemas do not appear in it.**
   FastAPI generates `/openapi.json` from the route annotations, so the artifact
   routes describe their *response* as a bare object while `docs/schemas/`

@@ -1507,7 +1507,13 @@ def convert(
     show_default=True,
     help="Max acquisitions to gather when searching (ignored with item URLs).",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the dataset summary as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the dataset summary as JSON (see docs/schemas/chip-dataset.schema.json; "
+    "the manifest's own records are docs/schemas/chip-record.schema.json).",
+)
 @_shared._fuzzy_option
 @_shared._acquisition_filter_options
 @_shared._local_index_options

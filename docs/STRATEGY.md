@@ -1199,8 +1199,26 @@ from:
   what a consumer gets wrong: a single-pass cube's null `net_change`, a
   geographic grid's null areas, `provenance` whose *absence* is a statement, and
   the two keys `windowed` adds when the percentiles stop being exact. See the
-  CHANGELOG. **Open:** the remaining unschema'd `--json` surfaces (`umbra
-  chips` first), and wiring the committed schemas into `umbra serve`'s generated
+  CHANGELOG.
+  ~~**Open:** the remaining unschema'd `--json` surfaces (`umbra chips`
+  first).~~ **shipped for `chips`** — `docs/schemas/chip-dataset`, `chip-record`
+  and `chip-skipped` publish what a chipping run produces, which is three
+  documents rather than one because a chip run has three consumers: an agent
+  reading `umbra chips --json`, a training loader reading `manifest.jsonl` line
+  by line, and whoever opens the directory later and finds the `skipped.jsonl`
+  sidecar. The middle one is why this surface was next — the file a loader opens
+  is written by one process and parsed by another months later, which is the case
+  a contract exists for — and the *record* rather than the manifest file is what
+  is described, since all three manifest formats (`.jsonl`, `.geojson`,
+  `.parquet`) carry the same one. What the contract had to get right is the
+  conditional half, because a chip payload is mostly optional blocks:
+  `conversion`, `noise`, `speckle`, `skipped` and `preflight` appear only when the
+  run had something to say with them, so the absence of `skipped` is the statement
+  “every acquisition offered was chipped” rather than a default — now in the
+  schema rather than implied by a docstring, and pinned against a real run at each
+  end. See the CHANGELOG. **Open:** the smaller unschema'd `--json` surfaces
+  (`umbra describe`, `ask`, `watch`, the ranked-match lists of `semantic` /
+  `embed`), and wiring the committed schemas into `umbra serve`'s generated
   OpenAPI document — see `TODO.md`.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
