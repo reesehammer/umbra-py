@@ -2633,6 +2633,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `umbra ask` remains an additive follow-on in `TODO.md`.
 
 ### Fixed
+- **The SAR overlay's de-rotation now actually runs: geotiff.js resolves tag
+  values lazily, so reading the affine as a property always saw `undefined`.**
+  The georeferenced placement shipped earlier read the raster's affine with
+  `fd.ModelTransformation`, a plain property access on the object
+  `getFileDirectory()` returns. A real geotiff.js `FileDirectory` does not carry
+  tags that way — values are resolved on demand through `hasTag` / `loadValue`,
+  and `loadValue` is asynchronous because a tag stored outside the IFD costs
+  another range request. So the read yielded `undefined` for every file,
+  `rasterGeoreference` returned null, and the driver took its own
+  unreadable-georeferencing fallback: the STAC bbox stretch it was written to
+  replace. The published explorer kept drawing every scene rotated, exactly as
+  before, with no error anywhere to say so.
+
+  The affine is now read through `hasTag`/`loadValue`, which makes the placement
+  step a promise the driver awaits before decoding pixels. Behaviour is
+  otherwise unchanged: same envelope, same resample, same bbox fallback for a
+  file that genuinely carries no georeferencing.
+
+  **The test doubles are what let this through, so they were the real fix.**
+  `fakeImage` handed back a plain object with the tags as properties, so the
+  suite validated an interface geotiff.js does not have — every assertion passed
+  against a shape that never occurs. The stub now implements `hasTag`/`loadValue`
+  and resolves on a later turn of the event loop, so it exercises the accessors
+  the library actually exposes and would catch an ordering mistake in the
+  driver's chain. Verified beyond the doubles by running the georeferencing code
+  *extracted from the generated `explore.html`* against the real pinned
+  geotiff.js bundle and the real Black River GEC: it now places from the file's
+  own affine, with an envelope matching GDAL's dataset bounds to the last digit.
 - **`umbra-mcp` runs on the current SDK again — ported to `mcp` 2.0 — and its
   image tools reach a client for the first time.** `mcp` 2.0.0 renamed
   `mcp.server.fastmcp` to `mcp.server.mcpserver` and `FastMCP` to `MCPServer`.
