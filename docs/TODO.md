@@ -931,15 +931,22 @@ filename, the README table names every file and no file it does not). Every
   emit into the generated document as `StackStats` / `StackProvenance` /
   `RenderJob` with each route's `responses=` `$ref`ing one. What is still open,
   and smaller:
-  - **The packaged copy is checked by a parse, not by a build.**
-    `test_the_wheel_ships_the_schemas_where_the_accessor_looks` reads
+  - **The packaged copy is checked by a parse in the suite, and by Docker in
+    CI.** `test_the_wheel_ships_the_schemas_where_the_accessor_looks` reads
     `pyproject.toml` and asserts the `force-include` target matches
-    `schemas.PACKAGE_DATA_DIR`, because every environment in CI installs
-    editable and so exercises only the *fallback* branch. That catches the drift
-    that would actually happen (a renamed target) and not a packaging change
-    that breaks the include some other way. Building a wheel in the suite would
-    catch both, at the cost of a build backend in the test path — worth it only
-    if the include ever breaks in a way a parse missed.
+    `schemas.PACKAGE_DATA_DIR`, because every environment in the Python matrix
+    installs editable and so exercises only the *fallback* branch. What a parse
+    cannot see is a build *context* that lacks the files: `docker.yml` caught
+    exactly that on the first run of this change, since the image copied only
+    `pyproject.toml`, `README.md` and `src/`, and a `force-include` is mandatory
+    — `FileNotFoundError: Forced include not found: /app/docs/schemas`, before
+    a line of Python ran. That is the right failure (an installed package has no
+    checkout to fall back to, so an image without the schemas would raise on
+    `/openapi.json` instead), and the `Dockerfile` + `.dockerignore` now carry
+    `docs/schemas` deliberately. Between the two, the packaged branch is
+    exercised end to end by the Docker smoke test rather than by the suite;
+    building a wheel inside the suite would bring the check closer, at the cost
+    of a build backend in the test path.
   - **The copy means `docs/schemas/README.md` ships inside the wheel too.**
     `force-include` takes the directory, so the reader's table is package data
     as well. Harmless (a few KB) and arguably useful next to the files it

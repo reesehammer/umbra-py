@@ -35,6 +35,11 @@ WORKDIR /app
 # on source changes, not on unrelated repo churn.
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
+# The published JSON contracts, which the wheel force-includes as package data
+# so `umbra serve` can put them in its generated OpenAPI document. An installed
+# package has no checkout to fall back to, so these are part of what the build
+# needs, not documentation.
+COPY docs/schemas ./docs/schemas
 
 RUN pip install ".[${UMBRA_EXTRAS}]"
 

@@ -17,7 +17,12 @@ dist
 *.egg-info
 tests
 examples
-docs
+# The planning docs, but *not* `docs/schemas/`: the wheel force-includes those
+# as package data (`umbra_py/_schemas/`) so `umbra serve` can put the published
+# contracts in its generated OpenAPI document, and an installed package has no
+# checkout to fall back to. Excluding them fails the build outright, which is
+# the honest failure for an image whose /openapi.json would otherwise raise.
+docs/*.md
 docs_src
 mkdocs.yml
 site

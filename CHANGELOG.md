@@ -31,7 +31,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the documented dev loop, and CI — resolve the same files a wheel ships.
   Nothing at runtime can notice those two ends disagreeing, so a test parses
   `pyproject.toml` and checks the `force-include` target against the accessor's
-  own constant, the same way `tests/test_workflows.py` parses the workflows.
+  own constant, the same way `tests/test_workflows.py` parses the workflows. The
+  `Dockerfile` and `.dockerignore` carry `docs/schemas` for the same reason a
+  wheel does: an installed package has no checkout to fall back to, so an image
+  built without them would raise on `/openapi.json` — and because a
+  `force-include` is mandatory, it fails the build instead, which is the honest
+  place for it.
 
   What it buys is a self-describing API. The three contracts the artifact routes
   emit are merged into the generated document as components — `StackStats`,
