@@ -77,6 +77,7 @@ src/umbra_py/
   schemas.py         # load_schema()/schema_names(): read the published docs/schemas/ contracts from an installed umbra-py (stdlib only; the wheel carries a copy of the directory as package data)
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
+  _specfun.py        # trigamma + regularized incomplete beta in stdlib math, so stack_stats' speckle detection floor needs no SciPy
 tests/
   test_catalog.py    # offline tests using an in-memory fake catalog tree
   test_models.py     # parsing/accessor tests against tests/data/sample_item.json

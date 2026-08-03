@@ -92,6 +92,10 @@
         }
       }
     },
+    "detection": {
+      "$ref": "#/$defs/detection",
+      "description": "Present only on a multi-pass cube whose looks could be read. Its absence means there was no comparison to weigh (a single pass), or that nothing measured the looks -- never that speckle is not a factor."
+    },
     "passes": {
       "type": "array",
       "description": "One record per acquisition, oldest first.",
@@ -113,7 +117,7 @@
     },
     "caveats": {
       "type": "array",
-      "description": "What these numbers do and do not mean, derived from the cube itself rather than fixed: the calibration, the flattening, a subtracted noise floor and how it was obtained, a speckle filter and what it cost, a geographic grid that cannot report area, and windowed percentiles.",
+      "description": "What these numbers do and do not mean, derived from the cube itself rather than fixed: the calibration, the flattening, a subtracted noise floor and how it was obtained, a speckle filter and what it cost, the speckle detection floor `detection` reports (and, when the observed change does not clear it, that it did not), a geographic grid that cannot report area, and windowed percentiles.",
       "items": { "type": "string" }
     }
   },
@@ -122,6 +126,48 @@
       "type": "object",
       "description": "A raster's `UMBRA_*` conversion record, keys lowercased and de-prefixed. See `stack-provenance.schema.json` for the report that groups a selection by it.",
       "additionalProperties": { "type": "string" }
+    },
+    "detection": {
+      "type": "object",
+      "description": "What speckle alone does to a change measured at `change_threshold_db`. Speckle is not an error bar on a mean: it is the dominant variation in a single cell, and at one look the pass-to-pass decibel difference of *unchanged* ground has a 7.9 dB spread. So a `changed_fraction` is evidence only to the degree it stands clear of this floor.",
+      "required": [
+        "looks",
+        "cell_sigma_db",
+        "false_alarm_fraction",
+        "false_alarm_target",
+        "target_threshold_db"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "looks": {
+          "type": "number",
+          "minimum": 1,
+          "description": "The equivalent number of looks the floor was computed at: the median of the passes that gave a reading, clamped to at least one look (no product has fewer). Every pass keeps its own `looks`, so a series whose passes disagree is visible rather than averaged away."
+        },
+        "cell_sigma_db": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The standard deviation, in decibels, of the pass-to-pass difference of a single *unchanged* cell at `looks`. Exactly `(10/ln 10) * sqrt(2 * trigamma(looks))`, since an L-look intensity is a gamma variate whose natural log has variance `trigamma(L)`."
+        },
+        "false_alarm_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The share of *unchanged* cells speckle alone pushes past `change_threshold_db`. Exact rather than approximate -- `2 * I_(1/(1+f))(looks, looks)` with `f = 10**(change_threshold_db/10)`, the regularized incomplete beta -- because a normal approximation is wrong by tens of per cent near one look, which is where the answer matters most. Read it against `net_change.changed_fraction`: the observed share is only evidence to the extent it exceeds this one. Because the looks read low on a textured scene, this is an upper bound on the false alarms rather than a flattering estimate."
+        },
+        "false_alarm_target": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The false-alarm rate `target_threshold_db` answers for.",
+          "examples": [0.05]
+        },
+        "target_threshold_db": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The threshold that would hold speckle's false alarms to `false_alarm_target` at these looks. A `change_threshold_db` below it is counting interference; speckle-filtering the cube (`to_stack(speckle_filter=...)`) raises the looks and brings this number down."
+        }
+      }
     },
     "change": {
       "type": "object",
@@ -188,6 +234,7 @@
         "std",
         "p5",
         "p95",
+        "looks",
         "change_vs_previous"
       ],
       "additionalProperties": false,
@@ -207,6 +254,11 @@
         "std": { "type": ["number", "null"] },
         "p5": { "type": ["number", "null"] },
         "p95": { "type": ["number", "null"] },
+        "looks": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "This pass's equivalent number of looks, read off the cube's own 16-cell blocks as the median block's `mean**2 / variance` of detected power. It describes the cells the numbers beside it are quoted about rather than the source product: `to_stack` decimates onto a shared grid, and decimation averages speckle down. Scene structure inflates a block's variance and so deflates the ratio, which means this reads low -- it is a floor on the looks present, not a claim about them. Null where no block could be read: a cube smaller than one block, or a pass whose blocks were nodata."
+        },
         "change_vs_previous": {
           "oneOf": [{ "$ref": "#/$defs/change" }, { "type": "null" }],
           "description": "Against the pass before it. Null for the first pass."

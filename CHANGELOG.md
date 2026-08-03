@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Say what speckle alone would have produced: `stack_stats` reports a
+  detection floor (`detection`, per-pass `looks`,
+  `docs/schemas/stack-stats.schema.json`, `src/umbra_py/_specfun.py`).** Every
+  change number this library has ever produced was quoted without the one
+  quantity that decides how to read it. `changed_fraction` counts the cells that
+  moved more than `change_threshold_db` between two passes — and on single-look
+  SAR imagery of ground that did **not** change, speckle by itself moves two
+  cells in three past a 3 dB threshold. A reduction that reports 0.66 and says
+  nothing about the 0.67 that interference would have produced anyway is not
+  reporting a measurement; it is reporting a number with its meaning withheld.
+
+  `stack_stats` now measures the floor and states it. Each pass gains `looks`,
+  its equivalent number of looks read off the cube's own 16-cell blocks
+  (`convert._block_enl_ratios`, the same reduction `umbra convert
+  --speckle-filter` reports its ENL pair from), and a multi-pass cube gains a
+  `detection` block: `cell_sigma_db`, the decibel spread of an *unchanged*
+  cell's pass-to-pass difference; `false_alarm_fraction`, the share of unchanged
+  cells speckle alone pushes past the requested threshold; and
+  `target_threshold_db`, the threshold that would hold that share to
+  `false_alarm_target` (5 %). A caveat quotes all three on every multi-pass
+  cube, and a second one fires when the observed `changed_fraction` does not
+  stand clear of the floor — the finding rather than the context, since that is
+  a series with no scene-wide change the threshold can tell from interference.
+
+  Three things make it a measurement rather than a rule of thumb. It is
+  **exact**: an L-look intensity is a gamma variate, so the false-alarm rate is
+  `2 * I_(1/(1+f))(L, L)` and the spread is `(10/ln 10) * sqrt(2 psi'(L))`,
+  where a normal approximation on the decibel axis is wrong by tens of per cent
+  near one look — which is exactly where the answer is most alarming. Both
+  special functions are ~80 lines of stdlib `math` (`_specfun.py`) rather than a
+  SciPy dependency for two calls, pinned against closed forms and a direct
+  integration. It is **read off the cube** rather than off the source products,
+  because `to_stack` decimates onto a shared grid and decimation averages
+  speckle down, so the looks that matter are the ones the cells being quoted
+  actually have. And it is **conservative by construction**: scene structure
+  inflates a block's variance and so deflates its looks, so the floor is an
+  upper bound on the false alarms rather than a flattering estimate.
+
+  The claim is checked end to end rather than argued: two independent
+  single-look realisations of the *same* surface are ground that did not change,
+  so every cell the detector flags is a false alarm — and the predicted
+  `false_alarm_fraction` lands within half a per cent of the observed
+  `changed_fraction` (0.664 against 0.667). It also puts a number on what the
+  speckle filter buys in the units of the answer rather than of the window: a
+  filtered cube reads more looks, so its floor, its spread and its 5 % threshold
+  all come down. Because the document is one `to_dict()`, it reaches `umbra
+  stack --stats`, `POST /artifacts/stats` and the `stack_stats` agent tool with
+  no new request field and no new flag — nothing to opt into, which is the point
+  for a caveat this load-bearing.
 - **Make the zero-install MCP front door runnable, and publish it where agents
   look (`server.json`, `release.yml`'s `publish-mcp` job,
   `tests/test_mcp_registry.py`).** The MCP server has been the project's

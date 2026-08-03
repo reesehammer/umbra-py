@@ -398,6 +398,27 @@ bought both reach the manifest: `speckle_enl_before` / `_after` / `_looks` join
 `speckle_filter` / `speckle_window` in every record on **either** path, and
 `ChipDataset.speckle` rolls them up per acquisition the way the noise summary
 does. **This closes the speckle group.**
+~~**Open:** every correction above removed or averaged something, and none of
+them said how much was left — so the library's change numbers were quoted
+without the one quantity that decides how to read them, and on single-look
+imagery of ground that did not change, speckle by itself moves two cells in
+three past a 3 dB threshold.~~ **shipped** — `stack_stats` measures the
+**detection floor** and states it: each pass's `looks` read off the cube's own
+blocks, and a `detection` block giving an unchanged cell's decibel spread, the
+share of unchanged cells speckle alone pushes past the requested threshold, and
+the threshold that would hold that share to 5 %. Exact rather than approximate
+(an L-look intensity is a gamma variate, so the rate is
+`2·I_{1/(1+f)}(L,L)` and the spread is `(10/ln10)·√(2ψ′(L))`, both from ~80 lines
+of stdlib `math` rather than a SciPy dependency), read off the *cube* rather than
+the sources (`to_stack` decimates, and decimation averages speckle down, so the
+looks that matter are the ones the quoted cells have), and conservative by
+construction (structure deflates a block's ENL, so the floor is an upper bound on
+the false alarms). Checked against the physics rather than argued: two
+independent single-look realisations of one surface are ground that did not
+change, and the predicted false-alarm fraction lands within half a per cent of
+the measured `changed_fraction`. It is also what finally prices the speckle
+filter in the units of the *answer* rather than of the window — a filtered cube
+reads more looks, so its floor, its spread and its 5 % threshold all come down.
 And the conversion pipeline now *feeds the ML on-ramp*: `umbra chips --asset
 SICD` geocodes each complex product through `sicd_to_geocoded_cog` and cuts the
 identical tiles from the result — and, with `--clip-bbox`, geocodes only the area
@@ -1031,6 +1052,40 @@ from:
   / `_after` / `_looks` beside `speckle_filter` / `speckle_window` on either path,
   and a `ChipDataset.speckle` roll-up counted per acquisition like the noise one.
   **This closes the speckle group.**
+- ~~Every correction above removed something from a pixel; none of them said how
+  much was left. So the library's own change numbers were quoted without the
+  quantity that decides how to read them: on single-look imagery of ground that
+  did **not** change, speckle by itself moves two cells in three past a 3 dB
+  threshold, and a `changed_fraction` of 0.66 reported beside no floor at all is
+  a number with its meaning withheld.~~ **shipped** — `stack_stats` measures the
+  **detection floor**. Each pass carries its `looks` (the equivalent number of
+  looks, read off the cube's own 16-cell blocks by `convert`'s own ENL
+  reduction), and a multi-pass cube carries a `detection` block: an unchanged
+  cell's decibel spread, the share of unchanged cells speckle alone pushes past
+  the requested threshold, and the threshold that would hold that share to 5 %.
+  A caveat quotes all three on every multi-pass cube, and a second fires when the
+  observed change does not stand clear of the floor — the finding rather than the
+  context.
+
+  Three properties make it a measurement. **Exact**: an L-look intensity is a
+  gamma variate, so the false-alarm rate is `2·I_{1/(1+f)}(L,L)` and the spread
+  is `(10/ln10)·√(2ψ′(L))`, where a normal approximation on the decibel axis is
+  wrong by tens of per cent near one look — precisely where the answer is most
+  alarming. Both special functions are ~80 lines of stdlib `math` (`_specfun.py`)
+  rather than a SciPy dependency for two calls. **Read off the cube** rather than
+  the sources, because `to_stack` decimates onto a shared grid and decimation
+  averages speckle down, so the looks that matter are the ones the quoted cells
+  have. **Conservative by construction**: structure inflates a block's variance
+  and deflates its looks, so the floor is an upper bound on the false alarms
+  rather than a flattering estimate. And it is checked against the physics rather
+  than argued — two independent single-look realisations of one surface are
+  ground that did not change, and the predicted false-alarm fraction lands within
+  half a per cent of the observed `changed_fraction`. It is also what finally
+  prices the speckle filter in the units of the *answer*: a filtered cube reads
+  more looks, so its floor, its spread and its 5 % threshold all come down.
+  Because the document is one `to_dict()`, it reaches `umbra stack --stats`,
+  `POST /artifacts/stats` and the `stack_stats` agent tool with no new request
+  field and no new flag. See the CHANGELOG.
 - ~~A product's own metadata could refuse a measurement, but the refusal had no
   name — so a chip batch could only die on the first scene that could not answer,
   and the most common failure a complex conversion has never reached the

@@ -57,14 +57,22 @@ Install with: ``pip install "umbra-py[load]"`` (add ``[dask]`` for lazy cubes).
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from ._specfun import regularized_incomplete_beta, trigamma
 from .constants import ATTRIBUTION, DATA_LICENSE
-from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
+from .convert import (
+    _ENL_BLOCK,
+    _ENL_PERCENTILE,
+    SPECKLE_FILTERS,
+    SPECKLE_WINDOW_DEFAULT,
+    _block_enl_ratios,
+)
 from .exceptions import AssetNotFoundError, MissingDependencyError
 from .models import UmbraItem
 
@@ -93,6 +101,47 @@ STACK_AUTO_CRS = "utm"
 #: about a bin -- 0.05 dB, or 0.6 % of amplitude -- against a measurement the
 #: caveats already call relative rather than absolute.
 _QUANTILE_BIN_DB = 0.05
+
+#: The false-alarm rate :func:`stack_stats`'s ``detection.target_threshold_db``
+#: answers for: the decibel threshold at which speckle alone would move this
+#: many unchanged cells. Five per cent is the conventional line and, more to the
+#: point, it is a *stated* one -- the number exists so a reader can see which
+#: rate the reported threshold buys rather than infer it from the threshold.
+DETECTION_FALSE_ALARM_TARGET = 0.05
+
+#: Decibels per neper: ``10 / ln(10)``. The bridge between the log-domain
+#: variance :func:`umbra_py._specfun.trigamma` returns and the decibels every
+#: change number in this module is quoted in.
+_DB_PER_NEPER = 10.0 / math.log(10.0)
+
+#: How far a cube's observed ``changed_fraction`` has to stand above the speckle
+#: floor before :func:`stack_stats` stops saying it does not. Both numbers are
+#: estimates -- the observed one fluctuates around the floor on ground that did
+#: not change, and the floor is an upper bound because the looks read low -- so a
+#: rule with no margin would flip on sampling noise at exactly the boundary the
+#: advisory exists to flag. A quarter again is the scale at which the excess is
+#: the finding rather than the arithmetic. Like
+#: :data:`umbra_py.convert.NOISE_MARGIN_WARN_DB`, it is deliberately not a knob:
+#: both numbers are reported unconditionally, so anyone who disagrees with the
+#: line can draw their own.
+DETECTION_EXCESS_WARN = 1.25
+
+#: Ceiling on the looks the detection floor is computed at. A block's ENL is
+#: ``mean**2 / variance``, so blocks that are numerically uniform -- a synthetic
+#: raster, a heavily quantised one, a cube decimated until neighbouring cells are
+#: the same number -- read arbitrarily high, and past a point the ratio stops
+#: being a measurement of anything. A thousand looks is far past any real SAR
+#: product and already puts the false-alarm fraction at any usable threshold
+#: below ``1e-50``, so the cap changes no answer that was ever meaningful; it
+#: keeps the beta integral inside double precision on the ones that were not.
+_DETECTION_MAX_LOOKS = 1024.0
+
+#: Widest threshold :func:`_detection_threshold_db` will search out to. Speckle's
+#: false-alarm rate falls monotonically with the threshold, so the bisection only
+#: needs a bracket wide enough to contain the answer: 60 dB is a factor of a
+#: million in power, past any real detection threshold and past where even
+#: single-look imagery still raises alarms.
+_DETECTION_MAX_THRESHOLD_DB = 60.0
 
 #: The :func:`umbra_py.convert.conversion_tags` keys that decide what a pixel
 #: value *is*, and so which ones :func:`to_stack` refuses to mix. A stack's time
@@ -2052,6 +2101,145 @@ class _DistAccum:
         }
 
 
+def _speckle_change_sigma_db(looks: float) -> float:
+    """How far speckle alone moves one *unchanged* cell between two passes, in dB.
+
+    An ``L``-look cell's intensity is a ``Gamma(L, mean/L)`` variate, so the
+    variance of its natural log is exactly ``psi'(L)``
+    (:func:`umbra_py._specfun.trigamma`) whatever the surface underneath. Two
+    independent passes of unchanged ground therefore differ by a log-domain
+    variance of ``2 psi'(L)``, and the decibel standard deviation is that,
+    scaled: ``(10/ln 10) * sqrt(2 psi'(L))``.
+
+    At one look that is 7.9 dB -- which is the whole reason this exists. A
+    library that reports a 3 dB change without saying that the interference under
+    it has a 7.9 dB spread is reporting a number nobody can weigh.
+    """
+    return _DB_PER_NEPER * math.sqrt(2.0 * trigamma(looks))
+
+
+def _speckle_false_alarm(threshold_db: float, looks: float) -> float:
+    """The fraction of *unchanged* cells speckle alone pushes past ``threshold_db``.
+
+    Exact rather than approximate, and that matters at the looks real imagery
+    has: the ratio of two independent ``Gamma(L, 1)`` variates ``G2/G1`` satisfies
+    ``P(G2/G1 <= r) = I_(r/(1+r))(L, L)``, so with ``f = 10**(threshold_db/10)``
+    the two tails come to ``2 * I_(1/(1+f))(L, L)``. A normal approximation on the
+    decibel axis would be wrong by tens of per cent near one look, which is
+    exactly where the answer is most alarming and so most worth getting right.
+
+    The two passes are taken to be independent, which is what repeat-pass
+    amplitude imagery of unchanged ground is. A threshold of zero (or less) lets
+    every cell through and returns 1.0.
+    """
+    if threshold_db <= 0.0:
+        return 1.0
+    ratio = 10.0 ** (threshold_db / 10.0)
+    return min(1.0, 2.0 * regularized_incomplete_beta(1.0 / (1.0 + ratio), looks, looks))
+
+
+def _detection_threshold_db(target: float, looks: float) -> float:
+    """The decibel threshold at which speckle's false-alarm rate falls to ``target``.
+
+    :func:`_speckle_false_alarm` is strictly decreasing in the threshold, so this
+    is a bisection rather than an inverted special function -- which keeps the
+    two numbers consistent by construction (the threshold reported is one this
+    module's own false-alarm function agrees about) and needs no second routine
+    to check.
+    """
+    low, high = 0.0, _DETECTION_MAX_THRESHOLD_DB
+    for _ in range(60):
+        middle = (low + high) / 2.0
+        if _speckle_false_alarm(middle, looks) > target:
+            low = middle
+        else:
+            high = middle
+    return high
+
+
+class _LooksAccum:
+    """One pass's equivalent number of looks, accumulated block by block.
+
+    The looks are read off the cube's *own* cells rather than off the source
+    products, which is the only reading that describes the numbers being quoted:
+    :func:`to_stack` warps and decimates every pass onto a shared grid, and
+    decimation from a finer source averages speckle down, so a cube's cells
+    generally carry more looks than the rasters they came from.
+
+    The reduction is :func:`umbra_py.convert._estimate_enl`'s -- the median
+    block's ``mean**2 / variance`` of detected power -- but taken through the
+    same mergeable histogram the percentiles use (:class:`_QuantileSketch`, here
+    on the *looks* axis in dB), so a pass measured window by window costs
+    occupied bins rather than one ratio per block of a cube that may never be
+    resident.
+
+    Structure inside a block inflates its variance and so deflates its looks,
+    which means this reads **low** on a textured scene. That is the safe
+    direction: a low looks estimate overstates how much of an observed change
+    could have been interference, so the detection floor built on it is an upper
+    bound on the false alarms rather than a claim that flatters the data.
+    """
+
+    def __init__(self, np: Any) -> None:
+        self._np = np
+        self._sketch = _QuantileSketch(np)
+        self._blocks = 0
+
+    def add(self, db_values: Any) -> None:
+        """Fold one slab (or window) of a pass in, as detected power."""
+        np = self._np
+        with np.errstate(over="ignore"):
+            power = np.power(10.0, db_values / 10.0)
+        ratios = _block_enl_ratios(power, block=_ENL_BLOCK)
+        if ratios.size == 0:
+            return
+        self._blocks += int(ratios.size)
+        self._sketch.add(10.0 * np.log10(ratios))
+
+    def result(self) -> float | None:
+        """The pass's looks, or ``None`` where no block could be read."""
+        if not self._blocks:
+            return None
+        return round(10.0 ** (self._sketch.quantile(_ENL_PERCENTILE / 100.0) / 10.0), 2)
+
+
+def _detection_floor(pass_looks: list[float | None], threshold_db: float) -> dict[str, Any] | None:
+    """What speckle alone would do to a change measured at ``threshold_db``.
+
+    Reduced to one representative looks -- the median of the passes that gave a
+    reading -- because the floor describes the cube rather than a pair: the
+    threshold applies to every interval, and reporting a different floor per
+    interval would say more about how each pass's blocks happened to read than
+    about what can be detected. Each pass keeps its own ``looks`` in the summary,
+    so a series whose passes disagree is visible rather than averaged away.
+
+    ``None`` when no pass gave a reading at all (a cube smaller than one
+    measuring block, or one whose every block was nodata), because a floor
+    nobody measured is not a floor.
+    """
+    readings = sorted(value for value in pass_looks if value is not None)
+    if not readings:
+        return None
+    middle = len(readings) // 2
+    looks = (
+        readings[middle] if len(readings) % 2 else (readings[middle - 1] + readings[middle]) / 2.0
+    )
+    # A block's ENL is a ratio of noisy estimates and can land below one look on a
+    # textured scene; no product has fewer looks than one, and believing a lower
+    # read would inflate the floor past what the physics allows. The other end is
+    # :data:`_DETECTION_MAX_LOOKS`, where the ratio has stopped measuring speckle.
+    looks = min(max(looks, 1.0), _DETECTION_MAX_LOOKS)
+    return {
+        "looks": round(looks, 2),
+        "cell_sigma_db": round(_speckle_change_sigma_db(looks), 2),
+        "false_alarm_fraction": round(_speckle_false_alarm(threshold_db, looks), 4),
+        "false_alarm_target": DETECTION_FALSE_ALARM_TARGET,
+        "target_threshold_db": round(
+            _detection_threshold_db(DETECTION_FALSE_ALARM_TARGET, looks), 2
+        ),
+    }
+
+
 def _measure_whole(
     np: Any,
     cube: xr.DataArray,
@@ -2079,6 +2267,8 @@ def _measure_whole(
         finite = np.isfinite(slab)
         n_valid = int(finite.sum())
         observed = slab[finite]
+        looks = _LooksAccum(np)
+        looks.add(db_slab)
         record: dict[str, Any] = {
             "item_id": item_id,
             "datetime": stamp,
@@ -2089,6 +2279,7 @@ def _measure_whole(
             "std": round(float(np.std(observed)), 3) if n_valid else None,
             "p5": round(float(np.percentile(observed, 5)), 3) if n_valid else None,
             "p95": round(float(np.percentile(observed, 95)), 3) if n_valid else None,
+            "looks": looks.result(),
             "change_vs_previous": (
                 _pair_change(
                     np,
@@ -2146,6 +2337,7 @@ def _measure_windowed(
         return _PairAccum(np, threshold_db=threshold_db, cell_area_m2=cell_area_m2)
 
     dists = [_DistAccum(np, units=units) for _ in range(count)]
+    looks = [_LooksAccum(np) for _ in range(count)]
     # Indexed like the passes: ``steps[i]`` is pass ``i`` against pass ``i - 1``,
     # so ``steps[0]`` stays empty and reports nothing, like the first pass's
     # ``change_vs_previous``.
@@ -2158,6 +2350,7 @@ def _measure_windowed(
         for i in range(count):
             slab, db_slab = _pass_slabs(np, cube, i, units=units, window=window)
             dists[i].add(slab, db_slab)
+            looks[i].add(db_slab)
             if i:
                 steps[i].add(previous_db, db_slab)
                 if changes is not None:
@@ -2177,6 +2370,7 @@ def _measure_windowed(
             "valid_cells": dists[i].count,
             "valid_fraction": round(dists[i].count / cells, 4) if cells else 0.0,
             **dists[i].result(),
+            "looks": looks[i].result(),
             "change_vs_previous": steps[i].result() if i else None,
         }
         for i, (item_id, stamp) in enumerate(zip(ids, stamps, strict=True))
@@ -2250,6 +2444,13 @@ def stack_stats(
         unchunked cube is one window, i.e. the default read with estimated
         percentiles.
 
+        Each pass's ``looks`` is a median over measuring blocks either way, and
+        the blocks are cut from whatever array is in hand — so a window whose
+        edge is not a whole number of blocks drops its remainder and the two
+        modes can differ in the last decimal. That is a property of the
+        diagnostic rather than of this mode: ``looks`` is a read of the scene,
+        like ``umbra convert``'s ENL pair, not one of the exact sums beside it.
+
     Returns
     -------
     dict
@@ -2260,8 +2461,28 @@ def stack_stats(
         the first caveat calls these decibels relative or calibrated. Each entry in
         ``passes`` carries ``item_id``, ``datetime``, ``valid_fraction`` and the
         distribution of that pass (``mean``/``median``/``std``/``p5``/``p95``, in
-        the cube's own ``units``), plus ``change_vs_previous`` (``None`` for the
-        first pass). ``net_change`` compares the first pass to the last.
+        the cube's own ``units``), plus ``looks`` — that pass's equivalent number
+        of looks, read off its own blocks — and ``change_vs_previous`` (``None``
+        for the first pass). ``net_change`` compares the first pass to the last.
+
+        A multi-pass cube whose looks could be read also carries ``detection``:
+        what speckle alone does to a change measured at ``change_threshold_db``.
+        Speckle is not an error bar on the mean, it is the dominant variation in
+        a single cell — at one look the pass-to-pass decibel difference of
+        *unchanged* ground has a 7.9 dB spread — so ``changed_fraction`` is only
+        evidence to the degree it stands clear of what interference produces by
+        itself. ``detection`` says by how much: ``looks`` (the representative
+        equivalent looks, the median of the passes that gave a reading),
+        ``cell_sigma_db`` (that spread), ``false_alarm_fraction`` (the share of
+        unchanged cells speckle alone pushes past the threshold) and
+        ``target_threshold_db`` (the threshold that would hold that share to
+        ``false_alarm_target``, :data:`DETECTION_FALSE_ALARM_TARGET`). The looks
+        are read off the *cube's* cells rather than the source products, because
+        they describe the numbers being quoted — :func:`to_stack` decimates onto
+        a shared grid, which averages speckle down — and a textured scene reads
+        low, so the floor is an upper bound on the false alarms. It is absent
+        rather than null on a single-pass cube (no comparison to weigh) and on
+        one no block could be read from (nothing measured it).
 
         With ``blocks``, an extra ``spatial`` key carries the grid: one record
         per block with its ``row``/``col``, a plain-language ``compass`` label,
@@ -2424,6 +2645,38 @@ def stack_stats(
             "and change number is exact."
         )
 
+    detection = (
+        _detection_floor([entry["looks"] for entry in passes], change_threshold_db)
+        if len(passes) > 1
+        else None
+    )
+    if detection is not None:
+        # Said on every multi-pass cube, because it is the caveat that decides how
+        # to read every other number here: a changed_fraction is only evidence to
+        # the extent it stands clear of what interference produces by itself.
+        caveats.append(
+            f"Speckle alone moves an unchanged cell by more than {change_threshold_db} dB "
+            f"about {detection['false_alarm_fraction']:.0%} of the time at this cube's "
+            f"measured {detection['looks']} equivalent looks, so a changed_fraction near "
+            f"that is interference rather than change; {detection['target_threshold_db']} dB "
+            f"is the threshold that would hold it to {DETECTION_FALSE_ALARM_TARGET:.0%}. The "
+            "looks are read off the cube's own blocks, which scene structure biases low, so "
+            "this floor is an upper bound on the false alarms rather than a flattering one."
+        )
+        changed = (net_change or {}).get("changed_fraction")
+        floor = detection["false_alarm_fraction"]
+        if changed is not None and changed < floor * DETECTION_EXCESS_WARN:
+            # Only when it bites. On a series that stands clear of the floor the
+            # caveat above is context; here it is the finding.
+            caveats.append(
+                f"The net changed_fraction ({changed}) does not stand clear of that speckle "
+                f"floor ({floor}), so this series shows no scene-wide change this threshold "
+                "can tell from interference. Speckle-filter the cube "
+                "(to_stack(speckle_filter=...)) to raise its looks, raise change_threshold_db, "
+                "or read the spatial breakdown (blocks=N) for a block where the change does "
+                "stand clear."
+            )
+
     summary: dict[str, Any] = {
         "count": len(passes),
         "units": units,
@@ -2448,6 +2701,11 @@ def stack_stats(
             "bounds": [float(v) for v in cube.attrs["bounds"]],
             "extent": cube.attrs.get("extent"),
         },
+        # Only when there is a change to weigh and a cube whose looks could be
+        # read: a floor under a single pass would describe a comparison nobody
+        # made, and one nothing measured would be an assumption wearing a
+        # measurement's name.
+        **({"detection": detection} if detection else {}),
         "passes": passes,
         "net_change": net_change,
         "license": DATA_LICENSE,
