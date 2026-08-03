@@ -478,7 +478,12 @@ def test_driver_reads_georeferencing_from_the_file():
     # Geo tags live on the full-res IFD, not on the overview that gets decoded,
     # so the picker has to hand back both.
     assert "{ base: base, image: chosen || fallback }" in js
-    assert "rasterGeoreference(picked.base, picked.image, MAX_OUT_DIM)" in js
+    assert "rasterGeoreference(picked.base, overview, MAX_OUT_DIM)" in js
+    # geotiff.js resolves tags lazily, so the affine is read through the
+    # accessors that actually fetch it -- never as a plain property.
+    assert "hasTag('ModelTransformation')" in js
+    assert "loadValue('ModelTransformation')" in js
+    assert "var m = fd.ModelTransformation;" not in js  # the shape that read undefined
 
 
 def test_driver_keeps_the_footprint_bbox_as_the_fallback():
@@ -495,9 +500,11 @@ def test_driver_keeps_the_footprint_bbox_as_the_fallback():
 def _run_georef_js(snippet: str):
     """Evaluate ``snippet`` against the driver's georeferencing chunk in node.
 
-    The chunk is plain arithmetic over a couple of geotiff.js accessors, so it
-    is the one part of the browser driver that can be checked for real rather
-    than grepped for. ``snippet`` must ``console.log`` one JSON value.
+    The chunk is plain arithmetic over a few geotiff.js accessors, so it is the
+    one part of the browser driver that can be checked for real rather than
+    grepped for. ``snippet`` must ``console.log`` one JSON value; since
+    ``rasterGeoreference`` resolves asynchronously, that is normally from a
+    ``.then``.
     """
     import json
     import shutil
@@ -519,13 +526,35 @@ def _run_georef_js(snippet: str):
     return json.loads(proc.stdout)
 
 
-# A geotiff.js-shaped stub: just the four accessors the chunk calls.
+# A geotiff.js-shaped stub.
+#
+# The shape here is the whole point of these tests, and getting it wrong is what
+# shipped a driver that silently did nothing: an earlier version of this stub
+# handed back a plain object with the tags as properties, so it "passed" against
+# an API geotiff.js does not have. A real `FileDirectory` exposes tags only
+# through `hasTag` / `loadValue`, and `loadValue` is async because reading a tag
+# stored outside the IFD costs another range request. `loadValue` resolves on a
+# later turn of the event loop here for the same reason -- a stub that resolved
+# synchronously would hide an ordering bug in the driver's promise chain.
 _FAKE_IMAGE_JS = """
-function fakeImage(w, h, fd, keys) {
+function fakeDirectory(tags) {
+  var t = tags || {};
+  return {
+    hasTag: function (name) { return Object.prototype.hasOwnProperty.call(t, name); },
+    loadValue: function (name) {
+      return new Promise(function (resolve) {
+        setTimeout(function () { resolve(t[name]); }, 0);
+      });
+    }
+  };
+}
+
+function fakeImage(w, h, tags, keys) {
+  var fd = fakeDirectory(tags);
   return {
     getWidth: function () { return w; },
     getHeight: function () { return h; },
-    getFileDirectory: function () { return fd || {}; },
+    getFileDirectory: function () { return fd; },
     getGeoKeys: function () { return keys || {}; }
   };
 }
@@ -550,8 +579,9 @@ def test_georeference_envelope_matches_the_rasters_own_bounds():
         _FAKE_IMAGE_JS
         + _ROTATED_GEC_JS
         + """
-var geo = rasterGeoreference(base, fakeImage(2001, 2001), 2048);
-console.log(JSON.stringify(geo.bounds));
+rasterGeoreference(base, fakeImage(2001, 2001), 2048).then(function (geo) {
+  console.log(JSON.stringify(geo.bounds));
+});
 """
     )
     (south, west), (north, east) = out
@@ -570,7 +600,7 @@ def test_georeference_pulls_each_output_pixel_from_the_rotated_grid():
         + _ROTATED_GEC_JS
         + """
 var w = 2001, sx = 16001 / w;
-var geo = rasterGeoreference(base, fakeImage(w, w), 2048);
+rasterGeoreference(base, fakeImage(w, w), 2048).then(function (geo) {
 var west = geo.bounds[0][1], north = geo.bounds[1][0];
 var lonPer = (geo.bounds[1][1] - west) / geo.width;
 var latPer = (north - geo.bounds[0][0]) / geo.height;
@@ -589,6 +619,7 @@ for (var u = 20; u < w - 20; u += 53) {
   }
 }
 console.log(JSON.stringify({ worst: worst, misses: misses }));
+});
 """
     )
     assert out["misses"] == 0
@@ -629,11 +660,12 @@ def test_georeference_leaves_a_north_up_raster_pixel_for_pixel():
 var base = fakeImage(100, 50,
   { ModelTiepoint: [0, 0, 0, -10.0, 5.0, 0], ModelPixelScale: [0.01, 0.02, 0] },
   { GeographicTypeGeoKey: 4326 });
-var geo = rasterGeoreference(base, fakeImage(100, 50), 2048);
-console.log(JSON.stringify({
-  bounds: geo.bounds, width: geo.width, height: geo.height,
-  corner: geo.sourceIndex(0, 0), last: geo.sourceIndex(99, 49)
-}));
+rasterGeoreference(base, fakeImage(100, 50), 2048).then(function (geo) {
+  console.log(JSON.stringify({
+    bounds: geo.bounds, width: geo.width, height: geo.height,
+    corner: geo.sourceIndex(0, 0), last: geo.sourceIndex(99, 49)
+  }));
+});
 """
     )
     assert out["width"] == 100 and out["height"] == 50
@@ -654,13 +686,16 @@ console.log(JSON.stringify({
     ],
 )
 def test_georeference_returns_null_when_it_cannot_place_the_raster(image_js):
-    """Unreadable georeferencing must return null so the caller falls back to
-    the STAC bbox, rather than throwing and losing the overlay entirely."""
+    """Unreadable georeferencing must resolve to null so the caller falls back
+    to the STAC bbox, rather than throwing and losing the overlay entirely."""
     out = _run_georef_js(
         _FAKE_IMAGE_JS
-        + f"""
-var img = {image_js};
-console.log(JSON.stringify(rasterGeoreference(img, img, 2048)));
+        + "\nvar img = "
+        + image_js
+        + """;
+rasterGeoreference(img, img, 2048).then(function (geo) {
+  console.log(JSON.stringify(geo));
+});
 """
     )
     assert out is None

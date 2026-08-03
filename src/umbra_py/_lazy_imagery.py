@@ -302,21 +302,37 @@ _GEOREF_OPS = """
 
   // Pixel (column, row) -> the file's model coordinates, as the six affine
   // terms. A rotated raster carries them as a ModelTransformation matrix; a
-  // north-up one as a tiepoint plus a pixel scale. Null when it has neither.
+  // north-up one as a tiepoint plus a pixel scale. Resolves to null when it
+  // has neither.
+  //
+  // Promise-returning because geotiff.js resolves tag values *lazily*: the
+  // object `getFileDirectory()` hands back does not carry the tags as plain
+  // properties, and reading one (`fd.ModelTransformation`) yields undefined
+  // whether the tag is absent or merely unread. `hasTag`/`loadValue` are the
+  // accessors that actually answer, and `loadValue` may need another range
+  // request -- so the affine can only be had asynchronously.
   function geoTransformOf(image) {
-    var fd = image.getFileDirectory() || {};
-    var m = fd.ModelTransformation;
-    if (m && m.length >= 16) {
-      return { a: m[0], b: m[1], c: m[3], d: m[4], e: m[5], f: m[7] };
+    var fd = image.getFileDirectory();
+    if (!fd || typeof fd.hasTag !== 'function') { return Promise.resolve(null); }
+    if (fd.hasTag('ModelTransformation')) {
+      return fd.loadValue('ModelTransformation').then(function (m) {
+        if (!m || m.length < 16) { return null; }
+        return { a: m[0], b: m[1], c: m[3], d: m[4], e: m[5], f: m[7] };
+      });
     }
-    var tie = fd.ModelTiepoint, scale = fd.ModelPixelScale;
-    if (tie && tie.length >= 6 && scale && scale.length >= 2) {
-      return {
-        a: scale[0], b: 0, c: tie[3] - tie[0] * scale[0],
-        d: 0, e: -scale[1], f: tie[4] + tie[1] * scale[1]
-      };
+    if (fd.hasTag('ModelTiepoint') && fd.hasTag('ModelPixelScale')) {
+      return Promise.all([
+        fd.loadValue('ModelTiepoint'), fd.loadValue('ModelPixelScale')
+      ]).then(function (v) {
+        var tie = v[0], scale = v[1];
+        if (!tie || tie.length < 6 || !scale || scale.length < 2) { return null; }
+        return {
+          a: scale[0], b: 0, c: tie[3] - tie[0] * scale[0],
+          d: 0, e: -scale[1], f: tie[4] + tie[1] * scale[1]
+        };
+      });
     }
-    return null;
+    return Promise.resolve(null);
   }
 
   // Model coordinates -> [lon, lat] for the CRS the file declares. Null for
@@ -336,8 +352,9 @@ _GEOREF_OPS = """
 
   // Everything needed to paint `image` (an overview of the full-res `base`)
   // north-up: the lat/lon box to place the canvas at, the canvas size, and the
-  // source pixel behind each output pixel. Null when `base` carries no
-  // georeferencing this driver can read.
+  // source pixel behind each output pixel. Resolves to null when `base` carries
+  // no georeferencing this driver can read, which sends the caller back to the
+  // item's STAC footprint bbox.
   //
   // The pixel -> lon/lat map is taken as affine, least-squares fitted through
   // the four grid corners. For a WGS84-geographic GEC that is exact (its model
@@ -345,9 +362,14 @@ _GEOREF_OPS = """
   // curvature to a couple of metres over a scene a few km across, well inside
   // one pixel at the resolution an overview renders at.
   function rasterGeoreference(base, image, maxOut) {
-    var t = geoTransformOf(base);
     var toLonLat = modelToLonLat(base);
-    if (!t || !toLonLat) { return null; }
+    if (!toLonLat) { return Promise.resolve(null); }
+    return geoTransformOf(base).then(function (t) {
+      return t ? placeGrid(t, toLonLat, base, image, maxOut) : null;
+    });
+  }
+
+  function placeGrid(t, toLonLat, base, image, maxOut) {
     var w = image.getWidth(), h = image.getHeight();
     // Overview IFDs carry no geo tags of their own, so the full-res affine is
     // rescaled by however much this overview shrank the grid.
@@ -597,14 +619,20 @@ _DRIVER_TEMPLATE = """
     // Where the raster says it sits, or null for a file whose georeferencing
     // we can't read -- then `bounds` (the STAC footprint bbox) still applies.
     var geo = null;
+    var overview = null;
     loadLib().then(function() {{
       return GeoTIFF.fromUrl(url);
     }}).then(function(tiff) {{
       return pickOverview(tiff);
     }}).then(function(picked) {{
-      geo = rasterGeoreference(picked.base, picked.image, MAX_OUT_DIM);
-      noData = normalizeNoData(picked.image.getGDALNoData());
-      return picked.image.readRasters();
+      overview = picked.image;
+      noData = normalizeNoData(overview.getGDALNoData());
+      // Reading the affine can cost another range request, so this step is
+      // awaited rather than assigned -- see geoTransformOf.
+      return rasterGeoreference(picked.base, overview, MAX_OUT_DIM);
+    }}).then(function(placement) {{
+      geo = placement;
+      return overview.readRasters();
     }}).then(function(rasters) {{
       var data = rasters[0];
       var stretch = computeStretch(data, noData);
