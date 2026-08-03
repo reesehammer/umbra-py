@@ -16,7 +16,12 @@ This buys two ecosystems from one component:
 - **The AI ecosystem** -- STAC API is a well-documented, schema'd REST surface
   that OpenAPI-driven agents (and everything that isn't MCP) consume from the
   generated OpenAPI document alone. It is the browser-facing sibling of the
-  ``umbra-mcp`` server: same index underneath, a different front door.
+  ``umbra-mcp`` server: same index underneath, a different front door. That
+  document describes the *artifact* routes too: the committed contracts they
+  emit (``docs/schemas/stack-stats``, ``stack-provenance``, ``render-job``) are
+  merged into it as components by :func:`openapi_components`, so a generated
+  client reads the same shape the CLI and the agent tools do rather than a bare
+  object.
 
 On top of *discovery* the server also renders *artifacts on demand*, so a
 front end (or an agent) can trigger the library's visual products over **any**
@@ -174,6 +179,7 @@ from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem
+from .schemas import load_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
@@ -1594,6 +1600,108 @@ class _InlineJobExecutor:
 
 
 # --------------------------------------------------------------------------
+# The published contracts, as OpenAPI component schemas
+# --------------------------------------------------------------------------
+
+#: The committed ``docs/schemas/`` contracts this server's routes actually
+#: emit, mapped to the component name they take in the generated OpenAPI
+#: document. Only these three: the picture endpoints return bytes, and a
+#: document describing shapes no route emits would be a claim rather than a
+#: contract.
+OPENAPI_SCHEMAS: dict[str, str] = {
+    "StackStats": "stack-stats",
+    "StackProvenance": "stack-provenance",
+    "RenderJob": "render-job",
+}
+
+
+def _rewrite_refs(node: Any, base: str) -> Any:
+    """Re-root a schema's internal ``$ref``\\ s at its place in the document.
+
+    A published schema resolves ``#/$defs/pass`` against its own ``$id``; the
+    same schema inlined under ``components/schemas/StackStats`` has to resolve it
+    against the OpenAPI document, so the pointer becomes
+    ``#/components/schemas/StackStats/$defs/pass``. A cross-file ``$ref`` (the
+    relative filename form ``render-manifest`` and ``watch-delta`` use) has no
+    such home and is refused rather than emitted as a dangling reference -- a
+    generated client that cannot resolve a shape is worse than one that was
+    never given it.
+    """
+    if isinstance(node, dict):
+        rewritten: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str):
+                if not value.startswith("#/"):
+                    raise ValueError(
+                        f"Cannot inline a schema with the cross-file reference {value!r}; "
+                        "publish the referenced schema as its own OpenAPI component first."
+                    )
+                rewritten[key] = base + value[1:]
+            else:
+                rewritten[key] = _rewrite_refs(value, base)
+        return rewritten
+    if isinstance(node, list):
+        return [_rewrite_refs(item, base) for item in node]
+    return node
+
+
+def _as_component(component: str, schema_name: str) -> dict[str, Any]:
+    """One published schema, prepared to live under ``components/schemas``.
+
+    ``$schema`` and ``$id`` are dropped: OpenAPI 3.1 already declares the
+    2020-12 dialect for the whole document, and an ``$id`` would re-base the
+    internal pointers :func:`_rewrite_refs` has just re-rooted onto a URL nothing
+    can fetch. The identity is kept as ``x-umbra-schema-id`` instead, so a
+    generated client can still see which committed contract the component is a
+    copy of.
+    """
+    schema = load_schema(schema_name)
+    schema.pop("$schema", None)
+    source = schema.pop("$id", None)
+    document = _rewrite_refs(schema, f"#/components/schemas/{component}")
+    if source is not None:
+        document["x-umbra-schema-id"] = source
+    return document
+
+
+def openapi_components() -> dict[str, Any]:
+    """``docs/schemas/`` as OpenAPI component schemas, ready to be merged in.
+
+    The generated OpenAPI document is how an OpenAPI-driven agent (and every
+    client generator) reads this API, so describing ``/artifacts/stats``'
+    response as a bare object while ``docs/schemas/stack-stats.schema.json``
+    describes it exactly made the published contract unreachable from the
+    surface that most needs it. These are the same files, byte-for-byte bar the
+    two keywords :func:`_as_component` re-homes -- not a restatement -- so the
+    HTTP surface cannot drift from the contract the CLI and the agent tools
+    already emit.
+    """
+    return {
+        component: _as_component(component, schema_name)
+        for component, schema_name in OPENAPI_SCHEMAS.items()
+    }
+
+
+def _json_response(component: str, description: str) -> dict[str, Any]:
+    """An OpenAPI response object pointing at one committed contract."""
+    return {
+        "description": description,
+        "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{component}"}}},
+    }
+
+
+def _binary_response(media_type: str, description: str) -> dict[str, Any]:
+    """An OpenAPI response object for an artifact that is bytes, not a document."""
+    return {"description": description, "content": {media_type: {}}}
+
+
+#: The job document every async artifact request answers with while it renders.
+_JOB_RESPONSE = _json_response(
+    "RenderJob", "Render queued; poll the `self` link until `status` leaves `queued`/`running`."
+)
+
+
+# --------------------------------------------------------------------------
 # FastAPI application factory
 # --------------------------------------------------------------------------
 
@@ -2163,7 +2271,12 @@ def build_app(
 
     if artifacts:
 
-        @app.get("/artifacts/quicklook/{item_id}.png", tags=["Artifacts"])
+        @app.get(
+            "/artifacts/quicklook/{item_id}.png",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={200: _binary_response("image/png", "The acquisition's SAR quicklook.")},
+        )
         def get_quicklook(
             item_id: str,
             asset: str = Query(default="GEC"),
@@ -2183,7 +2296,14 @@ def build_app(
                 "quicklook", [item], options, lambda: renderers.quicklook(item, options)
             )
 
-        @app.get("/artifacts/thumbnail/{item_id}.png", tags=["Artifacts"])
+        @app.get(
+            "/artifacts/thumbnail/{item_id}.png",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _binary_response("image/png", "The baked quicklook thumbnail, unrendered.")
+            },
+        )
         def get_thumbnail(item_id: str) -> Response:
             """Serve a baked quicklook thumbnail straight from the index.
 
@@ -2250,15 +2370,39 @@ def build_app(
                 kind, frames, options, render, media_type=media_type, suffix=suffix
             )
 
-        @app.post("/artifacts/change", tags=["Artifacts"])
+        @app.post(
+            "/artifacts/change",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _binary_response("image/png", "The change composite."),
+                202: _JOB_RESPONSE,
+            },
+        )
         def post_change(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
             return _composite(request, body, "change", change_frames, renderers.change)
 
-        @app.post("/artifacts/timescan", tags=["Artifacts"])
+        @app.post(
+            "/artifacts/timescan",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _binary_response("image/png", "The temporal-statistics composite."),
+                202: _JOB_RESPONSE,
+            },
+        )
         def post_timescan(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
             return _composite(request, body, "timescan", timescan_frames, renderers.timescan)
 
-        @app.post("/artifacts/swipe", tags=["Artifacts"])
+        @app.post(
+            "/artifacts/swipe",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _binary_response("text/html", "A self-contained before/after swipe map page."),
+                202: _JOB_RESPONSE,
+            },
+        )
         def post_swipe(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
             return _composite(
                 request,
@@ -2270,7 +2414,17 @@ def build_app(
                 suffix="html",
             )
 
-        @app.post("/artifacts/stats", tags=["Artifacts"])
+        @app.post(
+            "/artifacts/stats",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _json_response(
+                    "StackStats", "The datacube measurement (`docs/schemas/stack-stats`)."
+                ),
+                202: _JOB_RESPONSE,
+            },
+        )
         def post_stats(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
             """Measure how much a site changed across its passes, as JSON.
 
@@ -2320,7 +2474,19 @@ def build_app(
                 make_options=stats_options,
             )
 
-        @app.post("/artifacts/provenance", tags=["Artifacts"])
+        @app.post(
+            "/artifacts/provenance",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _json_response(
+                    "StackProvenance",
+                    "What the selection's sources say their pixel values are, and whether "
+                    "the series stacks (`docs/schemas/stack-provenance`). A mix is a 200: "
+                    "reporting it is the point.",
+                )
+            },
+        )
         def post_provenance(body: dict[str, Any] = Body(default={})) -> Response:
             """Say whether a selection is one measurement, before stats is spent on it.
 
@@ -2379,14 +2545,37 @@ def build_app(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse(content=report.to_dict())
 
-        @app.get("/jobs/{job_id}", tags=["Artifacts"])
+        @app.get(
+            "/jobs/{job_id}",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _json_response(
+                    "RenderJob", "The job's current state (`docs/schemas/render-job`)."
+                )
+            },
+        )
         def get_job(job_id: str, request: Request) -> JSONResponse:
             job = job_store.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"No job {job_id!r}")
             return JSONResponse(content=job_to_dict(job, str(request.base_url)))
 
-        @app.get("/jobs/{job_id}/result", tags=["Artifacts"])
+        @app.get(
+            "/jobs/{job_id}/result",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: {
+                    # Which of the three it is depends on the job's ``kind``, so
+                    # the honest description is all of them: a client reads the
+                    # job document's ``result`` link ``type`` to know which.
+                    "description": "The finished artifact, in the media type the job's "
+                    "`result` link names.",
+                    "content": {"image/png": {}, "text/html": {}, "application/json": {}},
+                }
+            },
+        )
         def get_job_result(job_id: str) -> Response:
             job = job_store.get(job_id)
             if job is None:
@@ -2410,6 +2599,23 @@ def build_app(
                 media_type=job.media_type,
                 headers={"X-Umbra-Cache": "hit"},
             )
+
+        # The artifact routes above reference the published contracts by
+        # ``$ref``; this is what puts the contracts themselves in the document
+        # they point into. Only when the artifact routes are mounted, since a
+        # component nothing references would be a shape this instance does not
+        # emit. FastAPI caches the generated document on the app, so merging
+        # into the object it returns is enough -- and idempotent.
+        generate_openapi = app.openapi
+
+        def _openapi() -> dict[str, Any]:
+            document = generate_openapi()
+            document.setdefault("components", {}).setdefault("schemas", {}).update(
+                openapi_components()
+            )
+            return document
+
+        app.openapi = _openapi
 
     return app
 

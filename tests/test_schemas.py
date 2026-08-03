@@ -945,3 +945,146 @@ def test_the_agent_surface_schemas_reject_drift(sample_item_dict):
     description = parse_description({"summary": "A quiet estuary."}).to_dict()
     description["confidence"] = "pretty sure"
     assert list(_validator("scene-description.schema.json").iter_errors(description))
+
+
+# --- The async job document ----------------------------------------------------
+
+
+def _job(**kwargs):
+    from umbra_py import serve
+
+    job = serve.RenderJob(
+        id="0f9c",
+        kind=kwargs.pop("kind", "stats"),
+        cache_key="deadbeef",
+        suffix="json",
+        media_type="application/json",
+        **kwargs,
+    )
+    return serve.job_to_dict(job, "http://testserver/")
+
+
+def test_a_queued_render_job_validates():
+    _check("render-job.schema.json", _job())
+
+
+def test_a_succeeded_render_job_validates():
+    from umbra_py import serve
+
+    payload = _job(
+        status=serve.JOB_SUCCEEDED, cached=True, started=None, finished="2026-08-03T00:00:00+00:00"
+    )
+    # The keys a finished job adds are exactly the two the contract makes
+    # conditional: the result link and whether any work ran.
+    assert payload["cache"] == "hit"
+    assert [link["rel"] for link in payload["links"]] == ["self", "result"]
+    _check("render-job.schema.json", payload)
+
+
+def test_a_failed_render_job_validates():
+    from umbra_py import serve
+
+    payload = _job(status=serve.JOB_FAILED, error="Need the 'load' extra to stack.")
+    assert "cache" not in payload  # a failed job never ran, so it hit nothing
+    _check("render-job.schema.json", payload)
+
+
+def test_the_job_schema_rejects_a_status_it_does_not_define():
+    payload = _job()
+    payload["status"] = "pending"  # a plausible fifth state that does not exist
+    assert list(_validator("render-job.schema.json").iter_errors(payload))
+
+
+# --- Reading the contracts from an installed umbra-py --------------------------
+
+
+def test_the_accessor_finds_every_committed_schema():
+    # `umbra_py.schemas` is how an installed package (and `umbra serve`'s
+    # OpenAPI document) reaches these files; if it resolves a different set from
+    # the one this suite validates, the contract shipped is not the one checked.
+    from umbra_py import schemas
+
+    assert set(schemas.schema_names()) == {
+        path.name[: -len(schemas.SCHEMA_SUFFIX)] for path in SCHEMA_PATHS
+    }
+    assert schemas.schema_dir() == SCHEMA_DIR
+
+
+@pytest.mark.parametrize("path", SCHEMA_PATHS, ids=lambda p: p.name)
+def test_the_accessor_loads_each_schema_by_either_name(path):
+    from umbra_py import schemas
+
+    stem = path.name[: -len(schemas.SCHEMA_SUFFIX)]
+    committed = json.loads(path.read_text())
+    assert schemas.load_schema(stem) == committed
+    assert schemas.load_schema(path.name) == committed
+
+
+def test_loading_a_schema_twice_hands_out_independent_objects():
+    # `umbra serve` rewrites what it loads into OpenAPI components; a shared
+    # cached dict would leak that rewrite into the next reader.
+    from umbra_py import schemas
+
+    first = schemas.load_schema("stack-stats")
+    first["title"] = "clobbered"
+    assert schemas.load_schema("stack-stats")["title"] != "clobbered"
+
+
+def test_an_unknown_schema_name_names_the_published_ones():
+    from umbra_py import schemas
+
+    with pytest.raises(ValueError) as excinfo:
+        schemas.load_schema("stack-statistics")
+    assert "stack-statistics" in str(excinfo.value)
+    assert "stack-stats" in str(excinfo.value)
+
+
+def test_the_packaged_copy_wins_over_the_checkout(tmp_path, monkeypatch):
+    """A wheel carries its own copy, and *that* is the one an install must read.
+
+    The fallback exists for an editable install (no wheel is built, so nothing
+    runs the `force-include`), which is what CI and the dev loop use -- so the
+    packaged branch is the one no environment here exercises by accident.
+    """
+    from umbra_py import schemas
+
+    packaged = tmp_path / schemas.PACKAGE_DATA_DIR
+    packaged.mkdir()
+    (packaged / "stack-stats.schema.json").write_text('{"title": "packaged"}')
+    monkeypatch.setattr(schemas, "_candidate_dirs", lambda: (packaged, SCHEMA_DIR))
+
+    assert schemas.schema_dir() == packaged
+    assert schemas.load_schema("stack-stats")["title"] == "packaged"
+
+    # ... and with no packaged copy present, the checkout answers instead.
+    monkeypatch.setattr(schemas, "_candidate_dirs", lambda: (tmp_path / "absent", SCHEMA_DIR))
+    assert schemas.schema_dir() == SCHEMA_DIR
+
+
+def test_a_missing_install_says_where_it_looked(tmp_path, monkeypatch):
+    from umbra_py import schemas
+
+    monkeypatch.setattr(schemas, "_candidate_dirs", lambda: (tmp_path / "a", tmp_path / "b"))
+    with pytest.raises(FileNotFoundError) as excinfo:
+        schemas.schema_dir()
+    assert str(tmp_path / "a") in str(excinfo.value)
+
+
+def test_the_wheel_ships_the_schemas_where_the_accessor_looks():
+    """The two ends of the package-data decision, checked against each other.
+
+    `pyproject.toml` force-includes `docs/schemas` into the wheel and
+    `umbra_py.schemas` reads it back by a hard-coded directory name. Nothing at
+    runtime can notice them disagreeing -- an editable install never builds a
+    wheel, so the fallback would quietly answer for a package that ships
+    nothing. This is a parse rather than a build, for the same reason
+    `tests/test_workflows.py` parses the workflows: it catches the drift that
+    would actually happen (a renamed target) without a packaging round trip.
+    """
+    tomllib = pytest.importorskip("tomllib")  # stdlib from 3.11; skipped on 3.10
+
+    from umbra_py import schemas
+
+    pyproject = tomllib.loads((SCHEMA_DIR.parents[1] / "pyproject.toml").read_text())
+    force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include == {"docs/schemas": f"umbra_py/{schemas.PACKAGE_DATA_DIR}"}

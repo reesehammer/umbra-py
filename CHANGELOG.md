@@ -7,6 +7,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Put the published contracts where the HTTP surface reads them
+  (`umbra_py.schemas`, `docs/schemas/render-job`, the OpenAPI components).**
+  Sixteen schemas were published, strict and checked against a real payload —
+  and unreachable from anything but a clone. They live in `docs/`, so a wheel
+  did not carry them and nothing in `src/` could load one, which had two
+  consequences worth naming. A consumer could not validate against the version
+  it installed. And `umbra serve`, whose whole claim for the non-MCP half of the
+  agent ecosystem is that a client consumes it "from the generated OpenAPI
+  document alone", described `POST /artifacts/stats` as returning a bare object
+  while `stack-stats.schema.json` described it exactly. The contract and the
+  document a generated client actually reads had no connection.
+
+  `umbra_py.schemas` is that connection: `load_schema("stack-stats")`,
+  `schema_names()`, `schema_path()`, stdlib only (these are data files, not a
+  validator — validating stays the consumer's choice). The packaging decision it
+  rests on is that the schemas keep **one home**, `docs/schemas/`, which is the
+  path every schema's own `$id` names and where they are read on GitHub, and the
+  wheel carries a *copy* of that directory as package data (`umbra_py/_schemas/`,
+  a `force-include`) the same way `py.typed` is a build artifact of a
+  source-tree fact. So the accessor reads the packaged copy first and falls back
+  to the checkout it was imported from, which is what makes an editable install —
+  the documented dev loop, and CI — resolve the same files a wheel ships.
+  Nothing at runtime can notice those two ends disagreeing, so a test parses
+  `pyproject.toml` and checks the `force-include` target against the accessor's
+  own constant, the same way `tests/test_workflows.py` parses the workflows. The
+  `Dockerfile` and `.dockerignore` carry `docs/schemas` for the same reason a
+  wheel does: an installed package has no checkout to fall back to, so an image
+  built without them would raise on `/openapi.json` — and because a
+  `force-include` is mandatory, it fails the build instead, which is the honest
+  place for it.
+
+  What it buys is a self-describing API. The three contracts the artifact routes
+  emit are merged into the generated document as components — `StackStats`,
+  `StackProvenance` and `RenderJob` — and every route's response `$ref`s one, so
+  a generated client gets the same shape the CLI's `--json` and the agent tools
+  hand back. They are the committed files rather than a restatement: only
+  `$schema` and `$id` are dropped (OpenAPI 3.1 declares the dialect for the whole
+  document, and an `$id` would re-base the internal pointers onto a URL nothing
+  can fetch, so `#/$defs/pass` is re-rooted to
+  `#/components/schemas/StackStats/$defs/pass` instead), and the identity comes
+  back as `x-umbra-schema-id`. A cross-file `$ref` — the form `render-manifest`
+  and `watch-delta` use — is **refused** rather than inlined, because a
+  reference no client can resolve is worse than a shape it was never given. The
+  suite asserts the component equals the file after that rewrite, that every
+  `$ref` in the whole document resolves, and that an `--no-artifacts` instance
+  publishes none of them, since a component nothing references would describe a
+  shape that instance does not emit.
+
+  The routes that return *bytes* say so too (`image/png`, `text/html`) rather
+  than advertising FastAPI's default `application/json` alongside a picture they
+  never emit. And the one document the HTTP surface emits that had no contract
+  at all now has one: `docs/schemas/render-job.schema.json`, the job every
+  `"async": true` request answers with and `GET /jobs/{id}` returns — the
+  document a client *polls*, so its conditional halves are the contract's
+  substance (a `result` link exactly when `status` is `succeeded`, `cache`
+  present only then, `error` only on `failed`, and a `started` that is null both
+  while queued and for a job born succeeded from the cache, which ran no work).
+  Seventeen schemas now.
+
 - **Publish the surfaces an agent reads as contracts, and check them
   (`docs/schemas/item-context`, `scene-description`, `search-plan`,
   `watch-delta`, `task-matches`, `scene-matches`).** The two previous entries

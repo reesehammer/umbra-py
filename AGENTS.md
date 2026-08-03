@@ -66,7 +66,7 @@ src/umbra_py/
   mcp_server.py      # umbra-mcp: MCP server exposing search/geocode/quicklook/change/timescan tools ([mcp])
   langchain.py       # umbra_tools(): the same catalog tools as native LangChain/LangGraph StructuredTools; reuses mcp_server's deterministic callables ([langchain])
   llamaindex.py      # umbra_tools(): the same catalog tools as native LlamaIndex FunctionTools; reuses mcp_server's deterministic callables ([llamaindex])
-  serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve])
+  serve.py           # umbra serve: read-only STAC API façade over CatalogIndex (FastAPI, [serve]); its artifact routes carry the committed docs/schemas/ contracts into the generated OpenAPI document as components
   context.py         # llm_context(): domain knowledge as a machine-readable JSON dict (`umbra context`)
   llms_txt.py        # llms_txt()/llms_full_txt(): llms.txt-convention agent guide (`umbra llms-txt`); stdlib-only
   planner.py         # umbra ask: model plans a search, library re-validates + executes it ([ai])
@@ -74,6 +74,7 @@ src/umbra_py/
   describe.py        # umbra describe: vision model reads a rendered quicklook -> structured, provenance-stamped scene description ([ai]+[viz])
   narrate.py         # umbra change --narrate: vision model narrates change, grounded in a deterministic per-block dB-delta grid ([ai]+[viz])
   watch.py           # umbra watch: idempotent delta detection for standing site monitoring (state in the index meta table; no model call)
+  schemas.py         # load_schema()/schema_names(): read the published docs/schemas/ contracts from an installed umbra-py (stdlib only; the wheel carries a copy of the directory as package data)
   exceptions.py      # UmbraError hierarchy
   _http.py           # tiny requests wrapper, default session, timeouts
 tests/
@@ -87,7 +88,7 @@ tests/
 examples/            # planned notebooks (v0.2); see examples/README.md
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
-docs/schemas/        # the published JSON contracts for every `--json` surface (public API)
+docs/schemas/        # the published JSON contracts for every `--json` surface (public API); shipped in the wheel too, read with `umbra_py.schemas`
 docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged PRs
 ```
 
@@ -324,6 +325,11 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 3. If the same document is emitted by more than one front door (the CLI's
    `--json`, an `umbra serve` route, an agent tool), keep it one `to_dict()`
    and one schema — validating the document once then covers all three.
+4. If an `umbra serve` route emits it, add the schema to
+   `serve.OPENAPI_SCHEMAS` and `$ref` it from that route's `responses=`, so the
+   generated OpenAPI document — all an OpenAPI-driven client reads — carries the
+   contract rather than a bare object. → verify:
+   `pytest tests/test_serve.py -k openapi`.
 
 ### Add a new optional dependency
 1. Put it under the right extra in `pyproject.toml`

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/render-job.schema.json",
+  "title": "Artifact render job",
+  "description": "One asynchronous artifact render on an `umbra serve` instance: what was asked for, how far it has got, and where the result will be. Returned by every `POST /artifacts/...` request that sets `\"async\": true` (202 while it runs, 200 when the content-addressed result was already cached) and by `GET /jobs/{id}`, which is what a client polls until `status` leaves `queued`/`running`. Produced by `umbra_py.serve.job_to_dict`. This is an HTTP-only document -- the CLI renders synchronously and has no jobs.",
+  "type": "object",
+  "required": ["id", "kind", "status", "created", "started", "finished", "links"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Opaque job identifier, unique within the running server. Job records are in-memory, so an id does not survive a restart -- the rendered artifact does, because it is a content-addressed file on disk, so a re-submitted request is answered from cache."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Which artifact is being rendered -- the endpoint's own name.",
+      "examples": ["quicklook", "change", "timescan", "swipe", "stats"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed"],
+      "description": "Where the render has got to. `queued` and `running` mean poll again; `succeeded` means the `result` link resolves; `failed` means `error` says why and the result link is absent."
+    },
+    "created": {
+      "type": "string",
+      "description": "When the job was submitted (RFC 3339, UTC)."
+    },
+    "started": {
+      "type": ["string", "null"],
+      "description": "When the render began (RFC 3339, UTC), or null while the job is still queued. Also null for a job born `succeeded` from the cache, which ran no work at all."
+    },
+    "finished": {
+      "type": ["string", "null"],
+      "description": "When the render finished or failed (RFC 3339, UTC), or null while it is queued or running."
+    },
+    "links": {
+      "type": "array",
+      "description": "Where to look next. A `self` link (this job document) is always present; a `result` link, typed with the artifact's own media type, is added exactly when `status` is `succeeded`.",
+      "items": {
+        "type": "object",
+        "required": ["rel", "href", "type"],
+        "additionalProperties": true,
+        "properties": {
+          "rel": {
+            "type": "string",
+            "description": "Link relation: `self` for this job document, `result` for the rendered artifact.",
+            "examples": ["self", "result"]
+          },
+          "href": {
+            "type": "string",
+            "description": "Absolute URL, resolved against the request's own base URL."
+          },
+          "type": {
+            "type": "string",
+            "description": "Media type of what the link points at: `application/json` for `self`, and for `result` the artifact's own type (`image/png`, `text/html; charset=utf-8`, or `application/json` for the stats endpoint).",
+            "examples": ["application/json", "image/png", "text/html; charset=utf-8"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Human-readable label, present on the `result` link."
+          }
+        }
+      }
+    },
+    "cache": {
+      "type": "string",
+      "enum": ["hit", "miss"],
+      "description": "Present only when `status` is `succeeded`: whether the artifact was already on disk when the job was submitted (`hit`, no render ran) or was rendered for this job (`miss`). Its absence on a queued or running job is not a claim either way -- the answer is not known until the job finishes."
+    },
+    "error": {
+      "type": "string",
+      "description": "Present only when `status` is `failed`: the render's own message, in the words the synchronous request would have answered with."
+    }
+  }
+}

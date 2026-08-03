@@ -919,18 +919,48 @@ filename, the README table names every file and no file it does not). Every
     whose contract is STAC's. That the stream is a plan object followed by
     newline-delimited items is a shape nothing describes, because it is a
     concatenation rather than a document. Same for `umbra semantic search --run`.
-- **`umbra serve` has an OpenAPI document and the schemas do not appear in it.**
-  FastAPI generates `/openapi.json` from the route annotations, so the artifact
-  routes describe their *response* as a bare object while `docs/schemas/`
-  describes it exactly. Wiring the committed schema into the route's
-  `responses=` would make the HTTP surface self-describing to a generated
-  client; it needs the schemas loadable at import time (they are data files, so
-  a package-data decision) rather than only from a checkout.
-- **The schemas live in `docs/`, so a wheel does not carry them.** Fine for a
-  contract read on GitHub, and it is why nothing in `src/` loads them at
-  runtime. If a consumer ever wants to validate against the version it
-  installed, they would have to ship as package data with a `Path`-based
-  accessor.
+- ~~**`umbra serve` has an OpenAPI document and the schemas do not appear in
+  it.**~~ ~~**The schemas live in `docs/`, so a wheel does not carry them.**~~
+  **shipped, both** — they were one item: the document could not carry a
+  contract nothing in `src/` could load. `umbra_py.schemas`
+  (`load_schema` / `schema_names` / `schema_path`, stdlib only) reads them, the
+  wheel carries a copy of `docs/schemas/` as package data
+  (`umbra_py/_schemas/`, via `[tool.hatch.build.targets.wheel.force-include]`)
+  while the directory stays the one home its `$id`s name, and
+  `serve.openapi_components()` merges the three contracts the artifact routes
+  emit into the generated document as `StackStats` / `StackProvenance` /
+  `RenderJob` with each route's `responses=` `$ref`ing one. What is still open,
+  and smaller:
+  - **The packaged copy is checked by a parse in the suite, and by Docker in
+    CI.** `test_the_wheel_ships_the_schemas_where_the_accessor_looks` reads
+    `pyproject.toml` and asserts the `force-include` target matches
+    `schemas.PACKAGE_DATA_DIR`, because every environment in the Python matrix
+    installs editable and so exercises only the *fallback* branch. What a parse
+    cannot see is a build *context* that lacks the files: `docker.yml` caught
+    exactly that on the first run of this change, since the image copied only
+    `pyproject.toml`, `README.md` and `src/`, and a `force-include` is mandatory
+    — `FileNotFoundError: Forced include not found: /app/docs/schemas`, before
+    a line of Python ran. That is the right failure (an installed package has no
+    checkout to fall back to, so an image without the schemas would raise on
+    `/openapi.json` instead), and the `Dockerfile` + `.dockerignore` now carry
+    `docs/schemas` deliberately. Between the two, the packaged branch is
+    exercised end to end by the Docker smoke test rather than by the suite;
+    building a wheel inside the suite would bring the check closer, at the cost
+    of a build backend in the test path.
+  - **The copy means `docs/schemas/README.md` ships inside the wheel too.**
+    `force-include` takes the directory, so the reader's table is package data
+    as well. Harmless (a few KB) and arguably useful next to the files it
+    describes; excluding it would mean listing the schemas individually, which
+    is the drift the directory-level include avoids.
+  - **Only the three schemas the artifact routes emit are components.** The
+    other fourteen describe CLI and agent-tool surfaces this server does not
+    have, so publishing them in *its* OpenAPI document would be a claim rather
+    than a contract. Add one when a route starts emitting it.
+  - **A cross-file `$ref` cannot be inlined.** `_rewrite_refs` refuses one
+    rather than emitting a reference no client can resolve, so publishing
+    `render-manifest` or `watch-delta` as a component would mean publishing its
+    target as a component first and pointing the ref at it. A few lines when
+    something needs it; deliberately not written on speculation.
 - **Nothing checks that a schema's `examples` validate against its own schema.**
   Several carry `examples` for the reader; they are prose as far as the suite is
   concerned. A loop asserting each example validates would keep them honest — a

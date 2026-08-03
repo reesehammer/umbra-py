@@ -12,6 +12,7 @@ with a `CHANGELOG.md` entry.
 | [`download.schema.json`](download.schema.json) | The `[{asset, path, bytes, sha256}, …]` array printed to stdout on success. | `umbra download --json`. |
 | [`index-info.schema.json`](index-info.schema.json) | The index-stats object (path, size, item/task counts, date span, build date) printed to stdout. | `umbra index info --json`. |
 | [`render-manifest.schema.json`](render-manifest.schema.json) | The `{output, items_used, parameters}` manifest printed to stdout on success. | `umbra change` / `timescan` / `swipe` / `gallery` / `map` / `stack`, each with `--json`. |
+| [`render-job.schema.json`](render-job.schema.json) | One asynchronous artifact render on an `umbra serve` instance: how far it has got and where the result will be. | Any `POST /artifacts/…` with `"async": true`; `GET /jobs/{id}` (`umbra_py.serve.job_to_dict`). |
 | [`stack-stats.schema.json`](stack-stats.schema.json) | The datacube measurement: per-pass distribution, pass-to-pass and net change, the optional spatial breakdown. | `umbra_py.stack_stats`; `umbra stack --stats --json` (as the manifest's `stats`); `POST /artifacts/stats`; the `stack_stats` agent tool. |
 | [`stack-provenance.schema.json`](stack-provenance.schema.json) | What a selection's sources say their pixel values are, and whether the series stacks. | `umbra_py.stack_provenance`; `umbra stack --provenance --json`; `POST /artifacts/provenance`; the `stack_provenance` agent tool. |
 | [`preflight.schema.json`](preflight.schema.json) | Which acquisitions can support a measurement, read from product metadata over the wire. | `umbra_py.preflight.preflight_items`; `umbra preflight --json`. |
@@ -145,6 +146,37 @@ emitted from.
 STAC's own rather than this project's — so nothing here describes it. The
 context card is a different document: a compact, explained reading of that item
 which this project does own.
+
+## They are reachable from an install, not only from a clone
+
+These files are the contract, and they are also *data an installed umbra-py can
+read*. `umbra_py.schemas` loads them by name:
+
+```python
+>>> from umbra_py.schemas import load_schema, schema_names
+>>> "stack-stats" in schema_names()
+True
+>>> load_schema("stack-stats")["title"]
+'Datacube statistics summary'
+```
+
+They keep one home — this directory, which is the path every schema's own `$id`
+names — and the wheel carries a *copy* of it as package data
+(`umbra_py/_schemas/`, via the `force-include` in `pyproject.toml`), the same way
+`py.typed` is a build artifact of a source-tree fact. So the accessor reads the
+packaged copy first and falls back to the checkout it was imported from, which is
+what makes an editable install resolve the same files a wheel ships. Loading is
+stdlib only; validating against them is the consumer's choice of validator.
+
+That reach is what lets the HTTP surface describe itself. `umbra serve`'s
+generated OpenAPI document — the whole of what an OpenAPI-driven agent or a
+client generator reads — used to describe `POST /artifacts/stats` as returning a
+bare object while `stack-stats.schema.json` described it exactly. Now the three
+contracts its routes actually emit are merged into the document as components
+(`StackStats`, `StackProvenance`, `RenderJob`, each carrying the `$id` of the
+file it is a copy of as `x-umbra-schema-id`) and each route's response `$ref`s
+one. They are the committed files rather than a restatement of them, so the HTTP
+surface cannot drift from the contract the CLI and the agent tools emit.
 
 ## They are checked, not just described
 

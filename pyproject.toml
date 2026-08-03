@@ -142,6 +142,18 @@ packages = ["src/umbra_py"]
 # Ship the PEP 561 marker so downstream type checkers consume the inline types.
 artifacts = ["src/umbra_py/py.typed"]
 
+# The published JSON contracts (`docs/schemas/`) keep one home -- the path every
+# schema's own `$id` names, and where they are read on GitHub -- and the wheel
+# carries a copy of that directory as package data, the same way `py.typed` is a
+# build artifact of a source-tree fact. That is what lets a consumer validate
+# against the version it installed and lets `umbra serve` put the committed
+# shape into its generated OpenAPI document. `umbra_py.schemas` reads this copy
+# first and falls back to the checkout (an editable install builds no wheel, so
+# nothing runs this); `PACKAGE_DATA_DIR` there is the target below, and
+# `tests/test_schemas.py` checks that the two still agree.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/schemas" = "umbra_py/_schemas"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
