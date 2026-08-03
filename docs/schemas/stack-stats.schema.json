@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/stack-stats.schema.json",
+  "title": "Datacube statistics summary",
+  "description": "The measured answer a time-series datacube reduces to: one record per pass, the net baseline-to-latest change, and (with a blocks grid) which part of the site moved and between which two passes. Emitted identically by `umbra_py.stack_stats`, `umbra stack --stats --json` (under the manifest's `stats` key), `POST /artifacts/stats` on `umbra serve`, and the `stack_stats` agent tool (MCP / LangChain / LlamaIndex).",
+  "type": "object",
+  "required": [
+    "count",
+    "units",
+    "product_type",
+    "change_threshold_db",
+    "grid",
+    "passes",
+    "net_change",
+    "license",
+    "attribution",
+    "caveats"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many passes the cube holds (the length of `passes`)."
+    },
+    "units": {
+      "type": "string",
+      "description": "The cube's own pixel units, which the per-pass distribution is reported in. Change is always reported in decibels regardless.",
+      "examples": ["amplitude", "dB"]
+    },
+    "product_type": {
+      "type": ["string", "null"],
+      "description": "The asset the cube was built from, or null when the cube records none.",
+      "examples": ["GEC"]
+    },
+    "change_threshold_db": {
+      "type": "number",
+      "description": "How many decibels a cell had to move between two passes to count as changed."
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenanceRecord",
+      "description": "What the cube's sources say their pixel values are, read off their `UMBRA_*` conversion tags. Present only when the sources recorded one, so its absence means \"the published products as delivered\" rather than \"unknown\". It is also what decides whether the first caveat calls these decibels relative or calibrated."
+    },
+    "quantile_method": {
+      "const": "histogram",
+      "description": "Present only under `windowed=True`, where the per-pass percentiles are histogram estimates rather than exact. Its absence means every number in the summary is exact."
+    },
+    "quantile_bin_db": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "The histogram bin width those estimates are good to, in decibels. Present exactly when `quantile_method` is."
+    },
+    "grid": {
+      "type": "object",
+      "description": "The shared grid every pass was co-registered onto.",
+      "required": [
+        "crs",
+        "width",
+        "height",
+        "cell_size",
+        "cell_area_m2",
+        "bounds",
+        "extent"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "crs": { "type": "string", "examples": ["EPSG:4326", "EPSG:32633"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "cell_size": {
+          "type": "array",
+          "description": "`[x, y]` cell size in the grid's own units (degrees for a geographic CRS, metres for a projected one).",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "cell_area_m2": {
+          "type": ["number", "null"],
+          "description": "Ground area of one cell, or null on a geographic grid whose cells are not equal-area (which is also why `changed_area_km2` is null there)."
+        },
+        "bounds": {
+          "type": "array",
+          "description": "`[minx, miny, maxx, maxy]` in the grid's CRS.",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "extent": {
+          "type": ["string", "null"],
+          "description": "Whether the grid is the acquisitions' shared footprint or their union.",
+          "examples": ["intersection", "union"]
+        }
+      }
+    },
+    "passes": {
+      "type": "array",
+      "description": "One record per acquisition, oldest first.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/pass" }
+    },
+    "net_change": {
+      "oneOf": [{ "$ref": "#/$defs/change" }, { "type": "null" }],
+      "description": "The first pass compared to the last. Null for a single-pass cube, and for a series whose first and last passes share no valid cell."
+    },
+    "spatial": {
+      "$ref": "#/$defs/spatial",
+      "description": "Present only when a blocks grid was asked for (`stack_stats(blocks=N)` / `umbra stack --blocks N`)."
+    },
+    "license": { "type": "string", "examples": ["CC-BY-4.0"] },
+    "attribution": {
+      "type": "string",
+      "description": "The attribution CC BY 4.0 requires, which must survive into anything quoting these numbers."
+    },
+    "caveats": {
+      "type": "array",
+      "description": "What these numbers do and do not mean, derived from the cube itself rather than fixed: the calibration, the flattening, a subtracted noise floor and how it was obtained, a speckle filter and what it cost, a geographic grid that cannot report area, and windowed percentiles.",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "provenanceRecord": {
+      "type": "object",
+      "description": "A raster's `UMBRA_*` conversion record, keys lowercased and de-prefixed. See `stack-provenance.schema.json` for the report that groups a selection by it.",
+      "additionalProperties": { "type": "string" }
+    },
+    "change": {
+      "type": "object",
+      "description": "A signed decibel comparison between two passes over the cells both observed.",
+      "required": [
+        "compared_cells",
+        "mean_delta_db",
+        "mean_abs_delta_db",
+        "brightened_fraction",
+        "dimmed_fraction",
+        "changed_fraction",
+        "changed_area_km2"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "compared_cells": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Cells valid in both passes. A pair sharing none has no record at all (null) rather than a record of zero."
+        },
+        "mean_delta_db": {
+          "type": "number",
+          "description": "Mean signed change, positive where the later pass is brighter."
+        },
+        "mean_abs_delta_db": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Mean unsigned change: how much ground moved, whichever way."
+        },
+        "brightened_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of compared cells that rose by at least `change_threshold_db`."
+        },
+        "dimmed_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction that fell by at least `change_threshold_db`."
+        },
+        "changed_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "`brightened_fraction` + `dimmed_fraction`."
+        },
+        "changed_area_km2": {
+          "type": ["number", "null"],
+          "description": "The changed cells as ground area, or null on a geographic grid, where counting cells measures nothing."
+        }
+      }
+    },
+    "pass": {
+      "type": "object",
+      "description": "One acquisition's distribution on the shared grid, plus its change against the pass before it.",
+      "required": [
+        "item_id",
+        "datetime",
+        "valid_cells",
+        "valid_fraction",
+        "mean",
+        "median",
+        "std",
+        "p5",
+        "p95",
+        "change_vs_previous"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": { "type": "string" },
+        "datetime": {
+          "type": "string",
+          "description": "The acquisition's timestamp, `YYYY-MM-DDTHH:MM:SSZ`."
+        },
+        "valid_cells": { "type": "integer", "minimum": 0 },
+        "valid_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mean": {
+          "type": ["number", "null"],
+          "description": "In the cube's own `units`. Null when the pass has no valid cell on the shared grid, as are the four statistics below."
+        },
+        "median": { "type": ["number", "null"] },
+        "std": { "type": ["number", "null"] },
+        "p5": { "type": ["number", "null"] },
+        "p95": { "type": ["number", "null"] },
+        "change_vs_previous": {
+          "oneOf": [{ "$ref": "#/$defs/change" }, { "type": "null" }],
+          "description": "Against the pass before it. Null for the first pass."
+        }
+      }
+    },
+    "interval": {
+      "type": "object",
+      "description": "One consecutive pass-to-pass step of a block, named by both ends.",
+      "required": [
+        "from_item_id",
+        "from_datetime",
+        "to_item_id",
+        "to_datetime",
+        "mean_delta_db",
+        "changed_fraction",
+        "changed_area_km2"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from_item_id": { "type": "string" },
+        "from_datetime": { "type": "string" },
+        "to_item_id": { "type": "string" },
+        "to_datetime": { "type": "string" },
+        "mean_delta_db": { "type": "number" },
+        "changed_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "changed_area_km2": { "type": ["number", "null"] }
+      }
+    },
+    "spatial": {
+      "type": "object",
+      "description": "The site cut into a coarse grid, so a change has a place as well as a size.",
+      "required": [
+        "grid_rows",
+        "grid_cols",
+        "bounds_crs",
+        "peak_block",
+        "grid_text",
+        "blocks"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "grid_rows": { "type": "integer", "minimum": 1 },
+        "grid_cols": { "type": "integer", "minimum": 1 },
+        "bounds_crs": {
+          "type": "string",
+          "description": "The CRS each block's `bounds` is in — the cube's own grid."
+        },
+        "peak_block": {
+          "oneOf": [{ "$ref": "#/$defs/peakBlock" }, { "type": "null" }],
+          "description": "The block that moved most overall, or null when no block had two comparable passes."
+        },
+        "grid_text": {
+          "type": "string",
+          "description": "The net signed change per block as a north-up ASCII heat-grid, one line per row."
+        },
+        "blocks": {
+          "type": "array",
+          "description": "Every block, row-major from the northwest.",
+          "items": { "$ref": "#/$defs/block" }
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "required": [
+        "row",
+        "col",
+        "compass",
+        "bounds",
+        "center_lonlat",
+        "cells",
+        "net_change",
+        "peak_interval"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "row": { "type": "integer", "minimum": 0 },
+        "col": { "type": "integer", "minimum": 0 },
+        "compass": {
+          "type": "string",
+          "description": "Plain-language position in the grid.",
+          "examples": ["northwest", "center", "southeast"]
+        },
+        "bounds": {
+          "type": "array",
+          "description": "`[minx, miny, maxx, maxy]` in `bounds_crs`.",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "center_lonlat": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            { "type": "null" }
+          ],
+          "description": "`[lon, lat]` to map or geocode the block by, or null when the grid's CRS could not be transformed to lon/lat."
+        },
+        "cells": { "type": "integer", "minimum": 1 },
+        "net_change": {
+          "oneOf": [{ "$ref": "#/$defs/change" }, { "type": "null" }],
+          "description": "First pass to last, over this block. Null where the block has no cell both passes observed."
+        },
+        "peak_interval": {
+          "oneOf": [{ "$ref": "#/$defs/interval" }, { "type": "null" }],
+          "description": "The consecutive pair of passes this block moved most between — its \"when\" answer. Null where no step could be measured."
+        },
+        "series": {
+          "type": "array",
+          "description": "Every consecutive step, oldest first, that `peak_interval` was picked from. Present only under `block_series=True`, which is what tells a steady drift apart from a single step.",
+          "items": { "$ref": "#/$defs/interval" }
+        }
+      }
+    },
+    "peakBlock": {
+      "type": "object",
+      "required": [
+        "row",
+        "col",
+        "compass",
+        "center_lonlat",
+        "mean_delta_db",
+        "direction",
+        "peak_interval"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "row": { "type": "integer", "minimum": 0 },
+        "col": { "type": "integer", "minimum": 0 },
+        "compass": { "type": "string" },
+        "center_lonlat": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            { "type": "null" }
+          ]
+        },
+        "mean_delta_db": { "type": "number" },
+        "direction": { "enum": ["brighter", "dimmer"] },
+        "peak_interval": {
+          "oneOf": [{ "$ref": "#/$defs/interval" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

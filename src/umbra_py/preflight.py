@@ -699,6 +699,11 @@ class PreflightReport:
         return sum(sizes) if sizes else None
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form, for ``umbra preflight --json``.
+
+        The document is public API, pinned by
+        ``docs/schemas/preflight.schema.json``.
+        """
         return {
             "asset": self.asset,
             "calibration": self.calibration,

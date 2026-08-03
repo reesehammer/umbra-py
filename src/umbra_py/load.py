@@ -631,7 +631,13 @@ class StackProvenance:
         return self.groups[0] if self.groups else None
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe form, for ``umbra stack --provenance --json``."""
+        """JSON-safe form, for ``umbra stack --provenance --json``.
+
+        The document is public API, pinned by
+        ``docs/schemas/stack-provenance.schema.json``: the same shape is what
+        ``POST /artifacts/provenance`` returns and what the ``stack_provenance``
+        agent tool hands a model.
+        """
         return {
             "asset": self.asset,
             "agrees": self.agrees,
@@ -2268,6 +2274,12 @@ def stack_stats(
         ``block_series`` each block additionally carries the ``series`` those
         peaks were picked from — every consecutive step, oldest first, in the
         same shape as ``peak_interval``.
+
+        The document is public API, pinned by
+        ``docs/schemas/stack-stats.schema.json`` — the same shape ``umbra stack
+        --stats --json`` carries under its manifest's ``stats`` key, ``POST
+        /artifacts/stats`` returns, and the ``stack_stats`` agent tool hands a
+        model.
 
         Change is **always** reported in decibels — a ratio of backscatter is a
         difference on the log scale — whether the cube holds dB or linear

@@ -377,7 +377,8 @@ def _echo_stack_provenance(report) -> None:
     help="Also print the cube's time-series statistics as JSON: per-pass "
     "distribution, the decibel change between consecutive passes, and the net "
     "first-to-last change (with the changed area in km2 under --crs utm). Pass "
-    "it without --out to measure without writing a file.",
+    "it without --out to measure without writing a file. See "
+    "docs/schemas/stack-stats.schema.json.",
 )
 @click.option(
     "--blocks",
@@ -418,7 +419,7 @@ def _echo_stack_provenance(report) -> None:
     "raster header and group the selection by what its pixel values are, so a "
     "series that cannot be measured says so before anything is warped or "
     "streamed. Names the largest agreeing subset (with URLs to re-run on) when "
-    "the selection is mixed.",
+    "the selection is mixed. See docs/schemas/stack-provenance.schema.json.",
 )
 @click.option(
     "--area",
@@ -1828,7 +1829,12 @@ def _preflight_line(result) -> str:
     show_default=True,
     help="Max acquisitions to gather when searching (ignored with item URLs).",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the report as JSON (see docs/schemas/preflight.schema.json).",
+)
 @_shared._fuzzy_option
 @_shared._acquisition_filter_options
 @_shared._local_index_options

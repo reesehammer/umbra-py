@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/preflight.schema.json",
+  "title": "Preflight report",
+  "description": "Which acquisitions of a selection can support a measurement, read from each complex product's own metadata over the wire (two HTTP range requests per product) rather than by downloading it. Emitted by `umbra preflight --json` (umbra_py.preflight.PreflightReport.to_dict); `umbra chips --preflight` asks the same question with the run's own conversion settings.",
+  "type": "object",
+  "required": [
+    "asset",
+    "calibration",
+    "noise_subtract",
+    "noise_model",
+    "rtc",
+    "count",
+    "supported_count",
+    "missing_count",
+    "unreadable_count",
+    "bytes_read",
+    "product_bytes",
+    "workers",
+    "results"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "asset": {
+      "type": "string",
+      "description": "Which product was read.",
+      "examples": ["SICD"]
+    },
+    "calibration": {
+      "type": ["string", "null"],
+      "description": "The calibration the verdicts were asked about, or null when none was.",
+      "examples": ["sigma0", "beta0", "gamma0", "rcs"]
+    },
+    "noise_subtract": {
+      "type": "boolean",
+      "description": "Whether the verdicts were asked about subtracting the noise floor."
+    },
+    "noise_model": {
+      "type": "string",
+      "description": "Where that floor would come from. Only `measured` depends on the product's metadata, so it is the only one a preflight can refuse.",
+      "examples": ["measured", "estimated", "estimated-range"]
+    },
+    "rtc": {
+      "type": "boolean",
+      "description": "Whether the verdicts were asked about radiometric terrain flattening, which needs the collection geometry the product states. The DEM half is a fact about the request, so no preflight can check it."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many acquisitions were read (the length of `results`)."
+    },
+    "supported_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many can support the requested measurement."
+    },
+    "missing_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many had no readable product behind them — a verdict, not a mishap, and the group a batch can act on by dropping."
+    },
+    "unreadable_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many failed on the wire. No verdict at all, so a batch keeps them and finds out the expensive way."
+    },
+    "bytes_read": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "What asking cost: header and XML only."
+    },
+    "product_bytes": {
+      "type": ["integer", "null"],
+      "description": "What the products it read weigh in full — the download this did not do — or null when no source stated a size."
+    },
+    "workers": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many acquisitions were read at once. It says how the answer was obtained rather than what it is: the verdicts, their order and the bytes read are identical at any width."
+    },
+    "results": {
+      "type": "array",
+      "description": "One verdict per acquisition, in the selection's own order.",
+      "items": { "$ref": "#/$defs/result" }
+    }
+  },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "datetime",
+        "href",
+        "supported",
+        "reason",
+        "hint",
+        "error",
+        "error_scope",
+        "capabilities"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": { "type": "string" },
+        "datetime": { "type": ["string", "null"] },
+        "href": {
+          "type": "string",
+          "description": "The product the metadata was read from."
+        },
+        "supported": {
+          "type": "boolean",
+          "description": "Whether the conversion's own support check cleared this product. False for a refusal and for every unread one."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "description": "The product's own words for why it cannot answer, verbatim from the `UnsupportedMeasurementError` the conversion would raise. Null where it can, and where nothing was read."
+        },
+        "hint": {
+          "type": ["string", "null"],
+          "description": "The refusal's single recovery step, or null when no one step applies."
+        },
+        "error": {
+          "type": ["string", "null"],
+          "description": "Why the metadata could not be read, or null when it was."
+        },
+        "error_scope": {
+          "description": "Which side of the line a failure fell on. `\"product\"` is final — the item lists no such asset, nothing is behind the href, what is there is not a readable SICD. `\"transport\"` is about the moment rather than the archive, so the pass is kept. Null when the read succeeded. Everything unrecognised is counted as transport, so the cautious branch is the default by construction.",
+          "enum": ["product", "transport", null]
+        },
+        "capabilities": {
+          "oneOf": [{ "$ref": "#/$defs/capabilities" }, { "type": "null" }],
+          "description": "What the product's metadata states, or null when it could not be read."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "What one complex product's own metadata says it can support.",
+      "required": [
+        "source",
+        "calibrations",
+        "noise_level",
+        "look_geometry",
+        "core_name",
+        "rows",
+        "cols",
+        "polarization",
+        "bytes_read",
+        "product_bytes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string" },
+        "calibrations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The calibrations whose scale-factor polynomial this product carries — empty for an uncalibrated product, which is most of Umbra's open archive."
+        },
+        "noise_level": {
+          "description": "`\"ABSOLUTE\"` is a floor that can be subtracted; `\"RELATIVE\"` describes how the floor varies without saying what it is, so it is refused rather than guessed at.",
+          "enum": ["ABSOLUTE", "RELATIVE", null]
+        },
+        "look_geometry": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            { "type": "null" }
+          ],
+          "description": "`[incidence_deg, azimuth_deg]` at scene centre, or null where the product states neither — the case `--rtc` refuses on."
+        },
+        "core_name": { "type": ["string", "null"] },
+        "rows": { "type": ["integer", "null"] },
+        "cols": { "type": ["integer", "null"] },
+        "polarization": { "type": ["string", "null"] },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes transferred to answer for this product."
+        },
+        "product_bytes": {
+          "type": ["integer", "null"],
+          "description": "The whole product's size, when the source stated one."
+        }
+      }
+    }
+  }
+}
