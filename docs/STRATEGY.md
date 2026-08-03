@@ -154,13 +154,26 @@ part of their data program's infrastructure.
 ### 5.3 Make adoption visible where Umbra looks — **partial**
 
 `CITATION.cff`, `SECURITY.md`, and a Contributor Covenant `CODE_OF_CONDUCT.md`
-ship, completing GitHub's community profile. **Open (mostly maintainer
-actions):** a PR to
+ship, completing GitHub's community profile. The MCP registry listing is now
+**plumbing rather than a project**: `server.json` is the manifest, the
+`publish-mcp` job in `release.yml` submits it after the PyPI upload of a
+release, the README carries the `mcp-name:` marker the registry's PyPI
+ownership check reads, and `tests/test_mcp_registry.py` derives the invocation
+from `pyproject.toml` so the manifest and every surface that documents the
+command cannot disagree. That test exists because the discovery half was resting
+on a command that did not run: every front door — README, `llms.txt`, the module
+docstring, the CLI help — told an agent to hand the `umbra-mcp` console script
+to `uvx` on its own, which resolves to a distribution that does not exist and
+would not have installed the `[mcp]` extra either. The zero-install front door
+was documented, published and unrunnable. It is
+`uvx --from 'umbra-py[mcp]' umbra-mcp` everywhere now, checked rather than
+restated. **Open (maintainer actions):** a PR to
 [awslabs/open-data-registry](https://github.com/awslabs/open-data-registry/blob/main/datasets/umbra-open-data.yaml)
 adding umbra-py under the Umbra entry's "Tools & Applications"; a listing on
-the [STAC Index](https://stacindex.org/) ecosystem page; registering
-`umbra-mcp` in the MCP registries and Anthropic's directory; and minting the
-Zenodo DOI on the first release.
+the [STAC Index](https://stacindex.org/) ecosystem page; cutting the first
+release, which is what actually fires the MCP submission (and Anthropic's
+directory, which is a separate manual listing); and minting the Zenodo DOI on
+that release.
 
 ### 5.4 Demo notebooks that create SAR converts — **shipped**
 
@@ -1300,7 +1313,11 @@ from:
 **Maintainer / relationship actions (no code)**
 
 - Register the PyPI Trusted Publisher and cut the `v0.1.0` GitHub Release to
-  claim the name (release plumbing already ships).
+  claim the name (release plumbing already ships). That release now carries the
+  ecosystem listing with it: `release.yml`'s `publish-mcp` job waits for the
+  upload to be resolvable on PyPI and submits `server.json` to the MCP registry,
+  so "cut a release" and "become findable from any MCP client" stopped being two
+  jobs.
 - The ecosystem-visibility actions in §5.3, the "offer it upstream" move in
   §5.2, and the "talk to Umbra" conversation in §5.6.
 

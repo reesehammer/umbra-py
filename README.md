@@ -1485,10 +1485,20 @@ experience instead of a tutorial chapter.
 
 ```bash
 pip install "umbra-py[mcp]"
-umbra mcp            # run the stdio server (also: umbra-mcp, or uvx umbra-mcp)
+umbra mcp            # run the stdio server (also: umbra-mcp)
+
+# …or run it with nothing installed at all:
+uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
 
-Register it with an MCP client (Claude Desktop shown):
+The `--from` is not optional decoration. The `umbra-mcp` console script lives in
+the **`umbra-py`** distribution and needs its `[mcp]` extra, so handing the
+script name to `uvx` on its own looks for a distribution called `umbra-mcp` —
+there is none — and would not install the extra either. `--from` names the
+distribution *and* the extra; the word after it is the script to run.
+
+Register it with an MCP client (Claude Desktop shown). The first form assumes
+`pip install "umbra-py[mcp]"`; the second installs nothing:
 
 ```json
 {
@@ -1497,6 +1507,25 @@ Register it with an MCP client (Claude Desktop shown):
   }
 }
 ```
+
+```json
+{
+  "mcpServers": {
+    "umbra": {
+      "command": "uvx",
+      "args": ["--from", "umbra-py[mcp]", "umbra-mcp"]
+    }
+  }
+}
+```
+
+That same command is published to the [MCP
+registry](https://registry.modelcontextprotocol.io/) as
+`io.github.reesehammer/umbra-mcp` — see [`server.json`](server.json), which the
+release workflow submits, and which `tests/test_mcp_registry.py` keeps in step
+with the packaging facts it describes.
+
+<!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 
 The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `stack_stats` (the same change

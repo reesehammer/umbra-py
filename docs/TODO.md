@@ -971,16 +971,36 @@ filename, the README table names every file and no file it does not). Every
 ## Register `umbra-mcp` in the MCP registries and Anthropic's directory
 
 - **Surfaced in:** the `umbra-mcp` MCP server PR.
-- **Code:** `src/umbra_py/mcp_server.py`, `pyproject.toml` (`[mcp]` extra,
-  `umbra-mcp` console script).
+- **Code:** `server.json`, `tests/test_mcp_registry.py`, the `publish-mcp` job in
+  `.github/workflows/release.yml`, `src/umbra_py/mcp_server.py`, `pyproject.toml`
+  (`[mcp]` extra, `umbra-mcp` console script).
 
-The server itself is shipped and runnable (`umbra mcp` / `uvx umbra-mcp`), and
-the agent-framework reach trilogy (MCP → LangChain → LlamaIndex) is complete.
+The server itself is shipped and runnable (`umbra mcp` /
+`uvx --from 'umbra-py[mcp]' umbra-mcp`), the agent-framework reach trilogy
+(MCP → LangChain → LlamaIndex) is complete, and the registry half is now
+plumbing rather than a project: `server.json` is the manifest, the `publish-mcp`
+job submits it after the PyPI upload of a release, and
+`tests/test_mcp_registry.py` derives the command from `pyproject.toml` so the
+manifest, the README, `llms.txt` and the module docstrings cannot state
+different commands. ~~The invocation every one of those surfaces documented —
+the console script handed to `uvx` on its own, without the distribution or the
+extra — did not work at all~~ — fixed in the same change; see the CHANGELOG.
 What is still open:
 
-- **Registration is a maintainer action.** Listing the server in the public MCP
-  registries and Anthropic's directory — the discovery half of the deliverable —
-  has not been done.
+- **The first publish is a maintainer action.** The `publish-mcp` job runs on a
+  published GitHub Release, and no release has been cut (the same gate the PyPI
+  Trusted Publisher registration sits behind — `STRATEGY.md` §8, "maintainer /
+  relationship actions"). Until then `io.github.reesehammer/umbra-mcp` is not in
+  the registry, and the registry's PyPI ownership check — which fetches the
+  distribution's own long description and looks for the `mcp-name:` marker the
+  README now carries — has never run against a real upload.
+- **Anthropic's directory is a separate, manual listing.** The official MCP
+  registry is one submission; the vendor directories are their own forms.
+- **The schema URL is pinned by hand.** `server.json` names a dated schema
+  version (`2025-12-11`) and `tests/test_mcp_registry.py` requires it to be a
+  dated one, but nothing notices when the registry publishes a newer one. That
+  is the right default — an unpinned schema is not reproducible — and the
+  network-marked validation test is what would catch the pin going stale.
 - **`change_composite` drops its polarization-mixing warning.** Returning that
   warning as structured text alongside the image block would let an agent see
   why a composite is suspect instead of only handing back the picture.

@@ -84,10 +84,12 @@ tests/
   test_live.py       # marked `network`, skipped by default
   test_workflows.py  # every `umbra ...` call in .github/workflows/ must parse
   test_schemas.py    # every docs/schemas/*.json validated against a real payload from the surface that emits it
+  test_mcp_registry.py # server.json and every documented `uvx ...` must be the command that actually starts umbra-mcp
   data/sample_item.json
 examples/            # planned notebooks (v0.2); see examples/README.md
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
+server.json          # MCP registry manifest for umbra-mcp; submitted by release.yml's publish-mcp job
 docs/schemas/        # the published JSON contracts for every `--json` surface (public API); shipped in the wheel too, read with `umbra_py.schemas`
 docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged PRs
 ```

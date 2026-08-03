@@ -7,6 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Make the zero-install MCP front door runnable, and publish it where agents
+  look (`server.json`, `release.yml`'s `publish-mcp` job,
+  `tests/test_mcp_registry.py`).** The MCP server has been the project's
+  zero-install claim since it shipped — "any MCP client becomes a
+  natural-language front door to the archive, nothing installed" — and every
+  surface that stated the command stated one that does not run. The README, the
+  two `llms.txt` documents, the module docstring and `umbra mcp --help` all told
+  an agent to hand the `umbra-mcp` console script to `uvx` on its own. That
+  script lives in the **`umbra-py`** distribution, so the short form resolves to
+  a distribution by the script's name — there is none — and would not have
+  installed the `[mcp]` extra the server needs even if there were. The command
+  is `uvx --from 'umbra-py[mcp]' umbra-mcp`, and it now says so in all five
+  places, plus a paste-in client configuration in the README for a client that
+  cannot run a shell.
+
+  The reason it could rot unnoticed is that nothing in the repository could tell
+  a command from a sentence, so the fix is a check rather than five edits.
+  `tests/test_mcp_registry.py` *derives* the invocation from the packaging —
+  `[project.name]`, `[project.scripts]`, `[project.optional-dependencies]` — and
+  requires every `uvx` mention in the documented surfaces to lex to exactly that
+  argv. Renaming the extra, the console script or the distribution fails on the
+  rename and names it, which is the same "parse it, don't run it" shape
+  `tests/test_workflows.py` gives the weekly workflows.
+
+  With the command real, the listing is worth having. `server.json` publishes it
+  to the [MCP registry](https://registry.modelcontextprotocol.io/) as
+  `io.github.reesehammer/umbra-mcp` (the `io.github.` namespace GitHub OIDC
+  grants this repository), declaring the four environment variables an operator
+  can set — the Canopy token that switches the same search tools to the
+  commercial archive, the local index path, and the two model keys the two
+  opt-in AI tools use — every one of them optional, because the open archive
+  needs no credentials. The manifest is checked the same way the command is:
+  its version tracks `__version__`, its package identifier is this
+  distribution, its runtime arguments must compose to the derived argv, its
+  declared variables must be ones the package actually reads, and its name's
+  owner segment must match the repository that will publish it (a mismatch is
+  rejected by the registry a week after it merges, not at review). One
+  assertion is about an ambiguity rather than a fact: a client that renders
+  `uvx <runtimeArguments> <identifier>` appends a stray `umbra-py` to the
+  command, which is harmless *only* because the entry point takes no arguments —
+  so the suite pins that signature rather than trusting it.
+
+  Submission is a job on the existing release pipeline (`publish-mcp`, after the
+  PyPI upload) rather than a new workflow, because the ordering is a hard
+  requirement, not a preference: the registry proves ownership of a PyPI package
+  by fetching its long description and looking for an `mcp-name:` marker — which
+  the README now carries, and which `pyproject.toml` ships as that description —
+  so publishing before the version is resolvable on PyPI is a guaranteed
+  failure. The job waits for it, bounded, and says so if it never arrives.
+  Cutting the first release and becoming findable from any MCP client are now
+  one action. See `docs/STRATEGY.md` §5.3.
 - **Put the published contracts where the HTTP surface reads them
   (`umbra_py.schemas`, `docs/schemas/render-job`, the OpenAPI components).**
   Sixteen schemas were published, strict and checked against a real payload —

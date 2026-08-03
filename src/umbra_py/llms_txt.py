@@ -201,7 +201,8 @@ def llms_txt() -> str:
     lines.append("## AI-native interfaces")
     lines.append("")
     lines.append(
-        "- MCP server (`umbra mcp` / `uvx umbra-mcp`, the `[mcp]` extra): exposes "
+        "- MCP server (`umbra mcp` / `uvx --from 'umbra-py[mcp]' umbra-mcp`, the "
+        "`[mcp]` extra): exposes "
         "`search_catalog`, `get_item`, `geocode_place`, `index_stats`, "
         "`quicklook`, `change_composite`, `timescan`, `download_asset`, "
         "`watch_site` (report only passes new since the last check) and "
@@ -327,7 +328,8 @@ def llms_full_txt() -> str:
     lines.append("## AI-native interfaces")
     lines.append("")
     lines.append(
-        "- **MCP server** (`umbra mcp` / `uvx umbra-mcp`, `[mcp]` extra) — "
+        "- **MCP server** (`umbra mcp` / `uvx --from 'umbra-py[mcp]' umbra-mcp`, "
+        "`[mcp]` extra) — "
         "exposes `search_catalog`, `get_item`, `geocode_place`, `index_stats`, "
         "`quicklook`, `change_composite`, `timescan`, `download_asset`, "
         "`watch_site` (report only passes new since the last check) and "
