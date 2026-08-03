@@ -30,7 +30,8 @@ def mcp() -> None:
     Exposes search / geocode / quicklook / change / timescan as MCP tools so an
     MCP client (Claude Desktop / Code and others) can drive the archive in
     natural language. Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``);
-    also runnable as ``umbra-mcp`` or ``uvx umbra-mcp``.
+    also runnable as ``umbra-mcp``, or with nothing installed as
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp``.
     """
     from ..exceptions import MissingDependencyError
     from ..mcp_server import main as run_server

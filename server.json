@@ -1,0 +1,69 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.reesehammer/umbra-mcp",
+  "title": "Umbra open SAR archive",
+  "description": "Search, quicklook and measure Umbra's open SAR archive from any MCP client.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/reesehammer/umbra-py",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "umbra-py",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--from",
+          "value": "umbra-py[mcp]",
+          "description": "The server ships inside the umbra-py distribution and needs its [mcp] extra, so the package uvx installs is not the bare identifier."
+        },
+        {
+          "type": "positional",
+          "value": "umbra-mcp",
+          "valueHint": "console_script",
+          "description": "The console script to run from that distribution ([project.scripts] in pyproject.toml)."
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "UMBRA_CANOPY_TOKEN",
+          "description": "Canopy API token. Set it and the same search tools query Umbra's authenticated commercial archive instead of the open bucket; leave it unset for the open data, which needs no credentials.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "UMBRA_INDEX_DB",
+          "description": "Path to a local catalog index (built with 'umbra index build' or fetched with 'umbra index fetch'). Without one the server walks the public bucket per search, which is correct but slow.",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Enables the two opt-in model tools, describe_scene and narrate_change. Every other tool is deterministic and calls no model.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "Alternative provider for the same two model tools, and the encoder behind find_similar_text.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "command": "uvx --from 'umbra-py[mcp]' umbra-mcp",
+      "documentation": "https://github.com/reesehammer/umbra-py#drive-it-from-an-ai-agent-mcp"
+    }
+  }
+}

@@ -24,9 +24,13 @@ designed. Two design commitments carry over from the rest of the package:
   Compact context cards (:meth:`UmbraItem.to_llm_context`), not full STAC JSON,
   are returned from search to protect the client's context window.
 
-Run it with ``uvx umbra-mcp`` / ``umbra mcp`` (stdio transport) or
-``python -m umbra_py.mcp_server``. Requires the ``mcp`` extra
-(``pip install 'umbra-py[mcp]'``).
+Run it with ``uvx --from 'umbra-py[mcp]' umbra-mcp`` (nothing installed),
+``umbra mcp`` or ``python -m umbra_py.mcp_server`` (stdio transport either
+way). Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``) -- which is
+why the zero-install form needs ``--from``: this console script lives in the
+``umbra-py`` distribution, so handing its name to ``uvx`` alone would look for a
+distribution called ``umbra-mcp`` (there is none) and would not install the
+extra either. ``server.json`` publishes the same command to the MCP registry.
 """
 
 from __future__ import annotations

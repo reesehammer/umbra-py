@@ -75,3 +75,54 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Listing `umbra-mcp` in the MCP registry is the discovery half of the agent
+  # front door: the server has been runnable since it shipped, but an MCP client
+  # that does not already know the project cannot find it. `server.json` is the
+  # manifest (kept in step with the packaging by `tests/test_mcp_registry.py`);
+  # this job is the submission.
+  #
+  # It runs *after* the PyPI upload, and waits for the version to be
+  # resolvable, because the registry validates ownership by fetching the
+  # package's own README and looking for the `mcp-name:` marker. Publishing
+  # before the release exists on PyPI is a guaranteed failure, not a race.
+  publish-mcp:
+    name: Publish to the MCP registry
+    if: github.event_name == 'release'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for the registry's GitHub OIDC login, which is what grants
+      # this repository the `io.github.reesehammer/*` namespace. No token is
+      # stored anywhere.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Wait for the release to be resolvable on PyPI
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in $(seq 1 30); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://pypi.org/pypi/umbra-py/${version}/json")"
+            if [ "$code" = "200" ]; then
+              echo "umbra-py ${version} is on PyPI."
+              exit 0
+            fi
+            echo "attempt ${attempt}: PyPI answered ${code}; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::umbra-py ${version} never appeared on PyPI."
+          exit 1
+
+      - name: Install the MCP publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Publish server.json
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
