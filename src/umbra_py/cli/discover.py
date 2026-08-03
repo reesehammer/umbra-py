@@ -306,7 +306,12 @@ def _print_watch_result(result) -> None:
     help="Exit 10 when there are new acquisitions and 0 when there are none, so a "
     "scheduler's shell 'if' can branch without parsing output.",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the delta as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the delta as JSON (see docs/schemas/watch-delta.schema.json).",
+)
 def watch_cmd(
     bbox,
     place,
@@ -400,7 +405,8 @@ def watch_cmd(
     "--json",
     "as_json",
     is_flag=True,
-    help="Emit the item's LLM context card as JSON instead of a readable summary.",
+    help="Emit the item's LLM context card as JSON instead of a readable summary "
+    "(see docs/schemas/item-context.schema.json).",
 )
 @click.option(
     "--token",
@@ -506,7 +512,12 @@ def llms_txt_cmd(full: bool) -> None:
     "so the polygon searched is always your file. Without a name, the file stem "
     "is used. A selected area becomes 'umbra search --intersects PATH'.",
 )
-@click.option("--json", "as_json", is_flag=True, help="Emit the resolved plan as JSON.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the resolved plan as JSON (see docs/schemas/search-plan.schema.json).",
+)
 @click.option(
     "--local",
     is_flag=True,

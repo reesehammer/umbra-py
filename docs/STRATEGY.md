@@ -1216,10 +1216,28 @@ from:
   run had something to say with them, so the absence of `skipped` is the statement
   “every acquisition offered was chipped” rather than a default — now in the
   schema rather than implied by a docstring, and pinned against a real run at each
-  end. See the CHANGELOG. **Open:** the smaller unschema'd `--json` surfaces
-  (`umbra describe`, `ask`, `watch`, the ranked-match lists of `semantic` /
-  `embed`), and wiring the committed schemas into `umbra serve`'s generated
-  OpenAPI document — see `TODO.md`.
+  end. See the CHANGELOG.
+  ~~**Open:** the smaller unschema'd `--json` surfaces (`umbra describe`, `ask`,
+  `watch`, the ranked-match lists of `semantic` / `embed`).~~ **shipped** —
+  `item-context`, `scene-description`, `search-plan`, `watch-delta`,
+  `task-matches` and `scene-matches` publish the surfaces whose reader is a model
+  or a scheduler rather than a person, which is what design principle 5 is
+  actually about. Six rather than the four this entry listed, because the list
+  was missing the document those surfaces *share*: `UmbraItem.to_llm_context()`,
+  the most-read shape in the library (`umbra info --json`, the agent tools, and
+  every `new_items` entry of a watch delta) — and it is not the source STAC item,
+  whose contract is STAC's, but an explained reading of one, which this project
+  owns. So `watch-delta` `$ref`s it rather than restating the card. What these
+  contracts had to get right is the half the measurement documents did not have:
+  **which fields a model wrote**. A description's `attribution` and `provenance`
+  are stamped on by the library and cannot be set by a reply; a plan's
+  `rationale` is the one model-authored string and never becomes a filter; a
+  match's `score` is a number a test can recompute. That boundary was documented
+  in docstrings and is now in the contract a consumer parses. **This closes the
+  unschema'd-`--json` set** — every structured shape the CLI emits is published.
+  **Open:** wiring the committed schemas into `umbra serve`'s generated OpenAPI
+  document, which needs a package-data decision (the schemas live in `docs/`, so
+  a wheel does not carry them) — see `TODO.md`.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

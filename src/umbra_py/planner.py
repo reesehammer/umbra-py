@@ -209,7 +209,11 @@ class SearchPlan:
         return plan_to_command(self)
 
     def to_dict(self) -> dict[str, Any]:
-        """A plain JSON-serialisable view of the plan (for ``--json``)."""
+        """A plain JSON-serialisable view of the plan (for ``--json``).
+
+        Published as ``docs/schemas/search-plan.schema.json`` -- the document a
+        caller audits before running the plan, which is why ``command`` is in it.
+        """
         return {
             "question": self.question,
             "area": self.area,

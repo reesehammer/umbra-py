@@ -120,6 +120,9 @@ class SceneMatch:
     A match is a pointer back to a real acquisition, never a model-authored fact:
     every field except ``score`` was recorded at build time from the deterministic
     item, and ``score`` is a measurement a test can recompute.
+
+    ``umbra embed similar|search --json`` emits these as
+    ``docs/schemas/scene-matches.schema.json``.
     """
 
     item_id: str

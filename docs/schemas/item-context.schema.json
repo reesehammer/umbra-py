@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/item-context.schema.json",
+  "title": "Acquisition context card",
+  "description": "One acquisition as a model reads it (`umbra_py.UmbraItem.to_llm_context`): the metadata plus the one-line explanations a reader with no SAR literacy needs, and the download URLs, so a downstream step can act on the scene with no second fetch. Deterministic and offline — no model call is involved in producing it. Emitted by `umbra info --json`, carried as each entry of a watch delta's `new_items`, and returned by the `search_catalog` / `get_item` agent tools. It is *not* the source STAC item: `umbra download`'s URL argument is `stac_href`, and the raw item behind it is STAC's own contract rather than this project's.",
+  "type": "object",
+  "required": [
+    "id",
+    "datetime",
+    "place",
+    "bbox",
+    "platform",
+    "instrument_mode",
+    "incidence_angle_deg",
+    "resolution_range_m",
+    "resolution_azimuth_m",
+    "polarizations",
+    "polarization_caveat",
+    "products",
+    "stac_href",
+    "license",
+    "attribution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The STAC item id — the acquisition's identity across every surface in this project.",
+      "examples": ["2d1827a2-d04c-4e15-9319-3810d011540b"]
+    },
+    "datetime": {
+      "type": ["string", "null"],
+      "description": "Acquisition time, ISO 8601 with an offset. Null when the source item stated none.",
+      "examples": ["2024-01-01T02:10:12+00:00"]
+    },
+    "place": {
+      "type": ["string", "null"],
+      "description": "A human-legible name for where the scene is: the reverse-geocoded label a baked index carries (`umbra index bake`), falling back to the task codename when the item came from a live walk. Null only when the item has neither.",
+      "examples": ["Reykjavík, Iceland", "ship_detection_testdata"]
+    },
+    "bbox": {
+      "type": ["array", "null"],
+      "description": "The footprint's bounding box, `[west, south, east, north]` in WGS84 degrees. Null when the item carried no geometry.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" }
+    },
+    "platform": {
+      "type": ["string", "null"],
+      "description": "Which Umbra satellite collected it.",
+      "examples": ["UMBRA_04"]
+    },
+    "instrument_mode": {
+      "type": ["string", "null"],
+      "description": "The collection mode the acquisition was taken in.",
+      "examples": ["SPOTLIGHT"]
+    },
+    "incidence_angle_deg": {
+      "type": ["number", "null"],
+      "description": "Scene-centre incidence angle in degrees. It decides how terrain and vertical structure image, so two passes at very different angles are not directly comparable."
+    },
+    "resolution_range_m": {
+      "type": ["number", "null"],
+      "description": "Ground resolution across the radar's range axis, in metres. Umbra samples finer than it resolves, so this is not the pixel size."
+    },
+    "resolution_azimuth_m": {
+      "type": ["number", "null"],
+      "description": "Ground resolution along the radar's azimuth axis, in metres."
+    },
+    "polarizations": {
+      "type": "array",
+      "description": "The polarizations present, e.g. `[\"VV\"]`.",
+      "items": { "type": "string" }
+    },
+    "polarization_caveat": {
+      "type": "string",
+      "description": "The fixed sentence saying that an HH scene and a VV scene of the same ground measure different scattering and must not be differenced. It travels with the data rather than living in a docstring, because it is the mistake this field exists to prevent — the same rule `POST /artifacts/stats` enforces by refusing a mixed selection."
+    },
+    "products": {
+      "type": "array",
+      "description": "Every product type this acquisition published, each with what it is for and where to get it. Ordered easiest to rawest (GEC, CSI, SIDD, SICD, CPHD), so the first entry is the usual starting point.",
+      "items": { "$ref": "#/$defs/product" }
+    },
+    "stac_href": {
+      "type": ["string", "null"],
+      "description": "The source STAC item's own URL — the argument every `umbra` command that takes an acquisition accepts. Null for an item built from a dict rather than fetched.",
+      "format": "uri"
+    },
+    "license": {
+      "type": "string",
+      "description": "The data licence, always `CC-BY-4.0`.",
+      "const": "CC-BY-4.0"
+    },
+    "attribution": {
+      "type": "string",
+      "description": "The attribution line that must survive into anything derived from the scene, including model-generated text about it (design principle 4).",
+      "examples": ["Contains Umbra open data, licensed under CC BY 4.0."]
+    }
+  },
+  "$defs": {
+    "product": {
+      "type": "object",
+      "required": ["type", "explanation", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "The canonical product name.",
+          "enum": ["GEC", "CSI", "SIDD", "SICD", "CPHD"]
+        },
+        "explanation": {
+          "type": "string",
+          "description": "One line on what the product is and what it is for — the SAR literacy a reader would otherwise need. Empty only for a product type carrying no entry in `PRODUCT_TYPE_EXPLANATIONS`."
+        },
+        "url": {
+          "type": "string",
+          "description": "The asset's own download URL, reconstructed against the item's sidecar where the published STAC points at a private bucket (`UmbraItem.asset_href`), so it is anonymously fetchable."
+        }
+      }
+    }
+  }
+}

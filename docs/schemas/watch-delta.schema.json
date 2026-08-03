@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/watch-delta.schema.json",
+  "title": "Watch delta",
+  "description": "What one run of a standing site watch found new since the last run (`umbra_py.watch.WatchResult.to_dict`), emitted by `umbra watch --json`. This is the document a *scheduler* reads: the run is idempotent and involves no model call, so the same query run twice reports the second time only what arrived in between. `new_count` of zero is the normal case and the one a cron job should stay quiet about.",
+  "type": "object",
+  "required": [
+    "watch",
+    "checked_at",
+    "first_run",
+    "new_count",
+    "total_seen",
+    "query",
+    "new_items",
+    "license",
+    "attribution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "watch": {
+      "type": "string",
+      "description": "The watch's name — the key its state is stored under. Derived from the query when the caller names none (a legible slug plus a short hash of the normalized filters), so the same query always lines up on the same stored state and two different queries essentially never collide.",
+      "examples": ["centerfield-utah-3f9a1c2e"]
+    },
+    "checked_at": {
+      "type": "string",
+      "description": "The date this run was made, ISO `YYYY-MM-DD`.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "first_run": {
+      "type": "boolean",
+      "description": "True when the watch had no stored state before this run, which is when `new_items` is the whole current selection rather than a delta. A scheduler should treat a first run as a baseline rather than as news."
+    },
+    "new_count": {
+      "type": "integer",
+      "description": "How many acquisitions are new (the length of `new_items`).",
+      "minimum": 0
+    },
+    "total_seen": {
+      "type": "integer",
+      "description": "The size of the watch's state after this run — the running count of distinct acquisitions it has ever reported.",
+      "minimum": 0
+    },
+    "query": {
+      "type": "object",
+      "description": "A JSON echo of the search that produced the delta, so a stored result says what it was watching. Unset filters are dropped rather than emitted as nulls, which is why this object is open rather than a fixed key set: it carries whichever of `area` / `place` / `bbox` / `intersects` / `product_types` / `start` / `end` / `fuzzy` / `limit` the run actually used.",
+      "additionalProperties": true,
+      "examples": [{ "area": "centerfield_utah", "product_types": ["GEC"] }]
+    },
+    "new_items": {
+      "type": "array",
+      "description": "The new acquisitions, each as a full context card rather than an id — so the next step (download, describe, stack) needs no second fetch to act on one.",
+      "items": { "$ref": "item-context.schema.json" }
+    },
+    "license": {
+      "type": "string",
+      "description": "The data licence, always `CC-BY-4.0`.",
+      "const": "CC-BY-4.0"
+    },
+    "attribution": {
+      "type": "string",
+      "description": "The attribution line, carried here as on every data-bearing surface in the library.",
+      "examples": ["Contains Umbra open data, licensed under CC BY 4.0."]
+    }
+  }
+}
