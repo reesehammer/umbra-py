@@ -1623,7 +1623,13 @@ It serves the STAC API landing page, `/conformance`, `/collections`,
 datetime, ids, pagination), with a generated OpenAPI document at `/openapi.json`
 and interactive docs at `/docs`. Queries hit the local index, so they answer in
 milliseconds; `umbra serve --live` walks S3 per request instead if you'd rather
-not build an index first.
+not build an index first. That OpenAPI document describes the artifact routes
+too: the published contracts they emit
+([`docs/schemas/`](docs/schemas/README.md) — `stack-stats`, `stack-provenance`,
+`render-job`) are merged into it as components, so a generated client reads the
+same shape `umbra stack --stats --json` and the agent tools hand back rather
+than a bare object. The same contracts are readable from an install with
+`umbra_py.load_schema("stack-stats")`.
 
 Beyond the STAC core filters, `/search` also exposes the index's Umbra-specific
 filters via the STAC **Query extension** — `product_types` (which product a

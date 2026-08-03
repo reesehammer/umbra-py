@@ -2078,3 +2078,132 @@ def test_sync_default_is_unchanged_by_async_support(art_client, recorder):
     assert resp.headers["content-type"] == "image/png"
     assert resp.content == FAKE_PNG
     assert resp.headers["x-umbra-cache"] == "miss"
+
+
+# --------------------------------------------------------------------------
+# The generated OpenAPI document carries the published contracts
+# --------------------------------------------------------------------------
+#
+# The module docstring's own claim for the AI half of this server is that an
+# OpenAPI-driven agent consumes it "from the generated OpenAPI document alone".
+# That was true of `/search` (FastAPI generates it from the annotations) and
+# false of the artifact routes, whose responses are hand-built `Response`
+# objects -- so the document described the measurement endpoints as returning a
+# bare object while `docs/schemas/` described them exactly.
+
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "docs" / "schemas"
+
+
+def _openapi(client: TestClient) -> dict:
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_openapi_document_carries_the_published_contracts(art_client):
+    components = _openapi(art_client)["components"]["schemas"]
+    assert {"StackStats", "StackProvenance", "RenderJob"} <= set(components)
+
+
+@pytest.mark.parametrize(
+    ("component", "filename"),
+    [
+        ("StackStats", "stack-stats.schema.json"),
+        ("StackProvenance", "stack-provenance.schema.json"),
+        ("RenderJob", "render-job.schema.json"),
+    ],
+)
+def test_each_component_is_the_committed_file_and_says_which(art_client, component, filename):
+    """Not a restatement of the contract -- the contract, re-homed.
+
+    Only three keywords may differ: `$schema` and `$id` are dropped (OpenAPI 3.1
+    declares the dialect for the whole document, and an `$id` would re-base the
+    internal pointers onto a URL nothing can fetch), and the identity comes back
+    as `x-umbra-schema-id`. Everything else, including every internal `$ref`
+    after re-rooting, has to be what the file says.
+    """
+    committed = json.loads((SCHEMA_DIR / filename).read_text())
+    got = _openapi(art_client)["components"]["schemas"][component]
+
+    assert got.pop("x-umbra-schema-id") == committed["$id"]
+    expected = serve._rewrite_refs(
+        {k: v for k, v in committed.items() if k not in ("$schema", "$id")},
+        f"#/components/schemas/{component}",
+    )
+    assert got == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "media_type", "component"),
+    [
+        ("/artifacts/stats", "200", "application/json", "StackStats"),
+        ("/artifacts/stats", "202", "application/json", "RenderJob"),
+        ("/artifacts/provenance", "200", "application/json", "StackProvenance"),
+        ("/artifacts/change", "202", "application/json", "RenderJob"),
+    ],
+)
+def test_the_json_routes_reference_a_contract(art_client, path, status, media_type, component):
+    response = _openapi(art_client)["paths"][path]["post"]["responses"][status]
+    schema = response["content"][media_type]["schema"]
+    assert schema == {"$ref": f"#/components/schemas/{component}"}
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "media_type"),
+    [
+        ("/artifacts/change", "post", "image/png"),
+        ("/artifacts/timescan", "post", "image/png"),
+        ("/artifacts/swipe", "post", "text/html"),
+        ("/artifacts/quicklook/{item_id}.png", "get", "image/png"),
+    ],
+)
+def test_the_byte_routes_declare_what_they_return(art_client, path, method, media_type):
+    # A picture is not a document, so it gets a media type rather than a schema
+    # -- and, because `response_class=Response` replaces FastAPI's default, *not*
+    # an `application/json` alternative it never emits.
+    content = _openapi(art_client)["paths"][path][method]["responses"]["200"]["content"]
+    assert set(content) == {media_type}
+
+
+def test_every_reference_in_the_document_resolves(art_client):
+    """No dangling `$ref` -- the failure mode inlining a schema actually has."""
+    document = _openapi(art_client)
+
+    def refs(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "$ref":
+                    yield value
+                else:
+                    yield from refs(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from refs(item)
+
+    seen = 0
+    for ref in refs(document):
+        assert ref.startswith("#/"), ref
+        target = document
+        for token in ref[2:].split("/"):
+            assert token in target, f"{ref} dangles at {token!r}"
+            target = target[token]
+        seen += 1
+    assert seen > len(serve.OPENAPI_SCHEMAS)  # the routes reference them, not just the components
+
+
+def test_an_artifactless_instance_publishes_no_artifact_contracts(index_path, tmp_path):
+    # A component nothing references would describe a shape this instance does
+    # not emit, which is the opposite of a contract.
+    app = serve.build_app(index_path, artifacts=False, cache_dir=tmp_path / "art")
+    components = _openapi(TestClient(app))["components"]["schemas"]
+    assert not {"StackStats", "StackProvenance", "RenderJob"} & set(components)
+
+
+def test_a_cross_file_reference_is_refused_rather_than_dangled():
+    # `render-manifest` and `watch-delta` `$ref` other files by name; inlining
+    # one of those without publishing its target would emit a reference no
+    # client can resolve.
+    with pytest.raises(ValueError, match="cross-file"):
+        serve._rewrite_refs(
+            {"properties": {"stats": {"$ref": "stack-stats.schema.json"}}}, "#/components/schemas/X"
+        )

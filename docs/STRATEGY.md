@@ -1235,9 +1235,30 @@ from:
   match's `score` is a number a test can recompute. That boundary was documented
   in docstrings and is now in the contract a consumer parses. **This closes the
   unschema'd-`--json` set** — every structured shape the CLI emits is published.
-  **Open:** wiring the committed schemas into `umbra serve`'s generated OpenAPI
+  ~~**Open:** wiring the committed schemas into `umbra serve`'s generated OpenAPI
   document, which needs a package-data decision (the schemas live in `docs/`, so
-  a wheel does not carry them) — see `TODO.md`.
+  a wheel does not carry them).~~ **shipped** — the packaging decision is that
+  the schemas keep *one home* (`docs/schemas/`, the path every schema's own `$id`
+  names) and the wheel carries a **copy** of it as package data
+  (`umbra_py/_schemas/`, a `force-include`), the way `py.typed` is a build
+  artifact of a source-tree fact; `umbra_py.schemas` reads that copy first and
+  falls back to the checkout it was imported from, so an editable install — the
+  documented dev loop, and CI — resolves the same files a wheel ships, and a test
+  parses `pyproject.toml` to check the two ends still agree, since nothing at
+  runtime can notice them drifting. With the contracts loadable, the three the
+  artifact routes emit are merged into the generated document as components and
+  each route's response `$ref`s one, so an OpenAPI-driven client reads the shape
+  the CLI and the agent tools already emit rather than a bare object. They are
+  the committed files re-homed rather than restated — `$schema` and `$id` dropped
+  (OpenAPI 3.1 declares the dialect for the whole document, and an `$id` would
+  re-base the internal pointers onto a URL nothing can fetch), the identity kept
+  as `x-umbra-schema-id`, and a cross-file `$ref` refused rather than emitted as
+  a reference no client can resolve. The same change gave the one document the
+  HTTP surface emits that had no contract at all one: `render-job`, what an
+  `"async": true` request answers with and what a client polls until the render
+  lands. **This closes the machine-readable-contracts group** — every structured
+  shape the CLI emits is published, and every one the HTTP surface emits is *in
+  the document a generated client reads*. See the CHANGELOG.
 
 **Agent-session hardening (was `STRATEGY` §7 follow-on)**
 

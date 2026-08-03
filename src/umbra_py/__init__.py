@@ -137,6 +137,7 @@ from .preflight import (
     read_sicd_xml,
     sicd_capabilities,
 )
+from .schemas import load_schema, schema_names, schema_path
 from .semantic import (
     SemanticError,
     SemanticMatch,
@@ -292,6 +293,9 @@ __all__ = [
     "matching_tasks",
     "llms_txt",
     "llms_full_txt",
+    "load_schema",
+    "schema_names",
+    "schema_path",
     "UmbraError",
     "CatalogError",
     "IndexSchemaError",
