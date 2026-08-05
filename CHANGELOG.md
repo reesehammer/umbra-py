@@ -7,6 +7,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Carry the detection floor onto the composite path: `umbra change --narrate`
+  reports what speckle alone would have produced (`ChangeStats.detection`,
+  `narrate._change_detection_floor`).** The detection floor `stack_stats` added
+  answered "is this bigger than speckle?" for a datacube, but the other surface
+  where that is the reader's first question — a two-pass change narration — quoted
+  a signed dB delta per grid block and grounded a vision model on it with no floor
+  at all. On single-look imagery of ground that did **not** change, speckle by
+  itself moves two cells in three past a 3 dB threshold, so a narration that
+  reports brightening in the northeast without saying the interference under it
+  has a 7.9 dB spread is handing the model — and the reader — a number with its
+  meaning withheld.
+
+  `compute_change_stats` now measures the floor for the two co-registered passes
+  it differences the grid between and puts it on `ChangeStats.detection`. Each
+  pass's equivalent number of looks is read off its own blocks with
+  `convert._estimate_enl` of detected power (amplitude squared) over the cells
+  imaged on both passes, and the two are reduced to one floor by
+  `load._detection_floor` — the cube's *own* functions rather than a second
+  implementation, so the block is `docs/schemas/stack-stats.schema.json`'s
+  `$defs/detection` exactly (`looks`, `cell_sigma_db`, `false_alarm_fraction`,
+  `false_alarm_target`, `target_threshold_db`) and a reader parses one contract
+  for the cube and the composite alike. It is `None` when neither pass held enough
+  homogeneous ground to read a looks estimate off (a scene smaller than one
+  16-cell block), because a floor nobody could measure is not a floor.
+
+  It reaches both audiences the narration has. The model is grounded on it: the
+  `detection` block travels in `build_narrate_messages`'s scene card and the
+  system prompt now teaches the floor as the bar a change must clear — treat
+  `scene_changed_fraction` as evidence only insofar as it exceeds
+  `false_alarm_fraction`, and a block within about one `cell_sigma_db` of zero as
+  indistinguishable from interference. The reader is too: a
+  `ChangeNarration.to_text` line states whether the observed change stands clear
+  of the floor (`changed >= false_alarm_fraction * DETECTION_EXCESS_WARN`, the
+  same margin the cube's advisory uses). And the whole thing flows to the JSON
+  sidecar and `umbra change --narrate --json` through `ChangeStats.to_dict()`
+  with no new flag. Checked the way `stack_stats`'s floor was — on two
+  single-look realisations of one unchanged surface every flagged cell is a false
+  alarm, and the predicted `false_alarm_fraction` lands on the observed
+  `scene_changed_fraction` — plus that averaging the pair (more looks) brings the
+  floor down, which is what prices a speckle filter in the units of the answer.
+  Deterministic, offline, and behind the existing `[ai]` + `[viz]` extras; no
+  model is consulted to compute a single number of it.
 - **Say what speckle alone would have produced: `stack_stats` reports a
   detection floor (`detection`, per-pass `looks`,
   `docs/schemas/stack-stats.schema.json`, `src/umbra_py/_specfun.py`).** Every

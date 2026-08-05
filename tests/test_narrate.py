@@ -127,6 +127,98 @@ def test_change_stats_to_dict_is_json_serialisable():
     json.dumps(data)  # must not raise
     assert data["grid_rows"] == 2
     assert len(data["blocks"]) == 4
+    assert "detection" in data
+
+
+# --- the speckle detection floor (the same floor stack_stats reports) -------
+
+
+def _unchanged_single_look(shape, seed):
+    """Two independent single-look SAR realisations of one *unchanged* surface.
+
+    Single-look intensity is exponential, so amplitude is its square root; two
+    independent draws of the same mean are ground that did not change between
+    the passes. Every cell the detector then flags is a false alarm -- which is
+    exactly what the detection floor predicts.
+    """
+    np = pytest.importorskip("numpy")
+    rng = np.random.default_rng(seed)
+    earlier = np.sqrt(rng.exponential(100.0, shape)).astype("float32")
+    later = np.sqrt(rng.exponential(100.0, shape)).astype("float32")
+    return earlier, later
+
+
+def test_detection_floor_matches_the_false_alarms_on_unchanged_single_look_ground():
+    """The claim checked against the physics, as stack_stats checks it for a
+    cube: on two realisations of one unchanged surface every flagged cell is a
+    false alarm, so the predicted fraction must land on the observed one."""
+    earlier, later = _unchanged_single_look((256, 256), seed=0)
+    stats = compute_change_stats(earlier, later, (0, 0, 1, 1), grid=6, change_threshold_db=3.0)
+    d = stats.detection
+    assert d is not None
+    # One look, so the pass-to-pass spread of unchanged ground is ~7.9 dB.
+    assert d["looks"] == pytest.approx(1.0, abs=0.4)
+    assert d["cell_sigma_db"] > 6.0
+    # The floor predicts the observed false alarms to within a fraction of a per cent.
+    assert d["false_alarm_fraction"] == pytest.approx(stats.scene_changed_fraction, abs=0.03)
+    # A 3 dB threshold is deep inside the speckle at one look; the threshold that
+    # would hold false alarms to 5% is far higher.
+    assert d["target_threshold_db"] > stats.change_threshold_db
+
+
+def test_detection_floor_shape_matches_stack_stats_contract():
+    """The composite's floor is the same document stack_stats emits, so a reader
+    parses one contract for both. Its keys are exactly the published schema's."""
+    import pathlib
+
+    earlier, later = _unchanged_single_look((128, 128), seed=1)
+    stats = compute_change_stats(earlier, later, (0, 0, 1, 1), grid=4)
+    assert stats.detection is not None
+
+    schema = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "docs"
+            / "schemas"
+            / "stack-stats.schema.json"
+        ).read_text()
+    )
+    required = set(schema["$defs"]["detection"]["required"])
+    assert set(stats.detection) == required
+
+
+def test_detection_floor_is_none_when_no_looks_can_be_read():
+    """A scene smaller than one 16-cell measuring block gives no looks estimate,
+    so there is no floor -- reported as None rather than an invented number."""
+    np = pytest.importorskip("numpy")
+    stats = compute_change_stats(np.ones((6, 6)), np.full((6, 6), 4.0), (0, 0, 1, 1), grid=2)
+    assert stats.detection is None
+    # And the None flows through the JSON view without breaking it.
+    assert stats.to_dict()["detection"] is None
+
+
+def test_detection_floor_comes_down_when_speckle_is_averaged():
+    """More looks (a smoother pair) is a lower floor -- the property that prices
+    a speckle filter in the units of the answer. A boxcar-averaged pair reads
+    more looks and so a smaller false-alarm fraction than the raw one."""
+    np = pytest.importorskip("numpy")
+    earlier, later = _unchanged_single_look((256, 256), seed=2)
+
+    def boxcar(a, k=5):
+        # A crude separable moving average, enough to raise the looks.
+        pad = k // 2
+        padded = np.pad(a, pad, mode="reflect")
+        out = np.zeros_like(a, dtype="float64")
+        for i in range(k):
+            for j in range(k):
+                out += padded[i : i + a.shape[0], j : j + a.shape[1]]
+        return (out / (k * k)).astype("float32")
+
+    raw = compute_change_stats(earlier, later, (0, 0, 1, 1), grid=6).detection
+    smoothed = compute_change_stats(boxcar(earlier), boxcar(later), (0, 0, 1, 1), grid=6).detection
+    assert raw is not None and smoothed is not None
+    assert smoothed["looks"] > raw["looks"]
+    assert smoothed["false_alarm_fraction"] < raw["false_alarm_fraction"]
 
 
 # --- build_narrate_messages -------------------------------------------------
@@ -158,6 +250,31 @@ def test_build_messages_states_what_the_decibels_are_when_converted():
     messages = build_narrate_messages({"place": "Centerfield, Utah"}, stats, PNG)
     assert "pixel_values" in messages["user"]
     assert "gamma0" in messages["user"]
+
+
+def test_build_messages_hands_the_model_the_detection_floor():
+    """The model is grounded on the floor, not just the change: the detection
+    block reaches the user message and the system prompt tells it to weigh the
+    observed change against it."""
+    earlier, later = _unchanged_single_look((256, 256), seed=3)
+    stats = compute_change_stats(earlier, later, (0, 0, 1, 1), grid=6)
+    assert stats.detection is not None
+    messages = build_narrate_messages({"place": "Test"}, stats, PNG)
+    assert "detection" in messages["user"]
+    assert "false_alarm_fraction" in messages["user"]
+    # The system prompt teaches the floor as the bar a change must clear.
+    assert "speckle floor" in messages["system"].lower()
+    assert "cell_sigma_db" in messages["system"]
+
+
+def test_build_messages_omits_the_floor_when_it_could_not_be_measured():
+    """A scene too small to read looks off carries no floor, and the prompt is
+    then byte-identical to before this key existed."""
+    np = pytest.importorskip("numpy")
+    stats = compute_change_stats(np.ones((6, 6)), np.full((6, 6), 4.0), (0, 0, 1, 1), grid=2)
+    assert stats.detection is None
+    messages = build_narrate_messages({"place": "Test"}, stats, PNG)
+    assert '"detection"' not in messages["user"]
 
 
 # --- parse_narration: the interpretation boundary ---------------------------
@@ -230,6 +347,44 @@ def test_narration_to_text_carries_grounding_and_provenance():
     assert "strongest change in the northeast" in text
     assert AI_PROVENANCE in text
     assert ATTRIBUTION in text
+
+
+def test_narration_to_text_reports_the_speckle_floor():
+    """A reader of the CLI output sees whether the change stands clear of
+    speckle, in the same words the model was grounded in."""
+    narration = ChangeNarration(
+        item_ids=["a", "b"],
+        period_start="2024-01-01",
+        period_end="2024-03-01",
+        summary="Little material change.",
+        change_stats={
+            "change_threshold_db": 3.0,
+            "scene_changed_fraction": 0.11,
+            "detection": {
+                "looks": 1.0,
+                "cell_sigma_db": 7.9,
+                "false_alarm_fraction": 0.66,
+                "false_alarm_target": 0.05,
+                "target_threshold_db": 15.8,
+            },
+        },
+    )
+    text = narration.to_text()
+    assert "Speckle floor" in text
+    # The observed 11% is below the 66% floor, so it does not stand clear.
+    assert "does not stand clear" in text
+
+
+def test_narration_to_text_without_a_floor_is_unchanged():
+    """A narration whose grid carries no floor prints exactly as before."""
+    narration = ChangeNarration(
+        item_ids=["a", "b"],
+        period_start=None,
+        period_end=None,
+        summary="Change observed.",
+        change_stats={"peak_compass": "north", "peak_direction": "brighter"},
+    )
+    assert "Speckle floor" not in narration.to_text()
 
 
 # --- narrate(): end-to-end with injected narrator + render ------------------

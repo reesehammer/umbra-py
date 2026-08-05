@@ -743,13 +743,34 @@ cube of two realisations of one unchanged surface. Follow-ons, none a blocker:
   block would invite reading a block's excess as a finding when it is sampling.
   The natural form is the floor plus that block's cell count; it wants someone
   asking which *block* stands clear rather than which cube.
-- **Nothing reports the floor on the composite path.** `umbra change --narrate`
-  quotes a signed dB delta per block and grounds a model on it, which is the
-  other surface where "is this bigger than speckle?" is the reader's first
-  question. `narrate.ChangeStats` has the two co-registered passes in hand, so
-  the same reduction would apply; it was left out here because this change's
-  claim is about the datacube reduction and adding a second consumer would have
-  put the arithmetic in two places before it had one caller asking for it.
+- ~~**Nothing reports the floor on the composite path.**~~ **shipped** —
+  `umbra change --narrate` quotes a signed dB delta per block and grounds a model
+  on it, which is the other surface where "is this bigger than speckle?" is the
+  reader's first question. `narrate.ChangeStats` now carries a `detection` block
+  (`narrate._change_detection_floor`), read off the two co-registered passes the
+  grid is differenced between: each pass's looks via `convert._estimate_enl` of
+  its detected power, reduced by `load._detection_floor` — the cube's own
+  functions rather than a second implementation, so the shape is
+  `docs/schemas/stack-stats.schema.json`'s `$defs/detection` exactly and a reader
+  parses one contract for the cube and the composite alike. It reaches the model
+  (the block is in `build_narrate_messages`'s scene card and the system prompt
+  now teaches the floor as the bar a change must clear) and the reader (a
+  `ChangeNarration.to_text` line says whether the observed `changed_fraction`
+  stands clear of it). Validated the same way `stack_stats` was: on two
+  single-look realisations of one unchanged surface the predicted
+  `false_alarm_fraction` lands on the observed `scene_changed_fraction`. What is
+  still open, and smaller:
+  - **The floor is scene-wide, not per block.** Like the cube's, it describes the
+    pair as a whole; a block's `mean_delta_db` is weighed against the scene
+    `cell_sigma_db` in the prompt but no per-block floor is emitted, for the same
+    reason `stack_stats`'s does not reach `spatial` (a block's share is far
+    noisier around the floor). The natural form is the floor plus each block's
+    valid-cell count, and it waits for the same consumer.
+  - **Looks is read off each whole pass, not windowed.** The composite holds both
+    bands in memory (the render already does), so there is no ceiling to lift and
+    `_LooksAccum`'s mergeable-histogram path is not needed here; a per-pass
+    `_estimate_enl` of the whole band is the exact read. If a clipped narration
+    ever streamed its passes, the windowed accumulator is the drop-in.
 - **`_DETECTION_MAX_LOOKS` is a numerical guard doing a physical job.** A cube
   whose blocks are numerically uniform (a synthetic raster, a heavily quantised
   one) reads unbounded looks, and the cap keeps the beta integral inside double
