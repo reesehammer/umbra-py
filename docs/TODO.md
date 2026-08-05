@@ -10,72 +10,84 @@ still open.
 
 ---
 
-## Narrated change in the demo store (prioritized workstream — `STRATEGY.md` §8)
+## Narrated change in the demo store (Mode B shipped — `STRATEGY.md` §8)
 
 - **Surfaced in:** the narration detection-floor PR (#193), which made the
   "scan a series, pick the pair worth narrating" selection honest — the interval
-  whose change stands clear of the speckle floor. Defined and prioritized in
-  `STRATEGY.md` §8 ("Bring the VLM to the browsing user").
-- **Code (to touch):** `src/umbra_py/load.py` (`stack_stats` / `to_stack`, the
-  new candidate selector), `src/umbra_py/narrate.py` (the existing narration it
-  feeds), `src/umbra_py/showcase.py` (`select_featured_sites`, the injectable
-  `featured_renderer`, `FEATURED_DIR`), `src/umbra_py/serve.py` (Mode B only, a
-  new artifact route), `.github/workflows/docs.yml` /
-  `.github/workflows/publish-index.yml` (the build-time bake, mirroring the
-  gated `OPENAI_API_KEY` embedding step).
+  whose change stands clear of the speckle floor. Defined in `STRATEGY.md` §8
+  ("Bring the VLM to the browsing user"). **Mode B shipped; Mode A deferred by
+  maintainer decision.**
+- **Code:** `src/umbra_py/load.py` (`select_change_interval`,
+  `best_change_interval`), `src/umbra_py/serve.py` (`Renderers.narrate`,
+  `narrate_options`, `NarrationBudget`, `POST /artifacts/narrate`, the landing
+  `narrate` link, `build_app`/`serve` narrator params), `src/umbra_py/cli/
+  explore.py` (`umbra serve --narrate` / `--narrate-model` /
+  `--narrate-daily-limit`), `src/umbra_py/narrate.py` (the existing narration it
+  feeds), `tests/test_load.py`, `tests/test_serve.py`.
 
 The two model capabilities exist on the CLI/MCP surfaces
 (`umbra change --narrate` for a pair; `stack_stats` over a `to_stack` cube for a
-series) but not for someone browsing the hosted `umbra showcase` / `umbra demo`
-explorer. This workstream surfaces both, composed: a deterministic selector
-finds the pair worth looking at, the existing narration reads it. Sequenced,
-smallest-first; none started:
+series) but were invisible to someone browsing the hosted `umbra showcase` /
+`umbra demo` explorer. **Mode B** surfaces both over HTTP, composed: a
+deterministic selector finds the pair worth looking at, the existing narration
+reads it. What shipped, and what is left:
 
-- **1. The candidate selector (do first — useful on the CLI immediately).** A
-  deterministic "best interval" over a site's series: build the `to_stack` cube,
-  run `stack_stats`, and return the pass-to-pass interval whose observed change
-  stands **furthest clear of the `detection` floor** (#193's number), plus the
-  runners-up. Pure/offline, no model, no `viz`; it is the honest answer to
-  "*which* two of these fifteen passes?" and belongs beside `stack_stats` in
-  `load.py`. Expose it as `umbra stack --pick-interval` (or similar) and an MCP
-  tool so an agent chains scan → narrate without a human. This is independent of
-  the showcase and worth shipping on its own.
-- **2. Precompute narrations for the featured sites (Mode A — the secure
-  default).** In the build-time job that already holds the model key
-  (`publish-index.yml`'s gated `OPENAI_API_KEY` pattern), run the selector and
-  `umbra change --narrate` for each `select_featured_sites` entry and bake the
-  narration JSON as a static sidecar beside the featured composite
-  (`featured/*`). The browsing user reads a **cached** narration — zero live
-  model calls, the key never leaves CI, cost bounded by the curated set. Reuse
-  the injectable `featured_renderer` seam so the whole thing stays offline-
-  testable. Gate on the secret's presence and keep it `continue-on-error` so a
-  missing key or a model outage never blocks the deterministic showcase publish.
-- **3. Surface it in the showcase UI.** A "What changed here" card on each
-  featured site that renders the precomputed narration (summary + the
-  auditable per-block dB grid + the detection-floor verdict), and an "Explain
-  this change" affordance in the interactive explorer for any site with ≥2
-  passes that shows a precomputed narration when one exists. Static-only, reads
-  the sidecars from step 2.
-- **4. (Later phase, gated) Live narration behind a hosted `umbra serve`.** A
-  `POST /artifacts/narrate` beside the existing artifact routes, key held
-  server-side, reusing the content-addressed artifact cache so a repeat request
-  is free. It is an unauthenticated proxy over the operator's model budget, so
-  it ships only with guardrails: the response cache, per-client rate limiting, a
-  global daily spend/request ceiling, and a curated allowlist bounding live
-  calls to the surfaced archive. This is the concrete form of the "hosted
-  community instance" item in the `umbra serve` section below (now with a model-
-  spend policy attached), and it sits behind the §6 guardrail — don't stand up a
-  branded hosted service without talking to Umbra first (§5.6).
+- ~~**1. The candidate selector.**~~ **shipped** — `select_change_interval`
+  (pure: reads a `stack_stats` payload, returns the consecutive interval whose
+  `changed_fraction` most exceeds the cube's `detection.false_alarm_fraction`,
+  with `stands_clear` against `DETECTION_EXCESS_WARN`) and `best_change_interval`
+  (builds the cube, reduces it, applies the selector, returns the two
+  `UmbraItem`s ready to narrate). Pure/offline for the selector; `load`-extra for
+  the orchestration. It is the honest answer to "*which* two of these fifteen
+  passes?" — a number picks the frames, never the model.
+- ~~**4. Live narration behind a hosted `umbra serve` (Mode B).**~~ **shipped** —
+  `POST /artifacts/narrate` (opt-in via `umbra serve --narrate` + a server-side
+  key) narrates a pair directly and **scans a longer series first** via
+  `best_change_interval`, returning the narration with the chosen
+  `selected_interval`. Guardrails that shipped: opt-in (`501` when disabled), the
+  content-addressed cache (a repeat request calls no model), and a per-day spend
+  ceiling (`NarrationBudget` / `--narrate-daily-limit`, counted only on
+  cache-miss calls, `429` when spent). The key is the instance's, never a request
+  field. What is still open, and gated on standing up a *public* instance (the
+  §5.6 Umbra conversation first):
+  - **Per-client rate limiting.** The daily cap is global to the instance; an
+    open instance also wants a per-IP/token limit so one client cannot spend the
+    whole day's budget in a burst. `NarrationBudget` is where a keyed variant
+    would go.
+  - **A curated allowlist.** Live calls should be bounded to the archive the
+    showcase actually surfaces (a bbox/collection allowlist), so an open endpoint
+    cannot be pointed at arbitrary scenes to run up spend. Deferred until a public
+    instance exists to need it.
+  - **Async / job-queue narration.** The endpoint is synchronous (a model call is
+    seconds, like a render); it deliberately does not take `"async": true`,
+    because the budget accounting would have to cross the job worker. Wire it if a
+    slow model makes the sync hold matter.
+  - **Expose the selector on the CLI / MCP.** `best_change_interval` is
+    library-only so far; an `umbra stack --pick-interval` and an MCP tool would
+    let an agent chain scan → narrate without the server. Small, independent of
+    the endpoint.
+- **2 & 3. Mode A (precompute in CI, serve static) — deferred by decision.** The
+  build-time bake (run the selector + narration over `select_featured_sites`,
+  write a static sidecar beside each `featured/*` composite, gated on the secret's
+  presence and `continue-on-error`) and the showcase UI card that reads it. It is
+  the lowest-exposure delivery and remains the right path for a *static* Pages
+  showcase, but the maintainer chose Mode B first, so this is deferred rather than
+  dropped. It is now a CI-wiring job rather than new machinery: it would call the
+  same `best_change_interval` + narration Mode B shipped. `Code (to touch)`:
+  `src/umbra_py/showcase.py` (`select_featured_sites`, the injectable
+  `featured_renderer`, `FEATURED_DIR`), `.github/workflows/docs.yml` /
+  `publish-index.yml`.
 
-Security note (the maintainer's question, recorded here so the decision is not
+Security note (the maintainer's question, recorded so the decision is not
 re-litigated): storing the model key as a **GitHub Actions secret is correct and
 already the established build-time pattern** (encrypted, masked, not exposed to
 fork PRs) — it is exactly how the scene-embedding step is keyed. What it does
-**not** support is a static Pages site "querying through that key" directly: a
-secret shipped to a browser is a published secret. Mode A keeps every model call
-in CI and serves only cached results, which is why it is the default and ships
-first; Mode B is the only way to key *live, arbitrary-scene* querying, and it
-requires a server plus the guardrails above rather than a static page.
+**not** support is a *static* Pages site "querying through that key" directly: a
+secret shipped to a browser is a published secret. Mode B (shipped) holds the key
+**server-side** in `umbra serve` and never sends it to the browser, so a static
+front end calls the server, not the model — which is the only way to key *live,
+arbitrary-scene* querying. Mode A (deferred) is the zero-exposure alternative
+that keeps every model call in CI and serves cached results.
 
 ---
 

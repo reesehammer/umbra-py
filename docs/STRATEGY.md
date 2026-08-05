@@ -764,7 +764,7 @@ from:
   default rather than being treated as a claim.
 
 **Bring the VLM to the browsing user — narrated change in the demo store
-(prioritized; not started)**
+(Mode B shipped; Mode A deferred by decision)**
 
 The two model-in-the-loop capabilities that already exist on the CLI/MCP
 surfaces — *analyze a pair of passes* (`umbra change --narrate`, the C2
@@ -804,41 +804,44 @@ directly: anything shipped to a browser is world-readable, so a key in the
 static site is a published key. That forces two modes, and they should ship in
 this order:
 
-- **Mode A — precompute in CI, serve static (recommended, ship first).** The
-  build-time job that already holds the secret runs the candidate selector and
-  the narration for the *curated / `--featured` sites* and bakes each result as
-  a static JSON sidecar beside the featured composite (`featured/*`, the
-  injectable-renderer seam `umbra showcase` already has). The browsing user then
-  reads a **cached narration with zero live model calls and no key anywhere near
-  the browser** — cost is bounded by the curated set (a fixed, small N times per
-  weekly rebuild), the key never leaves CI, and the failure mode is "no
-  narration card," never "leaked key" or "surprise bill." This covers the
-  discovery use case *completely* for the sites a showcase actually features, and
-  it is the smallest thing that delivers the headline.
-- **Mode B — live narration behind a hosted `umbra serve` (later, gated).**
-  Arbitrary, user-chosen scenes (any pair the explorer can select) need the
-  model called on demand, which needs a **server** holding the key
-  server-side — a new `POST /artifacts/narrate` beside the existing artifact
-  routes, reusing their content-addressed cache so a repeat request is free. This
-  is an *unauthenticated proxy spending the operator's model budget*, so it ships
-  only with guardrails: the response cache (already there for renders), per-client
-  rate limiting, a global daily spend/req ceiling, and a curated allowlist so live
-  calls are bounded to the archive the showcase actually surfaces. It is the
-  concrete form of the "hosted community instance" follow-on the `umbra serve`
-  section in `TODO.md` already flags as a policy (egress) decision — now with a
-  second policy (model spend) attached — and it sits behind the §6 guardrail:
-  *don't stand up a hosted service on Umbra's data or brand without talking to
-  them first.*
+- **Mode A — precompute in CI, serve static (deferred by decision).** The
+  build-time job that already holds the secret would run the candidate selector
+  and the narration for the *curated / `--featured` sites* and bake each result
+  as a static JSON sidecar beside the featured composite (`featured/*`, the
+  injectable-renderer seam `umbra showcase` already has), so the browsing user
+  reads a **cached narration with zero live model calls and no key near the
+  browser**. It is the lowest-exposure delivery, and it remains the recommended
+  path for a *static* Pages showcase — but the maintainer chose to build Mode B
+  first (live, arbitrary-scene narration), so Mode A is deferred rather than
+  dropped: the candidate selector and the narration renderer Mode B shipped are
+  exactly what a later build-time bake would call, so it is now a CI wiring job
+  (run the two over `select_featured_sites`, write the sidecar) rather than new
+  machinery. Tracked in `TODO.md`.
+- **Mode B — live narration behind a hosted `umbra serve` — shipped.**
+  `POST /artifacts/narrate` (opt-in via `umbra serve --narrate` + a server-side
+  model key) narrates the change between two passes over HTTP, and **scans a
+  longer series first** (`best_change_interval`) so the pair whose change stands
+  clear of the speckle floor is the one read — both capabilities in one endpoint.
+  It sits beside the existing artifact routes and reuses their content-addressed
+  cache, so a repeat request costs no model call. Because it is *an
+  unauthenticated proxy over the operator's model budget*, it ships guarded: the
+  response cache, a per-day spend ceiling (`--narrate-daily-limit`, counted only
+  on cache-miss calls that actually reach the model, `429` when spent), and the
+  key held server-side and never a request field so no client can point one
+  instance at another's model. It is the concrete form of the "hosted community
+  instance" follow-on the `umbra serve` section in `TODO.md` flags — now with a
+  model-spend policy attached — and standing up a *public* instance on Umbra's
+  data or brand still sits behind the §6 guardrail (talk to them first) and wants
+  a per-client rate limit and a curated allowlist on top of the daily cap before
+  it faces the open internet (`TODO.md`).
 
-Sequencing and priority: **Mode A first** — it is build-time-only, reuses the
-`featured` precompute machinery and the CI-secret pattern verbatim, exposes
-nothing, and delivers the discoverability headline for the curated store.
-Treat the candidate selector as the first concrete task (it is useful on the CLI
-the moment it exists, independent of the showcase), the featured-site narration
-bake as the second, and the showcase UI affordance (a "What changed here" card /
-an "Explain this change" action on a site with ≥2 passes) as the third. Mode B
-is a separate, later phase gated on the guardrails above and the Umbra
-conversation (§5.6). Fine-grained tasks are tracked in `TODO.md`.
+Priority: **Mode B is shipped** (the endpoint, the deterministic candidate
+selector `select_change_interval` / `best_change_interval` it composes with, and
+the opt-in + cache + daily-cap guardrails). What remains before a *public*
+instance is the internet-facing hardening (per-client rate limiting, a curated
+allowlist) and the §5.6 Umbra conversation; Mode A (the zero-exposure static
+bake) is deferred and would reuse Mode B's selector and renderer. Fine-grained
+tasks are tracked in `TODO.md`.
 
 **SAR-processing depth (was workstream 5.5)**
 

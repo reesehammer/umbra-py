@@ -7,6 +7,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Serve change narration over HTTP, opt-in and guarded: `POST
+  /artifacts/narrate` on `umbra serve --narrate` (`serve.py`,
+  `load.select_change_interval` / `load.best_change_interval`).** The two
+  model-in-the-loop capabilities — *narrate the change between two passes*
+  (`umbra change --narrate`) and *scan a site's whole series to find the pair
+  worth looking at* (`stack_stats` over a `to_stack` cube) — lived only on the
+  CLI/MCP surfaces, invisible to someone browsing the hosted archive. This brings
+  both to the server, composed into one endpoint: two or three passes are
+  narrated directly, and a longer series is **scanned first** — the pass-to-pass
+  interval whose measured change stands furthest clear of the speckle detection
+  floor (#193's number) is the pair narrated, chosen by a number rather than by
+  the model (the §7 determinism boundary applied to frame selection). The chosen
+  interval rides out on the response's `selected_interval`.
+
+  The selection is a new pair of deterministic functions in `load.py`:
+  `select_change_interval` (pure — reads a `stack_stats` payload, returns the
+  interval maximising `changed_fraction - detection.false_alarm_fraction`, with
+  `stands_clear` against the same `DETECTION_EXCESS_WARN` margin the reduction's
+  own advisory uses) and `best_change_interval` (builds the cube, reduces it,
+  applies the selector, returns the two `UmbraItem`s ready for
+  `narrate`). Both are exported from the package.
+
+  Because narration is the one renderer that **spends money per call**, it is
+  opt-in and guarded rather than always-on. It is mounted only when the instance
+  was started with `umbra serve --narrate` and a server-side model key
+  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, optionally `--narrate-model`); a
+  request to a server without it is a `501`, and the landing page advertises the
+  `narrate` link only when it is enabled. The result is cached like every other
+  artifact, so a repeat request returns the same narration with **no model call**
+  and spends nothing. A per-day ceiling (`--narrate-daily-limit N`,
+  `serve.NarrationBudget`) caps the *live* calls — counted only on a cache miss
+  that actually reaches the model, `429` when the day is spent — and resets at UTC
+  midnight. The key is read once at startup and held server-side; it is never a
+  request field, so no client can point one instance at another's model or
+  budget. A model failure maps to `502` (upstream), a malformed request to `400`,
+  a missing extra to `501`. Deterministic and offline-testable throughout: the
+  model boundary is an injected narrator and the render an injected renderer, so
+  the endpoint, the budget, the cache behaviour and the long-series scan are all
+  covered without a network call. This is Mode B of the demo-store narration
+  workstream (`docs/STRATEGY.md` §8); the static-precompute Mode A is deferred by
+  decision and would reuse these same two functions.
 - **Carry the detection floor onto the composite path: `umbra change --narrate`
   reports what speckle alone would have produced (`ChangeStats.detection`,
   `narrate._change_detection_floor`).** The detection floor `stack_stats` added

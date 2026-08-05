@@ -3154,3 +3154,60 @@ def test_detection_is_absent_rather_than_null_when_there_is_nothing_to_weigh(tmp
     tiny = stack_stats(to_stack(items, max_size=8, crs="utm"))
     assert "detection" not in tiny
     assert all(record["looks"] is None for record in tiny["passes"])
+
+
+# --- select_change_interval: which pair of a series is worth narrating ------
+
+
+def _stats_payload(floor, fractions):
+    """A minimal stack_stats-shaped dict: one interval per entry in ``fractions``.
+
+    ``fractions[i]`` is pass ``i+1``'s ``changed_fraction`` vs the previous pass
+    (``None`` for a pass that reported no change); ``floor`` is the cube's one
+    ``detection.false_alarm_fraction``.
+    """
+    passes = [{"item_id": "p0", "datetime": "2024-01-01", "change_vs_previous": None}]
+    for i, frac in enumerate(fractions, start=1):
+        change = None if frac is None else {"changed_fraction": frac, "mean_delta_db": frac * 10}
+        passes.append(
+            {"item_id": f"p{i}", "datetime": f"2024-0{i + 1}-01", "change_vs_previous": change}
+        )
+    return {"detection": {"false_alarm_fraction": floor}, "passes": passes}
+
+
+def test_select_change_interval_picks_the_most_speckle_clear_pair():
+    from umbra_py import select_change_interval
+
+    # Interval 3 (p2->p3) has the largest change; it also most exceeds the floor.
+    sel = select_change_interval(_stats_payload(0.10, [0.12, 0.20, 0.55]))
+    assert sel is not None
+    assert sel["index"] == 3
+    assert sel["earlier_id"] == "p2" and sel["later_id"] == "p3"
+    assert sel["changed_fraction"] == 0.55
+    assert sel["false_alarm_fraction"] == 0.1
+    assert sel["excess"] == pytest.approx(0.45)
+    assert sel["stands_clear"] is True
+
+
+def test_select_change_interval_maximises_excess_over_the_floor_not_raw_change():
+    from umbra_py import select_change_interval
+
+    # A higher floor is the same everywhere, so the pick is still the largest
+    # change -- but it now does not stand clear of the floor, and says so.
+    sel = select_change_interval(_stats_payload(0.66, [0.11, 0.09]))
+    assert sel["index"] == 1 and sel["changed_fraction"] == 0.11
+    assert sel["stands_clear"] is False
+
+
+def test_select_change_interval_skips_intervals_with_no_change_record():
+    from umbra_py import select_change_interval
+
+    sel = select_change_interval(_stats_payload(0.0, [None, 0.3]))
+    assert sel["index"] == 2 and sel["later_id"] == "p2"
+
+
+def test_select_change_interval_none_without_two_passes():
+    from umbra_py import select_change_interval
+
+    assert select_change_interval({"passes": [{"item_id": "p0"}]}) is None
+    assert select_change_interval({"passes": []}) is None

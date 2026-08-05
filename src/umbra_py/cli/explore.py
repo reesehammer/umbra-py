@@ -92,6 +92,29 @@ def mcp() -> None:
     "pool (faster per request, multiplies under concurrent ones).",
 )
 @click.option(
+    "--narrate",
+    is_flag=True,
+    help="Enable POST /artifacts/narrate: a vision-language reading of what "
+    "changed between two passes (a longer series is scanned for the pair worth "
+    "reading). Needs a model API key (ANTHROPIC_API_KEY or OPENAI_API_KEY) held "
+    "server-side and the 'ai' + 'viz' extras. Off by default -- it is the one "
+    "endpoint that spends money per call.",
+)
+@click.option(
+    "--narrate-model",
+    default=None,
+    help="With --narrate, override the vision model (default: $UMBRA_NARRATE_MODEL, "
+    "then the provider default). The model is the instance's, not a request field.",
+)
+@click.option(
+    "--narrate-daily-limit",
+    type=int,
+    default=None,
+    help="With --narrate, cap the number of *live* model calls per UTC day "
+    "(cached narrations never count). Unlimited if unset. A 429 is returned once "
+    "the day's cap is reached.",
+)
+@click.option(
     "--cache-dir",
     default=None,
     help="Directory for cached render artifacts (default: alongside the index).",
@@ -105,6 +128,9 @@ def serve(
     stack_lazy,
     stack_chunk_size,
     stack_scheduler,
+    narrate,
+    narrate_model,
+    narrate_daily_limit,
     cache_dir,
 ) -> None:
     """Run a read-only STAC API over the catalog index (HTTP server).
@@ -133,7 +159,17 @@ def serve(
     --speckle-filter``), which averages speckle down on the shared grid before
     anything is measured -- so a chunked instance takes both, and answers the
     largest cube it can build with the interference averaged out of it.
-    Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``).
+
+    With ``--narrate`` (and a model API key in the environment) it also mounts
+    ``POST /artifacts/narrate``: a vision-language reading of *what* changed
+    between two passes, grounded in the deterministic dB grid and the speckle
+    detection floor. A series longer than a composite is scanned first and the
+    pair whose change stands clear of the floor is the one narrated. It is the
+    one endpoint that spends money per call, so it is opt-in, cached like every
+    artifact (a repeat request costs no model call), and capped by
+    ``--narrate-daily-limit``. The key is held server-side and never a request
+    field. Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``), plus
+    ``ai`` + ``viz`` for ``--narrate``.
     """
     from ..exceptions import MissingDependencyError
     from ..serve import StackExecution
@@ -145,6 +181,23 @@ def serve(
         )
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--stack-chunk-size") from exc
+
+    # The narrate endpoint is the one that calls a model, so its key is read once,
+    # here, and held server-side -- a client never sends one. Building the narrator
+    # now (rather than on first request) means a missing key is a startup error
+    # with setup guidance, not a surprise 500 for the first visitor.
+    narrator = None
+    if narrate:
+        from ..narrate import default_narrator
+
+        try:
+            narrator = default_narrator(model=narrate_model)
+        except MissingDependencyError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif narrate_daily_limit is not None or narrate_model is not None:
+        raise click.UsageError(
+            "--narrate-model / --narrate-daily-limit only apply together with --narrate."
+        )
 
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if artifacts:
@@ -160,6 +213,9 @@ def serve(
         # page's "stats" link reports both options and the reason for the one
         # this instance cannot honour.
         click.echo('    advertised on / as the "stats" link\'s "umbra:options"')
+        if narrator is not None:
+            limit = f"{narrate_daily_limit}/day" if narrate_daily_limit is not None else "unlimited"
+            click.echo(f"  /artifacts/narrate (model): enabled, budget {limit}")
     try:
         run_stac_server(
             host=host,
@@ -168,6 +224,8 @@ def serve(
             live=live,
             artifacts=artifacts,
             stack_execution=execution,
+            narrator=narrator,
+            narration_daily_limit=narrate_daily_limit,
             cache_dir=cache_dir,
         )
     except MissingDependencyError as exc:
