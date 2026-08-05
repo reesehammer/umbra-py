@@ -763,6 +763,83 @@ from:
   preview from an older index reads as *unknown* and falls back to the assumed
   default rather than being treated as a claim.
 
+**Bring the VLM to the browsing user — narrated change in the demo store
+(prioritized; not started)**
+
+The two model-in-the-loop capabilities that already exist on the CLI/MCP
+surfaces — *analyze a pair of passes* (`umbra change --narrate`, the C2
+narration in §5.4) and *scan a site's whole series to find the pair worth
+looking at* (`stack_stats` over a `to_stack` cube, §5.5) — are invisible to the
+person the demo store is *for*: someone browsing `open-data.umbra.space`-style
+imagery through the hosted `umbra showcase` / `umbra demo` explorer, who never
+opens a terminal. The goal of this workstream is to make both **discoverable and
+usable from the showcase itself**, so a visitor can click a repeat-imaged site
+and get a plain-language "what changed here, and is it real?" — which is the
+single most funnel-widening thing the model layer can do (§1): it turns a wall
+of grey radar tiles into an answer a non-SAR analyst can act on, and that is the
+moment a curious visitor becomes someone who wants *tasking* (Canopy, §5.1).
+
+The two capabilities compose into one honest feature rather than sitting side by
+side. Narration reads a 2–3 date composite (a picture past three dates encodes
+nothing a model can separate), so the question "*which* two of a site's fifteen
+passes?" has to be answered before the model is called — and answered by a
+number, not by the model. That is exactly what the detection floor shipped in
+#192/#193 makes possible: over a site's `to_stack` cube, the interval whose
+measured change stands **furthest clear of the speckle floor** is the pair worth
+narrating, and the same reduction that picks it is the ground truth the
+narration is then grounded in. So the "scan many" half is a small deterministic
+**candidate selector** (a `stack_stats`-driven "best interval" over a series),
+and the "analyze two" half is the existing narration pointed at what it returns.
+The §7 determinism boundary holds throughout: the model never selects the pair
+and never produces a number — it reads the one the selector found.
+
+**The delivery decision is where the security question the maintainer raised
+gets answered, and it decides the whole shape.** A model API key stored as a
+GitHub Actions secret is the correct, already-established pattern *for
+build-time use* — `publish-index.yml`'s embedding step (§5.2) runs on exactly
+this: `OPENAI_API_KEY` as a repo secret, gated on its presence, `continue-on-error`,
+masked in logs, never exposed to fork PRs. But "all querying on the demo site
+goes through that key" cannot mean the **static** Pages showcase calls a model
+directly: anything shipped to a browser is world-readable, so a key in the
+static site is a published key. That forces two modes, and they should ship in
+this order:
+
+- **Mode A — precompute in CI, serve static (recommended, ship first).** The
+  build-time job that already holds the secret runs the candidate selector and
+  the narration for the *curated / `--featured` sites* and bakes each result as
+  a static JSON sidecar beside the featured composite (`featured/*`, the
+  injectable-renderer seam `umbra showcase` already has). The browsing user then
+  reads a **cached narration with zero live model calls and no key anywhere near
+  the browser** — cost is bounded by the curated set (a fixed, small N times per
+  weekly rebuild), the key never leaves CI, and the failure mode is "no
+  narration card," never "leaked key" or "surprise bill." This covers the
+  discovery use case *completely* for the sites a showcase actually features, and
+  it is the smallest thing that delivers the headline.
+- **Mode B — live narration behind a hosted `umbra serve` (later, gated).**
+  Arbitrary, user-chosen scenes (any pair the explorer can select) need the
+  model called on demand, which needs a **server** holding the key
+  server-side — a new `POST /artifacts/narrate` beside the existing artifact
+  routes, reusing their content-addressed cache so a repeat request is free. This
+  is an *unauthenticated proxy spending the operator's model budget*, so it ships
+  only with guardrails: the response cache (already there for renders), per-client
+  rate limiting, a global daily spend/req ceiling, and a curated allowlist so live
+  calls are bounded to the archive the showcase actually surfaces. It is the
+  concrete form of the "hosted community instance" follow-on the `umbra serve`
+  section in `TODO.md` already flags as a policy (egress) decision — now with a
+  second policy (model spend) attached — and it sits behind the §6 guardrail:
+  *don't stand up a hosted service on Umbra's data or brand without talking to
+  them first.*
+
+Sequencing and priority: **Mode A first** — it is build-time-only, reuses the
+`featured` precompute machinery and the CI-secret pattern verbatim, exposes
+nothing, and delivers the discoverability headline for the curated store.
+Treat the candidate selector as the first concrete task (it is useful on the CLI
+the moment it exists, independent of the showcase), the featured-site narration
+bake as the second, and the showcase UI affordance (a "What changed here" card /
+an "Explain this change" action on a site with ≥2 passes) as the third. Mode B
+is a separate, later phase gated on the guardrails above and the Umbra
+conversation (§5.6). Fine-grained tasks are tracked in `TODO.md`.
+
 **SAR-processing depth (was workstream 5.5)**
 
 - ~~Gamma-nought RTC by facet integration in image space.~~ **shipped** —

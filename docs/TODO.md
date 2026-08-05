@@ -10,6 +10,75 @@ still open.
 
 ---
 
+## Narrated change in the demo store (prioritized workstream — `STRATEGY.md` §8)
+
+- **Surfaced in:** the narration detection-floor PR (#193), which made the
+  "scan a series, pick the pair worth narrating" selection honest — the interval
+  whose change stands clear of the speckle floor. Defined and prioritized in
+  `STRATEGY.md` §8 ("Bring the VLM to the browsing user").
+- **Code (to touch):** `src/umbra_py/load.py` (`stack_stats` / `to_stack`, the
+  new candidate selector), `src/umbra_py/narrate.py` (the existing narration it
+  feeds), `src/umbra_py/showcase.py` (`select_featured_sites`, the injectable
+  `featured_renderer`, `FEATURED_DIR`), `src/umbra_py/serve.py` (Mode B only, a
+  new artifact route), `.github/workflows/docs.yml` /
+  `.github/workflows/publish-index.yml` (the build-time bake, mirroring the
+  gated `OPENAI_API_KEY` embedding step).
+
+The two model capabilities exist on the CLI/MCP surfaces
+(`umbra change --narrate` for a pair; `stack_stats` over a `to_stack` cube for a
+series) but not for someone browsing the hosted `umbra showcase` / `umbra demo`
+explorer. This workstream surfaces both, composed: a deterministic selector
+finds the pair worth looking at, the existing narration reads it. Sequenced,
+smallest-first; none started:
+
+- **1. The candidate selector (do first — useful on the CLI immediately).** A
+  deterministic "best interval" over a site's series: build the `to_stack` cube,
+  run `stack_stats`, and return the pass-to-pass interval whose observed change
+  stands **furthest clear of the `detection` floor** (#193's number), plus the
+  runners-up. Pure/offline, no model, no `viz`; it is the honest answer to
+  "*which* two of these fifteen passes?" and belongs beside `stack_stats` in
+  `load.py`. Expose it as `umbra stack --pick-interval` (or similar) and an MCP
+  tool so an agent chains scan → narrate without a human. This is independent of
+  the showcase and worth shipping on its own.
+- **2. Precompute narrations for the featured sites (Mode A — the secure
+  default).** In the build-time job that already holds the model key
+  (`publish-index.yml`'s gated `OPENAI_API_KEY` pattern), run the selector and
+  `umbra change --narrate` for each `select_featured_sites` entry and bake the
+  narration JSON as a static sidecar beside the featured composite
+  (`featured/*`). The browsing user reads a **cached** narration — zero live
+  model calls, the key never leaves CI, cost bounded by the curated set. Reuse
+  the injectable `featured_renderer` seam so the whole thing stays offline-
+  testable. Gate on the secret's presence and keep it `continue-on-error` so a
+  missing key or a model outage never blocks the deterministic showcase publish.
+- **3. Surface it in the showcase UI.** A "What changed here" card on each
+  featured site that renders the precomputed narration (summary + the
+  auditable per-block dB grid + the detection-floor verdict), and an "Explain
+  this change" affordance in the interactive explorer for any site with ≥2
+  passes that shows a precomputed narration when one exists. Static-only, reads
+  the sidecars from step 2.
+- **4. (Later phase, gated) Live narration behind a hosted `umbra serve`.** A
+  `POST /artifacts/narrate` beside the existing artifact routes, key held
+  server-side, reusing the content-addressed artifact cache so a repeat request
+  is free. It is an unauthenticated proxy over the operator's model budget, so
+  it ships only with guardrails: the response cache, per-client rate limiting, a
+  global daily spend/request ceiling, and a curated allowlist bounding live
+  calls to the surfaced archive. This is the concrete form of the "hosted
+  community instance" item in the `umbra serve` section below (now with a model-
+  spend policy attached), and it sits behind the §6 guardrail — don't stand up a
+  branded hosted service without talking to Umbra first (§5.6).
+
+Security note (the maintainer's question, recorded here so the decision is not
+re-litigated): storing the model key as a **GitHub Actions secret is correct and
+already the established build-time pattern** (encrypted, masked, not exposed to
+fork PRs) — it is exactly how the scene-embedding step is keyed. What it does
+**not** support is a static Pages site "querying through that key" directly: a
+secret shipped to a browser is a published secret. Mode A keeps every model call
+in CI and serves only cached results, which is why it is the default and ships
+first; Mode B is the only way to key *live, arbitrary-scene* querying, and it
+requires a server plus the guardrails above rather than a static page.
+
+---
+
 ## Workflow-CLI drift follow-ons (`tests/test_workflows.py` shipped)
 
 - **Surfaced in:** the publish-workflow fix (`STRATEGY.md` §8, "getting the
