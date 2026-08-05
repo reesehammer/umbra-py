@@ -147,6 +147,21 @@ class ChangeStats:
     carries the calibration, RTC model, noise subtraction, scale and units when
     the sources were converted, so a dB delta quoted from this grid can be
     attributed rather than merely believed.
+
+    ``detection`` says what speckle alone would have produced: the same floor
+    :func:`umbra_py.stack_stats` reports for a datacube, computed here for the
+    two passes the grid is differenced between. Speckle is not an error bar on a
+    mean -- it is the dominant variation in a single cell, and on single-look
+    imagery the pass-to-pass difference of *unchanged* ground has a 7.9 dB
+    spread -- so a ``scene_changed_fraction`` is evidence only to the degree it
+    stands clear of ``detection.false_alarm_fraction``, and a block's
+    ``mean_delta_db`` only to the degree it stands clear of
+    ``detection.cell_sigma_db``. It is ``None`` when neither pass held enough
+    homogeneous ground to read a looks estimate off (a scene smaller than one
+    16-cell block, or one whose every block was structured or nodata), because a
+    floor nobody could measure is not a floor. Its shape is identical to
+    ``stack_stats``'s ``detection`` block, so a reader parses one contract for
+    both the cube and the composite.
     """
 
     grid_rows: int
@@ -160,6 +175,7 @@ class ChangeStats:
     peak_direction: str | None = None
     peak_mean_delta_db: float | None = None
     provenance: dict[str, str] = field(default_factory=dict)
+    detection: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """A plain JSON-serialisable view of the grid (for the sidecar / ``--json``)."""
@@ -174,6 +190,7 @@ class ChangeStats:
             "peak_compass": self.peak_compass,
             "peak_direction": self.peak_direction,
             "peak_mean_delta_db": self.peak_mean_delta_db,
+            "detection": self.detection,
             "blocks": [asdict(b) for b in self.blocks],
         }
 
@@ -334,7 +351,48 @@ def compute_change_stats(
         peak_compass=peak.compass if peak else None,
         peak_direction=peak_direction,
         peak_mean_delta_db=peak.mean_delta_db if peak else None,
+        detection=_change_detection_floor(np, a, b, valid, change_threshold_db),
     )
+
+
+def _change_detection_floor(
+    np: Any,
+    band_earlier: Any,
+    band_later: Any,
+    valid: Any,
+    threshold_db: float,
+) -> dict[str, Any] | None:
+    """What speckle alone would do to a change measured at ``threshold_db``.
+
+    The same floor :func:`umbra_py.stack_stats` reports for a datacube, read
+    here off the two co-registered passes the change grid is differenced
+    between. Each pass's equivalent number of looks is read off its *own* blocks
+    with :func:`umbra_py.convert._estimate_enl` -- the median block's
+    ``mean**2 / variance`` of detected power (amplitude squared) over the cells
+    imaged on both passes -- and the two are reduced to one floor by
+    :func:`umbra_py.load._detection_floor`, exactly as the cube reduces its
+    per-pass looks. Reusing both keeps a single implementation of the arithmetic
+    and one output shape (``docs/schemas/stack-stats.schema.json``'s
+    ``$defs/detection``), so a reader parses one contract for the cube and the
+    composite alike.
+
+    Structure inside a block deflates its looks, so the read is conservative:
+    the floor is an upper bound on the false alarms rather than a flattering
+    estimate. ``None`` when neither pass could be read (a scene smaller than one
+    block, or one with no homogeneous ground), because a floor nobody measured
+    is not a floor. Requires only NumPy.
+    """
+    from .convert import _estimate_enl  # noqa: PLC0415
+    from .load import _detection_floor  # noqa: PLC0415
+
+    pass_looks: list[float | None] = []
+    for band in (band_earlier, band_later):
+        # Detected power over the cells imaged on both passes -- the same cells
+        # the change is measured on. Everything else is nodata, not a dark pixel,
+        # so it is excluded rather than read as a low return.
+        power = np.where(valid, np.square(band), np.nan)
+        pass_looks.append(_estimate_enl(power))
+    return _detection_floor(pass_looks, float(threshold_db))
 
 
 def _split_slices(length: int, parts: int) -> list[slice]:
@@ -425,6 +483,21 @@ class ChangeNarration:
                     f"Grounding: strongest change in the {peak} "
                     f"(got {direction}); scene mean |Δ| ≈ {mean_abs} dB."
                 )
+            detection = self.change_stats.get("detection")
+            changed = self.change_stats.get("scene_changed_fraction")
+            floor = detection.get("false_alarm_fraction") if detection else None
+            if detection and changed is not None and floor is not None:
+                from .load import DETECTION_EXCESS_WARN  # noqa: PLC0415
+
+                clears = changed >= floor * DETECTION_EXCESS_WARN
+                verdict = "stands clear of it" if clears else "does not stand clear of it"
+                lines.append(
+                    f"Speckle floor: at {detection.get('looks')} looks, interference "
+                    f"alone moves {floor:.0%} of unchanged cells past "
+                    f"{self.change_stats.get('change_threshold_db')} dB "
+                    f"(cell spread ≈ {detection.get('cell_sigma_db')} dB); the observed "
+                    f"{changed:.0%} {verdict}."
+                )
         lines.append("")
         lines.append(self.provenance)
         lines.append(self.attribution)
@@ -456,6 +529,17 @@ of the scene: POSITIVE = brighter in the later pass (green), NEGATIVE = dimmer
 (magenta), near zero = stable. Cite the grid: tie each change you report to a
 compass direction and an approximate dB magnitude, and do NOT report change in a
 region the grid shows as near zero.
+
+The speckle floor ("detection" in the scene numbers, when present) is the bar a
+change must clear to be real. SAR speckle moves even UNCHANGED ground pass to
+pass: "detection.cell_sigma_db" is that random spread in dB, and
+"detection.false_alarm_fraction" is the share of unchanged cells speckle alone
+pushes past the threshold. So treat "scene_changed_fraction" as evidence only to
+the extent it exceeds "false_alarm_fraction", and a block whose |mean_delta_db|
+is within about one "cell_sigma_db" of zero is not distinguishable from
+interference -- say so as a caveat rather than reporting it as change. If the
+observed change does not stand clear of the floor, lower your confidence and
+name the floor in the caveats.
 
 Return ONE JSON object and nothing else -- no prose, no code fence. Use exactly
 these keys:
@@ -537,6 +621,11 @@ def build_narrate_messages(
         # prompt for the usual case -- published GEC products, which umbra-py
         # did not convert -- is byte-identical to before this key existed.
         scene["pixel_values"] = stats.provenance
+    if stats.detection:
+        # What speckle alone would have produced. Only present when a looks
+        # estimate could be read, so a scene too small or too textured to read
+        # one is prompted exactly as before this key existed.
+        scene["detection"] = stats.detection
     user = (
         "Acquisitions compared (ground truth -- do not contradict):\n"
         f"{card}\n\n"
