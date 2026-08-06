@@ -2722,6 +2722,99 @@ def stack_stats(
     return summary
 
 
+def select_change_interval(stats: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the consecutive pass-pair whose change stands furthest clear of speckle.
+
+    Reads a :func:`stack_stats` payload and returns the interval — the later
+    pass's index ``i``, comparing pass ``i - 1`` to pass ``i`` — whose measured
+    ``changed_fraction`` most **exceeds the cube's speckle detection floor**. It
+    is the deterministic answer to "which two of these passes is the change
+    worth looking at between?", so a longer series can feed a two-pass narration
+    without a model choosing the frames — the §7 determinism boundary applied to
+    frame selection: the number picks the pair, not the model.
+
+    The floor is the cube's one ``detection.false_alarm_fraction`` (the share of
+    *unchanged* cells speckle alone pushes past the threshold; ``0`` when the
+    cube was too small to read looks off), so ``excess`` is
+    ``changed_fraction - false_alarm_fraction`` and the pick is the interval that
+    maximises it. Ties break toward the larger ``changed_fraction``.
+    ``stands_clear`` is whether the winner cleared the floor by the same margin
+    (:data:`DETECTION_EXCESS_WARN`) the reduction's own advisory uses — a series
+    whose largest change is still inside the speckle says so rather than
+    pretending an interval was found.
+
+    ``None`` when the payload has fewer than two passes, or when no interval
+    reported a change at all — there is no pair to narrate.
+    """
+    passes = list(stats.get("passes") or [])
+    if len(passes) < 2:
+        return None
+    floor = float((stats.get("detection") or {}).get("false_alarm_fraction") or 0.0)
+    best: dict[str, Any] | None = None
+    best_key: tuple[float, float] | None = None
+    for i in range(1, len(passes)):
+        change = passes[i].get("change_vs_previous")
+        if not change:
+            continue
+        fraction = float(change.get("changed_fraction") or 0.0)
+        key = (fraction - floor, fraction)
+        if best_key is None or key > best_key:
+            best_key = key
+            best = {
+                "index": i,
+                "earlier_id": passes[i - 1].get("item_id"),
+                "later_id": passes[i].get("item_id"),
+                "earlier_datetime": passes[i - 1].get("datetime"),
+                "later_datetime": passes[i].get("datetime"),
+                "changed_fraction": fraction,
+                "mean_delta_db": change.get("mean_delta_db"),
+                "false_alarm_fraction": round(floor, 4),
+            }
+    if best is None:
+        return None
+    best["excess"] = round(best["changed_fraction"] - floor, 4)
+    best["stands_clear"] = best["changed_fraction"] >= floor * DETECTION_EXCESS_WARN
+    return best
+
+
+def best_change_interval(
+    items: Iterable[UmbraItem],
+    *,
+    asset: str = "GEC",
+    max_size: int = 512,
+    change_threshold_db: float = 3.0,
+    extent: str = "intersection",
+    crs: str | None = STACK_AUTO_CRS,
+) -> dict[str, Any] | None:
+    """Scan a site's whole series and return the pair of passes worth narrating.
+
+    Builds the :func:`to_stack` cube over the series, reduces it with
+    :func:`stack_stats`, and applies :func:`select_change_interval` — so the
+    "scan many images to find the two worth a closer look" half of the change
+    story is one deterministic call, with no model in it. Returns
+    ``{"pair": [earlier, later], "selection": {...}}`` where ``pair`` is the two
+    :class:`~umbra_py.UmbraItem`\\ s of the chosen interval (ready to hand to
+    :func:`umbra_py.narrate`) and ``selection`` is
+    :func:`select_change_interval`'s verdict, or ``None`` when the series has
+    fewer than two comparable passes.
+
+    The frames are ordered chronologically first (:func:`_stack_items`, the same
+    order the cube uses), so the returned pair is the earlier pass then the
+    later one whatever order the selection arrived in. Requires the ``load``
+    extra (it builds a datacube).
+    """
+    ordered = _stack_items(list(items))
+    if len(ordered) < 2:
+        return None
+    cube = to_stack(ordered, asset=asset, max_size=max_size, db=True, extent=extent, crs=crs)
+    stats = stack_stats(cube, change_threshold_db=change_threshold_db)
+    selection = select_change_interval(stats)
+    if selection is None:
+        return None
+    i = int(selection["index"])
+    return {"pair": [ordered[i - 1], ordered[i]], "selection": selection}
+
+
 def stack_to_geotiff(
     items: Iterable[UmbraItem],
     dest: str | os.PathLike,

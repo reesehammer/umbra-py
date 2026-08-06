@@ -501,6 +501,7 @@ def landing_page(
     *,
     artifacts: bool = False,
     stack_execution: StackExecution | None = None,
+    narrate: bool = False,
 ) -> dict[str, Any]:
     """The STAC API landing page (a STAC ``Catalog`` with conformance + links).
 
@@ -591,6 +592,23 @@ def landing_page(
                 title="Whether a selection is one measurement, before /artifacts/stats",
             ),
         ]
+        # Advertised only when the instance opted in (a model key was configured):
+        # the endpoint answers 501 otherwise, so a client should not find a link
+        # to a door that is shut. A visitor discovers "this instance can explain
+        # its changes" from the landing page rather than by spending a request.
+        if narrate:
+            links.append(
+                _link(
+                    "narrate",
+                    f"{base}/artifacts/narrate",
+                    type="application/json",
+                    method="POST",
+                    title=(
+                        "Vision-language narration of the change between two passes "
+                        "(a longer series is scanned for the pair worth reading)"
+                    ),
+                )
+            )
     return {
         "type": "Catalog",
         "stac_version": STAC_VERSION,
@@ -1063,6 +1081,13 @@ class Renderers:
     #: The one artifact that is not an image: the datacube reduction
     #: (:func:`~umbra_py.load.stack_stats`) serialised as UTF-8 JSON.
     stats: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes]
+    #: The one artifact that calls a **model**: a vision-language narration of the
+    #: change between two passes (:func:`~umbra_py.narrate.narrate`), serialised as
+    #: UTF-8 JSON. ``None`` unless the instance was started with a narrator
+    #: (``umbra serve --narrate`` + a model API key), because it is the one
+    #: renderer that spends money per call -- so it is opt-in, and a route that
+    #: finds it ``None`` answers ``501`` rather than rendering.
+    narrate: Callable[[Sequence[UmbraItem], Mapping[str, Any]], bytes] | None = None
 
 
 def _stack_scheduler(execution: StackExecution) -> Any:
@@ -1091,7 +1116,11 @@ def _png_bytes(image: Any) -> bytes:
     return buf.getvalue()
 
 
-def default_renderers(stack_execution: StackExecution | None = None) -> Renderers:
+def default_renderers(
+    stack_execution: StackExecution | None = None,
+    *,
+    narrator: Any | None = None,
+) -> Renderers:
     """The production renderers, backed by :mod:`umbra_py.viz` (``viz`` extra).
 
     Imports are deferred to call time so building the app -- and importing this
@@ -1102,6 +1131,15 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
     ``stack_execution`` is the instance-wide policy for how the one non-picture
     renderer builds its datacube (see :class:`StackExecution`); it defaults to
     the eager read every hosted instance has had until now.
+
+    ``narrator`` is the injected model boundary
+    (:data:`umbra_py.narrate.Narrator`) for the one renderer that calls a model.
+    It defaults to ``None``, in which case :attr:`Renderers.narrate` stays
+    ``None`` and the narrate endpoint answers ``501`` -- narration is opt-in
+    because it is the only renderer that spends money. When present, the same
+    ``narrator`` is reused across requests, so one instance holds one key and one
+    model choice; :func:`~umbra_py.narrate.default_narrator` is what
+    ``umbra serve --narrate`` builds from the operator's environment.
     """
     execution = stack_execution or StackExecution()
 
@@ -1184,8 +1222,65 @@ def default_renderers(stack_execution: StackExecution | None = None) -> Renderer
             )
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
+    def narrate(items: Sequence[UmbraItem], opts: Mapping[str, Any]) -> bytes:
+        # The one renderer that calls a model. It is only wired when a narrator
+        # was injected (see below), so reaching here means the instance opted in.
+        from .load import best_change_interval
+        from .narrate import narrate as narrate_change
+        from .narrate import render_change_png
+
+        frames = list(items)
+        selection: dict[str, Any] | None = None
+        # The "scan many, narrate two" half: a series longer than a composite can
+        # encode is reduced to the pair whose change stands furthest clear of the
+        # speckle floor (deterministically -- the number picks the frames, not the
+        # model), and that pair is what the model reads.
+        if len(frames) > 3:
+            picked = best_change_interval(
+                frames,
+                asset=opts["asset"],
+                max_size=opts["max_size"],
+                change_threshold_db=opts["change_threshold_db"],
+            )
+            if picked is None:
+                raise ValueError(
+                    "Could not find a comparable pair to narrate in the series "
+                    "(fewer than two datable passes)."
+                )
+            frames = picked["pair"]
+            selection = picked["selection"]
+
+        def render(its: Sequence[UmbraItem]) -> tuple[bytes, Any]:
+            return render_change_png(
+                its,
+                asset=opts["asset"],
+                max_size=opts["max_size"],
+                db=opts["db"],
+                grid=opts["grid"],
+                change_threshold_db=opts["change_threshold_db"],
+            )
+
+        narration = narrate_change(
+            frames,
+            narrator=narrator,
+            render=render,
+            asset=opts["asset"],
+            change_threshold_db=opts["change_threshold_db"],
+        )
+        payload = narration.to_dict()
+        # Say which two passes were narrated and why, when they were chosen from a
+        # longer series -- so the answer carries the selection, not just the read.
+        if selection is not None:
+            payload["selected_interval"] = selection
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
     return Renderers(
-        quicklook=quicklook, change=change, timescan=timescan, swipe=swipe, stats=stats
+        quicklook=quicklook,
+        change=change,
+        timescan=timescan,
+        swipe=swipe,
+        stats=stats,
+        narrate=narrate if narrator is not None else None,
     )
 
 
@@ -1304,6 +1399,85 @@ def _speckle_options(body: Mapping[str, Any]) -> dict[str, Any]:
         else None
     )
     return {"speckle_filter": name, "speckle_window": window}
+
+
+#: Ceiling on the ``grid`` a narration request may ask for -- the coarse dB grid
+#: the model is grounded in. A cell is a compass-located number the narration
+#: cites, so this bounds how fine that grounding is, not the maths.
+NARRATE_MAX_GRID = 12
+
+
+def narrate_options(body: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalise the options a ``POST /artifacts/narrate`` request carries.
+
+    Extends :func:`artifact_options` (``asset`` / ``max_size`` / ``db``) with
+    the two the change grid the narration is grounded in needs:
+    ``change_threshold_db`` (the decibel move a cell must clear to count as
+    changed) and ``grid`` (the coarse N x N grounding grid). The model is *not*
+    a request option: it is the instance's, chosen once by the operator who
+    holds the key, so a client cannot make one instance spend on another's
+    model. Part of the cache key, so two identical narration requests are one
+    artifact (and one model call).
+
+    Raises ``ValueError`` for a non-positive threshold or an out-of-range grid,
+    which the route maps to ``400``.
+    """
+    body = body or {}
+    options = artifact_options(body)
+    threshold = float(body.get("change_threshold_db") or 3.0)
+    if threshold <= 0:
+        raise ValueError(f"change_threshold_db must be > 0, got {threshold}.")
+    grid = int(body.get("grid") or 6)
+    if not 1 <= grid <= NARRATE_MAX_GRID:
+        raise ValueError(f"grid must be between 1 and {NARRATE_MAX_GRID}, got {grid}.")
+    options.update(change_threshold_db=threshold, grid=grid)
+    return options
+
+
+class NarrationBudget:
+    """A per-day cap on how many *live* narrations an instance will spend.
+
+    A narration is a paid model call, so an endpoint open to the internet is an
+    open wallet. This caps the calls that actually reach the model -- a cache hit
+    spends nothing and never consults it -- and resets at UTC midnight.
+    ``limit=None`` is unlimited, which is the default because the cap is opt-in
+    like the endpoint itself (``umbra serve --narrate-daily-limit N`` sets it).
+
+    Thread-safe: the server answers requests on a pool, so :meth:`reserve` takes
+    a lock to make "check the day, check the count, spend one" atomic. It counts
+    *attempts* rather than successes, which is the conservative choice -- a model
+    call that then fails still cost something, and a budget that only counted
+    successes could be spun against a failing model without bound.
+    """
+
+    def __init__(self, limit: int | None = None) -> None:
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._day: date | None = None
+        self._spent = 0
+
+    def reserve(self) -> bool:
+        """Claim one narration for today; ``False`` if today's cap is reached."""
+        if self._limit is None:
+            return True
+        today = datetime.now(tz=timezone.utc).date()
+        with self._lock:
+            if today != self._day:
+                self._day, self._spent = today, 0
+            if self._spent >= self._limit:
+                return False
+            self._spent += 1
+            return True
+
+    def remaining(self) -> int | None:
+        """How many narrations today's cap still allows (``None`` if unlimited)."""
+        if self._limit is None:
+            return None
+        today = datetime.now(tz=timezone.utc).date()
+        with self._lock:
+            if today != self._day:
+                return self._limit
+            return max(0, self._limit - self._spent)
 
 
 def artifact_cache_key(kind: str, item_ids: Sequence[str], options: Mapping[str, Any]) -> str:
@@ -1713,6 +1887,8 @@ def build_app(
     artifacts: bool = True,
     renderers: Renderers | None = None,
     stack_execution: StackExecution | None = None,
+    narrator: Any | None = None,
+    narration_daily_limit: int | None = None,
     cache_dir: str | os.PathLike | None = None,
     job_executor: Any | None = None,
 ) -> FastAPI:
@@ -1754,8 +1930,11 @@ def build_app(
     globals().update(Request=Request, JSONResponse=JSONResponse, Response=Response)
 
     if renderers is None:
-        renderers = default_renderers(stack_execution)
+        renderers = default_renderers(stack_execution, narrator=narrator)
     cache_path = Path(cache_dir) if cache_dir is not None else default_artifact_cache_dir()
+    # The paid-call cap for the narrate endpoint. Only consulted on a cache miss
+    # (see ``post_narrate``), so a cached narration never spends against it.
+    narration_budget = NarrationBudget(narration_daily_limit)
 
     # Async render jobs: an in-memory registry + a background runner. Both are
     # created only when artifacts are enabled; the executor is injectable so a
@@ -1830,7 +2009,10 @@ def build_app(
         # describes the *default* renderers, as the policy itself does; injected
         # ones do their own stacking and answer for themselves.
         return landing_page(
-            str(request.base_url), artifacts=artifacts, stack_execution=stack_execution
+            str(request.base_url),
+            artifacts=artifacts,
+            stack_execution=stack_execution,
+            narrate=renderers.narrate is not None,
         )
 
     @app.get("/conformance", tags=["STAC"])
@@ -2545,6 +2727,105 @@ def build_app(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse(content=report.to_dict())
 
+        @app.post(
+            "/artifacts/narrate",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: {
+                    "description": (
+                        "A vision-language narration of the change between two passes, grounded "
+                        "in the deterministic per-block dB grid and the speckle detection floor."
+                    ),
+                    "content": {"application/json": {}},
+                },
+                429: {"description": "The instance's daily narration budget is exhausted."},
+                501: {"description": "Narration is not enabled on this instance."},
+            },
+        )
+        def post_narrate(request: Request, body: dict[str, Any] = Body(default={})) -> Response:
+            """Explain *what changed* between two passes in plain language (a model call).
+
+            The interpretive sibling of ``/artifacts/change``: same request shape
+            (``ids`` or a ``bbox``/``datetime`` query, the same content-addressed
+            cache), but the answer is a validated
+            :class:`~umbra_py.narrate.ChangeNarration` -- a short summary, the
+            concrete changes the numbers support, a confidence and SAR-specific
+            caveats -- grounded in the deterministic per-block decibel grid *and*
+            the speckle detection floor, so the model reports change only where it
+            stands clear of interference. The determinism boundary
+            (``docs/STRATEGY.md`` §7) holds: the picture and the numbers are
+            computed offline, and the model only interprets them.
+
+            **The two capabilities compose.** Two or three passes are narrated
+            directly. A **longer series is scanned first**
+            (:func:`~umbra_py.load.best_change_interval`) and the pair whose
+            change stands furthest clear of the speckle floor is the one narrated
+            -- a number picks the frames, never the model -- and the chosen
+            interval rides out on the response's ``selected_interval``.
+
+            This is the one endpoint that spends money per call, so it is
+            **opt-in** (a ``501`` unless the instance was started with
+            ``umbra serve --narrate`` and a model API key) and **guarded**: the
+            result is cached like every other artifact, so a repeat request costs
+            nothing and never calls the model; and a per-day budget
+            (``--narrate-daily-limit N``) caps the calls that actually reach the
+            model, answering ``429`` when today's cap is reached. The model is the
+            instance's, chosen once by the operator who holds the key -- it is not
+            a request field, so no client can point one instance at another's
+            model or spend.
+            """
+            if renderers.narrate is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail=(
+                        "Change narration is not enabled on this instance. Start the "
+                        "server with 'umbra serve --narrate' and a model API key "
+                        "(ANTHROPIC_API_KEY or OPENAI_API_KEY)."
+                    ),
+                )
+            from .narrate import NarrateError  # noqa: PLC0415
+
+            narrate_render = renderers.narrate
+            items = _resolve_for_composite(body)
+            try:
+                frames = stats_frames(items)
+                options = narrate_options(body)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            # A cache hit costs no model call, so it is served before -- and
+            # without touching -- the budget. Only a miss is about to spend.
+            key = artifact_cache_key("narrate", [it.id for it in frames], options)
+            cached = _cache_file(key, "json")
+            if cached.exists():
+                return Response(
+                    content=cached.read_bytes(),
+                    media_type="application/json",
+                    headers={"X-Umbra-Cache": "hit"},
+                )
+            if not narration_budget.reserve():
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "This instance's daily narration budget is exhausted. Try again "
+                        "tomorrow, or ask the operator to raise --narrate-daily-limit."
+                    ),
+                )
+            try:
+                return _serve_artifact(
+                    "narrate",
+                    frames,
+                    options,
+                    lambda: narrate_render(frames, options),
+                    media_type="application/json",
+                    suffix="json",
+                )
+            except NarrateError as exc:
+                # The model failed or returned something unparseable: an upstream
+                # problem, not the client's request -- 502 rather than 400/500.
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
         @app.get(
             "/jobs/{job_id}",
             tags=["Artifacts"],
@@ -2628,6 +2909,8 @@ def serve(
     live: bool = False,
     artifacts: bool = True,
     stack_execution: StackExecution | None = None,
+    narrator: Any | None = None,
+    narration_daily_limit: int | None = None,
     cache_dir: str | os.PathLike | None = None,
     log_level: str = "info",
 ) -> None:
@@ -2647,6 +2930,8 @@ def serve(
         live=live,
         artifacts=artifacts,
         stack_execution=stack_execution,
+        narrator=narrator,
+        narration_daily_limit=narration_daily_limit,
         cache_dir=cache_dir,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level)

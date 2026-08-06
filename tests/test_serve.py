@@ -1728,7 +1728,7 @@ def test_lee_keeps_more_than_boxcar_through_the_endpoint(tmp_path):
 def test_build_app_hands_the_policy_to_the_default_renderers(index_path, tmp_path, monkeypatch):
     seen: list = []
 
-    def spy(stack_execution=None):
+    def spy(stack_execution=None, *, narrator=None):
         seen.append(stack_execution)
         return RecordingRenderers().as_renderers()
 
@@ -2207,3 +2207,204 @@ def test_a_cross_file_reference_is_refused_rather_than_dangled():
         serve._rewrite_refs(
             {"properties": {"stats": {"$ref": "stack-stats.schema.json"}}}, "#/components/schemas/X"
         )
+
+
+# --------------------------------------------------------------------------
+# POST /artifacts/narrate (Mode B: the model behind the server, opt-in + guarded)
+# --------------------------------------------------------------------------
+
+
+class _NarrateRecorder:
+    """A fake narrate renderer that records calls and returns a fixed narration."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def render(self, items, opts):
+        self.calls += 1
+        return json.dumps(
+            {
+                "summary": "The northeast brightened.",
+                "item_ids": [it.id for it in items],
+                "grid": opts["grid"],
+                "change_threshold_db": opts["change_threshold_db"],
+            }
+        ).encode("utf-8")
+
+
+def _narrate_app(index_path, tmp_path, *, narrate_render, daily_limit=None):
+    base = serve.default_renderers()
+    rends = serve.Renderers(
+        quicklook=base.quicklook,
+        change=base.change,
+        timescan=base.timescan,
+        swipe=base.swipe,
+        stats=base.stats,
+        narrate=narrate_render,
+    )
+    return serve.build_app(
+        index_path,
+        renderers=rends,
+        narration_daily_limit=daily_limit,
+        cache_dir=tmp_path / "artifacts",
+    )
+
+
+# ---- narrate_options + NarrationBudget (pure) ----------------------------
+
+
+def test_narrate_options_normalises_and_validates():
+    opts = serve.narrate_options({"asset": "GEC", "grid": 4, "change_threshold_db": 2.0})
+    assert opts["grid"] == 4 and opts["change_threshold_db"] == 2.0
+    # 0 means "use the default" (the codebase's `or` idiom, as in stats_options).
+    assert serve.narrate_options({"grid": 0})["grid"] == 6
+    for bad in ({"grid": 99}, {"grid": -1}, {"change_threshold_db": -2.0}):
+        with pytest.raises(ValueError):
+            serve.narrate_options(bad)
+
+
+def test_narration_budget_caps_per_day_and_is_unlimited_when_unset():
+    budget = serve.NarrationBudget(2)
+    assert budget.reserve() and budget.reserve()
+    assert not budget.reserve()
+    assert budget.remaining() == 0
+    unlimited = serve.NarrationBudget(None)
+    assert all(unlimited.reserve() for _ in range(5))
+    assert unlimited.remaining() is None
+
+
+# ---- the endpoint --------------------------------------------------------
+
+
+def test_narrate_is_501_and_unadvertised_when_disabled(index_path, tmp_path):
+    app = serve.build_app(index_path, cache_dir=tmp_path / "art")
+    client = TestClient(app, raise_server_exceptions=False)
+    assert "narrate" not in {link["rel"] for link in client.get("/").json()["links"]}
+    resp = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 501
+    assert "not enabled" in resp.json()["detail"]
+
+
+def test_narrate_is_advertised_when_enabled(index_path, tmp_path):
+    app = _narrate_app(index_path, tmp_path, narrate_render=_NarrateRecorder().render)
+    link = next(
+        link_ for link_ in TestClient(app).get("/").json()["links"] if link_["rel"] == "narrate"
+    )
+    assert link["href"].endswith("/artifacts/narrate")
+    assert link["method"] == "POST"
+
+
+def test_narrate_endpoint_narrates_and_caches(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    app = _narrate_app(index_path, tmp_path, narrate_render=rec.render)
+    client = TestClient(app)
+
+    first = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert first.status_code == 200
+    assert first.headers["X-Umbra-Cache"] == "miss"
+    body = first.json()
+    assert body["summary"] == "The northeast brightened."
+    assert body["item_ids"] == ["item-0", "item-1"]
+
+    # The identical request is a cache hit: no second model call.
+    again = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert again.status_code == 200
+    assert again.headers["X-Umbra-Cache"] == "hit"
+    assert rec.calls == 1
+
+
+def test_narrate_grid_is_part_of_the_cache_key(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    client = TestClient(_narrate_app(index_path, tmp_path, narrate_render=rec.render))
+    client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"], "grid": 4})
+    client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"], "grid": 6})
+    # Two distinct artifacts, so two model calls.
+    assert rec.calls == 2
+
+
+def test_narrate_budget_returns_429_and_spares_cache_hits(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    app = _narrate_app(index_path, tmp_path, narrate_render=rec.render, daily_limit=1)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    # First (uncached) narration spends the day's one allowed model call.
+    assert client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]}).status_code == 200
+    # A repeat of it is a cache hit -- it must NOT be refused, since it spends nothing.
+    hit = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert hit.status_code == 200 and hit.headers["X-Umbra-Cache"] == "hit"
+    # A different (uncached) narration would spend a second call -> refused.
+    refused = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-2"]})
+    assert refused.status_code == 429
+    assert rec.calls == 1
+
+
+def test_narrate_needs_two_acquisitions(index_path, tmp_path):
+    app = _narrate_app(index_path, tmp_path, narrate_render=_NarrateRecorder().render)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/narrate", json={"ids": ["item-0"]})
+    assert resp.status_code == 400
+    assert "at least 2" in resp.json()["detail"]
+
+
+def test_narrate_maps_a_model_failure_to_502(index_path, tmp_path):
+    from umbra_py.narrate import NarrateError
+
+    def boom(items, opts):
+        raise NarrateError("the model returned nothing parseable")
+
+    client = TestClient(
+        _narrate_app(index_path, tmp_path, narrate_render=boom), raise_server_exceptions=False
+    )
+    resp = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 502
+    assert "parseable" in resp.json()["detail"]
+
+
+# ---- default_renderers wiring (opt-in; long-series scan) -----------------
+
+
+def test_default_renderers_has_no_narrate_without_a_narrator():
+    assert serve.default_renderers().narrate is None
+    assert serve.default_renderers(narrator=lambda messages: "{}").narrate is not None
+
+
+def test_default_renderers_narrate_scans_a_long_series(monkeypatch):
+    """A series longer than a composite is scanned for the pair worth narrating,
+    and the chosen interval rides out on `selected_interval`."""
+    import sys
+
+    import umbra_py.narrate  # noqa: F401  (ensure the submodule is in sys.modules)
+    from umbra_py import load
+
+    # ``from umbra_py import narrate`` resolves to the *function* (it shadows the
+    # submodule attribute), so reach the module through sys.modules to patch it --
+    # the same idiom test_narrate.py uses.
+    narrate_mod = sys.modules["umbra_py.narrate"]
+
+    picked_pair = [
+        UmbraItem(id="p2", properties={"datetime": "2024-03-01T00:00:00Z"}),
+        UmbraItem(id="p3", properties={"datetime": "2024-04-01T00:00:00Z"}),
+    ]
+    selection = {"index": 3, "earlier_id": "p2", "later_id": "p3", "changed_fraction": 0.5}
+
+    def fake_best(items, **kwargs):
+        assert len(list(items)) > 3  # only called for a long series
+        return {"pair": picked_pair, "selection": selection}
+
+    def fake_narrate(items, **kwargs):
+        assert [it.id for it in items] == ["p2", "p3"]  # the picked pair
+        return narrate_mod.ChangeNarration(
+            item_ids=["p2", "p3"], period_start=None, period_end=None, summary="scanned"
+        )
+
+    monkeypatch.setattr(load, "best_change_interval", fake_best)
+    monkeypatch.setattr(narrate_mod, "narrate", fake_narrate)
+
+    renderer = serve.default_renderers(narrator=lambda messages: "{}").narrate
+    series = [
+        UmbraItem(id=f"p{i}", properties={"datetime": f"2024-0{i + 1}-01T00:00:00Z"})
+        for i in range(5)
+    ]
+    payload = json.loads(renderer(series, serve.narrate_options({})))
+    assert payload["summary"] == "scanned"
+    assert payload["selected_interval"] == selection
