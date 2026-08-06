@@ -64,10 +64,12 @@ from typing import Any
 from .constants import AI_PROVENANCE, ATTRIBUTION, POLARIZATION_CAVEAT
 from .describe import (
     _SAR_PRIMER,
+    OPENROUTER_DEFAULT_MODEL,
     _anthropic_describer,
     _coerce_str_list,
     _extract_json_object,
     _openai_describer,
+    _openrouter_describer,
 )
 from .exceptions import MissingDependencyError, UmbraError
 from .models import UmbraItem
@@ -811,11 +813,14 @@ def default_narrator(*, model: str | None = None) -> Narrator:
 
     Reuses the exact provider plumbing of :func:`umbra_py.describe.default_describer`
     (the multimodal message contract is identical): Anthropic when
-    ``ANTHROPIC_API_KEY`` is set, else an OpenAI-compatible endpoint when
-    ``OPENAI_API_KEY`` is set. ``UMBRA_NARRATE_MODEL`` (or ``model=`` / ``--model``)
-    overrides the model. Raises :class:`umbra_py.MissingDependencyError` with setup
-    guidance when no key is configured -- the feature never runs without an
-    explicit, user-supplied key.
+    ``ANTHROPIC_API_KEY`` is set, else OpenRouter when ``OPENROUTER_API_KEY`` is
+    set (its OpenAI-compatible endpoint, checked before the generic OpenAI key so
+    an explicit OpenRouter opt-in wins over a stray ``OPENAI_API_KEY``), else an
+    OpenAI-compatible endpoint when ``OPENAI_API_KEY`` is set. ``UMBRA_NARRATE_MODEL``
+    (or ``model=`` / ``--model``) overrides the model -- name an OpenRouter model
+    like ``anthropic/claude-3.5-sonnet`` to pick one there. Raises
+    :class:`umbra_py.MissingDependencyError` with setup guidance when no key is
+    configured -- the feature never runs without an explicit, user-supplied key.
     """
     model = model or os.environ.get("UMBRA_NARRATE_MODEL")
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -824,6 +829,11 @@ def default_narrator(*, model: str | None = None) -> Narrator:
             model=model or "claude-sonnet-5",
             base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         )
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return _openrouter_describer(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            model=model or OPENROUTER_DEFAULT_MODEL,
+        )
     if os.environ.get("OPENAI_API_KEY"):
         return _openai_describer(
             api_key=os.environ["OPENAI_API_KEY"],
@@ -831,12 +841,13 @@ def default_narrator(*, model: str | None = None) -> Narrator:
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )
     raise MissingDependencyError(
-        "umbra change --narrate needs a vision model API key. Set ANTHROPIC_API_KEY "
-        "(or OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
-        "endpoint) and, optionally, UMBRA_NARRATE_MODEL to pick the model. The "
-        "model only interprets the change composite; every narration is stamped as "
-        "an AI interpretation and carries the CC-BY attribution.",
-        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
+        "umbra change --narrate needs a vision model API key. Set ANTHROPIC_API_KEY, "
+        "OPENROUTER_API_KEY (for OpenRouter), or OPENAI_API_KEY (optionally with "
+        "OPENAI_BASE_URL for another compatible endpoint) and, optionally, "
+        "UMBRA_NARRATE_MODEL to pick the model. The model only interprets the change "
+        "composite; every narration is stamped as an AI interpretation and carries "
+        "the CC-BY attribution.",
+        hint="Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY",
     )
 
 

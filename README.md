@@ -1009,7 +1009,7 @@ model **plan** the search while the library still **executes** it deterministica
 
 ```bash
 pip install "umbra-py[ai]"
-export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
+export ANTHROPIC_API_KEY=...        # or OPENROUTER_API_KEY, or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
 umbra ask "what did Umbra image at Centerfield, Utah last spring?"
 ```
 
@@ -1104,7 +1104,7 @@ correctly, not as an optical photo.
 
 ```bash
 pip install "umbra-py[ai,viz]"       # the model call + the quicklook render
-export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
+export ANTHROPIC_API_KEY=...          # or OPENROUTER_API_KEY, or OPENAI_API_KEY (+ optional OPENAI_BASE_URL)
 umbra describe https://.../<item>/<id>.json
 ```
 

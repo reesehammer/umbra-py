@@ -536,10 +536,37 @@ def test_render_change_png_leaves_published_products_unlabelled(monkeypatch):
 
 
 def test_default_narrator_errors_without_a_key(monkeypatch):
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(MissingDependencyError, match="vision model API key"):
         default_narrator()
+
+
+def test_default_narrator_routes_an_openrouter_key_to_openrouter(monkeypatch):
+    """`umbra change --narrate` reads an OPENROUTER_API_KEY the same way describe
+    does -- OpenRouter's host, default model and headers -- so the scan the
+    selector picks can be narrated through OpenRouter with no other config."""
+    describe_mod = sys.modules["umbra_py.describe"]
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-stray")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["model"] = payload["model"]
+        return {"choices": [{"message": {"content": '{"summary": "ok"}'}}]}
+
+    monkeypatch.setattr(describe_mod, "_post_json", fake_post)
+    narrator = default_narrator()
+    text = narrator({"system": "s", "user": "u", "image_png": PNG})
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["model"] == "openai/gpt-4o-mini"
+    assert captured["headers"]["X-Title"] == "umbra-py"
+    assert '"summary": "ok"' in text
 
 
 def test_default_narrator_prefers_anthropic(monkeypatch):

@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Power the AI features with an OpenRouter API key: `OPENROUTER_API_KEY` is a
+  first-class provider for `umbra describe`, `umbra change --narrate`,
+  `umbra serve --narrate` and `umbra ask` (`constants.py`, `describe.py`,
+  `narrate.py`, `planner.py`).** OpenRouter (https://openrouter.ai) is an
+  OpenAI-compatible gateway — one key reaches many providers' models over the
+  same `/chat/completions` shape (including `image_url` multimodal) umbra-py
+  already speaks — so it needed no new HTTP client, only recognition: set
+  `OPENROUTER_API_KEY` and every model-consulting feature routes to
+  `https://openrouter.ai/api/v1` with a vision-capable default model
+  (`openai/gpt-4o-mini`) and OpenRouter's two (optional) ranking headers. It was
+  reachable before only by knowing to set `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+  by hand; now it is discoverable and named in every setup error and `--help`.
+
+  It is checked **before** the generic `OPENAI_API_KEY` — because setting an
+  OpenRouter key is an unambiguous opt-in, nobody sets it by accident — so it
+  wins over a stray `OPENAI_API_KEY` in the environment, while a native
+  `ANTHROPIC_API_KEY` still takes precedence. `OPENROUTER_BASE_URL` overrides the
+  host, and the existing model overrides (`UMBRA_NARRATE_MODEL` /
+  `UMBRA_DESCRIBE_MODEL` / `UMBRA_ASK_MODEL`, or `--model`) select an OpenRouter
+  model like `anthropic/claude-3.5-sonnet`. The determinism boundary is
+  unchanged: OpenRouter is only ever the model at the interpretive edge; every
+  narration/description still carries the CC-BY attribution and the AI-provenance
+  note, and no measurement comes from the model.
 - **Expose the change-interval selector on the CLI and the agent tools:
   `umbra stack --pick-interval` and the `pick_change_interval` MCP / LangChain /
   LlamaIndex tool (`cli/process.py`, `mcp_server.py`, `langchain.py`,

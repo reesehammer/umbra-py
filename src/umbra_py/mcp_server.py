@@ -990,9 +990,10 @@ def describe_scene(
     a model's reading of radar is never mistaken for a measurement.
 
     It requires the ``[ai]`` extra plus a user-supplied vision key
-    (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``, optionally ``OPENAI_BASE_URL`` /
-    ``UMBRA_DESCRIBE_MODEL``), and the ``[viz]`` extra for the render; it raises a
-    helpful setup error when no key is configured, so it never runs implicitly.
+    (``ANTHROPIC_API_KEY``, ``OPENROUTER_API_KEY``, or ``OPENAI_API_KEY``,
+    optionally ``OPENAI_BASE_URL`` / ``UMBRA_DESCRIBE_MODEL``), and the ``[viz]``
+    extra for the render; it raises a helpful setup error when no key is
+    configured, so it never runs implicitly.
     ``db=True`` (the default) reads the decibel stretch — the radiometrically
     correct SAR look; ``asset`` picks which product's quicklook to read (default
     ``GEC``); ``model`` overrides the configured model. To *see* the same scene the
@@ -1060,9 +1061,10 @@ def narrate_change(
     grid's), and every narration is stamped with the CC-BY attribution and an
     ``AI_PROVENANCE`` note so a model's reading of radar is never mistaken for
     ground truth. It requires the ``[ai]`` extra plus a user-supplied vision key
-    (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``, optionally ``OPENAI_BASE_URL`` /
-    ``UMBRA_NARRATE_MODEL``) and the ``[viz]`` extra for the render; it raises a
-    helpful setup error when no key is configured, so it never runs implicitly. To
+    (``ANTHROPIC_API_KEY``, ``OPENROUTER_API_KEY``, or ``OPENAI_API_KEY``,
+    optionally ``OPENAI_BASE_URL`` / ``UMBRA_NARRATE_MODEL``) and the ``[viz]``
+    extra for the render; it raises a helpful setup error when no key is
+    configured, so it never runs implicitly. To
     *see* the composite the narration is of, call :func:`change_composite` on the
     same URLs.
     """

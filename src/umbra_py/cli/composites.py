@@ -119,7 +119,8 @@ from ._root import cli
     help="Composite (image) output only: after rendering, have a vision model "
     "narrate WHAT changed, grounded in a per-block decibel-change grid. Writes a "
     "machine-readable '<out>.narration.json' sidecar and prints the reading. "
-    "Needs the 'ai' extra and a model API key (ANTHROPIC_API_KEY / OPENAI_API_KEY).",
+    "Needs the 'ai' extra and a model API key (ANTHROPIC_API_KEY, "
+    "OPENROUTER_API_KEY, or OPENAI_API_KEY).",
 )
 @click.option(
     "--model",

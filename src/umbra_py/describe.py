@@ -82,7 +82,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .constants import AI_PROVENANCE, ATTRIBUTION, POLARIZATION_CAVEAT
+from .constants import (
+    AI_PROVENANCE,
+    ATTRIBUTION,
+    OPENROUTER_BASE_URL,
+    OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_HEADERS,
+    POLARIZATION_CAVEAT,
+)
 from .exceptions import MissingDependencyError, UmbraError
 from .models import UmbraItem
 
@@ -607,12 +614,17 @@ def _anthropic_describer(*, api_key: str, model: str, base_url: str) -> Describe
     return describer
 
 
-def _openai_describer(*, api_key: str, model: str, base_url: str) -> Describer:
+def _openai_describer(
+    *, api_key: str, model: str, base_url: str, extra_headers: dict[str, str] | None = None
+) -> Describer:
     def describer(messages: dict[str, Any]) -> str:
         b64 = base64.b64encode(messages["image_png"]).decode("ascii")
+        headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         data = _post_json(
             f"{base_url.rstrip('/')}/chat/completions",
-            {"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            headers,
             {
                 "model": model,
                 "temperature": 0,
@@ -639,6 +651,16 @@ def _openai_describer(*, api_key: str, model: str, base_url: str) -> Describer:
     return describer
 
 
+def _openrouter_describer(*, api_key: str, model: str) -> Describer:
+    """An OpenRouter-keyed describer: the OpenAI client, OpenRouter's host + headers."""
+    return _openai_describer(
+        api_key=api_key,
+        model=model,
+        base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
+        extra_headers=OPENROUTER_HEADERS,
+    )
+
+
 def default_describer(*, model: str | None = None) -> Describer:
     """Build a :data:`Describer` from environment variables.
 
@@ -647,14 +669,21 @@ def default_describer(*, model: str | None = None) -> Describer:
 
     - ``ANTHROPIC_API_KEY`` -> Anthropic Messages API (``ANTHROPIC_BASE_URL``
       overrides the host; model default ``claude-sonnet-5``).
+    - else ``OPENROUTER_API_KEY`` -> OpenRouter's OpenAI-compatible endpoint
+      (``OPENROUTER_BASE_URL`` overrides the host; model default
+      ``openai/gpt-4o-mini``). Checked *before* ``OPENAI_API_KEY`` because it is
+      an unambiguous opt-in -- nobody sets it by accident -- so it routes to
+      OpenRouter even in an environment that already carries a stray
+      ``OPENAI_API_KEY``.
     - else ``OPENAI_API_KEY`` -> OpenAI-compatible chat completions
       (``OPENAI_BASE_URL`` overrides the host; model default ``gpt-4o-mini``).
 
-    Both defaults are vision-capable. ``UMBRA_DESCRIBE_MODEL`` (or the ``model=``
+    Every default is vision-capable. ``UMBRA_DESCRIBE_MODEL`` (or the ``model=``
     argument / ``--model`` flag) overrides the model for whichever provider is
-    selected. Raises :class:`umbra_py.MissingDependencyError` with setup guidance
-    when no key is configured -- the feature never runs without an explicit,
-    user-supplied key.
+    selected -- name an OpenRouter model like ``anthropic/claude-3.5-sonnet`` to
+    pick one there. Raises :class:`umbra_py.MissingDependencyError` with setup
+    guidance when no key is configured -- the feature never runs without an
+    explicit, user-supplied key.
     """
     model = model or os.environ.get("UMBRA_DESCRIBE_MODEL")
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -663,6 +692,11 @@ def default_describer(*, model: str | None = None) -> Describer:
             model=model or "claude-sonnet-5",
             base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         )
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return _openrouter_describer(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            model=model or OPENROUTER_DEFAULT_MODEL,
+        )
     if os.environ.get("OPENAI_API_KEY"):
         return _openai_describer(
             api_key=os.environ["OPENAI_API_KEY"],
@@ -670,12 +704,13 @@ def default_describer(*, model: str | None = None) -> Describer:
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )
     raise MissingDependencyError(
-        "umbra describe needs a vision model API key. Set ANTHROPIC_API_KEY (or "
-        "OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
-        "endpoint) and, optionally, UMBRA_DESCRIBE_MODEL to pick the model. "
-        "The model only interprets the imagery; every description is stamped as "
-        "an AI interpretation and carries the CC-BY attribution.",
-        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
+        "umbra describe needs a vision model API key. Set ANTHROPIC_API_KEY, "
+        "OPENROUTER_API_KEY (for OpenRouter), or OPENAI_API_KEY (optionally with "
+        "OPENAI_BASE_URL for another compatible endpoint) and, optionally, "
+        "UMBRA_DESCRIBE_MODEL to pick the model. The model only interprets the "
+        "imagery; every description is stamped as an AI interpretation and "
+        "carries the CC-BY attribution.",
+        hint="Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY",
     )
 
 

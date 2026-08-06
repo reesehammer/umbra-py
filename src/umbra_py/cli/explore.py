@@ -96,7 +96,8 @@ def mcp() -> None:
     is_flag=True,
     help="Enable POST /artifacts/narrate: a vision-language reading of what "
     "changed between two passes (a longer series is scanned for the pair worth "
-    "reading). Needs a model API key (ANTHROPIC_API_KEY or OPENAI_API_KEY) held "
+    "reading). Needs a model API key (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or "
+    "OPENAI_API_KEY) held "
     "server-side and the 'ai' + 'viz' extras. Off by default -- it is the one "
     "endpoint that spends money per call.",
 )
