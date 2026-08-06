@@ -633,6 +633,81 @@ def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
     return _stack_provenance(items, asset=asset).to_dict()
 
 
+def pick_change_interval(
+    urls: list[str],
+    asset: str = "GEC",
+    max_size: int = 512,
+    change_threshold_db: float = 3.0,
+    extent: str = "intersection",
+    crs: str = "utm",
+) -> dict[str, Any]:
+    """Scan a site's whole series and name the two passes worth narrating.
+
+    The deterministic first half of the "watch a site over time" story, and the
+    step that turns a wall of passes into an answer. Given the STAC URLs of a
+    site's passes (2 or more, any order), it co-registers them into a
+    ``to_stack`` cube, reduces it with ``stack_stats``, and returns the *one*
+    consecutive pass-pair whose measured change stands **furthest clear of the
+    speckle detection floor** — the pair a reader should look at first. No model
+    is called: a number picks the frames (``STRATEGY.md`` §7's determinism
+    boundary applied to frame selection), so the choice is reproducible and safe
+    to quote.
+
+    Why this exists as its own tool: ``narrate_change`` reads a *pair* of passes,
+    but a site has many, and "which two?" is a measurement question, not a model
+    one — a picture past three dates encodes nothing a model can separate, so the
+    pair has to be chosen before the model is called. This answers it. The
+    returned ``urls`` are the two chosen passes in time order, ready to hand
+    straight to ``narrate_change`` (or ``change_composite`` to see them): the
+    two tools chain into scan → narrate with no server and no model in the
+    selection.
+
+    Returns ``selected_interval`` (the interval's ``earlier_id`` / ``later_id``,
+    their datetimes, the ``changed_fraction`` and signed ``mean_delta_db``, the
+    cube's ``false_alarm_fraction`` speckle floor, the ``excess`` of the change
+    over that floor, and ``stands_clear`` — whether the change cleared the floor
+    by a usable margin), ``urls`` (the earlier then the later pass's STAC URL),
+    and the license/attribution. When ``stands_clear`` is false the series' own
+    largest change is still inside the speckle, so the pair is offered but the
+    reader is warned the difference may be interference rather than change.
+
+    ``selected_interval`` is ``None`` (and ``urls`` empty) when the series has
+    fewer than two comparable passes or no interval reported any change — there
+    is no pair to narrate. ``crs="utm"`` (the default) grids the cube in the
+    site's UTM zone so the change fractions weigh equal ground; ``max_size`` and
+    ``change_threshold_db`` match ``stack_stats``. Refuses to mix polarizations
+    (HH vs VV are not comparable). Requires the ``load`` extra.
+    """
+    from .load import best_change_interval
+
+    items = [_fetch_item(u) for u in urls]
+    if len(items) < 2:
+        raise ValueError("pick_change_interval needs at least two item URLs.")
+    _require_same_polarization(items)
+    picked = best_change_interval(
+        items,
+        asset=asset,
+        max_size=max_size,
+        change_threshold_db=change_threshold_db,
+        extent=extent,
+        crs=crs,
+    )
+    if picked is None:
+        return {
+            "selected_interval": None,
+            "urls": [],
+            "license": DATA_LICENSE,
+            "attribution": ATTRIBUTION,
+        }
+    earlier, later = picked["pair"]
+    return {
+        "selected_interval": picked["selection"],
+        "urls": [earlier.href, later.href],
+        "license": DATA_LICENSE,
+        "attribution": ATTRIBUTION,
+    }
+
+
 def download_asset(
     url: str, asset: str = "GEC", dest_dir: str = ".", confirm: bool = False
 ) -> dict[str, Any]:
@@ -1040,7 +1115,10 @@ def build_server() -> MCPServer:
             "also says which part of the site moved and when), and "
             "stack_provenance says whether a selection is one measurement "
             "before stack_stats is spent on it — and names the largest subset "
-            "that is, when it is not. describe_scene "
+            "that is, when it is not. pick_change_interval scans a whole series "
+            "and names the two passes whose change stands clearest of the speckle "
+            "floor, so a long series can feed narrate_change without a model "
+            "choosing the frames. describe_scene "
             "returns a SAR-literate model reading of a scene, and narrate_change "
             "reads what changed between passes grounded in a per-block decibel grid "
             "(the two tools that consult a model, and only when an [ai] key is "
@@ -1059,6 +1137,7 @@ def build_server() -> MCPServer:
         timescan,
         stack_stats,
         stack_provenance,
+        pick_change_interval,
         download_asset,
         watch_site,
         find_similar,

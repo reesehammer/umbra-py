@@ -521,6 +521,73 @@ def test_cli_stack_writes_datacube(tmp_path, monkeypatch):
         assert ds.read([2])[0] == pytest.approx(8.0)
 
 
+def test_cli_stack_pick_interval_names_the_pair_to_narrate(tmp_path, monkeypatch):
+    """`umbra stack --pick-interval` scans the series and prints the one pair
+    worth narrating, with the two URLs to hand to `umbra change --narrate`."""
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py import load
+
+    urls = [f"http://example.com/p{i}.json" for i in range(3)]
+    stac = {
+        url: {
+            "id": f"p{i}",
+            "properties": {"datetime": f"2024-0{i + 1}-08T00:00:00Z"},
+            "assets": {},
+        }
+        for i, url in enumerate(urls)
+    }
+    monkeypatch.setattr("umbra_py.cli._shared.get_json", lambda url: stac[url])
+
+    seen: dict = {}
+    selection = {
+        "index": 2,
+        "earlier_id": "p1",
+        "later_id": "p2",
+        "earlier_datetime": "2024-02-08T00:00:00Z",
+        "later_datetime": "2024-03-08T00:00:00Z",
+        "changed_fraction": 0.4,
+        "mean_delta_db": 5.0,
+        "false_alarm_fraction": 0.1,
+        "excess": 0.3,
+        "stands_clear": True,
+    }
+
+    def fake_best(items, **kwargs):
+        items = list(items)
+        seen["kwargs"] = kwargs
+        # The later pair of the series is the one the (mocked) selector picked.
+        return {"pair": items[-2:], "selection": selection}
+
+    monkeypatch.setattr(load, "best_change_interval", fake_best)
+
+    result = CliRunner().invoke(cli_mod.cli, ["stack", *urls, "--pick-interval", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["selected_interval"] == selection
+    assert payload["urls"] == urls[-2:]
+    # The scan defaults to the site's UTM zone so its change fractions weigh
+    # equal ground, even though the datacube writer defaults to lon/lat.
+    assert seen["kwargs"]["crs"] == "utm"
+
+
+def test_cli_stack_pick_interval_is_its_own_mode(tmp_path):
+    """It reduces to one answer, so it does not pair with --out/--stats."""
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["stack", "http://x/a.json", "http://x/b.json", "--pick-interval", "--out", "c.tif"],
+    )
+    assert result.exit_code != 0
+    assert "--pick-interval scans the series" in result.output
+
+
 def test_cli_stack_crs_writes_a_projected_cube(tmp_path, monkeypatch):
     pytest.importorskip("xarray")
     rasterio = pytest.importorskip("rasterio")

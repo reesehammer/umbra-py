@@ -1556,7 +1556,10 @@ The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
 question in numbers: per-pass decibel statistics and how much ground moved, in
 km² — and with `blocks=N`, which part of the site moved and between which two
 passes), `stack_provenance` (whether those passes are one measurement at all,
-and which of them are when they aren't), `download_asset`, `watch_site`
+and which of them are when they aren't), `pick_change_interval` (scan a whole
+series and name the two passes whose change stands clearest of the speckle
+floor — the scan half of scan → narrate, deterministic), `download_asset`,
+`watch_site`
 (report only passes new since the last check), `find_similar` /
 `find_similar_text` (visual similarity search over a prebuilt scene-embedding
 index), `describe_scene` (a SAR-literate model reading of one scene) and
@@ -1599,8 +1602,8 @@ agent = create_react_agent(my_chat_model, umbra_tools())
 ```
 
 `umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
-`index_stats`, `stack_stats`, `stack_provenance`, `download_asset`,
-`watch_site`, `find_similar` /
+`index_stats`, `stack_stats`, `stack_provenance`, `pick_change_interval`,
+`download_asset`, `watch_site`, `find_similar` /
 `find_similar_text`, `describe_scene`, `narrate_change` and the `quicklook` /
 `change_composite` / `timescan` render tools — the full MCP inventory, each
 schema inferred from the function signature and each description from its
@@ -1636,7 +1639,7 @@ agent = ReActAgent.from_tools(tools, llm=my_llm)
 
 `umbra_tools()` returns the same inventory as the LangChain adapter
 (`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `stack_stats`,
-`stack_provenance`, `download_asset`,
+`stack_provenance`, `pick_change_interval`, `download_asset`,
 `watch_site`, `find_similar` / `find_similar_text`, `describe_scene`,
 `narrate_change` and the `quicklook` / `change_composite` / `timescan` render
 tools) — each name and description inferred from the function's docstring and each
