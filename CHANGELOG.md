@@ -7,6 +7,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Power the AI features with an OpenRouter API key: `OPENROUTER_API_KEY` is a
+  first-class provider for `umbra describe`, `umbra change --narrate`,
+  `umbra serve --narrate` and `umbra ask` (`constants.py`, `describe.py`,
+  `narrate.py`, `planner.py`).** OpenRouter (https://openrouter.ai) is an
+  OpenAI-compatible gateway — one key reaches many providers' models over the
+  same `/chat/completions` shape (including `image_url` multimodal) umbra-py
+  already speaks — so it needed no new HTTP client, only recognition: set
+  `OPENROUTER_API_KEY` and every model-consulting feature routes to
+  `https://openrouter.ai/api/v1` with a vision-capable default model
+  (`openai/gpt-4o-mini`) and OpenRouter's two (optional) ranking headers. It was
+  reachable before only by knowing to set `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+  by hand; now it is discoverable and named in every setup error and `--help`.
+
+  It is checked **before** the generic `OPENAI_API_KEY` — because setting an
+  OpenRouter key is an unambiguous opt-in, nobody sets it by accident — so it
+  wins over a stray `OPENAI_API_KEY` in the environment, while a native
+  `ANTHROPIC_API_KEY` still takes precedence. `OPENROUTER_BASE_URL` overrides the
+  host, and the existing model overrides (`UMBRA_NARRATE_MODEL` /
+  `UMBRA_DESCRIBE_MODEL` / `UMBRA_ASK_MODEL`, or `--model`) select an OpenRouter
+  model like `anthropic/claude-3.5-sonnet`. The determinism boundary is
+  unchanged: OpenRouter is only ever the model at the interpretive edge; every
+  narration/description still carries the CC-BY attribution and the AI-provenance
+  note, and no measurement comes from the model.
+- **Expose the change-interval selector on the CLI and the agent tools:
+  `umbra stack --pick-interval` and the `pick_change_interval` MCP / LangChain /
+  LlamaIndex tool (`cli/process.py`, `mcp_server.py`, `langchain.py`,
+  `llamaindex.py`).** `best_change_interval` — the deterministic "which two of a
+  site's passes is the change worth looking at between?" scan — was library-only,
+  so the scan → narrate chain existed whole only behind a hosted `umbra serve
+  --narrate`. This brings its first half to the two front doors built so nobody
+  has to stand up a server: a shell (`umbra stack --pick-interval`) and a
+  model (`pick_change_interval`) can now scan a whole series and get back the one
+  consecutive pass-pair whose measured change stands **furthest clear of the
+  speckle detection floor**, with the two STAC URLs ready to hand straight to
+  `umbra change --narrate` / the `narrate_change` tool. A number picks the
+  frames, never the model (`STRATEGY.md` §7's determinism boundary applied to
+  frame selection), so the choice is reproducible and safe to quote.
+
+  Both surfaces are thin adapters over the same `best_change_interval`, so there
+  is no new selection logic and the three ways to ask it (server, shell, agent)
+  cannot drift. `--pick-interval` is its own mode — it reduces the cube to one
+  answer rather than writing it or its whole statistics, so it does not pair with
+  `--out` / `--stats` / `--provenance`, the way `--provenance` already stands
+  alone — and it defaults the grid to the site's UTM zone (like the
+  `stack_stats` tool) so the change fractions the pick is made on weigh equal
+  ground. When the series' own largest change is still inside the speckle floor
+  the pair is still offered, with `stands_clear: false` and a warning that the
+  difference may be interference rather than change; a series with fewer than two
+  comparable passes or no measured change returns no pair rather than a false
+  one. The agent tool refuses a mixed-polarization or single-pass selection like
+  its `stack_stats` sibling. See `TODO.md` (the VLM-in-the-store workstream, where
+  the deferred internet-facing hardening still lives).
 - **Serve change narration over HTTP, opt-in and guarded: `POST
   /artifacts/narrate` on `umbra serve --narrate` (`serve.py`,
   `load.select_change_interval` / `load.best_change_interval`).** The two

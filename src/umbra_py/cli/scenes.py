@@ -40,7 +40,8 @@ from ._root import cli
     default=None,
     help="Override the vision model (default: $UMBRA_DESCRIBE_MODEL, else the "
     "provider default). The provider is chosen by which API key is set — "
-    "ANTHROPIC_API_KEY or OPENAI_API_KEY (with optional OPENAI_BASE_URL).",
+    "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY (with optional "
+    "OPENAI_BASE_URL).",
 )
 @click.option(
     "--max-size",
@@ -103,8 +104,8 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
 
     Requires the ``ai`` extra for the model call and ``viz`` for the render
     (``pip install 'umbra-py[ai,viz]'``) plus a vision model API key: set
-    ANTHROPIC_API_KEY, or OPENAI_API_KEY (optionally with OPENAI_BASE_URL for a
-    compatible endpoint). Example::
+    ANTHROPIC_API_KEY, OPENROUTER_API_KEY (for OpenRouter), or OPENAI_API_KEY
+    (optionally with OPENAI_BASE_URL for another compatible endpoint). Example::
 
         umbra describe https://.../<item>/<id>.json
     """

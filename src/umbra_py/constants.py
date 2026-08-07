@@ -29,6 +29,26 @@ CANOPY_ARCHIVE_URL = "https://api.canopy.umbra.space/archive/search"
 #: not passed explicitly, so a token never has to appear in shell history.
 CANOPY_TOKEN_ENV = "UMBRA_CANOPY_TOKEN"
 
+#: OpenRouter (https://openrouter.ai) is an OpenAI-compatible model gateway: one
+#: key reaches models from many providers over the same ``/chat/completions``
+#: shape umbra-py's ``describe`` / ``change --narrate`` / ``ask`` already speak.
+#: So it needs no new HTTP client -- only its host, a vision-capable default
+#: model, and the two (optional) ranking headers OpenRouter asks callers to
+#: send. A user sets ``OPENROUTER_API_KEY`` and the AI features route here;
+#: ``OPENROUTER_BASE_URL`` overrides the host. Recognised *before* the generic
+#: ``OPENAI_API_KEY`` so an explicit OpenRouter opt-in wins over a stray one.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+#: OpenRouter's model ids are ``provider/model``; this vision-capable default is
+#: the cheap one, overridable via ``UMBRA_NARRATE_MODEL`` / ``UMBRA_DESCRIBE_MODEL``
+#: / ``UMBRA_ASK_MODEL`` (or ``--model``) -- e.g. ``anthropic/claude-3.5-sonnet``.
+OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini"
+#: The identifying headers OpenRouter uses to attribute traffic. Optional on
+#: OpenRouter and ignored by other OpenAI-compatible hosts, so always safe to send.
+OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://github.com/reesehammer/umbra-py",
+    "X-Title": "umbra-py",
+}
+
 #: Canonical Umbra product types, ordered from most processed / easiest to use
 #: (GEC, a cloud-optimized GeoTIFF) to most raw (CPHD). Different catalog
 #: generations name their STAC assets differently (e.g. an explicit ``"GEC"``

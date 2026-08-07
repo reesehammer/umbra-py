@@ -837,11 +837,16 @@ this order:
 
 Priority: **Mode B is shipped** (the endpoint, the deterministic candidate
 selector `select_change_interval` / `best_change_interval` it composes with, and
-the opt-in + cache + daily-cap guardrails). What remains before a *public*
-instance is the internet-facing hardening (per-client rate limiting, a curated
-allowlist) and the §5.6 Umbra conversation; Mode A (the zero-exposure static
-bake) is deferred and would reuse Mode B's selector and renderer. Fine-grained
-tasks are tracked in `TODO.md`.
+the opt-in + cache + daily-cap guardrails). The selector's first half — the scan
+that answers "which two of these passes?" — has since reached the two front doors
+that need no server: `umbra stack --pick-interval` and the `pick_change_interval`
+MCP / LangChain / LlamaIndex tool, so a shell or an agent can chain scan → narrate
+without standing up `umbra serve` (both thin adapters over `best_change_interval`,
+so the three surfaces cannot drift). What remains before a *public* instance is
+the internet-facing hardening (per-client rate limiting, a curated allowlist) and
+the §5.6 Umbra conversation; Mode A (the zero-exposure static bake) is deferred
+and would reuse Mode B's selector and renderer. Fine-grained tasks are tracked in
+`TODO.md`.
 
 **SAR-processing depth (was workstream 5.5)**
 

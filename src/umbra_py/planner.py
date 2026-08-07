@@ -63,7 +63,12 @@ from datetime import date
 from typing import Any
 
 from ._geometry import Geometry, geometry_bbox, to_geojson
-from .constants import PRODUCT_ASSETS
+from .constants import (
+    OPENROUTER_BASE_URL,
+    OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_HEADERS,
+    PRODUCT_ASSETS,
+)
 from .context import llm_context
 from .dates import parse_date_bound
 from .exceptions import MissingDependencyError, UmbraError
@@ -704,11 +709,16 @@ def _anthropic_planner(*, api_key: str, model: str, base_url: str) -> Planner:
     return planner
 
 
-def _openai_planner(*, api_key: str, model: str, base_url: str) -> Planner:
+def _openai_planner(
+    *, api_key: str, model: str, base_url: str, extra_headers: dict[str, str] | None = None
+) -> Planner:
     def planner(messages: dict[str, str]) -> str:
+        headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         data = _post_json(
             f"{base_url.rstrip('/')}/chat/completions",
-            {"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            headers,
             {
                 "model": model,
                 "temperature": 0,
@@ -734,12 +744,17 @@ def default_planner(*, model: str | None = None) -> Planner:
 
     - ``ANTHROPIC_API_KEY`` -> Anthropic Messages API (``ANTHROPIC_BASE_URL``
       overrides the host; model default ``claude-sonnet-5``).
+    - else ``OPENROUTER_API_KEY`` -> OpenRouter's OpenAI-compatible endpoint
+      (``OPENROUTER_BASE_URL`` overrides the host; model default
+      ``openai/gpt-4o-mini``). Checked before ``OPENAI_API_KEY`` because it is an
+      unambiguous opt-in, so it wins over a stray ``OPENAI_API_KEY``.
     - else ``OPENAI_API_KEY`` -> OpenAI-compatible chat completions
       (``OPENAI_BASE_URL`` overrides the host, e.g. a local or proxy endpoint;
       model default ``gpt-4o-mini``).
 
     ``UMBRA_ASK_MODEL`` (or the ``model=`` argument / ``--model`` flag) overrides
-    the model for whichever provider is selected. Raises
+    the model for whichever provider is selected -- name an OpenRouter model like
+    ``anthropic/claude-3.5-sonnet`` to pick one there. Raises
     :class:`umbra_py.MissingDependencyError` with setup guidance when no key is
     configured -- the feature never runs without an explicit, user-supplied key.
     """
@@ -750,6 +765,13 @@ def default_planner(*, model: str | None = None) -> Planner:
             model=model or "claude-sonnet-5",
             base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         )
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return _openai_planner(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            model=model or OPENROUTER_DEFAULT_MODEL,
+            base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
+            extra_headers=OPENROUTER_HEADERS,
+        )
     if os.environ.get("OPENAI_API_KEY"):
         return _openai_planner(
             api_key=os.environ["OPENAI_API_KEY"],
@@ -757,12 +779,12 @@ def default_planner(*, model: str | None = None) -> Planner:
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )
     raise MissingDependencyError(
-        "umbra ask needs a model API key. Set ANTHROPIC_API_KEY (or "
-        "OPENAI_API_KEY, optionally with OPENAI_BASE_URL for a compatible "
-        "endpoint) and, optionally, UMBRA_ASK_MODEL to pick the model. "
-        "The model only plans the search; the library still runs it "
-        "deterministically.",
-        hint="Set ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
+        "umbra ask needs a model API key. Set ANTHROPIC_API_KEY, "
+        "OPENROUTER_API_KEY (for OpenRouter), or OPENAI_API_KEY (optionally with "
+        "OPENAI_BASE_URL for another compatible endpoint) and, optionally, "
+        "UMBRA_ASK_MODEL to pick the model. The model only plans the search; the "
+        "library still runs it deterministically.",
+        hint="Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY",
     )
 
 

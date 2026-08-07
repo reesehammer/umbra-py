@@ -62,10 +62,15 @@ reads it. What shipped, and what is left:
     seconds, like a render); it deliberately does not take `"async": true`,
     because the budget accounting would have to cross the job worker. Wire it if a
     slow model makes the sync hold matter.
-  - **Expose the selector on the CLI / MCP.** `best_change_interval` is
-    library-only so far; an `umbra stack --pick-interval` and an MCP tool would
-    let an agent chain scan → narrate without the server. Small, independent of
-    the endpoint.
+  - ~~**Expose the selector on the CLI / MCP.**~~ **shipped** — `umbra stack
+    --pick-interval` and the `pick_change_interval` MCP / LangChain / LlamaIndex
+    tool scan a whole series and return the pass-pair whose change stands
+    furthest clear of the speckle floor, with the two URLs ready to hand to
+    `umbra change --narrate` / `narrate_change` — so the scan → narrate chain no
+    longer needs a hosted `umbra serve`. Both are thin adapters over the same
+    `best_change_interval`, so the server, the shell and the agent surfaces
+    cannot drift; `--pick-interval` is its own mode (like `--provenance`) and
+    defaults the grid to UTM like the `stack_stats` tool. See the CHANGELOG.
 - **2 & 3. Mode A (precompute in CI, serve static) — deferred by decision.** The
   build-time bake (run the selector + narration over `select_featured_sites`,
   write a static sidecar beside each `featured/*` composite, gated on the secret's

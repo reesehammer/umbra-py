@@ -2781,7 +2781,7 @@ def build_app(
                     detail=(
                         "Change narration is not enabled on this instance. Start the "
                         "server with 'umbra serve --narrate' and a model API key "
-                        "(ANTHROPIC_API_KEY or OPENAI_API_KEY)."
+                        "(ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY)."
                     ),
                 )
             from .narrate import NarrateError  # noqa: PLC0415

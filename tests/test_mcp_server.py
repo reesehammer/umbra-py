@@ -61,6 +61,7 @@ def test_build_server_registers_expected_surface():
         "timescan",
         "stack_stats",
         "stack_provenance",
+        "pick_change_interval",
         "download_asset",
         "watch_site",
         "find_similar",
@@ -565,6 +566,83 @@ def test_stack_provenance_shares_stack_stats_preconditions(sample_item_dict):
         ms.stack_provenance([vv_url, hh_url])
     with pytest.raises(ValueError, match="at least two item URLs"):
         ms.stack_provenance([vv_url])
+
+
+@responses.activate
+def test_pick_change_interval_names_the_pair_and_the_urls_to_narrate(sample_item_dict, monkeypatch):
+    """The scan half of scan -> narrate on the agent surface: a number picks the
+    two passes and hands their URLs straight to ``narrate_change``, no model in
+    the selection."""
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+
+    selection = {
+        "index": 1,
+        "earlier_id": "a",
+        "later_id": "b",
+        "changed_fraction": 0.42,
+        "false_alarm_fraction": 0.1,
+        "excess": 0.32,
+        "stands_clear": True,
+    }
+    seen: dict = {}
+
+    def fake_best(items, **kwargs):
+        seen["items"] = list(items)
+        seen.update(kwargs)
+        # The tool hands back the *items* the selector chose, so the URLs it
+        # returns are those items' own hrefs -- the ones the fetch set.
+        return {"pair": list(seen["items"]), "selection": selection}
+
+    monkeypatch.setattr(load, "best_change_interval", fake_best)
+    out = ms.pick_change_interval([ITEM_URL, second_url])
+
+    # The agent surface scans in the site's UTM zone so the change fractions the
+    # pick is made on weigh equal ground.
+    assert seen["crs"] == "utm"
+    assert len(seen["items"]) == 2
+    assert out["selected_interval"] == selection
+    assert out["urls"] == [ITEM_URL, second_url]
+    assert out["attribution"] == ms.ATTRIBUTION
+
+
+@responses.activate
+def test_pick_change_interval_reports_no_pair_when_the_series_is_flat(
+    sample_item_dict, monkeypatch
+):
+    """A series with no interval clear of the floor is offered no pair rather than
+    a false one -- ``None`` and empty ``urls``, not an exception."""
+    from umbra_py import load
+
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    responses.add(responses.GET, second_url, json=sample_item_dict, status=200)
+    monkeypatch.setattr(load, "best_change_interval", lambda items, **kwargs: None)
+
+    out = ms.pick_change_interval([ITEM_URL, second_url])
+    assert out["selected_interval"] is None
+    assert out["urls"] == []
+
+
+@responses.activate
+def test_pick_change_interval_shares_stack_stats_preconditions(sample_item_dict):
+    """Same two refusals as ``stack_stats`` -- mixed polarization is not one
+    measurement, and a lone pass is no series to scan."""
+    vv_url = ITEM_URL
+    hh_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, hh_url, json=_with_polarization(sample_item_dict, "HH"), status=200
+    )
+    with pytest.raises(ValueError, match="polarization"):
+        ms.pick_change_interval([vv_url, hh_url])
+    with pytest.raises(ValueError, match="at least two item URLs"):
+        ms.pick_change_interval([vv_url])
 
 
 @responses.activate

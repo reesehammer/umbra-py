@@ -217,7 +217,7 @@ def test_render_quicklook_png_wraps_read_errors(monkeypatch, sample_item_dict):
 
 
 def test_default_describer_errors_without_a_key(monkeypatch):
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(MissingDependencyError, match="vision model API key"):
         default_describer()
@@ -265,6 +265,53 @@ def test_default_describer_falls_back_to_openai_with_data_uri(monkeypatch):
     image_blocks = [b for b in blocks if b.get("type") == "image_url"]
     assert image_blocks and image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert '"summary": "reservoir"' in text
+
+
+def test_default_describer_routes_an_openrouter_key_to_openrouter(monkeypatch):
+    """A single OPENROUTER_API_KEY reaches OpenRouter's OpenAI-compatible host,
+    with its default model and the ranking headers -- and wins over a stray
+    OPENAI_API_KEY, since setting the OpenRouter key is an unambiguous opt-in."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-stray")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["model"] = payload["model"]
+        return {"choices": [{"message": {"content": '{"summary": "via openrouter"}'}}]}
+
+    monkeypatch.setattr(describe_mod, "_post_json", fake_post)
+    describer = default_describer()
+    text = describer({"system": "s", "user": "u", "image_png": PNG})
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["model"] == "openai/gpt-4o-mini"
+    # OpenRouter's ranking headers ride along (optional there, ignored elsewhere).
+    assert captured["headers"]["X-Title"] == "umbra-py"
+    assert "HTTP-Referer" in captured["headers"]
+    assert '"summary": "via openrouter"' in text
+
+
+def test_default_describer_openrouter_honors_base_url_and_model(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://gateway.example/v1")
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured["url"] = url
+        captured["model"] = payload["model"]
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(describe_mod, "_post_json", fake_post)
+    default_describer(model="anthropic/claude-3.5-sonnet")(
+        {"system": "s", "user": "u", "image_png": PNG}
+    )
+    assert captured["url"] == "https://gateway.example/v1/chat/completions"
+    assert captured["model"] == "anthropic/claude-3.5-sonnet"
 
 
 # --- CLI: umbra describe ----------------------------------------------------

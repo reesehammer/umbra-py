@@ -25,7 +25,7 @@ from ..convert import (
     SPECKLE_FILTERS,
     SPECKLE_WINDOW_DEFAULT,
 )
-from ..load import STACK_EXTENTS
+from ..load import STACK_AUTO_CRS, STACK_EXTENTS
 from ..preflight import DEFAULT_PREFLIGHT_WORKERS, PREFLIGHT_ASSET
 from ..viz import (
     select_change_frames,
@@ -362,6 +362,38 @@ def _echo_stack_provenance(report) -> None:
             click.echo(f"      {source.item_id}: {source.error}")
 
 
+def _echo_pick_interval(result: dict) -> None:
+    """The `umbra stack --pick-interval` verdict, as the command prints it."""
+    selection = result.get("selected_interval")
+    if selection is None:
+        click.echo(
+            "No pair to narrate: the series has fewer than two comparable passes, "
+            "or no interval reported a change."
+        )
+        return
+    urls = result.get("urls") or []
+    click.echo(
+        f"Look here first: {selection['earlier_id']} → {selection['later_id']} "
+        f"({selection.get('earlier_datetime')} → {selection.get('later_datetime')})."
+    )
+    delta = selection.get("mean_delta_db")
+    delta_txt = f", mean {delta:+.2f} dB" if isinstance(delta, (int, float)) else ""
+    click.echo(
+        f"  {selection['changed_fraction'] * 100:.1f}% of ground moved"
+        f"{delta_txt}; speckle floor {selection['false_alarm_fraction'] * 100:.1f}% "
+        f"(excess {selection['excess'] * 100:+.1f} points)."
+    )
+    if not selection.get("stands_clear", True):
+        click.echo(
+            "  warning: the largest change is still inside the speckle floor, so it "
+            "may be interference rather than change.",
+            err=True,
+        )
+    if urls and all(urls):
+        click.echo("  Narrate it:")
+        click.echo("    umbra change --narrate " + " ".join(f"'{u}'" for u in urls))
+
+
 @cli.command()
 @click.argument("item_urls", nargs=-1)
 @click.option(
@@ -420,6 +452,18 @@ def _echo_stack_provenance(report) -> None:
     "series that cannot be measured says so before anything is warped or "
     "streamed. Names the largest agreeing subset (with URLs to re-run on) when "
     "the selection is mixed. See docs/schemas/stack-provenance.schema.json.",
+)
+@click.option(
+    "--pick-interval",
+    "pick_interval",
+    is_flag=True,
+    help="Don't write a cube: scan the whole series and print the one "
+    "consecutive pass-pair whose measured change stands furthest clear of the "
+    "speckle detection floor -- the pair worth looking at first, and the two "
+    "URLs to hand to 'umbra change --narrate'. A number picks the frames, not a "
+    "model. Prints the interval's ids, datetimes, changed fraction and signed "
+    "dB delta, the cube's false-alarm floor, and whether the change stands clear "
+    "of it. Uses --change-threshold-db, --asset, --max-size, --extent and --crs.",
 )
 @click.option(
     "--area",
@@ -564,6 +608,7 @@ def stack(
     stats_windowed,
     change_threshold_db,
     provenance,
+    pick_interval,
     area,
     fuzzy,
     bbox,
@@ -658,6 +703,15 @@ def stack(
     the largest agreeing subset and the URLs to re-run on, which is the advice
     the refusal could only give in the abstract.
 
+    --pick-interval answers the question a long series poses before you can
+    render it: which two of these passes is the change worth looking at
+    between? A picture past three dates encodes nothing to separate, so the pair
+    has to be chosen first -- and by a number, not a model. It reduces the cube
+    and returns the one consecutive interval whose measured change stands
+    furthest clear of the speckle detection floor, with the two URLs ready to
+    hand to 'umbra change --narrate'. That is the scan half of scan -> narrate,
+    deterministic end to end.
+
     Two ways to choose what to stack:
 
     \b
@@ -674,6 +728,7 @@ def stack(
     # and stacking a series twice would double the bytes streamed.
     from ..load import (  # noqa: PLC0415
         _write_stack_geotiff,
+        best_change_interval,
         stack_provenance,
         stack_stats,
         to_stack,
@@ -699,10 +754,19 @@ def stack(
             "--provenance reads the sources and writes nothing; drop --out/--stats "
             "(run it first, then stack the acquisitions it says agree)."
         )
-    if not (out_path or stats or provenance):
+    if pick_interval and (out_path or stats or provenance):
+        # It reduces the cube to a single answer -- which pair to look at --
+        # rather than writing the cube or its whole statistics, so it stands
+        # alone the way --provenance does.
+        raise click.UsageError(
+            "--pick-interval scans the series and names one pair; drop "
+            "--out/--stats/--provenance (narrate the pair it returns)."
+        )
+    if not (out_path or stats or provenance or pick_interval):
         raise click.UsageError(
             "Give --out to write the datacube, --stats to measure it, "
-            "--provenance to check the sources agree first, or both of the first two."
+            "--pick-interval to name the pair worth narrating, --provenance to "
+            "check the sources agree first, or both of the first two."
         )
     search_mode = any(v for v in (area, bbox, place, intersects, start, end))
     if item_urls and search_mode:
@@ -764,6 +828,29 @@ def stack(
             click.echo(json.dumps(report.to_dict(), indent=2))
         else:
             _echo_stack_provenance(report)
+        return
+
+    if pick_interval:
+        with OrbitSpinner(f"Scanning {len(items)} acquisitions for the pair worth narrating"):
+            picked = best_change_interval(
+                items,
+                asset=asset,
+                max_size=max_size,
+                change_threshold_db=change_threshold_db,
+                extent=extent,
+                crs=crs or STACK_AUTO_CRS,
+            )
+        result: dict = {"selected_interval": None, "urls": []}
+        if picked is not None:
+            earlier, later = picked["pair"]
+            result = {
+                "selected_interval": picked["selection"],
+                "urls": [earlier.href, later.href],
+            }
+        if as_json:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            _echo_pick_interval(result)
         return
 
     with OrbitSpinner(f"Stacking {len(items)} acquisitions"):

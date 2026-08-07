@@ -37,6 +37,7 @@ _EXPECTED_NAMES = {
     "index_stats",
     "stack_stats",
     "stack_provenance",
+    "pick_change_interval",
     "download_asset",
     "watch_site",
     "find_similar",
@@ -103,6 +104,9 @@ def test_json_tools_are_the_same_callables_as_mcp():
     # ...and so does its preflight, which reads raster headers and returns the
     # same report document the CLI and the HTTP endpoint emit.
     assert lc.stack_provenance is ms.stack_provenance
+    # pick_change_interval is the deterministic scan that names the pair worth
+    # narrating -- shared verbatim so scan -> narrate is one inventory.
+    assert lc.pick_change_interval is ms.pick_change_interval
     # narrate_change is the C2 change-narration tool -- the last MCP tool to reach
     # the agent surfaces; it is the same callable here (no drift), not re-wrapped.
     assert lc.narrate_change is ms.narrate_change

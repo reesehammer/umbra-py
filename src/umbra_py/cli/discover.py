@@ -494,7 +494,8 @@ def llms_txt_cmd(full: bool) -> None:
     default=None,
     help="Override the planning model (default: $UMBRA_ASK_MODEL, else the "
     "provider default). The provider is chosen by which API key is set — "
-    "ANTHROPIC_API_KEY or OPENAI_API_KEY (with optional OPENAI_BASE_URL).",
+    "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY (with optional "
+    "OPENAI_BASE_URL).",
 )
 @click.option(
     "--limit",
@@ -547,8 +548,8 @@ def ask(question, run, model, limit, aois, as_json, local, db_path) -> None:
 
     By default it only prints the plan; pass --run to execute it. Requires the
     ``ai`` extra (``pip install 'umbra-py[ai]'``) and a model API key: set
-    ANTHROPIC_API_KEY, or OPENAI_API_KEY (optionally with OPENAI_BASE_URL for a
-    compatible endpoint). Example::
+    ANTHROPIC_API_KEY, OPENROUTER_API_KEY (for OpenRouter), or OPENAI_API_KEY
+    (optionally with OPENAI_BASE_URL for another compatible endpoint). Example::
 
         umbra ask "what did Umbra image at Centerfield, Utah last spring?"
         umbra ask "scenes over the delta since March" --aoi delta.geojson

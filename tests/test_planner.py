@@ -261,10 +261,34 @@ def test_ask_rejects_empty_question():
 
 
 def test_default_planner_errors_without_a_key(monkeypatch):
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(MissingDependencyError, match="model API key"):
         default_planner()
+
+
+def test_default_planner_routes_an_openrouter_key_to_openrouter(monkeypatch):
+    """`umbra ask` honors an OPENROUTER_API_KEY too, so one key powers every AI
+    feature -- and it wins over a stray OPENAI_API_KEY."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-stray")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["model"] = payload["model"]
+        return {"choices": [{"message": {"content": '{"place": "Tokyo"}'}}]}
+
+    monkeypatch.setattr(planner_mod, "_post_json", fake_post)
+    planner = default_planner()
+    text = planner({"system": "s", "user": "u"})
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["model"] == "openai/gpt-4o-mini"
+    assert captured["headers"]["X-Title"] == "umbra-py"
+    assert '"place": "Tokyo"' in text
 
 
 def test_default_planner_prefers_anthropic(monkeypatch):
