@@ -446,6 +446,127 @@ def test_assemble_without_featured_writes_no_directory(tmp_path):
     assert not (out / "featured").exists()
 
 
+# --- featured narration (Mode A) ------------------------------------------
+def test_assemble_bakes_featured_narration_with_injected_narrator(tmp_path):
+    """Mode A: each rendered site also gets a cached reading — a JSON sidecar
+    beside its composite and a summary under the tile — with no model in the
+    test (the narrator is injected)."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 5)])
+    narrated: list[list[str]] = []
+
+    def fake_narrator(items):
+        narrated.append([i.id for i in items])
+        return {
+            "summary": "The northeast brightened between the two passes.",
+            "changes": ["new bright returns in the NE"],
+            "item_ids": [i.id for i in items],
+        }
+
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out,
+        featured_sites=sites,
+        featured_renderer=lambda items, dest: dest.write_bytes(b"\x89PNG"),
+        featured_narrator=fake_narrator,
+    )
+
+    # The narrator saw the site's passes, and its reading landed as a sidecar.
+    assert narrated == [["Alpha-1", "Alpha-5"]]
+    sidecar = out / "featured" / "alpha.narration.json"
+    assert sidecar.exists()
+    import json as _json
+
+    assert _json.loads(sidecar.read_text())["summary"].startswith("The northeast")
+
+    idx = (out / "index.html").read_text()
+    assert "AI reading" in idx
+    assert "The northeast brightened" in idx
+    # The tile links to the full sidecar with the numbers it cites.
+    assert 'href="featured/alpha.narration.json"' in idx
+
+
+def test_assemble_featured_narration_none_leaves_tile_unchanged(tmp_path):
+    """A narrator that declines (returns None) writes no sidecar and adds no
+    reading — the tile is exactly what it would be without one."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 2)])
+    out = tmp_path / "site"
+    showcase.assemble_showcase(
+        out,
+        featured_sites=sites,
+        featured_renderer=lambda items, dest: dest.write_bytes(b"\x89PNG"),
+        featured_narrator=lambda items: None,
+    )
+    assert not (out / "featured" / "alpha.narration.json").exists()
+    idx = (out / "index.html").read_text()
+    assert "AI reading" not in idx
+    assert 'src="featured/alpha.png"' in idx  # the picture is still there
+
+
+def test_assemble_featured_narration_failure_is_nonfatal(tmp_path):
+    """A model hiccup on one site costs its reading, never its tile or the build."""
+    sites = showcase.select_featured_sites([_pass("Alpha", d) for d in (1, 2)])
+
+    def boom(items):
+        raise RuntimeError("model timeout")
+
+    out = tmp_path / "site"
+    with pytest.warns(RuntimeWarning, match="No narration for featured site"):
+        showcase.assemble_showcase(
+            out,
+            featured_sites=sites,
+            featured_renderer=lambda items, dest: dest.write_bytes(b"\x89PNG"),
+            featured_narrator=boom,
+        )
+    assert not (out / "featured" / "alpha.narration.json").exists()
+    idx = (out / "index.html").read_text()
+    assert 'src="featured/alpha.png"' in idx
+    assert "AI reading" not in idx
+
+
+def test_default_featured_narrator_only_for_change_view():
+    """timescan (whole series) and swipe (an interactive page) have no single
+    two/three-date change to read, so the default narrator is None there."""
+    assert showcase._default_featured_narrator(2, view="timescan") is None
+    assert showcase._default_featured_narrator(2, view="swipe") is None
+    assert showcase._default_featured_narrator(2, view="change") is not None
+
+
+def test_default_featured_narrator_reads_the_composite_frames(monkeypatch):
+    """The baked reading is of the *same* passes the composite shows: it selects
+    frames with viz.select_change_frames and hands them to narrate()."""
+    picked = [_pass("Alpha", 1), _pass("Alpha", 9)]
+    seen: dict = {}
+
+    def fake_select(items, frames):
+        seen["frames"] = frames
+        return picked
+
+    class _Narration:
+        def to_dict(self):
+            return {"summary": "ok", "item_ids": [i.id for i in picked]}
+
+    def fake_narrate(items, **kwargs):
+        seen["narrated"] = [i.id for i in items]
+        seen["asset"] = kwargs.get("asset")
+        seen["model"] = kwargs.get("model")
+        return _Narration()
+
+    # ``from umbra_py import narrate`` shadows the submodule with the function,
+    # so reach the real module through sys.modules to patch it.
+    import sys
+
+    monkeypatch.setattr("umbra_py.viz.select_change_frames", fake_select)
+    monkeypatch.setattr(sys.modules["umbra_py.narrate"], "narrate", fake_narrate)
+
+    narrator = showcase._default_featured_narrator(3, asset="CSI", view="change", model="prov/mod")
+    doc = narrator([_pass("Alpha", d) for d in (1, 5, 9)])
+    assert seen["frames"] == 3
+    assert seen["narrated"] == ["Alpha-1", "Alpha-9"]
+    assert seen["asset"] == "CSI"
+    assert seen["model"] == "prov/mod"
+    assert doc == {"summary": "ok", "item_ids": ["Alpha-1", "Alpha-9"]}
+
+
 # --- CLI: featured --------------------------------------------------------
 def _stub_featured_renderer(monkeypatch):
     """Replace the viz-backed default renderer with one that just writes bytes."""
@@ -535,6 +656,89 @@ def test_cli_showcase_rejects_negative_featured(tmp_path):
     )
     assert result.exit_code != 0
     assert "--featured must be zero or more" in result.output
+
+
+def _stub_featured_narrator(monkeypatch):
+    """Replace the model-backed default narrator with one that returns a fixed
+    reading, so the CLI --narrate path runs offline."""
+
+    def factory(frames, asset="GEC", *, view="change", model=None):
+        def narrate_site(items):
+            return {"summary": "The site changed.", "item_ids": [i.id for i in items]}
+
+        return narrate_site
+
+    monkeypatch.setattr("umbra_py.showcase._default_featured_narrator", factory)
+
+
+def test_cli_showcase_narrate_bakes_readings(tmp_path, monkeypatch):
+    """--narrate with a key set bakes a sidecar + a reading under each tile."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items", lambda **kwargs: [_pass("Alpha", d) for d in (1, 2)]
+    )
+    _stub_featured_renderer(monkeypatch)
+    _stub_featured_narrator(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        ["showcase", "--local", "--out", str(out), "--no-explore", "--featured", "1", "--narrate"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (out / "featured" / "alpha.narration.json").exists()
+    assert "AI reading" in (out / "index.html").read_text()
+
+
+def test_cli_showcase_narrate_without_a_key_skips_but_builds(tmp_path, monkeypatch):
+    """--narrate and no model key: a note, no sidecar, and the gallery still
+    ships (the pictures are the showcase, the readings are the bonus)."""
+    for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items", lambda **kwargs: [_pass("Alpha", d) for d in (1, 2)]
+    )
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        ["showcase", "--local", "--out", str(out), "--no-explore", "--featured", "1", "--narrate"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "found no model API key" in result.output
+    assert not (out / "featured" / "alpha.narration.json").exists()
+    assert [p.name for p in (out / "featured").glob("*.png")] == ["alpha.png"]
+
+
+def test_cli_showcase_narrate_noop_on_non_change_view(tmp_path, monkeypatch):
+    """--narrate on a timescan view says so and bakes nothing (no single pair)."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        "umbra_py.cli._shared._gather_items",
+        lambda **kwargs: [_pass("Alpha", d) for d in (1, 2, 3)],
+    )
+    _stub_featured_renderer(monkeypatch)
+
+    out = tmp_path / "site"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "showcase",
+            "--local",
+            "--out",
+            str(out),
+            "--no-explore",
+            "--featured",
+            "1",
+            "--featured-view",
+            "timescan",
+            "--narrate",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "does not apply to --featured-view timescan" in result.output
+    assert not list((out / "featured").glob("*.narration.json"))
 
 
 def test_default_featured_renderer_calls_viz(monkeypatch, tmp_path):

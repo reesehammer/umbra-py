@@ -764,7 +764,7 @@ from:
   default rather than being treated as a claim.
 
 **Bring the VLM to the browsing user — narrated change in the demo store
-(Mode B shipped; Mode A deferred by decision)**
+(both modes shipped)**
 
 The two model-in-the-loop capabilities that already exist on the CLI/MCP
 surfaces — *analyze a pair of passes* (`umbra change --narrate`, the C2
@@ -804,19 +804,21 @@ directly: anything shipped to a browser is world-readable, so a key in the
 static site is a published key. That forces two modes, and they should ship in
 this order:
 
-- **Mode A — precompute in CI, serve static (deferred by decision).** The
-  build-time job that already holds the secret would run the candidate selector
-  and the narration for the *curated / `--featured` sites* and bake each result
-  as a static JSON sidecar beside the featured composite (`featured/*`, the
-  injectable-renderer seam `umbra showcase` already has), so the browsing user
-  reads a **cached narration with zero live model calls and no key near the
-  browser**. It is the lowest-exposure delivery, and it remains the recommended
-  path for a *static* Pages showcase — but the maintainer chose to build Mode B
-  first (live, arbitrary-scene narration), so Mode A is deferred rather than
-  dropped: the candidate selector and the narration renderer Mode B shipped are
-  exactly what a later build-time bake would call, so it is now a CI wiring job
-  (run the two over `select_featured_sites`, write the sidecar) rather than new
-  machinery. Tracked in `TODO.md`.
+- **Mode A — precompute in CI, serve static — shipped.** `umbra showcase
+  --narrate` runs the narration at *build time*, with the model key held in CI,
+  for each `--featured` `change` site and bakes each result into the page: a
+  plain-language summary under the tile plus a `featured/<slug>.narration.json`
+  sidecar carrying the dB grid it cites (`featured/*`, the injectable-renderer
+  seam `umbra showcase` already had — the narration rides a parallel injectable
+  `featured_narrator` seam). So the browsing user reads a **cached narration with
+  zero live model calls and no key near the browser** — the lowest-exposure
+  delivery, and the right one for a *static* Pages showcase. It reuses the exact
+  narration Mode B ships, narrating the *same* two passes the composite shows
+  (`select_change_frames` for both, so picture and words agree), and is gated so a
+  keyless build or a non-`change` view skips cleanly rather than failing the
+  deploy. `docs.yml` passes the repo's model-key secret to the main-only showcase
+  build and runs `--narrate`; a fork PR (no secrets) ships the gallery without
+  readings. Fine-grained follow-ons in `TODO.md`.
 - **Mode B — live narration behind a hosted `umbra serve` — shipped.**
   `POST /artifacts/narrate` (opt-in via `umbra serve --narrate` + a server-side
   model key) narrates the change between two passes over HTTP, and **scans a
@@ -835,18 +837,20 @@ this order:
   a per-client rate limit and a curated allowlist on top of the daily cap before
   it faces the open internet (`TODO.md`).
 
-Priority: **Mode B is shipped** (the endpoint, the deterministic candidate
-selector `select_change_interval` / `best_change_interval` it composes with, and
-the opt-in + cache + daily-cap guardrails). The selector's first half — the scan
-that answers "which two of these passes?" — has since reached the two front doors
-that need no server: `umbra stack --pick-interval` and the `pick_change_interval`
-MCP / LangChain / LlamaIndex tool, so a shell or an agent can chain scan → narrate
-without standing up `umbra serve` (both thin adapters over `best_change_interval`,
-so the three surfaces cannot drift). What remains before a *public* instance is
-the internet-facing hardening (per-client rate limiting, a curated allowlist) and
-the §5.6 Umbra conversation; Mode A (the zero-exposure static bake) is deferred
-and would reuse Mode B's selector and renderer. Fine-grained tasks are tracked in
-`TODO.md`.
+Priority: **both delivery modes are shipped.** Mode B (the live endpoint, the
+deterministic candidate selector `select_change_interval` / `best_change_interval`
+it composes with, and the opt-in + cache + daily-cap guardrails) and now **Mode A**
+(the zero-exposure static bake: `umbra showcase --narrate` precomputes a reading
+per featured `change` site in CI and bakes it into the Pages showcase, no key near
+the browser). The selector's first half — the scan that answers "which two of
+these passes?" — also reached the two front doors that need no server:
+`umbra stack --pick-interval` and the `pick_change_interval` MCP / LangChain /
+LlamaIndex tool, so a shell or an agent can chain scan → narrate without standing
+up `umbra serve` (both thin adapters over `best_change_interval`, so the surfaces
+cannot drift). **This closes the "bring the VLM to the browsing user" workstream.**
+What remains is only the *public-instance* hardening for a hosted Mode B
+(per-client rate limiting, a curated allowlist) and the §5.6 Umbra conversation.
+Fine-grained tasks are tracked in `TODO.md`.
 
 **SAR-processing depth (was workstream 5.5)**
 

@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Bake precomputed change narrations into the static showcase (Mode A):
+  `umbra showcase --narrate` (`showcase.py`, `cli/explore.py`, `docs.yml`).**
+  The VLM "what changed here?" reading existed only behind a live
+  `umbra serve --narrate` (Mode B) — invisible to a visitor browsing the static
+  GitHub Pages showcase, which calls no model (a key shipped to a browser is a
+  published key). This adds the zero-exposure delivery: at **build time**, with
+  the model key held in CI, `umbra showcase --narrate` narrates each featured
+  `change` site and bakes the result into the page — a plain-language summary
+  under the tile plus a `featured/<site>.narration.json` sidecar carrying the dB
+  grid it cites — so the browsing user reads a cached narration with **no live
+  model call and no key near the browser**.
+
+  It narrates **the same two passes the composite shows** (`select_change_frames`
+  picks them for both), so the picture and the words describe one pair. It reuses
+  the exact narration Mode B ships (`umbra_py.narrate`), gated so a keyless build
+  or a non-`change` view skips cleanly rather than failing the deploy: a narrator
+  that returns nothing or errors leaves the tile untouched — the pictures are the
+  showcase, the readings are the bonus. The bake is an injectable
+  `featured_narrator` seam on `assemble_showcase` (like `featured_renderer`), so
+  the whole feature is offline-testable with no model. `docs.yml` passes the
+  repo's model-key secret (`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY`) to the main-only showcase build and runs it with `--narrate`;
+  a fork PR (no secrets) simply ships the gallery without readings. Every baked
+  narration keeps its CC-BY attribution and AI-provenance note, and the tile
+  labels it "AI reading" and links the numbers, so a model's reading of radar is
+  never mistaken for ground truth. See `STRATEGY.md` §8 (this closes the
+  "bring the VLM to the browsing user" workstream — both modes now shipped).
 - **Power the AI features with an OpenRouter API key: `OPENROUTER_API_KEY` is a
   first-class provider for `umbra describe`, `umbra change --narrate`,
   `umbra serve --narrate` and `umbra ask` (`constants.py`, `describe.py`,

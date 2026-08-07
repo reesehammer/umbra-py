@@ -60,6 +60,7 @@ follow-on).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -252,6 +253,12 @@ class FeaturedArtifact:
     ``kind`` mirrors the :class:`FeaturedView` that produced it: an ``"image"``
     tile *is* the picture, a ``"page"`` tile is a link card onto an interactive
     HTML artifact that has no still to show.
+
+    ``narration`` / ``narration_href`` carry an optional precomputed VLM reading
+    of the site's change (Mode A, ``umbra showcase --narrate``): the plain-language
+    ``summary`` shown under the tile and the relative path to the full JSON
+    sidecar it was cut from. Both are ``None`` on a build without ``--narrate`` or
+    a model key, so a gallery without narration is byte-identical to before.
     """
 
     href: str
@@ -259,11 +266,20 @@ class FeaturedArtifact:
     caption: str
     kind: str = "image"
     alt: str = ""
+    narration: str | None = None
+    narration_href: str | None = None
 
 
 #: Renders one site's featured artifact to a path. Injectable so the whole
 #: assembler stays offline-testable; the default calls into ``umbra_py.viz``.
 FeaturedRenderer = Callable[[list[UmbraItem], Path], None]
+
+#: Narrates one site's change, returning the narration document (the
+#: ``ChangeNarration.to_dict()`` shape) or ``None`` to skip it. Injectable, like
+#: :data:`FeaturedRenderer`, so the assembler stays offline-testable and never
+#: calls a model in tests; the default (:func:`_default_featured_narrator`)
+#: reads the same passes the composite shows and calls :func:`umbra_py.narrate`.
+FeaturedNarrator = Callable[[list[UmbraItem]], "dict[str, Any] | None"]
 
 
 def _slug(value: str) -> str:
@@ -509,7 +525,8 @@ def _featured_tile(art: FeaturedArtifact) -> str:
     href = escape(art.href, quote=True)
     caption = (
         f"          <figcaption><strong>{escape(art.label)}</strong>"
-        f"<span>{escape(art.caption)}</span></figcaption>\n"
+        f"<span>{escape(art.caption)}</span>"
+        f"{_narration_block(art)}</figcaption>\n"
     )
     if art.kind == "page":
         body = (
@@ -521,6 +538,24 @@ def _featured_tile(art: FeaturedArtifact) -> str:
     alt = escape(art.alt or art.label, quote=True)
     body = f'          <a href="{href}"><img src="{href}" alt="{alt}" loading="lazy"/></a>\n'
     return f'        <figure class="shot">\n{body}{caption}        </figure>'
+
+
+def _narration_block(art: FeaturedArtifact) -> str:
+    """The precomputed AI reading shown under a tile, or "" when there is none.
+
+    Labelled as an AI interpretation and linked to its JSON sidecar, so a visitor
+    sees a plain-language "what changed here" without a live model call — and
+    knows it is a model's reading of radar, not ground truth (design principle:
+    the determinism boundary is visible, not just honoured)."""
+    if not art.narration:
+        return ""
+    reading = f'<span class="reading">{escape(art.narration)}</span>'
+    if art.narration_href:
+        link = escape(art.narration_href, quote=True)
+        reading += (
+            f'<a class="reading-more" href="{link}">Full reading &amp; the numbers it cites</a>'
+        )
+    return f'<span class="narration"><span class="tag">AI reading</span>{reading}</span>'
 
 
 def featured_caption(site: FeaturedSite, frames: int, *, view: str = DEFAULT_FEATURED_VIEW) -> str:
@@ -567,6 +602,7 @@ def assemble_showcase(
     featured_frames: int = DEFAULT_FEATURED_FRAMES,
     featured_view: str = DEFAULT_FEATURED_VIEW,
     featured_renderer: FeaturedRenderer | None = None,
+    featured_narrator: FeaturedNarrator | None = None,
     **showcase_kwargs: Any,
 ) -> Path:
     """Assemble a static showcase directory and return its ``index.html`` path.
@@ -615,6 +651,17 @@ def assemble_showcase(
         streams each scene's overview. A site whose render fails is warned about
         and dropped, never fatal: one unreadable asset must not cost the whole
         showcase.
+    featured_narrator:
+        ``(items) -> dict | None``, called once per rendered featured site to
+        bake a precomputed VLM narration of its change into
+        ``featured/<slug>.narration.json`` and a summary line under the tile
+        (Mode A). ``None`` (the default) bakes nothing, so the output is
+        byte-identical to a build without it. The production narrator
+        (``umbra showcase --narrate``) reads the same passes the ``change``
+        composite shows and needs the ``ai`` + ``viz`` extras plus a model key;
+        it is injected here so tests never call a model. A narrator that returns
+        ``None`` or raises leaves the tile untouched — the model call is the one
+        build step that can fail for reasons unrelated to the data.
     pmtiles_path:
         A local whole-catalog ``.pmtiles`` file to include. It is copied into
         ``dest_dir`` (so the directory is self-contained and relocatable) and the
@@ -639,9 +686,12 @@ def assemble_showcase(
         ``repo_url``, ``docs_url``). ``item_count`` and the two ``*_href`` values
         are supplied here from what was actually written.
 
-    Deterministic and offline: it only copies a file and calls the existing
-    ``save_viewer`` / ``save_demo`` writers, so it needs no network and no
-    ``viz`` extra.
+    Deterministic and offline in its default form: it only copies a file and
+    calls the existing ``save_viewer`` / ``save_demo`` writers, so it needs no
+    network and no ``viz`` extra. The two injectable seams are where that changes
+    by choice — the production ``featured_renderer`` streams each scene's overview
+    (``viz``), and a ``featured_narrator`` calls a model (``ai``) — and both are
+    ``None`` by default.
     """
     if unified and pmtiles_path is None:
         raise ValueError("unified=True needs a pmtiles_path (the archive is the data source)")
@@ -698,6 +748,7 @@ def assemble_showcase(
         frames=featured_frames,
         view=featured_view,
         renderer=featured_renderer,
+        narrator=featured_narrator,
     )
 
     index = dest / "index.html"
@@ -722,9 +773,16 @@ def _render_featured(
     frames: int,
     view: str = DEFAULT_FEATURED_VIEW,
     renderer: FeaturedRenderer | None,
+    narrator: FeaturedNarrator | None = None,
 ) -> list[FeaturedArtifact]:
     """Render one artifact per site into ``dest/featured/`` and return the ones
-    that actually landed (a failed render is skipped, not fatal)."""
+    that actually landed (a failed render is skipped, not fatal).
+
+    When ``narrator`` is given, each site that rendered is also narrated and its
+    reading written to ``featured/<slug>.narration.json`` (Mode A). Narration is
+    strictly additive: a narrator that returns ``None`` or raises leaves the tile
+    exactly as it would be without one, so one model hiccup costs a caption line,
+    never the gallery."""
     if not sites:
         return []
     spec = FEATURED_VIEWS[view]
@@ -754,6 +812,7 @@ def _render_featured(
         if not out_path.exists():  # a renderer that silently wrote nothing
             continue
         label = site.label
+        narration, narration_href = _narrate_featured(out_dir, stem, site, narrator)
         artifacts.append(
             FeaturedArtifact(
                 href=f"{FEATURED_DIR}/{out_path.name}",
@@ -761,9 +820,45 @@ def _render_featured(
                 caption=featured_caption(site, min(frames, len(site.items)), view=view),
                 kind=spec.kind,
                 alt=spec.alt_template.format(label=label) if spec.alt_template else "",
+                narration=narration,
+                narration_href=narration_href,
             )
         )
     return artifacts
+
+
+def _narrate_featured(
+    out_dir: Path,
+    stem: str,
+    site: FeaturedSite,
+    narrator: FeaturedNarrator | None,
+) -> tuple[str | None, str | None]:
+    """Narrate one featured site and write its JSON sidecar (Mode A).
+
+    Returns ``(summary, href)`` — the plain-language line to show under the tile
+    and the relative path to the full narration JSON — or ``(None, None)`` when
+    there is no narrator, the narrator declined (``None``), or it raised. A
+    failure here is warned about and swallowed: a model call is the one part of
+    the build that can fail for reasons that have nothing to do with the data
+    (no key, spend cap, a timeout), and none of those should cost the picture
+    that already rendered."""
+    if narrator is None:
+        return None, None
+    try:
+        document = narrator(site.items)
+    except Exception as exc:  # noqa: BLE001 - a model hiccup must not fail the build
+        warnings.warn(
+            f"No narration for featured site {site.task!r}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None, None
+    if not document:
+        return None, None
+    narration_path = out_dir / f"{stem}.narration.json"
+    narration_path.write_text(json.dumps(document, indent=2))
+    summary = document.get("summary")
+    return (summary or None), f"{FEATURED_DIR}/{narration_path.name}"
 
 
 def _default_featured_renderer(
@@ -804,6 +899,37 @@ def _default_featured_renderer(
         "timescan": render_timescan,
         "swipe": render_swipe,
     }[view]
+
+
+def _default_featured_narrator(
+    frames: int,
+    asset: str = "GEC",
+    *,
+    view: str = DEFAULT_FEATURED_VIEW,
+    model: str | None = None,
+) -> FeaturedNarrator | None:
+    """The production narrator for ``view``, or ``None`` when the view has no
+    two/three-pass change for a model to read.
+
+    It narrates **the same passes the composite shows** — ``select_change_frames``
+    picks them for both the ``change`` render and this reading — so the picture
+    and the plain-language summary describe one pair, not two. Only the ``change``
+    view qualifies: a ``timescan`` collapses the whole series (no single pair) and
+    a ``swipe`` is an interactive page rather than a still, so neither gets a
+    baked reading here. Needs the ``ai`` + ``viz`` extras and a model key at call
+    time; a keyless or failing call is swallowed per site by
+    :func:`_narrate_featured`."""
+    if view != "change":
+        return None
+
+    def narrate_site(items: list[UmbraItem]) -> dict[str, Any] | None:
+        from .narrate import narrate  # noqa: PLC0415
+        from .viz import select_change_frames  # noqa: PLC0415
+
+        picked = select_change_frames(items, frames=frames)
+        return narrate(picked, asset=asset, model=model).to_dict()
+
+    return narrate_site
 
 
 _STYLES = """
@@ -877,7 +1003,23 @@ _STYLES = """
     .shot--page .glyph:hover { background: linear-gradient(135deg, var(--panel), var(--border)); }
     .shot figcaption { padding: .75rem 1rem 1rem; font-size: .85rem; }
     .shot figcaption strong { display: block; margin-bottom: .15rem; }
-    .shot figcaption span { color: var(--muted); }
+    .shot figcaption > span { color: var(--muted); }
+    .narration {
+      display: block; margin-top: .6rem; padding-top: .6rem;
+      border-top: 1px solid var(--border); color: var(--fg);
+    }
+    .narration .tag {
+      display: inline-block; margin-bottom: .3rem; padding: .05em .5em;
+      border-radius: 999px; background: rgba(124,156,255,.15);
+      color: var(--accent); font-size: .72rem; font-weight: 600;
+      letter-spacing: .02em; text-transform: uppercase;
+    }
+    .narration .reading { display: block; color: var(--fg); }
+    .narration .reading-more {
+      display: inline-block; margin-top: .35rem; color: var(--accent);
+      font-size: .8rem; text-decoration: none;
+    }
+    .narration .reading-more:hover { text-decoration: underline; }
     footer {
       color: var(--muted); font-size: .85rem; text-align: center;
       padding: 0 1.25rem 2.5rem; max-width: 640px;

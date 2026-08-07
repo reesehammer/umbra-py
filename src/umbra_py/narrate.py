@@ -87,6 +87,7 @@ __all__ = [
     "render_change_png",
     "save_change_scene",
     "default_narrator",
+    "model_key_configured",
     "narrate",
 ]
 
@@ -806,6 +807,21 @@ def save_change_scene(png_bytes: bytes, dest: str | os.PathLike) -> Any:
 
 
 # --- The model boundary (the only part that calls a model) ------------------
+
+
+def model_key_configured() -> bool:
+    """Whether any vision/chat model key is set in the environment.
+
+    True when one of ``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` /
+    ``OPENAI_API_KEY`` is present — the same keys :func:`default_narrator` (and
+    :func:`umbra_py.describe.default_describer`) select a provider from. Lets a
+    caller decide *whether* to attempt narration before building the narrator,
+    so an opt-in bake can skip cleanly rather than raise per item when no key is
+    configured.
+    """
+    return any(
+        os.environ.get(var) for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
+    )
 
 
 def default_narrator(*, model: str | None = None) -> Narrator:
