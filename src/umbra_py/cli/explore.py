@@ -815,6 +815,24 @@ def tiles(
     help="Size of the candidate pool the auto-selected featured sites are "
     "chosen from (tasks are scanned in name order).",
 )
+@click.option(
+    "--narrate",
+    is_flag=True,
+    help="Precompute a vision-language reading of each featured 'change' site "
+    "and bake it into the page (a summary under the tile + a JSON sidecar), so a "
+    "visitor gets a plain-language 'what changed here' with no live model call "
+    "and no key near the browser. Reads the same passes the composite shows. "
+    "Needs the 'ai' + 'viz' extras and a model API key (ANTHROPIC_API_KEY, "
+    "OPENROUTER_API_KEY, or OPENAI_API_KEY); without a key the narrations are "
+    "skipped and the gallery still builds. Applies to --featured-view change.",
+)
+@click.option(
+    "--narrate-model",
+    default=None,
+    help="With --narrate, override the vision model (default: $UMBRA_NARRATE_MODEL, "
+    "then the provider default). E.g. an OpenRouter id like "
+    "'anthropic/claude-3.5-sonnet'.",
+)
 @click.option("--title", default=None, help="Override the landing-page title.")
 @click.option("--tagline", default=None, help="Override the landing-page one-line pitch.")
 @click.option(
@@ -848,6 +866,8 @@ def showcase(
     featured_areas,
     featured_frames,
     featured_limit,
+    narrate,
+    narrate_model,
     title,
     tagline,
     updated,
@@ -886,6 +906,14 @@ def showcase(
     needs the 'viz' extra and streams each scene's overview; without it every
     page is self-contained HTML, so this runs in a core install and is the front
     end the '.github/workflows/docs.yml' Pages deploy publishes beside the docs.
+
+    --narrate adds a precomputed vision-language reading under each featured
+    'change' tile: at build time it narrates the same two passes the composite
+    shows and bakes the result into the page (a summary + a JSON sidecar with the
+    dB grid it cites), so a visitor reads 'what changed here' with no live model
+    call and no key ever near the browser. It needs the 'ai' extra and a model
+    key (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY); with no key
+    the readings are skipped and the gallery builds unchanged.
     """
     if pmtiles_path and fetch_pmtiles:
         raise click.ClickException("Pass either --pmtiles or --fetch-pmtiles, not both.")
@@ -987,9 +1015,40 @@ def showcase(
     if updated:
         showcase_kwargs["updated"] = updated
 
+    # Mode A: bake a precomputed narration per featured site, all model calls at
+    # build time so the static page holds cached readings and no key near the
+    # browser. Best-effort and gated here so a keyless build (or a non-change
+    # view) skips cleanly rather than failing the deploy: the pictures are the
+    # showcase, the readings are the bonus.
+    featured_narrator = None
+    if narrate:
+        from ..narrate import model_key_configured  # noqa: PLC0415
+        from ..showcase import _default_featured_narrator  # noqa: PLC0415
+
+        if featured_view != "change":
+            click.echo(
+                f"note: --narrate reads a two/three-date change, so it does not "
+                f"apply to --featured-view {featured_view}; skipping narration.",
+                err=True,
+            )
+        elif not featured_sites:
+            pass  # nothing to narrate; the "nothing to show" guards already ran
+        elif not model_key_configured():
+            click.echo(
+                "note: --narrate found no model API key (set ANTHROPIC_API_KEY, "
+                "OPENROUTER_API_KEY, or OPENAI_API_KEY); building the gallery "
+                "without narrations.",
+                err=True,
+            )
+        else:
+            featured_narrator = _default_featured_narrator(
+                int(featured_frames), asset=asset, view=featured_view, model=narrate_model
+            )
+
     label = "Assembling showcase site"
     if featured_sites:
-        label = f"Rendering {len(featured_sites)} featured composite(s) + showcase site"
+        verb = "Narrating + rendering" if featured_narrator else "Rendering"
+        label = f"{verb} {len(featured_sites)} featured composite(s) + showcase site"
     with OrbitSpinner(label):
         index = assemble_showcase(
             dest,
@@ -1008,6 +1067,7 @@ def showcase(
             featured_sites=featured_sites,
             featured_frames=int(featured_frames),
             featured_view=featured_view,
+            featured_narrator=featured_narrator,
             **showcase_kwargs,
         )
 

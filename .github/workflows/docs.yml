@@ -80,6 +80,17 @@ jobs:
       # index, hence the fetch below.
       - name: Build catalog showcase
         if: github.ref == 'refs/heads/main'
+        # Mode A: the model key is held here, at build time, and never reaches
+        # the static site (a secret shipped to a browser is a published secret).
+        # `umbra showcase --narrate` bakes a cached reading per featured site; it
+        # is gated on a key's presence inside the command, so a fork PR (no
+        # secrets) or an unset secret just skips the narrations and still ships
+        # the gallery. Any one of the three keys works — whichever the maintainer
+        # set as a repo secret.
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
           umbra index fetch &&
@@ -88,6 +99,7 @@ jobs:
               --local \
               --fetch-pmtiles \
               --featured 6 \
+              --narrate \
               --out site/showcase \
               --updated "$(date -u +%Y-%m-%d)"
           status=$?

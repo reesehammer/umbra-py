@@ -10,13 +10,14 @@ still open.
 
 ---
 
-## Narrated change in the demo store (Mode B shipped — `STRATEGY.md` §8)
+## Narrated change in the demo store (both modes shipped — `STRATEGY.md` §8)
 
 - **Surfaced in:** the narration detection-floor PR (#193), which made the
   "scan a series, pick the pair worth narrating" selection honest — the interval
   whose change stands clear of the speckle floor. Defined in `STRATEGY.md` §8
-  ("Bring the VLM to the browsing user"). **Mode B shipped; Mode A deferred by
-  maintainer decision.**
+  ("Bring the VLM to the browsing user"). **Mode B shipped (live `umbra serve
+  --narrate`); Mode A shipped (`umbra showcase --narrate`, the CI bake into the
+  static Pages showcase).**
 - **Code:** `src/umbra_py/load.py` (`select_change_interval`,
   `best_change_interval`), `src/umbra_py/serve.py` (`Renderers.narrate`,
   `narrate_options`, `NarrationBudget`, `POST /artifacts/narrate`, the landing
@@ -71,17 +72,32 @@ reads it. What shipped, and what is left:
     `best_change_interval`, so the server, the shell and the agent surfaces
     cannot drift; `--pick-interval` is its own mode (like `--provenance`) and
     defaults the grid to UTM like the `stack_stats` tool. See the CHANGELOG.
-- **2 & 3. Mode A (precompute in CI, serve static) — deferred by decision.** The
-  build-time bake (run the selector + narration over `select_featured_sites`,
-  write a static sidecar beside each `featured/*` composite, gated on the secret's
-  presence and `continue-on-error`) and the showcase UI card that reads it. It is
-  the lowest-exposure delivery and remains the right path for a *static* Pages
-  showcase, but the maintainer chose Mode B first, so this is deferred rather than
-  dropped. It is now a CI-wiring job rather than new machinery: it would call the
-  same `best_change_interval` + narration Mode B shipped. `Code (to touch)`:
-  `src/umbra_py/showcase.py` (`select_featured_sites`, the injectable
-  `featured_renderer`, `FEATURED_DIR`), `.github/workflows/docs.yml` /
-  `publish-index.yml`.
+- ~~**2 & 3. Mode A (precompute in CI, serve static).**~~ **shipped** —
+  `umbra showcase --narrate` narrates each featured `change` site at build time
+  and bakes the result into the page: a summary under the tile plus a
+  `featured/<slug>.narration.json` sidecar with the dB grid it cites, so the
+  static Pages visitor reads a cached narration with no live model call and no key
+  near the browser. It reuses the same narration Mode B ships (it narrates the
+  *same* two passes the composite shows, `select_change_frames` for both), is an
+  injectable `featured_narrator` seam on `assemble_showcase` (offline-testable,
+  like `featured_renderer`), and is gated so a keyless build or a non-`change`
+  view skips cleanly rather than failing the deploy. `docs.yml` passes the repo
+  model-key secret to the main-only showcase build and runs `--narrate`; a fork PR
+  (no secrets) ships the gallery without readings. See the CHANGELOG. What is
+  still open, and smaller:
+  - **Narration is baked for the `change` view only.** `timescan` (whole series)
+    and `swipe` (an interactive page) have no single two/three-date pair for the
+    model to read, so `_default_featured_narrator` returns `None` there and the
+    CLI says so. A per-view reading (e.g. a whole-series summary for timescan)
+    would be a different prompt and a different grounding; it waits for a view
+    that wants one.
+  - **The bake uses `select_change_frames`, not `best_change_interval`.** The
+    reading is of the frames the composite *shows* (so picture and words agree),
+    which is the honest demo; the speckle-clearest interval the selector would
+    pick can differ. Grounding it on `best_change_interval` instead would mean
+    also rendering the composite of the selected pair, so the two still agree —
+    worth doing only if a featured site's shown pair turns out to be a poor
+    read.
 
 Security note (the maintainer's question, recorded so the decision is not
 re-litigated): storing the model key as a **GitHub Actions secret is correct and
