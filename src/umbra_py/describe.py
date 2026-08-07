@@ -562,14 +562,13 @@ def _baked_preview_caveat(image: SceneImage) -> str:
 
 
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
-    import requests  # a core dependency; imported here to keep the module light
+    """POST to the vision model with bounded retries, surfacing the provider's
+    own error message. See :func:`umbra_py._http.post_model_json` -- it also
+    retries the HTTP-200-with-error-body case a gateway like OpenRouter returns
+    when an upstream provider hiccups, which a lone narration should ride out."""
+    from ._http import post_model_json  # noqa: PLC0415
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    if resp.status_code >= 400:
-        raise DescribeError(
-            f"The model endpoint returned HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-    return resp.json()
+    return post_model_json(url, headers, payload, error_cls=DescribeError, timeout=120)
 
 
 #: Upper bound on the model's completion for a scene description / change

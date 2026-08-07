@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Retry a model endpoint's transient failures and surface its real error
+  message (`_http.py`, `describe.py`, `planner.py`).** The model POST was a plain
+  request that raised only on HTTP ≥ 400 and reported nothing but the status.
+  That missed the failure that skipped one featured narration: a gateway like
+  OpenRouter returns **HTTP 200 with an error body** (not a completion) when an
+  upstream provider hiccups, so the reply had no `choices` and the code raised a
+  bare "Unexpected OpenAI response shape: 'choices'", discarding the provider's
+  actual message. Both the describe/narrate and the ask paths now go through a
+  shared `post_model_json` that (1) retries a dropped connection, an HTTP 429/5xx,
+  and the HTTP-200-with-error-body case a few times with backoff — riding out a
+  one-off blip that a lone narration would otherwise lose — and (2) raises with
+  the provider's own words (`"...returned an error: <message>"`) so a persistent
+  failure says *why* in the build log. A genuine verdict (400 bad request, 401
+  bad key, 402 out of credit) is still raised at once, not retried.
 - **Bound the completion on the OpenAI-compatible model requests so an
   OpenRouter key isn't refused (`describe.py`, `planner.py`).** The
   OpenAI-compatible path (`umbra describe`, `umbra change --narrate`,
