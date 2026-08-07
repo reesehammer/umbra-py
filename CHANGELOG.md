@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Bound the completion on the OpenAI-compatible model requests so an
+  OpenRouter key isn't refused (`describe.py`, `planner.py`).** The
+  OpenAI-compatible path (`umbra describe`, `umbra change --narrate`,
+  `umbra serve --narrate`, `umbra ask`) sent no `max_tokens`, so a gateway that
+  reserves the model's whole output budget against the key's credit limit —
+  OpenRouter does — returned `HTTP 402` ("you requested up to 16384 tokens but
+  can only afford …") and every narration/description/plan failed, even though a
+  reply is a short JSON of a few hundred tokens. Both requests now cap the
+  completion at 1024, matching what the Anthropic path already sent (Anthropic
+  requires the field). Surfaced by the first live `umbra showcase --narrate` run
+  in CI: the featured composites rendered but every reading was skipped on a 402.
+
 ### Added
 - **Bake precomputed change narrations into the static showcase (Mode A):
   `umbra showcase --narrate` (`showcase.py`, `cli/explore.py`, `docs.yml`).**

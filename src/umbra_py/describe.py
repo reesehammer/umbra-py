@@ -572,6 +572,15 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
     return resp.json()
 
 
+#: Upper bound on the model's completion for a scene description / change
+#: narration. Both are a short JSON object (a summary, a few change strings, a
+#: hedge), so a few hundred tokens is plenty; 1024 leaves headroom. Anthropic
+#: *requires* the field, and it matters just as much on the OpenAI-compatible
+#: path — an omitted bound makes a gateway like OpenRouter reserve the model's
+#: whole output budget against the key's credit limit and refuse the call.
+_MAX_COMPLETION_TOKENS = 1024
+
+
 def _anthropic_describer(*, api_key: str, model: str, base_url: str) -> Describer:
     def describer(messages: dict[str, Any]) -> str:
         b64 = base64.b64encode(messages["image_png"]).decode("ascii")
@@ -584,7 +593,7 @@ def _anthropic_describer(*, api_key: str, model: str, base_url: str) -> Describe
             },
             {
                 "model": model,
-                "max_tokens": 1024,
+                "max_tokens": _MAX_COMPLETION_TOKENS,
                 "system": messages["system"],
                 "messages": [
                     {
@@ -628,6 +637,12 @@ def _openai_describer(
             {
                 "model": model,
                 "temperature": 0,
+                # Cap the completion, matching the Anthropic path's 1024. A scene
+                # description / change narration is a short JSON; without this the
+                # request carries no bound, and a gateway like OpenRouter reserves
+                # the *model's* full output budget (16k+) against the key's credit
+                # limit and 402s a request that only needs a few hundred tokens.
+                "max_tokens": _MAX_COMPLETION_TOKENS,
                 "messages": [
                     {"role": "system", "content": messages["system"]},
                     {

@@ -722,6 +722,11 @@ def _openai_planner(
             {
                 "model": model,
                 "temperature": 0,
+                # Bound the completion, matching the Anthropic path's 1024: a
+                # search plan is a small JSON object, and an omitted bound makes a
+                # gateway like OpenRouter reserve the model's full output budget
+                # against the key's credit limit and 402 the request.
+                "max_tokens": 1024,
                 "messages": [
                     {"role": "system", "content": messages["system"]},
                     {"role": "user", "content": messages["user"]},
