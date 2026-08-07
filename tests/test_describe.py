@@ -264,6 +264,10 @@ def test_default_describer_falls_back_to_openai_with_data_uri(monkeypatch):
     blocks = captured["payload"]["messages"][1]["content"]
     image_blocks = [b for b in blocks if b.get("type") == "image_url"]
     assert image_blocks and image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    # The completion is bounded (matching the Anthropic path): an omitted
+    # max_tokens makes a gateway like OpenRouter reserve the model's whole
+    # output budget against the key's limit and 402 the call.
+    assert captured["payload"]["max_tokens"] == 1024
     assert '"summary": "reservoir"' in text
 
 

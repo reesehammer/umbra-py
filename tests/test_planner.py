@@ -317,12 +317,16 @@ def test_default_planner_falls_back_to_openai(monkeypatch):
 
     def fake_post(url, headers, payload):
         captured["url"] = url
+        captured["payload"] = payload
         return {"choices": [{"message": {"content": '{"place": "Tokyo"}'}}]}
 
     monkeypatch.setattr(planner_mod, "_post_json", fake_post)
     planner = default_planner()
     text = planner({"system": "s", "user": "u"})
     assert captured["url"] == "https://proxy.example/v1/chat/completions"
+    # Bounded completion (matching the Anthropic path) so a gateway like
+    # OpenRouter does not reserve the model's whole output budget and 402.
+    assert captured["payload"]["max_tokens"] == 1024
     assert '"place": "Tokyo"' in text
 
 
