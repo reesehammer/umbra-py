@@ -675,12 +675,12 @@ def plan_to_command(plan: SearchPlan) -> str:
 
 
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
-    import requests  # a core dependency; imported here to keep the module light
+    """POST to the planning model with bounded retries, surfacing the provider's
+    own error message (shared with the describe path -- see
+    :func:`umbra_py._http.post_model_json`)."""
+    from ._http import post_model_json  # noqa: PLC0415
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    if resp.status_code >= 400:
-        raise AskError(f"The model endpoint returned HTTP {resp.status_code}: {resp.text[:300]}")
-    return resp.json()
+    return post_model_json(url, headers, payload, error_cls=AskError, timeout=60)
 
 
 def _anthropic_planner(*, api_key: str, model: str, base_url: str) -> Planner:
