@@ -116,6 +116,23 @@ def mcp() -> None:
     "the day's cap is reached.",
 )
 @click.option(
+    "--narrate-client-limit",
+    type=int,
+    default=None,
+    help="With --narrate, cap live model calls per client per UTC day (keyed by "
+    "bearer token, else peer address), so one caller cannot burst through the "
+    "whole day's budget. Unlimited if unset. The hardening a public instance "
+    "wants on top of --narrate-daily-limit.",
+)
+@click.option(
+    "--narrate-allow-bbox",
+    default=None,
+    help="With --narrate, bound the endpoint to a curated area "
+    "('min_lon,min_lat,max_lon,max_lat'): a scene whose footprint centroid falls "
+    "outside is refused with 403, so an open endpoint cannot be pointed at "
+    "arbitrary scenes to run up model spend. Unbounded if unset.",
+)
+@click.option(
     "--cache-dir",
     default=None,
     help="Directory for cached render artifacts (default: alongside the index).",
@@ -132,6 +149,8 @@ def serve(
     narrate,
     narrate_model,
     narrate_daily_limit,
+    narrate_client_limit,
+    narrate_allow_bbox,
     cache_dir,
 ) -> None:
     """Run a read-only STAC API over the catalog index (HTTP server).
@@ -167,13 +186,16 @@ def serve(
     detection floor. A series longer than a composite is scanned first and the
     pair whose change stands clear of the floor is the one narrated. It is the
     one endpoint that spends money per call, so it is opt-in, cached like every
-    artifact (a repeat request costs no model call), and capped by
-    ``--narrate-daily-limit``. The key is held server-side and never a request
-    field. Requires the ``serve`` extra (``pip install 'umbra-py[serve]'``), plus
-    ``ai`` + ``viz`` for ``--narrate``.
+    artifact (a repeat request costs no model call), and guarded: capped per day
+    (``--narrate-daily-limit``), per client (``--narrate-client-limit``, so no
+    single caller drains the day's budget) and bounded to a curated area
+    (``--narrate-allow-bbox``, refusing scenes outside it with 403) -- the
+    hardening a public instance wants. The key is held server-side and never a
+    request field. Requires the ``serve`` extra (``pip install
+    'umbra-py[serve]'``), plus ``ai`` + ``viz`` for ``--narrate``.
     """
     from ..exceptions import MissingDependencyError
-    from ..serve import StackExecution
+    from ..serve import StackExecution, parse_bbox
     from ..serve import serve as run_stac_server
 
     try:
@@ -188,6 +210,7 @@ def serve(
     # now (rather than on first request) means a missing key is a startup error
     # with setup guidance, not a surprise 500 for the first visitor.
     narrator = None
+    narrate_bbox = None
     if narrate:
         from ..narrate import default_narrator
 
@@ -195,9 +218,17 @@ def serve(
             narrator = default_narrator(model=narrate_model)
         except MissingDependencyError as exc:
             raise click.ClickException(str(exc)) from exc
-    elif narrate_daily_limit is not None or narrate_model is not None:
+        try:
+            narrate_bbox = parse_bbox(narrate_allow_bbox)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--narrate-allow-bbox") from exc
+    elif any(
+        v is not None
+        for v in (narrate_model, narrate_daily_limit, narrate_client_limit, narrate_allow_bbox)
+    ):
         raise click.UsageError(
-            "--narrate-model / --narrate-daily-limit only apply together with --narrate."
+            "--narrate-model / --narrate-daily-limit / --narrate-client-limit / "
+            "--narrate-allow-bbox only apply together with --narrate."
         )
 
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
@@ -217,6 +248,10 @@ def serve(
         if narrator is not None:
             limit = f"{narrate_daily_limit}/day" if narrate_daily_limit is not None else "unlimited"
             click.echo(f"  /artifacts/narrate (model): enabled, budget {limit}")
+            if narrate_client_limit is not None:
+                click.echo(f"    per-client budget {narrate_client_limit}/day")
+            if narrate_bbox is not None:
+                click.echo("    bounded to --narrate-allow-bbox (403 outside it)")
     try:
         run_stac_server(
             host=host,
@@ -227,6 +262,8 @@ def serve(
             stack_execution=execution,
             narrator=narrator,
             narration_daily_limit=narrate_daily_limit,
+            narration_client_limit=narrate_client_limit,
+            narration_allow_bbox=narrate_bbox,
             cache_dir=cache_dir,
         )
     except MissingDependencyError as exc:

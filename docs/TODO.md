@@ -20,11 +20,13 @@ still open.
   static Pages showcase).**
 - **Code:** `src/umbra_py/load.py` (`select_change_interval`,
   `best_change_interval`), `src/umbra_py/serve.py` (`Renderers.narrate`,
-  `narrate_options`, `NarrationBudget`, `POST /artifacts/narrate`, the landing
-  `narrate` link, `build_app`/`serve` narrator params), `src/umbra_py/cli/
-  explore.py` (`umbra serve --narrate` / `--narrate-model` /
-  `--narrate-daily-limit`), `src/umbra_py/narrate.py` (the existing narration it
-  feeds), `tests/test_load.py`, `tests/test_serve.py`.
+  `narrate_options`, `NarrationBudget`, `ClientNarrationBudget`,
+  `NarrationAllowlist`, `client_identity`, `narrate_capabilities`, `POST
+  /artifacts/narrate`, the landing `narrate` link, `build_app`/`serve` narrator +
+  budget/allowlist params), `src/umbra_py/cli/explore.py` (`umbra serve
+  --narrate` / `--narrate-model` / `--narrate-daily-limit` /
+  `--narrate-client-limit` / `--narrate-allow-bbox`), `src/umbra_py/narrate.py`
+  (the existing narration it feeds), `tests/test_load.py`, `tests/test_serve.py`.
 
 The two model capabilities exist on the CLI/MCP surfaces
 (`umbra change --narrate` for a pair; `stack_stats` over a `to_stack` cube for a
@@ -51,14 +53,37 @@ reads it. What shipped, and what is left:
   cache-miss calls, `429` when spent). The key is the instance's, never a request
   field. What is still open, and gated on standing up a *public* instance (the
   §5.6 Umbra conversation first):
-  - **Per-client rate limiting.** The daily cap is global to the instance; an
-    open instance also wants a per-IP/token limit so one client cannot spend the
-    whole day's budget in a burst. `NarrationBudget` is where a keyed variant
-    would go.
-  - **A curated allowlist.** Live calls should be bounded to the archive the
-    showcase actually surfaces (a bbox/collection allowlist), so an open endpoint
-    cannot be pointed at arbitrary scenes to run up spend. Deferred until a public
-    instance exists to need it.
+  - ~~**Per-client rate limiting.**~~ **shipped** — `umbra serve
+    --narrate-client-limit N` caps live model calls *per client* per UTC day
+    (`ClientNarrationBudget`, keyed by `client_identity` — a bearer token, hashed
+    rather than stored, else the peer address), checked *before* the global
+    `NarrationBudget` so one caller cannot burst through the whole day's budget,
+    counted only on a cache-miss call, and answering a `429` that names the
+    per-client limit. What is still open, and smaller:
+    - **The peer address is the socket peer.** Behind a reverse proxy every
+      client reads as the proxy unless it is trusted to set a forwarded-for header
+      and uvicorn is run with `--proxy-headers`. `client_identity` deliberately
+      does *not* honour a client-settable `X-Forwarded-For` (which would make the
+      cap trivially evadable); a proxy that must be configured is the operator's
+      call. A bearer-token client is unaffected.
+    - **The tracking dict is bounded only by the daily reset.** A client rotating
+      tokens/addresses within a day grows `ClientNarrationBudget._counts` until
+      UTC midnight clears it. Fine at any real client count; if a public instance
+      ever meets an adversary minting identities, an LRU cap (evicting the
+      least-recently-seen, which frees at most one slot's worth of budget) is the
+      shape.
+  - ~~**A curated allowlist.**~~ **shipped** — `umbra serve --narrate-allow-bbox
+    min_lon,min_lat,max_lon,max_lat` (`NarrationAllowlist`) bounds the endpoint to
+    a curated area, refusing with `403` any scene whose footprint *centroid* falls
+    outside it — before the cache, either budget or the model, and *failing
+    closed* on a footprint-less scene. The centroid, not the footprint overlap, is
+    the test on purpose: a huge footprint clipping the corner of the area is not
+    *in* it. What is still open, and smaller:
+    - **It is a bbox, not the `bbox/collection` this entry sketched.** A single
+      rectangle is the shape a showcase's featured region has; a collection
+      allowlist (or a polygon, `--intersects`-style) waits for an instance whose
+      curated area is not a rectangle. `NarrationAllowlist` is a frozen dataclass
+      with room for the extra field.
   - **Async / job-queue narration.** The endpoint is synchronous (a model call is
     seconds, like a render); it deliberately does not take `"async": true`,
     because the budget accounting would have to cross the job worker. Wire it if a

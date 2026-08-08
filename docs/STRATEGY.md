@@ -832,10 +832,17 @@ this order:
   key held server-side and never a request field so no client can point one
   instance at another's model. It is the concrete form of the "hosted community
   instance" follow-on the `umbra serve` section in `TODO.md` flags — now with a
-  model-spend policy attached — and standing up a *public* instance on Umbra's
-  data or brand still sits behind the §6 guardrail (talk to them first) and wants
-  a per-client rate limit and a curated allowlist on top of the daily cap before
-  it faces the open internet (`TODO.md`).
+  model-spend policy attached — and the two guards a *public* instance wants on
+  top of the daily cap now ship too: `--narrate-client-limit N`
+  (`ClientNarrationBudget`, a per-client daily cap keyed by bearer token or peer
+  address, so one caller cannot burst through the whole budget) and
+  `--narrate-allow-bbox` (`NarrationAllowlist`, a curated area outside which a
+  scene is refused with `403`, so the endpoint cannot be pointed at arbitrary
+  scenes to run up spend). Both are the instance's policy rather than request
+  fields, advertised on the landing page's `narrate` link. Standing up a public
+  instance on Umbra's data or brand still sits behind the §6 guardrail (talk to
+  them first), but the endpoint no longer lacks the caps to face the open
+  internet.
 
 Priority: **both delivery modes are shipped.** Mode B (the live endpoint, the
 deterministic candidate selector `select_change_interval` / `best_change_interval`
@@ -848,9 +855,11 @@ these passes?" — also reached the two front doors that need no server:
 LlamaIndex tool, so a shell or an agent can chain scan → narrate without standing
 up `umbra serve` (both thin adapters over `best_change_interval`, so the surfaces
 cannot drift). **This closes the "bring the VLM to the browsing user" workstream.**
-What remains is only the *public-instance* hardening for a hosted Mode B
-(per-client rate limiting, a curated allowlist) and the §5.6 Umbra conversation.
-Fine-grained tasks are tracked in `TODO.md`.
+The *public-instance* hardening for a hosted Mode B (per-client rate limiting via
+`--narrate-client-limit`, a curated allowlist via `--narrate-allow-bbox`) has now
+shipped too, so what remains is only the operational act of standing up the public
+instance and the §5.6 Umbra conversation. Fine-grained tasks are tracked in
+`TODO.md`.
 
 **SAR-processing depth (was workstream 5.5)**
 
