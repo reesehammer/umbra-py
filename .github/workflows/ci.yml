@@ -97,8 +97,17 @@ jobs:
       - name: Install package with all extras
         run: uv pip install --system -e ".[dev,all,dask,mcp,serve,ai,langchain,llamaindex]"
 
+      # `--python-version 3.12` overrides the config's 3.10 target for this job
+      # only. numpy's shipped stubs use PEP 695 `type` statements, which mypy
+      # refuses to parse below a 3.12 target -- so checking the all-extras
+      # surface at 3.10 dies in numpy's `.pyi`, not in our code. The 3.10 floor
+      # that the py.typed promise is really about stays enforced on umbra-py's
+      # own annotations by the core `type-check` job above (which has no numpy);
+      # the `[attr-defined]`-class misuse this job exists to catch is
+      # target-independent, so nothing is lost by checking the stub surface at
+      # 3.12.
       - name: Type check (all extras)
-        run: mypy
+        run: mypy --python-version 3.12
 
   # The core matrix installs only [dev], so every test needing an optional
   # extra (viz / load / convert / export) importorskips there — silently.

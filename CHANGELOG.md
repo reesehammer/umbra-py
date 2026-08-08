@@ -20,9 +20,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own internals reference, runtime-identical, and clean in *both* environments —
   a `cast`/`# type: ignore` would have been redundant in whichever install made
   it so, tripping `warn_unused_ignores`/`warn_redundant_casts`), and a new
-  `type-check-all-extras` CI job runs the same mypy with all extras installed —
-  the type-check mirror of `test-all-extras` — so this class of drift is caught
-  at the root rather than rediscovered by the next agent.
+  `type-check-all-extras` CI job runs mypy with all extras installed (at the
+  3.12 target numpy's PEP 695 stubs require; the core `type-check` job keeps
+  umbra-py's own annotations checked at the real 3.10 floor) — the type-check
+  mirror of `test-all-extras` — so this class of drift is caught at the root
+  rather than rediscovered by the next agent.
 - **Retry a model endpoint's transient failures and surface its real error
   message (`_http.py`, `describe.py`, `planner.py`).** The model POST was a plain
   request that raised only on HTTP ≥ 400 and reported nothing but the status.
