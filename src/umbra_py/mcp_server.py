@@ -170,6 +170,29 @@ def _require_same_polarization(items: list[UmbraItem]) -> None:
         )
 
 
+def _polarization_advisory(items: list[UmbraItem]) -> str | None:
+    """Warn when a composite's same-polarization property could not be *verified*.
+
+    :func:`_require_same_polarization` refuses a *visible* mix -- two passes whose
+    known polarizations differ. What it cannot see is a pass that carries no
+    ``sar:polarizations`` metadata at all: the composite still renders, but whether
+    every pass measured the same scattering is then unknown, and an HH-vs-VV mix
+    would read as false change. Return an advisory naming that gap so an agent
+    handed the picture also sees why it may be suspect (design principle: images
+    are the API -- return the artifact *with its provenance*), or ``None`` when
+    every pass declares one and the same polarization.
+    """
+    missing = sum(1 for item in items if not item.polarizations)
+    if missing:
+        return (
+            f"Caution: {missing} of {len(items)} pass(es) carry no polarization "
+            "metadata, so umbra-py could not verify they share one polarization. "
+            "An HH-vs-VV mix would read as false change; confirm the passes match "
+            "before trusting this composite."
+        )
+    return None
+
+
 def _resolve_semantic_area(
     query: str, *, top_k: int = 5, min_score: float = 0.0, model: str | None = None
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -450,7 +473,9 @@ def change_composite(
     order. Colors encode change: bright green = signal appeared after the first
     date, magenta = signal vanished, grey = unchanged. Refuses to mix
     polarizations (HH vs VV are not comparable). Returns the image block plus a
-    caption naming the color semantics and attribution.
+    caption naming the color semantics and attribution -- and, when a pass carries
+    no polarization metadata so same-polarization could not be *verified*, a
+    structured caution text block naming that gap.
     """
     _, Image = _require_mcp()
     from . import viz
@@ -464,7 +489,12 @@ def change_composite(
         "Change composite (green = appeared, magenta = vanished, grey = "
         f"unchanged) over {len(items)} passes. {ATTRIBUTION}"
     )
-    return [Image(data=_png_bytes(image), format="png"), caption]
+    blocks: list[Any] = [Image(data=_png_bytes(image), format="png")]
+    advisory = _polarization_advisory(items)
+    if advisory:
+        blocks.append(advisory)
+    blocks.append(caption)
+    return blocks
 
 
 def timescan(

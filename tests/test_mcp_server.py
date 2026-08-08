@@ -318,6 +318,70 @@ def test_change_composite_refuses_mixed_polarization(sample_item_dict):
         ms.change_composite([vv_url, hh_url])
 
 
+def _without_polarization(base: dict) -> dict:
+    item = copy.deepcopy(base)
+    item["properties"].pop("sar:polarizations", None)
+    return item
+
+
+@responses.activate
+def test_change_composite_warns_when_polarization_unverifiable(sample_item_dict, monkeypatch):
+    """A pass with no polarization metadata is not a *visible* mix, so the render
+    is not refused -- but same-polarization then can't be verified, so the tool
+    rides a structured caution block alongside the picture rather than handing
+    back a possibly-suspect composite with no signal."""
+    from PIL import Image as PILImage
+
+    import umbra_py.viz as viz
+
+    vv_url = ITEM_URL
+    blank_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, vv_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, blank_url, json=_without_polarization(sample_item_dict), status=200
+    )
+    monkeypatch.setattr(
+        viz, "change_composite", lambda items, **kw: PILImage.new("RGB", (4, 4), (1, 2, 3))
+    )
+
+    out = ms.change_composite([vv_url, blank_url])
+
+    assert isinstance(out[0], Image)  # the picture still ships
+    texts = [b for b in out[1:] if isinstance(b, str)]
+    advisory = next(t for t in texts if "could not verify" in t)
+    assert "1 of 2" in advisory
+    assert out[-1].endswith(ms.ATTRIBUTION)  # the caption (with attribution) stays last
+
+
+@responses.activate
+def test_change_composite_no_advisory_when_polarization_verified(sample_item_dict, monkeypatch):
+    """When every pass declares one and the same polarization the composite is
+    fully verified, so no caution block is added and the shape is image + caption."""
+    from PIL import Image as PILImage
+
+    import umbra_py.viz as viz
+
+    first_url = ITEM_URL
+    second_url = ITEM_URL.replace("item", "item2")
+    responses.add(
+        responses.GET, first_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    responses.add(
+        responses.GET, second_url, json=_with_polarization(sample_item_dict, "VV"), status=200
+    )
+    monkeypatch.setattr(
+        viz, "change_composite", lambda items, **kw: PILImage.new("RGB", (4, 4), (1, 2, 3))
+    )
+
+    out = ms.change_composite([first_url, second_url])
+
+    assert isinstance(out[0], Image)
+    assert len(out) == 2  # image + caption, no advisory
+    assert out[1].endswith(ms.ATTRIBUTION)
+
+
 @responses.activate
 def test_stack_stats_measures_the_series_in_numbers(sample_item_dict, monkeypatch):
     """The quantitative counterpart to the render tools: JSON, no model, no image."""

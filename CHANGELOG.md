@@ -52,6 +52,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in CI: the featured composites rendered but every reading was skipped on a 402.
 
 ### Added
+- **Ride a structured polarization-caution block alongside a `change_composite`
+  MCP picture when same-polarization could not be *verified* (`mcp_server.py`).**
+  `_require_same_polarization` refuses a *visible* mix — two passes whose known
+  polarizations differ, HH vs VV measuring different scattering — before any
+  render. What it could not see is a pass that carries no `sar:polarizations`
+  metadata at all: the composite rendered and the agent got a picture with no
+  signal that whether every pass measured the same scattering was *unknown*, even
+  though an HH-vs-VV mix there would read as false change. The tool now returns an
+  advisory text block (`_polarization_advisory`) beside the image whenever a pass
+  lacks the metadata — "N of M pass(es) carry no polarization metadata, so
+  umbra-py could not verify they share one polarization" — so an agent handed the
+  composite also sees why it may be suspect (design principle: images are the API
+  — return the artifact *with its provenance*, and agents are users). A fully
+  verified selection (every pass declaring one and the same polarization) is
+  unchanged: image + caption, no caution. The caption, which carries the CC-BY
+  attribution, stays last.
 - **Carry the speckle detection floor into `stack_stats`'s spatial breakdown, so
   a `blocks=N` grid says which *block* stands clear of speckle — not only whether
   the cube does (`load.py`, `docs/schemas/stack-stats.schema.json`).** The
