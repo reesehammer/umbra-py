@@ -1252,9 +1252,15 @@ What is still open:
   dated one, but nothing notices when the registry publishes a newer one. That
   is the right default — an unpinned schema is not reproducible — and the
   network-marked validation test is what would catch the pin going stale.
-- **`change_composite` drops its polarization-mixing warning.** Returning that
-  warning as structured text alongside the image block would let an agent see
-  why a composite is suspect instead of only handing back the picture.
+- ~~**`change_composite` drops its polarization-mixing warning.**~~ **shipped** —
+  `_require_same_polarization` refuses a *visible* mix (two passes whose known
+  polarizations differ) before any render, but could not see a pass carrying no
+  `sar:polarizations` metadata, so it composited and handed the agent a picture
+  with no signal that same-polarization was *unverified* — where an HH-vs-VV mix
+  would read as false change. `change_composite` now rides a structured caution
+  text block (`_polarization_advisory`) beside the image whenever a pass lacks the
+  metadata, naming the gap, and leaves a fully verified selection (image +
+  caption) unchanged. The caption, which carries the attribution, stays last.
 
 ---
 
