@@ -183,10 +183,17 @@ extend-immutable-calls = ["fastapi.Query", "fastapi.Body", "fastapi.Path", "fast
 [tool.mypy]
 # The package ships a py.typed marker (PEP 561), so downstream type checkers
 # consume these inline annotations -- this config makes CI verify they are
-# actually consistent, rather than shipping an unchecked promise. It runs
-# against a core install: the optional third-party libraries behind the extras
-# (rasterio, fastapi, sarpy, folium, PIL, click, mcp, ...) ship no stubs, so
-# their imports are ignored and only umbra-py's own types are checked.
+# actually consistent, rather than shipping an unchecked promise. CI runs it in
+# two environments (the `type-check` and `type-check-all-extras` jobs), the same
+# core-vs-everything split the `test` / `test-all-extras` jobs use: on a core
+# [dev] install the extras' libraries are absent and import-ignored, while an
+# all-extras install brings the ones that *do* ship stubs (PIL, click, numpy)
+# into the check -- which is the surface a dev/agent environment actually sees.
+# Because the same config runs both ways, an ignore that is needed in one is
+# redundant in the other (`warn_unused_ignores` below would flag it), so prefer
+# referencing a real typed attribute (e.g. `Image.Palette.ADAPTIVE`) over a
+# `# type: ignore` for a stub-bearing extra. The rest -- rasterio, fastapi,
+# sarpy, folium, mcp, ... -- ship no stubs and stay import-ignored either way.
 python_version = "3.10"
 files = ["src/umbra_py"]
 ignore_missing_imports = true

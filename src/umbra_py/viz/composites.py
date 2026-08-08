@@ -551,7 +551,7 @@ def save_change_animation(
     # Quantize to a palette first: Pillow's multi-frame GIF writer silently
     # collapses RGB ``append_images`` to a single frame, but writes every
     # palette-mode frame.
-    paletted = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in frames]
+    paletted = [f.convert("P", palette=Image.Palette.ADAPTIVE, colors=256) for f in frames]
     paletted[0].save(
         str(dest),
         save_all=True,
