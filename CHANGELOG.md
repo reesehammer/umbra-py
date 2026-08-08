@@ -52,6 +52,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in CI: the featured composites rendered but every reading was skipped on a 402.
 
 ### Added
+- **Harden the live narration endpoint (Mode B) for a public instance:
+  per-client rate limiting and a curated allowlist (`serve.py`,
+  `cli/explore.py`).** `POST /artifacts/narrate` is an *unauthenticated proxy
+  over the operator's model budget*, and its only guards were a content-addressed
+  cache and a single instance-wide daily cap — so one client could burst through
+  the whole day's budget, and the endpoint could be pointed at any scene in the
+  archive to run up spend. Both were named in `STRATEGY.md` §8 / `TODO.md` as
+  what stands between the shipped local endpoint and a public one. This adds the
+  two: `umbra serve --narrate-client-limit N` caps live model calls *per client*
+  per UTC day (`ClientNarrationBudget`, keyed by `client_identity` — a bearer
+  token when present, hashed rather than stored, else the peer address), checked
+  before the global cap so a single caller cannot drain it and answering a `429`
+  that names the per-client limit; and `umbra serve --narrate-allow-bbox
+  min_lon,min_lat,max_lon,max_lat` bounds the endpoint to a curated area
+  (`NarrationAllowlist`), refusing with `403` any scene whose footprint centroid
+  falls outside it — before the cache, either budget or the model, and *failing
+  closed* on a scene whose footprint is unknown. Both caps count only calls that
+  reach the model, so a cache hit is spared, and both reset at UTC midnight like
+  the global one. Neither is a request field — they are the instance's policy,
+  like the model and its key — and all three (the daily cap, the per-client cap,
+  the allowed bbox) are advertised on the landing page's `narrate` link under
+  `umbra:options` (`narrate_capabilities`, mirroring the `stats` link's
+  `stats_capabilities`), so a client reads an instance's spend policy from `/`
+  rather than by tripping a `403`/`429`. Unbounded by default (opt-in like the
+  endpoint itself), so an existing instance is unchanged.
 - **Bake precomputed change narrations into the static showcase (Mode A):
   `umbra showcase --narrate` (`showcase.py`, `cli/explore.py`, `docs.yml`).**
   The VLM "what changed here?" reading existed only behind a live

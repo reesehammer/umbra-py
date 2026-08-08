@@ -2232,7 +2232,15 @@ class _NarrateRecorder:
         ).encode("utf-8")
 
 
-def _narrate_app(index_path, tmp_path, *, narrate_render, daily_limit=None):
+def _narrate_app(
+    index_path,
+    tmp_path,
+    *,
+    narrate_render,
+    daily_limit=None,
+    client_limit=None,
+    allow_bbox=None,
+):
     base = serve.default_renderers()
     rends = serve.Renderers(
         quicklook=base.quicklook,
@@ -2246,6 +2254,8 @@ def _narrate_app(index_path, tmp_path, *, narrate_render, daily_limit=None):
         index_path,
         renderers=rends,
         narration_daily_limit=daily_limit,
+        narration_client_limit=client_limit,
+        narration_allow_bbox=allow_bbox,
         cache_dir=tmp_path / "artifacts",
     )
 
@@ -2271,6 +2281,73 @@ def test_narration_budget_caps_per_day_and_is_unlimited_when_unset():
     unlimited = serve.NarrationBudget(None)
     assert all(unlimited.reserve() for _ in range(5))
     assert unlimited.remaining() is None
+
+
+def test_client_narration_budget_is_per_client_and_unlimited_when_unset():
+    budget = serve.ClientNarrationBudget(2)
+    # Each client gets its own count of two; one client's spend never touches
+    # another's, which is the whole point of the per-client cap.
+    assert budget.reserve("a") and budget.reserve("a")
+    assert not budget.reserve("a")
+    assert budget.remaining("a") == 0
+    assert budget.reserve("b")  # a fresh client is unaffected by "a"
+    assert budget.remaining("b") == 1
+    unlimited = serve.ClientNarrationBudget(None)
+    assert all(unlimited.reserve("a") for _ in range(5))
+    assert unlimited.remaining("a") is None
+
+
+def test_client_identity_prefers_bearer_token_then_peer_address():
+    class _Req:
+        def __init__(self, headers, host):
+            self.headers = headers
+            self.client = type("C", (), {"host": host})() if host else None
+
+    # A bearer token identifies the caller and is hashed, not stored verbatim.
+    tok = serve.client_identity(_Req({"authorization": "Bearer secret-xyz"}, "1.2.3.4"))
+    assert tok.startswith("token:") and "secret-xyz" not in tok
+    # Same token -> same identity; different token -> different identity.
+    assert tok == serve.client_identity(_Req({"authorization": "Bearer secret-xyz"}, "9.9.9.9"))
+    assert tok != serve.client_identity(_Req({"authorization": "Bearer other"}, "1.2.3.4"))
+    # No token falls back to the peer address; an unknown peer is still a key.
+    assert serve.client_identity(_Req({}, "1.2.3.4")) == "ip:1.2.3.4"
+    assert serve.client_identity(_Req({}, None)) == "ip:unknown"
+
+
+def test_narration_allowlist_uses_the_footprint_centroid_and_fails_closed(sample_item_dict):
+    from umbra_py.models import UmbraItem
+
+    item = UmbraItem.from_dict(sample_item_dict, href=_href(0))
+    assert item.bbox is not None
+    cx = (item.bbox[0] + item.bbox[2]) / 2.0
+    # Unbounded permits everything, including a footprint-less item.
+    assert serve.NarrationAllowlist().permits(item)
+    # A box around the centroid permits; a distant one refuses.
+    around = serve.NarrationAllowlist((cx - 1, item.bbox[1] - 1, cx + 1, item.bbox[3] + 1))
+    assert around.permits(item) and around.disallowed([item]) is None
+    away = serve.NarrationAllowlist((cx + 10, 0.0, cx + 11, 1.0))
+    assert not away.permits(item)
+    assert away.disallowed([item]) is item
+    # An item with no footprint cannot be shown to be inside -> refused.
+    blind = UmbraItem(id="x", geometry=None, bbox=None)
+    assert not around.permits(blind)
+
+
+def test_narrate_capabilities_reports_the_instance_policy():
+    caps = serve.narrate_capabilities(
+        serve.NarrationAllowlist((1.0, 2.0, 3.0, 4.0)), daily_limit=10, client_limit=2
+    )
+    assert caps == {
+        "allowed_bbox": [1.0, 2.0, 3.0, 4.0],
+        "daily_limit": 10,
+        "client_daily_limit": 2,
+    }
+    # Unbounded is None everywhere, not omitted -- a client reads three fields.
+    assert serve.narrate_capabilities() == {
+        "allowed_bbox": None,
+        "daily_limit": None,
+        "client_daily_limit": None,
+    }
 
 
 # ---- the endpoint --------------------------------------------------------
@@ -2336,6 +2413,80 @@ def test_narrate_budget_returns_429_and_spares_cache_hits(index_path, tmp_path):
     refused = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-2"]})
     assert refused.status_code == 429
     assert rec.calls == 1
+
+
+def test_narrate_per_client_budget_isolates_and_spares_other_clients(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    app = _narrate_app(index_path, tmp_path, narrate_render=rec.render, client_limit=1)
+    client = TestClient(app, raise_server_exceptions=False)
+    a = {"Authorization": "Bearer client-a"}
+    b = {"Authorization": "Bearer client-b"}
+
+    # Client A spends its one allowed call...
+    assert (
+        client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]}, headers=a).status_code
+        == 200
+    )
+    # ...and its next *uncached* call is refused with the per-client message.
+    refused = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-2"]}, headers=a)
+    assert refused.status_code == 429
+    assert "per-client" in refused.json()["detail"]
+    # A cache hit is spared even at the per-client cap (it spends nothing).
+    hit = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]}, headers=a)
+    assert hit.status_code == 200 and hit.headers["X-Umbra-Cache"] == "hit"
+    # Client B has its own budget -- A's spend never touched it.
+    assert (
+        client.post("/artifacts/narrate", json={"ids": ["item-0", "item-2"]}, headers=b).status_code
+        == 200
+    )
+    assert rec.calls == 2
+
+
+def test_narrate_allowlist_refuses_scenes_outside_the_area_before_spending(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    # The sample item sits near (-68, 10.5); a box far away permits nothing.
+    app = _narrate_app(
+        index_path,
+        tmp_path,
+        narrate_render=rec.render,
+        allow_bbox=(0.0, 0.0, 1.0, 1.0),
+        daily_limit=1,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 403
+    assert "outside" in resp.json()["detail"]
+    # Refused before the model and before the budget: no call, cap untouched.
+    assert rec.calls == 0
+
+
+def test_narrate_allowlist_permits_scenes_inside_the_area(index_path, tmp_path):
+    rec = _NarrateRecorder()
+    app = _narrate_app(
+        index_path, tmp_path, narrate_render=rec.render, allow_bbox=(-69.0, 10.0, -67.0, 11.0)
+    )
+    client = TestClient(app)
+    resp = client.post("/artifacts/narrate", json={"ids": ["item-0", "item-1"]})
+    assert resp.status_code == 200
+    assert rec.calls == 1
+
+
+def test_narrate_link_advertises_the_spend_policy(index_path, tmp_path):
+    app = _narrate_app(
+        index_path,
+        tmp_path,
+        narrate_render=_NarrateRecorder().render,
+        daily_limit=10,
+        client_limit=2,
+        allow_bbox=(-69.0, 10.0, -67.0, 11.0),
+    )
+    link = next(
+        link_ for link_ in TestClient(app).get("/").json()["links"] if link_["rel"] == "narrate"
+    )
+    caps = link[serve.STATS_CAPABILITY_FIELD]
+    assert caps["daily_limit"] == 10
+    assert caps["client_daily_limit"] == 2
+    assert caps["allowed_bbox"] == [-69.0, 10.0, -67.0, 11.0]
 
 
 def test_narrate_needs_two_acquisitions(index_path, tmp_path):

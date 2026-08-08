@@ -502,6 +502,7 @@ def landing_page(
     artifacts: bool = False,
     stack_execution: StackExecution | None = None,
     narrate: bool = False,
+    narrate_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The STAC API landing page (a STAC ``Catalog`` with conformance + links).
 
@@ -516,6 +517,11 @@ def landing_page(
     a client learns whether ``windowed`` (and, historically, ``speckle_filter``)
     is available by reading the landing page rather than by sending a request and
     parsing the ``400``.
+
+    The ``narrate`` link does the same for the one endpoint that spends money:
+    when ``narrate_policy`` is given (:func:`narrate_capabilities`) it rides under
+    the same :data:`STATS_CAPABILITY_FIELD`, so a client reads an instance's spend
+    caps and area bound before a ``403``/``429`` teaches them the hard way.
     """
     base = base_url.rstrip("/")
     geojson = "application/geo+json"
@@ -597,6 +603,9 @@ def landing_page(
         # to a door that is shut. A visitor discovers "this instance can explain
         # its changes" from the landing page rather than by spending a request.
         if narrate:
+            narrate_extra: dict[str, Any] = {}
+            if narrate_policy is not None:
+                narrate_extra[STATS_CAPABILITY_FIELD] = dict(narrate_policy)
             links.append(
                 _link(
                     "narrate",
@@ -607,6 +616,7 @@ def landing_page(
                         "Vision-language narration of the change between two passes "
                         "(a longer series is scanned for the pair worth reading)"
                     ),
+                    **narrate_extra,
                 )
             )
     return {
@@ -1480,6 +1490,145 @@ class NarrationBudget:
             return max(0, self._limit - self._spent)
 
 
+def client_identity(request: Any) -> str:
+    """A stable, low-cardinality key for the per-client narration cap.
+
+    A ``Bearer`` token in the ``Authorization`` header identifies a caller more
+    precisely than an address does, so it wins when present -- it is hashed
+    rather than kept, since the budget only needs to tell clients apart, not hold
+    their secrets. Otherwise the immediate peer address (``request.client.host``)
+    is the key.
+
+    That address is the *socket* peer, so behind a reverse proxy every client
+    reads as the proxy unless the proxy is trusted to set a forwarded-for header
+    and uvicorn is run with ``--proxy-headers``. That is the operator's decision,
+    not this function's: honouring an ``X-Forwarded-For`` that an untrusted client
+    can forge would make the per-client cap trivially evadable, which is worse
+    than a proxy that must be configured to be believed.
+    """
+    auth = request.headers.get("authorization")
+    if auth:
+        scheme, _, token = auth.partition(" ")
+        token = token.strip()
+        if scheme.lower() == "bearer" and token:
+            return f"token:{hashlib.sha256(token.encode('utf-8')).hexdigest()[:16]}"
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None) if client is not None else None
+    return f"ip:{host or 'unknown'}"
+
+
+class ClientNarrationBudget:
+    """A per-client daily cap on *live* narrations, layered under the global one.
+
+    :class:`NarrationBudget` protects the operator's wallet in aggregate; this
+    protects it from a *single* client, so one caller cannot spend the whole
+    day's budget in a burst -- the hardening a public, unauthenticated instance
+    needs on top of the global cap. It is keyed by :func:`client_identity` (a
+    bearer token, else the peer address), counts only calls that reach the model
+    (a cache hit never consults it), and resets at UTC midnight like the global
+    cap. ``limit=None`` is unlimited -- the default, since like the endpoint
+    itself the per-client cap is opt-in (``umbra serve --narrate-client-limit N``).
+
+    Thread-safe (one lock over "roll the day, read the count, spend one"), and it
+    counts *attempts* for the reason the global budget does: a call that then
+    fails still cost something. The daily reset also bounds the tracking dict,
+    which is dropped whenever the day rolls over.
+    """
+
+    def __init__(self, limit: int | None = None) -> None:
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._day: date | None = None
+        self._counts: dict[str, int] = {}
+
+    def _roll(self, today: date) -> None:
+        if today != self._day:
+            self._day, self._counts = today, {}
+
+    def reserve(self, client: str) -> bool:
+        """Claim one narration for ``client`` today; ``False`` at their cap."""
+        if self._limit is None:
+            return True
+        today = datetime.now(tz=timezone.utc).date()
+        with self._lock:
+            self._roll(today)
+            spent = self._counts.get(client, 0)
+            if spent >= self._limit:
+                return False
+            self._counts[client] = spent + 1
+            return True
+
+    def remaining(self, client: str) -> int | None:
+        """How many narrations ``client``'s cap still allows (``None`` if unlimited)."""
+        if self._limit is None:
+            return None
+        today = datetime.now(tz=timezone.utc).date()
+        with self._lock:
+            self._roll(today)
+            return max(0, self._limit - self._counts.get(client, 0))
+
+
+@dataclass(frozen=True)
+class NarrationAllowlist:
+    """Which acquisitions a public narration endpoint will spend a model call on.
+
+    The narrate endpoint is an *unauthenticated proxy over the operator's model
+    budget*, so an open instance wants it bounded to the archive its showcase
+    actually surfaces rather than pointable at arbitrary scenes. ``bbox`` is that
+    bound: a ``(min_lon, min_lat, max_lon, max_lat)`` rectangle every narrated
+    frame's footprint centroid must fall inside. ``bbox=None`` (the default) is
+    no bound, since -- like the endpoint -- the allowlist is opt-in
+    (``umbra serve --narrate-allow-bbox min_lon,min_lat,max_lon,max_lat``).
+
+    The centroid, not the footprint, is the test on purpose: a scene whose large
+    footprint merely clips the corner of the allowed area is not *in* it, and a
+    frame whose footprint is unknown cannot be shown to be inside, so it is
+    refused -- an open wallet fails closed.
+    """
+
+    bbox: BBox | None = None
+
+    def permits(self, item: UmbraItem) -> bool:
+        """Whether ``item`` sits inside the allowed area (always, if unbounded)."""
+        if self.bbox is None:
+            return True
+        if item.bbox is None:
+            return False
+        cx = (item.bbox[0] + item.bbox[2]) / 2.0
+        cy = (item.bbox[1] + item.bbox[3]) / 2.0
+        min_lon, min_lat, max_lon, max_lat = self.bbox
+        return min_lon <= cx <= max_lon and min_lat <= cy <= max_lat
+
+    def disallowed(self, frames: Sequence[UmbraItem]) -> UmbraItem | None:
+        """The first frame outside the allowed area, or ``None`` if all pass."""
+        if self.bbox is None:
+            return None
+        return next((it for it in frames if not self.permits(it)), None)
+
+
+def narrate_capabilities(
+    allowlist: NarrationAllowlist | None = None,
+    *,
+    daily_limit: int | None = None,
+    client_limit: int | None = None,
+) -> dict[str, Any]:
+    """The narrate endpoint's spend policy, for the landing page to advertise.
+
+    Mirrors :func:`stats_capabilities`: the ``narrate`` link carries this under
+    :data:`STATS_CAPABILITY_FIELD` so a client discovers an instance's spend caps
+    and area bound by reading ``/`` rather than by sending a request that a
+    ``403``/``429`` then refuses. Every field is a *policy* the operator set, not
+    a request option -- the model, its key and these bounds are the instance's,
+    never a client's to send.
+    """
+    allowed = allowlist.bbox if allowlist is not None else None
+    return {
+        "allowed_bbox": list(allowed) if allowed is not None else None,
+        "daily_limit": daily_limit,
+        "client_daily_limit": client_limit,
+    }
+
+
 def artifact_cache_key(kind: str, item_ids: Sequence[str], options: Mapping[str, Any]) -> str:
     """A stable content hash for a render request.
 
@@ -1889,6 +2038,8 @@ def build_app(
     stack_execution: StackExecution | None = None,
     narrator: Any | None = None,
     narration_daily_limit: int | None = None,
+    narration_client_limit: int | None = None,
+    narration_allow_bbox: BBox | None = None,
     cache_dir: str | os.PathLike | None = None,
     job_executor: Any | None = None,
 ) -> FastAPI:
@@ -1910,6 +2061,13 @@ def build_app(
     instance-wide policy for how ``POST /artifacts/stats`` builds its datacube
     (:class:`StackExecution`) and applies only to the default renderers, since
     injected ones do their own stacking.
+    The narrate endpoint's spend is bounded by three optional policies:
+    ``narration_daily_limit`` (the instance-wide model-call cap),
+    ``narration_client_limit`` (the same cap per client, so no single caller
+    bursts through the day's budget), and ``narration_allow_bbox`` (a curated
+    ``(min_lon, min_lat, max_lon, max_lat)`` area outside which the endpoint
+    refuses to spend at all). All three are ``None`` (unbounded) by default and
+    are advertised on the landing page's ``narrate`` link.
     ``cache_dir`` overrides where rendered PNGs are cached (defaults to
     :func:`default_artifact_cache_dir`). ``job_executor`` overrides the
     background runner for async jobs (anything with ``submit(fn)`` / ``shutdown``,
@@ -1932,9 +2090,19 @@ def build_app(
     if renderers is None:
         renderers = default_renderers(stack_execution, narrator=narrator)
     cache_path = Path(cache_dir) if cache_dir is not None else default_artifact_cache_dir()
-    # The paid-call cap for the narrate endpoint. Only consulted on a cache miss
-    # (see ``post_narrate``), so a cached narration never spends against it.
+    # The paid-call caps for the narrate endpoint. Both are consulted only on a
+    # cache miss (see ``post_narrate``), so a cached narration never spends
+    # against either: the global one protects the operator's wallet in aggregate,
+    # the per-client one stops a single caller bursting through it. The allowlist
+    # bounds *which* scenes a (possibly public) instance will spend on at all.
     narration_budget = NarrationBudget(narration_daily_limit)
+    client_narration_budget = ClientNarrationBudget(narration_client_limit)
+    narration_allowlist = NarrationAllowlist(narration_allow_bbox)
+    narration_policy = narrate_capabilities(
+        narration_allowlist,
+        daily_limit=narration_daily_limit,
+        client_limit=narration_client_limit,
+    )
 
     # Async render jobs: an in-memory registry + a background runner. Both are
     # created only when artifacts are enabled; the executor is injectable so a
@@ -2013,6 +2181,7 @@ def build_app(
             artifacts=artifacts,
             stack_execution=stack_execution,
             narrate=renderers.narrate is not None,
+            narrate_policy=narration_policy,
         )
 
     @app.get("/conformance", tags=["STAC"])
@@ -2739,7 +2908,14 @@ def build_app(
                     ),
                     "content": {"application/json": {}},
                 },
-                429: {"description": "The instance's daily narration budget is exhausted."},
+                403: {
+                    "description": "The requested scene is outside the instance's narration area."
+                },
+                429: {
+                    "description": (
+                        "The instance's daily (or per-client) narration budget is exhausted."
+                    )
+                },
                 501: {"description": "Narration is not enabled on this instance."},
             },
         )
@@ -2794,8 +2970,24 @@ def build_app(
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+            # Policy first: a (possibly public) narrate endpoint is an
+            # unauthenticated proxy over the operator's model budget, so an
+            # instance may bound *which* scenes it will spend on. A frame outside
+            # the allowed area is refused before the cache, the budgets and the
+            # model -- it is not a request this instance answers at all.
+            outside = narration_allowlist.disallowed(frames)
+            if outside is not None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Acquisition {outside.id!r} is outside this instance's "
+                        "narration area. This endpoint is bounded to a curated region; "
+                        "narrate a site within it."
+                    ),
+                )
+
             # A cache hit costs no model call, so it is served before -- and
-            # without touching -- the budget. Only a miss is about to spend.
+            # without touching -- either budget. Only a miss is about to spend.
             key = artifact_cache_key("narrate", [it.id for it in frames], options)
             cached = _cache_file(key, "json")
             if cached.exists():
@@ -2803,6 +2995,19 @@ def build_app(
                     content=cached.read_bytes(),
                     media_type="application/json",
                     headers={"X-Umbra-Cache": "hit"},
+                )
+            # Fairness before the wallet: the per-client cap gates a single caller
+            # first, so one client cannot burst through the whole instance's daily
+            # budget. Keyed by bearer token, else peer address, and counted only
+            # here -- on a miss that is about to spend.
+            if not client_narration_budget.reserve(client_identity(request)):
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "You have reached this instance's per-client daily narration "
+                        "limit. Try again tomorrow, or ask the operator to raise "
+                        "--narrate-client-limit."
+                    ),
                 )
             if not narration_budget.reserve():
                 raise HTTPException(
@@ -2911,6 +3116,8 @@ def serve(
     stack_execution: StackExecution | None = None,
     narrator: Any | None = None,
     narration_daily_limit: int | None = None,
+    narration_client_limit: int | None = None,
+    narration_allow_bbox: BBox | None = None,
     cache_dir: str | os.PathLike | None = None,
     log_level: str = "info",
 ) -> None:
@@ -2932,6 +3139,8 @@ def serve(
         stack_execution=stack_execution,
         narrator=narrator,
         narration_daily_limit=narration_daily_limit,
+        narration_client_limit=narration_client_limit,
+        narration_allow_bbox=narration_allow_bbox,
         cache_dir=cache_dir,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level)
