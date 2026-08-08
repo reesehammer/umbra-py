@@ -840,8 +840,11 @@ of looks before and after. Follow-ons, none a blocker:
   `_DETECTION_MAX_LOOKS`, `_DETECTION_MAX_THRESHOLD_DB`, `_DB_PER_NEPER`,
   `_speckle_change_sigma_db`, `_speckle_false_alarm`, `_detection_threshold_db`,
   `_LooksAccum`, `_detection_floor`, the two caveats and the `looks` field on
-  both measurement walks), `docs/schemas/stack-stats.schema.json`
-  (`$defs/detection`, `$defs/pass.looks`), `tests/test_specfun.py`.
+  both measurement walks, and — for the per-block floor — the `detection=`
+  parameter on `_spatial_breakdown`, each block's `detection` sub-record and
+  `peak_block.stands_clear`), `docs/schemas/stack-stats.schema.json`
+  (`$defs/detection`, `$defs/blockDetection`, `$defs/pass.looks`,
+  `$defs/peakBlock.stands_clear`), `tests/test_specfun.py`.
 
 `stack_stats` reports what speckle alone would have done to the change it just
 measured: each pass's `looks` read off the cube's own blocks, and a `detection`
@@ -869,12 +872,34 @@ cube of two realisations of one unchanged surface. Follow-ons, none a blocker:
   looks in the unequal-shape form `regularized_incomplete_beta` already supports.
   It waits for a consumer, since the threshold it would be reported against is
   one number for the whole cube.
-- **The floor does not reach `spatial`.** A block's `changed_fraction` is
-  measured over far fewer cells than the scene's, so the same floor applies but
-  the observed share is much noisier around it — quoting the scene's floor per
-  block would invite reading a block's excess as a finding when it is sampling.
-  The natural form is the floor plus that block's cell count; it wants someone
-  asking which *block* stands clear rather than which cube.
+- ~~**The floor does not reach `spatial`.**~~ **shipped** — a `blocks=N`
+  breakdown now carries the floor per block: each block that had two comparable
+  passes gets a `detection` sub-record — the cube-wide per-cell
+  `false_alarm_fraction`, the block's own `compared_cells`, and whether its net
+  `changed_fraction` `stands_clear` of the floor by the same
+  `DETECTION_EXCESS_WARN` margin the cube-level advisory uses — and `peak_block`
+  gains a `stands_clear` so the headline mover carries its own verdict (the
+  biggest block-mover can still sit inside the floor, which is exactly the case a
+  reader needs told). The shape is the one this entry sketched, "the floor plus
+  that block's cell count", and the cell count travels *with* the flag on purpose:
+  the floor is an exact per-cell expectation whatever a block's size, but a block
+  is measured over far fewer cells than the scene, so its observed share scatters
+  more widely around it — a bare `stands_clear` would be the "reading a block's
+  excess as a finding when it is sampling" trap this entry named, so the caveat
+  and the block record both say to read `stands_clear` together with
+  `compared_cells`. It closes the loop the summary already advertised: the
+  "does not stand clear … read the spatial breakdown for a block where the change
+  does" caveat now points at a breakdown that carries the floor it names. What is
+  still open, and smaller:
+  - **The block flag is the margin heuristic, not a significance test.** It
+    reuses `DETECTION_EXCESS_WARN` exactly as the cube-level `stands_clear` does,
+    so it inherits the same limit named in the "per cell / correlated cells"
+    entry above: a proper per-block significance test needs an independent-cell
+    count nothing here measures (the block's `compared_cells` overstates it for an
+    oversampled product), and an independent-cell binomial would be
+    anti-conservative in exactly the wrong direction. Exposing the cell count is
+    the honest half that can ship without it; the significance test waits for the
+    same autocorrelation read `looks` does.
 - ~~**Nothing reports the floor on the composite path.**~~ **shipped** —
   `umbra change --narrate` quotes a signed dB delta per block and grounds a model
   on it, which is the other surface where "is this bigger than speckle?" is the

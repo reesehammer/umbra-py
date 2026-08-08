@@ -290,7 +290,7 @@
     },
     "spatial": {
       "type": "object",
-      "description": "The site cut into a coarse grid, so a change has a place as well as a size.",
+      "description": "The site cut into a coarse grid, so a change has a place as well as a size — and, when the cube carried a speckle `detection` floor, whether each block's change stands clear of it.",
       "required": [
         "grid_rows",
         "grid_cols",
@@ -371,6 +371,10 @@
           "oneOf": [{ "$ref": "#/$defs/interval" }, { "type": "null" }],
           "description": "The consecutive pair of passes this block moved most between — its \"when\" answer. Null where no step could be measured."
         },
+        "detection": {
+          "$ref": "#/$defs/blockDetection",
+          "description": "How this block's net change weighs against the cube's speckle floor. Present only when the cube carried a `detection` floor and this block had two comparable passes; absent otherwise."
+        },
         "series": {
           "type": "array",
           "description": "Every consecutive step, oldest first, that `peak_interval` was picked from. Present only under `block_series=True`, which is what tells a steady drift apart from a single step.",
@@ -409,6 +413,33 @@
         "direction": { "enum": ["brighter", "dimmer"] },
         "peak_interval": {
           "oneOf": [{ "$ref": "#/$defs/interval" }, { "type": "null" }]
+        },
+        "stands_clear": {
+          "type": "boolean",
+          "description": "Whether the headline block's net `changed_fraction` stands clear of the cube's speckle floor by the same margin the cube-level advisory uses. Present only when the cube carried a `detection` floor. `false` says the biggest mover is still inside the floor — interference rather than change."
+        }
+      }
+    },
+    "blockDetection": {
+      "type": "object",
+      "description": "One block's net change weighed against the cube's speckle detection floor. The floor is a per-cell expectation (`detection.false_alarm_fraction`) and so is exact for a block of any size, but a block is measured over far fewer cells than the whole scene, so its observed `changed_fraction` scatters more widely around it — read `stands_clear` together with `compared_cells` rather than on its own.",
+      "required": ["false_alarm_fraction", "compared_cells", "stands_clear"],
+      "additionalProperties": false,
+      "properties": {
+        "false_alarm_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The cube-wide per-cell floor `detection.false_alarm_fraction`, repeated here so a block record can be weighed on its own. Read it against this block's `net_change.changed_fraction`."
+        },
+        "compared_cells": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The number of cells both compared passes observed in this block — the sample size behind its `changed_fraction`, and how far to trust `stands_clear`. Equal to `net_change.compared_cells`."
+        },
+        "stands_clear": {
+          "type": "boolean",
+          "description": "Whether this block's `net_change.changed_fraction` exceeds the floor by the same `DETECTION_EXCESS_WARN` margin the cube-level advisory uses. `false` means the block's change does not stand clear of what speckle produces here."
         }
       }
     }

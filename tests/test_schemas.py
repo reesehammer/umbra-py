@@ -268,6 +268,41 @@ def test_stack_stats_with_a_spatial_breakdown_validates(stack):
     _check("stack-stats.schema.json", stack_stats(cube, blocks=2, block_series=True))
 
 
+def test_stack_stats_spatial_per_block_detection_floor_validates(tmp_path):
+    """The per-block `detection` (and `peak_block.stands_clear`), which the flat
+    fixture never produces: a constant scene reads `looks: null` and so carries no
+    floor at any level. A speckled series gives the blocks a floor to weigh."""
+    pytest.importorskip("xarray")
+    np = pytest.importorskip("numpy")
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    from umbra_py import stack_stats, to_stack
+
+    items = []
+    for n in (1, 2):
+        path = tmp_path / f"speckle{n}.tif"
+        rng = np.random.default_rng(n)
+        profile = {
+            "driver": "GTiff",
+            "height": 128,
+            "width": 128,
+            "count": 1,
+            "dtype": "float32",
+            "crs": "EPSG:32633",
+            "transform": from_origin(500000.0, 4000000.0, 10.0, 10.0),
+        }
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(np.sqrt(rng.gamma(1.0, 1.0, (128, 128))).astype("float32"), 1)
+        items.append(_item(path, f"acq-{n}", f"2024-0{n}-08T12:00:00Z"))
+
+    summary = stack_stats(to_stack(items, max_size=128, crs="utm"), blocks=2)
+    block = summary["spatial"]["blocks"][0]
+    assert set(block["detection"]) == {"false_alarm_fraction", "compared_cells", "stands_clear"}
+    assert "stands_clear" in summary["spatial"]["peak_block"]
+    _check("stack-stats.schema.json", summary)
+
+
 def test_stack_stats_on_a_geographic_grid_validates(stack):
     # No projected CRS, so `cell_area_m2` and every `changed_area_km2` are null
     # -- the nullable half of the schema, which a projected cube never exercises.
