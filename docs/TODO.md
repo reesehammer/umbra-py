@@ -170,15 +170,20 @@ commands. It runs synchronously. Follow-ons that build on it, none a blocker:
   extras so nothing import-skips. If a maintainer only ever touches the core, a
   `[dev]`-only install (matching the core CI matrix) is faster; the full set is
   the deliberate default so the coverage-gated suite runs unabridged.
-- **`mypy` disagrees between the hook's environment and CI's.** Surfaced by the
-  `stack_stats` PR. CI's `type-check` job installs only `[dev]`, so Pillow is
-  absent and `[tool.mypy]`'s import-ignore covers it; the hook installs every
-  extra, so Pillow's stubs *are* checked and `viz/composites.py`'s `Image.ADAPTIVE`
-  reads as `[attr-defined]`. CI is green and the code is correct (`ADAPTIVE` is a
-  real Pillow constant the stubs place elsewhere), but every remote agent session
-  starts with one failing `mypy` line. Smallest fix: `cast` the constant or
-  narrow the ignore at that call site, so the documented dev loop is clean in
-  both environments.
+- ~~**`mypy` disagrees between the hook's environment and CI's.**~~ **shipped** —
+  the disagreement was that CI's `type-check` job installed only `[dev]`, so
+  Pillow was absent and import-ignored, while the hook (and `test-all-extras`)
+  install every extra, so Pillow's stubs *were* checked and
+  `viz/composites.py`'s `Image.ADAPTIVE` read as `[attr-defined]` — a failing
+  `mypy` line on every stubs-present dev/agent session even though CI was green.
+  Two changes close it at the root: the call site now references
+  `Image.Palette.ADAPTIVE` (the real typed attribute Pillow's own internals use,
+  clean under both environments — not a `cast`/`# type: ignore`, which
+  `warn_unused_ignores`/`warn_redundant_casts` would have flagged in whichever
+  environment made it redundant), and a new `type-check-all-extras` CI job runs
+  the same `mypy` with all extras installed, the type-check mirror of
+  `test-all-extras`, so a misuse of a stub-bearing extra fails a PR instead of
+  greeting the next agent session. See the CHANGELOG.
 
 ---
 

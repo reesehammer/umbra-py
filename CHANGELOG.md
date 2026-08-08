@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Type-check the all-extras surface in CI so a stub-bearing extra's misuse
+  fails a PR instead of every agent session (`viz/composites.py`, `ci.yml`,
+  `pyproject.toml`).** CI's `type-check` job installed only `[dev]`, so mypy
+  import-ignored every optional library and never saw a misuse of one that
+  *does* ship stubs. `viz/composites.py` called `Image.ADAPTIVE`, which Pillow's
+  stubs place on the `Image.Palette` enum rather than the module, so it was
+  invisible to CI (green) yet failed `[attr-defined]` on every environment with
+  Pillow present — the SessionStart hook's, `test-all-extras`', and every remote
+  coding-agent session, each of which opened with one failing `mypy` line. The
+  call site now uses `Image.Palette.ADAPTIVE` (the real typed attribute Pillow's
+  own internals reference, runtime-identical, and clean in *both* environments —
+  a `cast`/`# type: ignore` would have been redundant in whichever install made
+  it so, tripping `warn_unused_ignores`/`warn_redundant_casts`), and a new
+  `type-check-all-extras` CI job runs mypy with all extras installed (at the
+  3.12 target numpy's PEP 695 stubs require; the core `type-check` job keeps
+  umbra-py's own annotations checked at the real 3.10 floor) — the type-check
+  mirror of `test-all-extras` — so this class of drift is caught at the root
+  rather than rediscovered by the next agent.
 - **Retry a model endpoint's transient failures and surface its real error
   message (`_http.py`, `describe.py`, `planner.py`).** The model POST was a plain
   request that raised only on HTTP ≥ 400 and reported nothing but the status.
