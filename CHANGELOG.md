@@ -52,6 +52,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in CI: the featured composites rendered but every reading was skipped on a 402.
 
 ### Added
+- **Carry the speckle detection floor into `stack_stats`'s spatial breakdown, so
+  a `blocks=N` grid says which *block* stands clear of speckle — not only whether
+  the cube does (`load.py`, `docs/schemas/stack-stats.schema.json`).** The
+  detection floor (what interference alone would produce, PRs #192/#193) was
+  scene-wide: it said whether the *cube* changed, while the flagship spatial
+  breakdown ("which part of a site moved") gave each block a `changed_fraction`
+  with no floor to weigh it against — so the very caveat that tells a reader to
+  "read the spatial breakdown for a block where the change stands clear" pointed
+  at a breakdown that could not answer. Now each block that had two comparable
+  passes carries a `detection` sub-record: the cube-wide per-cell
+  `false_alarm_fraction`, the block's own `compared_cells`, and whether its net
+  `changed_fraction` `stands_clear` of the floor by the same
+  `DETECTION_EXCESS_WARN` margin the cube-level advisory uses; and `peak_block`
+  gains a `stands_clear`, so the headline mover carries its own verdict — the
+  biggest block-mover can still sit inside the floor, which is exactly the case a
+  reader needs told. The cell count travels *with* the flag on purpose: the floor
+  is an exact per-cell expectation whatever a block's size, but a block is
+  measured over far fewer cells than the whole scene, so its observed share
+  scatters more widely around it — a bare `stands_clear` would invite reading a
+  block's excess as a finding when it is sampling, so the block record and a new
+  caveat both say to read `stands_clear` together with `compared_cells`. It is
+  the same one `to_dict()` reaching every surface (`umbra stack --stats`,
+  `POST /artifacts/stats`, the `stack_stats` agent tool) with no new request field
+  or flag, and the strict schema gains `$defs/blockDetection` (validated against a
+  speckled cube, since the constant-valued fixture reads `looks: null` and so
+  carries no floor at any level). Both fields are present only when the cube
+  carried a `detection` floor, so a cube too small to read looks is unchanged.
 - **Harden the live narration endpoint (Mode B) for a public instance:
   per-client rate limiting and a curated allowlist (`serve.py`,
   `cli/explore.py`).** `POST /artifacts/narrate` is an *unauthenticated proxy

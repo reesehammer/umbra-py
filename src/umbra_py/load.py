@@ -1885,6 +1885,7 @@ def _spatial_breakdown(
     transform: tuple[float, ...],
     crs_name: str,
     block_series: bool = False,
+    detection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Per-block change over the whole series — *where* it happened, and *when*.
 
@@ -1897,11 +1898,23 @@ def _spatial_breakdown(
 
     With ``block_series`` each block also keeps the *whole* consecutive sequence
     it was reduced from, not only its peak — the same records, none discarded.
+
+    When the cube carried a speckle ``detection`` floor, each block that had two
+    comparable passes carries its own ``detection``: the same cube-wide per-cell
+    ``false_alarm_fraction``, the block's own ``compared_cells``, and whether the
+    block's net ``changed_fraction`` ``stands_clear`` of the floor by the same
+    :data:`DETECTION_EXCESS_WARN` margin the cube-level advisory uses. The floor
+    is a per-cell expectation and so is exact for any block whatever its size; the
+    ``compared_cells`` is there because a block is measured over far fewer cells
+    than the scene, so its observed share scatters more widely around that floor —
+    the two are meant to be read together, which is why the cell count travels
+    with the flag rather than a bare boolean claiming a block "changed".
     """
     from .narrate import _compass_label  # noqa: PLC0415
 
     blocks = changes.blocks
     xres, _, xoff, _, yres, yoff = transform
+    floor = detection["false_alarm_fraction"] if detection is not None else None
     net_by_block = changes.net()
     steps_by_block = changes.steps()
 
@@ -1936,6 +1949,23 @@ def _spatial_breakdown(
                     "cells": int((rsl.stop - rsl.start) * (csl.stop - csl.start)),
                     "net_change": net,
                     "peak_interval": peak_interval,
+                    # Only when the cube has a floor and this block was compared:
+                    # the floor per block, with the block's own cell count so its
+                    # extra sampling scatter is visible rather than hidden behind
+                    # a bare stands_clear.
+                    **(
+                        {
+                            "detection": {
+                                "false_alarm_fraction": floor,
+                                "compared_cells": net["compared_cells"],
+                                "stands_clear": (
+                                    net["changed_fraction"] >= floor * DETECTION_EXCESS_WARN
+                                ),
+                            }
+                        }
+                        if floor is not None and net is not None
+                        else {}
+                    ),
                     # Only when asked: N x N blocks x (passes - 1) steps is the
                     # largest thing this reduction can emit.
                     **({"series": steps} if block_series else {}),
@@ -1960,6 +1990,16 @@ def _spatial_breakdown(
                 "mean_delta_db": peak["net_change"]["mean_delta_db"],
                 "direction": ("brighter" if peak["net_change"]["mean_delta_db"] >= 0 else "dimmer"),
                 "peak_interval": peak["peak_interval"],
+                # The headline block's own verdict: the biggest mover can still sit
+                # inside the floor, which is exactly what a reader needs told.
+                **(
+                    {
+                        "stands_clear": peak["net_change"]["changed_fraction"]
+                        >= floor * DETECTION_EXCESS_WARN
+                    }
+                    if floor is not None
+                    else {}
+                ),
             }
             if peak is not None
             else None
@@ -2676,6 +2716,20 @@ def stack_stats(
                 "or read the spatial breakdown (blocks=N) for a block where the change does "
                 "stand clear."
             )
+        if changes is not None:
+            # The spatial breakdown now carries this floor per block. Say what that
+            # does and does not license: the floor is exact per cell, but a block's
+            # share is measured over far fewer cells than the scene's, so it
+            # scatters more widely around it -- read a block's stands_clear together
+            # with its compared_cells rather than on its own.
+            caveats.append(
+                "The spatial breakdown weighs each block against this same floor "
+                "(blocks[i].detection.stands_clear, and peak_block.stands_clear for "
+                "the headline mover), but a block is measured over far fewer cells "
+                "than the whole scene, so its changed_fraction scatters more widely "
+                "around the floor -- read a block's stands_clear together with its "
+                "detection.compared_cells."
+            )
 
     summary: dict[str, Any] = {
         "count": len(passes),
@@ -2718,6 +2772,7 @@ def stack_stats(
             transform=tuple(cube.attrs["transform"]),
             crs_name=crs_name,
             block_series=block_series,
+            detection=detection,
         )
     return summary
 

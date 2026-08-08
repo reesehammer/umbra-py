@@ -1645,11 +1645,11 @@ def _without_estimates(summary):
     """A summary stripped of everything the two walks don't report identically.
 
     The percentiles, because ``windowed=True`` estimates them from a histogram;
-    and ``looks`` (with the ``detection`` floor derived from it, and the caveat
-    quoting both), because it is a median over 16-cell measuring blocks cut from
-    whatever array is in hand -- so a window narrower than a block finds none
-    where a whole slice finds several. Everything left is a count or a sum, and
-    those are exact either way.
+    and ``looks`` (with the ``detection`` floor derived from it, its per-block
+    echo in the spatial breakdown, and the caveats quoting both), because it is a
+    median over 16-cell measuring blocks cut from whatever array is in hand -- so
+    a window narrower than a block finds none where a whole slice finds several.
+    Everything left is a count or a sum, and those are exact either way.
     """
     import json
 
@@ -1660,8 +1660,18 @@ def _without_estimates(summary):
     trimmed.pop("quantile_method", None)
     trimmed.pop("quantile_bin_db", None)
     trimmed.pop("detection", None)
+    spatial = trimmed.get("spatial")
+    if spatial is not None:
+        for block in spatial["blocks"]:
+            block.pop("detection", None)
+        if spatial["peak_block"] is not None:
+            spatial["peak_block"].pop("stands_clear", None)
     trimmed["caveats"] = [
-        c for c in trimmed["caveats"] if "window by window" not in c and "Speckle alone" not in c
+        c
+        for c in trimmed["caveats"]
+        if "window by window" not in c
+        and "Speckle alone" not in c
+        and "spatial breakdown weighs each block" not in c
     ]
     return trimmed
 
@@ -3221,6 +3231,80 @@ def test_detection_is_absent_rather_than_null_when_there_is_nothing_to_weigh(tmp
     tiny = stack_stats(to_stack(items, max_size=8, crs="utm"))
     assert "detection" not in tiny
     assert all(record["looks"] is None for record in tiny["passes"])
+
+
+def test_the_spatial_breakdown_carries_the_floor_per_block(tmp_path):
+    """The floor reaches the blocks: the changed corner stands clear, the rest do not.
+
+    A cube of two single-look realisations of the same ground with only the
+    southeast quadrant brightened 25 dB. That corner is change no interference
+    accounts for; the other three quadrants are unchanged ground, where the
+    observed share is exactly what the floor predicts. So the SE block stands
+    clear and the NW one does not -- the per-block form of the same claim the
+    cube-level ``detection`` makes.
+    """
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    items = [
+        _stack_item(
+            _speckled_scene(tmp_path / "a.tif", seed=1),
+            "acq-1",
+            "2024-01-08T12:00:00Z",
+        ),
+        _stack_item(
+            _speckled_scene(tmp_path / "b.tif", seed=2, bright=25.0),
+            "acq-2",
+            "2024-02-08T12:00:00Z",
+        ),
+    ]
+    stats = stack_stats(to_stack(items, max_size=256, crs="utm"), blocks=2)
+    floor = stats["detection"]["false_alarm_fraction"]
+    spatial = stats["spatial"]
+
+    southeast = _block(spatial, 1, 1)
+    northwest = _block(spatial, 0, 0)
+    # The floor per block: the cube-wide per-cell rate, this block's own cell
+    # count, and the verdict weighed against them.
+    assert southeast["detection"]["false_alarm_fraction"] == floor
+    assert southeast["detection"]["compared_cells"] == southeast["net_change"]["compared_cells"]
+    assert southeast["detection"]["stands_clear"] is True
+    assert northwest["detection"]["stands_clear"] is False
+
+    # The headline block carries its own verdict, and here it is the real corner.
+    peak = spatial["peak_block"]
+    assert (peak["row"], peak["col"]) == (1, 1)
+    assert peak["stands_clear"] is True
+
+    # And the summary says how to read a per-block verdict rather than leaving it bare.
+    assert any("read a block's stands_clear" in c for c in stats["caveats"])
+
+
+def test_the_spatial_floor_flags_an_unchanged_headline(tmp_path):
+    """On ground that did not change, even the biggest block-mover is interference."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_speckled_pair(tmp_path), max_size=256, crs="utm"), blocks=2)
+    spatial = stats["spatial"]
+
+    # No block's change stands clear of the floor -- the true changed fraction is
+    # zero, so every flag is a false one, block by block as scene-wide.
+    assert not any(b["detection"]["stands_clear"] for b in spatial["blocks"])
+    assert spatial["peak_block"]["stands_clear"] is False
+
+
+def test_the_spatial_breakdown_has_no_per_block_floor_without_one(tmp_path):
+    """A cube too small to read looks has no floor, so its blocks carry none."""
+    pytest.importorskip("xarray")
+    from umbra_py import stack_stats, to_stack
+
+    stats = stack_stats(to_stack(_speckled_pair(tmp_path), max_size=8, crs="utm"), blocks=2)
+    assert "detection" not in stats
+    spatial = stats["spatial"]
+    assert all("detection" not in b for b in spatial["blocks"])
+    if spatial["peak_block"] is not None:
+        assert "stands_clear" not in spatial["peak_block"]
 
 
 # --- select_change_interval: which pair of a series is worth narrating ------

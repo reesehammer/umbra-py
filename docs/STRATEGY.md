@@ -1184,6 +1184,25 @@ instance and the §5.6 Umbra conversation. Fine-grained tasks are tracked in
   Because the document is one `to_dict()`, it reaches `umbra stack --stats`,
   `POST /artifacts/stats` and the `stack_stats` agent tool with no new request
   field and no new flag. See the CHANGELOG.
+  ~~**Open:** the floor was scene-wide — it said whether the *cube* changed, but
+  the flagship spatial breakdown (`blocks=N`, "which part of a site moved") gave
+  each block a `changed_fraction` and no floor to weigh it against, so the very
+  caveat that told a reader to "read the spatial breakdown for a block where the
+  change stands clear" pointed at a breakdown that could not answer.~~
+  **shipped** — a `blocks=N` breakdown now carries the floor per block: each
+  block that had two comparable passes gets a `detection` sub-record (the
+  cube-wide per-cell `false_alarm_fraction`, the block's own `compared_cells`, and
+  whether its net change `stands_clear` by the same `DETECTION_EXCESS_WARN`
+  margin), and `peak_block` gains a `stands_clear` so the headline mover carries
+  its own verdict — because the biggest block-mover can still sit inside the
+  floor, which is exactly the case a reader needs told. The cell count travels
+  *with* the flag rather than a bare boolean: the floor is exact per cell whatever
+  a block's size, but a block is measured over far fewer cells than the scene, so
+  its share scatters more widely around it — the honest read is `stands_clear`
+  *and* `compared_cells`, which is what the block record and a new caveat both
+  say. It rides the same one `to_dict()` to every surface (`umbra stack --stats`,
+  `POST /artifacts/stats`, the agent tool) and the same strict schema
+  (`$defs/blockDetection`) with no new flag. See the CHANGELOG.
 - ~~A product's own metadata could refuse a measurement, but the refusal had no
   name — so a chip batch could only die on the first scene that could not answer,
   and the most common failure a complex conversion has never reached the
