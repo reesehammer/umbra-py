@@ -1181,6 +1181,19 @@ def test_site_coverage_record_validates_with_the_nullable_cadence_fields():
     _check("site-coverage.schema.json", payload)
 
 
+def test_site_coverage_record_validates_with_comparable_below_the_raw_count():
+    """A mixed-polarization site: `comparable_passes` (the largest same-pol dated
+    subset) sits below `passes`, the non-trivial half of the field's contract."""
+    from umbra_py.coverage import site_coverage
+
+    passes = [_site_pass("Mixed", d, pols=["VV"]) for d in (1, 3, 6)]
+    passes.append(_site_pass("Mixed", 8, pols=["HH"]))
+    payload = site_coverage("Mixed", passes).to_dict()
+
+    assert payload["passes"] == 4 and payload["comparable_passes"] == 3
+    _check("site-coverage.schema.json", payload)
+
+
 def test_site_coverage_validates_from_the_cli(monkeypatch):
     from click.testing import CliRunner
 

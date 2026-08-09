@@ -221,7 +221,12 @@ def _print_site_coverage(site) -> None:
         click.echo(f"  task     : {site.task}")
     span = f" over {site.span_days}d" if site.span_days is not None else ""
     dates = f"{site.first} \N{EN DASH} {site.last}" if site.first != site.last else site.first
-    click.echo(f"  passes   : {site.passes}{span} ({dates})")
+    # ``comparable_passes`` is the largest same-polarization dated subset -- the
+    # depth a change series can actually reach. Note it only when it undercuts the
+    # raw count (a polarization mix, or undated passes), so the common single-pol
+    # site stays a one-number line.
+    usable = f", {site.comparable_passes} usable" if site.comparable_passes != site.passes else ""
+    click.echo(f"  passes   : {site.passes}{span} ({dates}){usable}")
     click.echo(
         f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
         f"{_format_revisit(site.median_revisit_days)} typical, "
@@ -325,7 +330,11 @@ def sites(
     that answers *which* site before those verbs answer *what changed there*.
 
     Each site reports its pass count, date span, revisit cadence, footprint and
-    products; --json adds the pass URLs (oldest-first) ready to pipe onward.
+    products; the pass line adds a 'usable' figure when fewer passes are
+    differenceable together than exist (the largest same-polarization dated
+    subset, since the analysis verbs refuse a mixed-polarization series). --json
+    adds that as 'comparable_passes' plus the pass URLs (oldest-first) ready to
+    pipe onward.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
