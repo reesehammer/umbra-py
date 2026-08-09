@@ -6,6 +6,21 @@
   "type": "object",
   "required": ["output", "items_used", "parameters"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "output": "/data/umbra/rotterdam_change.png",
+      "items_used": [
+        "acq-2024-01-08",
+        "acq-2024-03-08"
+      ],
+      "parameters": {
+        "asset": "GEC",
+        "max_size": 1024,
+        "db": true,
+        "percentile": 98
+      }
+    }
+  ],
   "properties": {
     "output": {
       "type": "string",

@@ -4,6 +4,16 @@
   "title": "umbra-py download manifest",
   "description": "The JSON array umbra-py prints to stdout when 'umbra download --json' succeeds: one record per downloaded asset, so a caller can verify each file it just fetched without re-hashing it. Stable within a minor version.",
   "type": "array",
+  "examples": [
+    [
+      {
+        "asset": "GEC",
+        "path": "/data/umbra/2d1827a2_GEC.tif",
+        "bytes": 148307968,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  ],
   "items": {
     "type": "object",
     "required": ["asset", "path", "bytes", "sha256"],

@@ -6,6 +6,21 @@
   "type": "object",
   "required": ["query", "matches"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "query": "a copper mine in the desert",
+      "matches": [
+        {
+          "task": "chuquicamata_mine",
+          "score": 0.312841
+        },
+        {
+          "task": "escondida_pit",
+          "score": 0.287533
+        }
+      ]
+    }
+  ],
   "properties": {
     "query": {
       "type": "string",

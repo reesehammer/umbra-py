@@ -6,6 +6,13 @@
   "type": "object",
   "required": ["error", "message", "hint"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "error": "MissingDependencyError",
+      "message": "This feature needs the 'viz' extra, which is not installed.",
+      "hint": "pip install \"umbra-py[viz]\""
+    }
+  ],
   "properties": {
     "error": {
       "type": "string",
