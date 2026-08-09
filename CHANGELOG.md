@@ -44,14 +44,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   acquisitions, not rank sites. So the deterministic scan → analyse chain the
   analysis routes assume (`POST /artifacts/stats` / `change` measure *what*
   changed, given the passes) still started one step short over HTTP: nothing told
-  a client *which* passes to send. `GET /sites` closes that gap. It reuses the
-  same STAC search the API already runs to gather a filtered pool (the same
+  a client *which* passes to send. `GET /sites` closes that gap. It takes the same
   `bbox` / `intersects` / `datetime` / `product_types` / `area` / `fuzzy` and SAR
-  filters `GET /search` takes, with `limit` sizing the pool, `top` capping the
-  answer and `min_passes` the qualifying depth) and ranks it through the *same*
-  `rank_site_coverage` selector `umbra sites`, `find_repeat_sites` and the static
-  showcase's featured gallery use — single-sourced so no surface can disagree
-  about what "most repeat-imaged" means. Each returned site is a `site-coverage`
+  filters `GET /search` takes (`top` capping the answer and `min_passes` the
+  qualifying depth), and ranks through the *same* `rank_site_coverage` selector
+  `umbra sites`, `find_repeat_sites` and the static showcase's featured gallery
+  use — single-sourced so no surface can disagree about what "most repeat-imaged"
+  means. On an index the depth is measured **whole-archive** (via
+  `CatalogIndex.rank_sites`' `GROUP BY task` over the entire catalog), so a deep
+  site ranks by all its passes rather than by whatever a pool cap admitted;
+  `limit` sizes the re-listed pool only on a `--live` backend, which has no index
+  to group over. Each returned site is a `site-coverage`
   record (passes, date span, revisit cadence, union footprint, products,
   polarizations, and the pass `hrefs` **oldest-first**, ready to send straight to
   `POST /artifacts/stats` / `change`), and the response's items reference the

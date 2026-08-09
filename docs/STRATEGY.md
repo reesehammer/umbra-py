@@ -654,10 +654,21 @@ from:
   per-item polygon and acquisition-property filters take an uncapped-pool path
   that is still whole-archive. It reuses `select_featured_sites`' ranking and
   `site_coverage`'s summary, so the deep path cannot disagree with the pool one,
-  and a test pins the two identical for every filter. **Open:** the agent tools
+  and a test pins the two identical for every filter. ~~**Open:** the agent tools
   and `GET /sites` still re-list a capped pool (both have an index, so `rank_sites`
   is the drop-in — it waits on the agent tools growing a `--local` mode and on a
-  public `serve` instance, §5.6). See the CHANGELOG and `TODO.md`.
+  public `serve` instance, §5.6).~~ **shipped for `GET /sites`** — `run_sites`
+  routes an index backend (the normal serving mode) through
+  `CatalogIndex.rank_sites`, so the hosted discovery moat is whole-archive too: a
+  deeply-imaged site ranks by all its passes rather than by whatever the first
+  `limit` rows admitted, and `limit` now sizes only the re-listed pool a `--live`
+  instance uses (there being no index to `GROUP BY` there). The drop-in did not
+  wait on a public instance after all — it is correct on any self-hosted one, and
+  a `limit=1` test pins that a tiny pool cap can no longer shrink a site's measured
+  depth on an index. **Open:** the agent tools still re-list a capped pool — they
+  have an index available but no `--local` mode to reach it through, so that is the
+  remaining half (a `find_repeat_sites` local path routing to `rank_sites`, the
+  same drop-in one surface further out). See the CHANGELOG and `TODO.md`.
 
 **Structural code debt (schedule, don't rush)**
 
