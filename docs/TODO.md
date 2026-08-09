@@ -159,12 +159,26 @@ artifacts exist. Follow-ons, none a blocker:
   credentials, which is why the cheap check is the one that exists. If a
   semantic break ever ships, the place to catch it is the live canary
   (`live-canary.yml`), not here.
-- **Only `umbra` invocations are checked.** The workflows also call `gh`,
+- ~~**Only `umbra` invocations are checked.** The workflows also call `gh`,
   `python -c` and `pip` with arguments that can drift (the `python -c` in the
   tiling step imports `umbra_py.pmtiles.save_viewer` and
   `constants.CATALOG_INDEX_PMTILES_URL` by name, so a rename there breaks the
-  same run and no test would notice). Extending the scan to `python -c` bodies
-  is a small addition — compile them, or import the names — if that ever bites.
+  same run and no test would notice).~~ **shipped for `python -c`** — the same
+  suite now extracts every `python -c` body from `.github/workflows/*.yml`,
+  compiles it (`_package_references` → `ast.parse`, so a syntax slip fails a PR)
+  and resolves every name it reads out of `umbra_py` against the live package: an
+  `import umbra_py.pmtiles as p` is imported, a `p.save_viewer` attribute is
+  checked with `hasattr`, and a `from umbra_py.constants import …` member is
+  verified — so the tiling step's viewer write is covered exactly the way the CLI
+  invocations are. Body extraction splits on newlines only (never `;`/`|`, which a
+  `-c` body legitimately contains), and three tests keep the check honest: a
+  self-check that the publish body's two hand-written names were seen
+  (`test_the_python_scan_found_the_publish_viewer_call`), and two drift tests
+  pinning that a renamed function or a retired constant would be caught. What is
+  still open, and smaller: `gh` and `pip` argument drift is not checked — `gh`
+  release/upload flags are GitHub's contract rather than this project's, and a
+  `pip install` typo fails its own step loudly rather than throwing away a crawl,
+  so neither is the silent-until-Monday class this suite exists for.
 - **The scan is textual, so a genuinely dynamic invocation would be missed.**
   Nothing builds an `umbra` command line from a shell variable today; if
   something ever does, the extractor will silently skip it. The self-check

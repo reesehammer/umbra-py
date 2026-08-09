@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The workflow-drift safety net now covers `python -c` bodies, not just `umbra`
+  invocations — the publish pipeline's *other* moving part (`tests/test_workflows.py`).**
+  `tests/test_workflows.py` parses every `umbra …` invocation in the workflows so
+  a renamed CLI option fails a PR instead of the weekly `Publish catalog index`
+  run — the drift that once darkened every published artifact for months. But the
+  same publish run's tiling step continues into `python -c "import umbra_py.pmtiles
+  as p, umbra_py.constants as c; p.save_viewer(c.CATALOG_INDEX_PMTILES_URL, …)"`,
+  which names library symbols by hand and no test watched: a renamed module, a
+  moved function or a retired constant would break that run just as invisibly, and
+  a Click parse cannot see it because it is not a CLI call. The suite now extracts
+  every `python -c` body, compiles it (so a syntax slip fails a PR) and resolves
+  every name it reads out of `umbra_py` against the live package — the
+  `import … as p` module is imported, the `p.save_viewer` attribute is checked, and
+  a `from umbra_py.constants import …` member is verified. Body extraction splits
+  on newlines only (never `;`/`|`, which a `-c` body legitimately contains and the
+  CLI extractor does split on), and three tests keep it honest: a self-check that
+  the publish body's two hand-written names were actually seen, and two drift tests
+  pinning that a renamed function or a retired constant would be caught. Offline,
+  no network, no credentials — the class of check that could have caught the
+  failure that shipped, now extended to the Python half of the same pipeline.
 - **`POST /sites` — the GeoJSON-body twin of `GET /sites`, so the discovery route
   takes an area-of-interest polygon as an object (`serve.py`,
   `tests/test_serve.py`).** `GET /sites` ranks the archive's most repeat-imaged
