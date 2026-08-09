@@ -7,6 +7,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`CatalogIndex.rank_sites` — whole-archive, index-native site ranking, so
+  `umbra sites --local` measures a site's depth across the *entire* index
+  (`index.py`, `cli/discover.py`, `tests/test_index.py`, `tests/test_coverage.py`).**
+  `umbra sites` ranks the archive's most repeat-imaged sites — the discovery step
+  before `change` / `timescan` / `stack` — but `rank_site_coverage` ranks whatever
+  pool it is handed, so `--local` capped that pool at `--limit` acquisitions and a
+  site with many passes just *outside* the first `--limit` rows read as shallower
+  than it is (worse: the pool is ordered by `(task, acq_date)`, so the cap
+  admitted alphabetically-early tasks and dropped the rest). Umbra files every
+  pass of a site under one task, so a site's depth is a `GROUP BY task` the index
+  can answer over its whole contents — no pool cap. `rank_sites` does exactly
+  that: it counts each site's dated passes directly in SQL for the
+  SQL-expressible filters (`bbox` / `start` / `end` / `area` / `fuzzy` /
+  `product_types`), then loads only the top tasks' documents to summarise — cheap
+  even whole-archive. The polygon (`intersects`) and acquisition-property
+  (`polarizations`, incidence, resolution) filters run per item in Python (as in
+  `search`), so when any is set it ranks the full *uncapped* matching stream
+  instead — still whole-archive, identical to the pool path, just without the cap.
+  The ranking is `select_featured_sites`' own (dated passes per task, most first,
+  task name breaking ties, `min_passes` qualifying), single-sourced so `umbra
+  sites`, `find_repeat_sites`, the featured gallery and now the deep local path
+  cannot disagree about what "most repeat-imaged" means; each site is summarised
+  by the same `site_coverage`, so a `--local` record is byte-identical to a live
+  one bar its depth. `umbra sites --local` (and `--index-db`) now routes here, so
+  `--limit` is a live-/`--token`-path pool size only and is documented as such.
+  A test pins the deep path exactly against the uncapped-pool ranking for every
+  filter, so the two answers cannot drift. **This closes the discovery moat's one
+  remaining `--local` gap (`STRATEGY.md` §8): the whole-archive "deepest series"
+  answer no longer waits behind a pool cap.**
 - **`GET /sites` — the repeat-imaged-site discovery step, now on the `umbra
   serve` STAC API (`serve.py`, `tests/test_serve.py`).** `umbra sites` (CLI) and
   `find_repeat_sites` (MCP / LangChain / LlamaIndex) already answer *which* site
