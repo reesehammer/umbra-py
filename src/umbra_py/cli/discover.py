@@ -1,8 +1,10 @@
-"""Finding acquisitions: ``search``, ``watch``, ``info``, ``ask``, and context.
+"""Finding acquisitions: ``search``, ``sites``, ``watch``, ``info``, ``ask``, context.
 
 The verbs that answer *which* acquisitions exist, in metadata rather than
-pixels -- including the natural-language front door (``ask``), whose model
-output is re-validated by :mod:`umbra_py.planner` before it becomes a filter.
+pixels -- ``search`` for the passes themselves, ``sites`` for the repeat-imaged
+areas worth analysing (the discovery step before ``change`` / ``stack``), and
+the natural-language front door (``ask``), whose model output is re-validated by
+:mod:`umbra_py.planner` before it becomes a filter.
 """
 
 from __future__ import annotations
@@ -203,6 +205,162 @@ def search(
     finally:
         if isinstance(source, CatalogIndex):
             source.close()
+
+
+def _format_revisit(days: float | None) -> str:
+    """A revisit gap as a compact human string (``"6d"``, ``"1.5d"``, ``"-"``)."""
+    if days is None:
+        return "-"
+    return f"{days:.0f}d" if days >= 10 or days == int(days) else f"{days:.1f}d"
+
+
+def _print_site_coverage(site) -> None:
+    """Human-readable rendering of one :class:`~umbra_py.coverage.SiteCoverage`."""
+    click.echo(site.label)
+    if site.label != site.task:
+        click.echo(f"  task     : {site.task}")
+    span = f" over {site.span_days}d" if site.span_days is not None else ""
+    dates = f"{site.first} \N{EN DASH} {site.last}" if site.first != site.last else site.first
+    click.echo(f"  passes   : {site.passes}{span} ({dates})")
+    click.echo(
+        f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
+        f"{_format_revisit(site.median_revisit_days)} typical"
+    )
+    if site.products:
+        click.echo(f"  products : {', '.join(site.products)}")
+    if site.polarizations:
+        click.echo(f"  pol      : {', '.join(site.polarizations)}")
+    if site.bbox is not None:
+        click.echo("  bbox     : " + ",".join(f"{c:.4f}" for c in site.bbox))
+    click.echo("")
+
+
+@cli.command()
+@click.option("--bbox", help="Footprint filter: 'min_lon,min_lat,max_lon,max_lat'.")
+@click.option(
+    "--place",
+    default=None,
+    help="Geocode a place name (e.g. 'California', 'Tokyo') to a bounding box "
+    "and rank sites within it, via OpenStreetMap Nominatim. Mutually exclusive "
+    "with --bbox; the match is rectangular, so it can include nearby areas "
+    "outside the named place.",
+)
+@_shared._geometry_option
+@click.option(
+    "--start",
+    help="Earliest acquisition date. Accepts YYYY-MM-DD, a year or month "
+    "(2024, 2024-03), or a relative expression ('today', '3 months ago').",
+)
+@click.option(
+    "--end",
+    help="Latest acquisition date (same formats as --start; a bare year, month "
+    "or period like 'last month' snaps to that span's last day).",
+)
+@_shared._area_option
+@_shared._fuzzy_option
+@click.option(
+    "--product",
+    "products",
+    multiple=True,
+    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
+    help="Only count passes exposing this asset (repeatable).",
+)
+@_shared._acquisition_filter_options
+@click.option(
+    "--limit",
+    type=int,
+    default=500,
+    show_default=True,
+    help="Size of the acquisition pool to rank sites from. Bigger finds more "
+    "sites and deeper series but scans more of the archive; --area narrows it.",
+)
+@click.option(
+    "--top",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Number of best-covered sites to report.",
+)
+@click.option(
+    "--min-passes",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Passes a site needs to qualify (2 is the minimum a change composite "
+    "can use; raise it to find only deeply-revisited series).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
+@_shared._local_index_options
+@_shared._token_option
+def sites(
+    bbox,
+    place,
+    intersects,
+    start,
+    end,
+    area,
+    fuzzy,
+    products,
+    polarizations,
+    min_incidence,
+    max_incidence,
+    max_resolution,
+    limit,
+    top,
+    min_passes,
+    as_json,
+    local,
+    db_path,
+    token,
+):
+    """Rank the archive's most repeat-imaged sites -- where change detection has
+    something to measure.
+
+    Umbra files every pass of an area under one task, so a site's coverage is how
+    many dated passes share it; the best-covered are exactly the ones worth
+    feeding to 'umbra change' / 'timescan' / 'stack'. This is the discovery step
+    that answers *which* site before those verbs answer *what changed there*.
+
+    Each site reports its pass count, date span, revisit cadence, footprint and
+    products; --json adds the pass URLs (oldest-first) ready to pipe onward.
+    Runs against the open bucket, a --local index, or the Canopy archive
+    (--token) -- the same backends as 'umbra search'.
+    """
+    from ..coverage import rank_site_coverage
+
+    _shared._check_token_not_local(token, local, db_path)
+    search_bbox, search_geometry = _shared._resolve_geography(bbox, place, intersects)
+    pool = _shared._gather_items(
+        local=local,
+        db_path=db_path,
+        token=token,
+        bbox=search_bbox,
+        intersects=search_geometry,
+        start=start,
+        end=end,
+        area=area,
+        fuzzy=fuzzy,
+        product_types=list(products) or None,
+        limit=limit,
+        live_label="Searching for repeat-imaged sites",
+        **_shared._acquisition_filter_kwargs(
+            polarizations, min_incidence, max_incidence, max_resolution
+        ),
+    )
+    ranked = rank_site_coverage(pool, top=top, min_passes=min_passes)
+    if as_json:
+        for site in ranked:
+            click.echo(json.dumps(site.to_dict()))
+        return
+    if not ranked:
+        click.echo(
+            f"No site in the pool of {len(pool)} acquisition(s) has {min_passes}+ "
+            "passes. Widen --limit or the search, or lower --min-passes."
+        )
+        return
+    for site in ranked:
+        _print_site_coverage(site)
+    click.echo(f"{len(ranked)} site(s), best-covered first.")
 
 
 def _print_watch_result(result) -> None:

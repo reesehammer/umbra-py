@@ -14,8 +14,8 @@ The layout, in the order a reader would walk it:
 * :mod:`._shared` -- the option groups (geography, task name, acquisition
   properties, token, manifest) and the search-vs-explicit-URLs gathering that
   more than one command needs.
-* :mod:`.discover` -- ``search``, ``watch``, ``info``, ``context``,
-  ``llms-txt``, ``ask``: which acquisitions exist.
+* :mod:`.discover` -- ``search``, ``sites``, ``watch``, ``info``, ``context``,
+  ``llms-txt``, ``ask``: which acquisitions (and which repeat-imaged sites) exist.
 * :mod:`.scenes` -- ``describe``, ``download``, ``quicklook``, ``view``,
   ``load``: one acquisition at a time.
 * :mod:`.process` -- ``stack``, ``convert``, ``chips``: data products.
@@ -76,6 +76,7 @@ from .discover import (  # noqa: E402
     info,
     llms_txt_cmd,
     search,
+    sites,
     watch_cmd,
 )
 from .explore import _tiles_fetch, demo, mcp, serve, showcase, tiles  # noqa: E402

@@ -1293,6 +1293,44 @@ What is still open:
 
 ---
 
+## Repeat-imaged-site discovery follow-ons (`umbra sites` shipped)
+
+- **Surfaced in:** the `umbra sites` PR (`STRATEGY.md` §8, "Discovery surface").
+- **Code:** `src/umbra_py/coverage.py` (`SiteCoverage`, `site_coverage`,
+  `rank_site_coverage`), `umbra sites` in `src/umbra_py/cli/discover.py`,
+  `tests/test_coverage.py`; the ranking is
+  `src/umbra_py/showcase.py`'s `select_featured_sites` reused.
+
+`umbra sites` ranks the archive's most repeat-imaged sites and summarises each
+one's coverage (passes, date span, revisit cadence, footprint, products, and
+`--json` pass URLs) — the discovery step before every `change` / `timescan` /
+`stack` verb, single-sourced against the showcase's featured-gallery selector.
+Follow-ons that build on it, none a blocker:
+
+- **The answer is CLI-only; the agent surfaces don't have it.** The deterministic
+  scan → narrate chain the strategy describes (`pick_change_interval` → the
+  narration) still starts one step in, because nothing answers *which site* for
+  an agent. A `find_repeat_sites` tool on the MCP server (and the LangChain /
+  LlamaIndex wrappers derived from it, plus the parity test that keeps the three
+  in step) would complete the chain — `find sites → pick-interval →
+  narrate-change` — and is a thin adapter over `rank_site_coverage`, the same way
+  `pick_change_interval` is over `best_change_interval`. Deferred from the first
+  PR to keep it self-contained; it is the obvious next increment.
+- **No `umbra serve` route.** A hosted instance could answer "best-covered sites
+  in this bbox" over HTTP (a `GET /sites`-shaped route reusing the STAC search it
+  already runs), which is the discovery half of the same "queryable with zero
+  install" promise the artifact routes make. Gated on a public instance existing
+  (the `umbra serve` section below), so nothing here waits on it.
+- **The pool is a flat search, so a site's rank is only as deep as `--limit`.**
+  A site with many passes just outside the first `--limit` acquisitions reads as
+  shallower than it is; `--area` scopes the pool to fix it per-site, but a
+  whole-archive "deepest series" answer would want the published index's own
+  per-task counts rather than a re-listing. Cheap against `catalog.db` (a `GROUP
+  BY task` the index could answer directly); it waits for a consumer past the
+  live/`--local` search the command already has.
+
+---
+
 ## Grow the `umbra serve` STAC API (a hosted instance)
 
 - **Surfaced in:** the `umbra serve` STAC API PR.

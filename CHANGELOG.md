@@ -52,6 +52,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in CI: the featured composites rendered but every reading was skipped on a 402.
 
 ### Added
+- **`umbra sites` — rank the archive's most repeat-imaged sites, the discovery
+  step before every change/stack verb (`coverage.py`, `cli/discover.py`).**
+  Every analysis verb this library ships — `umbra change`, `timescan`, `stack`,
+  `change --narrate`, the `stack_stats` cube — begins with a question none of
+  them answers: *which* site has a time series worth looking at? Umbra files
+  every pass of an area under one task directory, so a site's coverage is just
+  how many dated passes share it, and the best-covered are exactly where change
+  detection has something to measure. The static showcase already picked them
+  (`select_featured_sites`) for its featured gallery, but that ranking was
+  invisible to anyone not building a showcase. `umbra sites` turns it into a
+  first-class discovery answer: it ranks the sites and reports each one's
+  coverage — pass count, date span, revisit cadence (shortest and typical gap),
+  union footprint, products and polarizations — with `--json` adding the pass
+  URLs oldest-first, ready to pipe straight into `umbra change` / `stack`. It is
+  a full gather command (the shared geography, task-name and acquisition-property
+  option groups; `--local` / `--token` / bbox / place / polygon / dates), so it
+  joins `conftest.GATHER_COMMANDS` and the option-group parity suites cover it.
+  The new `coverage.py` is pure and dependency-free (stdlib +
+  `UmbraItem`, exercised entirely offline) and reuses the showcase's selector for
+  the grouping, so the two surfaces cannot disagree about what "most
+  repeat-imaged" means — only the per-site summary is new. See `docs/TODO.md` for
+  the deferred agent-tool / `umbra serve` follow-ons.
 - **Validate every published schema's `examples`, and give the agent-facing
   contracts a whole-document example to parse (`docs/schemas/*.schema.json`,
   `tests/test_schemas.py`).** `examples` is a JSON Schema *annotation* — a

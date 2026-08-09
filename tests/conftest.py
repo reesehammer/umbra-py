@@ -11,6 +11,7 @@ DATA_DIR = Path(__file__).parent / "data"
 # shared-option parity suites (`test_geometry.py`, `test_cli_option_groups.py`)
 # all parametrize over this list.
 GATHER_COMMANDS = [
+    ["sites"],
     ["change", "--out", "c.png"],
     ["timescan", "--out", "t.png"],
     ["swipe", "--out", "s.html"],
