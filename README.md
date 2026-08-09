@@ -1551,7 +1551,10 @@ with the packaging facts it describes.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 
-The server offers `search_catalog`, `get_item`, `geocode_place`, `index_stats`,
+The server offers `search_catalog`, `find_repeat_sites` (rank the archive's most
+repeat-imaged sites when you don't yet know *which* site to analyse — the
+discovery step before the change verbs, returning each site's passes oldest-first
+ready for `pick_change_interval`), `get_item`, `geocode_place`, `index_stats`,
 `quicklook`, `change_composite`, `timescan`, `stack_stats` (the same change
 question in numbers: per-pass decibel statistics and how much ground moved, in
 km² — and with `blocks=N`, which part of the site moved and between which two
@@ -1601,7 +1604,8 @@ from langgraph.prebuilt import create_react_agent
 agent = create_react_agent(my_chat_model, umbra_tools())
 ```
 
-`umbra_tools()` returns `search_catalog`, `get_item`, `geocode_place`,
+`umbra_tools()` returns `search_catalog`, `find_repeat_sites`, `get_item`,
+`geocode_place`,
 `index_stats`, `stack_stats`, `stack_provenance`, `pick_change_interval`,
 `download_asset`, `watch_site`, `find_similar` /
 `find_similar_text`, `describe_scene`, `narrate_change` and the `quicklook` /
@@ -1638,7 +1642,8 @@ agent = ReActAgent.from_tools(tools, llm=my_llm)
 ```
 
 `umbra_tools()` returns the same inventory as the LangChain adapter
-(`search_catalog`, `get_item`, `geocode_place`, `index_stats`, `stack_stats`,
+(`search_catalog`, `find_repeat_sites`, `get_item`, `geocode_place`,
+`index_stats`, `stack_stats`,
 `stack_provenance`, `pick_change_interval`, `download_asset`,
 `watch_site`, `find_similar` / `find_similar_text`, `describe_scene`,
 `narrate_change` and the `quicklook` / `change_composite` / `timescan` render

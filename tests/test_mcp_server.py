@@ -53,6 +53,7 @@ def test_build_server_registers_expected_surface():
     tools = {t.name for t in asyncio.run(server.list_tools())}
     assert tools == {
         "search_catalog",
+        "find_repeat_sites",
         "get_item",
         "geocode_place",
         "index_stats",
@@ -149,6 +150,74 @@ def test_search_catalog_geocodes_place_and_returns_cards(sample_item_dict, monke
     # The geocoded bbox is passed through to the deterministic search layer.
     assert _FakeCatalog.kwargs["bbox"] == (-68.0, 10.0, -67.0, 11.0)
     assert _FakeCatalog.kwargs["limit"] == 5
+
+
+def _site_pass(task, day, *, pols=("VV",), assets=("GEC",)):
+    """One dated pass of ``task`` whose href carries the task path coverage groups on."""
+    return UmbraItem.from_dict(
+        {
+            "type": "Feature",
+            "id": f"{task}-{day}",
+            "bbox": [-112.0, 39.1, -111.9, 39.2],
+            "geometry": None,
+            "properties": {
+                "datetime": f"2024-0{day}-08T00:00:00Z",
+                "sar:polarizations": list(pols),
+            },
+            "assets": {a: {} for a in assets},
+        },
+        href=f"https://x.s3.amazonaws.com/sar-data/tasks/{task}/t/{day}/i.stac.v2.json",
+    )
+
+
+def test_find_repeat_sites_ranks_the_pool_and_hands_pass_urls_onward(monkeypatch):
+    # A deep site (three passes) and a shallow one (one pass); min_passes drops the
+    # shallow one, and the ranking is single-sourced with `umbra sites`.
+    pool = [_site_pass("Centerfield", d) for d in (1, 3, 6)] + [_site_pass("Lone", 2)]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(area="anywhere", limit=100, local=False)
+
+    assert out["source"] == "live-catalog"
+    assert out["count"] == 1  # only Centerfield clears min_passes=2
+    site = out["sites"][0]
+    assert site["task"] == "Centerfield"
+    assert site["passes"] == 3
+    # The pass URLs come back oldest-first, ready to hand to pick_change_interval.
+    assert len(site["hrefs"]) == 3
+    assert site["hrefs"][0].endswith("/t/1/i.stac.v2.json")
+    assert site["hrefs"][-1].endswith("/t/6/i.stac.v2.json")
+    assert out["attribution"]
+    # The pool filters reach the deterministic search layer, uncapped per task so a
+    # site's full depth is counted.
+    assert _FakeCatalog.kwargs["area"] == "anywhere"
+    assert "max_per_task" not in _FakeCatalog.kwargs
+
+
+def test_find_repeat_sites_geocodes_place_and_reports_it(monkeypatch):
+    monkeypatch.setattr(ms, "_geocode_place", lambda q: ((-68.0, 10.0, -67.0, 11.0), "Somewhere"))
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([_site_pass("Alpha", d) for d in (1, 3)])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(place="Somewhere", local=False)
+
+    assert out["resolved_place"] == "Somewhere"
+    assert out["resolved_bbox"] == [-68.0, 10.0, -67.0, 11.0]
+    assert _FakeCatalog.kwargs["bbox"] == (-68.0, 10.0, -67.0, 11.0)
+
+
+def test_find_repeat_sites_rejects_bbox_with_intersects():
+    with pytest.raises(ValueError, match="intersects or bbox"):
+        ms.find_repeat_sites(bbox=[0, 0, 1, 1], intersects={"type": "Point", "coordinates": [0, 0]})
 
 
 def test_search_catalog_local_without_index_errors(monkeypatch, tmp_path):

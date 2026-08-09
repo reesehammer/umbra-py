@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/site-coverage.schema.json",
+  "title": "Repeat-imaged site coverage",
+  "description": "One repeat-imaged site's coverage, reduced to the facts that decide whether it is worth analysing — emitted one object per line by `umbra sites --json` and, wrapped in a list under `sites`, by the `find_repeat_sites` agent tool (MCP / LangChain / LlamaIndex). Umbra files every pass of an area under one task, so a site's coverage is how many dated passes share it; this is the discovery answer to *which* site before every `change` / `timescan` / `stack` / `pick_change_interval` verb answers *what changed there*. Every field is present on every record; the ones a site with fewer than two dated passes cannot supply are null rather than absent.",
+  "type": "object",
+  "required": [
+    "task",
+    "label",
+    "passes",
+    "first",
+    "last",
+    "span_days",
+    "min_revisit_days",
+    "median_revisit_days",
+    "bbox",
+    "products",
+    "polarizations",
+    "hrefs"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "task": "Centerfield_Utah",
+      "label": "Centerfield, Utah",
+      "passes": 7,
+      "first": "2024-01-08",
+      "last": "2024-06-19",
+      "span_days": 163,
+      "min_revisit_days": 11.0,
+      "median_revisit_days": 27.5,
+      "bbox": [-111.99, 39.11, -111.87, 39.19],
+      "products": ["GEC", "SICD"],
+      "polarizations": ["VV"],
+      "hrefs": [
+        "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-01-08.stac.v2.json",
+        "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-06-19.stac.v2.json"
+      ]
+    }
+  ],
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "The Umbra task (site) codename every pass of this site is filed under — the argument `umbra search --area` takes to reach it."
+    },
+    "label": {
+      "type": "string",
+      "description": "A human-readable name: the first pass's baked place name (`umbra index bake`) when one exists, else the `task` codename. Single-sourced with the static showcase's featured-gallery label so the two cannot drift."
+    },
+    "passes": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many acquisitions of this site are in the ranked pool, dated or not — the count that ranks it (more passes, more to measure)."
+    },
+    "first": {
+      "type": ["string", "null"],
+      "description": "The earliest pass's acquisition date, ISO `YYYY-MM-DD`, or null when no pass carries a datetime."
+    },
+    "last": {
+      "type": ["string", "null"],
+      "description": "The latest pass's acquisition date, ISO `YYYY-MM-DD`, or null when no pass carries a datetime."
+    },
+    "span_days": {
+      "type": ["integer", "null"],
+      "description": "Whole days from the first dated pass to the last, or null with fewer than two dated passes (no span to measure)."
+    },
+    "min_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The shortest gap in days between two consecutive dated passes — the site's tightest revisit — or null with fewer than two dated passes."
+    },
+    "median_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The median gap in days between consecutive dated passes — the site's typical cadence — or null with fewer than two dated passes."
+    },
+    "bbox": {
+      "type": ["array", "null"],
+      "description": "The union footprint of every pass that has one, `[min_lon, min_lat, max_lon, max_lat]` in WGS84 degrees — the rectangle a follow-up `--bbox` / `--intersects` would cover — or null when no pass carries a footprint.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" }
+    },
+    "products": {
+      "type": "array",
+      "description": "The product/asset types available across the site's passes (any of GEC, SICD, SIDD, CPHD), sorted.",
+      "items": { "type": "string" }
+    },
+    "polarizations": {
+      "type": "array",
+      "description": "The polarizations present across the site's passes, sorted. More than one means the passes are not all comparable for change (HH and VV measure different scattering); filter to one before differencing.",
+      "items": { "type": "string" }
+    },
+    "hrefs": {
+      "type": "array",
+      "description": "The site's pass STAC URLs, oldest-first (undated passes last) — the order `umbra change` / `stack` / `pick_change_interval` want their passes in, ready to pipe straight onward.",
+      "items": { "type": "string" }
+    }
+  }
+}

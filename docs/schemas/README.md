@@ -25,6 +25,7 @@ with a `CHANGELOG.md` entry.
 | [`watch-delta.schema.json`](watch-delta.schema.json) | What one run of a standing watch found new since the last run. | `umbra watch --json` (`umbra_py.watch.WatchResult.to_dict`). |
 | [`task-matches.schema.json`](task-matches.schema.json) | Umbra task/site names ranked against a plain-language query. | `umbra semantic search --json`. |
 | [`scene-matches.schema.json`](scene-matches.schema.json) | Acquisitions ranked by visual similarity to a scene or to a text query. | `umbra embed similar --json` / `umbra embed search --json`. |
+| [`site-coverage.schema.json`](site-coverage.schema.json) | One repeat-imaged site's coverage — passes, date span, revisit cadence, footprint, and the pass URLs oldest-first. | `umbra sites --json` (one object per line); the `find_repeat_sites` agent tool (in a list under `sites`). |
 
 ## Structured success output
 
@@ -126,6 +127,7 @@ formatting choice:
 | [`search-plan`](search-plan.schema.json) | a person or an agent auditing a plan before running it | `umbra ask --json` |
 | [`watch-delta`](watch-delta.schema.json) | a cron job or an agent acting on new acquisitions | `umbra watch --json` |
 | [`task-matches`](task-matches.schema.json) / [`scene-matches`](scene-matches.schema.json) | whoever turns a ranked list into a search | `umbra semantic search --json` / `umbra embed similar\|search --json` |
+| [`site-coverage`](site-coverage.schema.json) | a model choosing *which* site to analyse before it asks *what changed* | `umbra sites --json`, the `find_repeat_sites` agent tool |
 
 Two rules run through all five, and both are in the contracts rather than only
 in the docstrings. **The deterministic fields are marked as deterministic**: a

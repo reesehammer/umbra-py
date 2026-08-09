@@ -64,6 +64,7 @@ from .exceptions import MissingDependencyError
 from .mcp_server import (  # noqa: F401 - re-exported for direct use
     describe_scene,
     download_asset,
+    find_repeat_sites,
     find_similar,
     find_similar_text,
     geocode_place,
@@ -194,6 +195,7 @@ def timescan(
 # register unconditionally.
 _JSON_TOOLS = (
     search_catalog,
+    find_repeat_sites,
     get_item,
     geocode_place,
     index_stats,
@@ -243,6 +245,7 @@ __all__ = [
     "umbra_tools",
     "RenderResult",
     "search_catalog",
+    "find_repeat_sites",
     "get_item",
     "geocode_place",
     "index_stats",

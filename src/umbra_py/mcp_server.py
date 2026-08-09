@@ -385,6 +385,115 @@ def search_catalog(
     }
 
 
+def find_repeat_sites(
+    bbox: list[float] | None = None,
+    intersects: dict[str, Any] | None = None,
+    place: str | None = None,
+    area: str | None = None,
+    fuzzy: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+    products: list[str] | None = None,
+    polarizations: list[str] | None = None,
+    min_incidence: float | None = None,
+    max_incidence: float | None = None,
+    max_resolution: float | None = None,
+    limit: int = 500,
+    top: int = 20,
+    min_passes: int = 2,
+    local: bool | None = None,
+) -> dict[str, Any]:
+    """Rank the archive's most repeat-imaged sites — where change detection has
+    something to measure.
+
+    The discovery step *before* every analysis verb. ``change`` / ``timescan`` /
+    ``stack`` / ``pick_change_interval`` / ``narrate_change`` all answer *what*
+    changed at a site, but each assumes the caller already knows *which* site to
+    point them at. Umbra files every pass of an area under one task (site), so a
+    site's coverage is just how many dated passes share its task; the sites with
+    the most are exactly the ones where a time series exists to analyse. This
+    tool ranks them, so ``find_repeat_sites → pick_change_interval →
+    narrate_change`` is a complete chain a model can drive with no site known in
+    advance — the deterministic answer to "where is there something to look at?"
+    (``STRATEGY.md`` §3's discovery moat; no model is called).
+
+    The filters scope the *pool* of acquisitions the ranking is computed over,
+    and are the same ones ``search_catalog`` takes: ``bbox``
+    (``[min_lon, min_lat, max_lon, max_lat]`` WGS84), ``intersects`` (a GeoJSON
+    polygon, mutually exclusive with ``bbox`` / ``place``), ``place`` (free-text,
+    geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
+    ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
+    the SAR property filters ``polarizations`` / ``min_incidence`` /
+    ``max_incidence`` / ``max_resolution``. ``limit`` sizes that pool (bigger
+    finds more sites and deeper series but scans more of the archive; ``area``
+    narrows it instead), ``top`` caps how many sites are returned, and
+    ``min_passes`` is how many dated passes a site needs to qualify (2 is the
+    minimum a change composite can use; raise it to find only deeply-revisited
+    series).
+
+    Returns ``sites``, best-covered first: each a ``SiteCoverage`` with the site's
+    ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
+    ``last`` dates and ``span_days``, ``min_revisit_days`` / ``median_revisit_days``
+    cadence, union ``bbox`` footprint, ``products`` and ``polarizations``, and the
+    ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
+    to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
+    ``count`` (sites returned), the pool ``source`` and the resolved
+    ``place`` / ``bbox`` / ``area``, and the attribution line.
+
+    ``local`` selects the backend exactly as ``search_catalog`` does — unset uses
+    the on-disk index when present (instant) and a live S3 walk otherwise. With a
+    Canopy token configured (``$UMBRA_CANOPY_TOKEN``) the pool is drawn from the
+    commercial archive instead. The ranking is single-sourced with the static
+    showcase's featured-gallery selector, so this and ``umbra sites`` cannot
+    disagree about what "most repeat-imaged" means.
+    """
+    from .coverage import rank_site_coverage
+
+    if intersects is not None and (bbox or place):
+        raise ValueError("pass intersects or bbox/place, not both")
+
+    resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
+    resolved_place = None
+    if place and resolved_bbox is None:
+        resolved_bbox, resolved_place = _geocode_place(place)
+    geometry = _parse_geometry(intersects) if intersects is not None else None
+
+    token = _canopy_token()
+    source, is_index = _search_source(local, token=token)
+    label = _source_label(is_index, bool(token))
+    try:
+        pool = list(
+            source.search(
+                bbox=resolved_bbox,
+                intersects=geometry,
+                start=start,
+                end=end,
+                product_types=list(products) if products else None,
+                area=area,
+                fuzzy=fuzzy,
+                polarizations=list(polarizations) if polarizations else None,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                limit=limit,
+            )
+        )
+    finally:
+        if isinstance(source, CatalogIndex):
+            source.close()
+
+    sites = rank_site_coverage(pool, top=top, min_passes=min_passes)
+    return {
+        "count": len(sites),
+        "source": label,
+        "resolved_place": resolved_place,
+        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+        "resolved_area": area,
+        "sites": [site.to_dict() for site in sites],
+        "attribution": ATTRIBUTION,
+    }
+
+
 def get_item(url: str) -> dict[str, Any]:
     """Return the full context card for one item.
 
@@ -1140,6 +1249,9 @@ def build_server() -> MCPServer:
             "Search and visualize Umbra's open SAR archive. Start by reading "
             "the 'umbra://context' resource for product-type and search "
             "semantics. Use search_catalog to find acquisitions (compact cards), "
+            "find_repeat_sites to rank the most repeat-imaged sites when you do "
+            "not yet know which site to analyse (it returns each site's passes "
+            "oldest-first, ready for pick_change_interval), "
             "get_item for one item's full metadata, and quicklook / "
             "change_composite / timescan to see the radar imagery. stack_stats "
             "answers the same change question in numbers (per-pass decibel "
@@ -1161,6 +1273,7 @@ def build_server() -> MCPServer:
 
     for fn in (
         search_catalog,
+        find_repeat_sites,
         get_item,
         geocode_place,
         index_stats,
