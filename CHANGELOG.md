@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`POST /sites` — the GeoJSON-body twin of `GET /sites`, so the discovery route
+  takes an area-of-interest polygon as an object (`serve.py`,
+  `tests/test_serve.py`).** `GET /sites` ranks the archive's most repeat-imaged
+  sites but, like `GET /search`, has to take `intersects` as a JSON-*string* query
+  param — awkward for a real polygon. `POST /sites` mirrors the `GET`/`POST
+  /search` pair exactly: same `run_sites` ranking, same `site-coverage` records,
+  same filters, but the body carries `intersects` as a GeoJSON object and the SAR
+  filters as top-level fields *or* a STAC `query` object (a top-level field
+  overrides the same field in `query`, identical to `POST /search`). `limit` sizes
+  the pool only on a `--live` backend and `top` / `min_passes` cap and qualify the
+  ranking as on `GET`; a new `_opt_int` coerces the body's paging/ranking fields so
+  a malformed `top`/`limit` is a `400` rather than a silent truncation. The route
+  is advertised on the landing page (a second `sites` link with `method: POST`),
+  references the committed `site-coverage` contract in the generated OpenAPI
+  document alongside the `GET`, and is documented on the README and in `llms.txt`.
+  This completes the `GET`/`POST` symmetry `/search` already had for the one
+  discovery route that lacked it.
 - **`find_repeat_sites` ranks whole-archive on the local index — the discovery
   moat's whole-archive ranking now reaches the *last* surface (`mcp_server.py`,
   `tests/test_mcp_server.py`).** `CatalogIndex.rank_sites` had already made

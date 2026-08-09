@@ -713,6 +713,81 @@ def test_sites_route_ranks_whole_archive_under_a_tiny_limit(sites_client):
 
 
 # --------------------------------------------------------------------------
+# POST /sites (the GeoJSON-body twin of GET /sites)
+# --------------------------------------------------------------------------
+
+
+def test_post_sites_matches_get_sites(sites_client):
+    # The POST twin ranks the same way and returns the same records as GET.
+    get_body = sites_client.get("/sites").json()
+    post_body = sites_client.post("/sites", json={}).json()
+    assert post_body["count"] == get_body["count"]
+    assert [(s["task"], s["passes"]) for s in post_body["sites"]] == [("Alpha", 3), ("Beta", 2)]
+    assert post_body["attribution"].startswith("Contains Umbra open data")
+
+
+def test_post_sites_respects_top_and_min_passes(sites_client):
+    top1 = sites_client.post("/sites", json={"top": 1}).json()
+    assert [s["task"] for s in top1["sites"]] == ["Alpha"]
+    deep = sites_client.post("/sites", json={"min_passes": 3}).json()
+    assert [s["task"] for s in deep["sites"]] == ["Alpha"]
+
+
+def test_post_sites_filters_by_area_top_level_and_query(sites_client):
+    top_level = sites_client.post("/sites", json={"area": "Beta"}).json()
+    assert [s["task"] for s in top_level["sites"]] == ["Beta"]
+    assert top_level["resolved_area"] == "Beta"
+    # The STAC query extension is accepted exactly as POST /search accepts it.
+    via_query = sites_client.post("/sites", json={"query": {"area": {"like": "Beta"}}}).json()
+    assert [s["task"] for s in via_query["sites"]] == ["Beta"]
+
+
+def test_post_sites_takes_intersects_as_a_geojson_object(sites_client):
+    # The reason POST exists beside GET: a body carries the polygon as an object,
+    # not the JSON-string query param GET needs. A far-away polygon empties the pool.
+    far = {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]],
+    }
+    body = sites_client.post("/sites", json={"intersects": far}).json()
+    assert body["count"] == 0
+
+
+def test_post_sites_rejects_bbox_and_intersects_together(sites_client):
+    resp = sites_client.post(
+        "/sites",
+        json={"bbox": [0, 0, 1, 1], "intersects": {"type": "Point", "coordinates": [0, 0]}},
+    )
+    assert resp.status_code == 400
+
+
+def test_post_sites_bad_field_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"bbox": "oops"}).status_code == 400
+    # A non-integral ranking field is a 400, not a silent truncation.
+    assert client.post("/sites", json={"top": 1.5}).status_code == 400
+
+
+def test_post_sites_ranks_whole_archive_under_a_tiny_limit(sites_client):
+    body = sites_client.post("/sites", json={"limit": 1}).json()
+    assert [(s["task"], s["passes"]) for s in body["sites"]] == [("Alpha", 3), ("Beta", 2)]
+
+
+def test_post_sites_records_validate_against_the_published_contract(sites_client):
+    jsonschema = pytest.importorskip("jsonschema")
+    from umbra_py.schemas import load_schema
+
+    validator = jsonschema.Draft202012Validator(load_schema("site-coverage.schema.json"))
+    for site in sites_client.post("/sites", json={}).json()["sites"]:
+        validator.validate(site)
+
+
+def test_post_sites_link_is_on_the_landing_page(client):
+    methods = {(link["rel"], link.get("method")) for link in client.get("/").json()["links"]}
+    assert ("sites", "POST") in methods
+
+
+# --------------------------------------------------------------------------
 # On-demand render artifacts
 # --------------------------------------------------------------------------
 
@@ -2347,6 +2422,13 @@ def test_sites_response_references_the_site_coverage_contract(client):
         "schema"
     ]
     assert schema["properties"]["sites"]["items"] == {"$ref": "#/components/schemas/SiteCoverage"}
+    # The POST twin references the same contract in the same document.
+    post_schema = document["paths"]["/sites"]["post"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert post_schema["properties"]["sites"]["items"] == {
+        "$ref": "#/components/schemas/SiteCoverage"
+    }
 
 
 def test_the_site_coverage_component_is_the_committed_file(client):

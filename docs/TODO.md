@@ -1334,10 +1334,17 @@ Follow-ons that build on it, none a blocker:
   whether or not the artifact routes are, unlike the three artifact contracts),
   and the route is advertised on the landing page's `sites` link. See the
   CHANGELOG. What is still open, and smaller:
-  - **No `POST /sites` for a polygon body.** `GET /sites` takes `intersects` as
-    a JSON-string query param (as `GET /search` does), so no capability is lost;
-    a `POST /sites` mirroring `POST /search` would be the ergonomic form for a
-    large polygon, added the same way if a client wants it.
+  - ~~**No `POST /sites` for a polygon body.**~~ **shipped** — `POST /sites`
+    (`serve.post_sites`) mirrors the `GET`/`POST /search` pair: the same
+    `run_sites` ranking and `site-coverage` records, but the body carries
+    `intersects` as a GeoJSON *object* rather than the JSON-string query param
+    `GET` needs, plus the SAR filters as top-level fields or a STAC `query`
+    object exactly as `POST /search` accepts them (a top-level field overrides
+    `query`). A new `_opt_int` makes a malformed `top`/`limit`/`min_passes` a
+    `400` rather than a silent truncation; the route is advertised on the landing
+    page (a second `sites` link, `method: POST`) and references the committed
+    `site-coverage` contract in the generated OpenAPI document beside the `GET`.
+    See the CHANGELOG.
   - ~~**The route re-lists the pool per request.**~~ **shipped** — `run_sites`
     routes an index backend through `CatalogIndex.rank_sites`, so `GET /sites`
     ranks whole-archive (`GROUP BY task`) on the normal serving mode, exactly as
@@ -1382,8 +1389,9 @@ Follow-ons that build on it, none a blocker:
 
 The read-only STAC API is shipped (landing / conformance / collections / items /
 `GET`+`POST /search` with bbox, datetime, geometry `intersects`, ids and token
-pagination), ranks the archive's most repeat-imaged sites (`GET /sites`, the
-discovery step in front of the analysis routes), renders artifacts on demand
+pagination), ranks the archive's most repeat-imaged sites
+(`GET`+`POST /sites`, the discovery step in front of the analysis routes),
+renders artifacts on demand
 (`GET /artifacts/quicklook/{id}.png`, `GET /artifacts/thumbnail/{id}.png`, `POST
 /artifacts/change`, `.../timescan`, `.../swipe`, and the one that is numbers
 rather than a picture, `POST /artifacts/stats` — with `POST /artifacts/provenance`

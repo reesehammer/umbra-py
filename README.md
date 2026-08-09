@@ -1732,6 +1732,17 @@ and each record follows the committed
 curl "http://127.0.0.1:8000/sites?bbox=-112.1,39.0,-111.9,39.2&top=5"
 ```
 
+There is a `POST /sites` twin as well, mirroring the `GET`/`POST /search` pair:
+same ranking and records, but the body carries `intersects` as a GeoJSON object
+(and the SAR filters as top-level fields or a STAC `query`), which is the
+ergonomic form for a real area-of-interest polygon:
+
+```bash
+curl -X POST http://127.0.0.1:8000/sites \
+  -H 'content-type: application/json' \
+  -d '{"intersects": {"type": "Polygon", "coordinates": [[[-112.1,39.0],[-112.1,39.2],[-111.9,39.2],[-111.9,39.0],[-112.1,39.0]]]}, "top": 5}'
+```
+
 Beyond discovery, `umbra serve` also **renders the visual products on demand**,
 so a front end (or an agent) can trigger them over any site straight from HTTP:
 
