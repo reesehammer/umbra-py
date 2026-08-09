@@ -184,6 +184,8 @@ from .schemas import load_schema
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
 
+    from .coverage import SiteCoverage
+
 # --------------------------------------------------------------------------
 # STAC API constants
 # --------------------------------------------------------------------------
@@ -215,6 +217,15 @@ CONFORMANCE_CLASSES = (
 #: Default page size, and the ceiling a client can request via ``limit``.
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 10_000
+
+#: ``GET /sites`` defaults: how deep the pool the ranking is computed over is
+#: (``limit``, bounded by :data:`MAX_LIMIT`), how many sites are returned
+#: (``top``, bounded by :data:`SITES_MAX_TOP`), and how many dated passes a site
+#: needs to qualify (``min_passes``; 2 is the minimum a change composite can use).
+SITES_POOL_LIMIT = 500
+SITES_DEFAULT_TOP = 20
+SITES_MAX_TOP = 100
+SITES_MIN_PASSES = 2
 
 
 def _require_serve():
@@ -532,6 +543,13 @@ def landing_page(
         _link("data", f"{base}/collections"),
         _link("search", f"{base}/search", type=geojson, method="GET", title="STAC search"),
         _link("search", f"{base}/search", type=geojson, method="POST", title="STAC search"),
+        _link(
+            "sites",
+            f"{base}/sites",
+            type="application/json",
+            method="GET",
+            title="Rank the archive's most repeat-imaged sites (discovery before analysis)",
+        ),
         _link(
             "service-desc",
             f"{base}/openapi.json",
@@ -869,6 +887,101 @@ def get_one(source: Any, item_id: str) -> UmbraItem | None:
         return source.get(item_id)
     page, _ = run_search(source, ids=[item_id], limit=1)
     return page[0] if page else None
+
+
+def _clamp_top(top: int | None) -> int:
+    if top is None:
+        return SITES_DEFAULT_TOP
+    return max(1, min(int(top), SITES_MAX_TOP))
+
+
+def run_sites(
+    source: Any,
+    *,
+    bbox: BBox | None = None,
+    intersects: Geometry | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    product_types: list[str] | None = None,
+    area: str | None = None,
+    fuzzy: bool = False,
+    polarizations: list[str] | None = None,
+    min_incidence: float | None = None,
+    max_incidence: float | None = None,
+    max_resolution: float | None = None,
+    limit: int = SITES_POOL_LIMIT,
+    top: int = SITES_DEFAULT_TOP,
+    min_passes: int = SITES_MIN_PASSES,
+) -> list[SiteCoverage]:
+    """Rank the most repeat-imaged sites in a filtered pool of the archive.
+
+    The discovery answer *before* the analysis endpoints: ``/artifacts/change`` /
+    ``timescan`` / ``stats`` all measure *what* changed at a site, but each
+    assumes the caller already knows *which* site's passes to send. Umbra files
+    every pass of an area under one task, so a site's coverage is how many dated
+    passes share its task; the ones with the most are exactly where a time series
+    exists to analyse.
+
+    ``limit`` sizes the single ``source.search`` the ranking is computed over (a
+    bigger pool finds more sites and deeper series but scans more of the archive;
+    ``area`` narrows it instead), and the SAR/date/geometry filters are the same
+    ones :func:`run_search` takes, pushed down to the backend. The ranking is
+    :func:`~umbra_py.coverage.rank_site_coverage` exactly -- the same selector
+    ``umbra sites``, the ``find_repeat_sites`` agent tool and the static
+    showcase's featured gallery use, so no two surfaces disagree about what "most
+    repeat-imaged" means. Pure ranking: no renderer and no model
+    (``STRATEGY.md`` §7's determinism boundary applied to discovery).
+    """
+    from .coverage import rank_site_coverage
+
+    pool = list(
+        source.search(
+            bbox=bbox,
+            intersects=intersects,
+            start=start,
+            end=end,
+            product_types=product_types,
+            area=area,
+            fuzzy=fuzzy,
+            polarizations=polarizations,
+            min_incidence=min_incidence,
+            max_incidence=max_incidence,
+            max_resolution=max_resolution,
+            limit=_clamp_limit(limit),
+        )
+    )
+    return rank_site_coverage(pool, top=_clamp_top(top), min_passes=max(1, int(min_passes)))
+
+
+def sites_result(
+    sites: list[SiteCoverage],
+    base_url: str,
+    *,
+    resolved_bbox: BBox | None = None,
+    resolved_area: str | None = None,
+    self_href: str | None = None,
+) -> dict[str, Any]:
+    """Wrap ranked sites in the ``GET /sites`` response document.
+
+    Each entry of ``sites`` is a :meth:`~umbra_py.coverage.SiteCoverage.to_dict`
+    (``docs/schemas/site-coverage.schema.json`` -- the same shape ``umbra sites
+    --json`` and the ``find_repeat_sites`` agent tool emit), so the HTTP surface
+    reads the one contract the CLI and the agent tools already do. ``count`` and
+    the resolved query echo sit beside them, with the CC-BY ``attribution`` the
+    licence requires on every derived answer.
+    """
+    base = base_url.rstrip("/")
+    links = [_link("root", f"{base}/")]
+    if self_href:
+        links.append(_link("self", self_href))
+    return {
+        "count": len(sites),
+        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+        "resolved_area": resolved_area,
+        "sites": [site.to_dict() for site in sites],
+        "attribution": ATTRIBUTION,
+        "links": links,
+    }
 
 
 def open_source(index_path: str | os.PathLike | None = None, *, live: bool = False) -> Any:
@@ -1937,6 +2050,13 @@ OPENAPI_SCHEMAS: dict[str, str] = {
     "RenderJob": "render-job",
 }
 
+#: Contracts the *always-mounted* routes reference, so they belong in every
+#: instance's OpenAPI document -- unlike :data:`OPENAPI_SCHEMAS`, which describe
+#: the ``/artifacts/*`` routes and appear only when those are mounted.
+CORE_OPENAPI_SCHEMAS: dict[str, str] = {
+    "SiteCoverage": "site-coverage",
+}
+
 
 def _rewrite_refs(node: Any, base: str) -> Any:
     """Re-root a schema's internal ``$ref``\\ s at its place in the document.
@@ -2005,6 +2125,20 @@ def openapi_components() -> dict[str, Any]:
     }
 
 
+def core_openapi_components() -> dict[str, Any]:
+    """The contracts the always-mounted routes reference (:data:`CORE_OPENAPI_SCHEMAS`).
+
+    Separate from :func:`openapi_components` because these belong in *every*
+    instance's document -- ``GET /sites`` is mounted whether or not the artifact
+    routes are -- whereas the artifact contracts describe shapes an artifactless
+    instance never emits.
+    """
+    return {
+        component: _as_component(component, schema_name)
+        for component, schema_name in CORE_OPENAPI_SCHEMAS.items()
+    }
+
+
 def _json_response(component: str, description: str) -> dict[str, Any]:
     """An OpenAPI response object pointing at one committed contract."""
     return {
@@ -2022,6 +2156,35 @@ def _binary_response(media_type: str, description: str) -> dict[str, Any]:
 _JOB_RESPONSE = _json_response(
     "RenderJob", "Render queued; poll the `self` link until `status` leaves `queued`/`running`."
 )
+
+#: The ``GET /sites`` response: the ranked wrapper over ``SiteCoverage`` records
+#: (the ``sites`` items ``$ref`` the committed ``site-coverage`` contract).
+_SITES_RESPONSE: dict[str, Any] = {
+    "description": (
+        "Ranked repeat-imaged sites, each a `docs/schemas/site-coverage` record, "
+        "best-covered first."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "resolved_bbox": {
+                        "type": ["array", "null"],
+                        "items": {"type": "number"},
+                    },
+                    "resolved_area": {"type": ["string", "null"]},
+                    "sites": {
+                        "type": "array",
+                        "items": {"$ref": "#/components/schemas/SiteCoverage"},
+                    },
+                    "attribution": {"type": "string"},
+                },
+            }
+        }
+    },
+}
 
 
 # --------------------------------------------------------------------------
@@ -2479,6 +2642,116 @@ def build_app(
             self_href=f"{base}/search",
         )
         return JSONResponse(content=result, media_type=geojson)
+
+    @app.get(
+        "/sites",
+        tags=["Discovery"],
+        responses={200: _SITES_RESPONSE},
+    )
+    def get_sites(
+        request: Request,
+        bbox: str | None = Query(default=None),
+        intersects: str | None = Query(
+            default=None, description="GeoJSON polygon geometry as a JSON string"
+        ),
+        datetime: str | None = Query(default=None),
+        product_types: str | None = Query(
+            default=None, description="Comma-separated product types, e.g. GEC,SICD"
+        ),
+        area: str | None = Query(default=None, description="Free-text task/site substring"),
+        fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
+        polarizations: str | None = Query(
+            default=None, description="Comma-separated polarizations, e.g. VV,VH"
+        ),
+        min_incidence: float | None = Query(
+            default=None, description="Minimum view incidence angle (degrees)"
+        ),
+        max_incidence: float | None = Query(
+            default=None, description="Maximum view incidence angle (degrees)"
+        ),
+        max_resolution: float | None = Query(
+            default=None, description="Coarsest range/azimuth resolution to keep (metres)"
+        ),
+        limit: int = Query(
+            default=SITES_POOL_LIMIT,
+            ge=1,
+            le=MAX_LIMIT,
+            description="How deep the pool the ranking is computed over is",
+        ),
+        top: int = Query(
+            default=SITES_DEFAULT_TOP,
+            ge=1,
+            le=SITES_MAX_TOP,
+            description="How many sites to return, best-covered first",
+        ),
+        min_passes: int = Query(
+            default=SITES_MIN_PASSES,
+            ge=1,
+            description="How many dated passes a site needs to qualify",
+        ),
+    ) -> JSONResponse:
+        """Rank the archive's most repeat-imaged sites — discovery before analysis.
+
+        The HTTP front door for the discovery step every analysis endpoint
+        assumes: ``/artifacts/change`` / ``timescan`` / ``stats`` answer *what*
+        changed at a site, but each needs the caller to already know *which*
+        site's passes to send. Umbra files every pass of an area under one task,
+        so a site's coverage is how many dated passes share it; the ones with the
+        most are exactly where a time series exists to measure.
+
+        The filters scope the *pool* the ranking runs over and are the same ones
+        ``GET /search`` takes (``bbox`` or ``intersects``, ``datetime``,
+        ``product_types``, ``area`` / ``fuzzy``, and the SAR properties). ``limit``
+        sizes that pool, ``top`` caps how many sites come back, and ``min_passes``
+        is how many dated passes a site needs to qualify (2 is the minimum a change
+        composite can use). Each returned site is a ``site-coverage`` record with
+        the pass ``hrefs`` **oldest-first**, ready to send straight to
+        ``POST /artifacts/stats`` / ``change``. The ranking is single-sourced with
+        ``umbra sites`` and the ``find_repeat_sites`` agent tool, and no model is
+        called (a number ranks the sites).
+        """
+        if intersects and bbox:
+            raise HTTPException(
+                status_code=400, detail="bbox and intersects are mutually exclusive"
+            )
+        try:
+            parsed_bbox = parse_bbox(bbox)
+            parsed_geometry = parse_intersects(intersects)
+            start, end = parse_datetime(datetime)
+            wanted_products = parse_product_types(product_types)
+            wanted_pols = parse_polarizations(polarizations)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        source = _open()
+        try:
+            sites = run_sites(
+                source,
+                bbox=parsed_bbox,
+                intersects=parsed_geometry,
+                start=start,
+                end=end,
+                product_types=wanted_products,
+                area=area,
+                fuzzy=fuzzy,
+                polarizations=wanted_pols,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                limit=limit,
+                top=top,
+                min_passes=min_passes,
+            )
+        finally:
+            _close(source)
+        base = str(request.base_url).rstrip("/")
+        result = sites_result(
+            sites,
+            str(request.base_url),
+            resolved_bbox=parsed_bbox,
+            resolved_area=area,
+            self_href=f"{base}/sites",
+        )
+        return JSONResponse(content=result)
 
     def _check_collections(collections: list[str] | None) -> None:
         if collections and COLLECTION_ID not in collections:
@@ -3086,22 +3359,25 @@ def build_app(
                 headers={"X-Umbra-Cache": "hit"},
             )
 
-        # The artifact routes above reference the published contracts by
-        # ``$ref``; this is what puts the contracts themselves in the document
-        # they point into. Only when the artifact routes are mounted, since a
-        # component nothing references would be a shape this instance does not
-        # emit. FastAPI caches the generated document on the app, so merging
-        # into the object it returns is enough -- and idempotent.
-        generate_openapi = app.openapi
+    # The routes above reference their published contracts by ``$ref``; this is
+    # what puts the contracts themselves in the document they point into. The
+    # always-mounted ``GET /sites`` needs ``SiteCoverage`` in every instance's
+    # document (:func:`core_openapi_components`); the ``/artifacts/*`` contracts
+    # are added only when those routes are mounted, since a component nothing
+    # references would be a shape this instance does not emit. FastAPI caches the
+    # generated document on the app, so merging into the object it returns is
+    # enough -- and idempotent.
+    generate_openapi = app.openapi
 
-        def _openapi() -> dict[str, Any]:
-            document = generate_openapi()
-            document.setdefault("components", {}).setdefault("schemas", {}).update(
-                openapi_components()
-            )
-            return document
+    def _openapi() -> dict[str, Any]:
+        document = generate_openapi()
+        schemas = document.setdefault("components", {}).setdefault("schemas", {})
+        schemas.update(core_openapi_components())
+        if artifacts:
+            schemas.update(openapi_components())
+        return document
 
-        app.openapi = _openapi
+    app.openapi = _openapi
 
     return app
 
