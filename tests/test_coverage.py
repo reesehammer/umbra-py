@@ -49,9 +49,10 @@ def test_site_coverage_summarises_passes_dates_and_cadence():
     assert site.first == "2024-01-01"
     assert site.last == "2024-01-10"
     assert site.span_days == 9
-    # Gaps are 3 and 6 days: shortest 3, median 4.5.
+    # Gaps are 3 and 6 days: shortest 3, median 4.5, longest 6.
     assert site.min_revisit_days == 3.0
     assert site.median_revisit_days == 4.5
+    assert site.max_revisit_days == 6.0
     assert site.hrefs[0].endswith("/t/1/i.json")
     assert site.hrefs[-1].endswith("/t/10/i.json")
 
@@ -84,6 +85,7 @@ def test_site_coverage_single_pass_has_no_revisit():
     assert site.span_days is None
     assert site.min_revisit_days is None
     assert site.median_revisit_days is None
+    assert site.max_revisit_days is None
 
 
 def test_site_coverage_undated_pass_rides_along_without_breaking_cadence():
@@ -94,6 +96,17 @@ def test_site_coverage_undated_pass_rides_along_without_breaking_cadence():
     assert site.passes == 3
     assert site.min_revisit_days == 3.0
     assert len(site.hrefs) == 3
+
+
+def test_max_revisit_separates_a_steady_cadence_from_a_gappy_one():
+    # Two sites, same pass count and same median gap, but one has a long hole.
+    steady = site_coverage("Steady", [_pass("Steady", d) for d in (1, 7, 13, 19)])
+    gappy = site_coverage("Gappy", [_pass("Gappy", d) for d in (1, 7, 13, 28)])
+    # Steady gaps 6,6,6; gappy gaps 6,6,15 -> same median, different tail.
+    assert steady.median_revisit_days == gappy.median_revisit_days == 6.0
+    # The longest gap is what tells them apart.
+    assert steady.max_revisit_days == 6.0
+    assert gappy.max_revisit_days == 15.0
 
 
 def test_to_dict_is_json_ready():
@@ -169,6 +182,7 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     assert len(rows) == 1
     assert rows[0]["passes"] == 2
     assert rows[0]["min_revisit_days"] == 4.0
+    assert rows[0]["max_revisit_days"] == 4.0  # one gap: shortest == longest
     assert len(rows[0]["hrefs"]) == 2
 
 

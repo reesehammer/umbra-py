@@ -224,7 +224,8 @@ def _print_site_coverage(site) -> None:
     click.echo(f"  passes   : {site.passes}{span} ({dates})")
     click.echo(
         f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
-        f"{_format_revisit(site.median_revisit_days)} typical"
+        f"{_format_revisit(site.median_revisit_days)} typical, "
+        f"{_format_revisit(site.max_revisit_days)} longest gap"
     )
     if site.products:
         click.echo(f"  products : {', '.join(site.products)}")

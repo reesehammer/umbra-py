@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.max_revisit_days` — the longest gap in a repeat-imaged site's
+  coverage, on every discovery surface at once (`coverage.py`, `cli/discover.py`,
+  `mcp_server.py`, `docs/schemas/site-coverage.schema.json`,
+  `tests/test_coverage.py`, `tests/test_schemas.py`).** The discovery answer
+  already reported a site's *shortest* and *typical* revisit
+  (`min_revisit_days` / `median_revisit_days`) but not its *longest* — and the
+  longest gap is the one figure that decides a site's worst-case temporal
+  resolution: the widest stretch in which a change could have happened unseen.
+  Read beside the median it also separates a site imaged on a steady cadence
+  (`max` near the median) from a bursty or thinning one (`max` far above it) —
+  which two sites with the same pass count and the same median can otherwise hide.
+  That thinning is exactly where the open archive stops answering and on-demand
+  tasking is the pitch (`STRATEGY.md` §1), so surfacing it shortens the path from
+  free data to a tasking decision. It completes the min/median/max revisit trio on
+  the single-sourced `SiteCoverage.to_dict()`, so it reaches all four discovery
+  surfaces with no drift — `umbra sites` (a new `… longest gap` field on the
+  revisit line), `find_repeat_sites` (MCP / LangChain / LlamaIndex), and
+  `GET`/`POST /sites` on `umbra serve` (via the committed `site-coverage` contract,
+  which gains the field as a required nullable — null with fewer than two dated
+  passes, exactly like the other two). A test pins that two sites with identical
+  pass counts and medians are told apart only by the new field.
 - **`POST /sites` — the GeoJSON-body twin of `GET /sites`, so the discovery route
   takes an area-of-interest polygon as an object (`serve.py`,
   `tests/test_serve.py`).** `GET /sites` ranks the archive's most repeat-imaged
