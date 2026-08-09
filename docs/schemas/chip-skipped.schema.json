@@ -4,7 +4,7 @@
   "title": "Skipped acquisition",
   "description": "One acquisition a chip run could not include, in the product's own words (`umbra_py.chips.SkippedAcquisition.to_dict`). It is one line of the `skipped.jsonl` sidecar written beside the manifest, and one entry of the `skipped` array in a chip dataset summary — the same record either way, so a loader reading the directory and an agent reading stdout learn the same thing. Only a *final* fact about a product produces one: metadata that cannot support the request, or no readable product behind the href. A transport failure does not, because a dropped connection says nothing about the archive.",
   "type": "object",
-  "required": ["item_id", "datetime", "reason", "hint", "stage"],
+  "required": ["item_id", "datetime", "reason", "hint", "stage", "bbox"],
   "additionalProperties": false,
   "properties": {
     "item_id": {
@@ -27,6 +27,13 @@
     "stage": {
       "description": "When the hole was found, which is the one thing the two routes to it do not share. `conversion` means the product was downloaded and then refused (`--skip-unsupported`); `preflight` means its metadata was read over the wire and it was never downloaded at all (`--preflight`). The reason is the product's own either way, so only the cost differs.",
       "enum": ["conversion", "preflight"]
+    },
+    "bbox": {
+      "type": ["array", "null"],
+      "description": "Where the missing pass was: the acquisition's own footprint in EPSG:4326, `[min_lon, min_lat, max_lon, max_lat]`, so the hole is located in space as `datetime` locates it in time. A loader reconstituting a time series over an area of interest can tell a hole that falls over its site from one that never overlapped it. Null when the source item stated no footprint.",
+      "items": { "type": "number" },
+      "minItems": 4,
+      "maxItems": 4
     }
   }
 }

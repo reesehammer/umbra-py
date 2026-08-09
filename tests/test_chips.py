@@ -1883,6 +1883,57 @@ def test_a_preflighted_drop_reaches_the_sidecar_naming_the_stage(tmp_path):
     assert rows[0]["stage"] == "preflight"
 
 
+def test_a_skipped_acquisition_carries_its_footprint(tmp_path):
+    """The sidecar locates a hole in space as well as in time, so a loader can
+    tell a hole over its area of interest from one that never overlapped it."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    footprint = (12.0, 36.0, 12.2, 36.2)
+    acq_a, acq_b = _sicd_item("acq-a", cog), _sicd_item("acq-b", cog)
+    acq_b.bbox = footprint
+    dataset = write_chips(
+        [acq_a, acq_b],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        skip_unsupported=True,
+    )
+
+    skipped = dataset.skipped[0]
+    assert skipped.bbox == footprint
+    # It rides the same record all the way to disk and to the summary, as a
+    # plain list of four numbers -- the shape a ChipRecord's bbox already has.
+    rows = [
+        json.loads(line) for line in Path(dataset.skipped_path).read_text().strip().splitlines()
+    ]
+    assert rows[0]["bbox"] == list(footprint)
+    assert dataset.to_dict()["skipped"][0]["bbox"] == list(footprint)
+
+
+def test_a_footprintless_skip_records_a_null_bbox(tmp_path):
+    """An item that stated no footprint is a null rather than a missing key, so
+    absence is a value a consumer can read rather than a schema it must guess."""
+    pytest.importorskip("numpy")
+    from umbra_py.chips import write_chips
+
+    cog = _make_converted_cog(tmp_path / "geocoded.tif", calibration="sigma0")
+    # `_sicd_item` sets no bbox, so acq-b has none to carry.
+    dataset = write_chips(
+        [_sicd_item("acq-a", cog), _sicd_item("acq-b", cog)],
+        tmp_path / "ds",
+        asset="SICD",
+        chip_size=10,
+        preparer=_refusing_preparer(cog, refuse={"acq-b"}),
+        skip_unsupported=True,
+    )
+
+    assert dataset.skipped[0].bbox is None
+    assert dataset.to_dict()["skipped"][0]["bbox"] is None
+
+
 def test_the_sidecar_can_be_suppressed_and_follows_the_manifest(tmp_path):
     pytest.importorskip("numpy")
     from umbra_py.chips import write_chips
