@@ -693,6 +693,25 @@ def test_run_sites_ranks_the_pool_directly(sites_index):
     assert [(s.task, s.passes) for s in ranked] == [("Alpha", 3), ("Beta", 2)]
 
 
+def test_run_sites_over_an_index_ranks_the_whole_archive_not_a_capped_pool(sites_index):
+    # The index measures a site's depth with a GROUP BY task over its whole
+    # contents, so `limit` cannot shrink it: Alpha still reads as its full 3
+    # passes even though a re-listed pool of one row could never qualify a
+    # 2-pass site. This is the whole-archive drop-in (STRATEGY.md §8) -- a deep
+    # site no longer under-counts because its passes fell outside the first
+    # `limit` rows.
+    with CatalogIndex(sites_index) as source:
+        ranked = serve.run_sites(source, limit=1, min_passes=2)
+    assert [(s.task, s.passes) for s in ranked] == [("Alpha", 3), ("Beta", 2)]
+
+
+def test_sites_route_ranks_whole_archive_under_a_tiny_limit(sites_client):
+    # The HTTP surface inherits the whole-archive ranking: `limit=1` on an index
+    # instance still returns both sites at their full depth.
+    body = sites_client.get("/sites?limit=1").json()
+    assert [(s["task"], s["passes"]) for s in body["sites"]] == [("Alpha", 3), ("Beta", 2)]
+
+
 # --------------------------------------------------------------------------
 # On-demand render artifacts
 # --------------------------------------------------------------------------

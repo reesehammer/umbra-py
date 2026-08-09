@@ -218,10 +218,11 @@ CONFORMANCE_CLASSES = (
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 10_000
 
-#: ``GET /sites`` defaults: how deep the pool the ranking is computed over is
-#: (``limit``, bounded by :data:`MAX_LIMIT`), how many sites are returned
-#: (``top``, bounded by :data:`SITES_MAX_TOP`), and how many dated passes a site
-#: needs to qualify (``min_passes``; 2 is the minimum a change composite can use).
+#: ``GET /sites`` defaults: the live-backend pool size (``limit``, bounded by
+#: :data:`MAX_LIMIT`; ignored on an index, which ranks the whole archive), how
+#: many sites are returned (``top``, bounded by :data:`SITES_MAX_TOP`), and how
+#: many dated passes a site needs to qualify (``min_passes``; 2 is the minimum a
+#: change composite can use).
 SITES_POOL_LIMIT = 500
 SITES_DEFAULT_TOP = 20
 SITES_MAX_TOP = 100
@@ -922,17 +923,48 @@ def run_sites(
     passes share its task; the ones with the most are exactly where a time series
     exists to analyse.
 
-    ``limit`` sizes the single ``source.search`` the ranking is computed over (a
-    bigger pool finds more sites and deeper series but scans more of the archive;
-    ``area`` narrows it instead), and the SAR/date/geometry filters are the same
-    ones :func:`run_search` takes, pushed down to the backend. The ranking is
-    :func:`~umbra_py.coverage.rank_site_coverage` exactly -- the same selector
-    ``umbra sites``, the ``find_repeat_sites`` agent tool and the static
-    showcase's featured gallery use, so no two surfaces disagree about what "most
-    repeat-imaged" means. Pure ranking: no renderer and no model
-    (``STRATEGY.md`` §7's determinism boundary applied to discovery).
+    On the normal (index) backend the ranking is **whole-archive**: a site's
+    depth is one ``GROUP BY task`` :meth:`CatalogIndex.rank_sites` answers over the
+    index's entire contents, so a deeply-imaged site is ranked by all its passes
+    rather than by the arbitrary window a pool cap admits -- the drop-in
+    ``STRATEGY.md`` §8 names, so ``GET /sites`` no longer under-counts a deep site
+    whose passes fall outside the first ``limit`` rows. ``limit`` sizes only the
+    live-backend pool: a live :class:`~umbra_py.catalog.UmbraCatalog` (``umbra serve
+    --live``) has no index to group over, so it re-lists a single capped
+    ``source.search`` and ranks that (a bigger pool finds more sites and deeper
+    series but scans more of the archive; ``area`` narrows it instead). The
+    SAR/date/geometry filters are the same ones :func:`run_search` takes, pushed
+    down to the backend either way.
+
+    The ranking is :func:`~umbra_py.coverage.rank_site_coverage` (via
+    :meth:`~umbra_py.CatalogIndex.rank_sites` on the index, which shares the same
+    selector and summariser) -- the same one ``umbra sites``, the
+    ``find_repeat_sites`` agent tool and the static showcase's featured gallery
+    use, so no two surfaces disagree about what "most repeat-imaged" means. Pure
+    ranking: no renderer and no model (``STRATEGY.md`` §7's determinism boundary
+    applied to discovery).
     """
     from .coverage import rank_site_coverage
+
+    top_n = _clamp_top(top)
+    min_p = max(1, int(min_passes))
+
+    if isinstance(source, CatalogIndex):
+        return source.rank_sites(
+            bbox=bbox,
+            intersects=intersects,
+            start=start,
+            end=end,
+            product_types=product_types,
+            area=area,
+            fuzzy=fuzzy,
+            polarizations=polarizations,
+            min_incidence=min_incidence,
+            max_incidence=max_incidence,
+            max_resolution=max_resolution,
+            top=top_n,
+            min_passes=min_p,
+        )
 
     pool = list(
         source.search(
@@ -950,7 +982,7 @@ def run_sites(
             limit=_clamp_limit(limit),
         )
     )
-    return rank_site_coverage(pool, top=_clamp_top(top), min_passes=max(1, int(min_passes)))
+    return rank_site_coverage(pool, top=top_n, min_passes=min_p)
 
 
 def sites_result(
@@ -2676,7 +2708,10 @@ def build_app(
             default=SITES_POOL_LIMIT,
             ge=1,
             le=MAX_LIMIT,
-            description="How deep the pool the ranking is computed over is",
+            description=(
+                "Pool size for a live (`--live`) backend only; ignored on an "
+                "index, which ranks the whole archive"
+            ),
         ),
         top: int = Query(
             default=SITES_DEFAULT_TOP,
@@ -2699,12 +2734,16 @@ def build_app(
         so a site's coverage is how many dated passes share it; the ones with the
         most are exactly where a time series exists to measure.
 
-        The filters scope the *pool* the ranking runs over and are the same ones
-        ``GET /search`` takes (``bbox`` or ``intersects``, ``datetime``,
-        ``product_types``, ``area`` / ``fuzzy``, and the SAR properties). ``limit``
-        sizes that pool, ``top`` caps how many sites come back, and ``min_passes``
-        is how many dated passes a site needs to qualify (2 is the minimum a change
-        composite can use). Each returned site is a ``site-coverage`` record with
+        The filters scope the ranking and are the same ones ``GET /search`` takes
+        (``bbox`` or ``intersects``, ``datetime``, ``product_types``, ``area`` /
+        ``fuzzy``, and the SAR properties). On an index the depth is measured
+        **whole-archive** (a ``GROUP BY task`` over the entire catalog), so a site
+        deep in passes ranks by all of them rather than by whatever a pool cap
+        admitted; ``limit`` sizes the pool only on a ``--live`` backend, which has
+        no index to group over. ``top`` caps how many sites come back, and
+        ``min_passes`` is how many dated passes a site needs to qualify (2 is the
+        minimum a change composite can use). Each returned site is a
+        ``site-coverage`` record with
         the pass ``hrefs`` **oldest-first**, ready to send straight to
         ``POST /artifacts/stats`` / ``change``. The ranking is single-sourced with
         ``umbra sites`` and the ``find_repeat_sites`` agent tool, and no model is

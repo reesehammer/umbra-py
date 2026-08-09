@@ -1338,13 +1338,14 @@ Follow-ons that build on it, none a blocker:
     a JSON-string query param (as `GET /search` does), so no capability is lost;
     a `POST /sites` mirroring `POST /search` would be the ergonomic form for a
     large polygon, added the same way if a client wants it.
-  - **The route re-lists the pool per request.** Like the live CLI path, it ranks
-    a flat search capped by `limit`, rather than the `GROUP BY task` the index now
-    answers for the `--local` CLI (see the shipped entry below). The server has
-    the index open per request, so `CatalogIndex.rank_sites` is the drop-in if a
-    hosted instance's site ranking ever needs to be deeper than one page —
-    unblocked now that the SQL path exists; it waits only for a public instance
-    (§5.6) to be worth the wiring.
+  - ~~**The route re-lists the pool per request.**~~ **shipped** — `run_sites`
+    routes an index backend through `CatalogIndex.rank_sites`, so `GET /sites`
+    ranks whole-archive (`GROUP BY task`) on the normal serving mode, exactly as
+    `umbra sites --local` does. `limit` now sizes only the re-listed pool a
+    `--live` instance uses (no index to group over there). The drop-in was
+    correct on any self-hosted instance, so it did not in fact wait on a public
+    one; a `limit=1` test pins that a tiny pool cap can no longer shrink a site's
+    measured depth on an index. See the CHANGELOG.
 - ~~**The pool is a flat search, so a site's rank is only as deep as `--limit`.**~~
   **shipped** — `CatalogIndex.rank_sites` answers a site's depth as a `GROUP BY
   task` over the *whole* index, and `umbra sites --local` / `--index-db` routes
@@ -1360,12 +1361,13 @@ Follow-ons that build on it, none a blocker:
   the featured gallery, and a test pins it byte-for-byte against the uncapped-pool
   ranking for every filter. `--limit` is now a live-/`--token`-path pool size only.
   See the CHANGELOG. What is still open, and smaller:
-  - **The agent tools and `GET /sites` still re-list a pool.** `find_repeat_sites`
-    (MCP / LangChain / LlamaIndex) and the HTTP route rank a capped STAC search,
-    not the index — the same shallow-rank limit, now removed only on the `--local`
-    CLI. Both have (or can open) an index, so `rank_sites` is the drop-in; it waits
-    for the agent tools to grow a `--local`-style index mode and for a public
-    `serve` instance (§5.6) to make the HTTP depth worth having.
+  - **The agent tools still re-list a pool.** `find_repeat_sites` (MCP / LangChain
+    / LlamaIndex) ranks a capped STAC search, not the index — the same shallow-rank
+    limit, now removed on the `--local` CLI *and* on `GET /sites` (which routes an
+    index backend through `rank_sites`; see the shipped entry above). The agent
+    tools have (or can open) an index too, so `rank_sites` is the same drop-in one
+    surface further out; it waits for the agent tools to grow a `--local`-style
+    index mode to reach it through, since they gather live by default.
 
 ---
 
