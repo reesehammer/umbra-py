@@ -32,6 +32,7 @@ _NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
 _EXPECTED_NAMES = {
     "search_catalog",
+    "find_repeat_sites",
     "get_item",
     "geocode_place",
     "index_stats",
@@ -104,6 +105,9 @@ def test_json_tools_are_the_same_callables_as_mcp():
     # ...and so does its preflight, which reads raster headers and returns the
     # same report document the CLI and the HTTP endpoint emit.
     assert lc.stack_provenance is ms.stack_provenance
+    # find_repeat_sites is the deterministic discovery step that ranks the
+    # repeat-imaged sites -- shared verbatim so find -> pick -> narrate is one chain.
+    assert lc.find_repeat_sites is ms.find_repeat_sites
     # pick_change_interval is the deterministic scan that names the pair worth
     # narrating -- shared verbatim so scan -> narrate is one inventory.
     assert lc.pick_change_interval is ms.pick_change_interval

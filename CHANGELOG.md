@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`find_repeat_sites` — the repeat-imaged-site discovery step, now on the agent
+  surfaces (`mcp_server.py`, `langchain.py`, `llamaindex.py`, and the
+  `site-coverage` schema).** `umbra sites` ranks the archive's most
+  repeat-imaged sites — where change detection has something to measure — but the
+  answer was CLI-only, so the deterministic scan → narrate chain the strategy
+  describes (`pick_change_interval` → `narrate_change`) still started one step in:
+  nothing told an agent *which* site to point those verbs at. `find_repeat_sites`
+  closes that gap. It is a thin adapter over `rank_site_coverage` (the same
+  selector the static showcase's featured gallery uses, single-sourced so the two
+  cannot disagree about what "most repeat-imaged" means), gathering the pool with
+  the same backend selection and geography/date/product/SAR filters
+  `search_catalog` takes, and returning each site's coverage — passes, date span,
+  revisit cadence, footprint, products, and the pass URLs **oldest-first**, ready
+  to hand straight to `pick_change_interval`. So `find_repeat_sites →
+  pick_change_interval → narrate_change` is a complete chain a model can drive
+  with no site known in advance — the §3 discovery moat reached from every agent
+  front door. It ships on all three (MCP, LangChain, LlamaIndex) as the *same*
+  callable, so the surfaces cannot drift, with the parity tests extended to keep
+  it that way. The shape it emits — `SiteCoverage.to_dict()`, already the
+  `umbra sites --json` contract — is now published as `site-coverage.schema.json`
+  and validated against a real payload from both the CLI and the record, so
+  `umbra sites --json` is no longer an unschema'd surface (design principle 5,
+  "agents are users"). No model is called: a number ranks the sites (`STRATEGY.md`
+  §7's determinism boundary applied to discovery).
+
 ### Fixed
 - **Type-check the all-extras surface in CI so a stub-bearing extra's misuse
   fails a PR instead of every agent session (`viz/composites.py`, `ci.yml`,

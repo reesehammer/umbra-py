@@ -617,11 +617,21 @@ from:
   applied to the site rather than the pass. The ranking is the showcase's own
   `select_featured_sites` (single-sourced in the new dependency-free
   `coverage.py`), so the CLI and the featured gallery cannot disagree about what
-  "most repeat-imaged" means. See the CHANGELOG. **Open:** the same answer is not
+  "most repeat-imaged" means. See the CHANGELOG. ~~**Open:** the same answer is not
   yet on the agent surfaces (MCP / LangChain / LlamaIndex) or `umbra serve`, so
   the deterministic scan → narrate agent chain still starts one step in — a
   find-repeat-sites tool would complete it (`find sites → pick-interval →
-  narrate-change`). Tracked in `TODO.md`.
+  narrate-change`).~~ **shipped for the agent surfaces** — `find_repeat_sites`
+  ranks the pool through the *same* `rank_site_coverage`
+  (`pick_change_interval` is over `best_change_interval`), on all three agent
+  front doors as one shared callable, and returns each site's passes oldest-first
+  ready to hand straight to `pick_change_interval` — so `find sites →
+  pick-interval → narrate-change` is a complete chain a model can drive with no
+  site known in advance. The shape it emits (`SiteCoverage.to_dict()`, the
+  `umbra sites --json` contract) is now published as `site-coverage.schema.json`,
+  closing the unschema'd surface `umbra sites` had left. See the CHANGELOG.
+  **Open (maintainer):** the `umbra serve` route, gated on a public instance
+  existing (§5.6 first). Tracked in `TODO.md`.
 
 **Structural code debt (schedule, don't rush)**
 

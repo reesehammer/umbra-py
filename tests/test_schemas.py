@@ -1123,6 +1123,95 @@ def test_scene_matches_validate(tmp_path, monkeypatch):
     _check("scene-matches.schema.json", json.loads(searched.stdout))
 
 
+# --- The repeat-imaged-site coverage record (`umbra sites` / find_repeat_sites) --
+
+
+def _site_pass(task, day, *, place=None, bbox=None, pols=None, assets=None):
+    from umbra_py.models import UmbraItem
+
+    props = {"datetime": f"2024-0{day}-08T00:00:00Z"}
+    if pols is not None:
+        props["sar:polarizations"] = pols
+    item = UmbraItem.from_dict(
+        {
+            "type": "Feature",
+            "id": f"{task}-{day}",
+            "bbox": list(bbox) if bbox else [-112.0, 39.1, -111.9, 39.2],
+            "geometry": None,
+            "properties": props,
+            "assets": assets or {},
+        },
+        href=f"https://x.s3.amazonaws.com/sar-data/tasks/{task}/t/{day}/i.json",
+    )
+    item.place = place
+    return item
+
+
+def test_site_coverage_record_validates():
+    """A well-covered site: every field populated, which `umbra sites --json`
+    and the `find_repeat_sites` agent tool both emit per record."""
+    from umbra_py.coverage import rank_site_coverage
+
+    passes = [
+        _site_pass("Centerfield", d, place="Centerfield, Utah", pols=["VV"], assets={"GEC": {}})
+        for d in (1, 3, 6)
+    ]
+    ranked = rank_site_coverage(passes, top=5, min_passes=2)
+
+    assert ranked and ranked[0].span_days is not None
+    for site in ranked:
+        _check("site-coverage.schema.json", site.to_dict())
+
+
+def test_site_coverage_record_validates_with_the_nullable_cadence_fields():
+    """A single-dated-pass site: `span_days`, both revisit gaps and the whole
+    date span are null with no second pass to measure against -- the nullable
+    half of the contract, and the footprint is null when no pass carries one."""
+    from umbra_py.coverage import site_coverage
+
+    site = site_coverage("Lone", [_site_pass("Lone", 2, bbox=None)])
+    payload = site.to_dict()
+    # `from_dict` with an explicit bbox above always sets one, so force the
+    # footprint-less case the schema's null branch describes.
+    payload["bbox"] = None
+
+    assert payload["span_days"] is None
+    assert payload["min_revisit_days"] is None and payload["median_revisit_days"] is None
+    _check("site-coverage.schema.json", payload)
+
+
+def test_site_coverage_validates_from_the_cli(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    passes = [_site_pass("Centerfield", d, pols=["VV"], assets={"GEC": {}}) for d in (1, 3, 6)]
+    monkeypatch.setattr("umbra_py.cli._shared._gather_items", lambda **kwargs: passes)
+
+    result = CliRunner().invoke(cli_mod.cli, ["sites", "--json"])
+
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines
+    for line in lines:
+        _check("site-coverage.schema.json", json.loads(line))
+
+
+def test_the_site_coverage_schema_rejects_drift():
+    """Strictness: a plausible-looking extra field, and a bbox that lost a corner."""
+    from umbra_py.coverage import site_coverage
+
+    payload = site_coverage("Alpha", [_site_pass("Alpha", 1), _site_pass("Alpha", 3)]).to_dict()
+
+    drifted = dict(payload)
+    drifted["revisit_days"] = 2.0  # a field that is not in the contract
+    assert list(_validator("site-coverage.schema.json").iter_errors(drifted))
+
+    three_corner = dict(payload)
+    three_corner["bbox"] = [-112.0, 39.1, -111.9]  # the drift a key-set check misses
+    assert list(_validator("site-coverage.schema.json").iter_errors(three_corner))
+
+
 def test_the_agent_surface_schemas_reject_drift(sample_item_dict):
     """Strictness on the two shapes an agent is most likely to read: a key added
     to a context card, and a confidence level that is not one of the three."""

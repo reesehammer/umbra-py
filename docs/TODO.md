@@ -1307,15 +1307,19 @@ one's coverage (passes, date span, revisit cadence, footprint, products, and
 `stack` verb, single-sourced against the showcase's featured-gallery selector.
 Follow-ons that build on it, none a blocker:
 
-- **The answer is CLI-only; the agent surfaces don't have it.** The deterministic
-  scan → narrate chain the strategy describes (`pick_change_interval` → the
-  narration) still starts one step in, because nothing answers *which site* for
-  an agent. A `find_repeat_sites` tool on the MCP server (and the LangChain /
-  LlamaIndex wrappers derived from it, plus the parity test that keeps the three
-  in step) would complete the chain — `find sites → pick-interval →
-  narrate-change` — and is a thin adapter over `rank_site_coverage`, the same way
-  `pick_change_interval` is over `best_change_interval`. Deferred from the first
-  PR to keep it self-contained; it is the obvious next increment.
+- ~~**The answer is CLI-only; the agent surfaces don't have it.**~~ **shipped** —
+  `find_repeat_sites` is on the MCP server, the LangChain and LlamaIndex wrappers
+  (one shared callable, so the three cannot drift, with the parity tests extended
+  to pin it), a thin adapter over `rank_site_coverage` exactly the way
+  `pick_change_interval` is over `best_change_interval`. It gathers the pool with
+  the same backend selection and filters `search_catalog` takes and returns each
+  site's passes oldest-first, so `find sites → pick-interval → narrate-change` is
+  a complete chain a model can drive with no site known in advance. Its emitted
+  shape (`SiteCoverage.to_dict()`) is published as `site-coverage.schema.json` and
+  validated against a real payload, so `umbra sites --json` is schema'd too. See
+  the CHANGELOG. What is still open, and smaller:
+  - **No `umbra serve` route** — see the next item, which was always the
+    server-only half of this one.
 - **No `umbra serve` route.** A hosted instance could answer "best-covered sites
   in this bbox" over HTTP (a `GET /sites`-shaped route reusing the STAC search it
   already runs), which is the discovery half of the same "queryable with zero
