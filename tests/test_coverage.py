@@ -151,7 +151,7 @@ def test_sites_cli_human_output(monkeypatch):
         *[_pass("Bravo", d) for d in (2, 3)],
     ]
     _patch_gather(monkeypatch, pool)
-    result = CliRunner().invoke(cli, ["sites", "--local"])
+    result = CliRunner().invoke(cli, ["sites"])
     assert result.exit_code == 0, result.output
     assert "Ogden" in result.output  # baked place label wins
     assert "task     : Alpha" in result.output  # codename shown when it differs
@@ -163,7 +163,7 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     from umbra_py.cli import cli
 
     _patch_gather(monkeypatch, [_pass("Alpha", d) for d in (1, 5)])
-    result = CliRunner().invoke(cli, ["sites", "--local", "--json"])
+    result = CliRunner().invoke(cli, ["sites", "--json"])
     assert result.exit_code == 0, result.output
     rows = [json.loads(line) for line in result.output.splitlines() if line.strip()]
     assert len(rows) == 1
@@ -174,13 +174,13 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
 
 def test_sites_cli_forwards_gather_kwargs(monkeypatch):
     """The parity suites check --area/--fuzzy/--intersects; this pins the rest of
-    the search (dates, product, pool limit) reaching the backend too."""
+    the search (dates, product, pool limit) reaching the live backend too."""
     from umbra_py.cli import cli
 
     captured = _patch_gather(monkeypatch, [])
     result = CliRunner().invoke(
         cli,
-        ["sites", "--local", "--start", "2024-01-01", "--product", "GEC", "--limit", "42"],
+        ["sites", "--start", "2024-01-01", "--product", "GEC", "--limit", "42"],
     )
     assert result.exit_code == 0, result.output
     assert captured["start"] == "2024-01-01"
@@ -192,9 +192,101 @@ def test_sites_cli_empty_pool_explains(monkeypatch):
     from umbra_py.cli import cli
 
     _patch_gather(monkeypatch, [_pass("Alpha", 1)])  # single pass, below min_passes
-    result = CliRunner().invoke(cli, ["sites", "--local"])
+    result = CliRunner().invoke(cli, ["sites"])
     assert result.exit_code == 0, result.output
     assert "has 2+" in result.output
+    assert "pool of 1 acquisition(s)" in result.output
+
+
+def _build_sites_index(tmp_path, pool):
+    """Persist a pool of hand-built passes into a real CatalogIndex on disk, so
+    the ``--local`` path (which reads SQL, not a patched gather) can be exercised.
+    """
+    from umbra_py.index import CatalogIndex
+
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        for item in pool:
+            idx.add(item)
+    return tmp_path / "catalog.db"
+
+
+def test_sites_cli_local_ranks_whole_index_not_a_capped_pool(tmp_path):
+    """--local ranks the whole index directly: a deeply-imaged site is found even
+    when its passes would fall outside a --limit-sized pool, and --limit is not
+    used on this path (a GROUP BY task, so depth is never capped)."""
+    from umbra_py.cli import cli
+
+    # Deep is the alphabetically-last task, so a limited pool ordered by
+    # (task, acq_date) would admit the shallow sites first and cap Deep out.
+    pool = [
+        *[_pass("Aaa", d) for d in (1, 2)],
+        *[_pass("Bbb", d) for d in (3, 4)],
+        *[_pass("Zzz", d) for d in (5, 6, 7, 8)],
+    ]
+    db = _build_sites_index(tmp_path, pool)
+    result = CliRunner().invoke(cli, ["sites", "--index-db", str(db), "--limit", "3", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    # All three sites ranked (limit ignored), deepest first.
+    assert [r["task"] for r in rows] == ["Zzz", "Aaa", "Bbb"]
+    assert rows[0]["passes"] == 4
+
+
+def test_sites_cli_local_missing_index_errors(tmp_path):
+    from umbra_py.cli import cli
+
+    result = CliRunner().invoke(cli, ["sites", "--index-db", str(tmp_path / "nope.db")])
+    assert result.exit_code != 0
+    assert "No index at" in result.output
+
+
+def test_sites_cli_local_empty_index_explains(tmp_path):
+    from umbra_py.cli import cli
+
+    db = _build_sites_index(tmp_path, [_pass("Alpha", 1)])  # single pass
+    result = CliRunner().invoke(cli, ["sites", "--local", "--index-db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert "No site in the local index has 2+ passes" in result.output
+
+
+def test_sites_cli_local_forwards_filters_to_rank_sites(tmp_path, monkeypatch):
+    """The local path threads geography / task-name / product filters (and --top /
+    --min-passes) down to CatalogIndex.rank_sites -- the deep-path counterpart of
+    the parity suites' forwarding check for the live gather."""
+    from umbra_py.cli import cli
+    from umbra_py.index import CatalogIndex
+
+    db = _build_sites_index(tmp_path, [_pass("Alpha", d) for d in (1, 2)])
+    captured: dict = {}
+
+    def _fake_rank(self, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(CatalogIndex, "rank_sites", _fake_rank)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "sites",
+            "--index-db",
+            str(db),
+            "--area",
+            "Centerfield",
+            "--fuzzy",
+            "--product",
+            "GEC",
+            "--top",
+            "5",
+            "--min-passes",
+            "3",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["area"] == "Centerfield"
+    assert captured["fuzzy"] is True
+    assert captured["product_types"] == ["GEC"]
+    assert captured["top"] == 5
+    assert captured["min_passes"] == 3
 
 
 def test_sites_cli_token_conflicts_with_local(monkeypatch):

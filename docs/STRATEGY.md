@@ -643,6 +643,21 @@ from:
   `site-coverage.schema.json` in the generated OpenAPI document, and it is
   advertised on the landing page's `sites` link. What remains is only the
   operational act of standing up a *public* instance (§5.6). See the CHANGELOG.
+  ~~**Open:** all three surfaces ranked a flat pool capped by `limit`, so a site
+  with many passes just outside the first `limit` acquisitions read as shallower
+  than it is — the discovery moat, capped.~~ **shipped for the `--local` CLI** —
+  `CatalogIndex.rank_sites` answers a site's depth as a `GROUP BY task` over the
+  *whole* index (the index's own answer to "which series is deepest?", which no
+  re-listing can match), and `umbra sites --local` routes through it, so the
+  local ranking is whole-archive with no pool cap. The SQL-expressible filters are
+  counted directly and only the top tasks' documents are read to summarise; the
+  per-item polygon and acquisition-property filters take an uncapped-pool path
+  that is still whole-archive. It reuses `select_featured_sites`' ranking and
+  `site_coverage`'s summary, so the deep path cannot disagree with the pool one,
+  and a test pins the two identical for every filter. **Open:** the agent tools
+  and `GET /sites` still re-list a capped pool (both have an index, so `rank_sites`
+  is the drop-in — it waits on the agent tools growing a `--local` mode and on a
+  public `serve` instance, §5.6). See the CHANGELOG and `TODO.md`.
 
 **Structural code debt (schedule, don't rush)**
 

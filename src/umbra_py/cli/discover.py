@@ -271,8 +271,10 @@ def _print_site_coverage(site) -> None:
     type=int,
     default=500,
     show_default=True,
-    help="Size of the acquisition pool to rank sites from. Bigger finds more "
-    "sites and deeper series but scans more of the archive; --area narrows it.",
+    help="Size of the acquisition pool to rank sites from on the live / --token "
+    "path: bigger finds more sites and deeper series but scans more of the "
+    "archive; --area narrows it. Ignored with --local, which ranks the whole "
+    "index directly (a GROUP BY task, so a site's depth is never capped).",
 )
 @click.option(
     "--top",
@@ -324,16 +326,15 @@ def sites(
     Each site reports its pass count, date span, revisit cadence, footprint and
     products; --json adds the pass URLs (oldest-first) ready to pipe onward.
     Runs against the open bucket, a --local index, or the Canopy archive
-    (--token) -- the same backends as 'umbra search'.
+    (--token) -- the same backends as 'umbra search'. With --local the whole
+    index is ranked directly (a GROUP BY task), so a site's depth is measured
+    across every indexed pass rather than the first --limit acquisitions.
     """
     from ..coverage import rank_site_coverage
 
     _shared._check_token_not_local(token, local, db_path)
     search_bbox, search_geometry = _shared._resolve_geography(bbox, place, intersects)
-    pool = _shared._gather_items(
-        local=local,
-        db_path=db_path,
-        token=token,
+    filters = dict(
         bbox=search_bbox,
         intersects=search_geometry,
         start=start,
@@ -341,22 +342,42 @@ def sites(
         area=area,
         fuzzy=fuzzy,
         product_types=list(products) or None,
-        limit=limit,
-        live_label="Searching for repeat-imaged sites",
         **_shared._acquisition_filter_kwargs(
             polarizations, min_incidence, max_incidence, max_resolution
         ),
     )
-    ranked = rank_site_coverage(pool, top=top, min_passes=min_passes)
+    if local or db_path is not None:
+        # The index can answer a site's *whole-archive* depth as a GROUP BY task,
+        # so --local ranks the entire index rather than a --limit-capped pool --
+        # a deeply-imaged site can no longer read as shallow just because its
+        # passes fall outside the first --limit rows.
+        path = _shared._index_path(db_path)
+        if not path.exists():
+            raise click.ClickException(
+                f"No index at {path}. Build one first with 'umbra index build'."
+            )
+        with OrbitSpinner("Ranking sites in local index"), CatalogIndex(path) as index:
+            ranked = index.rank_sites(top=top, min_passes=min_passes, **filters)
+        pool_size = None
+    else:
+        pool = _shared._gather_items(
+            token=token,
+            limit=limit,
+            live_label="Searching for repeat-imaged sites",
+            **filters,
+        )
+        ranked = rank_site_coverage(pool, top=top, min_passes=min_passes)
+        pool_size = len(pool)
     if as_json:
         for site in ranked:
             click.echo(json.dumps(site.to_dict()))
         return
     if not ranked:
-        click.echo(
-            f"No site in the pool of {len(pool)} acquisition(s) has {min_passes}+ "
-            "passes. Widen --limit or the search, or lower --min-passes."
+        where = (
+            "the local index" if pool_size is None else f"the pool of {pool_size} acquisition(s)"
         )
+        widen = "Build/refresh the index" if pool_size is None else "Widen --limit or the search"
+        click.echo(f"No site in {where} has {min_passes}+ passes. {widen}, or lower --min-passes.")
         return
     for site in ranked:
         _print_site_coverage(site)

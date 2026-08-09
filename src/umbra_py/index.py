@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ._geometry import Geometry, geometry_bbox
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
@@ -39,6 +40,9 @@ from .constants import CATALOG_INDEX_DB_URL
 from .exceptions import IndexSchemaError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .coverage import SiteCoverage
 
 #: On-disk schema version, stored via ``PRAGMA user_version``. Bump it whenever
 #: the table layout changes (a new column, a new index the queries assume) so an
@@ -1225,6 +1229,168 @@ class CatalogIndex:
             if added_any:
                 self.set_meta("built_at", date.today().isoformat())
                 self.commit()
+
+    def _ranking_where(
+        self,
+        bbox: BBox | None,
+        start: DateLike,
+        end: DateLike,
+        product_types: list[str] | None,
+        area: str | None,
+        fuzzy: bool,
+    ) -> tuple[str, list[object]]:
+        """Build the SQL ``WHERE`` clause :meth:`rank_sites` counts sites under.
+
+        Mirrors the SQL-expressible half of :meth:`search`'s condition-building --
+        the acquisition-date bound, the bounding-box overlap, the ``area`` (or
+        ``fuzzy`` task-set) match and the product-asset membership -- so a
+        ``GROUP BY task`` here counts the same rows a ``search`` with the same
+        filters would yield. It always constrains to rows that can be *grouped and
+        ranked*: a non-null ``task`` (the site key) and a non-null ``datetime``
+        (a dated pass, exactly what :func:`umbra_py.showcase.select_featured_sites`
+        counts), so the count is a site's depth rather than its row total. The
+        polygon and acquisition-property filters are deliberately absent -- they
+        run per item in Python, so :meth:`rank_sites` takes the uncapped-pool path
+        when any is set rather than pushing an approximation into SQL.
+        """
+        conditions = ["task IS NOT NULL", "datetime IS NOT NULL"]
+        params: list[object] = []
+
+        start_d = _coerce_date(start)
+        end_d = _coerce_date(end, is_end=True)
+        if start_d is not None:
+            conditions.append("(acq_date IS NULL OR acq_date >= ?)")
+            params.append(start_d.isoformat())
+        if end_d is not None:
+            conditions.append("(acq_date IS NULL OR acq_date <= ?)")
+            params.append(end_d.isoformat())
+        if area and fuzzy:
+            # SQL LIKE can't express the token-wise fuzzy match; resolve the
+            # matching task names in Python (same matcher as `search`) and
+            # constrain to them. An empty match set means nothing can match.
+            names = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT task FROM items WHERE task IS NOT NULL"
+                )
+            ]
+            matched = matching_tasks(area, names)
+            if not matched:
+                conditions.append("1 = 0")
+            else:
+                placeholders = ", ".join("?" * len(matched))
+                conditions.append(f"task IN ({placeholders})")
+                params += matched
+        elif area:
+            conditions.append("LOWER(task) LIKE ? ESCAPE '\\'")
+            params.append(f"%{_escape_like(area.lower())}%")
+        if bbox:
+            conditions.append(
+                "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
+                "AND max_lat >= ? AND min_lat <= ?"
+            )
+            params += [bbox[0], bbox[2], bbox[1], bbox[3]]
+        if product_types:
+            wanted = [p.upper() for p in product_types]
+            placeholders = ", ".join("?" * len(wanted))
+            conditions.append(
+                f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
+            )
+            params += wanted
+
+        return " WHERE " + " AND ".join(conditions), params
+
+    def rank_sites(
+        self,
+        *,
+        bbox: BBox | None = None,
+        intersects: Geometry | None = None,
+        start: DateLike = None,
+        end: DateLike = None,
+        product_types: list[str] | None = None,
+        area: str | None = None,
+        fuzzy: bool = False,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
+        top: int = 20,
+        min_passes: int = 2,
+    ) -> list[SiteCoverage]:
+        """Rank the most repeat-imaged sites across the *whole* index.
+
+        The index-native form of :func:`umbra_py.coverage.rank_site_coverage`,
+        and the reason it exists: that function ranks whatever pool it is handed,
+        so ``umbra sites --local`` capped the pool at ``--limit`` acquisitions and
+        a site with many passes just *outside* the first ``--limit`` rows read as
+        shallower than it is. Umbra files every pass of a site under one task, so a
+        site's depth is a ``GROUP BY task`` the index can answer over its entire
+        contents -- no pool cap, so a deeply-imaged site is ranked by all its
+        passes rather than by the arbitrary window a limit happened to admit.
+
+        The ranking is :func:`umbra_py.showcase.select_featured_sites`' exactly --
+        dated passes per task, most first, task name breaking ties, keeping those
+        with at least ``min_passes`` -- so this, ``umbra sites`` and the featured
+        gallery cannot disagree about what "most repeat-imaged" means. Each site
+        is summarised by :func:`umbra_py.coverage.site_coverage`; the result is
+        the ``top`` best, best-first.
+
+        The filters mean exactly what they do on :meth:`search`. The
+        SQL-expressible ones (``bbox``, ``start`` / ``end``, ``area`` / ``fuzzy``,
+        ``product_types``) are counted directly in a ``GROUP BY``, so only the top
+        tasks' documents are then read to summarise -- cheap even whole-archive.
+        The polygon (``intersects``) and acquisition-property (``polarizations``,
+        ``min_incidence`` / ``max_incidence`` / ``max_resolution``) filters run per
+        item in Python, so when any is set this ranks the full *uncapped* matching
+        stream instead: still whole-archive (no ``limit``), identical to the pool
+        path, just without the cap this method exists to remove.
+        """
+        from .coverage import rank_site_coverage, site_coverage  # noqa: PLC0415
+
+        if top <= 0:
+            return []
+
+        if (
+            intersects is not None
+            or polarizations
+            or any(v is not None for v in (min_incidence, max_incidence, max_resolution))
+        ):
+            pool = list(
+                self.search(
+                    bbox=bbox,
+                    intersects=intersects,
+                    start=start,
+                    end=end,
+                    product_types=product_types,
+                    area=area,
+                    fuzzy=fuzzy,
+                    polarizations=polarizations,
+                    min_incidence=min_incidence,
+                    max_incidence=max_incidence,
+                    max_resolution=max_resolution,
+                )
+            )
+            return rank_site_coverage(pool, top=top, min_passes=min_passes)
+
+        where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
+        candidates = self._conn.execute(
+            f"SELECT task FROM items{where} GROUP BY task "
+            "HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC, task ASC LIMIT ?",
+            [*params, min_passes, top],
+        ).fetchall()
+
+        ranked: list[SiteCoverage] = []
+        for (task,) in candidates:
+            passes = []
+            for href, doc, place in self._conn.execute(
+                f"SELECT href, doc, place FROM items{where} AND task = ? ORDER BY datetime, href",
+                [*params, task],
+            ):
+                item = UmbraItem.from_dict(json.loads(doc), href=href)
+                item.place = place
+                passes.append(item)
+            ranked.append(site_coverage(task, passes))
+        return ranked
 
     def get(self, item_id: str) -> UmbraItem | None:
         """Return the indexed item with this STAC id, or ``None`` if absent.

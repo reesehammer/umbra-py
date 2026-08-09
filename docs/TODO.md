@@ -1338,18 +1338,34 @@ Follow-ons that build on it, none a blocker:
     a JSON-string query param (as `GET /search` does), so no capability is lost;
     a `POST /sites` mirroring `POST /search` would be the ergonomic form for a
     large polygon, added the same way if a client wants it.
-  - **The route re-lists the pool per request.** Like the CLI, it ranks a flat
-    search capped by `limit` (the same shallow-rank limit the next entry names),
-    rather than a `GROUP BY task` the published index could answer directly. The
-    server has the index open per request, so the SQL path is available if a
-    hosted instance's site ranking ever needs to be deeper than one page.
-- **The pool is a flat search, so a site's rank is only as deep as `--limit`.**
-  A site with many passes just outside the first `--limit` acquisitions reads as
-  shallower than it is; `--area` scopes the pool to fix it per-site, but a
-  whole-archive "deepest series" answer would want the published index's own
-  per-task counts rather than a re-listing. Cheap against `catalog.db` (a `GROUP
-  BY task` the index could answer directly); it waits for a consumer past the
-  live/`--local` search the command already has.
+  - **The route re-lists the pool per request.** Like the live CLI path, it ranks
+    a flat search capped by `limit`, rather than the `GROUP BY task` the index now
+    answers for the `--local` CLI (see the shipped entry below). The server has
+    the index open per request, so `CatalogIndex.rank_sites` is the drop-in if a
+    hosted instance's site ranking ever needs to be deeper than one page —
+    unblocked now that the SQL path exists; it waits only for a public instance
+    (§5.6) to be worth the wiring.
+- ~~**The pool is a flat search, so a site's rank is only as deep as `--limit`.**~~
+  **shipped** — `CatalogIndex.rank_sites` answers a site's depth as a `GROUP BY
+  task` over the *whole* index, and `umbra sites --local` / `--index-db` routes
+  through it, so a deeply-imaged site is ranked by all its passes rather than by
+  the arbitrary window a `--limit`-capped, `(task, acq_date)`-ordered pool
+  admitted (which favoured alphabetically-early tasks). The
+  SQL-expressible filters (`bbox` / date / `area` / `fuzzy` / `product`) are
+  counted directly and only the top tasks' documents are then read to summarise;
+  the polygon and acquisition-property filters, which run per item in Python, take
+  an uncapped-pool path that is still whole-archive. The ranking is
+  `select_featured_sites`' own and the summary is `site_coverage`, single-sourced
+  so the deep path cannot disagree with `umbra sites` / `find_repeat_sites` /
+  the featured gallery, and a test pins it byte-for-byte against the uncapped-pool
+  ranking for every filter. `--limit` is now a live-/`--token`-path pool size only.
+  See the CHANGELOG. What is still open, and smaller:
+  - **The agent tools and `GET /sites` still re-list a pool.** `find_repeat_sites`
+    (MCP / LangChain / LlamaIndex) and the HTTP route rank a capped STAC search,
+    not the index — the same shallow-rank limit, now removed only on the `--local`
+    CLI. Both have (or can open) an index, so `rank_sites` is the drop-in; it waits
+    for the agent tools to grow a `--local`-style index mode and for a public
+    `serve` instance (§5.6) to make the HTTP depth worth having.
 
 ---
 

@@ -1872,3 +1872,88 @@ def test_second_connection_reads_during_open_write_transaction(tmp_path):
     writer.commit()
     reader.close()
     writer.close()
+
+
+# --------------------------------------------------------------------------- #
+# rank_sites: whole-archive, index-native repeat-imaged-site ranking
+# --------------------------------------------------------------------------- #
+def _site_item(task, day, *, bbox=(0.0, 0.0, 1.0, 1.0), pols=None, products=("GEC",)):
+    """One dated pass of ``task`` on 2024-01-``day`` with a realistic href, so the
+    index derives its task and acquisition date. Optional polarizations/footprint
+    let the exact-filter (Python-side) ranking path be exercised."""
+    acq = f"2024-01-{day:02d}-00-00-00_UMBRA-04"
+    it = _make_item(task, acq, f"{task}-{day}", f"2024-01-{day:02d}T00:00:00Z", bbox, products)
+    if pols is not None:
+        it.properties["sar:polarizations"] = pols
+    return it
+
+
+def _rank_sites_pool_baseline(idx, **filters):
+    """The uncapped-pool answer rank_sites must reproduce: rank whatever an
+    unlimited search yields, exactly as the live path would."""
+    from umbra_py.coverage import rank_site_coverage
+
+    top = filters.pop("top", 20)
+    min_passes = filters.pop("min_passes", 2)
+    pool = list(idx.search(limit=None, **filters))
+    return rank_site_coverage(pool, top=top, min_passes=min_passes)
+
+
+def test_rank_sites_orders_by_depth_across_whole_index(tmp_path):
+    pool = [
+        *[_site_item("Deep", d) for d in (1, 2, 3, 4)],
+        *[_site_item("Mid", d) for d in (5, 6, 7)],
+        *[_site_item("Shallow", d) for d in (8, 9)],
+        _site_item("Lonely", 10),  # single pass -- below min_passes
+    ]
+    with _index(tmp_path, pool) as idx:
+        ranked = idx.rank_sites()
+    assert [(s.task, s.passes) for s in ranked] == [("Deep", 4), ("Mid", 3), ("Shallow", 2)]
+
+
+def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
+    """The cheap GROUP-BY path is exactly the uncapped-pool ranking, for every
+    SQL-expressible filter (date / bbox / area / product)."""
+    pool = [
+        *[_site_item("Alpha", d, products=("GEC", "SICD")) for d in (1, 5, 9)],
+        *[_site_item("Beta", d, bbox=(10.0, 10.0, 11.0, 11.0)) for d in (2, 6)],
+        *[_site_item("Gamma", d) for d in (3, 4)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        for filters in (
+            {},
+            {"min_passes": 3},
+            {"top": 1},
+            {"start": "2024-01-04"},
+            {"end": "2024-01-05"},
+            {"bbox": (9.5, 9.5, 11.5, 11.5)},
+            {"area": "alph"},
+            {"area": "gama", "fuzzy": True},
+            {"product_types": ["SICD"]},
+        ):
+            assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
+                filters
+            )
+
+
+def test_rank_sites_matches_uncapped_pool_for_exact_filters(tmp_path):
+    """When a polygon or acquisition-property filter is set, rank_sites takes the
+    uncapped-pool branch (the SQL count can't honour those); it must still equal
+    the pool ranking."""
+    pool = [
+        *[_site_item("Alpha", d, pols=["VV"]) for d in (1, 5, 9)],
+        *[_site_item("Beta", d, pols=["HH"]) for d in (2, 6)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        polygon = {"intersects": [[(-1.0, -1.0), (-1.0, 2.0), (2.0, 2.0), (2.0, -1.0)]]}
+        for filters in ({"polarizations": ["VV"]}, {"max_incidence": 90.0}, polygon):
+            assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters))
+
+
+def test_rank_sites_top_zero_and_empty_index(tmp_path):
+    with _index(tmp_path, [_site_item("Alpha", d) for d in (1, 2)]) as idx:
+        assert idx.rank_sites(top=0) == []
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with _index(empty, []) as idx:
+        assert idx.rank_sites() == []

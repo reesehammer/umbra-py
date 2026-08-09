@@ -64,9 +64,14 @@ def test_gather_commands_forward_area_and_fuzzy(spec, monkeypatch, tmp_path):
 
     monkeypatch.setattr("umbra_py.cli._shared._gather_items", _fake_gather)
 
+    # `sites --local` ranks the whole index through `CatalogIndex.rank_sites`, not
+    # `_gather_items`; its live path still forwards through the shared gather like
+    # every sibling, so check it there (the local forwarding is pinned separately
+    # in tests/test_coverage.py).
+    local = [] if spec[0] == "sites" else ["--local"]
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        runner.invoke(cli_mod.cli, [*spec, "--local", "--area", "Centerfield", "--fuzzy"])
+        runner.invoke(cli_mod.cli, [*spec, *local, "--area", "Centerfield", "--fuzzy"])
 
     assert captured, f"{spec[0]} did not call _gather_items"
     assert captured["area"] == "Centerfield"
