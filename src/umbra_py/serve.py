@@ -383,6 +383,24 @@ def _opt_float(value: Any, field: str) -> float | None:
         raise ValueError(f"{field} must be a number, got {value!r}") from exc
 
 
+def _opt_int(value: Any, field: str) -> int | None:
+    """Coerce an optional top-level POST body field to an int (``None`` stays).
+
+    Rejects a bool (``True`` is not a ``limit``) and a non-integral float, so a
+    malformed paging/ranking field is a ``400`` rather than a silent truncation.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer, got {value!r}") from exc
+
+
 class QueryFilters(NamedTuple):
     """The Umbra-specific filters :func:`parse_query` extracts from a STAC query.
 
@@ -550,6 +568,13 @@ def landing_page(
             type="application/json",
             method="GET",
             title="Rank the archive's most repeat-imaged sites (discovery before analysis)",
+        ),
+        _link(
+            "sites",
+            f"{base}/sites",
+            type="application/json",
+            method="POST",
+            title="Rank the archive's most repeat-imaged sites (GeoJSON body form)",
         ),
         _link(
             "service-desc",
@@ -2779,6 +2804,89 @@ def build_app(
                 limit=limit,
                 top=top,
                 min_passes=min_passes,
+            )
+        finally:
+            _close(source)
+        base = str(request.base_url).rstrip("/")
+        result = sites_result(
+            sites,
+            str(request.base_url),
+            resolved_bbox=parsed_bbox,
+            resolved_area=area,
+            self_href=f"{base}/sites",
+        )
+        return JSONResponse(content=result)
+
+    @app.post(
+        "/sites",
+        tags=["Discovery"],
+        responses={200: _SITES_RESPONSE},
+    )
+    def post_sites(request: Request, body: dict[str, Any] = Body(default={})) -> JSONResponse:
+        """Rank the archive's most repeat-imaged sites from a JSON body.
+
+        The POST twin of ``GET /sites``, mirroring the ``GET``/``POST /search``
+        pair: same ranking, same ``site-coverage`` records, same filters -- but a
+        body carries ``intersects`` as a GeoJSON object rather than the
+        JSON-string query param ``GET`` needs, which is the ergonomic form for a
+        real area-of-interest polygon (the reason ``POST /search`` exists beside
+        ``GET /search``). The SAR/date filters arrive as top-level fields or
+        inside a STAC ``query`` object exactly as ``POST /search`` accepts them (a
+        top-level field overrides the same field in ``query``); ``limit`` sizes
+        the pool only on a ``--live`` backend, and ``top`` / ``min_passes`` cap
+        and qualify the ranking as on ``GET``.
+        """
+        if body.get("intersects") is not None and body.get("bbox") is not None:
+            raise HTTPException(
+                status_code=400, detail="bbox and intersects are mutually exclusive"
+            )
+        try:
+            parsed_bbox = parse_bbox(body.get("bbox"))
+            parsed_geometry = parse_intersects(body.get("intersects"))
+            start, end = parse_datetime(body.get("datetime"))
+            # The Query-extension filters can arrive either as a STAC ``query``
+            # object or as plain top-level fields; a top-level field, when given,
+            # overrides the same field inside ``query`` -- identical to POST /search.
+            q = parse_query(body.get("query"))
+            top_products = parse_product_types(body.get("product_types"))
+            wanted_products = top_products if top_products is not None else q.product_types
+            top_area = body.get("area")
+            area = str(top_area).strip() if top_area not in (None, "") else q.area
+            top_pols = parse_polarizations(body.get("polarizations"))
+            polarizations = top_pols if top_pols is not None else q.polarizations
+            min_incidence = _opt_float(body.get("min_incidence"), "min_incidence")
+            if min_incidence is None:
+                min_incidence = q.min_incidence
+            max_incidence = _opt_float(body.get("max_incidence"), "max_incidence")
+            if max_incidence is None:
+                max_incidence = q.max_incidence
+            max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
+            if max_resolution is None:
+                max_resolution = q.max_resolution
+            limit = _opt_int(body.get("limit"), "limit")
+            top = _opt_int(body.get("top"), "top")
+            min_passes = _opt_int(body.get("min_passes"), "min_passes")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        fuzzy = bool(body.get("fuzzy", False))
+        source = _open()
+        try:
+            sites = run_sites(
+                source,
+                bbox=parsed_bbox,
+                intersects=parsed_geometry,
+                start=start,
+                end=end,
+                product_types=wanted_products,
+                area=area,
+                fuzzy=fuzzy,
+                polarizations=polarizations,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                limit=limit if limit is not None else SITES_POOL_LIMIT,
+                top=top if top is not None else SITES_DEFAULT_TOP,
+                min_passes=min_passes if min_passes is not None else SITES_MIN_PASSES,
             )
         finally:
             _close(source)
