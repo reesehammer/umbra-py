@@ -576,6 +576,124 @@ def test_run_search_offset_paging_is_stable(index_path):
 
 
 # --------------------------------------------------------------------------
+# GET /sites (discovery: rank the archive's most repeat-imaged sites)
+# --------------------------------------------------------------------------
+
+
+def _site_href(task: str, day: str, idx: int) -> str:
+    # The index derives a pass's date for the datetime filter from the href path,
+    # so keep it in step with the STAC ``datetime`` this fixture also sets.
+    return (
+        "https://umbra-open-data-catalog.s3.amazonaws.com/sar-data/tasks/"
+        f"{task}/{day}-00-00-00_UMBRA-{idx:02d}/x{idx}.stac.v2.json"
+    )
+
+
+@pytest.fixture
+def sites_index(tmp_path, sample_item_dict) -> Path:
+    """A temp index with two sites: Alpha (3 passes) then Beta (2 passes)."""
+    path = tmp_path / "sites.db"
+    passes = [
+        ("Alpha", "2024-01-01"),
+        ("Alpha", "2024-01-11"),
+        ("Alpha", "2024-01-21"),
+        ("Beta", "2024-02-01"),
+        ("Beta", "2024-02-05"),
+    ]
+    with CatalogIndex(path) as idx:
+        for i, (task, day) in enumerate(passes):
+            doc = copy.deepcopy(sample_item_dict)
+            doc["id"] = f"{task.lower()}-{i}"
+            doc["properties"]["datetime"] = f"{day}T00:00:00Z"
+            idx.add(UmbraItem.from_dict(doc, href=_site_href(task, day, i)))
+    return path
+
+
+@pytest.fixture
+def sites_client(sites_index) -> TestClient:
+    return TestClient(serve.build_app(sites_index))
+
+
+def test_sites_ranks_repeat_imaged_sites_best_first(sites_client):
+    body = sites_client.get("/sites").json()
+    assert body["count"] == 2
+    tasks = [(s["task"], s["passes"]) for s in body["sites"]]
+    # Best-covered first: Alpha (3 passes) then Beta (2).
+    assert tasks == [("Alpha", 3), ("Beta", 2)]
+    # The pass hrefs come back oldest-first, ready to pipe onward.
+    alpha = body["sites"][0]
+    assert alpha["hrefs"] == [
+        _site_href("Alpha", day, i)
+        for i, day in enumerate(("2024-01-01", "2024-01-11", "2024-01-21"))
+    ]
+    assert alpha["first"] == "2024-01-01" and alpha["last"] == "2024-01-21"
+    assert alpha["span_days"] == 20
+    assert body["attribution"].startswith("Contains Umbra open data")
+
+
+def test_sites_respects_top_and_min_passes(sites_client):
+    top1 = sites_client.get("/sites?top=1").json()
+    assert [s["task"] for s in top1["sites"]] == ["Alpha"]
+    # Only Alpha has three dated passes.
+    deep = sites_client.get("/sites?min_passes=3").json()
+    assert [s["task"] for s in deep["sites"]] == ["Alpha"]
+
+
+def test_sites_filters_by_area(sites_client):
+    body = sites_client.get("/sites?area=Beta").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+    assert body["resolved_area"] == "Beta"
+
+
+def test_sites_filters_by_datetime(sites_client):
+    # February bounds the pool to Beta's passes.
+    body = sites_client.get("/sites?datetime=2024-02-01/2024-02-28").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+
+
+def test_sites_filters_by_bbox(sites_client):
+    # A bbox far from the sample footprint leaves an empty pool.
+    empty = sites_client.get("/sites?bbox=0,0,1,1").json()
+    assert empty["count"] == 0
+    assert empty["resolved_bbox"] == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_sites_rejects_bbox_and_intersects_together(sites_client):
+    resp = sites_client.get('/sites?bbox=0,0,1,1&intersects={"type":"Point","coordinates":[0,0]}')
+    assert resp.status_code == 400
+
+
+def test_sites_bad_bbox_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.get("/sites?bbox=oops").status_code == 400
+
+
+def test_sites_missing_index_reports_service_unavailable(tmp_path):
+    client = TestClient(serve.build_app(tmp_path / "absent.db"), raise_server_exceptions=False)
+    assert client.get("/sites").status_code == 503
+
+
+def test_sites_records_validate_against_the_published_contract(sites_client):
+    jsonschema = pytest.importorskip("jsonschema")
+    from umbra_py.schemas import load_schema
+
+    validator = jsonschema.Draft202012Validator(load_schema("site-coverage.schema.json"))
+    for site in sites_client.get("/sites").json()["sites"]:
+        validator.validate(site)
+
+
+def test_sites_link_is_on_the_landing_page(client):
+    rels = {link["rel"] for link in client.get("/").json()["links"]}
+    assert "sites" in rels
+
+
+def test_run_sites_ranks_the_pool_directly(sites_index):
+    with CatalogIndex(sites_index) as source:
+        ranked = serve.run_sites(source, min_passes=2)
+    assert [(s.task, s.passes) for s in ranked] == [("Alpha", 3), ("Beta", 2)]
+
+
+# --------------------------------------------------------------------------
 # On-demand render artifacts
 # --------------------------------------------------------------------------
 
@@ -2197,6 +2315,30 @@ def test_an_artifactless_instance_publishes_no_artifact_contracts(index_path, tm
     app = serve.build_app(index_path, artifacts=False, cache_dir=tmp_path / "art")
     components = _openapi(TestClient(app))["components"]["schemas"]
     assert not {"StackStats", "StackProvenance", "RenderJob"} & set(components)
+    # But `GET /sites` is always mounted, so its contract is always published.
+    assert "SiteCoverage" in components
+
+
+def test_sites_response_references_the_site_coverage_contract(client):
+    # The always-mounted /sites route describes its records with the committed
+    # `site-coverage` schema, in every instance's document.
+    document = _openapi(client)
+    assert "SiteCoverage" in document["components"]["schemas"]
+    schema = document["paths"]["/sites"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert schema["properties"]["sites"]["items"] == {"$ref": "#/components/schemas/SiteCoverage"}
+
+
+def test_the_site_coverage_component_is_the_committed_file(client):
+    committed = json.loads((SCHEMA_DIR / "site-coverage.schema.json").read_text())
+    got = _openapi(client)["components"]["schemas"]["SiteCoverage"]
+    assert got.pop("x-umbra-schema-id") == committed["$id"]
+    expected = serve._rewrite_refs(
+        {k: v for k, v in committed.items() if k not in ("$schema", "$id")},
+        "#/components/schemas/SiteCoverage",
+    )
+    assert got == expected
 
 
 def test_a_cross_file_reference_is_refused_rather_than_dangled():

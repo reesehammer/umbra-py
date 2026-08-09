@@ -215,8 +215,9 @@ def llms_txt() -> str:
     lines.append(
         "- STAC API (`umbra serve`, the `[serve]` extra): a read-only STAC API "
         "over the catalog index -- landing page, `/conformance`, `/collections`, "
-        "`/collections/{id}/items`, and item search over `GET`/`POST /search` -- "
-        "with an OpenAPI doc at `/docs`. Speaks the protocol `pystac-client`, "
+        "`/collections/{id}/items`, item search over `GET`/`POST /search`, and "
+        "`GET /sites` to rank the most repeat-imaged sites (discovery before "
+        "analysis) -- with an OpenAPI doc at `/docs`. Speaks the protocol `pystac-client`, "
         "the QGIS STAC plugin, `stac-browser`, leafmap and OpenAPI-driven agents "
         "already understand."
     )
@@ -343,9 +344,11 @@ def llms_full_txt() -> str:
         "- **STAC API** (`umbra serve`, `[serve]` extra) — a read-only STAC API "
         "over the same `CatalogIndex`: landing page, `/conformance`, "
         "`/collections`, `/collections/{id}`, `/collections/{id}/items`, "
-        "`/collections/{id}/items/{item_id}`, and item search over `GET /search` "
+        "`/collections/{id}/items/{item_id}`, item search over `GET /search` "
         "and `POST /search` (bbox, datetime interval, ids, limit, token "
-        "pagination), with an OpenAPI doc at `/docs`."
+        "pagination), and `GET /sites` to rank the most repeat-imaged sites "
+        "(the discovery step before the analysis routes), with an OpenAPI doc at "
+        "`/docs`."
     )
     lines.append("")
 

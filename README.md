@@ -1714,6 +1714,24 @@ curl -X POST http://127.0.0.1:8000/search \
        "sar:resolution": {"lte": 0.5}}}'
 ```
 
+Before you can analyse a site you have to know *which* site, and `GET /sites`
+answers that over HTTP — the discovery step in front of the analysis routes. It
+ranks the archive's most repeat-imaged sites (where change detection has
+something to measure), reusing the same STAC search for the pool and the same
+ranking as `umbra sites` and the `find_repeat_sites` agent tool, and returns each
+site's coverage — passes, date span, revisit cadence, footprint, products, and
+the pass URLs **oldest-first**, ready to hand straight to `POST /artifacts/stats`
+/ `change`. It takes the same filters `/search` does (`bbox` / `intersects` /
+`datetime` / `product_types` / `area` / `fuzzy` / SAR properties), with `limit`
+sizing the pool, `top` capping the answer and `min_passes` the qualifying depth,
+and each record follows the committed
+[`site-coverage`](docs/schemas/README.md) contract:
+
+```bash
+# The most repeat-imaged sites in a bbox, then measure the top one's passes
+curl "http://127.0.0.1:8000/sites?bbox=-112.1,39.0,-111.9,39.2&top=5"
+```
+
 Beyond discovery, `umbra serve` also **renders the visual products on demand**,
 so a front end (or an agent) can trigger them over any site straight from HTTP:
 

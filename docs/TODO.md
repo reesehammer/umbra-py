@@ -1318,13 +1318,31 @@ Follow-ons that build on it, none a blocker:
   shape (`SiteCoverage.to_dict()`) is published as `site-coverage.schema.json` and
   validated against a real payload, so `umbra sites --json` is schema'd too. See
   the CHANGELOG. What is still open, and smaller:
-  - **No `umbra serve` route** — see the next item, which was always the
-    server-only half of this one.
-- **No `umbra serve` route.** A hosted instance could answer "best-covered sites
-  in this bbox" over HTTP (a `GET /sites`-shaped route reusing the STAC search it
-  already runs), which is the discovery half of the same "queryable with zero
-  install" promise the artifact routes make. Gated on a public instance existing
-  (the `umbra serve` section below), so nothing here waits on it.
+  - ~~**No `umbra serve` route**~~ **shipped** — see the next item.
+- ~~**No `umbra serve` route.**~~ **shipped** — `GET /sites`
+  (`serve.run_sites` / `serve.sites_result`, mounted in `build_app`) ranks
+  "best-covered sites in this bbox" over HTTP, reusing the API's own STAC search
+  for the filtered pool and the *same* `rank_site_coverage` selector for the
+  ranking, so the discovery moat is on every surface (CLI, agent tools, HTTP). It
+  was the `GET /sites`-shaped route this entry sketched, and it turned out not to
+  be gated on a public instance at all: it is useful to anyone self-hosting via
+  the shipped Docker setup, and it is the discovery half — `GET /sites → POST
+  /artifacts/stats` — of the "queryable with zero install" promise the artifact
+  routes made only for the analysis half. Its records reference the committed
+  `site-coverage.schema.json` in the generated OpenAPI document (a new
+  `CORE_OPENAPI_SCHEMAS` / `core_openapi_components`, since the route is mounted
+  whether or not the artifact routes are, unlike the three artifact contracts),
+  and the route is advertised on the landing page's `sites` link. See the
+  CHANGELOG. What is still open, and smaller:
+  - **No `POST /sites` for a polygon body.** `GET /sites` takes `intersects` as
+    a JSON-string query param (as `GET /search` does), so no capability is lost;
+    a `POST /sites` mirroring `POST /search` would be the ergonomic form for a
+    large polygon, added the same way if a client wants it.
+  - **The route re-lists the pool per request.** Like the CLI, it ranks a flat
+    search capped by `limit` (the same shallow-rank limit the next entry names),
+    rather than a `GROUP BY task` the published index could answer directly. The
+    server has the index open per request, so the SQL path is available if a
+    hosted instance's site ranking ever needs to be deeper than one page.
 - **The pool is a flat search, so a site's rank is only as deep as `--limit`.**
   A site with many passes just outside the first `--limit` acquisitions reads as
   shallower than it is; `--area` scopes the pool to fix it per-site, but a
@@ -1342,12 +1360,14 @@ Follow-ons that build on it, none a blocker:
 
 The read-only STAC API is shipped (landing / conformance / collections / items /
 `GET`+`POST /search` with bbox, datetime, geometry `intersects`, ids and token
-pagination), renders artifacts on demand (`GET /artifacts/quicklook/{id}.png`,
-`GET /artifacts/thumbnail/{id}.png`, `POST /artifacts/change`, `.../timescan`,
-`.../swipe`, and the one that is numbers rather than a picture, `POST
-/artifacts/stats` — with `POST /artifacts/provenance` as its preflight, the one
-route that neither renders nor caches) with an async job flow for long renders,
-and exposes the index's Umbra-specific filters through the STAC Query extension.
+pagination), ranks the archive's most repeat-imaged sites (`GET /sites`, the
+discovery step in front of the analysis routes), renders artifacts on demand
+(`GET /artifacts/quicklook/{id}.png`, `GET /artifacts/thumbnail/{id}.png`, `POST
+/artifacts/change`, `.../timescan`, `.../swipe`, and the one that is numbers
+rather than a picture, `POST /artifacts/stats` — with `POST /artifacts/provenance`
+as its preflight, the one route that neither renders nor caches) with an async job
+flow for long renders, and exposes the index's Umbra-specific filters through the
+STAC Query extension.
 Open follow-on:
 
 - **A hosted community instance.** The local-first server has no operational

@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`GET /sites` — the repeat-imaged-site discovery step, now on the `umbra
+  serve` STAC API (`serve.py`, `tests/test_serve.py`).** `umbra sites` (CLI) and
+  `find_repeat_sites` (MCP / LangChain / LlamaIndex) already answer *which* site
+  has a time series worth analysing, but the hosted HTTP surface — the one built
+  so a client can query the archive with **zero install** — could only list
+  acquisitions, not rank sites. So the deterministic scan → analyse chain the
+  analysis routes assume (`POST /artifacts/stats` / `change` measure *what*
+  changed, given the passes) still started one step short over HTTP: nothing told
+  a client *which* passes to send. `GET /sites` closes that gap. It reuses the
+  same STAC search the API already runs to gather a filtered pool (the same
+  `bbox` / `intersects` / `datetime` / `product_types` / `area` / `fuzzy` and SAR
+  filters `GET /search` takes, with `limit` sizing the pool, `top` capping the
+  answer and `min_passes` the qualifying depth) and ranks it through the *same*
+  `rank_site_coverage` selector `umbra sites`, `find_repeat_sites` and the static
+  showcase's featured gallery use — single-sourced so no surface can disagree
+  about what "most repeat-imaged" means. Each returned site is a `site-coverage`
+  record (passes, date span, revisit cadence, union footprint, products,
+  polarizations, and the pass `hrefs` **oldest-first**, ready to send straight to
+  `POST /artifacts/stats` / `change`), and the response's items reference the
+  committed `site-coverage.schema.json` in the generated OpenAPI document — the
+  contract re-homed, not restated, so an OpenAPI-driven client reads the same
+  shape the CLI and agent tools emit. The route is always mounted (pure search +
+  ranking, no `viz`/`load` extra) and advertised on the landing page's `sites`
+  link. No model is called: a number ranks the sites (`STRATEGY.md` §7's
+  determinism boundary applied to discovery). **This puts the discovery moat
+  (`STRATEGY.md` §3) on every surface — CLI, agent tools, and now HTTP.**
 - **`find_repeat_sites` — the repeat-imaged-site discovery step, now on the agent
   surfaces (`mcp_server.py`, `langchain.py`, `llamaindex.py`, and the
   `site-coverage` schema).** `umbra sites` ranks the archive's most

@@ -630,8 +630,19 @@ from:
   site known in advance. The shape it emits (`SiteCoverage.to_dict()`, the
   `umbra sites --json` contract) is now published as `site-coverage.schema.json`,
   closing the unschema'd surface `umbra sites` had left. See the CHANGELOG.
-  **Open (maintainer):** the `umbra serve` route, gated on a public instance
-  existing (§5.6 first). Tracked in `TODO.md`.
+  ~~**Open (maintainer):** the `umbra serve` route, gated on a public instance
+  existing (§5.6 first).~~ **shipped** — `GET /sites` ranks the archive's most
+  repeat-imaged sites over HTTP, reusing the API's own STAC search for the pool
+  and the *same* `rank_site_coverage` selector for the ranking, so the discovery
+  moat is now on **every** surface: CLI (`umbra sites`), agent tools
+  (`find_repeat_sites`), and the hosted API. The route was not in fact gated on a
+  public instance — it is useful to anyone self-hosting via the shipped Docker
+  setup, and it completes the "queryable with zero install" promise the artifact
+  routes make for the *analysis* half by adding the *discovery* half in front of
+  them (`GET /sites → POST /artifacts/stats`). Its records reference the committed
+  `site-coverage.schema.json` in the generated OpenAPI document, and it is
+  advertised on the landing page's `sites` link. What remains is only the
+  operational act of standing up a *public* instance (§5.6). See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 
