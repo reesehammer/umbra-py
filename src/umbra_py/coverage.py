@@ -41,15 +41,27 @@ class SiteCoverage:
     worst-case temporal resolution, the widest stretch a change could have
     happened in unseen; read together with ``median_revisit_days`` it separates a
     site imaged on a steady cadence (``max`` near the median) from a bursty or
-    thinning one (``max`` far above it). ``bbox`` is the union footprint of every
-    pass with one, so it is the rectangle a follow-up ``--bbox`` / ``--intersects``
-    would cover. ``hrefs`` is oldest-first, the order ``umbra change`` /
-    ``umbra stack`` want their passes in.
+    thinning one (``max`` far above it). ``comparable_passes`` is how many of the
+    passes can actually be *differenced* together: ``passes`` counts every
+    acquisition, but every analysis verb (``change`` / ``timescan`` / ``stack``,
+    ``stack_stats``, ``change --narrate``) refuses a mixed-polarization selection,
+    and an undated pass cannot be ordered onto a time axis at all, so the honest
+    depth of a change series here is the largest set of *dated* passes sharing one
+    polarization -- the pool
+    :func:`umbra_py.viz.composites.select_change_frames` draws from. When it is
+    below ``passes`` the raw count overstates what is analysable (a mix of
+    polarizations, or undated passes riding along); ``polarizations`` names which
+    polarizations are present, this says how deep the biggest comparable subset
+    is. ``bbox`` is the union footprint of every pass with one, so it is the
+    rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs`` is
+    oldest-first, the order ``umbra change`` / ``umbra stack`` want their passes
+    in.
     """
 
     task: str
     label: str
     passes: int
+    comparable_passes: int
     first: str | None
     last: str | None
     span_days: int | None
@@ -67,6 +79,7 @@ class SiteCoverage:
             "task": self.task,
             "label": self.label,
             "passes": self.passes,
+            "comparable_passes": self.comparable_passes,
             "first": self.first,
             "last": self.last,
             "span_days": self.span_days,
@@ -91,6 +104,25 @@ def _union_bbox(items: Iterable[UmbraItem]) -> BBox | None:
         max(b[2] for b in boxes),
         max(b[3] for b in boxes),
     )
+
+
+def _largest_comparable_group(items: Iterable[UmbraItem]) -> int:
+    """How many dated passes share the largest single-polarization signature.
+
+    This is the pool :func:`umbra_py.viz.composites.select_change_frames` selects
+    for a composite -- dated passes grouped by their polarization tuple, largest
+    group wins -- so it is the deepest change series the site supports before the
+    mixed-polarization refusal the analysis verbs enforce. Undated passes are
+    excluded (they cannot be ordered onto a time axis); a pass carrying no
+    polarization metadata groups with other such passes (the empty tuple), which
+    is exactly how the frame selector treats them. Zero when nothing is dated.
+    """
+    groups: dict[tuple[str, ...], int] = {}
+    for item in items:
+        if item.datetime is None:
+            continue
+        groups[tuple(item.polarizations)] = groups.get(tuple(item.polarizations), 0) + 1
+    return max(groups.values(), default=0)
 
 
 def _revisit_days(dates: Sequence[datetime]) -> list[float]:
@@ -129,6 +161,7 @@ def site_coverage(
         task=task,
         label=label,
         passes=len(ordered),
+        comparable_passes=_largest_comparable_group(ordered),
         first=first,
         last=last,
         span_days=span_days,

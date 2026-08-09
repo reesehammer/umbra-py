@@ -109,6 +109,42 @@ def test_max_revisit_separates_a_steady_cadence_from_a_gappy_one():
     assert gappy.max_revisit_days == 15.0
 
 
+def test_comparable_passes_is_the_largest_same_polarization_dated_subset():
+    # Five dated passes: three VV, two HH. The analysis verbs difference within
+    # one polarization, so the deepest comparable series is the three VV passes,
+    # not the raw count of five.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 3, pols=["VV"]),
+            _pass("Mixed", 6, pols=["VV"]),
+            _pass("Mixed", 8, pols=["HH"]),
+            _pass("Mixed", 10, pols=["HH"]),
+        ],
+    )
+    assert site.passes == 5
+    assert site.comparable_passes == 3
+    assert site.polarizations == ("HH", "VV")
+
+
+def test_comparable_passes_equals_the_dated_pass_count_under_one_polarization():
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (1, 2, 3)])
+    assert site.comparable_passes == site.passes == 3
+
+
+def test_comparable_passes_excludes_undated_passes():
+    # An undated pass rides along in `passes` and `hrefs` but cannot join a time
+    # series, so it is not comparable even when its polarization matches.
+    undated = _pass("Alpha", 1, pols=["VV"])
+    undated.properties.pop("datetime")
+    site = site_coverage(
+        "Alpha", [undated, _pass("Alpha", 2, pols=["VV"]), _pass("Alpha", 5, pols=["VV"])]
+    )
+    assert site.passes == 3
+    assert site.comparable_passes == 2
+
+
 def test_to_dict_is_json_ready():
     site = site_coverage(
         "Alpha", [_pass("Alpha", 1, bbox=(0, 0, 1, 1)), _pass("Alpha", 3, bbox=(2, 2, 3, 3))]
@@ -172,6 +208,25 @@ def test_sites_cli_human_output(monkeypatch):
     assert "2 site(s), best-covered first." in result.output
 
 
+def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        # Mixed: three VV, one HH -- only three are differenceable together.
+        *[_pass("Mixed", d, pols=["VV"]) for d in (1, 4, 8)],
+        _pass("Mixed", 10, pols=["HH"]),
+        # Uniform single-polarization site -- no 'usable' note needed.
+        *[_pass("Clean", d, pols=["VV"]) for d in (2, 5)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites"])
+    assert result.exit_code == 0, result.output
+    assert "passes   : 4" in result.output and "3 usable" in result.output
+    # The uniform site's line carries no 'usable' clause.
+    assert "passes   : 2 over" in result.output
+    assert "2 usable" not in result.output
+
+
 def test_sites_cli_json_carries_pass_urls(monkeypatch):
     from umbra_py.cli import cli
 
@@ -181,6 +236,7 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     rows = [json.loads(line) for line in result.output.splitlines() if line.strip()]
     assert len(rows) == 1
     assert rows[0]["passes"] == 2
+    assert rows[0]["comparable_passes"] == 2
     assert rows[0]["min_revisit_days"] == 4.0
     assert rows[0]["max_revisit_days"] == 4.0  # one gap: shortest == longest
     assert len(rows[0]["hrefs"]) == 2

@@ -8,6 +8,7 @@
     "task",
     "label",
     "passes",
+    "comparable_passes",
     "first",
     "last",
     "span_days",
@@ -25,6 +26,7 @@
       "task": "Centerfield_Utah",
       "label": "Centerfield, Utah",
       "passes": 7,
+      "comparable_passes": 7,
       "first": "2024-01-08",
       "last": "2024-06-19",
       "span_days": 163,
@@ -53,6 +55,11 @@
       "type": "integer",
       "minimum": 1,
       "description": "How many acquisitions of this site are in the ranked pool, dated or not — the count that ranks it (more passes, more to measure)."
+    },
+    "comparable_passes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many passes can actually be differenced together for change detection: the largest set of dated passes sharing one polarization — the pool a `change` / `timescan` / `stack` selection draws from before the mixed-polarization refusal the analysis verbs enforce. Undated passes are excluded (they cannot be ordered onto a time axis). Below `passes` means the raw count overstates the analysable depth (a polarization mix, or undated passes riding along); equal to the dated-pass count when every dated pass shares one polarization. `polarizations` says which polarizations are present, this says how deep the biggest comparable subset is."
     },
     "first": {
       "type": ["string", "null"],

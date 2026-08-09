@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.comparable_passes` — how many of a repeat-imaged site's passes
+  can actually be differenced together, on every discovery surface at once
+  (`coverage.py`, `cli/discover.py`, `docs/schemas/site-coverage.schema.json`,
+  `tests/test_coverage.py`, `tests/test_schemas.py`).** The discovery ranking
+  counts every acquisition (`passes`), but every analysis verb the answer feeds —
+  `change` / `timescan` / `stack`, `stack_stats`, `change --narrate` — refuses a
+  *mixed-polarization* selection (HH and VV measure different scattering), and an
+  undated pass cannot be ordered onto a time axis at all. So a raw pass count
+  overstates a site's *analysable* depth whenever its passes span more than one
+  polarization or some are undated. `comparable_passes` reports the honest figure:
+  the largest set of dated passes sharing one polarization — the exact pool
+  `viz.composites.select_change_frames` draws from before that refusal bites, so
+  the discovery answer and the verb it hands off to cannot disagree about how deep
+  a change series the site supports. It turns the existing `polarizations` field
+  from a *warning* ("more than one means not all comparable") into an actionable
+  *count*, which is the difference between knowing a site is mixed and knowing how
+  many passes survive the mix. Being a pure function of the passes it stays out of
+  the nullable-cadence family: it is always an integer (0 when nothing is dated,
+  equal to the dated-pass count under a single polarization), added to the
+  single-sourced `SiteCoverage.to_dict()` so it reaches all four discovery
+  surfaces with no drift — `umbra sites` (a `… usable` clause on the pass line,
+  shown only when it undercuts the raw count so a clean single-pol site stays a
+  one-number line), `find_repeat_sites` (MCP / LangChain / LlamaIndex), and
+  `GET`/`POST /sites` on `umbra serve` (via the committed `site-coverage` contract,
+  which gains the field as a required non-null integer). Tests pin a mixed-pol
+  site's comparable depth below its pass count, a single-pol site's equal to it,
+  and undated passes excluded.
 - **`SiteCoverage.max_revisit_days` — the longest gap in a repeat-imaged site's
   coverage, on every discovery surface at once (`coverage.py`, `cli/discover.py`,
   `mcp_server.py`, `docs/schemas/site-coverage.schema.json`,
