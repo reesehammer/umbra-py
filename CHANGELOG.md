@@ -72,6 +72,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   script reading the contract has a concrete document to parse against, not only
   a shape to satisfy. Closes the last open item in the machine-readable-contracts
   group (design principle 5, "agents are users"). See `docs/schemas/README.md`.
+- **Carry the missing pass's footprint into a chip run's `skipped.jsonl`
+  sidecar, so a hole is located in space as well as in time (`chips.py`,
+  `docs/schemas/chip-skipped.schema.json`).** `SkippedAcquisition` recorded
+  *which* pass a run could not include and *when* it was acquired, but not
+  *where* it was — so a training loader reading the sidecar could tell a time
+  series had a hole but not whether the hole fell over the area of interest it
+  cared about. A new `SkippedAcquisition.bbox` carries the acquisition's own
+  footprint (`UmbraItem.bbox`, EPSG:4326 `[min_lon, min_lat, max_lon, max_lat]`),
+  populated from the item that is already in hand at both routes to a skip — the
+  conversion refusal (`--skip-unsupported`) and the preflight drop
+  (`--preflight`) — so the record is described the same either way. That answers
+  the natural question ("was this dropped pass over my site?") from the directory
+  itself, without re-running the search that produced the selection — the
+  self-describing-artifact bar the sidecar was written to (design principle 5,
+  agents are users). It is a required-nullable field on
+  `chip-skipped.schema.json` (null when the source item stated no footprint, so
+  absence is a value a consumer reads rather than a missing key it must guess at),
+  emitted as the four-number list a `ChipRecord.bbox` already is. Closes the
+  batch-survivability follow-on in `TODO.md`.
 - **Ride a structured polarization-caution block alongside a `change_composite`
   MCP picture when same-polarization could not be *verified* (`mcp_server.py`).**
   `_require_same_polarization` refuses a *visible* mix — two passes whose known

@@ -807,6 +807,26 @@ def test_every_skipped_sidecar_line_validates(tmp_path):
         _check("chip-skipped.schema.json", _emitted(dataset.to_dict())["skipped"][0])
 
 
+def test_the_skipped_footprint_validates_present_and_absent_but_not_malformed():
+    """`bbox` locates the hole in space, and its contract is the ChipRecord
+    bbox's: four numbers or null, and the strictness rejects anything else."""
+    from umbra_py.chips import SkippedAcquisition
+
+    located = SkippedAcquisition(
+        item_id="acq-b", reason="metadata cannot support --calibrate", bbox=(12.0, 36.0, 12.2, 36.2)
+    )
+    _check("chip-skipped.schema.json", located.to_dict())
+
+    footprintless = SkippedAcquisition(item_id="acq-c", reason="no readable product")
+    assert footprintless.to_dict()["bbox"] is None
+    _check("chip-skipped.schema.json", footprintless.to_dict())
+
+    # A three-corner bbox is the drift a key-set comparison cannot see.
+    drifted = located.to_dict()
+    drifted["bbox"] = [12.0, 36.0, 12.2]
+    assert list(_validator("chip-skipped.schema.json").iter_errors(drifted))
+
+
 def test_a_preflighted_chip_run_validates(tmp_path):
     """The `preflight` block, and the `"preflight"` stage its drops are recorded
     under -- the one field that distinguishes a hole found before the download."""
