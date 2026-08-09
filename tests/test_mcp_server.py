@@ -220,6 +220,77 @@ def test_find_repeat_sites_rejects_bbox_with_intersects():
         ms.find_repeat_sites(bbox=[0, 0, 1, 1], intersects={"type": "Point", "coordinates": [0, 0]})
 
 
+def _build_sites_index(tmp_path, pool):
+    """Persist hand-built passes into a real CatalogIndex on disk, so the local
+    path (which reads SQL, not a patched search) can be exercised."""
+    from umbra_py.index import CatalogIndex
+
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        for item in pool:
+            idx.add(item)
+    return tmp_path / "catalog.db"
+
+
+def test_find_repeat_sites_local_ranks_whole_index_not_a_capped_pool(tmp_path, monkeypatch):
+    # A deep site whose passes fall outside a `limit`-sized pool ordered by
+    # (task, acq_date): the local path must route through CatalogIndex.rank_sites
+    # (a GROUP BY task, no pool cap) rather than re-listing `limit` acquisitions,
+    # so the deep site is still ranked by all its passes. `limit` is ignored here.
+    pool = [
+        *[_site_pass("Aaa", d) for d in (1, 2)],
+        *[_site_pass("Bbb", d) for d in (3, 4)],
+        *[_site_pass("Zzz", d) for d in (5, 6, 7, 8)],
+    ]
+    db = _build_sites_index(tmp_path, pool)
+    monkeypatch.setattr(ms, "default_index_path", lambda: db)
+
+    out = ms.find_repeat_sites(local=True, limit=3)
+
+    assert out["source"] == "local-index"
+    # All three sites ranked (limit ignored), the deepest first.
+    tasks = [s["task"] for s in out["sites"]]
+    assert tasks[0] == "Zzz"
+    assert set(tasks) == {"Aaa", "Bbb", "Zzz"}
+    assert out["sites"][0]["passes"] == 4
+
+
+def test_find_repeat_sites_local_forwards_filters_to_rank_sites(tmp_path, monkeypatch):
+    # The local path threads geography / task-name / product / SAR filters (and
+    # top / min_passes) down to CatalogIndex.rank_sites, and never re-lists a
+    # capped pool through search.
+    from umbra_py.index import CatalogIndex
+
+    db = _build_sites_index(tmp_path, [_site_pass("Alpha", d) for d in (1, 2)])
+    monkeypatch.setattr(ms, "default_index_path", lambda: db)
+    captured: dict = {}
+
+    def _fake_rank(self, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(CatalogIndex, "rank_sites", _fake_rank)
+    out = ms.find_repeat_sites(
+        area="Centerfield",
+        fuzzy=True,
+        products=["GEC"],
+        polarizations=["VV"],
+        top=5,
+        min_passes=3,
+        limit=999,
+        local=True,
+    )
+
+    assert out["source"] == "local-index"
+    assert captured["area"] == "Centerfield"
+    assert captured["fuzzy"] is True
+    assert captured["product_types"] == ["GEC"]
+    assert captured["polarizations"] == ["VV"]
+    assert captured["top"] == 5
+    assert captured["min_passes"] == 3
+    # `limit` sizes only the live/token pool -- it is not a rank_sites argument.
+    assert "limit" not in captured
+
+
 def test_search_catalog_local_without_index_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
     with pytest.raises(FileNotFoundError):

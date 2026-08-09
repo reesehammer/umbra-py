@@ -665,10 +665,23 @@ from:
   instance uses (there being no index to `GROUP BY` there). The drop-in did not
   wait on a public instance after all — it is correct on any self-hosted one, and
   a `limit=1` test pins that a tiny pool cap can no longer shrink a site's measured
-  depth on an index. **Open:** the agent tools still re-list a capped pool — they
+  depth on an index. ~~**Open:** the agent tools still re-list a capped pool — they
   have an index available but no `--local` mode to reach it through, so that is the
   remaining half (a `find_repeat_sites` local path routing to `rank_sites`, the
-  same drop-in one surface further out). See the CHANGELOG and `TODO.md`.
+  same drop-in one surface further out).~~ **shipped** — `find_repeat_sites` (the
+  MCP / LangChain / LlamaIndex tool, whose `local` already selected the index
+  backend) now routes that backend through `CatalogIndex.rank_sites` rather than
+  re-listing a `limit`-capped `search`, so the *last* discovery surface measures a
+  site's depth whole-archive. `limit` now sizes only the live/`--token` pool (no
+  index to `GROUP BY` there), exactly as it does on `umbra sites` and `GET /sites`.
+  The drop-in is one surface further out and byte-identical in shape to the other
+  two, so all four surfaces — CLI (`umbra sites`), the hosted API (`GET /sites`),
+  the featured gallery, and the agent tools — now rank the same whole-archive way
+  and cannot disagree about a deep site's depth. Two tests pin it: a deep site
+  whose passes fall outside a `limit`-sized pool is still ranked by all of them,
+  and every filter forwards to `rank_sites` with no `limit` re-list.
+  **This closes the discovery moat's whole-archive-ranking gap on every surface.**
+  See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 
