@@ -52,6 +52,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in CI: the featured composites rendered but every reading was skipped on a 402.
 
 ### Added
+- **Validate every published schema's `examples`, and give the agent-facing
+  contracts a whole-document example to parse (`docs/schemas/*.schema.json`,
+  `tests/test_schemas.py`).** `examples` is a JSON Schema *annotation* — a
+  validator never checks its members — so an example that drifted from the shape
+  it illustrates (an enum value renamed, a number turned string, a field a strict
+  schema no longer allows) shipped as valid-looking documentation a consumer
+  copying it would get wrong. `tests/test_schemas.py` now walks every schema in
+  `docs/schemas/` and validates each `examples` entry against the subschema it
+  sits on — at every depth, resolving `$defs` and cross-file `$ref`s through the
+  same registry the payload checks use — so a schema's example is held to the
+  same contract as the payloads it documents. Two self-tests keep the check
+  honest (that it found a real corpus rather than validating nothing, and that a
+  deliberately-drifted example is caught). The same change gives nine
+  consumer-facing contracts (`error`, `download`, `index-info`, `render-manifest`,
+  `render-job`, `task-matches`, `scene-matches`, `chip-skipped`,
+  `stack-provenance`) a top-level whole-document `examples` entry — a complete,
+  now-checked instance beside the field-by-field descriptions, so an agent or a
+  script reading the contract has a concrete document to parse against, not only
+  a shape to satisfy. Closes the last open item in the machine-readable-contracts
+  group (design principle 5, "agents are users"). See `docs/schemas/README.md`.
 - **Ride a structured polarization-caution block alongside a `change_composite`
   MCP picture when same-polarization could not be *verified* (`mcp_server.py`).**
   `_require_same_polarization` refuses a *visible* mix — two passes whose known

@@ -6,6 +6,20 @@
   "type": "object",
   "required": ["query", "matches"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "query": "a harbour with container cranes",
+      "matches": [
+        {
+          "item_id": "2d1827a2-d04c-4e15-9319-3810d011540b",
+          "score": 0.841204,
+          "task": "rotterdam_port",
+          "datetime": "2024-03-08T12:00:00Z",
+          "href": "https://example.com/rotterdam_port/2024-03-08.json"
+        }
+      ]
+    }
+  ],
   "properties": {
     "query": {
       "type": "string",

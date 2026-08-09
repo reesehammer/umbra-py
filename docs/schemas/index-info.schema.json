@@ -6,6 +6,19 @@
   "type": "object",
   "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "path": "/data/umbra/catalog.db",
+      "size_bytes": 41943040,
+      "items": 12874,
+      "start": "2023-02-14",
+      "end": "2026-01-12",
+      "tasks": 903,
+      "labeled": 12874,
+      "thumbnailed": 1500,
+      "built_at": "2026-01-13"
+    }
+  ],
   "properties": {
     "path": {
       "type": "string",

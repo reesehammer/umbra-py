@@ -1121,8 +1121,9 @@ blocker:
 
 Sixteen schemas now, each strict and each validated against a payload from the
 surface that emits it, plus the meta checks (valid draft 2020-12, `$id` matches
-filename, the README table names every file and no file it does not). Every
-`--json` shape the CLI emits is published. Follow-ons, none a blocker:
+filename, the README table names every file and no file it does not, and every
+`examples` entry validates against the subschema it sits on). Every `--json`
+shape the CLI emits is published. Follow-ons, none a blocker:
 
 - ~~**`umbra chips --json` has no schema.**~~ **shipped** — `chip-dataset`,
   `chip-record` and `chip-skipped`, three documents because a chip run has three
@@ -1212,10 +1213,30 @@ filename, the README table names every file and no file it does not). Every
     `render-manifest` or `watch-delta` as a component would mean publishing its
     target as a component first and pointing the ref at it. A few lines when
     something needs it; deliberately not written on speculation.
-- **Nothing checks that a schema's `examples` validate against its own schema.**
-  Several carry `examples` for the reader; they are prose as far as the suite is
-  concerned. A loop asserting each example validates would keep them honest — a
-  few lines, worth it once an example is more than a one-line value.
+- ~~**Nothing checks that a schema's `examples` validate against its own
+  schema.**~~ **shipped** — `tests/test_schemas.py` walks every schema in
+  `docs/schemas/` and validates each `examples` entry against the subschema it
+  sits on, at every depth, resolving `$defs` and cross-file `$ref`s through the
+  same registry the payload checks use — so a `examples` value that drifts from
+  the shape it illustrates (an enum value renamed, a number turned string, a
+  field a strict schema no longer allows) fails the build rather than misleading
+  a consumer who copies it. Two self-tests keep the check from going vacuous
+  (that it found a real corpus, and that a deliberately-drifted example is
+  caught). The clause this entry left ("worth it once an example is more than a
+  one-line value") is now met: nine consumer-facing contracts (`error`,
+  `download`, `index-info`, `render-manifest`, `render-job`, `task-matches`,
+  `scene-matches`, `chip-skipped`, `stack-provenance`) gained a top-level
+  whole-document `examples` entry — a complete, checked instance a consumer can
+  parse against — and the check validates those against the whole schema too.
+  See the CHANGELOG. What is still open, and smaller:
+  - **The complex documents still carry property examples, not a whole-document
+    one.** `stack-stats`, `chip-dataset`, `chip-record`, `item-context`,
+    `scene-description`, `search-plan`, `preflight` and `watch-delta` are large,
+    conditional shapes whose most trustworthy example is a real emitted payload —
+    which the suite already validates from the surface that produces it. A
+    hand-authored whole-document example for each would be checked by the same
+    loop; it waits for a case where the real-payload fixtures are not example
+    enough for a reader.
 
 ---
 

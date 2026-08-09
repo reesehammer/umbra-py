@@ -98,6 +98,105 @@ def test_the_readme_lists_no_schema_that_is_gone():
     assert named == {path.name for path in SCHEMA_PATHS}
 
 
+# --- Every example a schema carries validates against that schema --------------
+
+# `examples` is a JSON Schema *annotation*: a validator never checks its members.
+# So an example that drifts from the shape it illustrates -- an enum value
+# renamed, a number turned string, a field a strict schema no longer allows --
+# ships as valid-looking documentation that a consumer copying it would get
+# wrong. These tests close that gap: every `examples` entry, at every depth and
+# for a whole-document example alike, is validated against the subschema it sits
+# on, resolving `$defs` and cross-file `$ref`s through the same registry the
+# payload checks use.
+
+_INSTANCE_KEYWORDS = frozenset({"examples", "default", "const", "enum"})
+
+
+def _registry():
+    return Registry().with_resources(
+        [
+            (schema["$id"], Resource(contents=schema, specification=DRAFT202012))
+            for schema in (_load(path.name) for path in SCHEMA_PATHS)
+        ]
+    )
+
+
+def _json_pointer(parts):
+    if not parts:
+        return "#"  # the whole document
+    escaped = [part.replace("~", "~0").replace("/", "~1") for part in parts]
+    return "#/" + "/".join(escaped)
+
+
+def _iter_schema_examples(node, path):
+    """Yield ``(pointer, index, example)`` for every ``examples`` array in a schema.
+
+    ``pointer`` locates the subschema carrying the array, so each example is
+    checked against the shape it annotates rather than the whole document. The
+    walk does not descend into instance-data keywords (``examples`` members,
+    ``default``, ``const``, ``enum``), whose contents are values rather than
+    subschemas and so could carry a nested ``examples`` key that is not one.
+    """
+    if isinstance(node, dict):
+        members = node.get("examples")
+        if isinstance(members, list):
+            for index, example in enumerate(members):
+                yield _json_pointer(path), index, example
+        for key, value in node.items():
+            if key in _INSTANCE_KEYWORDS:
+                continue
+            yield from _iter_schema_examples(value, path + [key])
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _iter_schema_examples(value, path + [str(index)])
+
+
+def _example_failures(schema, registry):
+    """Every example in ``schema`` that does not validate against its subschema."""
+    failures = []
+    for pointer, index, example in _iter_schema_examples(schema, []):
+        validator = jsonschema.Draft202012Validator(
+            {"$ref": schema["$id"] + pointer}, registry=registry
+        )
+        for error in validator.iter_errors(example):
+            failures.append(f"{pointer} examples[{index}]: {error.message}")
+    return failures
+
+
+@pytest.mark.parametrize("path", SCHEMA_PATHS, ids=lambda p: p.name)
+def test_every_example_validates_against_its_own_schema(path):
+    schema = json.loads(path.read_text())
+    failures = _example_failures(schema, _registry())
+    assert not failures, f"{path.name}:\n" + "\n".join(failures)
+
+
+def test_the_example_check_actually_found_examples():
+    # A green run above must mean examples were validated, not that the traversal
+    # found none -- the same vacuity guard the schema suite already applies to
+    # itself. Both a corpus floor and the whole-document examples are pinned, so
+    # dropping every example, or every root example, fails here.
+    found = [
+        pointer
+        for path in SCHEMA_PATHS
+        for pointer, _index, _example in _iter_schema_examples(_load(path.name), [])
+    ]
+    assert len(found) >= 100  # 126 today; a floor well below that
+    assert found.count("#") >= 5  # the whole-document examples, checked at the root
+
+
+def test_the_example_check_catches_a_drifted_example():
+    # Proof the check has teeth: a real schema with an example that violates its
+    # own subschema is caught. `scene-matches`'s `query` is a string.
+    schema = _load("scene-matches.schema.json")
+    schema["properties"]["query"]["examples"] = [12345]
+    registry = Registry().with_resources(
+        [(schema["$id"], Resource(contents=schema, specification=DRAFT202012))]
+    )
+    assert _example_failures(schema, registry), (
+        "a numeric example for a string property must be caught"
+    )
+
+
 # --- The error contract --------------------------------------------------------
 
 

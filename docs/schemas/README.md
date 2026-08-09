@@ -187,3 +187,13 @@ added to a payload and not to its contract fails the build rather than a
 consumer. The suite also checks that every schema is valid draft 2020-12, that
 its `$id` matches its filename (a cross-file `$ref` resolves against it), and
 that the table above names every file and no file it does not.
+
+The `examples` these schemas carry are checked too. `examples` is a JSON Schema
+*annotation* — a validator never checks its members — so an example that drifts
+from the shape it illustrates (an enum value renamed, a number turned string, a
+field a strict schema no longer allows) would ship as valid-looking
+documentation a consumer copying it would get wrong. So the suite validates
+every `examples` entry against the subschema it sits on, at every depth and for
+the whole-document examples several schemas now carry alike, resolving `$defs`
+and cross-file `$ref`s through the same registry the payload checks use. A
+schema's example is held to the same contract as the payloads it documents.

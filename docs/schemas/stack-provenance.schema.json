@@ -6,6 +6,38 @@
   "type": "object",
   "required": ["asset", "agrees", "groups", "unreadable"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "asset": "GEC",
+      "agrees": true,
+      "groups": [
+        {
+          "record": {
+            "calibration": "gamma0",
+            "rtc_model": "facet",
+            "scale": "amplitude",
+            "units": "amplitude"
+          },
+          "count": 2,
+          "item_ids": [
+            "acq-2024-01-08",
+            "acq-2024-03-08"
+          ],
+          "hrefs": [
+            "https://example.com/1.json",
+            "https://example.com/2.json"
+          ]
+        }
+      ],
+      "unreadable": [],
+      "shared": {
+        "calibration": "gamma0",
+        "rtc_model": "facet",
+        "scale": "amplitude",
+        "units": "amplitude"
+      }
+    }
+  ],
   "properties": {
     "asset": {
       "type": "string",

@@ -6,6 +6,15 @@
   "type": "object",
   "required": ["item_id", "datetime", "reason", "hint", "stage"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "item_id": "acq-2024-02-08",
+      "datetime": "2024-02-08T12:00:00Z",
+      "reason": "This product carries no Radiometric.NoiseLevel, so --noise-model measured is unsupported.",
+      "hint": "Try --noise-model estimated.",
+      "stage": "preflight"
+    }
+  ],
   "properties": {
     "item_id": {
       "type": "string",

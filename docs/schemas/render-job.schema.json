@@ -6,6 +6,30 @@
   "type": "object",
   "required": ["id", "kind", "status", "created", "started", "finished", "links"],
   "additionalProperties": false,
+  "examples": [
+    {
+      "id": "job-8f3a1c",
+      "kind": "stats",
+      "status": "succeeded",
+      "created": "2026-01-15T14:32:00Z",
+      "started": null,
+      "finished": "2026-01-15T14:32:00Z",
+      "links": [
+        {
+          "rel": "self",
+          "href": "https://serve.example.com/jobs/job-8f3a1c",
+          "type": "application/json"
+        },
+        {
+          "rel": "result",
+          "href": "https://serve.example.com/artifacts/stats/abc123.json",
+          "type": "application/json",
+          "title": "Datacube statistics"
+        }
+      ],
+      "cache": "hit"
+    }
+  ],
   "properties": {
     "id": {
       "type": "string",
