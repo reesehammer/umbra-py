@@ -441,7 +441,9 @@ def find_repeat_sites(
     Returns ``sites``, best-covered first: each a ``SiteCoverage`` with the site's
     ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
     ``last`` dates and ``span_days``, ``min_revisit_days`` / ``median_revisit_days``
-    cadence, union ``bbox`` footprint, ``products`` and ``polarizations``, and the
+    / ``max_revisit_days`` cadence (the last being the longest gap, i.e. the site's
+    worst-case temporal resolution), union ``bbox`` footprint, ``products`` and
+    ``polarizations``, and the
     ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
     to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
     ``count`` (sites returned), the pool ``source`` and the resolved

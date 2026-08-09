@@ -37,10 +37,14 @@ class SiteCoverage:
 
     The revisit figures are the gaps between consecutive dated passes, in days;
     they are ``None`` for a site with fewer than two dated passes (no gap to
-    measure). ``bbox`` is the union footprint of every pass with one, so it is
-    the rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs``
-    is oldest-first, the order ``umbra change`` / ``umbra stack`` want their
-    passes in.
+    measure). ``max_revisit_days`` is the *longest* such gap -- the site's
+    worst-case temporal resolution, the widest stretch a change could have
+    happened in unseen; read together with ``median_revisit_days`` it separates a
+    site imaged on a steady cadence (``max`` near the median) from a bursty or
+    thinning one (``max`` far above it). ``bbox`` is the union footprint of every
+    pass with one, so it is the rectangle a follow-up ``--bbox`` / ``--intersects``
+    would cover. ``hrefs`` is oldest-first, the order ``umbra change`` /
+    ``umbra stack`` want their passes in.
     """
 
     task: str
@@ -51,6 +55,7 @@ class SiteCoverage:
     span_days: int | None
     min_revisit_days: float | None
     median_revisit_days: float | None
+    max_revisit_days: float | None
     bbox: BBox | None
     products: tuple[str, ...]
     polarizations: tuple[str, ...]
@@ -67,6 +72,7 @@ class SiteCoverage:
             "span_days": self.span_days,
             "min_revisit_days": self.min_revisit_days,
             "median_revisit_days": self.median_revisit_days,
+            "max_revisit_days": self.max_revisit_days,
             "bbox": list(self.bbox) if self.bbox is not None else None,
             "products": list(self.products),
             "polarizations": list(self.polarizations),
@@ -128,6 +134,7 @@ def site_coverage(
         span_days=span_days,
         min_revisit_days=min(gaps) if gaps else None,
         median_revisit_days=median(gaps) if gaps else None,
+        max_revisit_days=max(gaps) if gaps else None,
         bbox=_union_bbox(ordered),
         products=tuple(products),
         polarizations=tuple(pols),

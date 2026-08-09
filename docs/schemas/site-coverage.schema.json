@@ -13,6 +13,7 @@
     "span_days",
     "min_revisit_days",
     "median_revisit_days",
+    "max_revisit_days",
     "bbox",
     "products",
     "polarizations",
@@ -29,6 +30,7 @@
       "span_days": 163,
       "min_revisit_days": 11.0,
       "median_revisit_days": 27.5,
+      "max_revisit_days": 42.0,
       "bbox": [-111.99, 39.11, -111.87, 39.19],
       "products": ["GEC", "SICD"],
       "polarizations": ["VV"],
@@ -71,6 +73,10 @@
     "median_revisit_days": {
       "type": ["number", "null"],
       "description": "The median gap in days between consecutive dated passes — the site's typical cadence — or null with fewer than two dated passes."
+    },
+    "max_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The longest gap in days between two consecutive dated passes — the site's worst-case temporal resolution, the widest stretch a change could have gone unseen — or null with fewer than two dated passes. Far above `median_revisit_days` means a bursty or thinning series rather than a steady cadence."
     },
     "bbox": {
       "type": ["array", "null"],
