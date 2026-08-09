@@ -603,6 +603,26 @@ the `umbra convert` SICD/DEM/RTC pipeline have all shipped (see the CHANGELOG).
 What remains, grouped by the kind of work rather than by the old doc it came
 from:
 
+**Discovery surface — the moat (§3)**
+
+- ~~Every analysis verb (`change`, `timescan`, `stack`, `change --narrate`, the
+  `stack_stats` cube) assumed the user already knew *which* site to point it at;
+  the only code that ranked the archive's repeat-imaged sites was buried in the
+  static showcase's featured-gallery builder.~~ **shipped** — `umbra sites`
+  ranks the most repeat-imaged sites (where change detection has something to
+  measure) and reports each one's coverage — passes, date span, revisit cadence,
+  footprint, products, and (with `--json`) the pass URLs ready to hand to
+  `umbra change` / `stack`. It is the discovery step *before* the analysis verbs,
+  the same "search over a catalog with no search API" moat those verbs assume,
+  applied to the site rather than the pass. The ranking is the showcase's own
+  `select_featured_sites` (single-sourced in the new dependency-free
+  `coverage.py`), so the CLI and the featured gallery cannot disagree about what
+  "most repeat-imaged" means. See the CHANGELOG. **Open:** the same answer is not
+  yet on the agent surfaces (MCP / LangChain / LlamaIndex) or `umbra serve`, so
+  the deterministic scan → narrate agent chain still starts one step in — a
+  find-repeat-sites tool would complete it (`find sites → pick-interval →
+  narrate-change`). Tracked in `TODO.md`.
+
 **Structural code debt (schedule, don't rush)**
 
 - Extract the shared search-vs-URLs gathering + common Click option groups out

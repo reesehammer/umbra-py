@@ -46,6 +46,11 @@ from .convert import (
     sicd_to_amplitude_geotiff,
     sicd_to_geocoded_cog,
 )
+from .coverage import (
+    SiteCoverage,
+    rank_site_coverage,
+    site_coverage,
+)
 from .dates import parse_date_bound
 from .dem import (
     DemUnavailableError,
@@ -338,6 +343,9 @@ __all__ = [
     "assemble_showcase",
     "select_featured_sites",
     "FeaturedSite",
+    "SiteCoverage",
+    "site_coverage",
+    "rank_site_coverage",
     "build_viewer",
     "save_viewer",
     "default_pmtiles_path",
