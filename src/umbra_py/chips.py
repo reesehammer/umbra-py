@@ -891,6 +891,14 @@ class SkippedAcquisition:
     conversion's own check, or the reader's -- so the dataset's hole is described
     the same and only its cost differs.
 
+    ``bbox`` is *where* the missing pass was -- the acquisition's own footprint
+    (``UmbraItem.bbox``, EPSG:4326 ``[min_lon, min_lat, max_lon, max_lat]``), so
+    the sidecar locates the hole in space as ``datetime`` does in time. A loader
+    reconstituting a time series over an area of interest can then tell a hole
+    that falls over the site it cares about from one that never overlapped it,
+    without re-running the search that produced the selection. Null when the
+    source item stated no footprint.
+
     Published as ``docs/schemas/chip-skipped.schema.json`` -- one line of the
     ``skipped.jsonl`` sidecar and one entry of the dataset summary's ``skipped``
     array, which is one contract because it is one record.
@@ -901,6 +909,7 @@ class SkippedAcquisition:
     datetime: str | None = None
     hint: str | None = None
     stage: str = "conversion"
+    bbox: tuple[float, float, float, float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -909,6 +918,7 @@ class SkippedAcquisition:
             "reason": self.reason,
             "hint": self.hint,
             "stage": self.stage,
+            "bbox": list(self.bbox) if self.bbox is not None else None,
         }
 
 
@@ -1737,6 +1747,9 @@ def write_chips(
                     # pass and a chipped one are comparable in the same payload.
                     datetime=item.datetime.isoformat() if item.datetime else None,
                     hint=exc.hint,
+                    # Where the hole is, so a loader can tell one that falls over
+                    # its area of interest from one that never overlapped it.
+                    bbox=item.bbox,
                 )
             )
             recs = []
@@ -1846,6 +1859,7 @@ def _preflight_filter(
                 datetime=item.datetime.isoformat() if item.datetime else None,
                 hint=result.hint,
                 stage="preflight",
+                bbox=item.bbox,
             )
         )
         if result.capabilities and result.capabilities.product_bytes:

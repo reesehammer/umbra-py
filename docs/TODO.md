@@ -516,12 +516,20 @@ carries into every manifest record and rolls up across the batch
     is written only when there is something to record, so a clean run leaves
     exactly the files it left before and the file's presence is itself the
     statement. What is still open, and smaller:
-    - **The sidecar carries no footprint.** `SkippedAcquisition` records which
-      pass is missing but not *where* it was, so a loader can tell a series has
-      a hole but not whether the hole is over the site it cares about. The item
-      is in hand at both skip points, so a `bbox` field is a few lines; it waits
-      for a consumer, since the natural question ("which passes over my area?")
-      is one the search that produced the selection already answered.
+    - ~~**The sidecar carries no footprint.**~~ **shipped** —
+      `SkippedAcquisition.bbox` carries the acquisition's own footprint
+      (`UmbraItem.bbox`, EPSG:4326 `[min_lon, min_lat, max_lon, max_lat]`),
+      populated from the item that is in hand at both skip points (the
+      conversion-refusal and the preflight-drop), so the sidecar locates a hole
+      in space as `datetime` locates it in time. That answers the question this
+      entry deferred *from the directory itself* — a loader reconstituting a time
+      series over an area of interest can tell a hole that falls over its site
+      from one that never overlapped it without re-running the search that
+      produced the selection, which is the case a self-describing artifact exists
+      for. It is a required-nullable field on `chip-skipped.schema.json` (null
+      when the source item stated no footprint, so absence is a value rather than
+      a missing key), emitted as the four-number list a `ChipRecord.bbox` already
+      is. See the CHANGELOG.
     - **Nothing reads it back.** There is no `read_skipped_manifest` to pair
       with the writer, because the file is one JSON object per line and a
       loader's own `json.loads` is the whole reader. Add one only if a
