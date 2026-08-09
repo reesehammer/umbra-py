@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`find_repeat_sites` ranks whole-archive on the local index — the discovery
+  moat's whole-archive ranking now reaches the *last* surface (`mcp_server.py`,
+  `tests/test_mcp_server.py`).** `CatalogIndex.rank_sites` had already made
+  `umbra sites --local` (CLI) and `GET /sites` (hosted API) measure a site's depth
+  across the *entire* index — one `GROUP BY task`, no pool cap — but the agent
+  tool (`find_repeat_sites`, shared across the MCP / LangChain / LlamaIndex
+  surfaces) still re-listed a `limit`-capped `search` even when its `local`
+  backend was an index, so a deeply-imaged site whose passes fell just outside the
+  first `limit` rows read as shallower than it is. It now routes an index backend
+  through `CatalogIndex.rank_sites` — the same drop-in `umbra sites --local` and
+  `GET /sites` use, one surface further out — so all four surfaces (CLI, hosted
+  API, the static showcase's featured gallery, and the agent tools) rank the same
+  whole-archive way and cannot disagree about a deep site's depth. `limit` now
+  sizes only the live/`--token` pool (a live catalog or the Canopy archive has no
+  index to `GROUP BY` over); the docstring says so. Two tests pin it: a deep site
+  whose passes fall outside a `limit`-sized pool is still ranked by all of them,
+  and every filter (`bbox` / `intersects` / `area` / `fuzzy` / `product_types` /
+  the SAR properties, plus `top` / `min_passes`) forwards to `rank_sites` with no
+  `limit` re-list. **This closes the discovery moat's one remaining whole-archive
+  ranking gap (`STRATEGY.md` §8): every surface now measures depth over the whole
+  index rather than a capped pool.**
 - **`CatalogIndex.rank_sites` — whole-archive, index-native site ranking, so
   `umbra sites --local` measures a site's depth across the *entire* index
   (`index.py`, `cli/discover.py`, `tests/test_index.py`, `tests/test_coverage.py`).**

@@ -1360,14 +1360,18 @@ Follow-ons that build on it, none a blocker:
   so the deep path cannot disagree with `umbra sites` / `find_repeat_sites` /
   the featured gallery, and a test pins it byte-for-byte against the uncapped-pool
   ranking for every filter. `--limit` is now a live-/`--token`-path pool size only.
-  See the CHANGELOG. What is still open, and smaller:
-  - **The agent tools still re-list a pool.** `find_repeat_sites` (MCP / LangChain
-    / LlamaIndex) ranks a capped STAC search, not the index — the same shallow-rank
-    limit, now removed on the `--local` CLI *and* on `GET /sites` (which routes an
-    index backend through `rank_sites`; see the shipped entry above). The agent
-    tools have (or can open) an index too, so `rank_sites` is the same drop-in one
-    surface further out; it waits for the agent tools to grow a `--local`-style
-    index mode to reach it through, since they gather live by default.
+  See the CHANGELOG. What shipped after it:
+  - ~~**The agent tools still re-list a pool.**~~ **shipped** — `find_repeat_sites`
+    (MCP / LangChain / LlamaIndex), whose `local` parameter already selected the
+    index backend via `_search_source`, now routes that backend through
+    `CatalogIndex.rank_sites` rather than re-listing a `limit`-capped `search` — the
+    same drop-in the `--local` CLI and `GET /sites` use, one surface further out. So
+    the shallow-rank limit is gone from the last discovery surface, and `limit`
+    sizes only the live/`--token` pool (no index to `GROUP BY` there). Two tests
+    pin it: a deep site whose passes fall outside a `limit`-sized pool is still
+    ranked by all of them, and every filter forwards to `rank_sites` with no `limit`
+    re-list. **This closes the whole-archive-ranking gap on every surface.** See the
+    CHANGELOG.
 
 ---
 

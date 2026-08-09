@@ -424,12 +424,19 @@ def find_repeat_sites(
     geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
     ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
     the SAR property filters ``polarizations`` / ``min_incidence`` /
-    ``max_incidence`` / ``max_resolution``. ``limit`` sizes that pool (bigger
-    finds more sites and deeper series but scans more of the archive; ``area``
-    narrows it instead), ``top`` caps how many sites are returned, and
-    ``min_passes`` is how many dated passes a site needs to qualify (2 is the
-    minimum a change composite can use; raise it to find only deeply-revisited
-    series).
+    ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
+    returned, and ``min_passes`` is how many dated passes a site needs to qualify
+    (2 is the minimum a change composite can use; raise it to find only
+    deeply-revisited series).
+
+    ``limit`` sizes the *live/token* pool only. On the local index a site's depth
+    is measured **whole-archive** — one ``GROUP BY task`` over the entire index
+    (:meth:`CatalogIndex.rank_sites`), so a deeply-imaged site is ranked by all
+    its passes rather than by whatever the first ``limit`` rows admitted, and
+    ``limit`` does not apply. On the live open bucket or the Canopy archive there
+    is no index to group over, so ``limit`` sizes the single re-listed pool the
+    ranking is computed from (bigger finds more sites and deeper series but scans
+    more of the archive; ``area`` narrows it instead).
 
     Returns ``sites``, best-covered first: each a ``SiteCoverage`` with the site's
     ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
@@ -462,8 +469,14 @@ def find_repeat_sites(
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
     try:
-        pool = list(
-            source.search(
+        if isinstance(source, CatalogIndex):
+            # The index can answer a site's *whole-archive* depth as a GROUP BY
+            # task, so route through rank_sites rather than re-listing a
+            # limit-capped pool -- a deeply-imaged site is ranked by all its passes
+            # rather than by whatever the first `limit` rows admitted (the drop-in
+            # `STRATEGY.md` §8 names, the same one `umbra sites --local` and
+            # `GET /sites` already use). `limit` sizes only the live/token pool.
+            sites = source.rank_sites(
                 bbox=resolved_bbox,
                 intersects=geometry,
                 start=start,
@@ -475,14 +488,31 @@ def find_repeat_sites(
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
                 max_resolution=max_resolution,
-                limit=limit,
+                top=top,
+                min_passes=min_passes,
             )
-        )
+        else:
+            pool = list(
+                source.search(
+                    bbox=resolved_bbox,
+                    intersects=geometry,
+                    start=start,
+                    end=end,
+                    product_types=list(products) if products else None,
+                    area=area,
+                    fuzzy=fuzzy,
+                    polarizations=list(polarizations) if polarizations else None,
+                    min_incidence=min_incidence,
+                    max_incidence=max_incidence,
+                    max_resolution=max_resolution,
+                    limit=limit,
+                )
+            )
+            sites = rank_site_coverage(pool, top=top, min_passes=min_passes)
     finally:
         if isinstance(source, CatalogIndex):
             source.close()
 
-    sites = rank_site_coverage(pool, top=top, min_passes=min_passes)
     return {
         "count": len(sites),
         "source": label,
