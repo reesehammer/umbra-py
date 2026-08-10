@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The workflow drift check now covers `python -c` bodies, not just `umbra …`
+  invocations (`tests/test_workflows.py`, `docs/TODO.md`).** `tests/test_workflows.py`
+  already parsed every `umbra …` command in `.github/workflows/*.yml` against the
+  real Click tree — the guard that would have caught the `--db`/`--index-db` typo
+  that killed the first two `Publish catalog index` runs. But the same publish
+  pipeline also drives the library from Python: the tiling step ends with
+  `python -c "import umbra_py.pmtiles as p, umbra_py.constants as c;
+  p.save_viewer(c.CATALOG_INDEX_PMTILES_URL, …)"`, referencing two library
+  symbols *by name* that the Click parse (which only sees `umbra` argv) cannot
+  see — so a rename of `save_viewer` or a move of `CATALOG_INDEX_PMTILES_URL`
+  would break the weekly run silently, the exact failure mode the suite exists to
+  prevent, one interpreter over. The suite now extracts every `python -c` body
+  (`_python_snippets`, quote-aware so a snippet's own `;` and `|` are not
+  mistaken for shell operators the way the CLI scan's separator split would),
+  compiles it (a syntax error is drift too), and resolves every name it reads
+  from `umbra_py` against the installed package (`_umbra_name_errors` /
+  `_umbra_aliases`): an `import umbra_py.x` that no longer resolves, a `from
+  umbra_py.x import y` whose `y` is gone, and a `p.save_viewer` whose attribute
+  was renamed all fail a pull request. It stays offline and lean like the rest of
+  the suite — it imports only the `umbra_py` modules the snippets actually name
+  (all stdlib-only today), and an import that fails for want of an *optional*
+  dependency is treated as an absent extra in the core `[dev]` test job rather
+  than as drift, told apart by which module `ModuleNotFoundError` reports missing
+  (the `umbra_py` one that was named → drift; a third-party package underneath →
+  absent extra). `test_a_renamed_library_symbol_would_be_caught` pins the
+  `save_viewer` rename the way `test_the_drift_that_broke_the_publish_would_be_caught`
+  pins the `--db` typo, and `test_the_scan_actually_found_the_python_snippets`
+  guards against a scanner that silently matches nothing.
 - **`umbra chips --clip-bbox` now reports what the clip read across the batch
   (`chips.py`, `cli/process.py`, `docs/schemas/chip-dataset.schema.json`,
   `tests/test_chips.py`, `tests/test_schemas.py`).** `umbra convert --clip-bbox`

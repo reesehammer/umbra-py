@@ -159,12 +159,31 @@ artifacts exist. Follow-ons, none a blocker:
   credentials, which is why the cheap check is the one that exists. If a
   semantic break ever ships, the place to catch it is the live canary
   (`live-canary.yml`), not here.
-- **Only `umbra` invocations are checked.** The workflows also call `gh`,
+- ~~**Only `umbra` invocations are checked.** The workflows also call `gh`,
   `python -c` and `pip` with arguments that can drift (the `python -c` in the
   tiling step imports `umbra_py.pmtiles.save_viewer` and
   `constants.CATALOG_INDEX_PMTILES_URL` by name, so a rename there breaks the
-  same run and no test would notice). Extending the scan to `python -c` bodies
-  is a small addition — compile them, or import the names — if that ever bites.
+  same run and no test would notice).~~ **shipped for `python -c`** — the same
+  suite now extracts every `python -c` body (quote-aware, so a snippet's own `;`
+  and `|` are not mistaken for shell operators), compiles it (a syntax error is
+  drift), and resolves every name it reads from `umbra_py` against the installed
+  package: an `import umbra_py.x` that no longer resolves and a `p.save_viewer`
+  whose attribute was renamed both fail a pull request, which is the exact class
+  of break that would kill the weekly publish while the Click parse stayed green.
+  It is the "import the names" option this entry sketched, and it stays offline —
+  it imports only the `umbra_py` modules the snippets name (all stdlib-only
+  today), and an import that fails for want of an *optional* dependency is treated
+  as an absent extra in the core `[dev]` test job rather than as drift (told apart
+  by which module `ModuleNotFoundError` reports missing). `test_a_renamed_library
+  _symbol_would_be_caught` pins the `save_viewer` rename the way
+  `test_the_drift_that_broke_the_publish_would_be_caught` pins the `--db` typo,
+  and `test_the_scan_actually_found_the_python_snippets` guards against a scanner
+  that silently matches nothing. See the CHANGELOG. What is still open, and
+  smaller:
+  - **`gh` and `pip` invocations are still unchecked.** Their arguments can drift
+    too, but neither references a library symbol the way the `python -c` bodies
+    do, so a break there is a workflow-syntax problem a run surfaces rather than a
+    silent rename. Add a scan for them only if one ever bites.
 - **The scan is textual, so a genuinely dynamic invocation would be missed.**
   Nothing builds an `umbra` command line from a shell variable today; if
   something ever does, the extractor will silently skip it. The self-check
