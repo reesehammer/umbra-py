@@ -683,7 +683,7 @@ def test_chip_dataset_summary_validates(tmp_path):
 
     payload = _emitted(_chip_run(tmp_path).to_dict())
 
-    assert not {"conversion", "noise", "speckle", "skipped", "preflight"} & set(payload)
+    assert not {"conversion", "noise", "speckle", "clip", "skipped", "preflight"} & set(payload)
     _check("chip-dataset.schema.json", payload)
 
 
@@ -713,6 +713,30 @@ def test_a_geojson_manifests_feature_properties_are_the_same_record(tmp_path):
     assert collection["type"] == "FeatureCollection"
     for feature in collection["features"]:
         _check("chip-record.schema.json", feature["properties"])
+
+
+def test_a_clipped_chip_run_validates_its_clip_block(tmp_path):
+    """A `--clip-bbox` run carries the `clip` roll-up, and it validates.
+
+    The block is the batch form of `umbra convert`'s `clipped` line, and it is
+    the one conditional block an *amplitude* run can raise on its own -- so it is
+    checked here rather than only alongside the converted-run blocks above.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+
+    from umbra_py.chips import write_chips
+
+    from .test_chips import _item_for, _lonlat_window, _make_geotiff
+
+    scene, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    bbox = _lonlat_window(scene, 10, 10, 20, 20)
+    dataset = write_chips([_item_for(scene)], tmp_path / "ds", chip_size=10, bbox=bbox)
+
+    payload = _emitted(dataset.to_dict())
+    assert payload["clip"]["scenes"] == 1
+    assert payload["clip"]["scene_pixels"] == 400
+    _check("chip-dataset.schema.json", payload)
 
 
 def _converted_run(tmp_path, *, refuse=frozenset()):

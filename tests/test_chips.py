@@ -1128,6 +1128,45 @@ def test_chip_item_bbox_tiles_only_the_area_of_interest(tmp_path):
     assert north == pytest.approx(bbox[3], abs=2e-4)
 
 
+def test_chip_item_bbox_reports_what_the_clip_read(tmp_path):
+    """An amplitude clip prices its window against the whole scene."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    # The bottom-right quadrant: a quarter of the 20x20 scene.
+    bbox = _lonlat_window(tif, 10, 10, 20, 20)
+    saved: list = []
+
+    chip_item(
+        _item_for(tif),
+        tmp_path / "chips",
+        chip_size=10,
+        bbox=bbox,
+        clip_report=saved.append,
+    )
+
+    # Reported exactly once, for the acquisition, against the source's own size.
+    assert len(saved) == 1
+    assert saved[0].scene_rows == 20 and saved[0].scene_cols == 20
+    assert saved[0].scene_pixels == 400
+    # A quarter, to within the pixel the reprojected bbox rounds outward to.
+    assert saved[0].fraction == pytest.approx(0.25, abs=0.06)
+
+
+def test_chip_item_without_bbox_reports_no_clip(tmp_path):
+    """No clip, nothing to price -- the callback is left alone."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import chip_item
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    saved: list = []
+    chip_item(_item_for(tif), tmp_path / "chips", chip_size=10, clip_report=saved.append)
+    assert saved == []
+
+
 def test_chip_item_without_bbox_still_tiles_the_whole_raster(tmp_path):
     pytest.importorskip("numpy")
     pytest.importorskip("rasterio")
@@ -1168,6 +1207,88 @@ def test_chip_item_bbox_becomes_the_sicd_conversion_clip(tmp_path):
 
     conversion = calls[0][3]
     assert conversion.bbox == tuple(float(v) for v in bbox)
+
+
+def test_prepare_sicd_forwards_the_clip_report(tmp_path):
+    """The SICD half is priced by the conversion, so the callback rides down."""
+    from umbra_py.chips import SicdConversion, _prepare_sicd
+
+    seen = {}
+
+    def fake_geocode(src, dst, **kwargs):
+        seen.update(kwargs)
+        Path(dst).write_bytes(b"cog")
+        return Path(dst)
+
+    import umbra_py.convert as convert_mod
+    import umbra_py.download as download_mod
+
+    original_geocode = convert_mod.sicd_to_geocoded_cog
+    original_download = download_mod.download_asset
+    convert_mod.sicd_to_geocoded_cog = fake_geocode
+    download_mod.download_asset = lambda item, asset, work_dir: Path(work_dir) / "scene.ntf"
+    marker = object()
+    try:
+        _prepare_sicd(
+            _item_for(tmp_path / "unused.tif"),
+            "SICD",
+            tmp_path / "work",
+            SicdConversion(bbox=(-100.0, 39.0, -99.0, 40.0)),
+            clip_report=marker,  # type: ignore[arg-type]
+        )
+    finally:
+        convert_mod.sicd_to_geocoded_cog = original_geocode
+        download_mod.download_asset = original_download
+
+    # The chipper is a handle on the conversion, not a second implementation: the
+    # clip report is the conversion's, passed straight down (it is what knows the
+    # whole-scene size the already-clipped COG no longer carries).
+    assert seen["clip_report"] is marker
+
+
+def test_write_chips_rolls_up_the_clip_savings(tmp_path):
+    """A clipped batch reports what it read across its scenes; a plain one doesn't."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from umbra_py.chips import write_chips
+
+    a = _make_geotiff(tmp_path / "a.tif", width=20, height=20, nodata_corner=False)[0]
+    b = _make_geotiff(tmp_path / "b.tif", width=20, height=20, nodata_corner=False)[0]
+    items = [_item_for(a), _item_for(b)]
+    bbox = _lonlat_window(a, 10, 10, 20, 20)
+
+    clipped = write_chips(items, tmp_path / "clip", chip_size=10, bbox=bbox, manifest=None)
+    assert clipped.clip is not None
+    assert clipped.clip.scenes == 2
+    # Two quarter-scene reads out of two whole scenes.
+    assert clipped.clip.scene_pixels == 800
+    assert clipped.clip.fraction == pytest.approx(0.25, abs=0.06)
+    assert clipped.clip.min_fraction <= clipped.clip.max_fraction
+    # And it is in the --json payload, only when there was a clip.
+    assert clipped.to_dict()["clip"]["scenes"] == 2
+
+    plain = write_chips(items, tmp_path / "plain", chip_size=10, manifest=None)
+    assert plain.clip is None
+    assert "clip" not in plain.to_dict()
+
+
+def test_summarise_clip_spans_the_per_scene_fractions():
+    from umbra_py.chips import ClipSavings, _summarise_clip
+
+    assert _summarise_clip([]) is None
+    summary = _summarise_clip(
+        [
+            ClipSavings(window_rows=10, window_cols=10, scene_rows=20, scene_cols=20),  # 0.25
+            ClipSavings(window_rows=10, window_cols=10, scene_rows=10, scene_cols=10),  # 1.0
+        ]
+    )
+    assert summary is not None
+    assert summary.scenes == 2
+    assert summary.window_pixels == 200
+    assert summary.scene_pixels == 500
+    assert summary.fraction == pytest.approx(0.4)
+    assert summary.min_fraction == pytest.approx(0.25)
+    assert summary.max_fraction == pytest.approx(1.0)
 
 
 def test_conversion_cache_key_tracks_the_clip(tmp_path):
@@ -1225,6 +1346,40 @@ def test_cli_chips_clip_bbox_reaches_the_writer(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["bbox"] == pytest.approx(bbox)
     assert json.loads(result.output)["chip_count"] == 1
+
+
+def test_cli_chips_clip_bbox_prints_what_it_read(tmp_path, monkeypatch):
+    """The human-readable run prices the clip, like `umbra convert` does."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("rasterio")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+
+    tif, _, _ = _make_geotiff(tmp_path / "scene.tif", width=20, height=20, nodata_corner=False)
+    bbox = _lonlat_window(tif, 10, 10, 20, 20)
+    monkeypatch.setattr(
+        "umbra_py.cli._shared.get_json",
+        lambda url: {"id": "cli-acq", "assets": {"GEC": {"href": str(tif)}}},
+    )
+
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        [
+            "chips",
+            "http://example.com/item.json",
+            "--out",
+            str(tmp_path / "ds"),
+            "--chip-size",
+            "10",
+            "--clip-bbox",
+            ",".join(str(v) for v in bbox),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "clipped: read" in result.output
+    assert "of 400 scene px" in result.output
 
 
 # --- Speckle-filtering the published amplitude rasters ------------------------

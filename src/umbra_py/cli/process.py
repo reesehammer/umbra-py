@@ -325,6 +325,32 @@ def _echo_chip_speckle_report(dataset: ChipDataset) -> None:
         )
 
 
+def _echo_chip_clip_report(dataset: ChipDataset) -> None:
+    """Say how much of each scene a ``--clip-bbox`` run read, across the batch.
+
+    :func:`_echo_clip_savings` is the same job for the one raster ``umbra
+    convert`` writes; this is its batch form, for the reason
+    :func:`_echo_chip_noise_report` is the noise report's -- the value of the
+    flag is the *set's* saving, not a line per scene. Silent when nothing was
+    clipped (no ``--clip-bbox``), like the other roll-ups. The figure is the
+    fraction, since that is what says whether pointing the run at an area of
+    interest was worth it.
+    """
+    clip = dataset.clip
+    if clip is None:
+        return
+    click.echo(
+        f"  clipped: read {clip.window_pixels:,} of {clip.scene_pixels:,} scene px "
+        f"across {clip.scenes} scene(s) ({clip.fraction:.1%})"
+    )
+    if clip.min_fraction < clip.max_fraction:
+        # Only when the scenes disagree: an evenly-clipped batch has nothing to
+        # add here, and a single-scene run has min == max by construction.
+        click.echo(
+            f"  per scene {clip.min_fraction:.1%} to {clip.max_fraction:.1%} of the whole scene"
+        )
+
+
 def _provenance_label(record: dict[str, str]) -> str:
     """One group's conversion, as a line: only the steps that ran.
 
@@ -1860,6 +1886,7 @@ def chips(
     _echo_chip_skipped_report(dataset)
     _echo_chip_noise_report(dataset)
     _echo_chip_speckle_report(dataset)
+    _echo_chip_clip_report(dataset)
 
 
 def _human_bytes(count: int | None) -> str:
