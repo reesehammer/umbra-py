@@ -359,6 +359,61 @@ def test_rank_respects_top_and_min_passes():
     assert rank_site_coverage([]) == []
 
 
+def test_rank_by_comparable_prefers_the_deeper_differenceable_series():
+    # "Broad" has more passes but they split across polarizations, so only two
+    # (the VV pair) are differenceable; "Deep" has fewer passes, all VV, so all
+    # three are. Raw ranking puts Broad first; comparable ranking flips them,
+    # because the analysable series is what a change verb can actually use.
+    pool = [
+        *[_pass("Broad", d, pols=["VV"]) for d in (1, 2)],
+        *[_pass("Broad", d, pols=["HH"]) for d in (3, 4)],
+        _pass("Broad", 5, pols=["VH"]),
+        *[_pass("Deep", d, pols=["VV"]) for d in (6, 7, 8)],
+    ]
+    by_passes = rank_site_coverage(pool, rank_by="passes")
+    assert [(s.task, s.passes, s.comparable_passes) for s in by_passes] == [
+        ("Broad", 5, 2),
+        ("Deep", 3, 3),
+    ]
+    by_comparable = rank_site_coverage(pool, rank_by="comparable")
+    assert [(s.task, s.passes, s.comparable_passes) for s in by_comparable] == [
+        ("Deep", 3, 3),
+        ("Broad", 5, 2),
+    ]
+
+
+def test_rank_by_comparable_promotes_a_deep_site_past_the_raw_top():
+    # A deeply-analysable site with fewer raw passes than several broad ones must
+    # still surface at top=1 under comparable ranking -- the key is applied before
+    # the truncation, so it is not dropped by the raw-count cap first.
+    pool = [
+        *[_pass("MixA", d, pols=(["VV"] if d % 2 else ["HH"])) for d in (1, 2, 3, 4, 5, 6)],
+        *[_pass("MixB", d, pols=(["VV"] if d % 2 else ["HH"])) for d in (7, 8, 9, 10, 11, 12)],
+        *[_pass("Clean", d, pols=["VV"]) for d in (13, 14, 15, 16)],
+    ]
+    # Each Mix site has 6 raw passes (3 VV / 3 HH -> comparable 3); Clean has 4
+    # raw passes, all VV -> comparable 4. Raw top=1 is a Mix; comparable top=1 is
+    # Clean, even though two sites have more raw passes.
+    assert rank_site_coverage(pool, top=1, rank_by="passes")[0].comparable_passes == 3
+    assert rank_site_coverage(pool, top=1, rank_by="comparable")[0].task == "Clean"
+
+
+def test_rank_by_agrees_when_every_pass_shares_one_polarization():
+    pool = [
+        *[_pass("Alpha", d, pols=["VV"]) for d in (1, 2, 3)],
+        *[_pass("Bravo", d, pols=["VV"]) for d in (4, 5)],
+    ]
+    assert [s.task for s in rank_site_coverage(pool, rank_by="passes")] == ["Alpha", "Bravo"]
+    assert [s.task for s in rank_site_coverage(pool, rank_by="comparable")] == ["Alpha", "Bravo"]
+
+
+def test_rank_rejects_an_unknown_ranking():
+    import pytest
+
+    with pytest.raises(ValueError, match="rank_by must be one of"):
+        rank_site_coverage([_pass("Alpha", 1)], rank_by="deepest")
+
+
 # --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
@@ -431,6 +486,39 @@ def test_sites_cli_revisit_line_notes_the_usable_series_own_longest_gap(monkeypa
     # The uniform site's revisit line carries no across-the-usable-series note.
     assert "6d longest gap\n" in result.output
     assert result.output.count("across the usable series") == 1
+
+
+def test_sites_cli_rank_by_comparable_reorders_and_labels(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        # Broad: 5 raw passes, only the VV pair differenceable -> comparable 2.
+        *[_pass("Broad", d, pols=["VV"]) for d in (1, 2)],
+        *[_pass("Broad", d, pols=["HH"]) for d in (3, 4)],
+        _pass("Broad", 5, pols=["VH"]),
+        # Deep: 3 raw passes, all VV -> comparable 3.
+        *[_pass("Deep", d, pols=["VV"]) for d in (6, 7, 8)],
+    ]
+    _patch_gather(monkeypatch, pool)
+
+    raw = CliRunner().invoke(cli, ["sites"])
+    assert raw.exit_code == 0, raw.output
+    assert raw.output.index("Broad") < raw.output.index("Deep")
+    assert "best-covered first." in raw.output
+
+    comp = CliRunner().invoke(cli, ["sites", "--rank-by", "comparable"])
+    assert comp.exit_code == 0, comp.output
+    assert comp.output.index("Deep") < comp.output.index("Broad")
+    assert "deepest usable series first." in comp.output
+
+
+def test_sites_cli_rejects_unknown_rank_by(monkeypatch):
+    from umbra_py.cli import cli
+
+    _patch_gather(monkeypatch, [_pass("Alpha", d) for d in (1, 2)])
+    result = CliRunner().invoke(cli, ["sites", "--rank-by", "bogus"])
+    assert result.exit_code != 0
+    assert "bogus" in result.output
 
 
 def test_sites_cli_json_carries_pass_urls(monkeypatch):

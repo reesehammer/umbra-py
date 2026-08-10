@@ -938,6 +938,7 @@ def run_sites(
     limit: int = SITES_POOL_LIMIT,
     top: int = SITES_DEFAULT_TOP,
     min_passes: int = SITES_MIN_PASSES,
+    rank_by: str = "passes",
 ) -> list[SiteCoverage]:
     """Rank the most repeat-imaged sites in a filtered pool of the archive.
 
@@ -968,9 +969,17 @@ def run_sites(
     use, so no two surfaces disagree about what "most repeat-imaged" means. Pure
     ranking: no renderer and no model (``STRATEGY.md`` §7's determinism boundary
     applied to discovery).
-    """
-    from .coverage import rank_site_coverage
 
+    ``rank_by`` is one of :data:`umbra_py.coverage.SITE_RANKINGS`: ``"passes"``
+    (raw pass count, the default) or ``"comparable"`` (the site's *analysable*
+    depth -- the largest same-polarization dated subset a change verb can
+    difference). It is forwarded unchanged to the index and pool rankers, so this
+    endpoint orders sites exactly as ``umbra sites --rank-by`` and the
+    ``find_repeat_sites`` agent tool do.
+    """
+    from .coverage import _check_ranking, rank_site_coverage
+
+    _check_ranking(rank_by)
     top_n = _clamp_top(top)
     min_p = max(1, int(min_passes))
 
@@ -989,6 +998,7 @@ def run_sites(
             max_resolution=max_resolution,
             top=top_n,
             min_passes=min_p,
+            rank_by=rank_by,
         )
 
     pool = list(
@@ -1007,7 +1017,7 @@ def run_sites(
             limit=_clamp_limit(limit),
         )
     )
-    return rank_site_coverage(pool, top=top_n, min_passes=min_p)
+    return rank_site_coverage(pool, top=top_n, min_passes=min_p, rank_by=rank_by)
 
 
 def sites_result(
@@ -2749,6 +2759,14 @@ def build_app(
             ge=1,
             description="How many dated passes a site needs to qualify",
         ),
+        rank_by: str = Query(
+            default="passes",
+            description=(
+                "Order sites by 'passes' (raw pass count) or 'comparable' (the "
+                "usable series' depth -- the largest same-polarization dated subset "
+                "a change verb can difference)"
+            ),
+        ),
     ) -> JSONResponse:
         """Rank the archive's most repeat-imaged sites — discovery before analysis.
 
@@ -2784,6 +2802,9 @@ def build_app(
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
             wanted_pols = parse_polarizations(polarizations)
+            from .coverage import _check_ranking  # noqa: PLC0415
+
+            _check_ranking(rank_by)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         source = _open()
@@ -2804,6 +2825,7 @@ def build_app(
                 limit=limit,
                 top=top,
                 min_passes=min_passes,
+                rank_by=rank_by,
             )
         finally:
             _close(source)
@@ -2866,6 +2888,10 @@ def build_app(
             limit = _opt_int(body.get("limit"), "limit")
             top = _opt_int(body.get("top"), "top")
             min_passes = _opt_int(body.get("min_passes"), "min_passes")
+            rank_by = body.get("rank_by", "passes")
+            from .coverage import _check_ranking  # noqa: PLC0415
+
+            _check_ranking(rank_by)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         fuzzy = bool(body.get("fuzzy", False))
@@ -2887,6 +2913,7 @@ def build_app(
                 limit=limit if limit is not None else SITES_POOL_LIMIT,
                 top=top if top is not None else SITES_DEFAULT_TOP,
                 min_passes=min_passes if min_passes is not None else SITES_MIN_PASSES,
+                rank_by=rank_by,
             )
         finally:
             _close(source)

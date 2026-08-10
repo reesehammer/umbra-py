@@ -1316,6 +1316,7 @@ class CatalogIndex:
         max_resolution: float | None = None,
         top: int = 20,
         min_passes: int = 2,
+        rank_by: str = "passes",
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1344,9 +1345,28 @@ class CatalogIndex:
         item in Python, so when any is set this ranks the full *uncapped* matching
         stream instead: still whole-archive (no ``limit``), identical to the pool
         path, just without the cap this method exists to remove.
-        """
-        from .coverage import rank_site_coverage, site_coverage  # noqa: PLC0415
 
+        ``rank_by`` is one of :data:`umbra_py.coverage.SITE_RANKINGS`. ``"passes"``
+        (the default) is answerable in SQL -- a ``COUNT(*)`` per task orders the
+        candidates, so only the top ``top`` tasks' documents are read.
+        ``"comparable"`` ranks by *analysable* depth (``comparable_passes``), which
+        depends on each pass's polarization inside the document JSON and so is not a
+        ``COUNT``: every qualifying task's documents are read and summarised, then
+        re-ranked by the analysable subset and truncated to ``top``. That is heavier
+        than the raw path (it reads every repeat-imaged task rather than the top
+        ``top``), but still whole-archive and correct -- a deeply-analysable site
+        cannot be missed by a raw-count cap applied before its polarizations are
+        known. The two rankings share :func:`umbra_py.coverage._rank_sort_key`, so
+        this and the pool path order a comparable ranking identically.
+        """
+        from .coverage import (  # noqa: PLC0415
+            _check_ranking,
+            _rank_sort_key,
+            rank_site_coverage,
+            site_coverage,
+        )
+
+        _check_ranking(rank_by)
         if top <= 0:
             return []
 
@@ -1370,14 +1390,21 @@ class CatalogIndex:
                     max_resolution=max_resolution,
                 )
             )
-            return rank_site_coverage(pool, top=top, min_passes=min_passes)
+            return rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
-        candidates = self._conn.execute(
+        # Raw-count ranking picks the candidates in SQL and caps at ``top``; the
+        # analysable ranking cannot (comparable depth is not a COUNT), so it reads
+        # every task with enough passes and re-ranks after summarising.
+        candidate_sql = (
             f"SELECT task FROM items{where} GROUP BY task "
-            "HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC, task ASC LIMIT ?",
-            [*params, min_passes, top],
-        ).fetchall()
+            "HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC, task ASC"
+        )
+        candidate_params: list[object] = [*params, min_passes]
+        if rank_by == "passes":
+            candidate_sql += " LIMIT ?"
+            candidate_params.append(top)
+        candidates = self._conn.execute(candidate_sql, candidate_params).fetchall()
 
         ranked: list[SiteCoverage] = []
         for (task,) in candidates:
@@ -1390,6 +1417,16 @@ class CatalogIndex:
                 item.place = place
                 passes.append(item)
             ranked.append(site_coverage(task, passes))
+        if rank_by != "passes":
+            ranked.sort(
+                key=lambda c: _rank_sort_key(
+                    comparable_passes=c.comparable_passes,
+                    passes=c.passes,
+                    task=c.task,
+                    rank_by=rank_by,
+                )
+            )
+            ranked = ranked[:top]
         return ranked
 
     def get(self, item_id: str) -> UmbraItem | None:

@@ -1950,6 +1950,65 @@ def test_rank_sites_matches_uncapped_pool_for_exact_filters(tmp_path):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters))
 
 
+def test_rank_sites_by_comparable_reranks_whole_archive(tmp_path):
+    """rank_by='comparable' orders by analysable depth over the whole index, even
+    though the analysable depth is not a COUNT the candidate SQL can order by."""
+    pool = [
+        # Broad: 5 raw passes, only the VV pair differenceable -> comparable 2.
+        *[_site_item("Broad", d, pols=["VV"]) for d in (1, 2)],
+        *[_site_item("Broad", d, pols=["HH"]) for d in (3, 4)],
+        _site_item("Broad", 5, pols=["VH"]),
+        # Deep: 3 raw passes, all VV -> comparable 3.
+        *[_site_item("Deep", d, pols=["VV"]) for d in (6, 7, 8)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        by_passes = idx.rank_sites(rank_by="passes")
+        by_comparable = idx.rank_sites(rank_by="comparable")
+    assert [(s.task, s.comparable_passes) for s in by_passes] == [("Broad", 2), ("Deep", 3)]
+    assert [(s.task, s.comparable_passes) for s in by_comparable] == [("Deep", 3), ("Broad", 2)]
+
+
+def test_rank_sites_by_comparable_survives_the_top_cap(tmp_path):
+    """A deeply-analysable site with fewer raw passes than the broad ones must
+    still be the top result under comparable ranking with top=1 -- the candidate
+    SQL's raw-count LIMIT is dropped for the comparable path so it is not lost."""
+    pool = [
+        *[_site_item("MixA", d, pols=(["VV"] if d % 2 else ["HH"])) for d in (1, 2, 3, 4, 5, 6)],
+        *[_site_item("MixB", d, pols=(["VV"] if d % 2 else ["HH"])) for d in range(7, 13)],
+        *[_site_item("Clean", d, pols=["VV"]) for d in (13, 14, 15, 16)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        assert idx.rank_sites(top=1, rank_by="passes")[0].comparable_passes == 3
+        assert idx.rank_sites(top=1, rank_by="comparable")[0].task == "Clean"
+
+
+def test_rank_sites_by_comparable_matches_the_pool_ranking(tmp_path):
+    """The index comparable ranking equals the uncapped-pool comparable ranking,
+    on both the SQL-candidate path and the exact-filter (Python) path."""
+    pool = [
+        *[_site_item("Alpha", d, pols=(["VV"] if d % 2 else ["HH"])) for d in (1, 3, 5, 7)],
+        *[_site_item("Beta", d, pols=["VV"]) for d in (2, 6)],
+        *[_site_item("Gamma", d, pols=["HH"]) for d in (4, 8, 9)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        from umbra_py.coverage import rank_site_coverage
+
+        pool_ranked = rank_site_coverage(list(idx.search(limit=None)), rank_by="comparable")
+        assert idx.rank_sites(rank_by="comparable") == pool_ranked
+        # Exact-filter branch (polarizations set) must agree too.
+        assert idx.rank_sites(rank_by="comparable", polarizations=["VV"]) == rank_site_coverage(
+            list(idx.search(limit=None, polarizations=["VV"])), rank_by="comparable"
+        )
+
+
+def test_rank_sites_rejects_unknown_rank_by(tmp_path):
+    import pytest
+
+    with _index(tmp_path, [_site_item("Alpha", d) for d in (1, 2)]) as idx:
+        with pytest.raises(ValueError, match="rank_by must be one of"):
+            idx.rank_sites(rank_by="deepest")
+
+
 def test_rank_sites_top_zero_and_empty_index(tmp_path):
     with _index(tmp_path, [_site_item("Alpha", d) for d in (1, 2)]) as idx:
         assert idx.rank_sites(top=0) == []

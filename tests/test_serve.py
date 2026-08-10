@@ -712,6 +712,53 @@ def test_sites_route_ranks_whole_archive_under_a_tiny_limit(sites_client):
     assert [(s["task"], s["passes"]) for s in body["sites"]] == [("Alpha", 3), ("Beta", 2)]
 
 
+@pytest.fixture
+def ranked_sites_client(tmp_path, sample_item_dict) -> TestClient:
+    """An index with a broad-but-mixed site (5 passes, 2 differenceable) and a
+    deep single-polarization one (3 passes, all 3 differenceable), so the two
+    rankings disagree."""
+    path = tmp_path / "ranked.db"
+    passes = [
+        ("Broad", "2024-01-01", ["VV"]),
+        ("Broad", "2024-01-02", ["VV"]),
+        ("Broad", "2024-01-03", ["HH"]),
+        ("Broad", "2024-01-04", ["HH"]),
+        ("Broad", "2024-01-05", ["VH"]),
+        ("Deep", "2024-02-01", ["VV"]),
+        ("Deep", "2024-02-02", ["VV"]),
+        ("Deep", "2024-02-03", ["VV"]),
+    ]
+    with CatalogIndex(path) as idx:
+        for i, (task, day, pols) in enumerate(passes):
+            doc = copy.deepcopy(sample_item_dict)
+            doc["id"] = f"{task.lower()}-{i}"
+            doc["properties"]["datetime"] = f"{day}T00:00:00Z"
+            doc["properties"]["sar:polarizations"] = pols
+            idx.add(UmbraItem.from_dict(doc, href=_site_href(task, day, i)))
+    return TestClient(serve.build_app(path))
+
+
+def test_sites_route_rank_by_comparable_reorders(ranked_sites_client):
+    by_passes = ranked_sites_client.get("/sites").json()["sites"]
+    assert [(s["task"], s["comparable_passes"]) for s in by_passes] == [("Broad", 2), ("Deep", 3)]
+    by_comparable = ranked_sites_client.get("/sites?rank_by=comparable").json()["sites"]
+    assert [(s["task"], s["comparable_passes"]) for s in by_comparable] == [
+        ("Deep", 3),
+        ("Broad", 2),
+    ]
+
+
+def test_post_sites_rank_by_comparable_reorders(ranked_sites_client):
+    body = ranked_sites_client.post("/sites", json={"rank_by": "comparable"}).json()
+    assert [s["task"] for s in body["sites"]] == ["Deep", "Broad"]
+
+
+def test_sites_rejects_unknown_rank_by(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.get("/sites?rank_by=bogus").status_code == 400
+    assert client.post("/sites", json={"rank_by": "bogus"}).status_code == 400
+
+
 # --------------------------------------------------------------------------
 # POST /sites (the GeoJSON-body twin of GET /sites)
 # --------------------------------------------------------------------------

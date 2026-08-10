@@ -1723,9 +1723,12 @@ site's coverage — passes, date span, revisit cadence, footprint, products, and
 the pass URLs **oldest-first**, ready to hand straight to `POST /artifacts/stats`
 / `change`. It takes the same filters `/search` does (`bbox` / `intersects` /
 `datetime` / `product_types` / `area` / `fuzzy` / SAR properties), with `limit`
-sizing the pool, `top` capping the answer and `min_passes` the qualifying depth,
-and each record follows the committed
-[`site-coverage`](docs/schemas/README.md) contract:
+sizing the pool, `top` capping the answer and `min_passes` the qualifying depth.
+`rank_by=comparable` orders sites by their *usable* series depth — the largest
+same-polarization dated subset a change verb can actually difference — rather than
+raw pass count (`rank_by=passes`, the default), so a deep single-polarization site
+is not outranked by a broader one whose passes can't be compared. Each record
+follows the committed [`site-coverage`](docs/schemas/README.md) contract:
 
 ```bash
 # The most repeat-imaged sites in a bbox, then measure the top one's passes
