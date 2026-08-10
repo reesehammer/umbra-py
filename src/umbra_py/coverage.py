@@ -60,7 +60,20 @@ class SiteCoverage:
     range past the window the analysable series actually covers, the temporal
     twin of ``comparable_passes`` undercutting ``passes``; ``None`` with fewer
     than two comparable passes, exactly as ``span_days`` is with fewer than two
-    dated ones. ``bbox`` is the union footprint of every pass with one, so it is the
+    dated ones. ``comparable_max_revisit_days`` is that same subset's *cadence*:
+    the longest gap between two consecutive passes of the comparable group -- the
+    widest stretch a change could have gone unseen *in the series that can
+    actually be differenced*, where ``max_revisit_days`` measures the gaps of the
+    whole dated range. The two can disagree either way, and both directions are a
+    correction: a cross-polarization pass landing inside a gap makes the raw
+    cadence look *tighter* than the analysable series is (raw below comparable),
+    while a wide gap between off-polarization passes -- irrelevant to a
+    single-polarization change run -- can inflate the raw figure past anything in
+    the comparable series (raw above comparable). So it is the worst-case revisit
+    of the passes ``comparable_hrefs`` hands onward, the cadence counterpart of
+    ``comparable_span_days``; ``None`` with fewer than two comparable passes, as
+    ``max_revisit_days`` is with fewer than two dated ones. ``bbox`` is the union
+    footprint of every pass with one, so it is the
     rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs`` is
     every pass oldest-first, the order ``umbra change`` / ``umbra stack`` want
     their passes in; ``comparable_hrefs`` is the subset of those URLs belonging to
@@ -83,6 +96,7 @@ class SiteCoverage:
     min_revisit_days: float | None
     median_revisit_days: float | None
     max_revisit_days: float | None
+    comparable_max_revisit_days: float | None
     bbox: BBox | None
     products: tuple[str, ...]
     polarizations: tuple[str, ...]
@@ -103,6 +117,7 @@ class SiteCoverage:
             "min_revisit_days": self.min_revisit_days,
             "median_revisit_days": self.median_revisit_days,
             "max_revisit_days": self.max_revisit_days,
+            "comparable_max_revisit_days": self.comparable_max_revisit_days,
             "bbox": list(self.bbox) if self.bbox is not None else None,
             "products": list(self.products),
             "polarizations": list(self.polarizations),
@@ -194,6 +209,10 @@ def site_coverage(
     comparable_span_days = (
         (comparable_dates[-1] - comparable_dates[0]).days if len(comparable_dates) >= 2 else None
     )
+    # The cadence of that same subset: gaps between consecutive comparable passes,
+    # so a cross-polarization pass filling a gap in the raw dated series cannot
+    # make the analysable series' worst-case revisit look tighter than it is.
+    comparable_gaps = _revisit_days(comparable_dates)
 
     return SiteCoverage(
         task=task,
@@ -207,6 +226,7 @@ def site_coverage(
         min_revisit_days=min(gaps) if gaps else None,
         median_revisit_days=median(gaps) if gaps else None,
         max_revisit_days=max(gaps) if gaps else None,
+        comparable_max_revisit_days=max(comparable_gaps) if comparable_gaps else None,
         bbox=_union_bbox(ordered),
         products=tuple(products),
         polarizations=tuple(pols),
