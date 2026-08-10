@@ -1005,12 +1005,31 @@ conversion's clip. Follow-ons, none a blocker:
   geotransform already states — not what a pixel value means, so it stays out of
   the provenance keys for the same reason the entry above records. What is still
   open, and smaller:
-  - **`umbra chips --clip-bbox` does not report it.** On `--asset SICD` the chip
-    run drives the same conversion, so the same `clip_report` callback would carry
-    the saving up to a `ChipDataset` roll-up (counted per acquisition, like the
-    noise one); on `GEC`/`CSI` the equivalent is the tile window `_clip_pixel_window`
-    cuts against the source's own size. Both are the same shape one surface out; it
-    waits for the batch to want the number the way the single conversion did.
+  - ~~**`umbra chips --clip-bbox` does not report it.**~~ **shipped** — a clipped
+    chip run rolls up what each acquisition read onto `ChipDataset.clip` (a new
+    `chips.ClipSummary`): total window vs total scene pixels, the overall fraction,
+    and the per-scene `min`/`max` fraction. `umbra chips` prints it
+    (`clipped: read … across N scene(s) (…%)`, the batch form of the single
+    conversion's `clipped` line, via `_echo_chip_clip_report`) and `--json` carries
+    a `clip` block, published as a conditional key on
+    `chip-dataset.schema.json` — present only when the run was clipped, so an
+    ordinary run's payload is unchanged. Both loader paths reach it through one new
+    `chip_item(clip_report=…)` callback (mirroring `sicd_to_geocoded_cog`'s): the
+    `GEC`/`CSI` half is priced in `chip_item` from the tile window against the
+    source raster's own size, and the `--asset SICD` half rides the callback down
+    through the default `_prepare_sicd` into the conversion, which is what knows the
+    whole-scene size the already-clipped COG no longer carries. Counted per
+    acquisition like the noise and speckle roll-ups, but *accumulated* during the
+    run rather than derived from the records — the clip saving is deliberately
+    neither a `ChipRecord` field nor a `UMBRA_*` tag, so there is nothing in the
+    manifest to derive it from. See the CHANGELOG. What is still open, and smaller:
+    - **A `SICD` prepared by a custom `preparer` or a `--work-dir` cache hit
+      reports no clip saving.** The callback is only wired to the default
+      `_prepare_sicd`, since the public `SicdPreparer` signature has no place to
+      report through, and a cache hit runs no conversion to price (the saving was
+      on the run that built the COG). Both are the honest failure mode — a run over
+      freshly-converted scenes reports fully — but a custom-preparer caller who
+      wants the number would need the seam widened to carry a report.
 
 ---
 

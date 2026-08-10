@@ -94,7 +94,7 @@ from .constants import ATTRIBUTION, DATA_LICENSE
 # below is defined, and duplicating the number here is exactly the drift the
 # shared constant prevents. `convert`'s module level is stdlib-only (its heavy
 # dependencies are behind `_require`), so this pulls in no extra.
-from .convert import SPECKLE_WINDOW_DEFAULT
+from .convert import SPECKLE_WINDOW_DEFAULT, ClipSavings
 from .exceptions import AssetNotFoundError, UnsupportedMeasurementError
 from .load import _open_path, _require
 from .models import UmbraItem
@@ -486,12 +486,20 @@ def _chip_source(
     conversion: SicdConversion | None,
     work_dir: str | os.PathLike | None,
     preparer: SicdPreparer | None,
+    clip_report: Callable[[ClipSavings], None] | None = None,
 ) -> Iterator[str]:
     """Yield something ``rasterio`` can open for this item's ``asset``.
 
     For an amplitude raster that is the remote URL itself, so only the bytes of
     each tile cross the network. For a complex product it is a locally geocoded
     COG, built once and (with ``work_dir``) kept.
+
+    ``clip_report`` is forwarded to the default :func:`_prepare_sicd` so a
+    caller learns what a clipped conversion read against the whole scene. It is
+    only wired to the default preparer -- a custom ``preparer`` has the fixed
+    :data:`SicdPreparer` signature with no place to report through, so a run with
+    one simply reports no SICD clip saving (as does a ``work_dir`` cache hit,
+    where no conversion runs to price).
     """
     if asset.upper() not in COMPLEX_ASSETS:
         url = item.asset_href(asset)
@@ -500,15 +508,20 @@ def _chip_source(
         yield _open_path(url)
         return
 
-    prepare = preparer or _prepare_sicd
     settings = conversion or SicdConversion()
+
+    def prepare(dest: Path) -> str:
+        if preparer is not None:
+            return str(preparer(item, asset, dest, settings))
+        return str(_prepare_sicd(item, asset, dest, settings, clip_report=clip_report))
+
     if work_dir is not None:
         kept = Path(work_dir)
         kept.mkdir(parents=True, exist_ok=True)
-        yield str(prepare(item, asset, kept, settings))
+        yield prepare(kept)
         return
     with tempfile.TemporaryDirectory(prefix="umbra-chips-") as tmp:
-        yield str(prepare(item, asset, Path(tmp), settings))
+        yield prepare(Path(tmp))
 
 
 def _prepare_sicd(
@@ -516,12 +529,19 @@ def _prepare_sicd(
     asset: str,
     work_dir: Path,
     conversion: SicdConversion,
+    *,
+    clip_report: Callable[[ClipSavings], None] | None = None,
 ) -> Path:
     """Download a complex product and geocode it to a chippable COG.
 
     Both halves are resumable: :func:`umbra_py.download.download_asset` resumes a
     partial NITF, and a geocoded COG already present for these exact settings is
     reused rather than rebuilt. Needs the ``[convert]`` extra.
+
+    ``clip_report`` is passed straight to :func:`sicd_to_geocoded_cog`, so a
+    clipped conversion prices what it read against the whole scene -- but only on
+    a rebuild: a COG already cached for these settings is returned without a
+    conversion, so nothing is priced (the saving was on the run that built it).
     """
     from .convert import sicd_to_geocoded_cog  # noqa: PLC0415
     from .download import download_asset  # noqa: PLC0415
@@ -550,6 +570,7 @@ def _prepare_sicd(
         speckle_filter=conversion.speckle_filter,
         speckle_window=conversion.speckle_window,
         bbox=conversion.bbox,
+        clip_report=clip_report,
     )
 
 
@@ -864,6 +885,93 @@ def _summarise_speckle(records: Iterable[ChipRecord]) -> SpeckleSummary | None:
 
 
 @dataclass(frozen=True)
+class ClipSummary:
+    """What a ``--clip-bbox`` read instead of the whole scene, across a run.
+
+    :class:`umbra_py.convert.ClipSavings` prices one clip -- the image window a
+    ground rectangle turned into against the pixels the whole product holds --
+    and ``umbra convert`` prints it for the one raster it wrote. A chip run
+    clips *many* scenes (a site's passes, each cut to the same area of
+    interest), so the equivalent there is not a line each but the batch's answer
+    to the only question the flag raises: **was pointing the run at an area of
+    interest worth it, and by how much?** The honest figure is the ratio of what
+    was read to what a whole-scene run would have read.
+
+    Counted per *acquisition* rather than per chip, like the noise and speckle
+    roll-ups: a clip is a fact about the scene each chip was cut from, and
+    counting chips would weight a wide pass more heavily for no reason.
+
+    Unlike :attr:`ChipDataset.noise` and :attr:`ChipDataset.speckle`, which are
+    *derived* from the records, this is *accumulated* during the run -- the clip
+    saving is deliberately not a :class:`ChipRecord` field (nor a ``UMBRA_*``
+    tag: a clip changes which ground is written, which the geotransform already
+    states, not what a pixel value means), so there is nothing in the manifest
+    to derive it from. The two figures it sums come straight from each
+    acquisition's own :class:`~umbra_py.convert.ClipSavings`.
+
+    Attributes
+    ----------
+    scenes:
+        Acquisitions in the run whose read was clipped to the area of interest.
+        Scenes whose clip covered the whole product still count -- the fraction
+        is what says a clip bought nothing there, not its absence.
+    window_pixels:
+        Pixels actually read, summed across ``scenes`` -- what the clipped run
+        cost.
+    scene_pixels:
+        Pixels the whole products hold, summed -- what an unclipped run would
+        have cost.
+    min_fraction, max_fraction:
+        The smallest and largest per-scene ``window / scene`` ratio in the
+        batch, so a reader can tell a run that clipped evenly from one that read
+        most of some passes and little of others.
+    """
+
+    scenes: int
+    window_pixels: int
+    scene_pixels: int
+    min_fraction: float
+    max_fraction: float
+
+    @property
+    def fraction(self) -> float:
+        """The batch's window as a fraction of its scenes in ``[0, 1]``.
+
+        ``0`` when the clipped scenes hold no pixels (an empty selection), so the
+        ratio is always defined.
+        """
+        return self.window_pixels / self.scene_pixels if self.scene_pixels else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scenes": self.scenes,
+            "window_pixels": self.window_pixels,
+            "scene_pixels": self.scene_pixels,
+            "fraction": self.fraction,
+            "min_fraction": self.min_fraction,
+            "max_fraction": self.max_fraction,
+        }
+
+
+def _summarise_clip(savings: Sequence[ClipSavings]) -> ClipSummary | None:
+    """Roll a run's per-scene clip savings up into one :class:`ClipSummary`.
+
+    ``None`` when nothing was clipped (no ``bbox`` was given, so no scene priced
+    a saving), which keeps the summary out of an unclipped run's output entirely.
+    """
+    if not savings:
+        return None
+    fractions = [s.fraction for s in savings]
+    return ClipSummary(
+        scenes=len(savings),
+        window_pixels=sum(s.window_pixels for s in savings),
+        scene_pixels=sum(s.scene_pixels for s in savings),
+        min_fraction=min(fractions),
+        max_fraction=max(fractions),
+    )
+
+
+@dataclass(frozen=True)
 class SkippedAcquisition:
     """One acquisition left out of a run because it could not support the request.
 
@@ -990,6 +1098,13 @@ class ChipDataset:
     ``preflight`` is the roll-up of that pre-download check when one ran: what
     reading the archive's headers cost, and the download it removed.
 
+    ``clip`` is the roll-up of what a ``--clip-bbox`` run read instead of the
+    whole scene, present only when the run was clipped to an area of interest.
+    Unlike :attr:`noise` and :attr:`speckle` it is *accumulated* during the run
+    rather than derived from ``records``: the clip saving is deliberately not a
+    :class:`ChipRecord` field, so there is nothing in the manifest to derive it
+    from (see :class:`ClipSummary`).
+
     ``skipped_path`` is where that hole was *written*, when there was one --
     the sidecar beside the manifest (see :func:`write_skipped_manifest`), so a
     loader reading the directory rather than the run can see it too. ``None``
@@ -998,7 +1113,7 @@ class ChipDataset:
 
     :meth:`to_dict` is what ``umbra chips --json`` prints, and its shape is
     published as ``docs/schemas/chip-dataset.schema.json``. Its conditional keys
-    are part of that contract: ``conversion``, ``noise``, ``speckle``,
+    are part of that contract: ``conversion``, ``noise``, ``speckle``, ``clip``,
     ``skipped`` and ``preflight`` appear only when the run had something to say
     with them, so an ordinary raster run's payload is unchanged by any of those
     features existing.
@@ -1016,6 +1131,7 @@ class ChipDataset:
     skipped: tuple[SkippedAcquisition, ...] = ()
     preflight: PreflightSummary | None = None
     skipped_path: str | None = None
+    clip: ClipSummary | None = None
 
     @property
     def chip_count(self) -> int:
@@ -1052,6 +1168,10 @@ class ChipDataset:
         speckle = self.speckle
         if speckle is not None:
             extra["speckle"] = speckle.to_dict()
+        # Absent from a run that clipped nothing, so an unclipped run's payload
+        # is unchanged by this field existing.
+        if self.clip is not None:
+            extra["clip"] = self.clip.to_dict()
         # Absent from a run that skipped nothing, so the payload of a dataset
         # with no hole in it is unchanged by this field existing.
         if self.skipped:
@@ -1146,6 +1266,7 @@ def chip_item(
     conversion: SicdConversion | None = None,
     work_dir: str | os.PathLike | None = None,
     preparer: SicdPreparer | None = None,
+    clip_report: Callable[[ClipSavings], None] | None = None,
 ) -> list[ChipRecord]:
     """Cut one acquisition into fixed-size, georeferenced training tiles.
 
@@ -1239,6 +1360,19 @@ def chip_item(
     preparer:
         Override for the download-and-geocode step (the test seam; defaults to
         :func:`_prepare_sicd`).
+    clip_report:
+        Optional callback, invoked once with a
+        :class:`umbra_py.convert.ClipSavings` when ``bbox`` clipped the read --
+        pricing the pixels this acquisition read against the pixels its whole
+        product holds, the same figure ``umbra convert --clip-bbox`` prints. On
+        an amplitude asset it comes from the tile window
+        (:func:`_clip_pixel_window`) against the source raster's own size; on a
+        ``SICD`` it is the conversion's own clip report, so it describes the
+        *scene* rather than the already-clipped COG that reaches the tile loop.
+        Not called when ``bbox`` is ``None`` (nothing was clipped), nor on a
+        ``SICD`` prepared by a custom ``preparer`` or served from a
+        ``work_dir`` cache (no conversion ran to price). A caller that does not
+        pass it is unchanged.
 
     Returns
     -------
@@ -1281,8 +1415,19 @@ def chip_item(
         # converted raster's own tags like every other conversion setting.
         conversion = _with_conversion_speckle(conversion, *requested)
         requested = None
+    # The clip saving to hand back once the read is done. On a complex asset the
+    # scene size is only known to the conversion (the COG that reaches the tile
+    # loop is already clipped), so it is captured from the conversion's own
+    # report; on an amplitude asset it is priced here from the tile window.
+    clip_savings: ClipSavings | None = None
+    captured: list[ClipSavings] = []
     source_cm = _chip_source(
-        item, asset, conversion=conversion, work_dir=work_dir, preparer=preparer
+        item,
+        asset,
+        conversion=conversion,
+        work_dir=work_dir,
+        preparer=preparer,
+        clip_report=captured.append if bbox is not None else None,
     )
     with source_cm as source, rasterio.open(source) as src:
         nodata = src.nodata
@@ -1303,6 +1448,21 @@ def chip_item(
             row0, col0, row_stop, col_stop = 0, 0, src.height, src.width
         else:
             row0, col0, row_stop, col_stop = _clip_pixel_window(src, bbox)
+            if complex_asset:
+                # The conversion priced the clip against the whole scene before
+                # it geocoded; the COG here is already that window, so its own
+                # size would understate what the clip saved.
+                clip_savings = captured[0] if captured else None
+            else:
+                # An amplitude raster is opened whole and the tiles are cut from
+                # this window, so both figures are in hand: the window against
+                # the source's own size.
+                clip_savings = ClipSavings(
+                    window_rows=row_stop - row0,
+                    window_cols=col_stop - col0,
+                    scene_rows=src.height,
+                    scene_cols=src.width,
+                )
 
         speckle: _ChipSpeckle | None = None
         if requested is not None:
@@ -1445,6 +1605,10 @@ def chip_item(
                         rtc_model=rtc_model,
                     )
                 )
+
+    # Once per acquisition, after the read, so a batch can roll the savings up.
+    if clip_report is not None and clip_savings is not None:
+        clip_report(clip_savings)
     return records
 
 
@@ -1620,7 +1784,10 @@ def write_chips(
 
     ``bbox`` restricts every acquisition to one area of interest (see
     :func:`chip_item`) -- the usual shape of a dataset build, where the site is
-    the subject and the scenes are just the passes over it.
+    the subject and the scenes are just the passes over it. What the clip read
+    instead of the whole scene is rolled up across the run onto
+    :attr:`ChipDataset.clip` (a :class:`ClipSummary`), the batch form of the
+    ``clipped`` line ``umbra convert --clip-bbox`` prints.
 
     ``speckle_filter`` / ``speckle_window`` average speckle down in every scene
     (see :func:`chip_item`), which for a complex ``asset`` means routing the
@@ -1705,6 +1872,7 @@ def write_chips(
         conversion = None
     records: list[ChipRecord] = []
     skipped: list[SkippedAcquisition] = []
+    clip_saved: list[ClipSavings] = []
     preflight_summary: PreflightSummary | None = None
     if preflight:
         items, dropped, preflight_summary = _preflight_filter(
@@ -1732,6 +1900,7 @@ def write_chips(
                 conversion=conversion,
                 work_dir=work_dir,
                 preparer=preparer,
+                clip_report=clip_saved.append,
             )
         except UnsupportedMeasurementError as exc:
             if not skip_unsupported:
@@ -1782,6 +1951,7 @@ def write_chips(
         skipped=tuple(skipped),
         preflight=preflight_summary,
         skipped_path=skipped_path,
+        clip=_summarise_clip(clip_saved),
     )
 
 

@@ -7,6 +7,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra chips --clip-bbox` now reports what the clip read across the batch
+  (`chips.py`, `cli/process.py`, `docs/schemas/chip-dataset.schema.json`,
+  `tests/test_chips.py`, `tests/test_schemas.py`).** `umbra convert --clip-bbox`
+  already prices its clip (the entry below), but the chipper — the loader that
+  turns a *site's* passes into a training set, which is where clipping to an area
+  of interest is the normal case rather than the exception — reported only the
+  chips it wrote. A clipped run now rolls up what each acquisition read against the
+  pixels its whole product holds onto `ChipDataset.clip` (a new `ClipSummary`), the
+  batch form of the `clipped` line the single conversion prints: total window vs
+  total scene pixels, the overall fraction, and the per-scene `min`/`max` fraction
+  so an evenly-clipped run reads apart from one that read most of some passes and
+  little of others. `umbra chips` prints it (`clipped: read 480,000 of 4,000,000
+  scene px across 12 scene(s) (12.0%)`) and `--json` carries a `clip` block,
+  published as a new conditional key on `chip-dataset.schema.json` — present only
+  when the run was clipped, so an ordinary run's payload is unchanged. Counted per
+  acquisition like the noise and speckle roll-ups, but *accumulated* during the run
+  rather than derived from the records: the clip saving is deliberately neither a
+  `ChipRecord` field nor a `UMBRA_*` tag (a clip changes which ground is written,
+  which the transform already states, not what a pixel value means), so there is
+  nothing in the manifest to derive it from. It reaches both loader paths through
+  one new `chip_item(clip_report=…)` callback mirroring `sicd_to_geocoded_cog`'s: on
+  a published `GEC`/`CSI` it is priced in `chip_item` from the tile window against
+  the source raster's own size; on a `SICD` the callback rides down through the
+  default `_prepare_sicd` into the conversion, which is what knows the whole-scene
+  size the already-clipped COG no longer carries (a custom `preparer` or a
+  `--work-dir` cache hit reports nothing, since no conversion runs to price). Tests
+  pin the amplitude path pricing a quarter-scene read, the callback staying silent
+  without a `bbox`, the SICD callback threading through `_prepare_sicd`, the run
+  roll-up and its absence on an unclipped run, the `ClipSummary` arithmetic, and the
+  `clip` block validating against the schema from a real clipped run.
 - **`umbra convert --clip-bbox` now reports what the clip saved (`convert.py`,
   `cli/process.py`, `tests/test_convert.py`).** `--clip-bbox` turns a ground
   rectangle into the image window covering it and reads only that window, so the

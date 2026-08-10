@@ -86,6 +86,10 @@
       "$ref": "#/$defs/speckle",
       "description": "Present only when some scene in the run was speckle-filtered."
     },
+    "clip": {
+      "$ref": "#/$defs/clip",
+      "description": "Present only when the run was clipped to an area of interest (`--clip-bbox`)."
+    },
     "skipped_count": {
       "type": "integer",
       "minimum": 1,
@@ -296,6 +300,55 @@
         "median_gain": {
           "type": ["number", "null"],
           "description": "The typical one. Null on the same condition."
+        }
+      }
+    },
+    "clip": {
+      "type": "object",
+      "title": "Clip roll-up",
+      "description": "What a `--clip-bbox` run read instead of the whole scene, across the batch (`umbra_py.chips.ClipSummary`) — the batch form of the `clipped` line `umbra convert --clip-bbox` prints. The question it answers is **was pointing the run at an area of interest worth it, and by how much**, and the honest figure is the ratio of what was read to what a whole-scene run would have read. Counted per acquisition, like the noise and speckle roll-ups. Unlike them it is *accumulated* during the run rather than derived from the records: the clip saving is deliberately not a `chip-record.schema.json` field (a clip changes which ground is written, which the transform already states, not what a pixel value means), so there is nothing in the manifest to derive it from.",
+      "required": [
+        "scenes",
+        "window_pixels",
+        "scene_pixels",
+        "fraction",
+        "min_fraction",
+        "max_fraction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scenes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Acquisitions in the run whose read was clipped to the area of interest. A scene whose clip covered the whole product still counts — its fraction is what says the clip bought nothing there, not its absence."
+        },
+        "window_pixels": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Pixels actually read, summed across `scenes` — what the clipped run cost."
+        },
+        "scene_pixels": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Pixels the whole products hold, summed — what an unclipped run would have cost."
+        },
+        "fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The batch's `window_pixels / scene_pixels` — the headline saving. 0 when the clipped scenes hold no pixels."
+        },
+        "min_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The smallest per-scene `window / scene` ratio in the batch."
+        },
+        "max_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest per-scene ratio. With `min_fraction` it tells a run that clipped evenly from one that read most of some passes and little of others."
         }
       }
     },
