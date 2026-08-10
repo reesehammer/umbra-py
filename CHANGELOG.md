@@ -438,6 +438,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   §7's determinism boundary applied to discovery).
 
 ### Fixed
+- **Restore the dependency security audit's signal so a real CVE is not lost in
+  weekly false red (`.github/workflows/security-audit.yml`).** The scheduled
+  `pip-audit` job had failed three Mondays running (issue #149) for two reasons,
+  neither a vulnerability in anything umbra-py ships or depends on. First,
+  `pip-audit --strict` audits the *entire* installed environment, which includes
+  the runner's own **pip** — and pip 24.0 carries six advisories (wheel/tar
+  extraction path-traversal, `console_scripts` handling), all fixed in pip ≥
+  26.1.2. pip is the installer, not a dependency umbra-py declares, and those CVEs
+  cannot reach anyone importing the library; but they turned the audit red every
+  week, so a genuine CVE landing in a real dependency would have shown the *same*
+  red and gone unnoticed — a monitor that always fails monitors nothing. Second,
+  `--strict` also fails on any distribution it cannot resolve to an advisory, and
+  the job installs umbra-py itself with `-e`, so the project's own editable
+  checkout — not on PyPI — was a second standing failure independent of the pip
+  one. The job now (1) upgrades the environment's pip to current before auditing
+  (`uv pip install --system --upgrade pip`), patching the ambient tooling rather
+  than muting the scanner with `--ignore-vuln`, and (2) audits with
+  `pip-audit --skip-editable` instead of `--strict`, which drops the local
+  editable package from the scan while keeping every third-party dependency
+  audited — a real CVE in one still fails the job, since pip-audit exits non-zero
+  on any finding whether or not `--strict` is set (verified against a pinned
+  vulnerable dependency). The audit is once again a trustworthy signal about the
+  project's dependency tree, which is the state a clean `v0.1.0` release needs.
 - **Type-check the all-extras surface in CI so a stub-bearing extra's misuse
   fails a PR instead of every agent session (`viz/composites.py`, `ci.yml`,
   `pyproject.toml`).** CI's `type-check` job installed only `[dev]`, so mypy

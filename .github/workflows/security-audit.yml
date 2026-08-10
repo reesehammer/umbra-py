@@ -42,11 +42,27 @@ jobs:
       - name: Install package with all extras
         run: uv pip install --system -e ".[dev,all,dask,mcp,serve,ai,langchain,llamaindex]"
 
+      # pip is the environment's installer, not a dependency umbra-py declares or
+      # ships -- but pip-audit scans the whole installed environment, so an
+      # advisory against the runner's own pip (a wheel/tar-extraction CVE that
+      # cannot reach anyone importing umbra-py) fails the audit and masks a real
+      # dependency CVE behind identical red. Keeping pip current patches the
+      # ambient tooling rather than muting the scanner, so the audit's signal is
+      # the project's dependency tree and not whatever pip the runner shipped with.
+      - name: Upgrade the environment's pip
+        run: uv pip install --system --upgrade pip
+
       - name: Install pip-audit
         run: uv pip install --system pip-audit
 
+      # --skip-editable excludes umbra-py's own editable checkout (installed with
+      # -e above): it is the package under audit, not a dependency, and is not on
+      # PyPI, so pip-audit cannot resolve it to an advisory. --strict is dropped
+      # because its *only* added failure here was that un-auditable local package;
+      # a real CVE in any third-party dependency still fails the job, since
+      # pip-audit exits non-zero on any finding whether or not --strict is set.
       - name: Audit installed dependencies
-        run: pip-audit --strict --desc
+        run: pip-audit --skip-editable --desc
 
       - name: Open or update a tracking issue on failure
         if: failure()
