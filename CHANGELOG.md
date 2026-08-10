@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.comparable_hrefs` — the pass URLs of a site's usable subset,
+  ready to hand an analysis verb straight through, on every discovery surface at
+  once (`coverage.py`, `cli/discover.py`,
+  `docs/schemas/site-coverage.schema.json`, `tests/test_coverage.py`,
+  `tests/test_schemas.py`).** `comparable_passes` reports *how deep* a site's
+  analysable change series is, but the discovery answer still handed onward only
+  `hrefs` — *every* pass. Following that answer into `umbra change` / `stack` /
+  `pick_change_interval` therefore trips the very mixed-polarization refusal
+  `comparable_passes` measures: a site reporting `comparable_passes: 3` beside four
+  `hrefs` (three VV, one HH) is a trap, since the four URLs it offers are exactly
+  the selection those verbs reject. `comparable_hrefs` closes that gap — it is the
+  subset of `hrefs` belonging to the `comparable_passes` group (the largest set of
+  dated passes sharing one polarization, oldest-first), so the discovery → analysis
+  chain (`find_repeat_sites → pick_change_interval`, `GET /sites → POST
+  /artifacts/stats`) can pipe a selection straight through that cannot be refused.
+  Where `hrefs` is the whole roster to choose from, `comparable_hrefs` is the
+  choice already made. It is single-sourced with `comparable_passes`: both derive
+  from one `_largest_comparable_group` (now returning the group's passes, ties
+  broken by the polarization tuple exactly as `select_change_frames` breaks them),
+  so `len(comparable_hrefs)` equals `comparable_passes` and the count and the URLs
+  cannot disagree. Added to the single-sourced `SiteCoverage.to_dict()`, so it
+  reaches all four discovery surfaces with no drift — `umbra sites --json`,
+  `find_repeat_sites` (MCP / LangChain / LlamaIndex), and `GET`/`POST /sites` on
+  `umbra serve` (via the committed `site-coverage` contract, which gains the field
+  as a required array). Tests pin the subset to the comparable group's URLs
+  oldest-first, equal to `hrefs` under one polarization, dropping the undated and
+  the off-polarization passes `hrefs` keeps, and empty when nothing is dated.
 - **`SiteCoverage.comparable_passes` — how many of a repeat-imaged site's passes
   can actually be differenced together, on every discovery surface at once
   (`coverage.py`, `cli/discover.py`, `docs/schemas/site-coverage.schema.json`,

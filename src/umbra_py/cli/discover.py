@@ -333,8 +333,9 @@ def sites(
     products; the pass line adds a 'usable' figure when fewer passes are
     differenceable together than exist (the largest same-polarization dated
     subset, since the analysis verbs refuse a mixed-polarization series). --json
-    adds that as 'comparable_passes' plus the pass URLs (oldest-first) ready to
-    pipe onward.
+    adds that as 'comparable_passes', all the pass URLs in 'hrefs' (oldest-first),
+    and in 'comparable_hrefs' just that usable subset -- the selection to pipe
+    straight into 'umbra change' / 'stack' without tripping the refusal.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
