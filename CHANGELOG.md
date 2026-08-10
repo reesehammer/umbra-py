@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`--rank-by comparable` now also floors `--min-passes` on analysable depth, on
+  every discovery surface (`coverage.py`, `showcase.py`, `index.py`,
+  `cli/discover.py`, `serve.py`, `mcp_server.py`,
+  `tests/test_coverage.py`, `tests/test_showcase.py`, `tests/test_index.py`).**
+  The comparable-figure workstream made a site's *ranking* honest about
+  analysable depth — `--rank-by comparable` orders by `comparable_passes`, the
+  largest single-polarization dated subset a change verb can actually difference,
+  so a broad-but-mixed site cannot outrank a deeper single-polarization one. But
+  the *qualification floor* was left on the raw count: `min_passes` still counted
+  every dated pass, so `umbra sites --rank-by comparable --min-passes 3` ranked by
+  usable depth yet admitted sites whose differenceable series was only one or two
+  passes deep — the exact "raw count overstates what is analysable" error the
+  ranking corrects, still present on the threshold. `min_passes` now measures the
+  same depth `rank_by` ranks by (`coverage._min_passes_depth`, the qualification
+  twin of `_rank_sort_key`): under `"comparable"` a site qualifies on its
+  `comparable_passes` depth, so `--rank-by comparable --min-passes N` means "sites
+  whose differenceable series is at least `N` passes deep" — not "sites with `N`
+  raw passes, ranked by their usable depth". Because `comparable_passes <= passes`
+  this only ever *narrows* a comparable ranking (it never admits a site the raw
+  floor rejected), and the default `"passes"` ranking is untouched, so nothing
+  that shipped — the featured gallery, every default `umbra sites` run — changes.
+  It is single-sourced through the two functions all four surfaces forward to:
+  `showcase.select_featured_sites` (the search-pool path, which
+  `rank_site_coverage` and the live/`--token` backends use) and
+  `CatalogIndex.rank_sites` (the whole-archive index path), where the SQL
+  `HAVING COUNT(*) >= min_passes` clause stays a valid *superset* pre-filter
+  (comparable depth is never above the raw count) and the true floor on
+  `comparable_passes` is applied in Python before the re-rank — so CLI
+  (`umbra sites`), agent tools (`find_repeat_sites`), the hosted API
+  (`GET`/`POST /sites`) and the featured gallery cannot disagree about who
+  qualifies. `umbra sites`' empty-result message names the depth it measured
+  (`No site … has 3+ comparable passes` under comparable ranking). This closes the
+  discovery moat's last raw-count-vs-analysable-depth gap: the comparable series is
+  now what the answer *ranks by* and *qualifies on*, not only what it reports.
 - **The workflow drift check now covers `python -c` bodies, not just `umbra …`
   invocations (`tests/test_workflows.py`, `docs/TODO.md`).** `tests/test_workflows.py`
   already parsed every `umbra …` command in `.github/workflows/*.yml` against the

@@ -707,6 +707,26 @@ from:
   The `SiteCoverage` payload is unchanged (only its order is), so no schema moved.
   **This completes the comparable-figure workstream from the report into the
   ranking.** See the CHANGELOG.
+  ~~**Open:** the ranking used analysable depth but the *qualification floor* still
+  did not — `min_passes` counted raw dated passes on every surface, so
+  `--rank-by comparable --min-passes N` ordered by usable depth yet admitted sites
+  whose differenceable series was one or two passes deep, the same raw-count
+  overstatement the ranking corrects, left on the threshold.~~ **shipped** —
+  `min_passes` now measures the same depth `rank_by` ranks by
+  (`coverage._min_passes_depth`, the qualification twin of `_rank_sort_key`): under
+  `"comparable"` a site qualifies on its `comparable_passes` depth, so
+  `--rank-by comparable --min-passes N` means "sites whose differenceable series is
+  at least `N` passes deep." Since `comparable_passes <= passes` it only ever
+  *narrows* a comparable ranking (never admits a site the raw floor rejected) and
+  the default `"passes"` floor is untouched, so nothing shipped changes. It is the
+  same drop-in through the same two single-sources the ranking used —
+  `select_featured_sites` (the pool path) and `CatalogIndex.rank_sites` (the
+  whole-archive index, where the SQL `HAVING COUNT(*) >= min_passes` stays a valid
+  superset pre-filter and the true comparable floor is applied in Python before the
+  re-rank) — so all four surfaces (CLI, agent tools, `GET`/`POST /sites`, the
+  featured gallery) qualify a site identically. **This closes the discovery moat's
+  last raw-count-vs-analysable-depth gap: the comparable series is now what the
+  answer ranks by *and* qualifies on, not only what it reports.** See the CHANGELOG.
 - ~~Every comparable figure reported the analysable series' magnitude — how deep
   (`comparable_passes`), how long (`comparable_span_days`), how often the
   `comparable_*_revisit_days` cadence, which passes (`comparable_hrefs`) — but none

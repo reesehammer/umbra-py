@@ -472,6 +472,36 @@ def test_rank_rejects_an_unknown_ranking():
         rank_site_coverage([_pass("Alpha", 1)], rank_by="deepest")
 
 
+def test_min_passes_counts_comparable_depth_under_comparable_ranking():
+    # "Mixed" has three dated passes but each in a different polarization, so its
+    # differenceable series is one pass deep (comparable_passes == 1). Under the raw
+    # ranking min_passes=2 admits it (three raw passes); under comparable ranking it
+    # must not, because the floor now measures the usable depth the ranking does.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 2, pols=["HH"]),
+        _pass("Mixed", 3, pols=["VH"]),
+        *[_pass("Deep", d, pols=["VV"]) for d in (4, 5)],
+    ]
+    by_passes = rank_site_coverage(pool, min_passes=2, rank_by="passes")
+    assert [(s.task, s.comparable_passes) for s in by_passes] == [("Mixed", 1), ("Deep", 2)]
+    # Comparable ranking with the same floor drops Mixed (usable depth 1 < 2) and
+    # keeps only the genuinely differenceable series.
+    by_comparable = rank_site_coverage(pool, min_passes=2, rank_by="comparable")
+    assert [s.task for s in by_comparable] == ["Deep"]
+
+
+def test_min_passes_floor_is_unchanged_under_the_default_passes_ranking():
+    # A site whose raw count clears the floor but whose comparable series does not
+    # still qualifies under the default ranking -- only comparable ranking narrows.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 2, pols=["HH"]),
+    ]
+    assert [s.task for s in rank_site_coverage(pool, min_passes=2)] == ["Mixed"]
+    assert rank_site_coverage(pool, min_passes=2, rank_by="comparable") == []
+
+
 # --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
@@ -587,6 +617,35 @@ def test_sites_cli_rank_by_comparable_reorders_and_labels(monkeypatch):
     assert comp.exit_code == 0, comp.output
     assert comp.output.index("Deep") < comp.output.index("Broad")
     assert "deepest usable series first." in comp.output
+
+
+def test_sites_cli_min_passes_gates_comparable_depth(monkeypatch):
+    from umbra_py.cli import cli
+
+    # Mixed has 3 raw passes but a comparable depth of 1 (each a different pol);
+    # Deep has 2 VV passes -> comparable depth 2.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 2, pols=["HH"]),
+        _pass("Mixed", 3, pols=["VH"]),
+        *[_pass("Deep", d, pols=["VV"]) for d in (4, 5)],
+    ]
+    _patch_gather(monkeypatch, pool)
+
+    # Default 'passes' ranking with --min-passes 2 keeps both sites.
+    raw = CliRunner().invoke(cli, ["sites", "--min-passes", "2"])
+    assert raw.exit_code == 0, raw.output
+    assert "Mixed" in raw.output and "Deep" in raw.output
+
+    # Comparable ranking floors the usable depth, so Mixed (usable 1) drops out.
+    comp = CliRunner().invoke(cli, ["sites", "--min-passes", "2", "--rank-by", "comparable"])
+    assert comp.exit_code == 0, comp.output
+    assert "Deep" in comp.output and "Mixed" not in comp.output
+
+    # And a floor nothing clears reports the comparable depth it measured.
+    none = CliRunner().invoke(cli, ["sites", "--min-passes", "3", "--rank-by", "comparable"])
+    assert none.exit_code == 0, none.output
+    assert "3+ comparable passes" in none.output
 
 
 def test_sites_cli_rejects_unknown_rank_by(monkeypatch):

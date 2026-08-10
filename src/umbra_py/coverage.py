@@ -72,6 +72,28 @@ def _rank_sort_key(
     return (-passes, task)
 
 
+def _min_passes_depth(*, comparable_passes: int, passes: int, rank_by: str) -> int:
+    """The depth ``min_passes`` gates a site on under ``rank_by``.
+
+    The qualification twin of :func:`_rank_sort_key`: the floor is measured on the
+    same quantity the ranking orders by, so ``min_passes`` and ``rank_by`` agree
+    about what "depth" means. Under ``"comparable"`` a site qualifies on its
+    *analysable* depth (``comparable_passes``, the largest single-polarization dated
+    subset an analysis verb can actually difference), so ``--rank-by comparable
+    --min-passes N`` means "sites whose differenceable series is at least ``N``
+    passes deep" -- it can no longer admit a site whose raw count clears the floor
+    but whose usable series falls short of it, the same "raw count overstates what is
+    analysable" correction the comparable ranking makes, applied to the floor.
+    Because ``comparable_passes <= passes`` this only ever *narrows* a comparable
+    ranking (it never admits a site the raw floor rejected). Under ``"passes"`` it is
+    the raw pass count, unchanged -- so the default discovery answer and the featured
+    gallery are untouched. Single-sourced so :func:`select_featured_sites` (filtering
+    a candidate pool) and :meth:`umbra_py.index.CatalogIndex.rank_sites` (filtering
+    summarised :class:`SiteCoverage` records) cannot disagree about who qualifies.
+    """
+    return comparable_passes if rank_by == "comparable" else passes
+
+
 @dataclass(frozen=True)
 class SiteCoverage:
     """A repeat-imaged site's coverage, reduced to the facts that decide whether
@@ -344,6 +366,13 @@ def rank_site_coverage(
     differenceable series. ``select_featured_sites`` applies the same key *before*
     truncating to ``top``, so a deeply-analysable site outside the raw top-``top`` is
     not dropped before the comparable ranking can promote it.
+
+    ``min_passes`` measures the same depth ``rank_by`` does (:func:`_min_passes_depth`):
+    under ``"comparable"`` a site must have at least ``min_passes`` *comparable*
+    passes to qualify, so ``rank_by="comparable", min_passes=N`` means "sites whose
+    differenceable series is at least ``N`` passes deep" rather than "sites with
+    ``N`` raw passes, ranked by their usable depth". Under ``"passes"`` it is the raw
+    dated pass count, unchanged.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 

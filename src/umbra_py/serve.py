@@ -2757,7 +2757,11 @@ def build_app(
         min_passes: int = Query(
             default=SITES_MIN_PASSES,
             ge=1,
-            description="How many dated passes a site needs to qualify",
+            description=(
+                "How many passes a site needs to qualify, counted on the depth "
+                "rank_by measures: raw dated passes by default, the usable "
+                "(comparable) series' depth under rank_by=comparable"
+            ),
         ),
         rank_by: str = Query(
             default="passes",
@@ -2784,8 +2788,11 @@ def build_app(
         deep in passes ranks by all of them rather than by whatever a pool cap
         admitted; ``limit`` sizes the pool only on a ``--live`` backend, which has
         no index to group over. ``top`` caps how many sites come back, and
-        ``min_passes`` is how many dated passes a site needs to qualify (2 is the
-        minimum a change composite can use). Each returned site is a
+        ``min_passes`` is how many passes a site needs to qualify (2 is the minimum
+        a change composite can use), counted on the depth ``rank_by`` measures --
+        raw dated passes by default, the usable (comparable) series' depth under
+        ``rank_by=comparable``, so that pairing returns only sites whose
+        differenceable series is at least ``min_passes`` deep. Each returned site is a
         ``site-coverage`` record with
         the pass ``hrefs`` **oldest-first**, ready to send straight to
         ``POST /artifacts/stats`` / ``change``. The ranking is single-sourced with
