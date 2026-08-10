@@ -994,10 +994,23 @@ conversion's clip. Follow-ons, none a blocker:
   `convert` operates on a downloaded file and has no search, so the geocoder is
   not wired in. One shared resolver call would do it if the coordinates prove
   annoying in practice.
-- **Nothing reports what a clip saved.** The command says what it wrote, not
-  that it read 4% of the product to write it. A line on the non-JSON output
-  (window pixels vs. scene pixels) would make the flag's value visible at the
-  moment someone is deciding whether to use it.
+- ~~**Nothing reports what a clip saved.**~~ **shipped** — `umbra convert
+  --clip-bbox` prints a `clipped` line pricing the pixels read against the pixels
+  the whole product holds and the ratio (`read 480,000 of 4,000,000 scene px
+  (12.0%)`), so the flag's value is visible at the moment someone is deciding
+  whether to use it. The figure comes from a new non-breaking `clip_report`
+  callback on `sicd_to_geocoded_cog` (a `ClipSavings` frozen dataclass, invoked
+  once before the read; a caller who does not pass it is unchanged) rather than
+  from the `UMBRA_*` tags, since a clip changes which ground is written — which the
+  geotransform already states — not what a pixel value means, so it stays out of
+  the provenance keys for the same reason the entry above records. What is still
+  open, and smaller:
+  - **`umbra chips --clip-bbox` does not report it.** On `--asset SICD` the chip
+    run drives the same conversion, so the same `clip_report` callback would carry
+    the saving up to a `ChipDataset` roll-up (counted per acquisition, like the
+    noise one); on `GEC`/`CSI` the equivalent is the tile window `_clip_pixel_window`
+    cuts against the source's own size. Both are the same shape one surface out; it
+    waits for the batch to want the number the way the single conversion did.
 
 ---
 

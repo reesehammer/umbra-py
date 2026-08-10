@@ -151,6 +151,26 @@ def _echo_speckle_report(path: Path) -> None:
         )
 
 
+def _echo_clip_savings(savings) -> None:
+    """Say how much of the scene a ``--clip-bbox`` conversion actually read.
+
+    A clip's whole promise is that the cost follows the area of interest rather
+    than the area the satellite collected, but the command otherwise reports only
+    what it *wrote* -- so the value of the flag was invisible at the moment someone
+    is deciding whether to use it. This prices it: the pixels read against the
+    pixels the whole product holds, and the ratio.
+
+    Unlike the noise and speckle reports, the figure is not in the output's tags
+    (a clip changes which ground is written, which the geotransform already states,
+    not what a pixel value means) so it comes from ``sicd_to_geocoded_cog``'s
+    ``clip_report`` callback rather than being read back from the file.
+    """
+    click.echo(
+        f"  clipped  : read {savings.window_pixels:,} of {savings.scene_pixels:,} "
+        f"scene px ({savings.fraction:.1%})"
+    )
+
+
 def _echo_chip_skipped_report(dataset: ChipDataset) -> None:
     """Say which acquisitions a run left out, and in whose words.
 
@@ -1105,7 +1125,8 @@ def stack(
     help="Convert only a lon/lat window 'min_lon,min_lat,max_lon,max_lat' of the "
     "scene. Only the image rows and columns covering that ground are read from "
     "the product and warped, and the output is cropped to the window, so a small "
-    "area of interest costs a small conversion instead of a whole-scene one. The "
+    "area of interest costs a small conversion instead of a whole-scene one "
+    "(the 'clipped' line reports how much of the scene was read). The "
     "download is whole-product either way -- a slant-plane NITF has no map grid "
     "to range-read.",
 )
@@ -1307,6 +1328,9 @@ def convert(
         )
 
     label = "Terrain-geocoding" if dem else "Geocoding"
+    # Collect the clip saving (window read vs. whole scene) so it can be reported
+    # after the write; the callback fires only when --clip-bbox is in play.
+    clip_savings: list = []
     with OrbitSpinner(f"{label} {Path(src).name}"):
         try:
             path = sicd_to_geocoded_cog(
@@ -1328,6 +1352,7 @@ def convert(
                 speckle_filter=speckle,
                 speckle_window=speckle_window,
                 bbox=clip,
+                clip_report=clip_savings.append if clip is not None else None,
             )
         except ValueError as exc:  # e.g. the product carries no scale factor
             raise click.ClickException(str(exc)) from exc
@@ -1344,6 +1369,8 @@ def convert(
     if subtract_noise:
         kind = f"{_noise_label(noise_model)} {kind}"
     click.echo(f"Wrote {kind} to {path}")
+    if clip_savings:
+        _echo_clip_savings(clip_savings[0])
     if subtract_noise:
         _echo_noise_report(path)
     if speckle:
