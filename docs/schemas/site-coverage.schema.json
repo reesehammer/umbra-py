@@ -12,6 +12,7 @@
     "first",
     "last",
     "span_days",
+    "comparable_span_days",
     "min_revisit_days",
     "median_revisit_days",
     "max_revisit_days",
@@ -31,6 +32,7 @@
       "first": "2024-01-08",
       "last": "2024-06-19",
       "span_days": 163,
+      "comparable_span_days": 163,
       "min_revisit_days": 11.0,
       "median_revisit_days": 27.5,
       "max_revisit_days": 42.0,
@@ -77,6 +79,10 @@
     "span_days": {
       "type": ["integer", "null"],
       "description": "Whole days from the first dated pass to the last, or null with fewer than two dated passes (no span to measure)."
+    },
+    "comparable_span_days": {
+      "type": ["integer", "null"],
+      "description": "Whole days spanned by the `comparable_passes` group — the largest set of dated passes sharing one polarization, the analysable change series — measured over that subset rather than the whole dated range. Below `span_days` means off-polarization or undated passes stretch the full range past the window the differenceable series actually covers (the temporal twin of `comparable_passes` undercutting `passes`); equal to `span_days` when every dated pass shares one polarization; null with fewer than two comparable passes (no span to measure), exactly as `span_days` is with fewer than two dated ones."
     },
     "min_revisit_days": {
       "type": ["number", "null"],

@@ -52,7 +52,15 @@ class SiteCoverage:
     below ``passes`` the raw count overstates what is analysable (a mix of
     polarizations, or undated passes riding along); ``polarizations`` names which
     polarizations are present, this says how deep the biggest comparable subset
-    is. ``bbox`` is the union footprint of every pass with one, so it is the
+    is. ``comparable_span_days`` is that subset's *temporal* reach -- whole days
+    from the comparable group's first pass to its last -- where ``span_days`` (and
+    the revisit figures) measure the whole dated range, including off-polarization
+    or undated passes no analysis verb can difference against the rest. Below
+    ``span_days`` it means passes outside the comparable group stretch the full
+    range past the window the analysable series actually covers, the temporal
+    twin of ``comparable_passes`` undercutting ``passes``; ``None`` with fewer
+    than two comparable passes, exactly as ``span_days`` is with fewer than two
+    dated ones. ``bbox`` is the union footprint of every pass with one, so it is the
     rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs`` is
     every pass oldest-first, the order ``umbra change`` / ``umbra stack`` want
     their passes in; ``comparable_hrefs`` is the subset of those URLs belonging to
@@ -71,6 +79,7 @@ class SiteCoverage:
     first: str | None
     last: str | None
     span_days: int | None
+    comparable_span_days: int | None
     min_revisit_days: float | None
     median_revisit_days: float | None
     max_revisit_days: float | None
@@ -90,6 +99,7 @@ class SiteCoverage:
             "first": self.first,
             "last": self.last,
             "span_days": self.span_days,
+            "comparable_span_days": self.comparable_span_days,
             "min_revisit_days": self.min_revisit_days,
             "median_revisit_days": self.median_revisit_days,
             "max_revisit_days": self.max_revisit_days,
@@ -176,6 +186,14 @@ def site_coverage(
     pols = sorted({p for i in ordered for p in i.polarizations})
     hrefs = tuple(i.href for i in ordered if i.href)
     comparable = _largest_comparable_group(ordered)
+    # The comparable group is dated and oldest-first by construction, so its span
+    # is the analysable series' temporal reach -- measured over that subset, not
+    # the whole dated range, so bracketing off-polarization passes cannot inflate
+    # it (the temporal twin of comparable_passes undercutting passes).
+    comparable_dates = [i.datetime for i in comparable if i.datetime is not None]
+    comparable_span_days = (
+        (comparable_dates[-1] - comparable_dates[0]).days if len(comparable_dates) >= 2 else None
+    )
 
     return SiteCoverage(
         task=task,
@@ -185,6 +203,7 @@ def site_coverage(
         first=first,
         last=last,
         span_days=span_days,
+        comparable_span_days=comparable_span_days,
         min_revisit_days=min(gaps) if gaps else None,
         median_revisit_days=median(gaps) if gaps else None,
         max_revisit_days=max(gaps) if gaps else None,

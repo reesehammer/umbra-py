@@ -224,8 +224,13 @@ def _print_site_coverage(site) -> None:
     # ``comparable_passes`` is the largest same-polarization dated subset -- the
     # depth a change series can actually reach. Note it only when it undercuts the
     # raw count (a polarization mix, or undated passes), so the common single-pol
-    # site stays a one-number line.
-    usable = f", {site.comparable_passes} usable" if site.comparable_passes != site.passes else ""
+    # site stays a one-number line; append the comparable span too when passes
+    # outside that subset stretch the full range past the analysable window.
+    usable = ""
+    if site.comparable_passes != site.passes:
+        usable = f", {site.comparable_passes} usable"
+        if site.comparable_span_days is not None and site.comparable_span_days != site.span_days:
+            usable += f" over {site.comparable_span_days}d"
     click.echo(f"  passes   : {site.passes}{span} ({dates}){usable}")
     click.echo(
         f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
@@ -332,10 +337,12 @@ def sites(
     Each site reports its pass count, date span, revisit cadence, footprint and
     products; the pass line adds a 'usable' figure when fewer passes are
     differenceable together than exist (the largest same-polarization dated
-    subset, since the analysis verbs refuse a mixed-polarization series). --json
-    adds that as 'comparable_passes', all the pass URLs in 'hrefs' (oldest-first),
-    and in 'comparable_hrefs' just that usable subset -- the selection to pipe
-    straight into 'umbra change' / 'stack' without tripping the refusal.
+    subset, since the analysis verbs refuse a mixed-polarization series), and its
+    own span when that subset covers a narrower window than the whole range.
+    --json adds those as 'comparable_passes' / 'comparable_span_days', all the
+    pass URLs in 'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable
+    subset -- the selection to pipe straight into 'umbra change' / 'stack' without
+    tripping the refusal.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
