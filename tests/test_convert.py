@@ -3087,6 +3087,75 @@ def test_sicd_to_geocoded_cog_clip_reads_only_the_window_and_keeps_the_geolocati
     assert clip_lat == pytest.approx(true_lat, abs=pixel)
 
 
+def test_clip_savings_prices_the_window_against_the_scene():
+    # Pure arithmetic, no extras: window pixels, scene pixels and their ratio.
+    savings = convert.ClipSavings(window_rows=10, window_cols=20, scene_rows=100, scene_cols=50)
+    assert savings.window_pixels == 200
+    assert savings.scene_pixels == 5000
+    assert savings.fraction == pytest.approx(0.04)
+    assert savings.to_dict() == {
+        "window_pixels": 200,
+        "scene_pixels": 5000,
+        "window_shape": [10, 20],
+        "scene_shape": [100, 50],
+        "fraction": pytest.approx(0.04),
+    }
+    # A degenerate (empty) scene reports 0 rather than dividing by zero.
+    assert convert.ClipSavings(0, 0, 0, 0).fraction == 0.0
+
+
+def test_clip_report_fires_once_with_the_window_actually_read(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    rows, cols = 60, 80
+    mark = (31, 41)
+    sicd = _FakeSicd()
+    reader = _FakeReader(_marked_complex(rows, cols, mark=mark), sicd)
+    _patch_open_complex(monkeypatch, reader)
+    bbox = _bbox_around(sicd, *mark, pad=0.02)
+
+    reported: list = []
+    convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "clip.tif",
+        gcp_grid=9,
+        resampling="nearest",
+        bbox=bbox,
+        clip_report=reported.append,
+    )
+
+    # Exactly one report, and it prices the very window the reader was asked for.
+    assert len(reported) == 1
+    savings = reported[0]
+    assert savings.scene_rows == rows and savings.scene_cols == cols
+    assert savings.scene_pixels == rows * cols
+    (read_rows, read_cols) = reader.reads[0]
+    assert savings.window_rows == read_rows.stop - read_rows.start
+    assert savings.window_cols == read_cols.stop - read_cols.start
+    assert savings.window_pixels < savings.scene_pixels
+    assert 0.0 < savings.fraction < 1.0
+
+
+def test_clip_report_is_not_called_without_a_bbox(tmp_path, monkeypatch):
+    pytest.importorskip("rasterio")
+    pytest.importorskip("sarpy")
+    pytest.importorskip("numpy")
+
+    _patch_open_complex(monkeypatch, _FakeReader(_fake_complex(40, 50), _FakeSicd()))
+    reported: list = []
+    convert.sicd_to_geocoded_cog(
+        tmp_path / "in.ntf",
+        tmp_path / "whole.tif",
+        gcp_grid=9,
+        resampling="nearest",
+        clip_report=reported.append,
+    )
+    # A whole-scene conversion reads everything, so there is no saving to report.
+    assert reported == []
+
+
 def test_sicd_to_geocoded_cog_clip_that_misses_the_scene_errors(tmp_path, monkeypatch):
     pytest.importorskip("sarpy")
     pytest.importorskip("numpy")
@@ -3118,6 +3187,9 @@ def test_cli_convert_clip_bbox(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
+    # The clip's value is reported: how much of the scene was actually read.
+    assert "clipped" in result.output
+    assert "scene px" in result.output
     with rasterio.open(out) as ds:
         # Cropped to the request, to within the ceil on the output width.
         slack = ds.transform.a

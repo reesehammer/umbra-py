@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra convert --clip-bbox` now reports what the clip saved (`convert.py`,
+  `cli/process.py`, `tests/test_convert.py`).** `--clip-bbox` turns a ground
+  rectangle into the image window covering it and reads only that window, so the
+  scene-sized amplitude array, the warp over it and the scene-sized output on disk
+  never exist — but the command reported only what it *wrote*, so the value of the
+  flag was invisible at the moment someone is deciding whether to use it. It now
+  prints a `clipped` line pricing the pixels read against the pixels the whole
+  product holds and the ratio (`read 480,000 of 4,000,000 scene px (12.0%)`). The
+  number is *not* recorded in the output's `UMBRA_*` tags — a clip changes which
+  ground is written, which the geotransform already states, not what a pixel value
+  means, so tagging it would make a clipped and an unclipped conversion of one site
+  disagree on a provenance key for no measurement reason — so it comes from a new
+  non-breaking `clip_report` callback on `sicd_to_geocoded_cog` (invoked once,
+  before the read, with a `ClipSavings` frozen dataclass; a caller who does not
+  pass it sees no behaviour change) rather than being read back from the file, the
+  way the noise and speckle reports are. This is the processing saving, not the
+  bytes fetched: the download is whole-product either way, a slant-plane NITF
+  having no map grid to range-read. Tests pin the callback firing exactly once with
+  figures matching the window the reader was actually asked for, not firing at all
+  on a whole-scene conversion, the pure `ClipSavings` arithmetic (including an
+  empty scene reporting `0` rather than dividing by zero), and the `clipped` line
+  reaching the CLI output.
 - **`SiteCoverage.comparable_polarizations` — name *which* polarization the
   analysable change series is, on every discovery surface at once (`coverage.py`,
   `cli/discover.py`, `mcp_server.py`, `docs/schemas/site-coverage.schema.json`,

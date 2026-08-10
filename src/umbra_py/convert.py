@@ -184,7 +184,7 @@ from __future__ import annotations
 import math
 import os
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -2275,6 +2275,58 @@ def _build_gcps(
     return gcps
 
 
+@dataclass(frozen=True)
+class ClipSavings:
+    """What a ``bbox`` clip read instead of the whole scene.
+
+    :func:`sicd_to_geocoded_cog` with a ``bbox`` turns a ground rectangle into the
+    image window covering it (:func:`_clip_window`) and reads only that window, so
+    the scene-sized amplitude array, the warp over it and the scene-sized output on
+    disk never exist. This prices that saving: ``window`` is the pixels actually
+    read, ``scene`` the pixels the whole product holds, and :attr:`fraction` the
+    ratio -- the number that says whether pointing the conversion at an area of
+    interest was worth it, at the moment someone is deciding whether to.
+
+    The *download* is whole-product either way (a slant-plane NITF has no map grid
+    to range-read), so this is the processing saving, not the bytes fetched -- the
+    same distinction :func:`sicd_to_geocoded_cog`'s docstring draws. It is reported
+    (``umbra convert``'s ``clipped`` line, via the ``clip_report`` callback) rather
+    than recorded in the ``UMBRA_*`` tags: the output's geotransform already states
+    which ground it covers, and a tag would make a clipped and an unclipped
+    conversion of one site disagree on a provenance key for no measurement reason.
+    """
+
+    window_rows: int
+    window_cols: int
+    scene_rows: int
+    scene_cols: int
+
+    @property
+    def window_pixels(self) -> int:
+        """Pixels read from the product (the clipped image window)."""
+        return self.window_rows * self.window_cols
+
+    @property
+    def scene_pixels(self) -> int:
+        """Pixels the whole product holds (what an unclipped run would read)."""
+        return self.scene_rows * self.scene_cols
+
+    @property
+    def fraction(self) -> float:
+        """The window as a fraction of the scene in ``[0, 1]`` (``0`` if empty)."""
+        return self.window_pixels / self.scene_pixels if self.scene_pixels else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-ready mapping of the two figures and their ratio."""
+        return {
+            "window_pixels": self.window_pixels,
+            "scene_pixels": self.scene_pixels,
+            "window_shape": [self.window_rows, self.window_cols],
+            "scene_shape": [self.scene_rows, self.scene_cols],
+            "fraction": self.fraction,
+        }
+
+
 def _clip_window(
     sicd: Any,
     shape: tuple[int, int],
@@ -3347,6 +3399,7 @@ def sicd_to_geocoded_cog(
     speckle_filter: str | None = None,
     speckle_window: int = SPECKLE_WINDOW_DEFAULT,
     bbox: tuple[float, float, float, float] | None = None,
+    clip_report: Callable[[ClipSavings], None] | None = None,
 ) -> Path:
     """Geocode a SICD to a north-up EPSG:4326 cloud-optimized GeoTIFF.
 
@@ -3375,7 +3428,10 @@ def sicd_to_geocoded_cog(
     conversion follows the area someone asked for rather than the area the
     satellite happened to collect. The download is whole-product either way (a
     slant-plane NITF has no map grid to range-read), which is why the saving is
-    in the processing rather than in the bytes fetched.
+    in the processing rather than in the bytes fetched. Pass ``clip_report`` to
+    learn how large that saving was: it is called once, before the read, with a
+    :class:`ClipSavings` pricing the window read against the whole scene (what
+    ``umbra convert``'s ``clipped`` line prints).
 
     Parameters
     ----------
@@ -3605,6 +3661,11 @@ def sicd_to_geocoded_cog(
         whole scene. The clip is *not* recorded in the provenance tags: the
         output's own geotransform states exactly which ground it covers, and the
         tags record what a pixel value means rather than where it is.
+    clip_report:
+        Optional callback, invoked once with a :class:`ClipSavings` when a
+        ``bbox`` clip is applied (never otherwise), pricing the image window read
+        against the whole scene. It is how ``umbra convert`` prints its
+        ``clipped`` line; a caller who does not pass it sees no behaviour change.
     """
     np = _require("numpy")
     _require("rasterio")
@@ -3657,14 +3718,27 @@ def sicd_to_geocoded_cog(
     else:
         # Ask which image window covers the ground first, then read only that --
         # the point of a clip is that the scene-sized array never exists.
+        scene_shape = _reader_shape(reader, sicd)
         row0, row1, col0, col1 = _clip_window(
             sicd,
-            _reader_shape(reader, sicd),
+            scene_shape,
             bbox,
             # Flat-earth for the *search* even with a DEM: the padding covers the
             # terrain shift, and the refinement loop below still places the pixels.
             projection_type="HAE" if dem is not None else projection_type,
         )
+        if clip_report is not None:
+            # Priced before the read, off the window just computed and the scene
+            # shape already in hand -- so a caller learns what the clip saved
+            # whether or not the (whole-product) download or the warp then run.
+            clip_report(
+                ClipSavings(
+                    window_rows=row1 - row0,
+                    window_cols=col1 - col0,
+                    scene_rows=scene_shape[0],
+                    scene_cols=scene_shape[1],
+                )
+            )
         origin = (row0, col0)
         amplitude = _amplitude(reader[row0:row1, col0:col1], decibels=decibels)
     noise: NoiseSubtraction | None = None
