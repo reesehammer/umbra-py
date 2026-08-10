@@ -54,8 +54,14 @@ class SiteCoverage:
     polarizations are present, this says how deep the biggest comparable subset
     is. ``bbox`` is the union footprint of every pass with one, so it is the
     rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs`` is
-    oldest-first, the order ``umbra change`` / ``umbra stack`` want their passes
-    in.
+    every pass oldest-first, the order ``umbra change`` / ``umbra stack`` want
+    their passes in; ``comparable_hrefs`` is the subset of those URLs belonging to
+    the ``comparable_passes`` group -- the exact passes that will *not* trip the
+    mixed-polarization refusal, so it is the selection to hand an analysis verb
+    straight through, where ``hrefs`` is the whole roster to choose from.
+    ``len(comparable_hrefs)`` equals ``comparable_passes`` (barring a pass with no
+    URL, which ``hrefs`` already drops); when the two href lists are equal every
+    dated pass is already comparable.
     """
 
     task: str
@@ -72,6 +78,7 @@ class SiteCoverage:
     products: tuple[str, ...]
     polarizations: tuple[str, ...]
     hrefs: tuple[str, ...]
+    comparable_hrefs: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         """A JSON-ready mapping (``umbra sites --json``), field order preserved."""
@@ -90,6 +97,7 @@ class SiteCoverage:
             "products": list(self.products),
             "polarizations": list(self.polarizations),
             "hrefs": list(self.hrefs),
+            "comparable_hrefs": list(self.comparable_hrefs),
         }
 
 
@@ -106,23 +114,34 @@ def _union_bbox(items: Iterable[UmbraItem]) -> BBox | None:
     )
 
 
-def _largest_comparable_group(items: Iterable[UmbraItem]) -> int:
-    """How many dated passes share the largest single-polarization signature.
+def _largest_comparable_group(items: Iterable[UmbraItem]) -> list[UmbraItem]:
+    """The dated passes of the largest single-polarization signature, oldest-first.
 
     This is the pool :func:`umbra_py.viz.composites.select_change_frames` selects
     for a composite -- dated passes grouped by their polarization tuple, largest
-    group wins -- so it is the deepest change series the site supports before the
-    mixed-polarization refusal the analysis verbs enforce. Undated passes are
-    excluded (they cannot be ordered onto a time axis); a pass carrying no
-    polarization metadata groups with other such passes (the empty tuple), which
-    is exactly how the frame selector treats them. Zero when nothing is dated.
+    group wins, ties broken by the polarization tuple (the same order the frame
+    selector uses, so the two cannot pick different passes) -- so it is the deepest
+    change series the site supports before the mixed-polarization refusal the
+    analysis verbs enforce. Undated passes are excluded (they cannot be ordered
+    onto a time axis); a pass carrying no polarization metadata groups with other
+    such passes (the empty tuple), which is exactly how the frame selector treats
+    them. Empty when nothing is dated.
+
+    Its length is ``comparable_passes`` and its passes' URLs are
+    ``comparable_hrefs``, both derived from this one group so the count and the
+    selection cannot disagree.
     """
-    groups: dict[tuple[str, ...], int] = {}
+    groups: dict[tuple[str, ...], list[UmbraItem]] = {}
     for item in items:
         if item.datetime is None:
             continue
-        groups[tuple(item.polarizations)] = groups.get(tuple(item.polarizations), 0) + 1
-    return max(groups.values(), default=0)
+        groups.setdefault(tuple(item.polarizations), []).append(item)
+    if not groups:
+        return []
+    # Largest group, ties broken by the polarization tuple -- select_change_frames'
+    # own deterministic order -- then sorted oldest-first (all members are dated).
+    winner = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[0][1]
+    return sorted(winner, key=lambda i: i.datetime or datetime.min)
 
 
 def _revisit_days(dates: Sequence[datetime]) -> list[float]:
@@ -156,12 +175,13 @@ def site_coverage(
     products = sorted({a for i in ordered for a in i.available_assets})
     pols = sorted({p for i in ordered for p in i.polarizations})
     hrefs = tuple(i.href for i in ordered if i.href)
+    comparable = _largest_comparable_group(ordered)
 
     return SiteCoverage(
         task=task,
         label=label,
         passes=len(ordered),
-        comparable_passes=_largest_comparable_group(ordered),
+        comparable_passes=len(comparable),
         first=first,
         last=last,
         span_days=span_days,
@@ -172,6 +192,7 @@ def site_coverage(
         products=tuple(products),
         polarizations=tuple(pols),
         hrefs=hrefs,
+        comparable_hrefs=tuple(i.href for i in comparable if i.href),
     )
 
 

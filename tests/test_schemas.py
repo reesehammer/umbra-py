@@ -1191,6 +1191,9 @@ def test_site_coverage_record_validates_with_comparable_below_the_raw_count():
     payload = site_coverage("Mixed", passes).to_dict()
 
     assert payload["passes"] == 4 and payload["comparable_passes"] == 3
+    # comparable_hrefs is the usable subset: the three VV URLs, not the HH one.
+    assert len(payload["comparable_hrefs"]) == 3
+    assert set(payload["comparable_hrefs"]) < set(payload["hrefs"])
     _check("site-coverage.schema.json", payload)
 
 

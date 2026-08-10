@@ -145,6 +145,57 @@ def test_comparable_passes_excludes_undated_passes():
     assert site.comparable_passes == 2
 
 
+def test_comparable_hrefs_are_the_comparable_group_urls_oldest_first():
+    # The same mixed site as above: three VV, two HH. `comparable_hrefs` must be
+    # exactly the three VV passes' URLs (the group `comparable_passes` counts),
+    # oldest-first, and none of the HH ones -- so a selection handed straight to
+    # `umbra stack` cannot trip the mixed-polarization refusal.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 8, pols=["HH"]),
+            _pass("Mixed", 6, pols=["VV"]),
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 10, pols=["HH"]),
+            _pass("Mixed", 3, pols=["VV"]),
+        ],
+    )
+    assert len(site.comparable_hrefs) == site.comparable_passes == 3
+    days = [h.rsplit("/t/", 1)[1] for h in site.comparable_hrefs]
+    assert days == ["1/i.json", "3/i.json", "6/i.json"]
+    assert set(site.comparable_hrefs) <= set(site.hrefs)
+    assert all("/t/8/" not in h and "/t/10/" not in h for h in site.comparable_hrefs)
+
+
+def test_comparable_hrefs_equal_hrefs_under_one_polarization():
+    # Every dated pass is comparable, so the usable selection is the whole roster.
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (3, 1, 2)])
+    assert site.comparable_hrefs == site.hrefs
+    assert len(site.comparable_hrefs) == site.comparable_passes == 3
+
+
+def test_comparable_hrefs_drop_the_undated_pass_hrefs_keeps():
+    # An undated pass rides along in `hrefs` (its URL is still useful to hand off)
+    # but cannot join a time series, so it is absent from `comparable_hrefs`.
+    undated = _pass("Alpha", 1, pols=["VV"])
+    undated.properties.pop("datetime")
+    site = site_coverage(
+        "Alpha", [undated, _pass("Alpha", 2, pols=["VV"]), _pass("Alpha", 5, pols=["VV"])]
+    )
+    assert len(site.hrefs) == 3
+    assert len(site.comparable_hrefs) == site.comparable_passes == 2
+    assert undated.href in site.hrefs
+    assert undated.href not in site.comparable_hrefs
+
+
+def test_comparable_hrefs_empty_when_nothing_dated():
+    undated = _pass("None", 1, pols=["VV"])
+    undated.properties.pop("datetime")
+    site = site_coverage("None", [undated])
+    assert site.comparable_passes == 0
+    assert site.comparable_hrefs == ()
+
+
 def test_to_dict_is_json_ready():
     site = site_coverage(
         "Alpha", [_pass("Alpha", 1, bbox=(0, 0, 1, 1)), _pass("Alpha", 3, bbox=(2, 2, 3, 3))]

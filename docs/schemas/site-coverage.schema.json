@@ -18,7 +18,8 @@
     "bbox",
     "products",
     "polarizations",
-    "hrefs"
+    "hrefs",
+    "comparable_hrefs"
   ],
   "additionalProperties": false,
   "examples": [
@@ -37,6 +38,10 @@
       "products": ["GEC", "SICD"],
       "polarizations": ["VV"],
       "hrefs": [
+        "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-01-08.stac.v2.json",
+        "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-06-19.stac.v2.json"
+      ],
+      "comparable_hrefs": [
         "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-01-08.stac.v2.json",
         "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-06-19.stac.v2.json"
       ]
@@ -104,7 +109,12 @@
     },
     "hrefs": {
       "type": "array",
-      "description": "The site's pass STAC URLs, oldest-first (undated passes last) — the order `umbra change` / `stack` / `pick_change_interval` want their passes in, ready to pipe straight onward.",
+      "description": "The site's pass STAC URLs, oldest-first (undated passes last) — the whole roster to choose passes from. Handing all of them to `umbra change` / `stack` / `pick_change_interval` trips the mixed-polarization refusal whenever `comparable_passes` is below `passes`; use `comparable_hrefs` for a selection that pipes straight onward.",
+      "items": { "type": "string" }
+    },
+    "comparable_hrefs": {
+      "type": "array",
+      "description": "The subset of `hrefs` belonging to the `comparable_passes` group — the largest set of dated passes sharing one polarization, oldest-first — so it is the selection to hand `umbra change` / `stack` / `pick_change_interval` straight through without tripping the mixed-polarization refusal those verbs enforce. Its length equals `comparable_passes` (barring a pass with no URL, which `hrefs` also drops); equal to `hrefs` (minus any undated passes) when every dated pass is already comparable, empty when no pass is dated.",
       "items": { "type": "string" }
     }
   }
