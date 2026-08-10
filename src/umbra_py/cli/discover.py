@@ -352,7 +352,9 @@ def sites(
     own span when that subset covers a narrower window than the whole range. The
     revisit line notes the usable series' own longest gap when it differs from the
     all-passes one. --json adds those as 'comparable_passes' /
-    'comparable_span_days' / 'comparable_max_revisit_days', all the pass URLs in
+    'comparable_span_days' and the full usable-series cadence
+    ('comparable_min_revisit_days' / 'comparable_median_revisit_days' /
+    'comparable_max_revisit_days'), all the pass URLs in
     'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable subset --
     the selection to pipe straight into 'umbra change' / 'stack' without tripping
     the refusal.

@@ -16,6 +16,8 @@
     "min_revisit_days",
     "median_revisit_days",
     "max_revisit_days",
+    "comparable_min_revisit_days",
+    "comparable_median_revisit_days",
     "comparable_max_revisit_days",
     "bbox",
     "products",
@@ -37,6 +39,8 @@
       "min_revisit_days": 11.0,
       "median_revisit_days": 27.5,
       "max_revisit_days": 42.0,
+      "comparable_min_revisit_days": 11.0,
+      "comparable_median_revisit_days": 27.5,
       "comparable_max_revisit_days": 42.0,
       "bbox": [-111.99, 39.11, -111.87, 39.19],
       "products": ["GEC", "SICD"],
@@ -97,6 +101,14 @@
     "max_revisit_days": {
       "type": ["number", "null"],
       "description": "The longest gap in days between two consecutive dated passes — the site's worst-case temporal resolution, the widest stretch a change could have gone unseen — or null with fewer than two dated passes. Far above `median_revisit_days` means a bursty or thinning series rather than a steady cadence."
+    },
+    "comparable_min_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The shortest gap in days between two consecutive passes of the `comparable_passes` group — the tightest revisit of the analysable single-polarization change series, the twin of `min_revisit_days` over just the differenceable subset. Like `comparable_max_revisit_days` it corrects the raw figure in either direction (a cross-polarization pass filling a gap can make the whole-dated cadence read tighter than the analysable series, while off-polarization passes can distort it the other way). Equal to `min_revisit_days` when every dated pass shares one polarization; null with fewer than two comparable passes, exactly as `min_revisit_days` is with fewer than two dated ones."
+    },
+    "comparable_median_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The median gap in days between consecutive passes of the `comparable_passes` group — the typical cadence of the analysable single-polarization change series, the twin of `median_revisit_days` over just the differenceable subset. With `comparable_min_revisit_days` and `comparable_max_revisit_days` it completes the comparable cadence, so the whole shortest/typical/worst triple can be read over the series a change run can actually difference. Equal to `median_revisit_days` when every dated pass shares one polarization; null with fewer than two comparable passes, exactly as `median_revisit_days` is with fewer than two dated ones."
     },
     "comparable_max_revisit_days": {
       "type": ["number", "null"],
