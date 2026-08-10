@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`rank_by="passes" | "comparable"` — rank the repeat-imaged-site discovery
+  answer by *analysable* depth, on every discovery surface at once (`coverage.py`,
+  `showcase.py`, `index.py`, `cli/discover.py`, `mcp_server.py`, `serve.py`,
+  `tests/test_coverage.py`, `tests/test_showcase.py`, `tests/test_index.py`,
+  `tests/test_mcp_server.py`, `tests/test_serve.py`).** The comparable-figure
+  workstream gave every raw coverage figure an analysable-series twin in the
+  *report* — `comparable_passes` is how many of a site's passes a change verb can
+  actually difference (the largest single-polarization dated subset), which the
+  raw pass count overstates whenever a site's passes span several polarizations or
+  carry undated ones. But the *ranking* still ordered by raw pass count
+  everywhere, so the discovery moat (`STRATEGY.md` §3) could surface a
+  broad-but-mixed site above a deeper single-polarization series a change run would
+  actually prefer — and, at a small `top`, could crowd the deeper series off the
+  list entirely. `rank_by="comparable"` orders by that differenceable depth
+  instead: a site with three same-polarization passes now outranks one with five
+  passes split across three polarizations, because three is the change series the
+  first supports and two is the second's. The default stays `"passes"` (the raw
+  count the static showcase's featured gallery wants — more acquisitions to
+  precompute, whatever their polarization mix), so nothing shipped changes silently;
+  the two coincide exactly when every dated pass of every site shares one
+  polarization. It reaches every surface as one forwarded argument — `umbra sites
+  --rank-by {passes,comparable}`, `find_repeat_sites(rank_by=…)` (MCP / LangChain /
+  LlamaIndex), `GET`/`POST /sites?rank_by=…` on `umbra serve`, and
+  `CatalogIndex.rank_sites(rank_by=…)` under `umbra sites --local` — single-sourced
+  through `select_featured_sites` and one shared `coverage._rank_sort_key`, so no
+  two surfaces can order a comparable ranking differently. The key is applied
+  *before* the `top` truncation (and, on the whole-archive index path, the
+  candidate SQL's raw-count `LIMIT` is dropped for the comparable ranking), so a
+  deeply-analysable site outside the raw top-`top` is promoted rather than lost —
+  the same whole-archive-not-a-capped-pool correction the discovery moat already
+  made for raw depth, now for analysable depth. An unknown ranking is a
+  self-describing `ValueError` (a `400` on the HTTP surface) naming the accepted
+  set, checked once in `coverage._check_ranking` that every surface shares. No
+  schema change — the `SiteCoverage` payload is unchanged; only its order is.
 - **`SiteCoverage.comparable_min_revisit_days` / `comparable_median_revisit_days`
   — the tightest and typical revisit of the *analysable* change series, completing
   the comparable cadence on every discovery surface at once (`coverage.py`,

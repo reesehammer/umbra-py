@@ -401,6 +401,7 @@ def find_repeat_sites(
     limit: int = 500,
     top: int = 20,
     min_passes: int = 2,
+    rank_by: str = "passes",
     local: bool | None = None,
 ) -> dict[str, Any]:
     """Rank the archive's most repeat-imaged sites — where change detection has
@@ -428,6 +429,15 @@ def find_repeat_sites(
     returned, and ``min_passes`` is how many dated passes a site needs to qualify
     (2 is the minimum a change composite can use; raise it to find only
     deeply-revisited series).
+
+    ``rank_by`` chooses the order: ``"passes"`` (the default) ranks by raw pass
+    count; ``"comparable"`` ranks by *analysable* depth instead -- the
+    ``comparable_passes`` largest same-polarization dated subset a change verb can
+    actually difference -- so a deep single-polarization series is not outranked by
+    a broader mixed-polarization site whose passes no analysis verb can compare. The
+    two agree when every dated pass of every site shares one polarization; prefer
+    ``"comparable"`` when the next step is ``pick_change_interval`` / ``stack_stats``,
+    which consume exactly that differenceable subset.
 
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index
@@ -460,8 +470,9 @@ def find_repeat_sites(
     showcase's featured-gallery selector, so this and ``umbra sites`` cannot
     disagree about what "most repeat-imaged" means.
     """
-    from .coverage import rank_site_coverage
+    from .coverage import _check_ranking, rank_site_coverage
 
+    _check_ranking(rank_by)
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
 
@@ -496,6 +507,7 @@ def find_repeat_sites(
                 max_resolution=max_resolution,
                 top=top,
                 min_passes=min_passes,
+                rank_by=rank_by,
             )
         else:
             pool = list(
@@ -514,7 +526,7 @@ def find_repeat_sites(
                     limit=limit,
                 )
             )
-            sites = rank_site_coverage(pool, top=top, min_passes=min_passes)
+            sites = rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
     finally:
         if isinstance(source, CatalogIndex):
             source.close()

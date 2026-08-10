@@ -307,6 +307,51 @@ def test_select_featured_sites_ranks_by_pass_count():
     assert [i.datetime.day for i in sites[0].items] == [4, 5, 6]
 
 
+def _pass_pol(task: str, day: int, pol: str) -> UmbraItem:
+    """A featured-gallery pass carrying a polarization, so the comparable ranking
+    (largest same-polarization dated subset) can be exercised."""
+    item = UmbraItem.from_dict(
+        {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": f"{task}-{day}-{pol}",
+            "bbox": [-110.0, 39.0, -109.9, 39.1],
+            "geometry": None,
+            "properties": {
+                "datetime": f"2024-01-{day:02d}T00:00:00Z",
+                "sar:polarizations": [pol],
+            },
+            "assets": {},
+        },
+        href=f"https://x.s3.amazonaws.com/sar-data/tasks/{task}/t/{day}/i.json",
+    )
+    return item
+
+
+def test_select_featured_sites_rank_by_comparable_uses_analysable_depth():
+    """rank_by='comparable' orders by the largest same-polarization dated subset,
+    so a broad-but-mixed site cannot outrank a deeper single-polarization one; the
+    default 'passes' ranking (what the gallery uses) is unchanged."""
+    items = [
+        # Broad: 5 passes, only the VV pair differenceable together.
+        *[_pass_pol("Broad", d, "VV") for d in (1, 2)],
+        *[_pass_pol("Broad", d, "HH") for d in (3, 4)],
+        _pass_pol("Broad", 5, "VH"),
+        # Deep: 3 passes, all VV.
+        *[_pass_pol("Deep", d, "VV") for d in (6, 7, 8)],
+    ]
+    assert [s.task for s in showcase.select_featured_sites(items)] == ["Broad", "Deep"]
+    ranked = showcase.select_featured_sites(items, rank_by="comparable")
+    assert [s.task for s in ranked] == ["Deep", "Broad"]
+
+
+def test_select_featured_sites_rejects_unknown_rank_by():
+    import pytest
+
+    with pytest.raises(ValueError, match="rank_by must be one of"):
+        showcase.select_featured_sites([_pass("Alpha", 1)], rank_by="deepest")
+
+
 def test_select_featured_sites_respects_count_and_min_passes():
     items = [*[_pass("Alpha", d) for d in (1, 2, 3)], *[_pass("Bravo", d) for d in (4, 5)]]
 

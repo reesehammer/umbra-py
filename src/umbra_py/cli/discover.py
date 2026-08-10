@@ -313,6 +313,16 @@ def _print_site_coverage(site) -> None:
     help="Passes a site needs to qualify (2 is the minimum a change composite "
     "can use; raise it to find only deeply-revisited series).",
 )
+@click.option(
+    "--rank-by",
+    type=click.Choice(["passes", "comparable"]),
+    default="passes",
+    show_default=True,
+    help="What to rank sites by: 'passes' (raw pass count) or 'comparable' (the "
+    "usable series' depth -- the largest same-polarization dated subset a change "
+    "verb can actually difference), so a deep single-polarization site is not "
+    "outranked by a broader mixed-polarization one it beats on analysable depth.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -332,6 +342,7 @@ def sites(
     limit,
     top,
     min_passes,
+    rank_by,
     as_json,
     local,
     db_path,
@@ -358,6 +369,12 @@ def sites(
     'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable subset --
     the selection to pipe straight into 'umbra change' / 'stack' without tripping
     the refusal.
+
+    --rank-by chooses the order: 'passes' (the default) ranks by raw pass count;
+    'comparable' ranks by that usable-series depth instead, so a deeply-imaged
+    single-polarization site is not outranked by a broader one whose passes a
+    change verb cannot difference together. The two agree when every dated pass
+    shares one polarization.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -390,7 +407,7 @@ def sites(
                 f"No index at {path}. Build one first with 'umbra index build'."
             )
         with OrbitSpinner("Ranking sites in local index"), CatalogIndex(path) as index:
-            ranked = index.rank_sites(top=top, min_passes=min_passes, **filters)
+            ranked = index.rank_sites(top=top, min_passes=min_passes, rank_by=rank_by, **filters)
         pool_size = None
     else:
         pool = _shared._gather_items(
@@ -399,7 +416,7 @@ def sites(
             live_label="Searching for repeat-imaged sites",
             **filters,
         )
-        ranked = rank_site_coverage(pool, top=top, min_passes=min_passes)
+        ranked = rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
         pool_size = len(pool)
     if as_json:
         for site in ranked:
@@ -414,7 +431,8 @@ def sites(
         return
     for site in ranked:
         _print_site_coverage(site)
-    click.echo(f"{len(ranked)} site(s), best-covered first.")
+    order = "deepest usable series" if rank_by == "comparable" else "best-covered"
+    click.echo(f"{len(ranked)} site(s), {order} first.")
 
 
 def _print_watch_result(result) -> None:

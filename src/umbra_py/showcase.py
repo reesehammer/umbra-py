@@ -298,13 +298,14 @@ def select_featured_sites(
     *,
     count: int = DEFAULT_FEATURED_COUNT,
     min_passes: int = 2,
+    rank_by: str = "passes",
 ) -> list[FeaturedSite]:
     """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
 
     A change composite needs two or more dated passes over the *same* ground,
     and Umbra files every pass of a site under one task directory -- so the
     tasks with the most acquisitions in the candidate pool are exactly the ones
-    worth precomputing. Sites are ranked by pass count (descending) and then by
+    worth precomputing. Sites are ranked by ``rank_by`` (descending) and then by
     task name, so the selection is deterministic for a given pool rather than
     dependent on iteration order.
 
@@ -318,12 +319,27 @@ def select_featured_sites(
     min_passes:
         Passes a site needs before it qualifies (2 is the minimum a change
         composite can use).
+    rank_by:
+        One of :data:`umbra_py.coverage.SITE_RANKINGS`. ``"passes"`` (the default,
+        and what the featured gallery uses) orders by raw pass count; ``"comparable"``
+        orders by each site's *analysable* depth -- the largest single-polarization
+        dated subset a change verb can difference -- so a broad-but-mixed site cannot
+        outrank a deeper single-polarization series. The key is applied before the
+        ``count`` truncation, so the comparable ordering is over the whole qualifying
+        pool rather than a raw-ranked prefix of it.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
     """
     if count <= 0:
         return []
+    # Single-sourced with the discovery layer: the same key builder and the same
+    # comparable-group definition, so the featured gallery, ``umbra sites`` and the
+    # index ranker cannot disagree about what "most repeat-imaged" means under
+    # either ranking (lazy import -- the default ``"passes"`` path needs neither).
+    from .coverage import _check_ranking, _largest_comparable_group, _rank_sort_key  # noqa: PLC0415
+
+    _check_ranking(rank_by)
     by_task: dict[str, list[UmbraItem]] = {}
     for item in items:
         if item.task and item.datetime is not None:
@@ -336,7 +352,14 @@ def select_featured_sites(
         for task, passes in by_task.items()
         if len(passes) >= min_passes
     ]
-    sites.sort(key=lambda s: (-len(s.items), s.task))
+    sites.sort(
+        key=lambda s: _rank_sort_key(
+            comparable_passes=len(_largest_comparable_group(s.items)),
+            passes=len(s.items),
+            task=s.task,
+            rank_by=rank_by,
+        )
+    )
     return sites[:count]
 
 

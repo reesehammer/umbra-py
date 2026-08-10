@@ -29,6 +29,48 @@ from statistics import median
 
 from .models import BBox, UmbraItem
 
+#: The orderings :func:`rank_site_coverage` (and every discovery surface that
+#: forwards to it) can rank sites by. ``"passes"`` is the historical default --
+#: raw pass count, most-imaged first -- which is what the static showcase's
+#: featured gallery wants (more acquisitions to precompute, whatever their
+#: polarization mix). ``"comparable"`` ranks by *analysable* depth instead: the
+#: ``comparable_passes`` figure, i.e. the largest single-polarization dated subset
+#: an analysis verb (``change`` / ``timescan`` / ``stack``, ``stack_stats``,
+#: ``change --narrate``) can actually difference. The two disagree exactly when a
+#: raw count overstates what is analysable -- a site whose passes span several
+#: polarizations, or carry undated passes -- so a shallow-but-broad site can
+#: outrank a deep single-polarization series under ``"passes"`` yet fall behind it
+#: under ``"comparable"``. The report has distinguished the two figures since the
+#: comparable-figure workstream; this lets the *ranking* distinguish them too.
+SITE_RANKINGS: tuple[str, ...] = ("passes", "comparable")
+
+
+def _check_ranking(rank_by: str) -> None:
+    """Reject an unknown ``rank_by``, naming the accepted set (shared by every
+    surface so they cannot disagree about what a ranking is)."""
+    if rank_by not in SITE_RANKINGS:
+        raise ValueError(f"rank_by must be one of {SITE_RANKINGS}, got {rank_by!r}")
+
+
+def _rank_sort_key(
+    *, comparable_passes: int, passes: int, task: str, rank_by: str
+) -> tuple[object, ...]:
+    """The deterministic sort key for one site under ``rank_by``.
+
+    ``"passes"`` orders by raw pass count then task name (the historical key
+    :func:`umbra_py.showcase.select_featured_sites` has always used). ``"comparable"``
+    orders by analysable depth first, breaking ties by raw pass count (so among
+    equally-analysable sites the one with more total context ranks higher) and then
+    by task name for full determinism. Both are ascending over negated counts, so a
+    plain ``sort`` puts the best-covered site first. Single-sourced so
+    :func:`select_featured_sites` (ranking ``FeaturedSite`` before summarising) and
+    :meth:`umbra_py.index.CatalogIndex.rank_sites` (ranking summarised
+    :class:`SiteCoverage` records) cannot pick a different order.
+    """
+    if rank_by == "comparable":
+        return (-comparable_passes, -passes, task)
+    return (-passes, task)
+
 
 @dataclass(frozen=True)
 class SiteCoverage:
@@ -254,18 +296,33 @@ def site_coverage(
 
 
 def rank_site_coverage(
-    items: Iterable[UmbraItem], *, top: int = 20, min_passes: int = 2
+    items: Iterable[UmbraItem],
+    *,
+    top: int = 20,
+    min_passes: int = 2,
+    rank_by: str = "passes",
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
     The ranking is :func:`umbra_py.showcase.select_featured_sites` exactly -- sites
-    ordered by pass count (descending) then task name, keeping those with at least
+    ordered by ``rank_by`` (descending) then task name, keeping those with at least
     ``min_passes`` dated passes -- so ``umbra sites`` and the showcase's featured
     gallery agree on what "most repeat-imaged" means. Only the summarisation is
     new here. Deterministic and offline: it calls no renderer, no model and no
     network.
+
+    ``rank_by`` is one of :data:`SITE_RANKINGS`: ``"passes"`` (the default -- raw
+    pass count) or ``"comparable"`` (the site's *analysable* depth, i.e. the
+    ``comparable_passes`` largest single-polarization dated subset a change verb can
+    actually difference). The two coincide when every dated pass of every site
+    shares one polarization; they diverge when a raw count overstates what is
+    analysable, which is exactly when the discovery answer should prefer the deeper
+    differenceable series. ``select_featured_sites`` applies the same key *before*
+    truncating to ``top``, so a deeply-analysable site outside the raw top-``top`` is
+    not dropped before the comparable ranking can promote it.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
-    sites = select_featured_sites(items, count=top, min_passes=min_passes)
+    _check_ranking(rank_by)
+    sites = select_featured_sites(items, count=top, min_passes=min_passes, rank_by=rank_by)
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

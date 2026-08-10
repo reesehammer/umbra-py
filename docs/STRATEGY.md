@@ -682,6 +682,31 @@ from:
   and every filter forwards to `rank_sites` with no `limit` re-list.
   **This closes the discovery moat's whole-archive-ranking gap on every surface.**
   See the CHANGELOG.
+- ~~All four surfaces ranked sites by *raw* pass count, while the comparable-figure
+  workstream had already established that the raw count overstates what is
+  analysable — so the discovery moat reported a site's differenceable depth
+  (`comparable_passes`) but still ranked and truncated on the raw one, able to
+  surface a broad-but-mixed site above a deeper single-polarization series a change
+  run would actually prefer, and to crowd that deeper series off a short list
+  entirely.~~ **shipped** — `rank_by="passes" | "comparable"` lets the ranking use
+  analysable depth too, as one forwarded argument on every discovery surface at
+  once: `umbra sites --rank-by`, `find_repeat_sites` (MCP / LangChain /
+  LlamaIndex), `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for
+  `umbra sites --local`. `"comparable"` orders by the largest single-polarization
+  dated subset a verb can difference, so three same-polarization passes outrank
+  five split across three polarizations; the default stays `"passes"` (the raw
+  count the featured gallery wants) so nothing shipped changes, and the two
+  coincide when every dated pass shares one polarization. The key is applied
+  *before* the `top` truncation — and the whole-archive index path drops its
+  raw-count SQL `LIMIT` for the comparable ranking — so a deeply-analysable site
+  outside the raw top-`top` is promoted rather than lost, the same
+  whole-archive-not-a-capped-pool correction the gap above made for raw depth, now
+  for analysable depth. Single-sourced through `select_featured_sites` and one
+  shared `coverage._rank_sort_key`, so the four surfaces cannot order a comparable
+  ranking differently; an unknown ranking is a self-describing `ValueError`/`400`.
+  The `SiteCoverage` payload is unchanged (only its order is), so no schema moved.
+  **This completes the comparable-figure workstream from the report into the
+  ranking.** See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

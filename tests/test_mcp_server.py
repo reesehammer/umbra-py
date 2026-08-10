@@ -220,6 +220,48 @@ def test_find_repeat_sites_rejects_bbox_with_intersects():
         ms.find_repeat_sites(bbox=[0, 0, 1, 1], intersects={"type": "Point", "coordinates": [0, 0]})
 
 
+def test_find_repeat_sites_rank_by_comparable_prefers_the_analysable_series(monkeypatch):
+    # Broad: 5 raw passes, only the VV pair differenceable. Deep: 3 passes, all
+    # VV. Raw ranking puts Broad first; comparable ranking flips them.
+    pool = [
+        *[_site_pass("Broad", d, pols=("VV",)) for d in (1, 2)],
+        *[_site_pass("Broad", d, pols=("HH",)) for d in (3, 4)],
+        _site_pass("Broad", 5, pols=("VH",)),
+        *[_site_pass("Deep", d, pols=("VV",)) for d in (6, 7, 8)],
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    by_passes = ms.find_repeat_sites(local=False, rank_by="passes")
+    assert [s["task"] for s in by_passes["sites"]] == ["Broad", "Deep"]
+    by_comparable = ms.find_repeat_sites(local=False, rank_by="comparable")
+    assert [s["task"] for s in by_comparable["sites"]] == ["Deep", "Broad"]
+
+
+def test_find_repeat_sites_rejects_unknown_rank_by():
+    with pytest.raises(ValueError, match="rank_by must be one of"):
+        ms.find_repeat_sites(rank_by="deepest", local=False)
+
+
+def test_find_repeat_sites_local_forwards_rank_by_to_rank_sites(tmp_path, monkeypatch):
+    from umbra_py.index import CatalogIndex
+
+    db = _build_sites_index(tmp_path, [_site_pass("Alpha", d) for d in (1, 2)])
+    monkeypatch.setattr(ms, "default_index_path", lambda: db)
+    captured: dict = {}
+
+    def _fake_rank(self, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(CatalogIndex, "rank_sites", _fake_rank)
+    ms.find_repeat_sites(local=True, rank_by="comparable")
+    assert captured["rank_by"] == "comparable"
+
+
 def _build_sites_index(tmp_path, pool):
     """Persist hand-built passes into a real CatalogIndex on disk, so the local
     path (which reads SQL, not a patched search) can be exercised."""
