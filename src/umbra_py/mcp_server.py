@@ -442,10 +442,14 @@ def find_repeat_sites(
     ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
     ``last`` dates and ``span_days``, ``min_revisit_days`` / ``median_revisit_days``
     / ``max_revisit_days`` cadence (the last being the longest gap, i.e. the site's
-    worst-case temporal resolution) with ``comparable_max_revisit_days`` the same
-    longest gap over just the differenceable subset (it can run wider than
-    ``max_revisit_days`` when a cross-polarization pass fills a gap the analysis
-    verbs cannot use), union ``bbox`` footprint, ``products`` and
+    worst-case temporal resolution) with the comparable triple
+    ``comparable_min_revisit_days`` / ``comparable_median_revisit_days`` /
+    ``comparable_max_revisit_days`` — the same tightest / typical / longest gap over
+    just the differenceable single-polarization subset, each of which can diverge
+    from its raw twin when a cross-polarization pass fills a gap (or an
+    off-polarization gap inflates one) the analysis verbs cannot use, so they are
+    the cadence the passes in ``comparable_hrefs`` actually keep — union ``bbox``
+    footprint, ``products`` and
     ``polarizations``, and the
     ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
     to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also

@@ -1179,6 +1179,8 @@ def test_site_coverage_record_validates_with_the_nullable_cadence_fields():
     assert payload["comparable_span_days"] is None
     assert payload["min_revisit_days"] is None and payload["median_revisit_days"] is None
     assert payload["max_revisit_days"] is None
+    assert payload["comparable_min_revisit_days"] is None
+    assert payload["comparable_median_revisit_days"] is None
     assert payload["comparable_max_revisit_days"] is None
     _check("site-coverage.schema.json", payload)
 

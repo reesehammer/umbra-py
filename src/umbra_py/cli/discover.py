@@ -232,17 +232,27 @@ def _print_site_coverage(site) -> None:
         if site.comparable_span_days is not None and site.comparable_span_days != site.span_days:
             usable += f" over {site.comparable_span_days}d"
     click.echo(f"  passes   : {site.passes}{span} ({dates}){usable}")
-    # The longest gap is measured over every dated pass; note the comparable
-    # series' own worst gap when it differs, since an off-polarization pass can
-    # make the raw cadence look tighter (or a gap between them wider) than the
-    # series a change run can actually difference.
+    # The cadence line is measured over every dated pass; note the comparable
+    # series' own cadence when any of the three figures differs, since an
+    # off-polarization pass can make the raw cadence look tighter (or a gap
+    # between them wider) than the series a change run can actually difference.
+    # The note mirrors the line above -- shortest / typical / longest, slash-
+    # separated -- so it reads as the analysable series' own three gaps.
     revisit_note = ""
-    if (
-        site.comparable_max_revisit_days is not None
-        and site.comparable_max_revisit_days != site.max_revisit_days
+    if site.comparable_max_revisit_days is not None and (
+        site.comparable_min_revisit_days != site.min_revisit_days
+        or site.comparable_median_revisit_days != site.median_revisit_days
+        or site.comparable_max_revisit_days != site.max_revisit_days
     ):
-        gap = _format_revisit(site.comparable_max_revisit_days)
-        revisit_note = f" ({gap} across the usable series)"
+        usable_gaps = "/".join(
+            _format_revisit(g)
+            for g in (
+                site.comparable_min_revisit_days,
+                site.comparable_median_revisit_days,
+                site.comparable_max_revisit_days,
+            )
+        )
+        revisit_note = f" ({usable_gaps} across the usable series)"
     click.echo(
         f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
         f"{_format_revisit(site.median_revisit_days)} typical, "
@@ -350,9 +360,11 @@ def sites(
     differenceable together than exist (the largest same-polarization dated
     subset, since the analysis verbs refuse a mixed-polarization series), and its
     own span when that subset covers a narrower window than the whole range. The
-    revisit line notes the usable series' own longest gap when it differs from the
-    all-passes one. --json adds those as 'comparable_passes' /
-    'comparable_span_days' / 'comparable_max_revisit_days', all the pass URLs in
+    revisit line notes the usable series' own cadence (shortest/typical/longest)
+    when it differs from the all-passes one. --json adds those as
+    'comparable_passes' / 'comparable_span_days' and the comparable cadence triple
+    'comparable_min_revisit_days' / 'comparable_median_revisit_days' /
+    'comparable_max_revisit_days', all the pass URLs in
     'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable subset --
     the selection to pipe straight into 'umbra change' / 'stack' without tripping
     the refusal.

@@ -14,7 +14,9 @@
     "span_days",
     "comparable_span_days",
     "min_revisit_days",
+    "comparable_min_revisit_days",
     "median_revisit_days",
+    "comparable_median_revisit_days",
     "max_revisit_days",
     "comparable_max_revisit_days",
     "bbox",
@@ -35,7 +37,9 @@
       "span_days": 163,
       "comparable_span_days": 163,
       "min_revisit_days": 11.0,
+      "comparable_min_revisit_days": 11.0,
       "median_revisit_days": 27.5,
+      "comparable_median_revisit_days": 27.5,
       "max_revisit_days": 42.0,
       "comparable_max_revisit_days": 42.0,
       "bbox": [-111.99, 39.11, -111.87, 39.19],
@@ -90,9 +94,17 @@
       "type": ["number", "null"],
       "description": "The shortest gap in days between two consecutive dated passes — the site's tightest revisit — or null with fewer than two dated passes."
     },
+    "comparable_min_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The shortest gap in days between two consecutive passes of the `comparable_passes` group — the tightest revisit of the analysable single-polarization change series, measured over that subset rather than the whole dated range. Corrects `min_revisit_days` the way `comparable_max_revisit_days` corrects `max_revisit_days`: a cross-polarization pass landing between two same-polarization passes can make the all-passes minimum read tighter than any gap the differenceable series actually has. Equal to `min_revisit_days` when every dated pass shares one polarization; null with fewer than two comparable passes, exactly as `min_revisit_days` is with fewer than two dated ones."
+    },
     "median_revisit_days": {
       "type": ["number", "null"],
       "description": "The median gap in days between consecutive dated passes — the site's typical cadence — or null with fewer than two dated passes."
+    },
+    "comparable_median_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The median gap in days between consecutive passes of the `comparable_passes` group — the typical cadence of the analysable single-polarization change series, measured over that subset rather than the whole dated range. This is the honest 'typical revisit' for a change run: off-polarization or undated passes riding along shift the all-passes median away from the cadence the differenceable series actually keeps. Equal to `median_revisit_days` when every dated pass shares one polarization; null with fewer than two comparable passes, exactly as `median_revisit_days` is with fewer than two dated ones."
     },
     "max_revisit_days": {
       "type": ["number", "null"],

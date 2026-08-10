@@ -54,7 +54,10 @@ def test_site_coverage_summarises_passes_dates_and_cadence():
     assert site.median_revisit_days == 4.5
     assert site.max_revisit_days == 6.0
     # Every pass shares one (empty) polarization, so the comparable series is the
-    # whole dated range and its worst gap equals the all-passes one.
+    # whole dated range and its cadence -- tightest, typical and worst gap --
+    # equals the all-passes one.
+    assert site.comparable_min_revisit_days == 3.0
+    assert site.comparable_median_revisit_days == 4.5
     assert site.comparable_max_revisit_days == 6.0
     assert site.hrefs[0].endswith("/t/1/i.json")
     assert site.hrefs[-1].endswith("/t/10/i.json")
@@ -89,6 +92,8 @@ def test_site_coverage_single_pass_has_no_revisit():
     assert site.min_revisit_days is None
     assert site.median_revisit_days is None
     assert site.max_revisit_days is None
+    assert site.comparable_min_revisit_days is None
+    assert site.comparable_median_revisit_days is None
     assert site.comparable_max_revisit_days is None
 
 
@@ -282,7 +287,43 @@ def test_comparable_max_revisit_null_with_fewer_than_two_comparable_passes():
     site = site_coverage("Mixed", [_pass("Mixed", 1, pols=["VV"]), _pass("Mixed", 5, pols=["HH"])])
     assert site.max_revisit_days == 4.0
     assert site.comparable_passes == 1
+    assert site.comparable_min_revisit_days is None
+    assert site.comparable_median_revisit_days is None
     assert site.comparable_max_revisit_days is None
+
+
+def test_comparable_cadence_triple_measures_the_differenceable_series():
+    # Three VV passes at days 1, 2, 10 (gaps 1 and 8) with a lone HH pass at day 5
+    # riding along. The raw dated series (1, 2, 5, 10) has gaps 1, 3, 5, so its
+    # median and worst gap are pulled toward the HH pass -- a pass a VV change run
+    # cannot use. The comparable (VV) cadence is the honest one: tightest 1, typical
+    # 4.5, worst 8, all measured over the series that can actually be differenced.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 2, pols=["VV"]),
+            _pass("Mixed", 5, pols=["HH"]),
+            _pass("Mixed", 10, pols=["VV"]),
+        ],
+    )
+    assert site.comparable_passes == 3
+    # Raw cadence over all four dated passes (gaps 1, 3, 5).
+    assert site.min_revisit_days == 1.0
+    assert site.median_revisit_days == 3.0
+    assert site.max_revisit_days == 5.0
+    # Comparable cadence over the three VV passes (gaps 1, 8): tightest agrees,
+    # typical and worst do not -- the divergence the correction exists for.
+    assert site.comparable_min_revisit_days == 1.0
+    assert site.comparable_median_revisit_days == 4.5
+    assert site.comparable_max_revisit_days == 8.0
+
+
+def test_comparable_cadence_equals_raw_under_one_polarization():
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (1, 4, 10)])
+    assert site.comparable_min_revisit_days == site.min_revisit_days == 3.0
+    assert site.comparable_median_revisit_days == site.median_revisit_days == 4.5
+    assert site.comparable_max_revisit_days == site.max_revisit_days == 6.0
 
 
 def test_to_dict_is_json_ready():
@@ -370,23 +411,25 @@ def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monke
     assert "2 usable" not in result.output
 
 
-def test_sites_cli_revisit_line_notes_the_usable_series_own_longest_gap(monkeypatch):
+def test_sites_cli_revisit_line_notes_the_usable_series_own_cadence(monkeypatch):
     from umbra_py.cli import cli
 
     pool = [
-        # VV days 1 and 20 with a lone HH pass at day 10 between them: the raw
-        # dated cadence reads a 10-day longest gap, but the VV change series has a
-        # single 19-day gap the HH pass does nothing to close.
+        # VV days 1, 2, 10 with a lone HH pass at day 5 riding along: the raw dated
+        # cadence (gaps 1, 3, 5) is pulled toward the HH pass, but the VV change
+        # series has gaps 1, 8 -- so the note carries its own shortest/typical/
+        # longest, mirroring the line above.
         _pass("Mixed", 1, pols=["VV"]),
-        _pass("Mixed", 10, pols=["HH"]),
-        _pass("Mixed", 20, pols=["VV"]),
+        _pass("Mixed", 2, pols=["VV"]),
+        _pass("Mixed", 5, pols=["HH"]),
+        _pass("Mixed", 10, pols=["VV"]),
         # Uniform single-polarization site -- the two cadences agree, no note.
         *[_pass("Clean", d, pols=["VV"]) for d in (2, 8)],
     ]
     _patch_gather(monkeypatch, pool)
     result = CliRunner().invoke(cli, ["sites"])
     assert result.exit_code == 0, result.output
-    assert "10d longest gap (19d across the usable series)" in result.output
+    assert "5d longest gap (1d/4.5d/8d across the usable series)" in result.output
     # The uniform site's revisit line carries no across-the-usable-series note.
     assert "6d longest gap\n" in result.output
     assert result.output.count("across the usable series") == 1
@@ -406,7 +449,10 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     assert rows[0]["comparable_span_days"] == 4  # both passes comparable -> equal
     assert rows[0]["min_revisit_days"] == 4.0
     assert rows[0]["max_revisit_days"] == 4.0  # one gap: shortest == longest
-    assert rows[0]["comparable_max_revisit_days"] == 4.0  # both passes comparable -> equal
+    # Both passes comparable -> the comparable cadence triple equals the raw one.
+    assert rows[0]["comparable_min_revisit_days"] == 4.0
+    assert rows[0]["comparable_median_revisit_days"] == 4.0
+    assert rows[0]["comparable_max_revisit_days"] == 4.0
     assert len(rows[0]["hrefs"]) == 2
 
 
