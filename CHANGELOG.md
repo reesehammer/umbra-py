@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.comparable_min_revisit_days` / `comparable_median_revisit_days`
+  — the tightest and typical revisit of the *analysable* change series, completing
+  the comparable cadence on every discovery surface at once (`coverage.py`,
+  `cli/discover.py`, `mcp_server.py`, `docs/schemas/site-coverage.schema.json`,
+  `tests/test_coverage.py`, `tests/test_schemas.py`).**
+  `comparable_max_revisit_days` gave the discovery answer's *worst* gap an honest
+  twin — measured over the largest single-polarization dated subset a `change` /
+  `timescan` / `stack` / `pick_change_interval` run can actually difference, not
+  over the whole dated range an off-polarization pass distorts — but the *shortest*
+  and *typical* gaps (`min` / `median_revisit_days`) were still quoted over every
+  dated pass, so two thirds of the revisit line a discovery answer prints could
+  still mislead in exactly the way the max twin was added to fix. A lone
+  cross-polarization pass landing between two same-polarization ones makes the raw
+  shortest gap read *tighter* than the differenceable series ever is (a VV series
+  imaged days 1 and 20 with an HH pass on day 10 reads a 10-day shortest gap where
+  the VV change run faces a real 19-day one), and the typical figure drifts
+  whenever off-series passes are woven through the cadence. `comparable_min_revisit_days`
+  and `comparable_median_revisit_days` report the honest numbers: the shortest and
+  median gaps between consecutive passes of the `comparable_passes` group — the
+  same pool `select_change_frames` draws from and the passes `comparable_hrefs`
+  hands onward — so the whole revisit cadence (shortest, typical, worst) can be
+  read over the series a change run actually has. Each equals its raw counterpart
+  when every dated pass shares one polarization, and each is `null` with fewer than
+  two comparable passes, exactly as `min_revisit_days` / `median_revisit_days` are
+  with fewer than two dated ones. Single-sourced from the same `comparable_gaps`
+  (over `_largest_comparable_group`) that already backs `comparable_max_revisit_days`,
+  so the shortest, typical and worst comparable gaps cannot disagree about which
+  passes the comparable series is. Added to the single-sourced
+  `SiteCoverage.to_dict()`, so they reach all four discovery surfaces with no drift
+  — `umbra sites --json`, `find_repeat_sites` (MCP / LangChain / LlamaIndex), and
+  `GET`/`POST /sites` on `umbra serve` (via the committed `site-coverage` contract,
+  which gains each as a required nullable number). **With the three, every raw
+  coverage figure — `passes`, `hrefs`, `span_days` and the full min/median/max
+  revisit cadence — now has an analysable-series twin, closing the comparable-figure
+  workstream.** Tests pin each twin diverging from its raw counterpart when
+  off-series passes distort the raw cadence, equal under one polarization, null
+  with fewer than two comparable passes, and validating from the CLI against the
+  schema.
 - **`SiteCoverage.comparable_max_revisit_days` — the worst-case revisit of the
   *analysable* change series, on every discovery surface at once (`coverage.py`,
   `cli/discover.py`, `mcp_server.py`,
