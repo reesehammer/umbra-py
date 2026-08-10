@@ -16,6 +16,7 @@
     "min_revisit_days",
     "median_revisit_days",
     "max_revisit_days",
+    "comparable_max_revisit_days",
     "bbox",
     "products",
     "polarizations",
@@ -36,6 +37,7 @@
       "min_revisit_days": 11.0,
       "median_revisit_days": 27.5,
       "max_revisit_days": 42.0,
+      "comparable_max_revisit_days": 42.0,
       "bbox": [-111.99, 39.11, -111.87, 39.19],
       "products": ["GEC", "SICD"],
       "polarizations": ["VV"],
@@ -95,6 +97,10 @@
     "max_revisit_days": {
       "type": ["number", "null"],
       "description": "The longest gap in days between two consecutive dated passes — the site's worst-case temporal resolution, the widest stretch a change could have gone unseen — or null with fewer than two dated passes. Far above `median_revisit_days` means a bursty or thinning series rather than a steady cadence."
+    },
+    "comparable_max_revisit_days": {
+      "type": ["number", "null"],
+      "description": "The longest gap in days between two consecutive passes of the `comparable_passes` group — the worst-case revisit of the analysable single-polarization change series, the cadence counterpart of `comparable_span_days`. It corrects `max_revisit_days` in either direction: above it when a cross-polarization pass lands inside a gap and makes the whole-dated cadence look tighter than the differenceable series (the honest worst gap the passes in `comparable_hrefs` actually leave), below it when a wide gap between off-polarization passes — irrelevant to a single-polarization change run — inflates the all-passes figure past anything in the comparable series. Equal to `max_revisit_days` when every dated pass shares one polarization; null with fewer than two comparable passes, exactly as `max_revisit_days` is with fewer than two dated ones."
     },
     "bbox": {
       "type": ["array", "null"],

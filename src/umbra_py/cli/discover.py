@@ -232,10 +232,21 @@ def _print_site_coverage(site) -> None:
         if site.comparable_span_days is not None and site.comparable_span_days != site.span_days:
             usable += f" over {site.comparable_span_days}d"
     click.echo(f"  passes   : {site.passes}{span} ({dates}){usable}")
+    # The longest gap is measured over every dated pass; note the comparable
+    # series' own worst gap when it differs, since an off-polarization pass can
+    # make the raw cadence look tighter (or a gap between them wider) than the
+    # series a change run can actually difference.
+    revisit_note = ""
+    if (
+        site.comparable_max_revisit_days is not None
+        and site.comparable_max_revisit_days != site.max_revisit_days
+    ):
+        gap = _format_revisit(site.comparable_max_revisit_days)
+        revisit_note = f" ({gap} across the usable series)"
     click.echo(
         f"  revisit  : {_format_revisit(site.min_revisit_days)} shortest, "
         f"{_format_revisit(site.median_revisit_days)} typical, "
-        f"{_format_revisit(site.max_revisit_days)} longest gap"
+        f"{_format_revisit(site.max_revisit_days)} longest gap{revisit_note}"
     )
     if site.products:
         click.echo(f"  products : {', '.join(site.products)}")
@@ -338,11 +349,13 @@ def sites(
     products; the pass line adds a 'usable' figure when fewer passes are
     differenceable together than exist (the largest same-polarization dated
     subset, since the analysis verbs refuse a mixed-polarization series), and its
-    own span when that subset covers a narrower window than the whole range.
-    --json adds those as 'comparable_passes' / 'comparable_span_days', all the
-    pass URLs in 'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable
-    subset -- the selection to pipe straight into 'umbra change' / 'stack' without
-    tripping the refusal.
+    own span when that subset covers a narrower window than the whole range. The
+    revisit line notes the usable series' own longest gap when it differs from the
+    all-passes one. --json adds those as 'comparable_passes' /
+    'comparable_span_days' / 'comparable_max_revisit_days', all the pass URLs in
+    'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable subset --
+    the selection to pipe straight into 'umbra change' / 'stack' without tripping
+    the refusal.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured

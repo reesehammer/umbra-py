@@ -53,6 +53,9 @@ def test_site_coverage_summarises_passes_dates_and_cadence():
     assert site.min_revisit_days == 3.0
     assert site.median_revisit_days == 4.5
     assert site.max_revisit_days == 6.0
+    # Every pass shares one (empty) polarization, so the comparable series is the
+    # whole dated range and its worst gap equals the all-passes one.
+    assert site.comparable_max_revisit_days == 6.0
     assert site.hrefs[0].endswith("/t/1/i.json")
     assert site.hrefs[-1].endswith("/t/10/i.json")
 
@@ -86,6 +89,7 @@ def test_site_coverage_single_pass_has_no_revisit():
     assert site.min_revisit_days is None
     assert site.median_revisit_days is None
     assert site.max_revisit_days is None
+    assert site.comparable_max_revisit_days is None
 
 
 def test_site_coverage_undated_pass_rides_along_without_breaking_cadence():
@@ -230,6 +234,57 @@ def test_comparable_span_days_null_with_fewer_than_two_comparable_passes():
     assert site.comparable_span_days is None
 
 
+def test_comparable_max_revisit_widens_when_a_cross_pol_pass_fills_a_gap():
+    # VV imaged days 1 and 20; a lone HH pass at day 10 sits in between. The raw
+    # dated cadence (1, 10, 20) reads a longest gap of 10 days, but that HH pass is
+    # useless to a VV change run -- the VV series itself has a single 19-day gap,
+    # which is the honest worst-case revisit of the analysable series.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 10, pols=["HH"]),
+            _pass("Mixed", 20, pols=["VV"]),
+        ],
+    )
+    assert site.max_revisit_days == 10.0  # over the whole dated range
+    assert site.comparable_passes == 2  # the two VV passes
+    assert site.comparable_max_revisit_days == 19.0  # the VV series' own gap
+
+
+def test_comparable_max_revisit_narrows_when_an_off_series_gap_inflates_the_raw():
+    # VV imaged days 1, 2, 3 (tight); two HH passes at days 5 and 30 open a wide
+    # hole. VV is the largest group, so the analysable series is 1, 2, 3 with a
+    # worst gap of one day -- the raw 25-day gap lives entirely in the HH passes.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 2, pols=["VV"]),
+            _pass("Mixed", 3, pols=["VV"]),
+            _pass("Mixed", 5, pols=["HH"]),
+            _pass("Mixed", 30, pols=["HH"]),
+        ],
+    )
+    assert site.comparable_passes == 3  # the three VV passes win the group
+    assert site.max_revisit_days == 25.0  # the HH hole, over the whole dated range
+    assert site.comparable_max_revisit_days == 1.0  # the tight VV cadence
+
+
+def test_comparable_max_revisit_equals_max_under_one_polarization():
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (1, 7, 13)])
+    assert site.comparable_max_revisit_days == site.max_revisit_days == 6.0
+
+
+def test_comparable_max_revisit_null_with_fewer_than_two_comparable_passes():
+    # One VV, one HH: two dated passes give a raw gap, but no two share a
+    # polarization, so there is no differenceable series to measure a gap over.
+    site = site_coverage("Mixed", [_pass("Mixed", 1, pols=["VV"]), _pass("Mixed", 5, pols=["HH"])])
+    assert site.max_revisit_days == 4.0
+    assert site.comparable_passes == 1
+    assert site.comparable_max_revisit_days is None
+
+
 def test_to_dict_is_json_ready():
     site = site_coverage(
         "Alpha", [_pass("Alpha", 1, bbox=(0, 0, 1, 1)), _pass("Alpha", 3, bbox=(2, 2, 3, 3))]
@@ -315,6 +370,28 @@ def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monke
     assert "2 usable" not in result.output
 
 
+def test_sites_cli_revisit_line_notes_the_usable_series_own_longest_gap(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        # VV days 1 and 20 with a lone HH pass at day 10 between them: the raw
+        # dated cadence reads a 10-day longest gap, but the VV change series has a
+        # single 19-day gap the HH pass does nothing to close.
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 10, pols=["HH"]),
+        _pass("Mixed", 20, pols=["VV"]),
+        # Uniform single-polarization site -- the two cadences agree, no note.
+        *[_pass("Clean", d, pols=["VV"]) for d in (2, 8)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites"])
+    assert result.exit_code == 0, result.output
+    assert "10d longest gap (19d across the usable series)" in result.output
+    # The uniform site's revisit line carries no across-the-usable-series note.
+    assert "6d longest gap\n" in result.output
+    assert result.output.count("across the usable series") == 1
+
+
 def test_sites_cli_json_carries_pass_urls(monkeypatch):
     from umbra_py.cli import cli
 
@@ -329,6 +406,7 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     assert rows[0]["comparable_span_days"] == 4  # both passes comparable -> equal
     assert rows[0]["min_revisit_days"] == 4.0
     assert rows[0]["max_revisit_days"] == 4.0  # one gap: shortest == longest
+    assert rows[0]["comparable_max_revisit_days"] == 4.0  # both passes comparable -> equal
     assert len(rows[0]["hrefs"]) == 2
 
 
