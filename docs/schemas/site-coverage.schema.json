@@ -22,6 +22,7 @@
     "bbox",
     "products",
     "polarizations",
+    "comparable_polarizations",
     "hrefs",
     "comparable_hrefs"
   ],
@@ -45,6 +46,7 @@
       "bbox": [-111.99, 39.11, -111.87, 39.19],
       "products": ["GEC", "SICD"],
       "polarizations": ["VV"],
+      "comparable_polarizations": ["VV"],
       "hrefs": [
         "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-01-08.stac.v2.json",
         "https://umbra-open-data-catalog.s3.amazonaws.com/.../2024-06-19.stac.v2.json"
@@ -129,6 +131,11 @@
     "polarizations": {
       "type": "array",
       "description": "The polarizations present across the site's passes, sorted. More than one means the passes are not all comparable for change (HH and VV measure different scattering); filter to one before differencing.",
+      "items": { "type": "string" }
+    },
+    "comparable_polarizations": {
+      "type": "array",
+      "description": "The shared polarization signature of the `comparable_passes` group — which single polarization the analysable change series is, the group key the largest same-polarization dated subset is selected on — where `polarizations` lists every polarization present across the whole site. A strict subset of `polarizations` names the one signature the comparable depth, span and cadence are all measured over, and the one a `--pol`-style filter would keep to reproduce `comparable_hrefs`; equal to `polarizations` when every dated pass already shares one signature. Empty both when the comparable group's passes carry no polarization metadata (the empty-signature group, as `polarizations` is empty then) and when no pass is dated (`comparable_passes` is 0, so there is no group to name) — the two told apart by `comparable_passes`. An array (possibly empty), never null, exactly like `polarizations`.",
       "items": { "type": "string" }
     },
     "hrefs": {

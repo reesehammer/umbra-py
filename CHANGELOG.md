@@ -7,6 +7,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.comparable_polarizations` — name *which* polarization the
+  analysable change series is, on every discovery surface at once (`coverage.py`,
+  `cli/discover.py`, `mcp_server.py`, `docs/schemas/site-coverage.schema.json`,
+  `tests/test_coverage.py`, `tests/test_schemas.py`).** The comparable-figure
+  workstream gave every raw coverage figure an analysable-series twin — how *deep*
+  the differenceable series is (`comparable_passes`), how *long*
+  (`comparable_span_days`), its *cadence* (`comparable_min`/`median`/`max_revisit_days`)
+  and *which passes* (`comparable_hrefs`) — but never said *what* that series is.
+  The comparable group is the largest set of dated passes sharing one polarization
+  (the pool `select_change_frames` draws from before the mixed-polarization refusal
+  every analysis verb enforces), yet the discovery answer named only
+  `polarizations`, the union across the *whole* site — so a reader who ranked by
+  `comparable` and got "3 usable passes" could not tell whether the analysable
+  series was VV or HH without opening `comparable_hrefs` and reading a URL.
+  `comparable_polarizations` is the group's own shared signature, taken from the
+  group `_largest_comparable_group` already selects (so the name and the passes it
+  names cannot disagree): a strict subset of `polarizations` when the site is mixed
+  — the one signature the whole comparable depth/span/cadence is measured over, and
+  the one a `--pol`-style filter would keep to reproduce `comparable_hrefs` — and
+  equal to `polarizations` when every dated pass already shares one signature. It
+  is an empty tuple both when the comparable group carries no polarization metadata
+  (the empty-signature group, exactly as `polarizations` is empty then) and when no
+  pass is dated at all (`comparable_passes` is 0, so there is no group to name), the
+  two told apart by `comparable_passes` — an array (possibly empty), never null,
+  like `polarizations`, since a signature is a set that can be empty rather than a
+  scalar that can be absent. It reaches every discovery surface through the
+  single-sourced `SiteCoverage.to_dict()` with no per-surface plumbing — `umbra
+  sites --json`, `find_repeat_sites` (MCP / LangChain / LlamaIndex), and
+  `GET`/`POST /sites` on `umbra serve` (via the committed `site-coverage` contract,
+  which gains it as a required array) — and the human-readable `umbra sites` output
+  names it inline: the `pol` line reads `HH, VV (usable: VV)` when the site spans
+  more than one signature, silent when it does not. **With it every raw coverage
+  figure's analysable twin is complete not just in magnitude but in identity: the
+  discovery answer says how deep, how long, how often, which passes *and which
+  polarization* the change series a verb can actually difference is.** Tests pin it
+  naming the usable subset when the site is mixed, equal to `polarizations` under
+  one signature, the whole dual-pol signature when the passes share one, empty for
+  no-metadata and for nothing-dated (told apart by `comparable_passes`), and
+  validating from the CLI against the committed schema.
 - **`rank_by="passes" | "comparable"` — rank the repeat-imaged-site discovery
   answer by *analysable* depth, on every discovery surface at once (`coverage.py`,
   `showcase.py`, `index.py`, `cli/discover.py`, `mcp_server.py`, `serve.py`,

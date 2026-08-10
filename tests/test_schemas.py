@@ -1198,6 +1198,10 @@ def test_site_coverage_record_validates_with_comparable_below_the_raw_count():
     # comparable_hrefs is the usable subset: the three VV URLs, not the HH one.
     assert len(payload["comparable_hrefs"]) == 3
     assert set(payload["comparable_hrefs"]) < set(payload["hrefs"])
+    # comparable_polarizations names that usable series: VV, a strict subset of the
+    # site's [HH, VV] -- the array-not-null half of the field's contract.
+    assert payload["polarizations"] == ["HH", "VV"]
+    assert payload["comparable_polarizations"] == ["VV"]
     # The VV subset spans months 1->6 (Jan 8 -> Jun 8, 152d); the HH month-8 pass
     # stretches the whole range to Aug 8 (213d), so comparable_span_days sits below
     # span_days -- the temporal twin of comparable_passes below passes.

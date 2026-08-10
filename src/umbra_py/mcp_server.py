@@ -457,7 +457,10 @@ def find_repeat_sites(
     shortest / typical / worst triple over just the differenceable subset (each can
     diverge from its raw twin when a cross-polarization pass fills a gap the
     analysis verbs cannot use), union ``bbox`` footprint, ``products`` and
-    ``polarizations``, and the
+    ``polarizations`` — with ``comparable_polarizations`` naming *which* single
+    polarization the usable series is (the signature the ``comparable_*`` figures
+    are all measured over, a strict subset of ``polarizations`` when the site is
+    mixed) — and the
     ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
     to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
     ``count`` (sites returned), the pool ``source`` and the resolved
