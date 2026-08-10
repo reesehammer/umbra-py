@@ -196,6 +196,40 @@ def test_comparable_hrefs_empty_when_nothing_dated():
     assert site.comparable_hrefs == ()
 
 
+def test_comparable_span_days_is_measured_over_the_comparable_subset():
+    # VV imaged days 5, 10, 15; HH days 1 and 20 bracket them. The whole dated
+    # range runs 1 -> 20, but the differenceable (VV) series only spans 5 -> 15,
+    # so the analysable window is narrower than the raw span the HH passes stretch.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["HH"]),
+            _pass("Mixed", 5, pols=["VV"]),
+            _pass("Mixed", 10, pols=["VV"]),
+            _pass("Mixed", 15, pols=["VV"]),
+            _pass("Mixed", 20, pols=["HH"]),
+        ],
+    )
+    assert site.span_days == 19  # whole dated range, HH included
+    assert site.comparable_passes == 3  # the three VV passes
+    assert site.comparable_span_days == 10  # 5 -> 15, the analysable window
+
+
+def test_comparable_span_days_equals_span_under_one_polarization():
+    # Every dated pass is comparable, so the analysable window is the whole span.
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (1, 5, 12)])
+    assert site.comparable_span_days == site.span_days == 11
+
+
+def test_comparable_span_days_null_with_fewer_than_two_comparable_passes():
+    # One VV, one HH: two dated passes span the range, but no two share a
+    # polarization, so there is no differenceable series to span.
+    site = site_coverage("Mixed", [_pass("Mixed", 1, pols=["VV"]), _pass("Mixed", 5, pols=["HH"])])
+    assert site.span_days == 4
+    assert site.comparable_passes == 1
+    assert site.comparable_span_days is None
+
+
 def test_to_dict_is_json_ready():
     site = site_coverage(
         "Alpha", [_pass("Alpha", 1, bbox=(0, 0, 1, 1)), _pass("Alpha", 3, bbox=(2, 2, 3, 3))]
@@ -273,6 +307,9 @@ def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monke
     result = CliRunner().invoke(cli, ["sites"])
     assert result.exit_code == 0, result.output
     assert "passes   : 4" in result.output and "3 usable" in result.output
+    # The comparable (VV) subset spans days 1->8 (7d), narrower than the whole
+    # 1->10 range the HH pass stretches, so the usable clause carries its span.
+    assert "3 usable over 7d" in result.output
     # The uniform site's line carries no 'usable' clause.
     assert "passes   : 2 over" in result.output
     assert "2 usable" not in result.output
@@ -288,6 +325,8 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     assert len(rows) == 1
     assert rows[0]["passes"] == 2
     assert rows[0]["comparable_passes"] == 2
+    assert rows[0]["span_days"] == 4
+    assert rows[0]["comparable_span_days"] == 4  # both passes comparable -> equal
     assert rows[0]["min_revisit_days"] == 4.0
     assert rows[0]["max_revisit_days"] == 4.0  # one gap: shortest == longest
     assert len(rows[0]["hrefs"]) == 2

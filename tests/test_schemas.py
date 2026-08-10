@@ -1176,6 +1176,7 @@ def test_site_coverage_record_validates_with_the_nullable_cadence_fields():
     payload["bbox"] = None
 
     assert payload["span_days"] is None
+    assert payload["comparable_span_days"] is None
     assert payload["min_revisit_days"] is None and payload["median_revisit_days"] is None
     assert payload["max_revisit_days"] is None
     _check("site-coverage.schema.json", payload)
@@ -1194,6 +1195,10 @@ def test_site_coverage_record_validates_with_comparable_below_the_raw_count():
     # comparable_hrefs is the usable subset: the three VV URLs, not the HH one.
     assert len(payload["comparable_hrefs"]) == 3
     assert set(payload["comparable_hrefs"]) < set(payload["hrefs"])
+    # The VV subset spans months 1->6 (Jan 8 -> Jun 8, 152d); the HH month-8 pass
+    # stretches the whole range to Aug 8 (213d), so comparable_span_days sits below
+    # span_days -- the temporal twin of comparable_passes below passes.
+    assert payload["span_days"] == 213 and payload["comparable_span_days"] == 152
     _check("site-coverage.schema.json", payload)
 
 

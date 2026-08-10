@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SiteCoverage.comparable_span_days` — how long the *analysable* change series
+  actually runs, on every discovery surface at once (`coverage.py`,
+  `cli/discover.py`, `docs/schemas/site-coverage.schema.json`,
+  `tests/test_coverage.py`, `tests/test_schemas.py`).** `comparable_passes` fixed
+  the *count* a discovery answer reports — the raw `passes` overstates depth
+  whenever a site's passes span more than one polarization — but the *temporal*
+  fields (`span_days` and the revisit figures) were still measured over every
+  dated pass, so a site could report a long, roomy span borrowed from passes no
+  analysis verb can difference against the rest. A site imaged Jan→Aug in HH but
+  only Jan→Jun in VV has a VV change series that covers five months, not eight;
+  `span_days` said eight. `comparable_span_days` reports the honest window: whole
+  days spanned by the `comparable_passes` group — the largest set of dated passes
+  sharing one polarization, the exact pool `select_change_frames` draws from — so
+  the discovery answer's temporal reach matches the series the analysis verb it
+  hands off to can build. It is the temporal twin of `comparable_passes`
+  undercutting `passes`: below `span_days` means off-polarization or undated passes
+  stretch the full range past the analysable window, equal to `span_days` when
+  every dated pass shares one polarization, and `null` with fewer than two
+  comparable passes exactly as `span_days` is with fewer than two dated ones. It is
+  single-sourced from the one `_largest_comparable_group` that already backs
+  `comparable_passes` / `comparable_hrefs`, so the count, the URLs and the span
+  cannot disagree about which passes the comparable series is. Added to the
+  single-sourced `SiteCoverage.to_dict()`, so it reaches all four discovery
+  surfaces with no drift — `umbra sites` (the pass line's `usable` clause gains an
+  `over Nd` note when the comparable subset covers a narrower window than the whole
+  range, shown only when it undercuts so a clean single-pol site stays a one-number
+  line), `find_repeat_sites` (MCP / LangChain / LlamaIndex), and `GET`/`POST /sites`
+  on `umbra serve` (via the committed `site-coverage` contract, which gains the
+  field as a required nullable integer). Tests pin it below the raw span on a
+  bracketed mixed-polarization site, equal to it under one polarization, null with
+  fewer than two comparable passes, and validating from the CLI against the schema.
 - **`SiteCoverage.comparable_hrefs` — the pass URLs of a site's usable subset,
   ready to hand an analysis verb straight through, on every discovery surface at
   once (`coverage.py`, `cli/discover.py`,
