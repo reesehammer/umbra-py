@@ -251,7 +251,15 @@ def _print_site_coverage(site) -> None:
     if site.products:
         click.echo(f"  products : {', '.join(site.products)}")
     if site.polarizations:
-        click.echo(f"  pol      : {', '.join(site.polarizations)}")
+        pol_line = ", ".join(site.polarizations)
+        # When the passes span more than one polarization, the usable series is just
+        # one of them; name which signature comparable_passes / comparable_hrefs are
+        # measured over, so a reader knows what to filter to before differencing.
+        if site.comparable_polarizations and set(site.comparable_polarizations) != set(
+            site.polarizations
+        ):
+            pol_line += f" (usable: {', '.join(site.comparable_polarizations)})"
+        click.echo(f"  pol      : {pol_line}")
     if site.bbox is not None:
         click.echo("  bbox     : " + ",".join(f"{c:.4f}" for c in site.bbox))
     click.echo("")
@@ -362,13 +370,15 @@ def sites(
     subset, since the analysis verbs refuse a mixed-polarization series), and its
     own span when that subset covers a narrower window than the whole range. The
     revisit line notes the usable series' own longest gap when it differs from the
-    all-passes one. --json adds those as 'comparable_passes' /
+    all-passes one, and the pol line names which polarization that usable series is
+    when the site spans more than one. --json adds those as 'comparable_passes' /
     'comparable_span_days' and the full usable-series cadence
     ('comparable_min_revisit_days' / 'comparable_median_revisit_days' /
-    'comparable_max_revisit_days'), all the pass URLs in
-    'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable subset --
-    the selection to pipe straight into 'umbra change' / 'stack' without tripping
-    the refusal.
+    'comparable_max_revisit_days'), 'comparable_polarizations' (the usable series'
+    shared signature, where 'polarizations' lists every one present), all the pass
+    URLs in 'hrefs' (oldest-first), and in 'comparable_hrefs' just that usable
+    subset -- the selection to pipe straight into 'umbra change' / 'stack' without
+    tripping the refusal.
 
     --rank-by chooses the order: 'passes' (the default) ranks by raw pass count;
     'comparable' ranks by that usable-series depth instead, so a deeply-imaged

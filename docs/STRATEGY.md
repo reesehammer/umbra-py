@@ -707,6 +707,26 @@ from:
   The `SiteCoverage` payload is unchanged (only its order is), so no schema moved.
   **This completes the comparable-figure workstream from the report into the
   ranking.** See the CHANGELOG.
+- ~~Every comparable figure reported the analysable series' magnitude — how deep
+  (`comparable_passes`), how long (`comparable_span_days`), how often the
+  `comparable_*_revisit_days` cadence, which passes (`comparable_hrefs`) — but none
+  said *which polarization* that series is, so a reader who ranked by `comparable`
+  learned a site had three usable passes without learning they were the VV ones,
+  and could not filter to reproduce the selection without reading a
+  `comparable_hrefs` URL.~~ **shipped** — `SiteCoverage.comparable_polarizations`
+  names the analysable series' own shared signature (the group key
+  `_largest_comparable_group` already selects, so the name and the passes it names
+  cannot disagree): a strict subset of `polarizations` — which lists every
+  signature across the *whole* site — when the site is mixed, equal to it under one
+  signature, and an empty array (never null, like `polarizations`) both for a
+  no-metadata group and for nothing-dated, the two told apart by `comparable_passes`.
+  It reaches all four discovery surfaces through the single-sourced
+  `SiteCoverage.to_dict()` (the committed `site-coverage` contract gains it as a
+  required array) and is named inline on the human-readable `umbra sites` `pol`
+  line (`HH, VV (usable: VV)`). **With it the comparable twin is complete in
+  identity as well as magnitude — the discovery answer says how deep, how long, how
+  often, which passes *and which polarization* the differenceable series is.** See
+  the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

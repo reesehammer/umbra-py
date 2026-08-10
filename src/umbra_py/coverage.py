@@ -124,7 +124,21 @@ class SiteCoverage:
     shares one polarization, and each is ``None`` with fewer than two comparable
     passes, exactly as its raw counterpart is with fewer than two dated ones. With
     the three the comparable cadence is complete: every raw coverage figure now has
-    an analysable-series twin. ``bbox`` is the union
+    an analysable-series twin. ``comparable_polarizations`` names *which*
+    polarization that analysable series is: the shared signature every pass of the
+    comparable group carries -- the group key :func:`_largest_comparable_group`
+    selects on -- where ``polarizations`` lists every polarization present across
+    the *whole* site. A strict subset of ``polarizations`` says which single
+    signature the ``comparable_passes`` depth, ``comparable_span_days`` reach and
+    comparable cadence are all measured over, and which one a ``--pol``-style
+    filter would keep to reproduce ``comparable_hrefs``; equal to ``polarizations``
+    when every dated pass already shares one signature. It is an empty tuple when
+    the comparable group's passes carry no polarization metadata (the
+    empty-signature group, exactly as ``polarizations`` is empty then) and when no
+    pass is dated at all (``comparable_passes`` is ``0``, so there is no group to
+    name) -- the two told apart by ``comparable_passes``, never ``None`` (a
+    signature is a set that can be empty, like ``polarizations``, not a scalar that
+    can be absent). ``bbox`` is the union
     footprint of every pass with one, so it is the
     rectangle a follow-up ``--bbox`` / ``--intersects`` would cover. ``hrefs`` is
     every pass oldest-first, the order ``umbra change`` / ``umbra stack`` want
@@ -154,6 +168,7 @@ class SiteCoverage:
     bbox: BBox | None
     products: tuple[str, ...]
     polarizations: tuple[str, ...]
+    comparable_polarizations: tuple[str, ...]
     hrefs: tuple[str, ...]
     comparable_hrefs: tuple[str, ...]
 
@@ -177,6 +192,7 @@ class SiteCoverage:
             "bbox": list(self.bbox) if self.bbox is not None else None,
             "products": list(self.products),
             "polarizations": list(self.polarizations),
+            "comparable_polarizations": list(self.comparable_polarizations),
             "hrefs": list(self.hrefs),
             "comparable_hrefs": list(self.comparable_hrefs),
         }
@@ -257,6 +273,13 @@ def site_coverage(
     pols = sorted({p for i in ordered for p in i.polarizations})
     hrefs = tuple(i.href for i in ordered if i.href)
     comparable = _largest_comparable_group(ordered)
+    # The signature that *defines* that group: every member shares one polarization
+    # tuple (it is the key `_largest_comparable_group` grouped on), so the first
+    # member's is the group's -- taken from the group itself rather than recomputed,
+    # so the name and the passes it names cannot disagree. Empty tuple when the
+    # group has no polarization metadata (the empty-signature group) or no group
+    # exists (nothing dated), the two told apart by `comparable_passes`.
+    comparable_polarizations = tuple(comparable[0].polarizations) if comparable else ()
     # The comparable group is dated and oldest-first by construction, so its span
     # is the analysable series' temporal reach -- measured over that subset, not
     # the whole dated range, so bracketing off-polarization passes cannot inflate
@@ -290,6 +313,7 @@ def site_coverage(
         bbox=_union_bbox(ordered),
         products=tuple(products),
         polarizations=tuple(pols),
+        comparable_polarizations=comparable_polarizations,
         hrefs=hrefs,
         comparable_hrefs=tuple(i.href for i in comparable if i.href),
     )

@@ -204,6 +204,64 @@ def test_comparable_hrefs_empty_when_nothing_dated():
     assert site.comparable_hrefs == ()
 
 
+def test_comparable_polarizations_names_the_usable_series_signature():
+    # The same mixed site: three VV, two HH. `polarizations` lists both, but the
+    # usable series is the VV group -- so `comparable_polarizations` names just it,
+    # the signature the comparable depth / span / cadence / hrefs are all over.
+    site = site_coverage(
+        "Mixed",
+        [
+            _pass("Mixed", 1, pols=["VV"]),
+            _pass("Mixed", 3, pols=["VV"]),
+            _pass("Mixed", 6, pols=["VV"]),
+            _pass("Mixed", 8, pols=["HH"]),
+            _pass("Mixed", 10, pols=["HH"]),
+        ],
+    )
+    assert site.polarizations == ("HH", "VV")
+    assert site.comparable_polarizations == ("VV",)
+    # It is the signature every pass in `comparable_hrefs` shares, so a `--pol VV`
+    # filter over `hrefs` would reproduce exactly that selection.
+    assert set(site.comparable_polarizations) < set(site.polarizations)
+
+
+def test_comparable_polarizations_equals_polarizations_under_one_signature():
+    # Every dated pass shares one signature, so naming the usable series' one adds
+    # nothing over `polarizations` -- and the two are equal, exactly as the other
+    # comparable twins equal their raw counterparts under one polarization.
+    site = site_coverage("VV", [_pass("VV", d, pols=["VV"]) for d in (1, 2, 3)])
+    assert site.comparable_polarizations == site.polarizations == ("VV",)
+
+
+def test_comparable_polarizations_is_the_dual_pol_signature_when_shared():
+    # A signature is the whole polarization tuple, not one channel: a dual-pol
+    # series' comparable signature is both channels, which is what change verbs
+    # difference together (they refuse a *mix* of signatures, not a dual-pol pass).
+    site = site_coverage("Dual", [_pass("Dual", d, pols=["HH", "HV"]) for d in (1, 4)])
+    assert site.comparable_polarizations == ("HH", "HV")
+    assert site.comparable_passes == 2
+
+
+def test_comparable_polarizations_empty_when_no_polarization_metadata():
+    # Passes carrying no polarization group under the empty signature (as the frame
+    # selector treats them), so the usable series exists but its signature is empty
+    # -- an empty tuple, never None, exactly as `polarizations` is empty then.
+    site = site_coverage("Bare", [_pass("Bare", d) for d in (1, 2, 3)])
+    assert site.polarizations == ()
+    assert site.comparable_passes == 3
+    assert site.comparable_polarizations == ()
+
+
+def test_comparable_polarizations_empty_when_nothing_dated():
+    # No dated pass means no comparable group to name; the empty signature is told
+    # apart from the no-metadata case above by `comparable_passes` being 0.
+    undated = _pass("None", 1, pols=["VV"])
+    undated.properties.pop("datetime")
+    site = site_coverage("None", [undated])
+    assert site.comparable_passes == 0
+    assert site.comparable_polarizations == ()
+
+
 def test_comparable_span_days_is_measured_over_the_comparable_subset():
     # VV imaged days 5, 10, 15; HH days 1 and 20 bracket them. The whole dated
     # range runs 1 -> 20, but the differenceable (VV) series only spans 5 -> 15,
@@ -466,6 +524,25 @@ def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monke
     assert "2 usable" not in result.output
 
 
+def test_sites_cli_pol_line_names_the_usable_series_when_the_site_is_mixed(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        # Mixed: three VV, one HH -- the pol line lists both but names VV as usable.
+        *[_pass("Mixed", d, pols=["VV"]) for d in (1, 4, 8)],
+        _pass("Mixed", 10, pols=["HH"]),
+        # Uniform single-polarization site -- one signature, so no usable clause.
+        *[_pass("Clean", d, pols=["VV"]) for d in (2, 5)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites"])
+    assert result.exit_code == 0, result.output
+    assert "pol      : HH, VV (usable: VV)" in result.output
+    # The uniform site's pol line carries no usable clause.
+    assert "pol      : VV\n" in result.output
+    assert result.output.count("(usable:") == 1
+
+
 def test_sites_cli_revisit_line_notes_the_usable_series_own_longest_gap(monkeypatch):
     from umbra_py.cli import cli
 
@@ -539,6 +616,10 @@ def test_sites_cli_json_carries_pass_urls(monkeypatch):
     assert rows[0]["comparable_min_revisit_days"] == 4.0
     assert rows[0]["comparable_median_revisit_days"] == 4.0
     assert rows[0]["comparable_max_revisit_days"] == 4.0
+    # Both passes carry no polarization metadata, so the usable series' signature
+    # is the empty one -- an empty list in JSON, matching `polarizations`.
+    assert rows[0]["polarizations"] == []
+    assert rows[0]["comparable_polarizations"] == []
     assert len(rows[0]["hrefs"]) == 2
 
 
