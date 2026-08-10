@@ -318,15 +318,20 @@ def select_featured_sites(
         Maximum number of sites to return.
     min_passes:
         Passes a site needs before it qualifies (2 is the minimum a change
-        composite can use).
+        composite can use), measured on the same depth ``rank_by`` ranks by: under
+        ``"comparable"`` a site qualifies on its *analysable* depth (its
+        ``comparable_passes`` largest single-polarization dated subset), so a site
+        whose raw count clears the floor but whose differenceable series does not is
+        not admitted. Under ``"passes"`` it is the raw dated pass count, unchanged.
     rank_by:
         One of :data:`umbra_py.coverage.SITE_RANKINGS`. ``"passes"`` (the default,
         and what the featured gallery uses) orders by raw pass count; ``"comparable"``
         orders by each site's *analysable* depth -- the largest single-polarization
         dated subset a change verb can difference -- so a broad-but-mixed site cannot
-        outrank a deeper single-polarization series. The key is applied before the
-        ``count`` truncation, so the comparable ordering is over the whole qualifying
-        pool rather than a raw-ranked prefix of it.
+        outrank a deeper single-polarization series, and (with ``min_passes``) cannot
+        qualify past a deeper one either. The key is applied before the ``count``
+        truncation, so the comparable ordering is over the whole qualifying pool
+        rather than a raw-ranked prefix of it.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
@@ -337,7 +342,12 @@ def select_featured_sites(
     # comparable-group definition, so the featured gallery, ``umbra sites`` and the
     # index ranker cannot disagree about what "most repeat-imaged" means under
     # either ranking (lazy import -- the default ``"passes"`` path needs neither).
-    from .coverage import _check_ranking, _largest_comparable_group, _rank_sort_key  # noqa: PLC0415
+    from .coverage import (  # noqa: PLC0415
+        _check_ranking,
+        _largest_comparable_group,
+        _min_passes_depth,
+        _rank_sort_key,
+    )
 
     _check_ranking(rank_by)
     by_task: dict[str, list[UmbraItem]] = {}
@@ -345,22 +355,32 @@ def select_featured_sites(
         if item.task and item.datetime is not None:
             by_task.setdefault(item.task, []).append(item)
 
-    # Every pass here has a datetime (filtered above); the ``or datetime.min``
-    # fallback is unreachable but keeps the sort key typed, as in viz.py.
-    sites = [
-        FeaturedSite(task=task, items=sorted(passes, key=lambda i: i.datetime or datetime.min))
-        for task, passes in by_task.items()
-        if len(passes) >= min_passes
-    ]
-    sites.sort(
-        key=lambda s: _rank_sort_key(
-            comparable_passes=len(_largest_comparable_group(s.items)),
-            passes=len(s.items),
-            task=s.task,
+    # Rank and qualify a site on the same depth (``_min_passes_depth`` /
+    # ``_rank_sort_key``): under ``"comparable"`` ``min_passes`` gates on analysable
+    # depth, so a site whose raw count clears the floor but whose differenceable
+    # series does not is dropped rather than admitted at the bottom of the list. The
+    # comparable group is only read under the comparable ranking -- the default
+    # passes path (the featured gallery) neither ranks nor qualifies on it. Every
+    # pass here has a datetime (filtered above); the ``or datetime.min`` fallback is
+    # unreachable but keeps the sort key typed, as in viz.py.
+    ranked: list[tuple[FeaturedSite, int]] = []
+    for task, passes in by_task.items():
+        ordered = sorted(passes, key=lambda i: i.datetime or datetime.min)
+        comparable = len(_largest_comparable_group(ordered)) if rank_by == "comparable" else 0
+        depth = _min_passes_depth(
+            comparable_passes=comparable, passes=len(ordered), rank_by=rank_by
+        )
+        if depth >= min_passes:
+            ranked.append((FeaturedSite(task=task, items=ordered), comparable))
+    ranked.sort(
+        key=lambda pair: _rank_sort_key(
+            comparable_passes=pair[1],
+            passes=len(pair[0].items),
+            task=pair[0].task,
             rank_by=rank_by,
         )
     )
-    return sites[:count]
+    return [site for site, _ in ranked[:count]]
 
 
 def build_showcase(

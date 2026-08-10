@@ -426,18 +426,22 @@ def find_repeat_sites(
     ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
     the SAR property filters ``polarizations`` / ``min_incidence`` /
     ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
-    returned, and ``min_passes`` is how many dated passes a site needs to qualify
-    (2 is the minimum a change composite can use; raise it to find only
-    deeply-revisited series).
+    returned, and ``min_passes`` is how many passes a site needs to qualify (2 is
+    the minimum a change composite can use; raise it to find only deeply-revisited
+    series), counted on the depth ``rank_by`` measures -- raw dated passes by
+    default, the usable (comparable) series' depth under ``rank_by="comparable"``.
 
     ``rank_by`` chooses the order: ``"passes"`` (the default) ranks by raw pass
     count; ``"comparable"`` ranks by *analysable* depth instead -- the
     ``comparable_passes`` largest same-polarization dated subset a change verb can
     actually difference -- so a deep single-polarization series is not outranked by
-    a broader mixed-polarization site whose passes no analysis verb can compare. The
-    two agree when every dated pass of every site shares one polarization; prefer
-    ``"comparable"`` when the next step is ``pick_change_interval`` / ``stack_stats``,
-    which consume exactly that differenceable subset.
+    a broader mixed-polarization site whose passes no analysis verb can compare, and
+    ``min_passes`` then floors that same usable depth, so ``rank_by="comparable",
+    min_passes=3`` returns only sites whose differenceable series is at least three
+    passes deep. The two agree when every dated pass of every site shares one
+    polarization; prefer ``"comparable"`` when the next step is
+    ``pick_change_interval`` / ``stack_stats``, which consume exactly that
+    differenceable subset.
 
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index

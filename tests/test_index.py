@@ -1995,6 +1995,32 @@ def test_rank_sites_by_comparable_matches_the_pool_ranking(tmp_path):
 
         pool_ranked = rank_site_coverage(list(idx.search(limit=None)), rank_by="comparable")
         assert idx.rank_sites(rank_by="comparable") == pool_ranked
+
+
+def test_rank_sites_min_passes_gates_comparable_depth(tmp_path):
+    """Under rank_by='comparable', min_passes floors the analysable depth, not the
+    raw count -- a site whose raw passes clear the SQL HAVING but whose comparable
+    series is shallower than min_passes is dropped, matching the pool ranking."""
+    pool = [
+        # Mixed: 3 dated passes, each a different polarization -> comparable 1.
+        _site_item("Mixed", 1, pols=["VV"]),
+        _site_item("Mixed", 2, pols=["HH"]),
+        _site_item("Mixed", 3, pols=["VH"]),
+        # Deep: 2 passes, both VV -> comparable 2.
+        *[_site_item("Deep", d, pols=["VV"]) for d in (4, 5)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        from umbra_py.coverage import rank_site_coverage
+
+        # Raw ranking admits Mixed (3 raw passes >= 2); comparable ranking drops it.
+        assert {s.task for s in idx.rank_sites(min_passes=2, rank_by="passes")} == {"Mixed", "Deep"}
+        by_comparable = idx.rank_sites(min_passes=2, rank_by="comparable")
+        assert [s.task for s in by_comparable] == ["Deep"]
+        # Still exactly the uncapped-pool comparable ranking with the same floor.
+        pool_ranked = rank_site_coverage(
+            list(idx.search(limit=None)), min_passes=2, rank_by="comparable"
+        )
+        assert by_comparable == pool_ranked
         # Exact-filter branch (polarizations set) must agree too.
         assert idx.rank_sites(rank_by="comparable", polarizations=["VV"]) == rank_site_coverage(
             list(idx.search(limit=None, polarizations=["VV"])), rank_by="comparable"

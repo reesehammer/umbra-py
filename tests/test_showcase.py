@@ -345,6 +345,26 @@ def test_select_featured_sites_rank_by_comparable_uses_analysable_depth():
     assert [s.task for s in ranked] == ["Deep", "Broad"]
 
 
+def test_select_featured_sites_min_passes_gates_comparable_depth_under_comparable():
+    """Under rank_by='comparable', min_passes floors the usable (comparable) depth,
+    not the raw count -- a site whose raw passes clear the floor but whose
+    differenceable series does not is dropped rather than ranked last."""
+    items = [
+        # Mixed: 3 dated passes, each a different polarization -> comparable depth 1.
+        _pass_pol("Mixed", 1, "VV"),
+        _pass_pol("Mixed", 2, "HH"),
+        _pass_pol("Mixed", 3, "VH"),
+        # Deep: 2 passes, both VV -> comparable depth 2.
+        *[_pass_pol("Deep", d, "VV") for d in (4, 5)],
+    ]
+    # Default 'passes' floor admits Mixed (3 raw passes >= 2); comparable floor
+    # drops it (usable depth 1 < 2) and keeps only the differenceable series.
+    by_passes = showcase.select_featured_sites(items, min_passes=2)
+    assert {s.task for s in by_passes} == {"Mixed", "Deep"}
+    by_comparable = showcase.select_featured_sites(items, min_passes=2, rank_by="comparable")
+    assert [s.task for s in by_comparable] == ["Deep"]
+
+
 def test_select_featured_sites_rejects_unknown_rank_by():
     import pytest
 

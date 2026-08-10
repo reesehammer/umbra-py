@@ -319,7 +319,9 @@ def _print_site_coverage(site) -> None:
     default=2,
     show_default=True,
     help="Passes a site needs to qualify (2 is the minimum a change composite "
-    "can use; raise it to find only deeply-revisited series).",
+    "can use; raise it to find only deeply-revisited series). Counts the depth "
+    "--rank-by measures: raw passes by default, the usable (comparable) series' "
+    "depth under --rank-by comparable.",
 )
 @click.option(
     "--rank-by",
@@ -383,8 +385,11 @@ def sites(
     --rank-by chooses the order: 'passes' (the default) ranks by raw pass count;
     'comparable' ranks by that usable-series depth instead, so a deeply-imaged
     single-polarization site is not outranked by a broader one whose passes a
-    change verb cannot difference together. The two agree when every dated pass
-    shares one polarization.
+    change verb cannot difference together. --min-passes then counts that same
+    usable depth, so '--rank-by comparable --min-passes 3' returns only sites whose
+    differenceable series is at least three passes deep -- not sites with three raw
+    passes ranked by their usable depth. The two agree when every dated pass shares
+    one polarization.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -437,7 +442,8 @@ def sites(
             "the local index" if pool_size is None else f"the pool of {pool_size} acquisition(s)"
         )
         widen = "Build/refresh the index" if pool_size is None else "Widen --limit or the search"
-        click.echo(f"No site in {where} has {min_passes}+ passes. {widen}, or lower --min-passes.")
+        depth = "comparable passes" if rank_by == "comparable" else "passes"
+        click.echo(f"No site in {where} has {min_passes}+ {depth}. {widen}, or lower --min-passes.")
         return
     for site in ranked:
         _print_site_coverage(site)

@@ -1358,9 +1358,19 @@ class CatalogIndex:
         cannot be missed by a raw-count cap applied before its polarizations are
         known. The two rankings share :func:`umbra_py.coverage._rank_sort_key`, so
         this and the pool path order a comparable ranking identically.
+
+        ``min_passes`` gates on the same depth ``rank_by`` ranks by
+        (:func:`umbra_py.coverage._min_passes_depth`): under ``"comparable"`` the
+        ``HAVING COUNT(*) >= min_passes`` clause is a superset pre-filter (comparable
+        depth is never above the raw count) and the true floor on ``comparable_passes``
+        is applied in Python before the re-rank, so ``--rank-by comparable
+        --min-passes N`` returns only sites whose differenceable series is at least
+        ``N`` passes deep. Under ``"passes"`` the SQL floor is exact and this and the
+        pool path qualify a site identically.
         """
         from .coverage import (  # noqa: PLC0415
             _check_ranking,
+            _min_passes_depth,
             _rank_sort_key,
             rank_site_coverage,
             site_coverage,
@@ -1396,6 +1406,11 @@ class CatalogIndex:
         # Raw-count ranking picks the candidates in SQL and caps at ``top``; the
         # analysable ranking cannot (comparable depth is not a COUNT), so it reads
         # every task with enough passes and re-ranks after summarising.
+        # ``HAVING COUNT(*) >= min_passes`` gates raw pass count in SQL. Under the
+        # comparable ranking that is a *superset* pre-filter -- comparable depth is
+        # never above the raw count, so no qualifying task is dropped -- and the true
+        # ``min_passes`` floor (on ``comparable_passes``) is applied in Python once
+        # the documents are read, before the re-rank and truncation.
         candidate_sql = (
             f"SELECT task FROM items{where} GROUP BY task "
             "HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC, task ASC"
@@ -1418,6 +1433,19 @@ class CatalogIndex:
                 passes.append(item)
             ranked.append(site_coverage(task, passes))
         if rank_by != "passes":
+            # Qualify on the same depth the ranking uses (``_min_passes_depth``): a
+            # site whose raw count cleared the SQL floor but whose comparable series
+            # is shallower than ``min_passes`` is dropped rather than ranked last, so
+            # ``--rank-by comparable --min-passes N`` is whole-archive *and* honest
+            # about analysable depth on both the qualification and the ordering.
+            ranked = [
+                c
+                for c in ranked
+                if _min_passes_depth(
+                    comparable_passes=c.comparable_passes, passes=c.passes, rank_by=rank_by
+                )
+                >= min_passes
+            ]
             ranked.sort(
                 key=lambda c: _rank_sort_key(
                     comparable_passes=c.comparable_passes,
