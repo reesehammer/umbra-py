@@ -793,6 +793,29 @@ from:
   schema moved. **With it the discovery moat selects on activity in both directions
   — still-active, dormant, or a latest-pass window — completing the recency axis.**
   See the CHANGELOG.
+  ~~**Open:** the recency pair gated a site's *newest* pass (still-active / dormant),
+  but its *earliest* pass — its **onset** — was reported (`first`) and never selected
+  on, so the moat could not ask for a *newly-appeared* series, nor a long-established
+  one, nor bound a site's onset to a window the way the recency pair bounds its newest
+  pass.~~ **shipped** — `first_since` / `first_before` add the onset (first-seen) axis,
+  the exact twins of the `active_*` pair one end of the activity interval over, on every
+  surface at once (`umbra sites --first-since` / `--first-before`, `find_repeat_sites`,
+  `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for `--local`): `first_since` keeps
+  only sites whose *earliest* dated pass is on or after a date (a newly-appeared series),
+  `first_before` only those whose first pass is on or before it (a long-established one),
+  and set together they bound the onset to a window. They reuse the recency pair's exact
+  machinery — the same two single-sourced functions (`select_featured_sites` and
+  `CatalogIndex.rank_sites`'s twin `HAVING … AND MIN(acq_date) >= ? / <= ?` clauses,
+  pure aggregates that need no full scan), pinned byte-for-byte identical between the SQL
+  and pool paths — and the same `dates.parse_date_bound` grammar, `first_before` snapping
+  a span to its last day like `active_before`. They are **orthogonal** to the recency
+  pair (when a site started and whether it is still going are independent, so
+  `--first-since X --active-before Y` finds series that appeared after X and are already
+  dormant by Y — a selection neither axis alone can make) and add no field to the
+  `site-coverage` contract (filter inputs, like the recency bounds), so no schema moved.
+  **With them the moat's recency axis is two-sided on *both* ends of a site's activity
+  interval — onset and recency — so it selects on every figure it reports: depth, onset,
+  recency, cadence and a bounded baseline span.** See the CHANGELOG.
 - ~~The moat could rank and qualify sites by depth and select them by recency, and it
   *reported* each site's revisit cadence (`max_revisit_days` and its comparable
   twin) — but it could not *select* on that cadence. A deep series imaged reliably

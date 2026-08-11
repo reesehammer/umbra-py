@@ -340,6 +340,26 @@ def test_select_featured_sites_active_before_selects_dormant_sites_and_windows()
     assert [s.task for s in window] == ["Fresh"]
 
 
+def test_select_featured_sites_first_since_before_filter_by_onset():
+    """first_since / first_before gate a site's *earliest* pass (the onset twins of
+    the active_* recency pair), selecting newly-appeared and long-established series
+    and, together, an onset window -- retaining each survivor's full history."""
+    items = [
+        *[_pass("New", d) for d in (10, 11, 12)],  # first 2024-01-10
+        *[_pass("Old", d) for d in (1, 2, 3)],  # first 2024-01-01
+    ]
+    newly = showcase.select_featured_sites(items, first_since="2024-01-05")
+    assert [s.task for s in newly] == ["New"]
+    assert [i.datetime.day for i in newly[0].items] == [10, 11, 12]  # full history kept
+    established = showcase.select_featured_sites(items, first_before="2024-01-05")
+    assert [s.task for s in established] == ["Old"]
+    # Set together they bound the onset to a window (nothing has an onset in [4, 6]).
+    windowed = showcase.select_featured_sites(
+        items, first_since="2024-01-04", first_before="2024-01-06"
+    )
+    assert windowed == []
+
+
 def test_select_featured_sites_max_revisit_keeps_reliably_imaged_sites():
     """max_revisit keeps a site only if its worst-case revisit gap is at most the
     bound, dropping a series with a long blind spot and retaining full history."""

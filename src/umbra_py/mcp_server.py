@@ -404,6 +404,8 @@ def find_repeat_sites(
     rank_by: str = "passes",
     active_since: str | None = None,
     active_before: str | None = None,
+    first_since: str | None = None,
+    first_before: str | None = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
@@ -465,6 +467,19 @@ def find_repeat_sites(
     active_before``). Same grammar as ``active_since``, but a bare year/month covers
     the whole named period (``active_before="2024"`` is "last imaged on or before
     2024-12-31"), symmetric with ``end``.
+
+    ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
+    ``active_*`` pair -- they gate each site's *earliest* pass rather than its newest.
+    ``first_since`` keeps **newly-appeared** series (first imaged on or after the date --
+    ones that entered the archive recently) and ``first_before`` keeps
+    **long-established** ones (first imaged on or before it -- watched since before
+    then); pass both to bound the onset to a window
+    (``first_since <= first <= first_before``), exactly as the ``active_*`` pair bounds
+    the newest pass. Same grammar as ``active_since``, ``first_before`` snapping a bare
+    year/month to its last day. Orthogonal to the ``active_*`` recency filters, since
+    when a site started and whether it is still going are independent axes -- so
+    ``first_since=X, active_before=Y`` finds series that appeared after X and have
+    already gone dormant by Y. ``None`` (the default) applies no onset filter.
 
     ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
     filter on each site's **worst-case** revisit gap (in days), so a series with any
@@ -580,6 +595,8 @@ def find_repeat_sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                first_since=first_since,
+                first_before=first_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,
@@ -608,6 +625,8 @@ def find_repeat_sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                first_since=first_since,
+                first_before=first_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,

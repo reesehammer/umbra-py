@@ -1900,6 +1900,8 @@ def _rank_sites_pool_baseline(idx, **filters):
     rank_by = filters.pop("rank_by", "passes")
     active_since = filters.pop("active_since", None)
     active_before = filters.pop("active_before", None)
+    first_since = filters.pop("first_since", None)
+    first_before = filters.pop("first_before", None)
     max_revisit_days = filters.pop("max_revisit_days", None)
     min_span_days = filters.pop("min_span_days", None)
     max_span_days = filters.pop("max_span_days", None)
@@ -1911,6 +1913,8 @@ def _rank_sites_pool_baseline(idx, **filters):
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        first_since=first_since,
+        first_before=first_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,
@@ -1960,6 +1964,16 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"active_before": "2024-01-05"},
             {"active_before": "2024-01"},
             {"active_since": "2024-01-02", "active_before": "2024-01-08"},
+            # first_since / first_before gate each group on its *earliest* pass in the
+            # twin MIN(acq_date) >= ? / <= ? clauses; they must equal the pool ranker's
+            # whole-site onset gate. Alpha first=1, Beta first=2, Gamma first=3.
+            {"first_since": "2024-01-02"},  # Beta, Gamma (Alpha's onset is earlier)
+            {"first_since": "2024-01-03"},  # Gamma only
+            {"first_before": "2024-01-01"},  # Alpha only
+            {"first_before": "2024-01-02"},  # Alpha, Beta
+            {"first_before": "2024-01"},  # bare month snaps to last day: all three
+            {"first_since": "2024-01-02", "first_before": "2024-01-03"},  # Beta, Gamma
+            {"first_since": "2024-01-02", "rank_by": "comparable"},
             # max_revisit is not a SQL aggregate, so the index path applies it in
             # Python on the same items the pool ranker does -- it must stay identical.
             # Alpha/Beta worst gap 4, Gamma worst gap 1.
@@ -2093,6 +2107,42 @@ def test_rank_sites_active_before_filters_whole_archive_to_dormant_sites(tmp_pat
     assert [(s.task, s.passes) for s in dormant] == [("Stale", 3)]  # full history kept
     assert [s.task for s in boundary] == ["Stale"]  # on-or-before is inclusive
     assert [s.task for s in window] == ["Stale"]  # newest pass inside [since, before]
+
+
+def test_rank_sites_first_since_filters_whole_archive_by_onset(tmp_path):
+    """first_since keeps only newly-appeared series (earliest pass on or after the
+    date) across the whole index, gating each group's MIN(acq_date) in the same
+    HAVING -- the onset twin of active_since, on the earliest pass rather than the
+    newest -- while retaining every pass of a survivor."""
+    pool = [
+        *[_site_item("New", d) for d in (10, 11, 12)],  # first 2024-01-10
+        *[_site_item("Old", d) for d in (1, 2, 20)],  # first 2024-01-01 (still active later)
+    ]
+    with _index(tmp_path, pool) as idx:
+        all_sites = idx.rank_sites()
+        newly = idx.rank_sites(first_since="2024-01-05")
+        boundary = idx.rank_sites(first_since="2024-01-10")  # New's own earliest
+    assert {s.task for s in all_sites} == {"New", "Old"}
+    assert [(s.task, s.passes) for s in newly] == [("New", 3)]  # full history kept
+    assert [s.task for s in boundary] == ["New"]  # on-or-after is inclusive
+
+
+def test_rank_sites_first_before_filters_whole_archive_to_established_sites(tmp_path):
+    """first_before keeps long-established series (earliest pass on or before the
+    date) and, with first_since, bounds the onset to a window -- across the whole
+    index, orthogonally to the active_* recency gates (a site established early can
+    still be imaged recently, so first_before keeps it where active_before would not)."""
+    pool = [
+        *[_site_item("New", d) for d in (10, 11, 12)],  # first 2024-01-10
+        *[_site_item("Old", d) for d in (1, 2, 20)],  # first 2024-01-01, newest 2024-01-20
+    ]
+    with _index(tmp_path, pool) as idx:
+        established = idx.rank_sites(first_before="2024-01-05")
+        boundary = idx.rank_sites(first_before="2024-01-01")  # Old's own earliest
+        window = idx.rank_sites(first_since="2024-01-05", first_before="2024-01-15")
+    assert [(s.task, s.passes) for s in established] == [("Old", 3)]  # full history kept
+    assert [s.task for s in boundary] == ["Old"]  # on-or-before is inclusive
+    assert [s.task for s in window] == ["New"]  # onset (10th) inside [5th, 15th]
 
 
 def test_rank_sites_max_revisit_filters_whole_archive_and_promotes_past_top(tmp_path):

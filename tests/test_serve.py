@@ -703,6 +703,41 @@ def test_sites_active_before_bad_date_is_a_client_error(sites_index):
     assert client.get("/sites?active_before=not-a-date").status_code == 400
 
 
+def test_sites_first_since_keeps_only_newly_appeared_sites(sites_client):
+    # Alpha's earliest pass is 2024-01-01, Beta's is 2024-02-01; an onset cutoff
+    # between them keeps the newly-appeared Beta and drops the long-established
+    # Alpha -- the earliest-pass twin of active_since (which gates the newest).
+    body = sites_client.get("/sites?first_since=2024-01-15").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+    # Boundary is inclusive (on or after), so Beta's own earliest date keeps it.
+    boundary = sites_client.get("/sites?first_since=2024-02-01").json()
+    assert [s["task"] for s in boundary["sites"]] == ["Beta"]
+
+
+def test_sites_first_before_keeps_only_established_sites(sites_client):
+    # The complement of first_since: a cutoff between the two sites' earliest passes
+    # keeps the long-established Alpha (first 2024-01-01) and drops Beta.
+    body = sites_client.get("/sites?first_before=2024-01-15").json()
+    assert [s["task"] for s in body["sites"]] == ["Alpha"]
+    # A bare month snaps to its last day (is_end), so 2024-01 keeps Alpha (first 01-01)
+    # and still drops Beta (first 02-01).
+    month = sites_client.get("/sites?first_before=2024-01").json()
+    assert [s["task"] for s in month["sites"]] == ["Alpha"]
+
+
+def test_sites_first_window_bounds_the_onset(sites_client):
+    # first_since and first_before together bound the site's earliest pass to a
+    # window: [2024-01-15, 2024-02-15] excludes Alpha (onset too early) and keeps Beta.
+    body = sites_client.get("/sites?first_since=2024-01-15&first_before=2024-02-15").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+
+
+def test_sites_first_since_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.get("/sites?first_since=not-a-date").status_code == 400
+    assert client.get("/sites?first_before=not-a-date").status_code == 400
+
+
 def test_sites_max_revisit_keeps_only_reliably_imaged_sites(sites_client):
     # Alpha's passes are 10 days apart (worst gap 10); Beta's are 4 days apart. A
     # 5-day cadence bound keeps the reliably-imaged Beta and drops Alpha.
@@ -913,6 +948,25 @@ def test_post_sites_filters_by_active_before_and_window(sites_client):
 def test_post_sites_active_before_bad_date_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"active_before": "nope"}).status_code == 400
+
+
+def test_post_sites_filters_by_first_since_before_and_window(sites_client):
+    # The POST twin honours the onset bounds and the window exactly as GET. Alpha's
+    # earliest pass is 2024-01-01, Beta's is 2024-02-01.
+    newly = sites_client.post("/sites", json={"first_since": "2024-01-15"}).json()
+    assert [s["task"] for s in newly["sites"]] == ["Beta"]
+    established = sites_client.post("/sites", json={"first_before": "2024-01-15"}).json()
+    assert [s["task"] for s in established["sites"]] == ["Alpha"]
+    window = sites_client.post(
+        "/sites", json={"first_since": "2024-01-15", "first_before": "2024-02-15"}
+    ).json()
+    assert [s["task"] for s in window["sites"]] == ["Beta"]
+
+
+def test_post_sites_first_since_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"first_since": "nope"}).status_code == 400
+    assert client.post("/sites", json={"first_before": "nope"}).status_code == 400
 
 
 def test_post_sites_filters_by_max_revisit(sites_client):

@@ -942,6 +942,8 @@ def run_sites(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    first_since: DateLike = None,
+    first_before: DateLike = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
@@ -997,6 +999,15 @@ def run_sites(
     the two bound the site's latest pass to a window exactly as ``umbra sites
     --active-since --active-before`` does.
 
+    ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
+    ``active_*`` pair -- they gate each site's *earliest* pass rather than its newest,
+    selecting **newly-appeared** series (``first_since``) and **long-established** ones
+    (``first_before``); set together they bound the onset to a window. Forwarded to the
+    index (twin ``MIN(acq_date) >= ?`` / ``MIN(acq_date) <= ?`` clauses in the same
+    ``GROUP BY``) and pool rankers unchanged, so this endpoint filters exactly as
+    ``umbra sites --first-since`` / ``--first-before`` does, orthogonally to the
+    ``active_*`` recency filters. ``None`` applies no onset filter.
+
     ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
     filter on each site's **worst-case** revisit gap (in days) -- forwarded to the
     index and pool rankers unchanged, so this endpoint filters exactly as ``umbra
@@ -1050,6 +1061,8 @@ def run_sites(
             rank_by=rank_by,
             active_since=active_since,
             active_before=active_before,
+            first_since=first_since,
+            first_before=first_before,
             max_revisit_days=max_revisit_days,
             min_span_days=min_span_days,
             max_span_days=max_span_days,
@@ -1078,6 +1091,8 @@ def run_sites(
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        first_since=first_since,
+        first_before=first_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,
@@ -2855,6 +2870,24 @@ def build_app(
                 "2024-12-31'), symmetric with the datetime end"
             ),
         ),
+        first_since: str | None = Query(
+            default=None,
+            description=(
+                "Keep only sites FIRST imaged on or after this date -- an onset filter "
+                "on each site's earliest pass, selecting newly-appeared series, where "
+                "active_since gates the newest pass (still live). Same grammar as "
+                "active_since. Orthogonal to the active_* recency filters"
+            ),
+        ),
+        first_before: str | None = Query(
+            default=None,
+            description=(
+                "The complement of first_since (the onset twin of active_before): keep "
+                "only sites first imaged on or before this date (a long-established "
+                "series). Set both to bound the onset to a window. A bare year/month "
+                "covers the whole period (2024 is 'on or before 2024-12-31')"
+            ),
+        ),
         max_revisit: float | None = Query(
             default=None,
             gt=0,
@@ -2935,6 +2968,11 @@ def build_app(
             # ``is_end`` snaps a span (a bare year/month) to its last day, so an
             # upper recency bound covers the whole named period, like the end bound.
             resolved_active_before = _coerce_date(active_before, is_end=True)
+            # The onset (first-seen) bounds gate the earliest pass, snapping the same
+            # way the recency pair does: first_since to a span's first day, first_before
+            # to its last, so a bare year/month bounds the whole named period.
+            resolved_first_since = _coerce_date(first_since)
+            resolved_first_before = _coerce_date(first_before, is_end=True)
             from .coverage import _check_ranking  # noqa: PLC0415
 
             _check_ranking(rank_by)
@@ -2961,6 +2999,8 @@ def build_app(
                 rank_by=rank_by,
                 active_since=resolved_active_since,
                 active_before=resolved_active_before,
+                first_since=resolved_first_since,
+                first_before=resolved_first_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,
@@ -2996,7 +3036,10 @@ def build_app(
         the pool only on a ``--live`` backend, and ``top`` / ``min_passes`` cap
         and qualify the ranking as on ``GET``. ``active_since`` (a top-level field)
         keeps only sites still imaged on or after that date, and ``active_before``
-        its complement (sites last imaged on or before it); ``max_revisit`` (days)
+        its complement (sites last imaged on or before it); ``first_since`` /
+        ``first_before`` are the onset twins (sites *first* imaged on or after / before
+        a date -- newly-appeared vs long-established series, set both for a window);
+        ``max_revisit`` (days)
         keeps only sites revisited at least that often; ``min_span`` (days) keeps only
         sites imaged over at least that long (an observation-baseline filter, a
         different axis from ``max_revisit``), and ``max_span`` (days) its upper twin
@@ -3040,6 +3083,10 @@ def build_app(
             resolved_active_since = _coerce_date(body.get("active_since"))
             # ``is_end`` snaps a span to its last day, like the datetime end bound.
             resolved_active_before = _coerce_date(body.get("active_before"), is_end=True)
+            # The onset (first-seen) bounds gate the earliest pass, snapping the same
+            # way the recency pair does (first_before to a span's last day).
+            resolved_first_since = _coerce_date(body.get("first_since"))
+            resolved_first_before = _coerce_date(body.get("first_before"), is_end=True)
             max_revisit = _opt_float(body.get("max_revisit"), "max_revisit")
             min_span = _opt_float(body.get("min_span"), "min_span")
             max_span = _opt_float(body.get("max_span"), "max_span")
@@ -3081,6 +3128,8 @@ def build_app(
                 rank_by=rank_by,
                 active_since=resolved_active_since,
                 active_before=resolved_active_before,
+                first_since=resolved_first_since,
+                first_before=resolved_first_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,

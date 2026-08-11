@@ -495,6 +495,8 @@ def rank_site_coverage(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    first_since: DateLike = None,
+    first_before: DateLike = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
@@ -540,6 +542,24 @@ def rank_site_coverage(
     ``active_since`` it selects sites whose latest pass falls within a window. A span
     expression snaps to its last day (``active_before="2024"`` is "last imaged on or
     before 2024-12-31"), symmetric with ``end``. ``None`` applies no upper bound.
+
+    ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
+    ``active_*`` pair: where ``active_since`` / ``active_before`` gate a site's
+    **newest** dated pass (is it still, or no longer, being imaged), these gate its
+    **earliest** one (when did it *start*). ``first_since`` keeps only sites whose
+    first dated pass is *on or after* that date -- a **newly-appeared** series, one
+    that entered the archive recently -- and ``first_before`` only those whose first
+    pass is *on or before* it -- a **long-established** series watched since before
+    then; set together they bound the onset to a window
+    (``first_since <= first <= first_before``), exactly as the ``active_*`` pair
+    bounds the newest pass. They accept the same grammar the recency bounds do, and
+    ``first_before`` snaps a span expression to its last day (``first_before="2024"``
+    is "first imaged on or before 2024-12-31"), symmetric with ``active_before`` /
+    ``end``. Both gate on the whole site's earliest pass (the ``first`` a summary
+    reports), independent of ``rank_by`` / ``min_passes`` and distinct from ``start``
+    / ``end`` (which bound which *passes* enter the pool, whereas these select whole
+    sites by onset and keep each survivor's full history). ``None`` (the default)
+    applies no onset filter.
 
     ``max_revisit_days`` keeps only sites revisited *at least this often* -- a
     cadence filter on each site's **worst-case** revisit gap, so a site with any
@@ -604,6 +624,8 @@ def rank_site_coverage(
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        first_since=first_since,
+        first_before=first_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,

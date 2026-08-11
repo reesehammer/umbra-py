@@ -1456,13 +1456,21 @@ Follow-ons that build on it, none a blocker:
     SQL-vs-pool pinning, snapping a span expression to its last day (symmetric with
     `end`, where `active_since` snaps to the first day). See the CHANGELOG. What is
     still open, and smaller:
-    - **The `MIN(acq_date)` complement is not selected on.** A "first seen after"
-      filter (a site whose *earliest* pass is on or after a date — a newly-appeared
-      series) is the same one-clause shape on `MIN(acq_date)` rather than `MAX`, but
-      answers a different question ("when did this site start?" vs "is it still
-      going?") and waits for a caller who wants it. A site's activity interval is
-      reported as `first` / `last`; the selection is now two-sided on `last` and
-      unselected on `first`.
+    - ~~**The `MIN(acq_date)` complement is not selected on.**~~ **shipped** —
+      `first_since` / `first_before` add the onset (first-seen) axis, the twins of the
+      `active_*` recency pair one end of the activity interval over, on every surface
+      (`umbra sites --first-since` / `--first-before`, `find_repeat_sites`,
+      `GET`/`POST /sites`, `CatalogIndex.rank_sites`): `first_since` (`MIN(acq_date)
+      >= ?`) keeps a newly-appeared series (earliest pass on or after a date),
+      `first_before` (`MIN(acq_date) <= ?`) a long-established one, and set together
+      they bound the onset to a window. They reuse `active_since`'s exact single-sourcing
+      and byte-identical SQL-vs-pool pinning (pure aggregates, so no full scan), the same
+      `dates.parse_date_bound` grammar (`first_before` snapping a span to its last day
+      like `active_before`), and are **orthogonal** to the recency pair — so
+      `--first-since X --active-before Y` finds series that appeared after X and are
+      already dormant by Y, the "different question" this entry named, now askable
+      *together with* the recency one. A site's activity interval is reported as `first`
+      / `last`; the selection is now two-sided on **both**. See the CHANGELOG.
   - **On the HTTP surface `active_since` accepts a relative expression, unlike the
     strict-ISO `datetime` filter.** `_coerce_date` resolves `"6 months ago"` on
     `GET`/`POST /sites`, which is convenient and matches the CLI, but it is a
