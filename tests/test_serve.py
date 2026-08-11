@@ -754,6 +754,22 @@ def test_sites_non_positive_max_revisit_is_a_client_error(sites_index):
     assert client.get("/sites?max_revisit=0").status_code == 422
 
 
+def test_sites_median_revisit_keeps_only_usually_imaged_sites(sites_client):
+    # Alpha's median gap is 10 days; Beta's is 4. A 5-day typical-cadence bound keeps
+    # the regularly-imaged Beta and drops Alpha -- the typical-cadence twin of
+    # max_revisit, wired the same way through GET /sites.
+    tight = sites_client.get("/sites?median_revisit=5").json()
+    assert [s["task"] for s in tight["sites"]] == ["Beta"]
+    both = sites_client.get("/sites?median_revisit=10").json()
+    assert [s["task"] for s in both["sites"]] == ["Alpha", "Beta"]
+
+
+def test_sites_non_positive_median_revisit_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    # gt=0 on the query rejects a non-positive typical-cadence bound.
+    assert client.get("/sites?median_revisit=0").status_code == 422
+
+
 def test_sites_min_span_keeps_only_long_baseline_sites(sites_client):
     # Alpha spans 20 days (Jan 1 -> Jan 21); Beta spans 4 (Feb 1 -> Feb 5). A 10-day
     # baseline bound keeps the long-baseline Alpha and drops the short-window Beta --
@@ -979,6 +995,18 @@ def test_post_sites_filters_by_max_revisit(sites_client):
 def test_post_sites_non_positive_max_revisit_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"max_revisit": 0}).status_code == 400
+
+
+def test_post_sites_filters_by_median_revisit(sites_client):
+    # The POST twin honours the typical-cadence bound exactly as GET: a 5-day bound
+    # keeps Beta (median 4) and drops Alpha (median 10).
+    tight = sites_client.post("/sites", json={"median_revisit": 5}).json()
+    assert [s["task"] for s in tight["sites"]] == ["Beta"]
+
+
+def test_post_sites_non_positive_median_revisit_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"median_revisit": 0}).status_code == 400
 
 
 def test_post_sites_filters_by_min_span(sites_client):

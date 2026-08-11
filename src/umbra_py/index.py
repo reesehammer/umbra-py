@@ -1322,6 +1322,7 @@ class CatalogIndex:
         first_since: DateLike = None,
         first_before: DateLike = None,
         max_revisit_days: float | None = None,
+        median_revisit_days: float | None = None,
         min_span_days: float | None = None,
         max_span_days: float | None = None,
     ) -> list[SiteCoverage]:
@@ -1426,6 +1427,20 @@ class CatalogIndex:
         and dropping a site with fewer than two passes in the gated series. ``None``
         applies no cadence filter; a non-positive value is a ``ValueError``.
 
+        ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
+        keep only sites whose **median** revisit gap is at most this many days (a site
+        *usually* imaged often, tolerating the odd long outage the worst-case bound
+        rejects). Like the worst-case filter it is *not* a SQL aggregate -- a median of
+        consecutive gaps is no more a ``HAVING`` clause than a max of them -- so it is
+        applied in Python on the same per-task items this method already reads, using the
+        same :func:`umbra_py.coverage._passes_median_revisit` the pool path uses (so the
+        two are byte-identical), gated on the analysable subset under ``"comparable"``,
+        and it drops the raw-count SQL ``LIMIT`` when set (as the cadence and span
+        filters do) so a usually-tight site outside the raw top-``top`` is promoted rather
+        than truncated before the filter runs. A site with fewer than two passes in the
+        gated series has no measurable cadence and is dropped. ``None`` applies no
+        typical-cadence filter; a non-positive value is a ``ValueError``.
+
         ``min_span_days`` keeps only sites imaged over *at least this long* -- a
         baseline filter on each site's observation **span** (whole days from first
         dated pass to last). Like the cadence filter it is applied in Python rather
@@ -1456,11 +1471,13 @@ class CatalogIndex:
         from .coverage import (  # noqa: PLC0415
             _check_max_revisit,
             _check_max_span,
+            _check_median_revisit,
             _check_min_span,
             _check_ranking,
             _min_passes_depth,
             _passes_cadence,
             _passes_max_span,
+            _passes_median_revisit,
             _passes_span,
             _rank_sort_key,
             rank_site_coverage,
@@ -1469,6 +1486,7 @@ class CatalogIndex:
 
         _check_ranking(rank_by)
         _check_max_revisit(max_revisit_days)
+        _check_median_revisit(median_revisit_days)
         _check_min_span(min_span_days)
         _check_max_span(max_span_days)
         if top <= 0:
@@ -1512,6 +1530,7 @@ class CatalogIndex:
                 first_since=first_since,
                 first_before=first_before,
                 max_revisit_days=max_revisit_days,
+                median_revisit_days=median_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,
             )
@@ -1570,6 +1589,7 @@ class CatalogIndex:
         needs_full_scan = (
             rank_by != "passes"
             or max_revisit_days is not None
+            or median_revisit_days is not None
             or min_span_days is not None
             or max_span_days is not None
         )
@@ -1594,6 +1614,15 @@ class CatalogIndex:
             # under ``"comparable"``. A site with no measurable cadence is dropped.
             if max_revisit_days is not None and not _passes_cadence(
                 passes, rank_by=rank_by, max_revisit_days=max_revisit_days
+            ):
+                continue
+            # Typical-cadence filter (median revisit gap), the complement of the
+            # worst-case one above, applied on the same items and with the same
+            # ``_passes_median_revisit`` the pool path uses, so the two paths are
+            # byte-identical. Gated on the analysable subset under ``"comparable"``.
+            # A site with no measurable cadence is dropped.
+            if median_revisit_days is not None and not _passes_median_revisit(
+                passes, rank_by=rank_by, median_revisit_days=median_revisit_days
             ):
                 continue
             # Span filter (observation baseline), applied on the same items the

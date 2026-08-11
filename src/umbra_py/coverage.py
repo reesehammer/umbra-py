@@ -112,6 +112,22 @@ def _check_max_revisit(max_revisit_days: float | None) -> None:
         raise ValueError(f"max_revisit_days must be positive (days), got {max_revisit_days!r}")
 
 
+def _check_median_revisit(median_revisit_days: float | None) -> None:
+    """Reject a non-positive ``median_revisit`` cadence bound.
+
+    The *typical*-cadence twin of :func:`_check_max_revisit`: a revisit gap between
+    two distinct passes is always positive, so a median gap is too, and a
+    non-positive bound could only ever return nothing -- the silent empty result
+    the rest of this surface refuses. ``None`` disables the filter (the default).
+    Shared by every discovery surface so they cannot disagree about what a typical
+    cadence bound is, exactly as :func:`_check_max_revisit` is for the worst-case one.
+    """
+    if median_revisit_days is not None and median_revisit_days <= 0:
+        raise ValueError(
+            f"median_revisit_days must be positive (days), got {median_revisit_days!r}"
+        )
+
+
 def _check_min_span(min_span_days: float | None) -> None:
     """Reject a non-positive ``min_span`` baseline bound.
 
@@ -168,6 +184,43 @@ def _passes_cadence(items: Iterable[UmbraItem], *, rank_by: str, max_revisit_day
     dates = sorted(i.datetime for i in series if i.datetime is not None)
     gaps = _revisit_days(dates)
     return bool(gaps) and max(gaps) <= max_revisit_days
+
+
+def _passes_median_revisit(
+    items: Iterable[UmbraItem], *, rank_by: str, median_revisit_days: float
+) -> bool:
+    """Whether the series ``rank_by`` measures is *typically* revisited this often.
+
+    The typical-cadence twin of :func:`_passes_cadence`: same series, same
+    :func:`_revisit_days` gaps, but it gates the *median* gap rather than the worst
+    one. Under ``"comparable"`` it gates the largest single-polarization dated subset
+    (:func:`_largest_comparable_group`, the differenceable series the analysis verbs
+    consume); under ``"passes"`` the whole dated series. Returns ``True`` iff that
+    series' *typical* revisit gap -- its ``median_revisit_days`` /
+    ``comparable_median_revisit_days`` figure, the gap a site is *usually* imaged at
+    -- is at most ``median_revisit_days`` days.
+
+    It selects a different question from :func:`_passes_cadence`: where the worst-gap
+    bound (``max_revisit``) drops a site the moment *any* stretch exceeds the bound
+    (never blind for longer than ``N`` days), the median bound tolerates the odd long
+    gap and keeps a site *usually* imaged often -- so a mostly-tight series with a
+    single outage passes the median filter but fails the worst-case one. The report
+    carries both figures, so the choice is only about which one the *filter* reads.
+
+    A series with fewer than two passes has no measurable cadence, so it *fails*: a
+    site whose revisit cannot be confirmed is not one a cadence filter should return,
+    exactly as :func:`_passes_cadence` drops it. The median is computed from the same
+    items by the same :func:`_revisit_days` and :func:`statistics.median` that
+    :func:`site_coverage` reduces, so filtering here can never disagree with the
+    :attr:`SiteCoverage.median_revisit_days` a summary reports -- which is what lets
+    the pool path (gating items in :func:`umbra_py.showcase.select_featured_sites`)
+    and the index path (gating the same items in
+    :meth:`umbra_py.index.CatalogIndex.rank_sites`) stay byte-identical.
+    """
+    series = _largest_comparable_group(items) if rank_by == "comparable" else items
+    dates = sorted(i.datetime for i in series if i.datetime is not None)
+    gaps = _revisit_days(dates)
+    return bool(gaps) and median(gaps) <= median_revisit_days
 
 
 def _passes_span(items: Iterable[UmbraItem], *, rank_by: str, min_span_days: float) -> bool:
@@ -498,6 +551,7 @@ def rank_site_coverage(
     first_since: DateLike = None,
     first_before: DateLike = None,
     max_revisit_days: float | None = None,
+    median_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
 ) -> list[SiteCoverage]:
@@ -577,6 +631,21 @@ def rank_site_coverage(
     (the default) applies no cadence filter; a non-positive value is a
     ``ValueError``.
 
+    ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
+    keep only sites whose **median** revisit gap is at most that many days, so a
+    site *usually* imaged often is kept even if a single stretch runs long, where
+    ``max_revisit_days`` drops it the moment *any* gap exceeds the bound. It is the
+    selection twin of the ``median_revisit_days`` figure the summary already reports,
+    and measures the same series ``rank_by`` does (:func:`_passes_median_revisit`):
+    under ``"comparable"`` the *analysable* series' typical gap
+    (``comparable_median_revisit_days``), so an off-polarization pass filling a gap
+    no change verb can use cannot make a site read as more regularly imaged than it
+    is. It is orthogonal to ``max_revisit_days`` (worst gap vs typical gap -- set both
+    for "usually imaged every A days and never blind longer than B"), to the recency
+    bounds and to ``start`` / ``end``. A site with fewer than two passes in the gated
+    series has no measurable cadence and is dropped. ``None`` (the default) applies no
+    typical-cadence filter; a non-positive value is a ``ValueError``.
+
     ``min_span_days`` keeps only sites imaged over *at least this long* -- a
     baseline filter on each site's observation **span** (whole days from its first
     dated pass to its last), so a series confined to a short window is dropped and a
@@ -615,6 +684,7 @@ def rank_site_coverage(
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_median_revisit(median_revisit_days)
     _check_min_span(min_span_days)
     _check_max_span(max_span_days)
     sites = select_featured_sites(
@@ -627,6 +697,7 @@ def rank_site_coverage(
         first_since=first_since,
         first_before=first_before,
         max_revisit_days=max_revisit_days,
+        median_revisit_days=median_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,
     )

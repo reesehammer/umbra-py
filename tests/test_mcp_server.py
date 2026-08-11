@@ -328,6 +328,33 @@ def test_find_repeat_sites_rejects_non_positive_max_revisit():
         ms.find_repeat_sites(max_revisit_days=0, local=False)
 
 
+def test_find_repeat_sites_median_revisit_filters_to_usually_imaged_sites(monkeypatch):
+    # Tight is imaged monthly (median gap ~31 days) but has one half-year outage;
+    # Even is imaged every ~3 months (median gap ~91 days). A 60-day typical-cadence
+    # bound keeps the usually-frequent Tight and drops Even -- and, being the
+    # complement of the worst-case bound, a 100-day worst-gap bound selects the other
+    # way (Tight's 184-day hole fails it, Even's steadier cadence passes).
+    pool = [
+        *[_site_pass("Tight", m) for m in (1, 2, 3, 9)],  # median ~31, worst ~184
+        *[_site_pass("Even", m) for m in (1, 4, 7)],  # median ~91, worst ~91
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    by_median = ms.find_repeat_sites(local=False, median_revisit_days=60)
+    assert [s["task"] for s in by_median["sites"]] == ["Tight"]
+    by_max = ms.find_repeat_sites(local=False, max_revisit_days=100)
+    assert [s["task"] for s in by_max["sites"]] == ["Even"]
+
+
+def test_find_repeat_sites_rejects_non_positive_median_revisit():
+    with pytest.raises(ValueError, match="median_revisit_days must be positive"):
+        ms.find_repeat_sites(median_revisit_days=0, local=False)
+
+
 def test_find_repeat_sites_min_span_filters_to_long_baseline_sites(monkeypatch):
     # Long spans Jan->Aug (~213 days); Short is confined to Jan->Mar (~60 days). A
     # 120-day baseline bound keeps the long-baseline site and drops the short-window

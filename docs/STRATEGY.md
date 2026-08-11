@@ -844,6 +844,29 @@ from:
   moved. **With it the discovery moat selects on all three of the axes it reports —
   depth, recency *and* cadence — not only ranks and qualifies on depth.** See the
   CHANGELOG.
+  ~~**Open:** the cadence gate read only the *worst-case* gap (`max_revisit`), a strict
+  test one long outage disqualifies a site by, so the moat could not ask the softer,
+  more common question — which sites are *usually* imaged often, tolerating the odd
+  gap.~~ **shipped** — `median_revisit` gates the **median** revisit gap on every
+  surface at once (`umbra sites --median-revisit`, `find_repeat_sites`, `GET`/`POST
+  /sites`, and `CatalogIndex.rank_sites` for `--local`): it keeps only sites whose
+  *typical* gap is at most `N` days, the selection twin of the `median_revisit_days`
+  figure the summary already reports and the exact complement of the worst-case bound —
+  a mostly-tight series with one outage passes the median filter but fails
+  `--max-revisit`, and a uniformly looser one the reverse, so set together they demand
+  "usually imaged every A days *and* never blind for longer than B". It measures the same
+  depth `--rank-by` does (`coverage._passes_median_revisit`, the typical-cadence twin of
+  `_passes_cadence`): under `--rank-by comparable` the *analysable* series' typical gap
+  (`comparable_median_revisit_days`). Single-sourced through the same two functions the
+  worst-case bound is (`select_featured_sites`, `CatalogIndex.rank_sites`) — and, like it,
+  a median of consecutive gaps is not a SQL aggregate, so the index path applies the
+  identical `_passes_median_revisit` in Python on the same per-task items it already reads
+  (pinned byte-for-byte identical to the pool path) and drops the raw-count SQL `LIMIT`
+  when set so a usually-tight site outside the raw top-`top` is promoted rather than
+  truncated. It adds no field to the `site-coverage` contract (a filter input, like
+  `max_revisit`), so no schema moved. **With it the cadence axis is two-sided — worst-case
+  *and* typical — so the discovery moat now selects on both readings of every figure it
+  reports.** See the CHANGELOG.
 - ~~The moat could select sites by depth, recency and cadence, and it *reported* each
   site's observation `span_days` — but it could not *select* on that span. A series
   imaged tightly over one week and one imaged sparsely over five years could rank and

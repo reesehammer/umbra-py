@@ -1492,14 +1492,25 @@ Follow-ons that build on it, none a blocker:
   path) and drops the raw-count SQL `LIMIT` when the filter is set, so a tightly-imaged
   site outside the raw top-`top` is promoted rather than truncated. See the CHANGELOG.
   What is still open, and smaller:
-  - **Only the *worst* gap is selected on, not the typical one.** `max_revisit` gates
-    `max_revisit_days` (the widest stretch a change could have gone unseen), which is
-    the honest cadence figure for a monitoring target — one long hole disqualifies a
-    site however tight the rest of its series. Selecting on `median_revisit_days`
-    instead (a site *usually* imaged often, tolerating the odd gap) is the same shape
-    on a different figure and waits for a caller who wants "typically frequent" rather
-    than "never blind for longer than N days." The report carries both, so the choice
-    is only about which one the *filter* reads.
+  - ~~**Only the *worst* gap is selected on, not the typical one.**~~ **shipped** —
+    `max_revisit` gates `max_revisit_days` (the widest stretch a change could have gone
+    unseen, one long hole disqualifying a site however tight the rest of its series), and
+    now `median_revisit` gates `median_revisit_days` (a site *usually* imaged often,
+    tolerating the odd gap) — the softer "typically frequent" question beside the strict
+    "never blind for longer than N days" one. It is the same shape on a different figure,
+    on every surface at once (`umbra sites --median-revisit`, `find_repeat_sites`,
+    `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for `--local`), single-sourced
+    through the same two functions the worst-case bound is (`select_featured_sites`,
+    `CatalogIndex.rank_sites`, the index path applying the identical
+    `coverage._passes_median_revisit` in Python since a median of consecutive gaps is no
+    more a SQL aggregate than a max of them, dropping the raw-count `LIMIT` when set,
+    pinned byte-identical to the pool path). The report carries both figures, so the two
+    are genuine complements — a mostly-tight series with one outage passes the median
+    filter but fails the worst-case one, and vice versa — and set together they demand
+    "usually imaged every A days *and* never blind for longer than B". It adds no field
+    to the `site-coverage` contract (a filter input, like `max_revisit`), so no schema
+    moved. **With it the moat selects on cadence from both readings — worst-case and
+    typical.** See the CHANGELOG.
 - ~~**Nothing filters the discovery answer by observation baseline (span).**~~
   **shipped** — `min_span` keeps only sites whose observation span (first dated pass to
   last) is at least `N` days, on every surface (`umbra sites --min-span`,
