@@ -945,6 +945,7 @@ def run_sites(
     first_since: DateLike = None,
     first_before: DateLike = None,
     max_revisit_days: float | None = None,
+    median_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
 ) -> list[SiteCoverage]:
@@ -1014,6 +1015,13 @@ def run_sites(
     sites --max-revisit`` does: on the analysable series under ``rank_by="comparable"``,
     orthogonally to the recency filters. ``None`` applies no cadence filter.
 
+    ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
+    keep only sites whose **median** revisit gap (in days) is at most that -- forwarded
+    to the index and pool rankers unchanged, so this endpoint filters exactly as
+    ``umbra sites --median-revisit`` does: on the analysable series under
+    ``rank_by="comparable"``, orthogonal to ``max_revisit_days`` (typical gap vs worst
+    gap) and the recency filters. ``None`` applies no typical-cadence filter.
+
     ``min_span_days`` keeps only sites imaged over *at least this long* -- a baseline
     filter on each site's observation **span** (in days, first pass to last),
     forwarded to the index and pool rankers unchanged, so this endpoint filters
@@ -1031,6 +1039,7 @@ def run_sites(
     from .coverage import (
         _check_max_revisit,
         _check_max_span,
+        _check_median_revisit,
         _check_min_span,
         _check_ranking,
         rank_site_coverage,
@@ -1038,6 +1047,7 @@ def run_sites(
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_median_revisit(median_revisit_days)
     _check_min_span(min_span_days)
     _check_max_span(max_span_days)
     top_n = _clamp_top(top)
@@ -1064,6 +1074,7 @@ def run_sites(
             first_since=first_since,
             first_before=first_before,
             max_revisit_days=max_revisit_days,
+            median_revisit_days=median_revisit_days,
             min_span_days=min_span_days,
             max_span_days=max_span_days,
         )
@@ -1094,6 +1105,7 @@ def run_sites(
         first_since=first_since,
         first_before=first_before,
         max_revisit_days=max_revisit_days,
+        median_revisit_days=median_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,
     )
@@ -2900,6 +2912,19 @@ def build_app(
                 "filters"
             ),
         ),
+        median_revisit: float | None = Query(
+            default=None,
+            gt=0,
+            description=(
+                "The typical-cadence twin of max_revisit: keep only sites whose MEDIAN "
+                "revisit gap (in days) is at most this, so a site usually imaged often "
+                "is kept even if a single stretch runs long. 'Usually imaged frequently' "
+                "rather than 'never blind for longer than N days'; set both to combine "
+                "them. Gates the cadence rank_by measures (the usable series' typical "
+                "gap under rank_by=comparable); orthogonal to max_revisit and the "
+                "recency filters"
+            ),
+        ),
         min_span: float | None = Query(
             default=None,
             gt=0,
@@ -3002,6 +3027,7 @@ def build_app(
                 first_since=resolved_first_since,
                 first_before=resolved_first_before,
                 max_revisit_days=max_revisit,
+                median_revisit_days=median_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,
             )
@@ -3040,7 +3066,9 @@ def build_app(
         ``first_before`` are the onset twins (sites *first* imaged on or after / before
         a date -- newly-appeared vs long-established series, set both for a window);
         ``max_revisit`` (days)
-        keeps only sites revisited at least that often; ``min_span`` (days) keeps only
+        keeps only sites revisited at least that often, and ``median_revisit`` (days)
+        its typical-cadence twin (sites whose *median* gap is at most that -- usually
+        imaged often, tolerating the odd outage); ``min_span`` (days) keeps only
         sites imaged over at least that long (an observation-baseline filter, a
         different axis from ``max_revisit``), and ``max_span`` (days) its upper twin
         (sites imaged over at most that long, a short-lived series -- set with
@@ -3088,11 +3116,13 @@ def build_app(
             resolved_first_since = _coerce_date(body.get("first_since"))
             resolved_first_before = _coerce_date(body.get("first_before"), is_end=True)
             max_revisit = _opt_float(body.get("max_revisit"), "max_revisit")
+            median_revisit = _opt_float(body.get("median_revisit"), "median_revisit")
             min_span = _opt_float(body.get("min_span"), "min_span")
             max_span = _opt_float(body.get("max_span"), "max_span")
             from .coverage import (  # noqa: PLC0415
                 _check_max_revisit,
                 _check_max_span,
+                _check_median_revisit,
                 _check_min_span,
                 _check_ranking,
             )
@@ -3100,6 +3130,8 @@ def build_app(
             _check_ranking(rank_by)
             # A non-positive cadence bound is a clean 400 here, like GET's gt=0.
             _check_max_revisit(max_revisit)
+            # And its typical-cadence twin, symmetric with the worst-case bound.
+            _check_median_revisit(median_revisit)
             # A non-positive span bound is a clean 400 too, like GET's gt=0.
             _check_min_span(min_span)
             # And its upper twin, symmetric with the floor.
@@ -3131,6 +3163,7 @@ def build_app(
                 first_since=resolved_first_since,
                 first_before=resolved_first_before,
                 max_revisit_days=max_revisit,
+                median_revisit_days=median_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,
             )

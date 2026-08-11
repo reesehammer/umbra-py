@@ -407,6 +407,7 @@ def find_repeat_sites(
     first_since: str | None = None,
     first_before: str | None = None,
     max_revisit_days: float | None = None,
+    median_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
     local: bool | None = None,
@@ -491,6 +492,16 @@ def find_repeat_sites(
     and drops a site with fewer than two passes in the gated series. A non-positive
     value is a ``ValueError``.
 
+    ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
+    keep only sites whose **median** revisit gap (in days) is at most that, so a site
+    *usually* imaged often is kept even if a single stretch runs long, where
+    ``max_revisit_days`` drops it the moment any gap exceeds the bound. Use it for
+    "usually imaged frequently" rather than "never blind for longer than N days"; set
+    both to combine the two. It gates the cadence ``rank_by`` measures (the usable
+    series' typical gap under ``rank_by="comparable"``), is orthogonal to
+    ``max_revisit_days`` and the recency filters, and drops a site with fewer than two
+    passes in the gated series. A non-positive value is a ``ValueError``.
+
     ``min_span_days`` keeps only sites imaged over *at least this long* -- a baseline
     filter on each site's observation **span** (in days, first pass to last), so a
     series confined to a short window is dropped and a long-baseline one kept. Use it
@@ -549,6 +560,7 @@ def find_repeat_sites(
     from .coverage import (
         _check_max_revisit,
         _check_max_span,
+        _check_median_revisit,
         _check_min_span,
         _check_ranking,
         rank_site_coverage,
@@ -556,6 +568,7 @@ def find_repeat_sites(
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_median_revisit(median_revisit_days)
     _check_min_span(min_span_days)
     _check_max_span(max_span_days)
     if intersects is not None and (bbox or place):
@@ -598,6 +611,7 @@ def find_repeat_sites(
                 first_since=first_since,
                 first_before=first_before,
                 max_revisit_days=max_revisit_days,
+                median_revisit_days=median_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,
             )
@@ -628,6 +642,7 @@ def find_repeat_sites(
                 first_since=first_since,
                 first_before=first_before,
                 max_revisit_days=max_revisit_days,
+                median_revisit_days=median_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,
             )

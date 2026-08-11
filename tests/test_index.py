@@ -1903,6 +1903,7 @@ def _rank_sites_pool_baseline(idx, **filters):
     first_since = filters.pop("first_since", None)
     first_before = filters.pop("first_before", None)
     max_revisit_days = filters.pop("max_revisit_days", None)
+    median_revisit_days = filters.pop("median_revisit_days", None)
     min_span_days = filters.pop("min_span_days", None)
     max_span_days = filters.pop("max_span_days", None)
     pool = list(idx.search(limit=None, **filters))
@@ -1916,6 +1917,7 @@ def _rank_sites_pool_baseline(idx, **filters):
         first_since=first_since,
         first_before=first_before,
         max_revisit_days=max_revisit_days,
+        median_revisit_days=median_revisit_days,
         min_span_days=min_span_days,
         max_span_days=max_span_days,
     )
@@ -1983,6 +1985,15 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             # (Alpha) fails the bound and Gamma is promoted from outside the top.
             {"max_revisit_days": 3, "top": 1},
             {"max_revisit_days": 4, "rank_by": "comparable"},
+            # median_revisit is the typical-cadence twin -- also not a SQL aggregate,
+            # so it too is applied in Python and must stay identical to the pool ranker.
+            # Alpha/Beta median gap 4, Gamma median gap 1.
+            {"median_revisit_days": 1},  # Gamma only
+            {"median_revisit_days": 4},  # all three (boundary-inclusive)
+            # With top=1 the median filter drops the SQL LIMIT: Alpha fails the bound
+            # and Gamma is promoted from outside the top.
+            {"median_revisit_days": 3, "top": 1},
+            {"median_revisit_days": 4, "rank_by": "comparable"},
             # min_span is not a SQL aggregate either (the comparable-subset span is
             # not a column), so it too is applied in Python and must stay identical to
             # the pool ranker. Alpha span 8 (days 1,5,9), Beta span 4, Gamma span 1.
@@ -2160,6 +2171,26 @@ def test_rank_sites_max_revisit_filters_whole_archive_and_promotes_past_top(tmp_
         # The cadence bound drops DeepGappy and promotes Tight past the top-1 cap.
         tight = idx.rank_sites(top=1, max_revisit_days=5)
     assert [(s.task, s.passes) for s in tight] == [("Tight", 2)]
+
+
+def test_rank_sites_median_revisit_filters_whole_archive_and_promotes_past_top(tmp_path):
+    """median_revisit keeps only sites usually imaged often across the whole index,
+    and because the median gap is not a SQL aggregate it drops the candidate LIMIT so
+    a regularly-imaged site outside the raw top-`top` is not truncated before the
+    filter runs -- and it selects the complement of max_revisit (a mostly-tight series
+    with one outage passes here but fails the worst-case bound)."""
+    pool = [
+        *[_site_item("DeepSparse", d) for d in (1, 12, 23, 28)],  # 4 passes, median 11
+        *[_site_item("Bursty", d) for d in (10, 12, 14, 30)],  # 4 passes, median 2, worst 16
+    ]
+    with _index(tmp_path, pool) as idx:
+        # Without a bound DeepSparse ties on depth but sorts first by task name.
+        assert [s.task for s in idx.rank_sites(top=1)] == ["Bursty"]
+        # median<=5 keeps only Bursty; drop it and DeepSparse is the sole survivor of
+        # a wide-enough bound -- confirming the median gate is measured whole-archive.
+        assert [s.task for s in idx.rank_sites(median_revisit_days=5)] == ["Bursty"]
+        # The worst-case bound rejects Bursty (16-day outage) though its median is tight.
+        assert idx.rank_sites(median_revisit_days=5, max_revisit_days=8) == []
 
 
 def test_rank_sites_by_comparable_reranks_whole_archive(tmp_path):

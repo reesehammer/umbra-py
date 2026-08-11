@@ -767,6 +767,94 @@ def test_max_revisit_none_applies_no_filter_and_non_positive_is_rejected():
 
 
 # --------------------------------------------------------------------------- #
+# median_revisit: the typical-cadence filter (usually-imaged-often sites)
+# --------------------------------------------------------------------------- #
+def test_median_revisit_keeps_sites_usually_imaged_often():
+    # Steady's median gap is 2 days; Sparse's is 10. A 5-day typical-cadence bound
+    # keeps the regularly-imaged site and drops the one usually left waiting -- even
+    # though both have the same pass count.
+    pool = [
+        *[_pass("Steady", d) for d in (1, 3, 5, 25)],  # gaps 2,2,20 -> median 2
+        *[_pass("Sparse", d) for d in (1, 11, 21, 24)],  # gaps 10,10,3 -> median 10
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["Sparse", "Steady"]
+    assert [s.task for s in rank_site_coverage(pool, median_revisit_days=5)] == ["Steady"]
+
+
+def test_median_revisit_is_the_complement_of_max_revisit():
+    # The two cadence bounds select different sites. Bursty is usually imaged every
+    # 2 days but has one 20-day outage; Even is imaged uniformly every 7 days.
+    #   - median<=5 keeps Bursty (typical gap 2) and drops Even (typical gap 7)
+    #   - max<=8    keeps Even (worst gap 7) and drops Bursty (worst gap 20)
+    # so a site can pass one filter and fail the other in either direction -- which is
+    # exactly why both exist. Set together they demand "usually tight AND never blind".
+    pool = [
+        *[_pass("Bursty", d) for d in (1, 3, 5, 25)],  # median 2, worst 20
+        *[_pass("Even", d) for d in (1, 8, 15, 22)],  # median 7, worst 7
+    ]
+    assert [s.task for s in rank_site_coverage(pool, median_revisit_days=5)] == ["Bursty"]
+    assert [s.task for s in rank_site_coverage(pool, max_revisit_days=8)] == ["Even"]
+    # Both bounds at once: neither site is usually-tight *and* never-blind, so empty.
+    assert rank_site_coverage(pool, median_revisit_days=5, max_revisit_days=8) == []
+
+
+def test_median_revisit_is_boundary_inclusive():
+    # A site whose median gap falls exactly on the bound is kept (at most, not below).
+    pool = [_pass("Six", d) for d in (1, 7, 13)]  # gaps 6,6 -> median 6
+    assert [s.task for s in rank_site_coverage(pool, median_revisit_days=6)] == ["Six"]
+    assert rank_site_coverage(pool, median_revisit_days=5.9) == []
+
+
+def test_median_revisit_drops_a_site_with_no_measurable_cadence():
+    # A single-pass site has no revisit gap, so it cannot be confirmed to meet any
+    # cadence requirement and is dropped -- exactly as the worst-case bound drops it.
+    pool = [_pass("Lonely", 1)]
+    assert [s.task for s in rank_site_coverage(pool, min_passes=1)] == ["Lonely"]
+    assert rank_site_coverage(pool, min_passes=1, median_revisit_days=30) == []
+
+
+def test_median_revisit_gates_the_comparable_cadence_under_comparable_ranking():
+    # A VV series on days 1, 20 and 21 (gaps 19, 1 -> median 10) with a lone HH pass
+    # at day 10: the raw dated series (gaps 9, 10, 1 -> median 9) reads tighter than
+    # the VV series a change verb can actually difference (median 10). Under 'passes'
+    # the raw 9 clears a 9.5-day bound; under 'comparable' the analysable 10 does not.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 10, pols=["HH"]),
+        _pass("Mixed", 20, pols=["VV"]),
+        _pass("Mixed", 21, pols=["VV"]),
+    ]
+    assert [s.task for s in rank_site_coverage(pool, median_revisit_days=9.5)] == ["Mixed"]
+    assert rank_site_coverage(pool, median_revisit_days=9.5, rank_by="comparable") == []
+    # A bound the 10-day VV median clears keeps it under either ranking.
+    assert [
+        s.task for s in rank_site_coverage(pool, median_revisit_days=10, rank_by="comparable")
+    ] == ["Mixed"]
+
+
+def test_median_revisit_is_orthogonal_to_recency_and_promotes_past_the_top():
+    # A typical-cadence bound selects on the median gap, not on depth or recency: a
+    # shallow but regularly-imaged site survives a bound a deep-but-sparse one fails,
+    # and it is not truncated away by a small --top before the filter runs.
+    pool = [
+        *[_pass("DeepSparse", d) for d in (1, 12, 23, 28)],  # 4 passes, median 11
+        *[_pass("Tight", d) for d in (10, 12)],  # 2 passes, median 2
+    ]
+    assert [s.task for s in rank_site_coverage(pool, top=1)] == ["DeepSparse"]
+    assert [s.task for s in rank_site_coverage(pool, top=1, median_revisit_days=5)] == ["Tight"]
+
+
+def test_median_revisit_none_applies_no_filter_and_non_positive_is_rejected():
+    import pytest
+
+    pool = [_pass("Any", d) for d in (1, 30)]  # median 29
+    assert [s.task for s in rank_site_coverage(pool, median_revisit_days=None)] == ["Any"]
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError, match="median_revisit_days must be positive"):
+            rank_site_coverage(pool, median_revisit_days=bad)
+
+
+# --------------------------------------------------------------------------- #
 # min_span: the observation-baseline filter (long-baseline sites)
 # --------------------------------------------------------------------------- #
 def test_min_span_keeps_only_long_baseline_sites():
@@ -1094,6 +1182,32 @@ def test_sites_cli_max_revisit_empty_result_names_the_cadence_bound(monkeypatch)
     assert result.exit_code == 0, result.output
     assert "revisited within 10d" in result.output
     assert "--max-revisit" in result.output  # the cadence bound is offered to loosen
+
+
+def test_sites_cli_median_revisit_filters_to_usually_imaged_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Steady", d) for d in (1, 3, 5, 25)],  # median gap 2
+        *[_pass("Sparse", d) for d in (1, 11, 21, 24)],  # median gap 10
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--median-revisit", "5"])
+    assert result.exit_code == 0, result.output
+    assert "Steady" in result.output
+    assert "Sparse" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_median_revisit_empty_result_names_the_cadence_bound(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Sparse", d) for d in (1, 11, 21, 24)]  # median gap 10
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--median-revisit", "5"])
+    assert result.exit_code == 0, result.output
+    assert "typically within 5d" in result.output
+    assert "--median-revisit" in result.output  # offered to loosen
 
 
 def test_sites_cli_min_span_filters_to_long_baseline_sites(monkeypatch):

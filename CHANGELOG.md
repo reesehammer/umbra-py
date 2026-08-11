@@ -7,6 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`median_revisit`: the *typical*-cadence axis on the discovery moat, selecting sites
+  *usually* imaged often (tolerating the odd long outage), the complement of
+  `max_revisit`'s worst-case gate, on every surface (`coverage.py`, `showcase.py`,
+  `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`, `tests/test_coverage.py`,
+  `tests/test_showcase.py`, `tests/test_index.py`, `tests/test_serve.py`,
+  `tests/test_mcp_server.py`).** The moat could already select *monitorable* sites by
+  `max_revisit` — the **worst-case** gap, dropping a site the moment *any* stretch runs
+  longer than `N` days — but that is a strict gate: one outage disqualifies an otherwise
+  reliably-imaged series. It could not ask the softer, more common question "which sites
+  are *usually* imaged frequently?", where a single long hole in an otherwise tight series
+  is tolerable. `umbra sites --median-revisit DAYS` (and `find_repeat_sites(median_revisit_days=…)`,
+  `GET`/`POST /sites?median_revisit=`, and `CatalogIndex.rank_sites(median_revisit_days=…)`
+  for `--local`) keeps only sites whose **median** revisit gap is at most `DAYS` — so a
+  mostly-tight series with one outage passes here yet fails `--max-revisit`, and a
+  uniformly-spaced looser series fails here yet passes a wide-enough worst-case bound: the
+  two are genuine complements, and set together (`--median-revisit A --max-revisit B`) they
+  demand "usually imaged every A days *and* never blind for longer than B". It is the
+  selection twin of the `median_revisit_days` figure the summary already reports, and
+  measures the same series `--rank-by` does: under `--rank-by comparable` the *analysable*
+  series' typical gap (`comparable_median_revisit_days`), so an off-polarization pass
+  filling a gap no change verb can use cannot make a site read as more regularly imaged than
+  it is. Single-sourced through the same two functions every other discovery filter is —
+  `showcase.select_featured_sites` (the pool path) and `CatalogIndex.rank_sites` (the
+  whole-archive index) — where, like `max_revisit` (a median of consecutive gaps is no more
+  a SQL aggregate than a max of them), it is applied in Python on the same per-task items
+  the index already reads to summarise, pinned byte-identical to the pool path by the
+  index-vs-pool parity test, and drops the raw-count SQL `LIMIT` when set so a usually-tight
+  site outside the raw top-`top` is promoted rather than truncated before the filter runs. A
+  site with fewer than two passes in the gated series has no measurable cadence and is
+  dropped, exactly as `max_revisit` drops it. It is orthogonal to the recency bounds and adds
+  no field to the `site-coverage` contract (a filter input, like `max_revisit`), so no schema
+  moved. With it the discovery moat selects on cadence from *both* readings — worst-case and
+  typical — closing the flagged `docs/TODO.md` follow-on.
 - **`first_since` / `first_before`: the onset (first-seen) axis on the discovery moat,
   selecting newly-appeared and long-established sites and completing the recency axis to
   two-sided on *both* the earliest and the newest pass, on every surface (`coverage.py`,

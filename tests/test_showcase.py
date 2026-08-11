@@ -372,6 +372,22 @@ def test_select_featured_sites_max_revisit_keeps_reliably_imaged_sites():
     assert [i.datetime.day for i in kept[0].items] == [1, 7, 13]  # full history kept
 
 
+def test_select_featured_sites_median_revisit_keeps_usually_imaged_sites():
+    """median_revisit keeps a site only if its *typical* (median) revisit gap is at
+    most the bound -- the complement of max_revisit: a mostly-tight series with one
+    long outage passes here but fails the worst-case bound, and vice versa."""
+    items = [
+        *[_pass("Bursty", d) for d in (1, 3, 5, 25)],  # median 2, worst 20
+        *[_pass("Even", d) for d in (1, 8, 15, 22)],  # median 7, worst 7
+    ]
+    kept = showcase.select_featured_sites(items, median_revisit_days=5)
+    assert [s.task for s in kept] == ["Bursty"]
+    assert [i.datetime.day for i in kept[0].items] == [1, 3, 5, 25]  # full history kept
+    # The worst-case bound selects the other site, confirming the two are complements.
+    kept_max = showcase.select_featured_sites(items, max_revisit_days=8)
+    assert [s.task for s in kept_max] == ["Even"]
+
+
 def test_select_featured_sites_min_span_keeps_long_baseline_sites():
     """min_span keeps a site only if its observation span is at least the bound,
     dropping a short-window series and retaining full history -- a different axis from

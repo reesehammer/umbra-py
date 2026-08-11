@@ -305,6 +305,7 @@ def select_featured_sites(
     first_since: DateLike = None,
     first_before: DateLike = None,
     max_revisit_days: float | None = None,
+    median_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
 ) -> list[FeaturedSite]:
@@ -393,6 +394,17 @@ def select_featured_sites(
         ``active_since`` / ``active_before`` and to ``start`` / ``end``. A site with
         fewer than two passes in the gated series has no measurable cadence and is
         dropped. ``None`` (the default) applies no cadence filter.
+    median_revisit_days:
+        The *typical*-cadence twin of ``max_revisit_days`` -- keep only sites whose
+        **median** revisit gap is at most this many days, so a site *usually* imaged
+        often is kept even if a single stretch runs long, where ``max_revisit_days``
+        drops it the moment any gap exceeds the bound. It gates the same depth
+        ``rank_by`` measures (:func:`umbra_py.coverage._passes_median_revisit`): under
+        ``"comparable"`` the *analysable* series' typical gap
+        (``comparable_median_revisit_days``). It is orthogonal to ``max_revisit_days``
+        (typical gap vs worst gap), to the recency bounds and to ``start`` / ``end``.
+        A site with fewer than two passes in the gated series is dropped. ``None``
+        (the default) applies no typical-cadence filter.
     min_span_days:
         Keep only sites imaged over *at least this long* -- a baseline filter on each
         site's observation **span** (whole days from its first dated pass to its
@@ -444,18 +456,21 @@ def select_featured_sites(
     from .coverage import (  # noqa: PLC0415
         _check_max_revisit,
         _check_max_span,
+        _check_median_revisit,
         _check_min_span,
         _check_ranking,
         _largest_comparable_group,
         _min_passes_depth,
         _passes_cadence,
         _passes_max_span,
+        _passes_median_revisit,
         _passes_span,
         _rank_sort_key,
     )
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_median_revisit(median_revisit_days)
     _check_min_span(min_span_days)
     _check_max_span(max_span_days)
     by_task: dict[str, list[UmbraItem]] = {}
@@ -508,6 +523,17 @@ def select_featured_sites(
         # cadence in that series is dropped.
         if max_revisit_days is not None and not _passes_cadence(
             ordered, rank_by=rank_by, max_revisit_days=max_revisit_days
+        ):
+            continue
+        # Typical-cadence gate: keep a site only if the series ``rank_by`` measures is
+        # *usually* revisited at least this often (its median gap is at most the
+        # bound). The complement of the worst-case gate above -- it tolerates a single
+        # long outage where ``max_revisit`` does not. Gated on the same items and the
+        # same ``_passes_median_revisit`` the index path uses (byte-identical), and on
+        # the *analysable* subset under ``"comparable"``. A site with no measurable
+        # cadence is dropped.
+        if median_revisit_days is not None and not _passes_median_revisit(
+            ordered, rank_by=rank_by, median_revisit_days=median_revisit_days
         ):
             continue
         # Span gate: keep a site only if the series ``rank_by`` measures covers a

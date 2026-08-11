@@ -384,6 +384,18 @@ def _print_site_coverage(site) -> None:
     "Orthogonal to --active-since / --active-before.",
 )
 @click.option(
+    "--median-revisit",
+    type=float,
+    default=None,
+    help="Keep only sites TYPICALLY revisited at least this often -- a cadence filter "
+    "on each site's MEDIAN gap (in days), so a site usually imaged often is kept even "
+    "if a single stretch runs long, where --max-revisit drops it the moment any gap "
+    "exceeds the bound. The answer for 'usually imaged frequently' rather than 'never "
+    "blind for longer than N days'; set both to combine the two. Counts the cadence "
+    "--rank-by measures (the usable series' typical gap under --rank-by comparable). "
+    "Orthogonal to --active-since / --active-before.",
+)
+@click.option(
     "--min-span",
     type=float,
     default=None,
@@ -432,6 +444,7 @@ def sites(
     first_since,
     first_before,
     max_revisit,
+    median_revisit,
     min_span,
     max_span,
     as_json,
@@ -494,7 +507,10 @@ def sites(
     that between consecutive passes is dropped: the answer for "which sites are imaged
     often enough to monitor?" It counts the cadence --rank-by measures (the usable
     series' worst gap under --rank-by comparable) and is orthogonal to the --active-*
-    recency filters.
+    recency filters. --median-revisit is its typical-cadence twin -- keep only sites
+    whose median gap is at most that many days, so a site usually imaged often is kept
+    even if a single stretch runs long: "usually imaged frequently" rather than "never
+    blind for longer than N days". Set both to combine the two.
 
     --min-span keeps only sites imaged over at least that long -- a baseline filter on
     each site's observation span (in days, first pass to last), so a series confined to
@@ -547,6 +563,7 @@ def sites(
                 first_since=first_since,
                 first_before=first_before,
                 max_revisit_days=max_revisit,
+                median_revisit_days=median_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,
                 **filters,
@@ -569,6 +586,7 @@ def sites(
             first_since=first_since,
             first_before=first_before,
             max_revisit_days=max_revisit,
+            median_revisit_days=median_revisit,
             min_span_days=min_span,
             max_span_days=max_span,
         )
@@ -599,7 +617,12 @@ def sites(
             onset = f" first imaged on/before {first_before}"
         else:
             onset = ""
-        cadence = f", revisited within {max_revisit:g}d" if max_revisit is not None else ""
+        cadence_parts = []
+        if max_revisit is not None:
+            cadence_parts.append(f"revisited within {max_revisit:g}d")
+        if median_revisit is not None:
+            cadence_parts.append(f"typically within {median_revisit:g}d")
+        cadence = f", {', '.join(cadence_parts)}" if cadence_parts else ""
         if min_span is not None and max_span is not None:
             baseline = f", imaged over {min_span:g}-{max_span:g}d"
         elif min_span is not None:
@@ -616,6 +639,7 @@ def sites(
                 ("--first-since", first_since),
                 ("--first-before", first_before),
                 ("--max-revisit", max_revisit),
+                ("--median-revisit", median_revisit),
                 ("--min-span", min_span),
                 ("--max-span", max_span),
             )
