@@ -1551,6 +1551,50 @@ with the packaging facts it describes.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 
+#### Authorize it (optional secrets)
+
+Every tool works with **no credentials** — that is the open bucket. Four
+environment variables unlock more, and the client passes them to the server
+through an `env` block alongside `command`:
+
+| Variable | What it unlocks |
+| --- | --- |
+| `UMBRA_CANOPY_TOKEN` | Points the same search tools at Umbra's authenticated **Canopy** commercial archive instead of the open bucket. |
+| `UMBRA_INDEX_DB` | A prebuilt catalog index (`umbra index build` / `umbra index fetch`) so search reads the index instead of walking the public bucket per query. |
+| `ANTHROPIC_API_KEY` *(or `OPENAI_API_KEY`)* | Enables the two opt-in model tools, `describe_scene` and `narrate_change`. Every other tool is deterministic and calls no model. |
+
+```json
+{
+  "mcpServers": {
+    "umbra": {
+      "command": "uvx",
+      "args": ["--from", "umbra-py[mcp]", "umbra-mcp"],
+      "env": {
+        "UMBRA_CANOPY_TOKEN": "your-canopy-token",
+        "UMBRA_INDEX_DB": "/path/to/umbra-index.db",
+        "ANTHROPIC_API_KEY": "your-anthropic-key"
+      }
+    }
+  }
+}
+```
+
+#### Add it to Claude Code
+
+Register the stdio server from the terminal — command after `--`, one `-e` per
+secret (all optional):
+
+```bash
+claude mcp add umbra -e UMBRA_CANOPY_TOKEN=your-token -- uvx --from 'umbra-py[mcp]' umbra-mcp
+```
+
+Then run `/mcp` inside Claude Code to confirm `umbra` shows **connected** and to
+inspect its tools. `/mcp` is also where any server that needs an interactive
+sign-in (a remote connector's OAuth flow) is authorized — a step that has to
+happen in an interactive session, not a headless/automated one. `umbra-mcp`
+itself needs no such sign-in: its only "authorization" is the optional secrets
+above.
+
 The server offers `search_catalog`, `find_repeat_sites` (rank the archive's most
 repeat-imaged sites when you don't yet know *which* site to analyse — the
 discovery step before the change verbs, returning each site's passes oldest-first
