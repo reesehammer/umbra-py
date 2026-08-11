@@ -352,6 +352,7 @@ def rank_site_coverage(
     min_passes: int = 2,
     rank_by: str = "passes",
     active_since: DateLike = None,
+    active_before: DateLike = None,
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
@@ -388,11 +389,22 @@ def rank_site_coverage(
     measures) and distinct from ``start`` / ``end`` (those bound which *passes*
     enter the pool; this selects whole sites by recency and keeps each survivor's
     full history). ``None`` (the default) applies no recency filter.
+
+    ``active_before`` is the complement -- keep only sites whose newest dated pass
+    is *on or before* that date (a dormant series that stopped imaging), so with
+    ``active_since`` it selects sites whose latest pass falls within a window. A span
+    expression snaps to its last day (``active_before="2024"`` is "last imaged on or
+    before 2024-12-31"), symmetric with ``end``. ``None`` applies no upper bound.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
     _check_ranking(rank_by)
     sites = select_featured_sites(
-        items, count=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+        items,
+        count=top,
+        min_passes=min_passes,
+        rank_by=rank_by,
+        active_since=active_since,
+        active_before=active_before,
     )
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

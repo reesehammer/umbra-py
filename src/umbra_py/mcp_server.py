@@ -403,6 +403,7 @@ def find_repeat_sites(
     min_passes: int = 2,
     rank_by: str = "passes",
     active_since: str | None = None,
+    active_before: str | None = None,
     local: bool | None = None,
 ) -> dict[str, Any]:
     """Rank the archive's most repeat-imaged sites — where change detection has
@@ -454,6 +455,13 @@ def find_repeat_sites(
     ``start`` / ``end``: those bound which *passes* enter the pool (truncating every
     series to a window), whereas this selects whole sites by recency and keeps each
     survivor's full history.
+
+    ``active_before`` is the complement -- keep only sites whose newest pass is *on
+    or before* that date (a dormant series that stopped imaging). Pass both to select
+    sites whose latest pass falls *within* a window (``active_since <= last <=
+    active_before``). Same grammar as ``active_since``, but a bare year/month covers
+    the whole named period (``active_before="2024"`` is "last imaged on or before
+    2024-12-31"), symmetric with ``end``.
 
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index
@@ -528,6 +536,7 @@ def find_repeat_sites(
                 min_passes=min_passes,
                 rank_by=rank_by,
                 active_since=active_since,
+                active_before=active_before,
             )
         else:
             pool = list(
@@ -547,7 +556,12 @@ def find_repeat_sites(
                 )
             )
             sites = rank_site_coverage(
-                pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+                pool,
+                top=top,
+                min_passes=min_passes,
+                rank_by=rank_by,
+                active_since=active_since,
+                active_before=active_before,
             )
     finally:
         if isinstance(source, CatalogIndex):

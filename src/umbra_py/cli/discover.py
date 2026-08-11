@@ -343,6 +343,15 @@ def _print_site_coverage(site) -> None:
     "every series to a window), this selects whole sites by recency and keeps each "
     "survivor's full history.",
 )
+@click.option(
+    "--active-before",
+    default=None,
+    help="Keep only sites last imaged ON OR BEFORE this date -- the complement of "
+    "--active-since, selecting dormant series that stopped imaging. Set both to "
+    "find sites whose newest pass falls WITHIN a window. Same grammar as "
+    "--active-since, but a bare year/month covers the whole period (--active-before "
+    "2024 is 'last imaged on or before 2024-12-31'), symmetric with --end.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -364,6 +373,7 @@ def sites(
     min_passes,
     rank_by,
     active_since,
+    active_before,
     as_json,
     local,
     db_path,
@@ -408,6 +418,9 @@ def sites(
     repeat-imaged sites are still live monitoring targets?" It is orthogonal to
     --rank-by / --min-passes and, unlike --start (which truncates every series to a
     window), selects whole sites and keeps each survivor's full history.
+    --active-before is the complement (sites last imaged on or before a date, i.e.
+    dormant series); set both to select sites whose newest pass falls within a
+    window.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -445,6 +458,7 @@ def sites(
                 min_passes=min_passes,
                 rank_by=rank_by,
                 active_since=active_since,
+                active_before=active_before,
                 **filters,
             )
         pool_size = None
@@ -456,7 +470,12 @@ def sites(
             **filters,
         )
         ranked = rank_site_coverage(
-            pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+            pool,
+            top=top,
+            min_passes=min_passes,
+            rank_by=rank_by,
+            active_since=active_since,
+            active_before=active_before,
         )
         pool_size = len(pool)
     if as_json:
@@ -469,8 +488,23 @@ def sites(
         )
         widen = "Build/refresh the index" if pool_size is None else "Widen --limit or the search"
         depth = "comparable passes" if rank_by == "comparable" else "passes"
-        recency = f" imaged on/after {active_since}" if active_since else ""
-        loosen = " or --active-since" if active_since else ""
+        if active_since and active_before:
+            recency = f" last imaged between {active_since} and {active_before}"
+        elif active_since:
+            recency = f" imaged on/after {active_since}"
+        elif active_before:
+            recency = f" last imaged on/before {active_before}"
+        else:
+            recency = ""
+        active_flags = [
+            flag
+            for flag, value in (
+                ("--active-since", active_since),
+                ("--active-before", active_before),
+            )
+            if value
+        ]
+        loosen = f" or {' / '.join(active_flags)}" if active_flags else ""
         click.echo(
             f"No site in {where} has {min_passes}+ {depth}{recency}. "
             f"{widen}, or lower --min-passes{loosen}."

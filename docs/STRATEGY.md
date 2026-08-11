@@ -774,6 +774,25 @@ from:
   filter input, like `min_passes`), so no schema moved. **With it the discovery
   answer selects on all three of the axes it reports — depth, cadence *and*
   recency — not only ranks and qualifies on depth.** See the CHANGELOG.
+  ~~**Open:** `active_since` gated only one side of the recency axis — a site's
+  newest pass being on or *after* a date (still-active sites) — so the moat could
+  not select the *dormant* series that stopped imaging, nor a site whose latest pass
+  falls within a window.~~ **shipped** — `active_before` adds the twin upper bound
+  on the same axis, on every surface at once (`umbra sites --active-before`,
+  `find_repeat_sites`, `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for
+  `--local`): it keeps only sites whose newest dated pass is on or *before* a date,
+  and set with `--active-since` the two bound the site's latest pass to a window
+  (`active_since <= last <= active_before`). It reuses `active_since`'s exact
+  machinery — the same two single-sourced functions (`select_featured_sites` and
+  `CatalogIndex.rank_sites`'s `HAVING … AND MAX(acq_date) <= ?` twin clause), pinned
+  byte-for-byte identical between the SQL and pool paths for every cutoff and window
+  — and the same `dates.parse_date_bound` grammar, but snapping a span expression to
+  its *last* day (`--active-before 2024` is "last imaged on or before 2024-12-31"),
+  symmetric with `--end` where `--active-since` snaps to the first day. It adds no
+  field to the `site-coverage` contract (a filter input, like `active_since`), so no
+  schema moved. **With it the discovery moat selects on activity in both directions
+  — still-active, dormant, or a latest-pass window — completing the recency axis.**
+  See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

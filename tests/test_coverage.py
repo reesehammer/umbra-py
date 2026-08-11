@@ -556,6 +556,53 @@ def test_active_since_accepts_a_relative_expression():
 
 
 # --------------------------------------------------------------------------- #
+# active_before: the upper recency bound (dormant series / activity windows)
+# --------------------------------------------------------------------------- #
+def test_active_before_keeps_only_sites_that_stopped_imaging():
+    # The complement of active_since: a cutoff between the two series' newest passes
+    # keeps the dormant (Stale) site and drops the still-active (Fresh) one.
+    pool = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],
+        *[_pass("Stale", d) for d in (1, 2, 3)],
+    ]
+    assert [s.task for s in rank_site_coverage(pool, active_before="2024-01-10")] == ["Stale"]
+
+
+def test_active_before_is_boundary_inclusive_and_keeps_full_history():
+    # A site whose newest pass falls exactly on the cutoff is kept (on or before),
+    # with all its passes retained. One day before the newest pass drops it.
+    pool = [_pass("Stale", d) for d in (1, 5, 10)]
+    [site] = rank_site_coverage(pool, active_before="2024-01-10")
+    assert site.task == "Stale"
+    assert site.passes == 3
+    assert rank_site_coverage(pool, active_before="2024-01-09") == []
+
+
+def test_active_before_and_since_bound_the_newest_pass_to_a_window():
+    # Set together they select sites whose *latest* pass falls within [since, before].
+    pool = [
+        *[_pass("TooOld", d) for d in (1, 2)],  # newest 2024-01-02, below the window
+        *[_pass("InWindow", d) for d in (10, 12)],  # newest 2024-01-12, inside
+        *[_pass("TooNew", d) for d in (25, 26)],  # newest 2024-01-26, above the window
+    ]
+    kept = rank_site_coverage(pool, active_since="2024-01-05", active_before="2024-01-20")
+    assert [s.task for s in kept] == ["InWindow"]
+
+
+def test_active_before_snaps_a_span_to_its_last_day():
+    # A bare month snaps to its last day (2024-01-31, is_end), so a mid-month newest
+    # pass is on or before it -- symmetric with the --end bound. Snapping to the
+    # first day instead (as active_since does) would wrongly drop it.
+    pool = [_pass("Jan", 15), _pass("Jan", 16)]  # newest 2024-01-16
+    assert [s.task for s in rank_site_coverage(pool, active_before="2024-01")] == ["Jan"]
+
+
+def test_active_before_none_applies_no_filter():
+    pool = [_pass("Any", d) for d in (1, 2)]
+    assert [s.task for s in rank_site_coverage(pool, active_before=None)] == ["Any"]
+
+
+# --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
 def _patch_gather(monkeypatch, pool):
@@ -609,6 +656,34 @@ def test_sites_cli_active_since_empty_result_names_the_recency_bound(monkeypatch
     assert result.exit_code == 0, result.output
     assert "imaged on/after 2024-06-01" in result.output
     assert "--active-since" in result.output  # the recency bound is offered to loosen
+
+
+def test_sites_cli_active_before_filters_to_dormant_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],
+        *[_pass("Stale", d) for d in (1, 2, 3)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--active-before", "2024-01-10"])
+    assert result.exit_code == 0, result.output
+    assert "Stale" in result.output
+    assert "Fresh" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_active_window_empty_result_names_both_bounds(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Stale", d) for d in (1, 2, 3)]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(
+        cli, ["sites", "--active-since", "2024-06-01", "--active-before", "2024-12-01"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "last imaged between 2024-06-01 and 2024-12-01" in result.output
+    assert "--active-since" in result.output and "--active-before" in result.output
 
 
 def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):

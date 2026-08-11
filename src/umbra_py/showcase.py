@@ -301,6 +301,7 @@ def select_featured_sites(
     min_passes: int = 2,
     rank_by: str = "passes",
     active_since: DateLike = None,
+    active_before: DateLike = None,
 ) -> list[FeaturedSite]:
     """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
 
@@ -346,6 +347,18 @@ def select_featured_sites(
         *passes* enter the pool (truncating every series to a window), whereas this
         selects whole sites by recency and keeps each surviving site's *full*
         history. ``None`` (the default) applies no recency filter.
+    active_before:
+        The complement of ``active_since``: keep only sites whose **newest** dated
+        pass is *on or before* this date, so a series that stopped imaging (a
+        dormant site) is kept and one still being revisited is dropped. Set with
+        ``active_since`` it selects sites whose latest pass falls *within* a window
+        (``active_since <= last <= active_before``). It accepts the same grammar
+        ``active_since`` does, but a span expression snaps to its *last* day (a bare
+        year/month covers the whole named period), so ``active_before="2024"`` means
+        "last imaged on or before 2024-12-31" -- symmetric with the ``end`` bound.
+        Like ``active_since`` it gates on the whole site's latest pass, independent
+        of ``rank_by`` / ``min_passes`` and of ``start`` / ``end``. ``None`` (the
+        default) applies no upper recency bound.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
@@ -353,6 +366,9 @@ def select_featured_sites(
     if count <= 0:
         return []
     since = _coerce_date(active_since)
+    # ``active_before`` snaps a span expression to its last day (``is_end``), so a
+    # bare year/month bounds the whole named period -- symmetric with ``end``.
+    before = _coerce_date(active_before, is_end=True)
     # Single-sourced with the discovery layer: the same key builder and the same
     # comparable-group definition, so the featured gallery, ``umbra sites`` and the
     # index ranker cannot disagree about what "most repeat-imaged" means under
@@ -381,11 +397,17 @@ def select_featured_sites(
     ranked: list[tuple[FeaturedSite, int]] = []
     for task, passes in by_task.items():
         ordered = sorted(passes, key=lambda i: i.datetime or datetime.min)
-        # Recency gate: drop a site whose newest dated pass predates the cutoff.
-        # ``ordered`` is oldest-first and every member is dated (filtered above),
-        # so the last pass is the latest -- the ``last`` a summary reports. The
-        # ``or datetime.min`` keeps the read typed, exactly as the sort key does.
-        if since is not None and (ordered[-1].datetime or datetime.min).date() < since:
+        # Recency gate: select a site by its newest dated pass. ``ordered`` is
+        # oldest-first and every member is dated (filtered above), so the last pass
+        # is the latest -- the ``last`` a summary reports. ``active_since`` drops a
+        # site whose latest predates the lower cutoff; ``active_before`` drops one
+        # whose latest is after the upper cutoff (so the two together keep sites
+        # whose latest pass falls within the window). The ``or datetime.min`` keeps
+        # the read typed, exactly as the sort key does.
+        newest = (ordered[-1].datetime or datetime.min).date()
+        if since is not None and newest < since:
+            continue
+        if before is not None and newest > before:
             continue
         comparable = len(_largest_comparable_group(ordered)) if rank_by == "comparable" else 0
         depth = _min_passes_depth(

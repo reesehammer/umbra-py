@@ -1899,9 +1899,15 @@ def _rank_sites_pool_baseline(idx, **filters):
     min_passes = filters.pop("min_passes", 2)
     rank_by = filters.pop("rank_by", "passes")
     active_since = filters.pop("active_since", None)
+    active_before = filters.pop("active_before", None)
     pool = list(idx.search(limit=None, **filters))
     return rank_site_coverage(
-        pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+        pool,
+        top=top,
+        min_passes=min_passes,
+        rank_by=rank_by,
+        active_since=active_since,
+        active_before=active_before,
     )
 
 
@@ -1941,6 +1947,13 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"active_since": "2024-01-04"},
             {"active_since": "2024-01-06"},
             {"active_since": "2024-01-10"},
+            # active_before is the twin MAX(acq_date) <= ? clause; a bare month
+            # snaps to its last day both in SQL and the pool path, and the two
+            # together bound the newest pass to a window.
+            {"active_before": "2024-01-04"},
+            {"active_before": "2024-01-05"},
+            {"active_before": "2024-01"},
+            {"active_since": "2024-01-02", "active_before": "2024-01-08"},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters
@@ -1987,6 +2000,23 @@ def test_rank_sites_active_since_on_the_exact_filter_branch(tmp_path):
     with _index(tmp_path, pool) as idx:
         recent = idx.rank_sites(polarizations=["VV"], active_since="2024-01-05")
     assert [(s.task, s.passes) for s in recent] == [("Fresh", 3)]
+
+
+def test_rank_sites_active_before_filters_whole_archive_to_dormant_sites(tmp_path):
+    """active_before keeps a stale site and drops an actively-imaged one, and with
+    active_since bounds the site's newest pass to a window -- across the whole
+    index, retaining every pass of a survivor."""
+    pool = [
+        *[_site_item("Fresh", d) for d in (7, 8, 9)],  # newest 2024-01-09
+        *[_site_item("Stale", d) for d in (1, 2, 3)],  # newest 2024-01-03
+    ]
+    with _index(tmp_path, pool) as idx:
+        dormant = idx.rank_sites(active_before="2024-01-05")
+        boundary = idx.rank_sites(active_before="2024-01-03")  # Stale's own newest
+        window = idx.rank_sites(active_since="2024-01-01", active_before="2024-01-05")
+    assert [(s.task, s.passes) for s in dormant] == [("Stale", 3)]  # full history kept
+    assert [s.task for s in boundary] == ["Stale"]  # on-or-before is inclusive
+    assert [s.task for s in window] == ["Stale"]  # newest pass inside [since, before]
 
 
 def test_rank_sites_by_comparable_reranks_whole_archive(tmp_path):

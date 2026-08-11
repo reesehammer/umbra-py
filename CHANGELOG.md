@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`active_before`: the upper recency bound on the discovery moat, completing the
+  activity-window selection on every surface (`showcase.py`, `coverage.py`,
+  `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`,
+  `tests/test_showcase.py`, `tests/test_coverage.py`, `tests/test_index.py`,
+  `tests/test_serve.py`, `tests/test_mcp_server.py`).** `active_since` added the
+  moat's missing *recency* axis but gated only one side of it — a site's **newest**
+  pass being on or *after* a date (still-active sites). It had no way to ask the
+  complement: which repeat-imaged sites have gone *dormant* (stopped imaging), or
+  which sites' latest pass falls *within* a window. `umbra sites --active-before
+  DATE` (and `find_repeat_sites(active_before=…)`, `GET`/`POST /sites?active_before=`,
+  and `CatalogIndex.rank_sites(active_before=…)` for `--local`) keeps only sites
+  whose newest dated pass is on or *before* `DATE`, and set together with
+  `--active-since` the two bound the site's latest pass to a window
+  (`active_since <= last <= active_before`). It takes the same grammar
+  `active_since` does (an ISO date, a bare year/month, or a relative expression like
+  `"6 months ago"`), but a span expression snaps to its *last* day — a bare
+  year/month covers the whole named period, so `--active-before 2024` means "last
+  imaged on or before 2024-12-31" — symmetric with the `--end` bound, where
+  `--active-since` snaps to the first day. It is single-sourced through the same two
+  functions `active_since` is: `showcase.select_featured_sites` (the pool path)
+  gates each site's newest pass in Python, and `CatalogIndex.rank_sites` answers it
+  whole-archive in the *same* `GROUP BY` — a twin `HAVING … AND MAX(acq_date) <= ?`
+  clause that costs nothing beyond the group already computed and drops an undatable
+  site (a NULL `MAX` fails `<= ?`) exactly as the pool path does. The byte-identical
+  index-vs-pool pinning test now covers `active_before` and the combined window for
+  every cutoff, so CLI, agent tools, the hosted API and the featured gallery cannot
+  disagree about which sites are dormant. On the HTTP surface a malformed date is a
+  clean `400` (coerced in the route with `is_end=True`, like `end`), and the `umbra
+  sites` empty-result message names the recency window it applied and offers both
+  `--active-*` bounds to loosen. Adds no field to the `site-coverage` contract (a
+  filter input, like `active_since`), so no schema moved. This completes the
+  discovery moat's recency axis: the moat can now *select* on activity in both
+  directions — still-active, dormant, or a latest-pass window — alongside the depth
+  and cadence it reports.
 - **`active_since`: a recency filter on the discovery moat, on every surface
   (`showcase.py`, `coverage.py`, `index.py`, `cli/discover.py`, `serve.py`,
   `mcp_server.py`, `tests/test_showcase.py`, `tests/test_coverage.py`,

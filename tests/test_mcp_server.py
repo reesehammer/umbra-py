@@ -259,6 +259,28 @@ def test_find_repeat_sites_active_since_filters_to_recent_sites(monkeypatch):
     assert [(s["task"], s["passes"]) for s in out["sites"]] == [("Fresh", 3)]
 
 
+def test_find_repeat_sites_active_before_filters_to_dormant_sites(monkeypatch):
+    # The complement of active_since: a cutoff between the two series' newest passes
+    # keeps the dormant site (Stale, newest 2024-03-08), dropping the live one, with
+    # its full history intact; with active_since it bounds the newest pass to a window.
+    pool = [
+        *[_site_pass("Fresh", d) for d in (5, 6, 7)],  # newest 2024-07-08
+        *[_site_pass("Stale", d) for d in (1, 2, 3)],  # newest 2024-03-08
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    dormant = ms.find_repeat_sites(local=False, active_before="2024-04-01")
+    assert [(s["task"], s["passes"]) for s in dormant["sites"]] == [("Stale", 3)]
+    window = ms.find_repeat_sites(
+        local=False, active_since="2024-04-01", active_before="2024-08-01"
+    )
+    assert [s["task"] for s in window["sites"]] == ["Fresh"]
+
+
 def test_find_repeat_sites_rejects_unknown_rank_by():
     with pytest.raises(ValueError, match="rank_by must be one of"):
         ms.find_repeat_sites(rank_by="deepest", local=False)

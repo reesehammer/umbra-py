@@ -322,6 +322,24 @@ def test_select_featured_sites_active_since_filters_by_recency():
     assert [i.datetime.day for i in survive[0].items] == [20, 21, 22]
 
 
+def test_select_featured_sites_active_before_selects_dormant_sites_and_windows():
+    """active_before keeps a site by its newest pass being on or before the cutoff
+    (the complement of active_since), and with it bounds the newest pass to a
+    window, retaining each survivor's full history."""
+    items = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],  # newest 2024-01-22
+        *[_pass("Stale", d) for d in (1, 2, 3)],  # newest 2024-01-03
+    ]
+    dormant = showcase.select_featured_sites(items, active_before="2024-01-10")
+    assert [s.task for s in dormant] == ["Stale"]
+    assert [i.datetime.day for i in dormant[0].items] == [1, 2, 3]  # full history kept
+    # With active_since it selects sites whose newest pass falls within the window.
+    window = showcase.select_featured_sites(
+        items, active_since="2024-01-15", active_before="2024-01-25"
+    )
+    assert [s.task for s in window] == ["Fresh"]
+
+
 def _pass_pol(task: str, day: int, pol: str) -> UmbraItem:
     """A featured-gallery pass carrying a polarization, so the comparable ranking
     (largest same-polarization dated subset) can be exercised."""
