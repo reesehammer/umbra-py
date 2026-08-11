@@ -199,6 +199,51 @@ def test_find_repeat_sites_ranks_the_pool_and_hands_pass_urls_onward(monkeypatch
     assert "max_per_task" not in _FakeCatalog.kwargs
 
 
+def test_find_repeat_sites_echoes_the_ranking_and_selection_inputs(monkeypatch):
+    # The answer records how it was ranked and filtered, so a chain reads the
+    # selection from the result rather than from its own request. Dates are echoed
+    # as the raw expressions the caller passed, not the day they resolve to.
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter([_site_pass("Alpha", d) for d in (1, 3, 6)])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(
+        local=False,
+        rank_by="recency",
+        top=5,
+        min_passes=3,
+        active_since="6 months ago",
+        max_revisit_days=45.0,
+    )
+
+    query = out["query"]
+    assert query["rank_by"] == "recency"
+    assert query["top"] == 5
+    assert query["min_passes"] == 3
+    # The raw expression is preserved verbatim -- "what did I ask for?".
+    assert query["active_since"] == "6 months ago"
+    assert query["max_revisit_days"] == 45.0
+    # Every selection key is present; unset filters echo as null.
+    assert query["active_before"] is None
+    assert query["first_since"] is None
+    assert query["median_revisit_days"] is None
+    assert query["min_span_days"] is None
+    assert set(query) == {
+        "rank_by",
+        "top",
+        "min_passes",
+        "active_since",
+        "active_before",
+        "first_since",
+        "first_before",
+        "max_revisit_days",
+        "median_revisit_days",
+        "min_span_days",
+        "max_span_days",
+    }
+
+
 def test_find_repeat_sites_geocodes_place_and_reports_it(monkeypatch):
     monkeypatch.setattr(ms, "_geocode_place", lambda q: ((-68.0, 10.0, -67.0, 11.0), "Somewhere"))
 

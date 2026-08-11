@@ -50,6 +50,7 @@ from .coverage import (
     SiteCoverage,
     rank_site_coverage,
     site_coverage,
+    site_query_echo,
 )
 from .dates import parse_date_bound
 from .dem import (
@@ -346,6 +347,7 @@ __all__ = [
     "SiteCoverage",
     "site_coverage",
     "rank_site_coverage",
+    "site_query_echo",
     "build_viewer",
     "save_viewer",
     "default_pmtiles_path",

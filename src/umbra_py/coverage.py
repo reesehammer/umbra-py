@@ -83,6 +83,73 @@ def _check_ranking(rank_by: str) -> None:
         raise ValueError(f"rank_by must be one of {SITE_RANKINGS}, got {rank_by!r}")
 
 
+def _echo_date(value: object) -> object:
+    """A date bound as the caller expressed it, JSON-ready.
+
+    Passed through unchanged when it is already a string or ``None`` -- the raw
+    expression the caller supplied, which is what :func:`site_query_echo` records
+    ("what did I ask for?", not "what did that resolve to?"). A ``date`` /
+    ``datetime`` is ISO-formatted defensively so the echo is always serialisable
+    even if a resolved bound is passed in.
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def site_query_echo(
+    *,
+    rank_by: str,
+    top: int,
+    min_passes: int,
+    active_since: object = None,
+    active_before: object = None,
+    first_since: object = None,
+    first_before: object = None,
+    max_revisit_days: float | None = None,
+    median_revisit_days: float | None = None,
+    min_span_days: float | None = None,
+    max_span_days: float | None = None,
+) -> dict[str, object]:
+    """The self-describing echo of how a discovery ranking was configured.
+
+    ``find_repeat_sites`` and ``GET`` / ``POST /sites`` already echo the *resolved
+    geography* (``resolved_place`` / ``resolved_bbox`` / ``resolved_area``) so a
+    caller can see what a free-text place or task name resolved to. This is the
+    twin for the *ranking* half: the ``rank_by`` order, the ``top`` cap and
+    ``min_passes`` floor, and the recency / onset / cadence / baseline bounds that
+    decide which sites the answer contains. Emitting them makes the discovery
+    response round-trippable -- a caller (an agent driving ``find_repeat_sites ->
+    pick_change_interval -> narrate_change``, ``STRATEGY.md`` §3, or anything that
+    records what it asked for) reads the selection from the answer rather than from
+    its own request, and two answers carrying the same ``query`` echo were ranked
+    and selected the same way.
+
+    Single-sourced here so the agent tool and the HTTP surface cannot emit a
+    different shape -- the discovery moat's standing rule that no two surfaces
+    disagree about a ranking. The values are the ones the caller supplied, dates as
+    the raw expressions they passed (``"6 months ago"`` stays ``"6 months ago"``,
+    not the day it resolved to), with ``None`` for any filter left unset. The
+    *pool* filters (``start`` / ``end`` / ``products`` / the SAR properties) and
+    the resolved geography are deliberately not repeated: they are the ``search``
+    contract and the ``resolved_*`` echo respectively, and this object is the
+    ranking-and-selection half those two do not cover.
+    """
+    return {
+        "rank_by": rank_by,
+        "top": top,
+        "min_passes": min_passes,
+        "active_since": _echo_date(active_since),
+        "active_before": _echo_date(active_before),
+        "first_since": _echo_date(first_since),
+        "first_before": _echo_date(first_before),
+        "max_revisit_days": max_revisit_days,
+        "median_revisit_days": median_revisit_days,
+        "min_span_days": min_span_days,
+        "max_span_days": max_span_days,
+    }
+
+
 def _rank_sort_key(
     *,
     comparable_passes: int,

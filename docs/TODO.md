@@ -1440,12 +1440,26 @@ Follow-ons that build on it, none a blocker:
   truncates every series to a window; this selects whole sites and keeps each
   survivor's full history) and adds no field to the `site-coverage` contract. See
   the CHANGELOG. What is still open, and smaller:
-  - **The filter input is not echoed in the `find_repeat_sites` / `/sites`
+  - ~~**The filter input is not echoed in the `find_repeat_sites` / `/sites`
     response metadata.** The return carries the resolved `place` / `bbox` / `area`
     but not `active_since`, `min_passes`, `rank_by` or `top` — the ranking inputs
-    are all left off the echo alike, so a caller that wants to record what it asked
-    for reads it from its own request. Add all four together if a consumer ever
-    needs the round-trip, rather than singling out this one.
+    are all left off the echo alike.~~ **shipped** — `find_repeat_sites` and
+    `GET`/`POST /sites` now carry a `query` object echoing the ranking-and-selection
+    inputs (`rank_by`, `top`, `min_passes` and the recency / onset / cadence /
+    baseline bounds — all eleven, a `null` for any unset, a stable shape), so an
+    answer records *how* it was ranked and filtered and an agent chain
+    (`find_repeat_sites → pick_change_interval → narrate_change`) reads the selection
+    from the result rather than from its own request. Done as the entry advised —
+    "all four together, rather than singling out this one" — plus the rest of the
+    ranking inputs it named by example. Dates echo as the *raw expressions* the
+    caller passed (`"6 months ago"` verbatim, not the resolved day), single-sourced
+    through one builder (`coverage.site_query_echo`) so the agent tool and the HTTP
+    surface cannot emit a different shape, and the `/sites` OpenAPI response
+    documents the object. The pool filters (`start` / `end` / `products` / SAR
+    properties) and the resolved geography stay the `search` contract and the
+    `resolved_*` echo respectively — this object is the ranking half those two do
+    not cover. `umbra sites --json` is unchanged (it streams one record per line
+    with no wrapper). See the CHANGELOG.
   - ~~**It gates on the site's *newest* pass, so there is no "quiet since" or
     activity-*window* query.**~~ **shipped for `active_before`** — `active_before`
     (`MAX(acq_date) <= ?`) is the twin upper bound on the same axis, on every surface
@@ -1563,14 +1577,22 @@ Follow-ons that build on it, none a blocker:
   baseline are facts about the site, not one polarization subset), with `min_passes`
   still qualifying on depth; no field moved on the `site-coverage` contract (a ranking
   input). See the CHANGELOG. What is still open, and smaller:
-  - **A `"cadence"` ordering is not added.** The moat reports each site's revisit
+  - ~~**A `"cadence"` ordering is not added.** The moat reports each site's revisit
     cadence (`max_revisit_days` / `median_revisit_days` and their comparable twins) and
     filters on it, but there is no `rank_by="cadence"` to order by tightest revisit
-    first. Unlike recency (newest first) and span (longest first), a cadence order has
-    two defensible readings (worst gap vs typical gap) and a less obvious default, so it
-    waits for a consumer that wants one rather than being written on the symmetry. When
-    it lands it is one more `_rank_sort_key` branch reading a figure `SiteCoverage`
-    already carries, plus the whole-site-vs-comparable choice recency/span sidestepped.
+    first.~~ **shipped** — `rank_by="cadence"` orders sites by each site's **typical**
+    revisit gap (`median_revisit_days`), tightest first, on every surface (`umbra sites
+    --rank-by cadence`, `find_repeat_sites`, `GET`/`POST /sites`,
+    `CatalogIndex.rank_sites`). The "less obvious default" this entry flagged (worst gap
+    vs typical gap) was resolved rather than dodged: it reads the *median* gap, not the
+    worst one, because a ranking should surface the site imaged reliably *often* and a
+    worst-case ordering is dominated by a single outage — the worst-case reading stays a
+    hard *filter* (`--max-revisit`). It is the one more `_rank_sort_key` branch this
+    entry predicted, single-sourced through `SITE_RANKINGS` / `_rank_sort_key` /
+    `_temporal_rank_figures` (extended to carry the median gap), pinned byte-identical
+    between the pool and whole-archive index paths, and — like recency/span — reads the
+    whole-site figure (the entry below still tracks the comparable-subset variant). See
+    the CHANGELOG.
   - **The temporal rankings order by the whole-site figure, not the comparable one.**
     `recency`/`span` sort on the site's `last` / `span_days`, deliberately independent of
     `--rank-by comparable`'s analysable subset (a site's newest pass and baseline do not
