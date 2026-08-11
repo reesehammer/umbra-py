@@ -651,6 +651,43 @@ def test_sites_filters_by_datetime(sites_client):
     assert [s["task"] for s in body["sites"]] == ["Beta"]
 
 
+def test_sites_echoes_the_ranking_and_selection_inputs(sites_client):
+    # The answer records how it was ranked and filtered, so a client reads the
+    # selection from the response rather than from its own request. The default
+    # answer echoes the defaults; a relative date echoes verbatim (the raw
+    # expression, not the day it resolved to).
+    default = sites_client.get("/sites").json()["query"]
+    assert default["rank_by"] == "passes"
+    assert default["top"] == 20
+    assert default["min_passes"] == 2
+    assert default["active_since"] is None
+    assert default["max_revisit_days"] is None
+
+    body = sites_client.get(
+        "/sites?rank_by=recency&top=5&min_passes=3&active_since=6+months+ago&max_revisit=45"
+    ).json()
+    query = body["query"]
+    assert query["rank_by"] == "recency"
+    assert query["top"] == 5
+    assert query["min_passes"] == 3
+    assert query["active_since"] == "6 months ago"
+    assert query["max_revisit_days"] == 45.0
+    # Every selection key is present, unset filters as null -- a stable shape.
+    assert set(query) == {
+        "rank_by",
+        "top",
+        "min_passes",
+        "active_since",
+        "active_before",
+        "first_since",
+        "first_before",
+        "max_revisit_days",
+        "median_revisit_days",
+        "min_span_days",
+        "max_span_days",
+    }
+
+
 def test_sites_active_since_keeps_only_recently_imaged_sites(sites_client):
     # Alpha's newest pass is 2024-01-21, Beta's is 2024-02-05; a cutoff between
     # them drops the stale site and keeps the live one -- discovery for "still
@@ -955,6 +992,34 @@ def test_post_sites_matches_get_sites(sites_client):
     assert post_body["count"] == get_body["count"]
     assert [(s["task"], s["passes"]) for s in post_body["sites"]] == [("Alpha", 3), ("Beta", 2)]
     assert post_body["attribution"].startswith("Contains Umbra open data")
+
+
+def test_post_sites_echoes_the_ranking_and_selection_inputs(sites_client):
+    # The POST twin echoes the same query shape as GET, from body fields, with the
+    # defaults filled in (so the echo says what actually ranked, not what the body
+    # happened to omit).
+    default = sites_client.post("/sites", json={}).json()["query"]
+    assert default["rank_by"] == "passes"
+    assert default["top"] == 20
+    assert default["min_passes"] == 2
+
+    query = sites_client.post(
+        "/sites",
+        json={
+            "rank_by": "span",
+            "top": 3,
+            "min_passes": 3,
+            "first_since": "2024",
+            "min_span": 10,
+        },
+    ).json()["query"]
+    assert query["rank_by"] == "span"
+    assert query["top"] == 3
+    assert query["min_passes"] == 3
+    # A bare year is echoed as the caller wrote it, not its resolved bound.
+    assert query["first_since"] == "2024"
+    assert query["min_span_days"] == 10.0
+    assert query["active_before"] is None
 
 
 def test_post_sites_respects_top_and_min_passes(sites_client):

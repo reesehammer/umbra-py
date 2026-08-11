@@ -556,8 +556,11 @@ def find_repeat_sites(
     mixed) — and the
     ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
     to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
-    ``count`` (sites returned), the pool ``source`` and the resolved
-    ``place`` / ``bbox`` / ``area``, and the attribution line.
+    ``count`` (sites returned), the pool ``source``, the resolved
+    ``place`` / ``bbox`` / ``area``, a ``query`` echo of the ranking-and-selection
+    inputs (``rank_by``, ``top``, ``min_passes`` and the recency / onset / cadence /
+    baseline bounds, as you passed them) so the answer records how it was ranked and
+    filtered, and the attribution line.
 
     ``local`` selects the backend exactly as ``search_catalog`` does — unset uses
     the on-disk index when present (instant) and a live S3 walk otherwise. With a
@@ -573,6 +576,7 @@ def find_repeat_sites(
         _check_min_span,
         _check_ranking,
         rank_site_coverage,
+        site_query_echo,
     )
 
     _check_ranking(rank_by)
@@ -665,6 +669,22 @@ def find_repeat_sites(
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
         "resolved_area": area,
+        # Echo how the answer was ranked and selected (single-sourced with
+        # GET/POST /sites), so a chain reads it from the result rather than its
+        # own request. Dates are the raw expressions the caller passed.
+        "query": site_query_echo(
+            rank_by=rank_by,
+            top=top,
+            min_passes=min_passes,
+            active_since=active_since,
+            active_before=active_before,
+            first_since=first_since,
+            first_before=first_before,
+            max_revisit_days=max_revisit_days,
+            median_revisit_days=median_revisit_days,
+            min_span_days=min_span_days,
+            max_span_days=max_span_days,
+        ),
         "sites": [site.to_dict() for site in sites],
         "attribution": ATTRIBUTION,
     }
