@@ -503,6 +503,59 @@ def test_min_passes_floor_is_unchanged_under_the_default_passes_ranking():
 
 
 # --------------------------------------------------------------------------- #
+# active_since: the whole-site recency filter (live monitoring targets)
+# --------------------------------------------------------------------------- #
+def test_active_since_keeps_only_recently_imaged_sites():
+    # Fresh's newest pass is 2024-01-22, Stale's is 2024-01-03; a cutoff between
+    # them drops the stale series and keeps the actively-imaged one.
+    pool = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],
+        *[_pass("Stale", d) for d in (1, 2, 3)],
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["Fresh", "Stale"]
+    assert [s.task for s in rank_site_coverage(pool, active_since="2024-01-10")] == ["Fresh"]
+
+
+def test_active_since_is_boundary_inclusive_and_keeps_full_history():
+    # A site whose newest pass falls exactly on the cutoff is kept (on or after),
+    # and it keeps *all* its passes -- including the one before the cutoff --
+    # because active_since selects whole sites, unlike start which truncates.
+    pool = [_pass("Fresh", d) for d in (1, 5, 10)]
+    [site] = rank_site_coverage(pool, active_since="2024-01-10")
+    assert site.task == "Fresh"
+    assert site.passes == 3  # the pre-cutoff passes on the 1st and 5th are retained
+    assert site.first == "2024-01-01"
+    # One day past the newest pass drops the site entirely.
+    assert rank_site_coverage(pool, active_since="2024-01-11") == []
+
+
+def test_active_since_is_orthogonal_to_rank_by():
+    # The recency gate is on the site's newest pass, independent of which depth the
+    # ranking measures: a broad-but-mixed fresh site and a deep stale one filter the
+    # same way under either ranking (only their order differs).
+    pool = [
+        *[_pass("FreshMixed", d, pols=["VV" if d % 2 else "HH"]) for d in (20, 21, 22)],
+        *[_pass("StaleDeep", d, pols=["VV"]) for d in (1, 2, 3)],
+    ]
+    for rank_by in ("passes", "comparable"):
+        kept = rank_site_coverage(pool, active_since="2024-01-10", rank_by=rank_by)
+        assert [s.task for s in kept] == ["FreshMixed"], rank_by
+
+
+def test_active_since_none_applies_no_filter():
+    pool = [_pass("Old", d) for d in (1, 2)]
+    assert [s.task for s in rank_site_coverage(pool, active_since=None)] == ["Old"]
+
+
+def test_active_since_accepts_a_relative_expression():
+    # A relative bound resolves against today, so 2024 passes fall before any
+    # plausible "6 months ago" cutoff and are dropped -- the same grammar
+    # --start / --end accept, reused rather than a second parser.
+    pool = [_pass("Old", d) for d in (1, 2)]
+    assert rank_site_coverage(pool, active_since="6 months ago") == []
+
+
+# --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
 def _patch_gather(monkeypatch, pool):
@@ -530,6 +583,32 @@ def test_sites_cli_human_output(monkeypatch):
     assert "task     : Alpha" in result.output  # codename shown when it differs
     assert "passes   : 3" in result.output
     assert "2 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_active_since_filters_to_recent_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],
+        *[_pass("Stale", d) for d in (1, 2, 3)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--active-since", "2024-01-10"])
+    assert result.exit_code == 0, result.output
+    assert "Fresh" in result.output
+    assert "Stale" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_active_since_empty_result_names_the_recency_bound(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Stale", d) for d in (1, 2, 3)]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--active-since", "2024-06-01"])
+    assert result.exit_code == 0, result.output
+    assert "imaged on/after 2024-06-01" in result.output
+    assert "--active-since" in result.output  # the recency bound is offered to loosen
 
 
 def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):

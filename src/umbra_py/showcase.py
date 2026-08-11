@@ -72,6 +72,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from .catalog import DateLike, _coerce_date
 from .constants import ATTRIBUTION, GITHUB_REPO
 from .models import UmbraItem
 
@@ -299,6 +300,7 @@ def select_featured_sites(
     count: int = DEFAULT_FEATURED_COUNT,
     min_passes: int = 2,
     rank_by: str = "passes",
+    active_since: DateLike = None,
 ) -> list[FeaturedSite]:
     """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
 
@@ -332,12 +334,25 @@ def select_featured_sites(
         qualify past a deeper one either. The key is applied before the ``count``
         truncation, so the comparable ordering is over the whole qualifying pool
         rather than a raw-ranked prefix of it.
+    active_since:
+        Keep only sites still being imaged *on or after* this date -- a recency
+        filter on the site's **newest** dated pass, so a deeply-imaged series that
+        stopped years ago is dropped while an actively-revisited one is kept. It
+        accepts anything :func:`umbra_py.dates.parse_date_bound` does (an ISO date,
+        a bare year/month, or a relative expression like ``"6 months ago"``). It is
+        orthogonal to ``rank_by`` and ``min_passes`` -- it gates on the whole site's
+        latest pass (the ``last`` a coverage summary reports), independent of which
+        depth the ranking measures -- and to ``start`` / ``end``: those bound which
+        *passes* enter the pool (truncating every series to a window), whereas this
+        selects whole sites by recency and keeps each surviving site's *full*
+        history. ``None`` (the default) applies no recency filter.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
     """
     if count <= 0:
         return []
+    since = _coerce_date(active_since)
     # Single-sourced with the discovery layer: the same key builder and the same
     # comparable-group definition, so the featured gallery, ``umbra sites`` and the
     # index ranker cannot disagree about what "most repeat-imaged" means under
@@ -366,6 +381,12 @@ def select_featured_sites(
     ranked: list[tuple[FeaturedSite, int]] = []
     for task, passes in by_task.items():
         ordered = sorted(passes, key=lambda i: i.datetime or datetime.min)
+        # Recency gate: drop a site whose newest dated pass predates the cutoff.
+        # ``ordered`` is oldest-first and every member is dated (filtered above),
+        # so the last pass is the latest -- the ``last`` a summary reports. The
+        # ``or datetime.min`` keeps the read typed, exactly as the sort key does.
+        if since is not None and (ordered[-1].datetime or datetime.min).date() < since:
+            continue
         comparable = len(_largest_comparable_group(ordered)) if rank_by == "comparable" else 0
         depth = _min_passes_depth(
             comparable_passes=comparable, passes=len(ordered), rank_by=rank_by

@@ -651,6 +651,35 @@ def test_sites_filters_by_datetime(sites_client):
     assert [s["task"] for s in body["sites"]] == ["Beta"]
 
 
+def test_sites_active_since_keeps_only_recently_imaged_sites(sites_client):
+    # Alpha's newest pass is 2024-01-21, Beta's is 2024-02-05; a cutoff between
+    # them drops the stale site and keeps the live one -- discovery for "still
+    # being imaged", the whole-site recency filter datetime cannot express.
+    body = sites_client.get("/sites?active_since=2024-02-01").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+    # Boundary is inclusive (on or after), so Alpha's own newest date keeps it.
+    both = sites_client.get("/sites?active_since=2024-01-21").json()
+    assert [s["task"] for s in both["sites"]] == ["Alpha", "Beta"]
+
+
+def test_sites_active_since_keeps_each_survivors_full_history(sites_client):
+    # Unlike datetime (which truncates every series to the window), active_since
+    # selects whole sites and keeps all their passes: Alpha survives a mid-series
+    # cutoff at its full depth of 3, including the pass before the cutoff.
+    body = sites_client.get("/sites?active_since=2024-01-11").json()
+    alpha = {s["task"]: s for s in body["sites"]}["Alpha"]
+    assert alpha["passes"] == 3
+    assert alpha["first"] == "2024-01-01"  # the pre-cutoff pass is retained
+    # The datetime window, by contrast, drops Alpha's first pass from the series.
+    windowed = sites_client.get("/sites?datetime=2024-01-11/2024-12-31").json()
+    assert {s["task"]: s["passes"] for s in windowed["sites"]}["Alpha"] == 2
+
+
+def test_sites_active_since_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.get("/sites?active_since=not-a-date").status_code == 400
+
+
 def test_sites_filters_by_bbox(sites_client):
     # A bbox far from the sample footprint leaves an empty pool.
     empty = sites_client.get("/sites?bbox=0,0,1,1").json()
@@ -778,6 +807,17 @@ def test_post_sites_respects_top_and_min_passes(sites_client):
     assert [s["task"] for s in top1["sites"]] == ["Alpha"]
     deep = sites_client.post("/sites", json={"min_passes": 3}).json()
     assert [s["task"] for s in deep["sites"]] == ["Alpha"]
+
+
+def test_post_sites_filters_by_active_since(sites_client):
+    # The POST twin honours the recency filter exactly as GET does.
+    body = sites_client.post("/sites", json={"active_since": "2024-02-01"}).json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+
+
+def test_post_sites_active_since_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"active_since": "nope"}).status_code == 400
 
 
 def test_post_sites_filters_by_area_top_level_and_query(sites_client):

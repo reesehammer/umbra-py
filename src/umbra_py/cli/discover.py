@@ -333,6 +333,16 @@ def _print_site_coverage(site) -> None:
     "verb can actually difference), so a deep single-polarization site is not "
     "outranked by a broader mixed-polarization one it beats on analysable depth.",
 )
+@click.option(
+    "--active-since",
+    default=None,
+    help="Keep only sites still imaged ON OR AFTER this date -- a recency filter "
+    "on each site's newest pass, so a deep series that stopped long ago is dropped "
+    "and an actively-revisited one is kept. Accepts an ISO date, a bare year/month, "
+    "or a relative expression ('6 months ago'). Unlike --start (which truncates "
+    "every series to a window), this selects whole sites by recency and keeps each "
+    "survivor's full history.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -353,6 +363,7 @@ def sites(
     top,
     min_passes,
     rank_by,
+    active_since,
     as_json,
     local,
     db_path,
@@ -390,6 +401,13 @@ def sites(
     differenceable series is at least three passes deep -- not sites with three raw
     passes ranked by their usable depth. The two agree when every dated pass shares
     one polarization.
+
+    --active-since keeps only sites still imaged on or after a date (a recency
+    filter on each site's newest pass), so a deep series that stopped long ago is
+    dropped and an actively-revisited one is kept -- the discovery answer for "which
+    repeat-imaged sites are still live monitoring targets?" It is orthogonal to
+    --rank-by / --min-passes and, unlike --start (which truncates every series to a
+    window), selects whole sites and keeps each survivor's full history.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -422,7 +440,13 @@ def sites(
                 f"No index at {path}. Build one first with 'umbra index build'."
             )
         with OrbitSpinner("Ranking sites in local index"), CatalogIndex(path) as index:
-            ranked = index.rank_sites(top=top, min_passes=min_passes, rank_by=rank_by, **filters)
+            ranked = index.rank_sites(
+                top=top,
+                min_passes=min_passes,
+                rank_by=rank_by,
+                active_since=active_since,
+                **filters,
+            )
         pool_size = None
     else:
         pool = _shared._gather_items(
@@ -431,7 +455,9 @@ def sites(
             live_label="Searching for repeat-imaged sites",
             **filters,
         )
-        ranked = rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
+        ranked = rank_site_coverage(
+            pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+        )
         pool_size = len(pool)
     if as_json:
         for site in ranked:
@@ -443,7 +469,12 @@ def sites(
         )
         widen = "Build/refresh the index" if pool_size is None else "Widen --limit or the search"
         depth = "comparable passes" if rank_by == "comparable" else "passes"
-        click.echo(f"No site in {where} has {min_passes}+ {depth}. {widen}, or lower --min-passes.")
+        recency = f" imaged on/after {active_since}" if active_since else ""
+        loosen = " or --active-since" if active_since else ""
+        click.echo(
+            f"No site in {where} has {min_passes}+ {depth}{recency}. "
+            f"{widen}, or lower --min-passes{loosen}."
+        )
         return
     for site in ranked:
         _print_site_coverage(site)

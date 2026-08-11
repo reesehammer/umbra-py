@@ -1430,6 +1430,35 @@ Follow-ons that build on it, none a blocker:
     ranked by all of them, and every filter forwards to `rank_sites` with no `limit`
     re-list. **This closes the whole-archive-ranking gap on every surface.** See the
     CHANGELOG.
+- ~~**Nothing filters the discovery answer by recency.**~~ **shipped** —
+  `active_since` keeps only sites whose newest dated pass is on or after a date, on
+  every surface (`umbra sites --active-since`, `find_repeat_sites`, `GET`/`POST
+  /sites`, `CatalogIndex.rank_sites`), single-sourced through
+  `select_featured_sites` (pool path) and `CatalogIndex.rank_sites`'s
+  `HAVING … AND MAX(acq_date) >= ?` (whole-archive), pinned byte-identical between
+  the two. It is the whole-site recency gate `--start` could not express (that
+  truncates every series to a window; this selects whole sites and keeps each
+  survivor's full history) and adds no field to the `site-coverage` contract. See
+  the CHANGELOG. What is still open, and smaller:
+  - **The filter input is not echoed in the `find_repeat_sites` / `/sites`
+    response metadata.** The return carries the resolved `place` / `bbox` / `area`
+    but not `active_since`, `min_passes`, `rank_by` or `top` — the ranking inputs
+    are all left off the echo alike, so a caller that wants to record what it asked
+    for reads it from its own request. Add all four together if a consumer ever
+    needs the round-trip, rather than singling out this one.
+  - **It gates on the site's *newest* pass, so there is no "quiet since" or
+    activity-*window* query.** `active_since` answers "still imaged since X"; the
+    complements — sites whose activity *stopped* before a date (`active_before` on
+    `MAX(acq_date)`), or those first seen after one (`MIN(acq_date)`) — are the same
+    one-clause shape and wait for a caller who wants them. A site's activity
+    interval is already reported as `first` / `last`; only the *selection* on it is
+    one-sided today.
+  - **On the HTTP surface `active_since` accepts a relative expression, unlike the
+    strict-ISO `datetime` filter.** `_coerce_date` resolves `"6 months ago"` on
+    `GET`/`POST /sites`, which is convenient and matches the CLI, but it is a
+    grammar the STAC `datetime` query param does not take — a deliberate asymmetry
+    (this is an umbra-specific discovery filter, not a STAC one), noted so it is not
+    mistaken for drift.
 
 ---
 

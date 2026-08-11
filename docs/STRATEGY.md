@@ -747,6 +747,33 @@ from:
   identity as well as magnitude — the discovery answer says how deep, how long, how
   often, which passes *and which polarization* the differenceable series is.** See
   the CHANGELOG.
+- ~~Every discovery figure measured *depth* (`passes` / `comparable_passes`) and
+  *cadence*, and the moat could rank and qualify sites by either — but it had no way
+  to *select* the sites still being imaged, only to report each one's `last` date.
+  A deep series that stopped two years ago and one imaged last week ranked
+  identically, so a reader who wanted a live monitoring target — the site a curious
+  analyst would actually want to *task* (§1's funnel) — could not ask for one.
+  `--start`/`--end` could not stand in: they bound which *passes* enter the pool,
+  truncating every series to a window, which answers "the recent slice of every
+  site" rather than "which whole sites are still active."~~ **shipped** —
+  `active_since` adds the missing discovery axis, *recency*, on every surface at
+  once (`umbra sites --active-since`, `find_repeat_sites`, `GET`/`POST /sites`, and
+  `CatalogIndex.rank_sites` for `--local`): it keeps only sites whose **newest**
+  dated pass is on or after a date and keeps each survivor's *full* history — a
+  whole-site gate, orthogonal to `--rank-by` and `--min-passes` (it measures the
+  site's latest pass, whatever depth the ranking counts) and distinct from
+  `--start` by construction. It reuses `dates.parse_date_bound`, so it takes the
+  same ISO / bare-year / relative (`"6 months ago"`) grammar the date bounds do
+  rather than a second parser. Single-sourced through the two functions all four
+  surfaces forward to — `select_featured_sites` (the pool path) and
+  `CatalogIndex.rank_sites` (the whole-archive index, where it is a
+  `HAVING … AND MAX(acq_date) >= ?` clause in the *same* `GROUP BY`, exact under
+  either ranking and costing nothing beyond the group already computed) — so the
+  four surfaces cannot disagree, pinned byte-for-byte identical between the SQL and
+  pool paths for every cutoff. It adds no field to the `site-coverage` contract (a
+  filter input, like `min_passes`), so no schema moved. **With it the discovery
+  answer selects on all three of the axes it reports — depth, cadence *and*
+  recency — not only ranks and qualifies on depth.** See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 
