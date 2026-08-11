@@ -98,6 +98,49 @@ def _min_passes_depth(*, comparable_passes: int, passes: int, rank_by: str) -> i
     return comparable_passes if rank_by == "comparable" else passes
 
 
+def _check_max_revisit(max_revisit_days: float | None) -> None:
+    """Reject a non-positive ``max_revisit`` cadence bound.
+
+    A revisit gap between two distinct passes is always positive, so a
+    non-positive bound could only ever return nothing -- a silent empty result of
+    exactly the kind the rest of this surface refuses. ``None`` disables the
+    filter (the default). Shared by every discovery surface so they cannot
+    disagree about what a cadence bound is, exactly as :func:`_check_ranking`
+    is for ``rank_by``.
+    """
+    if max_revisit_days is not None and max_revisit_days <= 0:
+        raise ValueError(f"max_revisit_days must be positive (days), got {max_revisit_days!r}")
+
+
+def _passes_cadence(items: Iterable[UmbraItem], *, rank_by: str, max_revisit_days: float) -> bool:
+    """Whether the series ``rank_by`` measures is revisited at least this often.
+
+    The cadence twin of :func:`_min_passes_depth`: the gate measures the *same*
+    series the ranking orders and qualifies by, so ``max_revisit`` and ``rank_by``
+    agree about which cadence "worst-case" means. Under ``"comparable"`` it gates
+    the largest single-polarization dated subset (the differenceable series the
+    analysis verbs consume -- :func:`_largest_comparable_group`); under
+    ``"passes"`` the whole dated series. Returns ``True`` iff that series'
+    *worst-case* revisit gap -- its ``max_revisit_days`` /
+    ``comparable_max_revisit_days`` figure, the widest stretch a change could have
+    gone unseen -- is at most ``max_revisit_days`` days.
+
+    A series with fewer than two passes has no measurable cadence, so it *fails*:
+    a site whose revisit cannot be confirmed is not one a cadence filter should
+    return, the same way ``active_since`` drops a site with no datable pass. The
+    worst gap is computed from the same items by the same :func:`_revisit_days`
+    that :func:`site_coverage` reduces, so filtering here can never disagree with
+    the :attr:`SiteCoverage.max_revisit_days` a summary reports -- which is what
+    lets the pool path (gating items in :func:`umbra_py.showcase.select_featured_sites`)
+    and the index path (gating the same items in
+    :meth:`umbra_py.index.CatalogIndex.rank_sites`) stay byte-identical.
+    """
+    series = _largest_comparable_group(items) if rank_by == "comparable" else items
+    dates = sorted(i.datetime for i in series if i.datetime is not None)
+    gaps = _revisit_days(dates)
+    return bool(gaps) and max(gaps) <= max_revisit_days
+
+
 @dataclass(frozen=True)
 class SiteCoverage:
     """A repeat-imaged site's coverage, reduced to the facts that decide whether
@@ -353,6 +396,7 @@ def rank_site_coverage(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    max_revisit_days: float | None = None,
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
@@ -395,10 +439,27 @@ def rank_site_coverage(
     ``active_since`` it selects sites whose latest pass falls within a window. A span
     expression snaps to its last day (``active_before="2024"`` is "last imaged on or
     before 2024-12-31"), symmetric with ``end``. ``None`` applies no upper bound.
+
+    ``max_revisit_days`` keeps only sites revisited *at least this often* -- a
+    cadence filter on each site's **worst-case** revisit gap, so a site with any
+    stretch longer than ``max_revisit_days`` days between consecutive passes is
+    dropped and one imaged reliably is kept. It is the selection twin of the
+    ``max_revisit_days`` figure the summary already reports, and it measures the
+    same depth ``rank_by`` does (:func:`_passes_cadence`): under ``"comparable"``
+    it gates the *analysable* series' worst gap (``comparable_max_revisit_days``),
+    so a site whose raw cadence looks tight only because an off-polarization pass
+    fills a gap no change verb can use is not admitted, the cadence counterpart of
+    ``min_passes`` gating comparable depth. It is orthogonal to ``active_since`` /
+    ``active_before`` (recency of the newest pass) and distinct from ``start`` /
+    ``end`` (which bound which passes enter the pool). A site with fewer than two
+    passes in the gated series has no measurable cadence and is dropped. ``None``
+    (the default) applies no cadence filter; a non-positive value is a
+    ``ValueError``.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
     _check_ranking(rank_by)
+    _check_max_revisit(max_revisit_days)
     sites = select_featured_sites(
         items,
         count=top,
@@ -406,5 +467,6 @@ def rank_site_coverage(
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        max_revisit_days=max_revisit_days,
     )
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

@@ -340,6 +340,18 @@ def test_select_featured_sites_active_before_selects_dormant_sites_and_windows()
     assert [s.task for s in window] == ["Fresh"]
 
 
+def test_select_featured_sites_max_revisit_keeps_reliably_imaged_sites():
+    """max_revisit keeps a site only if its worst-case revisit gap is at most the
+    bound, dropping a series with a long blind spot and retaining full history."""
+    items = [
+        *[_pass("Steady", d) for d in (1, 7, 13)],  # worst gap 6
+        *[_pass("Gappy", d) for d in (1, 7, 28)],  # worst gap 21
+    ]
+    kept = showcase.select_featured_sites(items, max_revisit_days=10)
+    assert [s.task for s in kept] == ["Steady"]
+    assert [i.datetime.day for i in kept[0].items] == [1, 7, 13]  # full history kept
+
+
 def _pass_pol(task: str, day: int, pol: str) -> UmbraItem:
     """A featured-gallery pass carrying a polarization, so the comparable ranking
     (largest same-polarization dated subset) can be exercised."""

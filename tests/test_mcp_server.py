@@ -281,6 +281,28 @@ def test_find_repeat_sites_active_before_filters_to_dormant_sites(monkeypatch):
     assert [s["task"] for s in window["sites"]] == ["Fresh"]
 
 
+def test_find_repeat_sites_max_revisit_filters_to_reliably_imaged_sites(monkeypatch):
+    # Tight is imaged monthly (worst gap ~31 days); Gappy has a half-year hole. A
+    # 60-day cadence bound keeps the monitorable site and drops the gappy one.
+    pool = [
+        *[_site_pass("Tight", m) for m in (1, 2, 3)],  # months Jan/Feb/Mar
+        *[_site_pass("Gappy", m) for m in (1, 2, 8)],  # a ~6-month gap to August
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(local=False, max_revisit_days=60)
+    assert [s["task"] for s in out["sites"]] == ["Tight"]
+
+
+def test_find_repeat_sites_rejects_non_positive_max_revisit():
+    with pytest.raises(ValueError, match="max_revisit_days must be positive"):
+        ms.find_repeat_sites(max_revisit_days=0, local=False)
+
+
 def test_find_repeat_sites_rejects_unknown_rank_by():
     with pytest.raises(ValueError, match="rank_by must be one of"):
         ms.find_repeat_sites(rank_by="deepest", local=False)

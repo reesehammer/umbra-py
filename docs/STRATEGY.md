@@ -772,8 +772,8 @@ from:
   four surfaces cannot disagree, pinned byte-for-byte identical between the SQL and
   pool paths for every cutoff. It adds no field to the `site-coverage` contract (a
   filter input, like `min_passes`), so no schema moved. **With it the discovery
-  answer selects on all three of the axes it reports — depth, cadence *and*
-  recency — not only ranks and qualifies on depth.** See the CHANGELOG.
+  answer selects on *recency* as well as depth — the site's newest pass, not only
+  how deep or how usable its series is.** See the CHANGELOG.
   ~~**Open:** `active_since` gated only one side of the recency axis — a site's
   newest pass being on or *after* a date (still-active sites) — so the moat could
   not select the *dormant* series that stopped imaging, nor a site whose latest pass
@@ -793,6 +793,34 @@ from:
   schema moved. **With it the discovery moat selects on activity in both directions
   — still-active, dormant, or a latest-pass window — completing the recency axis.**
   See the CHANGELOG.
+- ~~The moat could rank and qualify sites by depth and select them by recency, and it
+  *reported* each site's revisit cadence (`max_revisit_days` and its comparable
+  twin) — but it could not *select* on that cadence. A deep series imaged reliably
+  every two weeks and one with the same pass count but a months-long hole ranked
+  identically, so a reader who wanted a **monitorable** target — a site with no blind
+  spot longer than N days, where a change could not have slipped through unseen —
+  could not ask for one. `--min-passes` gates depth and `--active-*` gate recency;
+  neither expresses cadence.~~ **shipped** — `max_revisit` adds the cadence axis on
+  every surface at once (`umbra sites --max-revisit`, `find_repeat_sites`,
+  `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for `--local`): it keeps only
+  sites whose **worst-case** gap between consecutive passes is at most `N` days, the
+  selection twin of the `max_revisit_days` figure the summary already reports. It
+  measures the same depth `--rank-by` does (`coverage._passes_cadence`, the cadence
+  twin of `_min_passes_depth`): under `--rank-by comparable` it gates the *analysable*
+  series' worst gap (`comparable_max_revisit_days`), so a site whose raw cadence looks
+  tight only because an off-polarization pass fills a gap no change verb can use is
+  not admitted. It is single-sourced through the same two functions the other filters
+  are (`select_featured_sites`, `CatalogIndex.rank_sites`) — but unlike the recency
+  bounds a worst *consecutive* gap is not a SQL aggregate, so the index path applies
+  the identical `_passes_cadence` in Python on the same per-task items it already
+  reads to summarise (pinned byte-for-byte identical to the pool path for every
+  cutoff) and drops the raw-count SQL `LIMIT` when the filter is set — as the
+  comparable ranking does — so a tightly-imaged site outside the raw top-`top` is
+  promoted rather than truncated before the filter runs. It adds no field to the
+  `site-coverage` contract (a filter input, like the recency bounds), so no schema
+  moved. **With it the discovery moat selects on all three of the axes it reports —
+  depth, recency *and* cadence — not only ranks and qualifies on depth.** See the
+  CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

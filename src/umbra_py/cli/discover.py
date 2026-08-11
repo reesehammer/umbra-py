@@ -352,6 +352,18 @@ def _print_site_coverage(site) -> None:
     "--active-since, but a bare year/month covers the whole period (--active-before "
     "2024 is 'last imaged on or before 2024-12-31'), symmetric with --end.",
 )
+@click.option(
+    "--max-revisit",
+    type=float,
+    default=None,
+    help="Keep only sites revisited AT LEAST this often -- a cadence filter on each "
+    "site's worst-case revisit gap (in days), so a series with any stretch longer "
+    "than this between consecutive passes is dropped and a reliably-imaged one is "
+    "kept: the discovery answer for 'which sites are imaged often enough to "
+    "monitor?' Counts the cadence --rank-by measures: the whole dated series by "
+    "default, the usable (comparable) series' worst gap under --rank-by comparable. "
+    "Orthogonal to --active-since / --active-before.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -374,6 +386,7 @@ def sites(
     rank_by,
     active_since,
     active_before,
+    max_revisit,
     as_json,
     local,
     db_path,
@@ -421,6 +434,13 @@ def sites(
     --active-before is the complement (sites last imaged on or before a date, i.e.
     dormant series); set both to select sites whose newest pass falls within a
     window.
+
+    --max-revisit keeps only sites revisited at least that often -- a cadence filter
+    on each site's worst-case gap (in days), so a series with any stretch longer than
+    that between consecutive passes is dropped: the answer for "which sites are imaged
+    often enough to monitor?" It counts the cadence --rank-by measures (the usable
+    series' worst gap under --rank-by comparable) and is orthogonal to the --active-*
+    recency filters.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -459,6 +479,7 @@ def sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                max_revisit_days=max_revisit,
                 **filters,
             )
         pool_size = None
@@ -476,6 +497,7 @@ def sites(
             rank_by=rank_by,
             active_since=active_since,
             active_before=active_before,
+            max_revisit_days=max_revisit,
         )
         pool_size = len(pool)
     if as_json:
@@ -496,17 +518,19 @@ def sites(
             recency = f" last imaged on/before {active_before}"
         else:
             recency = ""
-        active_flags = [
+        cadence = f", revisited within {max_revisit:g}d" if max_revisit is not None else ""
+        loosen_flags = [
             flag
             for flag, value in (
                 ("--active-since", active_since),
                 ("--active-before", active_before),
+                ("--max-revisit", max_revisit),
             )
-            if value
+            if value is not None and value != ""
         ]
-        loosen = f" or {' / '.join(active_flags)}" if active_flags else ""
+        loosen = f" or {' / '.join(loosen_flags)}" if loosen_flags else ""
         click.echo(
-            f"No site in {where} has {min_passes}+ {depth}{recency}. "
+            f"No site in {where} has {min_passes}+ {depth}{recency}{cadence}. "
             f"{widen}, or lower --min-passes{loosen}."
         )
         return

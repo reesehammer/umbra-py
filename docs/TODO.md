@@ -1469,6 +1469,29 @@ Follow-ons that build on it, none a blocker:
     grammar the STAC `datetime` query param does not take — a deliberate asymmetry
     (this is an umbra-specific discovery filter, not a STAC one), noted so it is not
     mistaken for drift.
+- ~~**Nothing filters the discovery answer by cadence.**~~ **shipped** —
+  `max_revisit` keeps only sites whose **worst-case** gap between consecutive passes
+  is at most `N` days, on every surface (`umbra sites --max-revisit`,
+  `find_repeat_sites`, `GET`/`POST /sites`, `CatalogIndex.rank_sites`), so the moat
+  now selects the *monitorable* sites — those with no blind spot longer than `N` days
+  — where before it could only report each site's cadence. It measures the same depth
+  `--rank-by` does (`coverage._passes_cadence`, the cadence twin of
+  `_min_passes_depth`): under `--rank-by comparable` the *analysable* series' worst
+  gap, so an off-polarization pass filling a gap no change verb can use cannot make a
+  site read as tighter than it is. Unlike the recency bounds a worst *consecutive* gap
+  is not a SQL aggregate, so the index path applies the identical `_passes_cadence` in
+  Python on the same per-task items it already reads (pinned byte-identical to the pool
+  path) and drops the raw-count SQL `LIMIT` when the filter is set, so a tightly-imaged
+  site outside the raw top-`top` is promoted rather than truncated. See the CHANGELOG.
+  What is still open, and smaller:
+  - **Only the *worst* gap is selected on, not the typical one.** `max_revisit` gates
+    `max_revisit_days` (the widest stretch a change could have gone unseen), which is
+    the honest cadence figure for a monitoring target — one long hole disqualifies a
+    site however tight the rest of its series. Selecting on `median_revisit_days`
+    instead (a site *usually* imaged often, tolerating the odd gap) is the same shape
+    on a different figure and waits for a caller who wants "typically frequent" rather
+    than "never blind for longer than N days." The report carries both, so the choice
+    is only about which one the *filter* reads.
 
 ---
 

@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`max_revisit`: a worst-case-cadence filter on the discovery moat, selecting the
+  sites imaged often enough to monitor, on every surface (`coverage.py`,
+  `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`,
+  `tests/test_coverage.py`, `tests/test_showcase.py`, `tests/test_index.py`,
+  `tests/test_serve.py`, `tests/test_mcp_server.py`).** The discovery moat *reported*
+  each site's revisit cadence (`max_revisit_days` and its comparable twin) but could
+  only rank and qualify sites by depth and recency — so it could not answer "which
+  repeat-imaged sites have **no blind spot longer than N days**?", the question that
+  separates a monitorable target from a deep-but-bursty series where a change could
+  have slipped through a months-long gap unseen. `umbra sites --max-revisit DAYS`
+  (and `find_repeat_sites(max_revisit_days=…)`, `GET`/`POST /sites?max_revisit=`, and
+  `CatalogIndex.rank_sites(max_revisit_days=…)` for `--local`) keeps only sites whose
+  **worst-case** gap between consecutive passes is at most `DAYS`, dropping a site
+  with any longer stretch and a site with fewer than two passes (no measurable
+  cadence, dropped like `active_since` drops an undatable site). It measures the same
+  depth `--rank-by` does (`coverage._passes_cadence`, the cadence twin of
+  `_min_passes_depth`): under `--rank-by comparable` it gates the *analysable*
+  series' worst gap (`comparable_max_revisit_days`), so a site whose raw cadence
+  looks tight only because an off-polarization pass fills a gap no change verb can
+  use is not admitted. It is single-sourced through the same two functions the other
+  filters are — `showcase.select_featured_sites` (the pool path) and
+  `CatalogIndex.rank_sites` (the whole-archive index) — but, unlike the recency
+  filters, the worst *consecutive* gap is not a SQL aggregate, so the index path
+  applies the identical `_passes_cadence` in Python on the same per-task items it
+  already reads to summarise (byte-identical to the pool path, pinned by the
+  index-vs-pool test for every cutoff) and drops the raw-count SQL `LIMIT` when the
+  filter is set — as the comparable ranking already does — so a tightly-imaged site
+  outside the raw top-`top` is promoted rather than truncated before the filter runs.
+  It is orthogonal to `--active-since` / `--active-before` (cadence vs. recency of the
+  newest pass) and distinct from `--start` / `--end` (which bound the passes). On the
+  HTTP surface a non-positive bound is a clean client error (`gt=0` on `GET`, a `400`
+  on `POST`), and the `umbra sites` empty-result message names the cadence bound it
+  applied and offers `--max-revisit` to loosen. Adds no field to the `site-coverage`
+  contract (a filter input, like the recency bounds), so no schema moved. **With it
+  the discovery moat *selects* on all three axes it reports — depth, recency and now
+  cadence — not only ranks and qualifies on depth.**
 - **`active_before`: the upper recency bound on the discovery moat, completing the
   activity-window selection on every surface (`showcase.py`, `coverage.py`,
   `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`,

@@ -404,6 +404,7 @@ def find_repeat_sites(
     rank_by: str = "passes",
     active_since: str | None = None,
     active_before: str | None = None,
+    max_revisit_days: float | None = None,
     local: bool | None = None,
 ) -> dict[str, Any]:
     """Rank the archive's most repeat-imaged sites — where change detection has
@@ -463,6 +464,16 @@ def find_repeat_sites(
     the whole named period (``active_before="2024"`` is "last imaged on or before
     2024-12-31"), symmetric with ``end``.
 
+    ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
+    filter on each site's **worst-case** revisit gap (in days), so a series with any
+    stretch longer than that between consecutive passes is dropped and a reliably
+    imaged one kept. Use it to find monitorable targets ("repeat-imaged sites with no
+    blind spot longer than N days"). It gates the cadence ``rank_by`` measures -- the
+    whole dated series by default, the usable (comparable) series' worst gap under
+    ``rank_by="comparable"`` -- is orthogonal to ``active_since`` / ``active_before``,
+    and drops a site with fewer than two passes in the gated series. A non-positive
+    value is a ``ValueError``.
+
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index
     (:meth:`CatalogIndex.rank_sites`), so a deeply-imaged site is ranked by all
@@ -497,9 +508,10 @@ def find_repeat_sites(
     showcase's featured-gallery selector, so this and ``umbra sites`` cannot
     disagree about what "most repeat-imaged" means.
     """
-    from .coverage import _check_ranking, rank_site_coverage
+    from .coverage import _check_max_revisit, _check_ranking, rank_site_coverage
 
     _check_ranking(rank_by)
+    _check_max_revisit(max_revisit_days)
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
 
@@ -537,6 +549,7 @@ def find_repeat_sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                max_revisit_days=max_revisit_days,
             )
         else:
             pool = list(
@@ -562,6 +575,7 @@ def find_repeat_sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                max_revisit_days=max_revisit_days,
             )
     finally:
         if isinstance(source, CatalogIndex):

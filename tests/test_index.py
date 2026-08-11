@@ -1900,6 +1900,7 @@ def _rank_sites_pool_baseline(idx, **filters):
     rank_by = filters.pop("rank_by", "passes")
     active_since = filters.pop("active_since", None)
     active_before = filters.pop("active_before", None)
+    max_revisit_days = filters.pop("max_revisit_days", None)
     pool = list(idx.search(limit=None, **filters))
     return rank_site_coverage(
         pool,
@@ -1908,6 +1909,7 @@ def _rank_sites_pool_baseline(idx, **filters):
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        max_revisit_days=max_revisit_days,
     )
 
 
@@ -1954,6 +1956,15 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"active_before": "2024-01-05"},
             {"active_before": "2024-01"},
             {"active_since": "2024-01-02", "active_before": "2024-01-08"},
+            # max_revisit is not a SQL aggregate, so the index path applies it in
+            # Python on the same items the pool ranker does -- it must stay identical.
+            # Alpha/Beta worst gap 4, Gamma worst gap 1.
+            {"max_revisit_days": 1},  # Gamma only
+            {"max_revisit_days": 4},  # all three (boundary-inclusive)
+            # With top=1 the cadence filter drops the SQL LIMIT: the raw-deepest site
+            # (Alpha) fails the bound and Gamma is promoted from outside the top.
+            {"max_revisit_days": 3, "top": 1},
+            {"max_revisit_days": 4, "rank_by": "comparable"},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters
@@ -2017,6 +2028,23 @@ def test_rank_sites_active_before_filters_whole_archive_to_dormant_sites(tmp_pat
     assert [(s.task, s.passes) for s in dormant] == [("Stale", 3)]  # full history kept
     assert [s.task for s in boundary] == ["Stale"]  # on-or-before is inclusive
     assert [s.task for s in window] == ["Stale"]  # newest pass inside [since, before]
+
+
+def test_rank_sites_max_revisit_filters_whole_archive_and_promotes_past_top(tmp_path):
+    """max_revisit keeps only reliably-revisited sites across the whole index, and
+    because the worst gap is not a SQL aggregate it drops the candidate LIMIT so a
+    tightly-imaged site outside the raw top-`top` is not truncated before the filter
+    runs (the whole-archive correction the pool path also makes)."""
+    pool = [
+        *[_site_item("DeepGappy", d) for d in (1, 2, 3, 30)],  # 4 passes, worst gap 27
+        *[_site_item("Tight", d) for d in (10, 12)],  # 2 passes, worst gap 2
+    ]
+    with _index(tmp_path, pool) as idx:
+        # Without a cadence bound DeepGappy ranks first; top=1 would return only it.
+        assert [s.task for s in idx.rank_sites(top=1)] == ["DeepGappy"]
+        # The cadence bound drops DeepGappy and promotes Tight past the top-1 cap.
+        tight = idx.rank_sites(top=1, max_revisit_days=5)
+    assert [(s.task, s.passes) for s in tight] == [("Tight", 2)]
 
 
 def test_rank_sites_by_comparable_reranks_whole_archive(tmp_path):

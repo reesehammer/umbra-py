@@ -302,6 +302,7 @@ def select_featured_sites(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    max_revisit_days: float | None = None,
 ) -> list[FeaturedSite]:
     """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
 
@@ -359,6 +360,18 @@ def select_featured_sites(
         Like ``active_since`` it gates on the whole site's latest pass, independent
         of ``rank_by`` / ``min_passes`` and of ``start`` / ``end``. ``None`` (the
         default) applies no upper recency bound.
+    max_revisit_days:
+        Keep only sites revisited *at least this often* -- a cadence filter on each
+        site's **worst-case** revisit gap, so a series with any stretch longer than
+        ``max_revisit_days`` days between consecutive passes is dropped and a
+        reliably-imaged one kept. It gates the same depth ``rank_by`` measures
+        (:func:`umbra_py.coverage._passes_cadence`): under ``"comparable"`` the
+        *analysable* series' worst gap (``comparable_max_revisit_days``), so a site
+        whose raw cadence looks tight only because an off-polarization pass fills a
+        gap no change verb can use is not admitted. It is orthogonal to
+        ``active_since`` / ``active_before`` and to ``start`` / ``end``. A site with
+        fewer than two passes in the gated series has no measurable cadence and is
+        dropped. ``None`` (the default) applies no cadence filter.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
@@ -374,13 +387,16 @@ def select_featured_sites(
     # index ranker cannot disagree about what "most repeat-imaged" means under
     # either ranking (lazy import -- the default ``"passes"`` path needs neither).
     from .coverage import (  # noqa: PLC0415
+        _check_max_revisit,
         _check_ranking,
         _largest_comparable_group,
         _min_passes_depth,
+        _passes_cadence,
         _rank_sort_key,
     )
 
     _check_ranking(rank_by)
+    _check_max_revisit(max_revisit_days)
     by_task: dict[str, list[UmbraItem]] = {}
     for item in items:
         if item.task and item.datetime is not None:
@@ -408,6 +424,17 @@ def select_featured_sites(
         if since is not None and newest < since:
             continue
         if before is not None and newest > before:
+            continue
+        # Cadence gate: keep a site only if the series ``rank_by`` measures is
+        # revisited at least this often (its worst gap is at most the bound). Gated
+        # on the same items :func:`umbra_py.coverage.site_coverage` summarises, so
+        # this and the reported ``max_revisit_days`` cannot disagree -- and gated on
+        # the *analysable* subset under ``"comparable"`` (the cadence twin of
+        # ``min_passes`` measuring comparable depth). A site with no measurable
+        # cadence in that series is dropped.
+        if max_revisit_days is not None and not _passes_cadence(
+            ordered, rank_by=rank_by, max_revisit_days=max_revisit_days
+        ):
             continue
         comparable = len(_largest_comparable_group(ordered)) if rank_by == "comparable" else 0
         depth = _min_passes_depth(
