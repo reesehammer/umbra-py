@@ -944,6 +944,7 @@ def run_sites(
     active_before: DateLike = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
+    max_span_days: float | None = None,
 ) -> list[SiteCoverage]:
     """Rank the most repeat-imaged sites in a filtered pool of the archive.
 
@@ -1008,12 +1009,26 @@ def run_sites(
     exactly as ``umbra sites --min-span`` does: on the analysable series under
     ``rank_by="comparable"``, a different axis from ``max_revisit_days`` (cadence vs
     baseline) and orthogonal to the recency filters. ``None`` applies no span filter.
+
+    ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites imaged
+    over *at most this long* (a short-lived series), forwarded to the index and pool
+    rankers unchanged, so this endpoint filters exactly as ``umbra sites --max-span``
+    does. Set with ``min_span_days`` the two bound each site's baseline to a window
+    (``min_span_days <= span <= max_span_days``), as ``active_since`` / ``active_before``
+    bound the newest pass. ``None`` applies no span ceiling.
     """
-    from .coverage import _check_max_revisit, _check_min_span, _check_ranking, rank_site_coverage
+    from .coverage import (
+        _check_max_revisit,
+        _check_max_span,
+        _check_min_span,
+        _check_ranking,
+        rank_site_coverage,
+    )
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
     _check_min_span(min_span_days)
+    _check_max_span(max_span_days)
     top_n = _clamp_top(top)
     min_p = max(1, int(min_passes))
 
@@ -1037,6 +1052,7 @@ def run_sites(
             active_before=active_before,
             max_revisit_days=max_revisit_days,
             min_span_days=min_span_days,
+            max_span_days=max_span_days,
         )
 
     pool = list(
@@ -1064,6 +1080,7 @@ def run_sites(
         active_before=active_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
+        max_span_days=max_span_days,
     )
 
 
@@ -2863,6 +2880,17 @@ def build_app(
                 "orthogonal to the recency and cadence filters"
             ),
         ),
+        max_span: float | None = Query(
+            default=None,
+            gt=0,
+            description=(
+                "The upper twin of min_span: keep only sites imaged over at most this "
+                "long (a short-lived series, now over). Set with min_span the two bound "
+                "each site's baseline to a window (min_span <= span <= max_span), as "
+                "active_since/active_before bound the newest pass. Gates the span "
+                "rank_by measures (the usable series' span under rank_by=comparable)"
+            ),
+        ),
     ) -> JSONResponse:
         """Rank the archive's most repeat-imaged sites — discovery before analysis.
 
@@ -2935,6 +2963,7 @@ def build_app(
                 active_before=resolved_active_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
+                max_span_days=max_span,
             )
         finally:
             _close(source)
@@ -2970,8 +2999,10 @@ def build_app(
         its complement (sites last imaged on or before it); ``max_revisit`` (days)
         keeps only sites revisited at least that often; ``min_span`` (days) keeps only
         sites imaged over at least that long (an observation-baseline filter, a
-        different axis from ``max_revisit``) -- all top-level fields, exactly as on
-        ``GET``.
+        different axis from ``max_revisit``), and ``max_span`` (days) its upper twin
+        (sites imaged over at most that long, a short-lived series -- set with
+        ``min_span`` to bound the baseline to a window) -- all top-level fields, exactly
+        as on ``GET``.
         """
         if body.get("intersects") is not None and body.get("bbox") is not None:
             raise HTTPException(
@@ -3011,8 +3042,10 @@ def build_app(
             resolved_active_before = _coerce_date(body.get("active_before"), is_end=True)
             max_revisit = _opt_float(body.get("max_revisit"), "max_revisit")
             min_span = _opt_float(body.get("min_span"), "min_span")
+            max_span = _opt_float(body.get("max_span"), "max_span")
             from .coverage import (  # noqa: PLC0415
                 _check_max_revisit,
+                _check_max_span,
                 _check_min_span,
                 _check_ranking,
             )
@@ -3022,6 +3055,8 @@ def build_app(
             _check_max_revisit(max_revisit)
             # A non-positive span bound is a clean 400 too, like GET's gt=0.
             _check_min_span(min_span)
+            # And its upper twin, symmetric with the floor.
+            _check_max_span(max_span)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         fuzzy = bool(body.get("fuzzy", False))
@@ -3048,6 +3083,7 @@ def build_app(
                 active_before=resolved_active_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
+                max_span_days=max_span,
             )
         finally:
             _close(source)

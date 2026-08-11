@@ -406,6 +406,7 @@ def find_repeat_sites(
     active_before: str | None = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
+    max_span_days: float | None = None,
     local: bool | None = None,
 ) -> dict[str, Any]:
     """Rank the archive's most repeat-imaged sites — where change detection has
@@ -487,6 +488,15 @@ def find_repeat_sites(
     ``active_since`` / ``active_before`` / ``max_revisit_days``, and drops a site with
     fewer than two passes in the gated series. A non-positive value is a ``ValueError``.
 
+    ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites imaged
+    over *at most this long* (a short-lived series, a burst of imaging now over), the
+    complement of the floor. Set with ``min_span_days`` the two bound each site's
+    baseline to a window (``min_span_days <= span <= max_span_days``), exactly as
+    ``active_since`` / ``active_before`` bound the newest pass to one. It gates the same
+    span ``rank_by`` measures (the usable series under ``rank_by="comparable"``) and,
+    like the floor, drops a site with no measurable span so the window admits only a
+    confirmed baseline. A non-positive value is a ``ValueError``.
+
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index
     (:meth:`CatalogIndex.rank_sites`), so a deeply-imaged site is ranked by all
@@ -521,11 +531,18 @@ def find_repeat_sites(
     showcase's featured-gallery selector, so this and ``umbra sites`` cannot
     disagree about what "most repeat-imaged" means.
     """
-    from .coverage import _check_max_revisit, _check_min_span, _check_ranking, rank_site_coverage
+    from .coverage import (
+        _check_max_revisit,
+        _check_max_span,
+        _check_min_span,
+        _check_ranking,
+        rank_site_coverage,
+    )
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
     _check_min_span(min_span_days)
+    _check_max_span(max_span_days)
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
 
@@ -565,6 +582,7 @@ def find_repeat_sites(
                 active_before=active_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
+                max_span_days=max_span_days,
             )
         else:
             pool = list(
@@ -592,6 +610,7 @@ def find_repeat_sites(
                 active_before=active_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
+                max_span_days=max_span_days,
             )
     finally:
         if isinstance(source, CatalogIndex):

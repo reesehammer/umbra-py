@@ -1902,6 +1902,7 @@ def _rank_sites_pool_baseline(idx, **filters):
     active_before = filters.pop("active_before", None)
     max_revisit_days = filters.pop("max_revisit_days", None)
     min_span_days = filters.pop("min_span_days", None)
+    max_span_days = filters.pop("max_span_days", None)
     pool = list(idx.search(limit=None, **filters))
     return rank_site_coverage(
         pool,
@@ -1912,6 +1913,7 @@ def _rank_sites_pool_baseline(idx, **filters):
         active_before=active_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
+        max_span_days=max_span_days,
     )
 
 
@@ -1974,6 +1976,16 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"min_span_days": 5},  # Alpha only
             {"min_span_days": 8},  # Alpha only (boundary-inclusive)
             {"min_span_days": 5, "rank_by": "comparable"},
+            # max_span is the upper twin -- the complement selection, applied in Python
+            # the same way, so it too must stay identical to the pool ranker.
+            {"max_span_days": 4},  # Beta (span 4) and Gamma (span 1)
+            {"max_span_days": 1},  # Gamma only (boundary-inclusive)
+            # With top=1 the ceiling drops the SQL LIMIT: the raw-deepest Alpha fails
+            # and a shorter-baseline site is promoted from outside the top.
+            {"max_span_days": 4, "top": 1},
+            {"max_span_days": 8, "rank_by": "comparable"},
+            # Floor and ceiling together bound the baseline to a window.
+            {"min_span_days": 2, "max_span_days": 5},  # Beta only (span 4)
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters
@@ -2017,6 +2029,25 @@ def test_rank_sites_min_span_filters_whole_archive_and_promotes_past_top(tmp_pat
         # The span bound drops ShortDeep and promotes LongSparse past the top-1 cap.
         long_baseline = idx.rank_sites(top=1, min_span_days=20)
     assert [(s.task, s.passes) for s in long_baseline] == [("LongSparse", 2)]
+
+
+def test_rank_sites_max_span_filters_whole_archive_and_promotes_past_top(tmp_path):
+    """max_span is the upper twin of min_span: it keeps only short-baseline sites and,
+    because the ceiling too drops the candidate LIMIT, promotes a short-window site
+    outside the raw top-`top` rather than truncating it before the filter runs."""
+    pool = [
+        *[_site_item("LongDeep", d) for d in (1, 10, 20, 30)],  # 4 passes, span 29
+        *[_site_item("ShortSparse", d) for d in (1, 3)],  # 2 passes, span 2
+    ]
+    with _index(tmp_path, pool) as idx:
+        # Without a ceiling LongDeep ranks first (more passes); top=1 returns only it.
+        assert [s.task for s in idx.rank_sites(top=1)] == ["LongDeep"]
+        # The ceiling drops LongDeep and promotes ShortSparse past the top-1 cap.
+        short_baseline = idx.rank_sites(top=1, max_span_days=5)
+        # Floor and ceiling together bound the baseline to a window (nothing here).
+        windowed = idx.rank_sites(min_span_days=5, max_span_days=20)
+    assert [(s.task, s.passes) for s in short_baseline] == [("ShortSparse", 2)]
+    assert windowed == []  # neither site's span falls in [5, 20]
 
 
 def test_rank_sites_active_since_filters_whole_archive_by_recency(tmp_path):

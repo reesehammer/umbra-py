@@ -326,6 +326,29 @@ def test_find_repeat_sites_rejects_non_positive_min_span():
         ms.find_repeat_sites(min_span_days=0, local=False)
 
 
+def test_find_repeat_sites_max_span_filters_to_short_baseline_sites(monkeypatch):
+    # The upper twin of min_span: Long spans Jan->Aug (~213 days); Short is confined to
+    # Jan->Mar (~60 days). A 120-day ceiling keeps the short-window site and drops the
+    # long-baseline one -- the complement selection.
+    pool = [
+        *[_site_pass("Long", m) for m in (1, 4, 8)],  # months Jan/Apr/Aug
+        *[_site_pass("Short", m) for m in (1, 2, 3)],  # Jan/Feb/Mar
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(local=False, max_span_days=120)
+    assert [s["task"] for s in out["sites"]] == ["Short"]
+
+
+def test_find_repeat_sites_rejects_non_positive_max_span():
+    with pytest.raises(ValueError, match="max_span_days must be positive"):
+        ms.find_repeat_sites(max_span_days=0, local=False)
+
+
 def test_find_repeat_sites_rejects_unknown_rank_by():
     with pytest.raises(ValueError, match="rank_by must be one of"):
         ms.find_repeat_sites(rank_by="deepest", local=False)

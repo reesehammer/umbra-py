@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`max_span`: the upper observation-baseline bound on the discovery moat, selecting
+  the short-lived sites and completing the baseline axis to a two-sided window, on
+  every surface (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`,
+  `serve.py`, `mcp_server.py`, `tests/test_coverage.py`, `tests/test_index.py`,
+  `tests/test_serve.py`, `tests/test_mcp_server.py`).** `min_span` (shipped just above)
+  gave the discovery moat a baseline *floor* — "sites imaged over at least N days," the
+  long-baseline targets a *slow* change needs — but the baseline axis was selected on
+  only one side: a *short-lived* series (a burst of intensive imaging over a narrow
+  window, now over) could not be asked for, and `min_span` and `max_span` together
+  could not bound a site's baseline to a *window* the way `active_since` /
+  `active_before` already bound its newest pass to one. `umbra sites --max-span DAYS`
+  (and `find_repeat_sites(max_span_days=…)`, `GET`/`POST /sites?max_span=`, and
+  `CatalogIndex.rank_sites(max_span_days=…)` for `--local`) keeps only sites whose
+  observation span (first dated pass to last) is *at most* `DAYS` — the exact `<=` twin
+  of `min_span`'s `>=`, selecting the complement. Set with `--min-span` the two bound
+  each site's baseline to a window (`--min-span A --max-span B` keeps sites whose span
+  is between `A` and `B` days), symmetric with `--active-since --active-before`; an
+  inverted window (floor above ceiling) admits nothing rather than erroring, like an
+  inverted recency window. It measures the same series `--rank-by` does
+  (`coverage._passes_max_span`, the ceiling twin of `_passes_span`): under
+  `--rank-by comparable` it gates the *analysable* series' span, so off-polarization
+  passes bracketing the range cannot make a baseline read *longer* — and so escape a
+  ceiling — than the series a change verb can difference. Like `min_span` it drops a
+  site with fewer than two dated passes in the gated series (no confirmed baseline to
+  admit), which is what lets the two compose as a clean window that admits only a
+  measured span. It is single-sourced through the same two functions the other filters
+  are — `showcase.select_featured_sites` (the pool path) and `CatalogIndex.rank_sites`
+  (the whole-archive index) — and, like the cadence and floor filters, the
+  comparable-subset span is not a SQL aggregate, so the index path applies the identical
+  `_passes_max_span` in Python on the same per-task items it already reads to summarise
+  (byte-identical to the pool path, pinned by the index-vs-pool parity test for every
+  cutoff and window) and drops the raw-count SQL `LIMIT` when the ceiling is set, so a
+  short-baseline site outside the raw top-`top` is promoted rather than truncated before
+  the filter runs. It adds no field to the `site-coverage` contract (a filter input,
+  like `min_span` and the recency bounds), so no schema moved. **With it the discovery
+  moat's baseline axis is two-sided — a floor, a ceiling, or a window — matching the
+  recency axis; the moat now selects on depth, recency, cadence and a *bounded* baseline
+  span, and reports the baseline two-sided as `first` / `last`.**
 - **`min_span`: an observation-baseline filter on the discovery moat, selecting the
   sites imaged over a long enough window for slow change to show, on every surface
   (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`,

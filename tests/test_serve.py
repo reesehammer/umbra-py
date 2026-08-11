@@ -736,6 +736,30 @@ def test_sites_non_positive_min_span_is_a_client_error(sites_index):
     assert client.get("/sites?min_span=0").status_code == 422
 
 
+def test_sites_max_span_keeps_only_short_baseline_sites(sites_client):
+    # The upper twin of min_span: Alpha spans 20 days, Beta spans 4. A 10-day ceiling
+    # keeps the short-window Beta and drops the long-baseline Alpha -- the complement
+    # of the min_span selection above.
+    short_baseline = sites_client.get("/sites?max_span=10").json()
+    assert [s["task"] for s in short_baseline["sites"]] == ["Beta"]
+    # A ceiling Alpha's 20-day span clears (boundary-inclusive) keeps both.
+    both = sites_client.get("/sites?max_span=20").json()
+    assert [s["task"] for s in both["sites"]] == ["Alpha", "Beta"]
+
+
+def test_sites_span_window_bounds_the_baseline(sites_client):
+    # min_span and max_span together bound each site's span to a window: [10, 25]
+    # keeps only Alpha (span 20); Beta (span 4) is below the floor.
+    body = sites_client.get("/sites?min_span=10&max_span=25").json()
+    assert [s["task"] for s in body["sites"]] == ["Alpha"]
+
+
+def test_sites_non_positive_max_span_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    # gt=0 on the query rejects a non-positive span ceiling (FastAPI validation).
+    assert client.get("/sites?max_span=0").status_code == 422
+
+
 def test_sites_filters_by_bbox(sites_client):
     # A bbox far from the sample footprint leaves an empty pool.
     empty = sites_client.get("/sites?bbox=0,0,1,1").json()
@@ -913,6 +937,21 @@ def test_post_sites_filters_by_min_span(sites_client):
 def test_post_sites_non_positive_min_span_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"min_span": 0}).status_code == 400
+
+
+def test_post_sites_filters_by_max_span(sites_client):
+    # The POST twin honours the ceiling exactly as GET: a 10-day ceiling keeps Beta
+    # (4-day span) and drops Alpha (20-day span) -- and set with min_span the two
+    # bound the baseline to a window.
+    short_baseline = sites_client.post("/sites", json={"max_span": 10}).json()
+    assert [s["task"] for s in short_baseline["sites"]] == ["Beta"]
+    windowed = sites_client.post("/sites", json={"min_span": 10, "max_span": 25}).json()
+    assert [s["task"] for s in windowed["sites"]] == ["Alpha"]
+
+
+def test_post_sites_non_positive_max_span_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"max_span": 0}).status_code == 400
 
 
 def test_post_sites_filters_by_area_top_level_and_query(sites_client):
