@@ -679,6 +679,100 @@ def test_max_revisit_none_applies_no_filter_and_non_positive_is_rejected():
 
 
 # --------------------------------------------------------------------------- #
+# min_span: the observation-baseline filter (long-baseline sites)
+# --------------------------------------------------------------------------- #
+def test_min_span_keeps_only_long_baseline_sites():
+    # Long spans 29 days on 3 passes; Short spans 2 days on 3 passes. A 10-day
+    # baseline bound keeps the long-baseline site and drops the short-window one --
+    # even though Short has the *tighter* cadence, which is exactly the axis span is
+    # not: cadence is the worst gap, span is the total observation window.
+    pool = [
+        *[_pass("Long", d) for d in (1, 15, 30)],  # span 29, worst gap 15
+        *[_pass("Short", d) for d in (1, 2, 3)],  # span 2, worst gap 1
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["Long", "Short"]
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=10)] == ["Long"]
+
+
+def test_min_span_is_boundary_inclusive():
+    # A site whose span falls exactly on the bound is kept (at least, not above).
+    pool = [_pass("Nine", d) for d in (1, 10)]  # span 9
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=9)] == ["Nine"]
+    assert rank_site_coverage(pool, min_span_days=9.1) == []
+
+
+def test_min_span_drops_a_site_with_no_measurable_span():
+    # A single-pass site has no span, so it cannot be confirmed to meet any baseline
+    # requirement and is dropped -- the same way max_revisit drops a site with no
+    # measurable cadence (min_passes=1 admits it only when no span bound is set).
+    pool = [_pass("Lonely", 1)]
+    assert [s.task for s in rank_site_coverage(pool, min_passes=1)] == ["Lonely"]
+    assert rank_site_coverage(pool, min_passes=1, min_span_days=5) == []
+
+
+def test_min_span_gates_the_comparable_span_under_comparable_ranking():
+    # A VV pair on days 1 and 10 (span 9) with a lone HH pass at day 30: the raw
+    # dated series spans 29 days, but the series a change verb can actually difference
+    # (VV only) spans just 9. Under 'passes' the raw 29 clears a 20-day bound; under
+    # 'comparable' the analysable 9 does not -- the baseline twin of min_passes /
+    # max_revisit measuring the comparable series.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 10, pols=["VV"]),
+        _pass("Mixed", 30, pols=["HH"]),
+    ]
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=20)] == ["Mixed"]
+    assert rank_site_coverage(pool, min_span_days=20, rank_by="comparable") == []
+    # A bound the 9-day VV span clears keeps it under either ranking.
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=5, rank_by="comparable")] == [
+        "Mixed"
+    ]
+
+
+def test_min_span_is_orthogonal_to_cadence_and_promotes_past_the_top():
+    # A baseline bound selects on the span, not on depth or cadence: a shallow but
+    # long-baseline site survives a bound a deep-but-short-window one fails, and it is
+    # not truncated away by a small --top before the filter runs (the whole-archive
+    # correction the index path also makes). This is the complement of the max_revisit
+    # promotion test -- there the tight-cadence site was promoted; here the long one.
+    pool = [
+        *[_pass("ShortDeep", d) for d in (10, 11, 12, 13)],  # 4 passes, span 3
+        *[_pass("LongSparse", d) for d in (1, 30)],  # 2 passes, span 29
+    ]
+    assert [s.task for s in rank_site_coverage(pool, top=1)] == ["ShortDeep"]
+    assert [s.task for s in rank_site_coverage(pool, top=1, min_span_days=20)] == ["LongSparse"]
+
+
+def test_min_span_none_applies_no_filter_and_non_positive_is_rejected():
+    import pytest
+
+    pool = [_pass("Any", d) for d in (1, 2)]  # span 1
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=None)] == ["Any"]
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError, match="min_span_days must be positive"):
+            rank_site_coverage(pool, min_span_days=bad)
+
+
+def test_min_span_and_max_revisit_are_independent_axes():
+    # A site can be tightly-imaged over a short window, or sparsely over a long one.
+    # min_span selects the second, max_revisit the first; combined they demand both.
+    pool = [
+        *[_pass("Burst", d) for d in (1, 2, 3, 4)],  # span 3, worst gap 1
+        *[_pass("Slow", d) for d in (1, 16, 31)],  # span 30, worst gap 15
+        *[_pass("Both", d) for d in (1, 8, 15, 22, 29)],  # span 28, worst gap 7
+    ]
+    # Long baseline alone: Slow and Both (Burst's window is too short).
+    assert sorted(s.task for s in rank_site_coverage(pool, min_span_days=20)) == ["Both", "Slow"]
+    # Tight cadence alone: Burst and Both (Slow has a 15-day hole).
+    tight = rank_site_coverage(pool, max_revisit_days=10)
+    assert sorted(s.task for s in tight) == ["Both", "Burst"]
+    # Both axes at once: only Both is long *and* reliable.
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=20, max_revisit_days=10)] == [
+        "Both"
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
 def _patch_gather(monkeypatch, pool):
@@ -786,6 +880,32 @@ def test_sites_cli_max_revisit_empty_result_names_the_cadence_bound(monkeypatch)
     assert result.exit_code == 0, result.output
     assert "revisited within 10d" in result.output
     assert "--max-revisit" in result.output  # the cadence bound is offered to loosen
+
+
+def test_sites_cli_min_span_filters_to_long_baseline_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Long", d) for d in (1, 15, 30)],  # span 29
+        *[_pass("Short", d) for d in (1, 2, 3)],  # span 2
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--min-span", "10"])
+    assert result.exit_code == 0, result.output
+    assert "Long" in result.output
+    assert "Short" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_min_span_empty_result_names_the_baseline_bound(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Short", d) for d in (1, 2, 3)]  # span 2
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--min-span", "10"])
+    assert result.exit_code == 0, result.output
+    assert "imaged over 10d+" in result.output
+    assert "--min-span" in result.output  # the baseline bound is offered to loosen
 
 
 def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):

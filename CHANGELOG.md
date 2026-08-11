@@ -7,6 +7,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`min_span`: an observation-baseline filter on the discovery moat, selecting the
+  sites imaged over a long enough window for slow change to show, on every surface
+  (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`,
+  `mcp_server.py`, `tests/test_coverage.py`, `tests/test_showcase.py`,
+  `tests/test_index.py`, `tests/test_serve.py`, `tests/test_mcp_server.py`).** The
+  discovery moat could select sites by **depth** (`--min-passes` / `--rank-by`),
+  **recency** (`--active-since` / `--active-before`) and **cadence**
+  (`--max-revisit`), and it *reported* each site's observation `span_days`, but it
+  could not *select* on that span — so it could not answer "which repeat-imaged sites
+  have been watched over **at least N days**?", the question a *slow* change
+  (subsidence, construction, deforestation) needs, where the signal is only visible
+  across a long baseline. Span is a genuinely different axis from cadence: cadence is
+  the worst *gap* between consecutive passes (how reliably a site is watched), span is
+  the total *baseline* first-pass-to-last (how long it has been watched at all) — a
+  site imaged ten times in one week has a tight cadence but a short span, one imaged
+  once a year for five years the reverse. `umbra sites --min-span DAYS` (and
+  `find_repeat_sites(min_span_days=…)`, `GET`/`POST /sites?min_span=`, and
+  `CatalogIndex.rank_sites(min_span_days=…)` for `--local`) keeps only sites whose
+  observation span is at least `DAYS`, dropping a short-window series and a site with
+  fewer than two dated passes (no measurable span, dropped like `--max-revisit` drops
+  a site with no measurable cadence). It measures the same depth `--rank-by` does
+  (`coverage._passes_span`, the baseline twin of `_passes_cadence`): under
+  `--rank-by comparable` it gates the *analysable* series' span
+  (`comparable_span_days`), so off-polarization passes bracketing the range cannot
+  inflate the baseline past the series a change verb can difference. It is
+  single-sourced through the same two functions the other filters are —
+  `showcase.select_featured_sites` (the pool path) and `CatalogIndex.rank_sites` (the
+  whole-archive index) — and, like the cadence filter, the comparable-subset span is
+  not a SQL aggregate, so the index path applies the identical `_passes_span` in
+  Python on the same per-task items it already reads to summarise (byte-identical to
+  the pool path, pinned by the index-vs-pool test for every cutoff) and drops the
+  raw-count SQL `LIMIT` when the filter is set, so a long-baseline site outside the
+  raw top-`top` is promoted rather than truncated before the filter runs. It is
+  orthogonal to the recency and cadence filters and distinct from `--start` / `--end`
+  (which bound the passes). On the HTTP surface a non-positive bound is a clean client
+  error (`gt=0` on `GET`, a `400` on `POST`), and the `umbra sites` empty-result
+  message names the baseline bound it applied and offers `--min-span` to loosen. Adds
+  no field to the `site-coverage` contract (a filter input, like the recency and
+  cadence bounds), so no schema moved. **With it the discovery moat *selects* on all
+  four axes it reports — depth, recency, cadence and now baseline span.**
 - **`max_revisit`: a worst-case-cadence filter on the discovery moat, selecting the
   sites imaged often enough to monitor, on every surface (`coverage.py`,
   `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`,

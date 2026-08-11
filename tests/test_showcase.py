@@ -352,6 +352,19 @@ def test_select_featured_sites_max_revisit_keeps_reliably_imaged_sites():
     assert [i.datetime.day for i in kept[0].items] == [1, 7, 13]  # full history kept
 
 
+def test_select_featured_sites_min_span_keeps_long_baseline_sites():
+    """min_span keeps a site only if its observation span is at least the bound,
+    dropping a short-window series and retaining full history -- a different axis from
+    max_revisit (baseline, not cadence: Short has the tighter cadence but is dropped)."""
+    items = [
+        *[_pass("Long", d) for d in (1, 15, 30)],  # span 29, worst gap 15
+        *[_pass("Short", d) for d in (1, 2, 3)],  # span 2, worst gap 1
+    ]
+    kept = showcase.select_featured_sites(items, min_span_days=10)
+    assert [s.task for s in kept] == ["Long"]
+    assert [i.datetime.day for i in kept[0].items] == [1, 15, 30]  # full history kept
+
+
 def _pass_pol(task: str, day: int, pol: str) -> UmbraItem:
     """A featured-gallery pass carrying a polarization, so the comparable ranking
     (largest same-polarization dated subset) can be exercised."""

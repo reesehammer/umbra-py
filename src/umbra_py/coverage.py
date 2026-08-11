@@ -112,6 +112,20 @@ def _check_max_revisit(max_revisit_days: float | None) -> None:
         raise ValueError(f"max_revisit_days must be positive (days), got {max_revisit_days!r}")
 
 
+def _check_min_span(min_span_days: float | None) -> None:
+    """Reject a non-positive ``min_span`` baseline bound.
+
+    A site's observation span between two distinct passes is always positive, so a
+    non-positive bound could only ever mean "keep everything" -- a silent no-op of
+    exactly the kind the rest of this surface refuses. ``None`` disables the filter
+    (the default). Shared by every discovery surface so they cannot disagree about
+    what a span bound is, exactly as :func:`_check_max_revisit` is for
+    ``max_revisit`` and :func:`_check_ranking` is for ``rank_by``.
+    """
+    if min_span_days is not None and min_span_days <= 0:
+        raise ValueError(f"min_span_days must be positive (days), got {min_span_days!r}")
+
+
 def _passes_cadence(items: Iterable[UmbraItem], *, rank_by: str, max_revisit_days: float) -> bool:
     """Whether the series ``rank_by`` measures is revisited at least this often.
 
@@ -139,6 +153,43 @@ def _passes_cadence(items: Iterable[UmbraItem], *, rank_by: str, max_revisit_day
     dates = sorted(i.datetime for i in series if i.datetime is not None)
     gaps = _revisit_days(dates)
     return bool(gaps) and max(gaps) <= max_revisit_days
+
+
+def _passes_span(items: Iterable[UmbraItem], *, rank_by: str, min_span_days: float) -> bool:
+    """Whether the series ``rank_by`` measures spans at least this long.
+
+    The baseline twin of :func:`_passes_cadence`: the gate measures the *same*
+    series the ranking orders and qualifies by, so ``min_span`` and ``rank_by``
+    agree about which observation window "span" means. Under ``"comparable"`` it
+    gates the largest single-polarization dated subset (the differenceable series
+    the analysis verbs consume -- :func:`_largest_comparable_group`); under
+    ``"passes"`` the whole dated series. Returns ``True`` iff that series' baseline
+    -- its ``span_days`` / ``comparable_span_days`` figure, whole days from its
+    first dated pass to its last -- is at least ``min_span_days`` days.
+
+    Span is a different axis from cadence: ``max_revisit`` bounds the *worst gap*
+    between consecutive passes (how reliably a site is watched), whereas this bounds
+    the *total baseline* (how long it has been watched at all). A site imaged ten
+    times in one week has a tight cadence but a short span; one imaged once a year
+    for five years has a loose cadence but a long span -- the observation window a
+    slow change (subsidence, construction, deforestation) needs to be visible in.
+
+    A series with fewer than two dated passes has no measurable span, so it *fails*:
+    a site whose baseline cannot be confirmed is not one a span filter should
+    return, the same way :func:`_passes_cadence` drops a site with no measurable
+    cadence and ``active_since`` drops one with no datable pass. The span is
+    computed exactly as :func:`site_coverage` reduces ``span_days`` (whole days
+    between the first and last dated pass), so filtering here can never disagree
+    with the :attr:`SiteCoverage.span_days` a summary reports -- which is what lets
+    the pool path (gating items in :func:`umbra_py.showcase.select_featured_sites`)
+    and the index path (gating the same items in
+    :meth:`umbra_py.index.CatalogIndex.rank_sites`) stay byte-identical.
+    """
+    series = _largest_comparable_group(items) if rank_by == "comparable" else items
+    dates = sorted(i.datetime for i in series if i.datetime is not None)
+    if len(dates) < 2:
+        return False
+    return (dates[-1] - dates[0]).days >= min_span_days
 
 
 @dataclass(frozen=True)
@@ -397,6 +448,7 @@ def rank_site_coverage(
     active_since: DateLike = None,
     active_before: DateLike = None,
     max_revisit_days: float | None = None,
+    min_span_days: float | None = None,
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
@@ -455,11 +507,31 @@ def rank_site_coverage(
     passes in the gated series has no measurable cadence and is dropped. ``None``
     (the default) applies no cadence filter; a non-positive value is a
     ``ValueError``.
+
+    ``min_span_days`` keeps only sites imaged over *at least this long* -- a
+    baseline filter on each site's observation **span** (whole days from its first
+    dated pass to its last), so a series confined to a short window is dropped and a
+    long-baseline one kept. It is the selection twin of the ``span_days`` figure the
+    summary already reports, and a different axis from ``max_revisit_days``: cadence
+    is the worst *gap* (how reliably a site is watched), span is the total *baseline*
+    (how long it has been watched at all), so it is the discovery answer for slow
+    change that needs a long window to show -- subsidence, construction,
+    deforestation. It measures the same series ``rank_by`` does
+    (:func:`_passes_span`): under ``"comparable"`` the *analysable* series' span
+    (``comparable_span_days``), so off-polarization passes bracketing the range
+    cannot make a site's baseline look longer than the series a change verb can
+    difference. It is orthogonal to ``active_since`` / ``active_before`` (recency of
+    the newest pass) and to ``max_revisit_days`` (cadence), and distinct from
+    ``start`` / ``end`` (which bound which passes enter the pool). A site with fewer
+    than two passes in the gated series has no measurable span and is dropped.
+    ``None`` (the default) applies no span filter; a non-positive value is a
+    ``ValueError``.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_min_span(min_span_days)
     sites = select_featured_sites(
         items,
         count=top,
@@ -468,5 +540,6 @@ def rank_site_coverage(
         active_since=active_since,
         active_before=active_before,
         max_revisit_days=max_revisit_days,
+        min_span_days=min_span_days,
     )
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

@@ -1901,6 +1901,7 @@ def _rank_sites_pool_baseline(idx, **filters):
     active_since = filters.pop("active_since", None)
     active_before = filters.pop("active_before", None)
     max_revisit_days = filters.pop("max_revisit_days", None)
+    min_span_days = filters.pop("min_span_days", None)
     pool = list(idx.search(limit=None, **filters))
     return rank_site_coverage(
         pool,
@@ -1910,6 +1911,7 @@ def _rank_sites_pool_baseline(idx, **filters):
         active_since=active_since,
         active_before=active_before,
         max_revisit_days=max_revisit_days,
+        min_span_days=min_span_days,
     )
 
 
@@ -1965,6 +1967,13 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             # (Alpha) fails the bound and Gamma is promoted from outside the top.
             {"max_revisit_days": 3, "top": 1},
             {"max_revisit_days": 4, "rank_by": "comparable"},
+            # min_span is not a SQL aggregate either (the comparable-subset span is
+            # not a column), so it too is applied in Python and must stay identical to
+            # the pool ranker. Alpha span 8 (days 1,5,9), Beta span 4, Gamma span 1.
+            {"min_span_days": 1},  # all three (boundary-inclusive for Gamma)
+            {"min_span_days": 5},  # Alpha only
+            {"min_span_days": 8},  # Alpha only (boundary-inclusive)
+            {"min_span_days": 5, "rank_by": "comparable"},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters
@@ -1981,8 +1990,33 @@ def test_rank_sites_matches_uncapped_pool_for_exact_filters(tmp_path):
     ]
     with _index(tmp_path, pool) as idx:
         polygon = {"intersects": [[(-1.0, -1.0), (-1.0, 2.0), (2.0, 2.0), (2.0, -1.0)]]}
-        for filters in ({"polarizations": ["VV"]}, {"max_incidence": 90.0}, polygon):
+        for filters in (
+            {"polarizations": ["VV"]},
+            {"max_incidence": 90.0},
+            polygon,
+            # A span filter set together with an exact filter still routes through the
+            # uncapped-pool branch and must match the pool ranker.
+            {"polarizations": ["VV"], "min_span_days": 4},
+        ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters))
+
+
+def test_rank_sites_min_span_filters_whole_archive_and_promotes_past_top(tmp_path):
+    """min_span keeps only long-baseline sites across the whole index, and because a
+    span (least of all the comparable-subset span) is applied in Python it drops the
+    candidate LIMIT so a long-baseline site outside the raw top-`top` is not truncated
+    before the filter runs -- the same whole-archive correction max_revisit makes, for
+    the orthogonal axis (baseline, not cadence)."""
+    pool = [
+        *[_site_item("ShortDeep", d) for d in (10, 11, 12, 13)],  # 4 passes, span 3
+        *[_site_item("LongSparse", d) for d in (1, 30)],  # 2 passes, span 29
+    ]
+    with _index(tmp_path, pool) as idx:
+        # Without a span bound ShortDeep ranks first (more passes); top=1 returns only it.
+        assert [s.task for s in idx.rank_sites(top=1)] == ["ShortDeep"]
+        # The span bound drops ShortDeep and promotes LongSparse past the top-1 cap.
+        long_baseline = idx.rank_sites(top=1, min_span_days=20)
+    assert [(s.task, s.passes) for s in long_baseline] == [("LongSparse", 2)]
 
 
 def test_rank_sites_active_since_filters_whole_archive_by_recency(tmp_path):

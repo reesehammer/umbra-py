@@ -821,6 +821,36 @@ from:
   moved. **With it the discovery moat selects on all three of the axes it reports —
   depth, recency *and* cadence — not only ranks and qualifies on depth.** See the
   CHANGELOG.
+- ~~The moat could select sites by depth, recency and cadence, and it *reported* each
+  site's observation `span_days` — but it could not *select* on that span. A series
+  imaged tightly over one week and one imaged sparsely over five years could rank and
+  qualify identically wherever their depth and (worst-case) cadence matched, so a
+  reader who wanted a **long-baseline** target — the site watched over a long enough
+  window for a *slow* change (subsidence, construction, deforestation) to be visible —
+  could not ask for one. Cadence is not baseline: `--max-revisit` bounds the worst
+  *gap* between consecutive passes (how reliably a site is watched), which says nothing
+  about how *long* it has been watched at all.~~ **shipped** — `min_span` adds the
+  baseline (duration) axis on every surface at once (`umbra sites --min-span`,
+  `find_repeat_sites`, `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for
+  `--local`): it keeps only sites whose observation span (first dated pass to last) is
+  at least `N` days, the selection twin of the `span_days` figure the summary already
+  reports. It measures the same depth `--rank-by` does (`coverage._passes_span`, the
+  baseline twin of `_passes_cadence`): under `--rank-by comparable` it gates the
+  *analysable* series' span (`comparable_span_days`), so off-polarization passes
+  bracketing the range cannot make a site's baseline look longer than the series a
+  change verb can difference. It is single-sourced through the same two functions the
+  other filters are (`select_featured_sites`, `CatalogIndex.rank_sites`) — and, like
+  the cadence bound, the comparable-subset span is not a SQL aggregate, so the index
+  path applies the identical `_passes_span` in Python on the same per-task items it
+  already reads to summarise (pinned byte-for-byte identical to the pool path for every
+  cutoff) and drops the raw-count SQL `LIMIT` when set, so a long-baseline site outside
+  the raw top-`top` is promoted rather than truncated before the filter runs. It is
+  orthogonal to the recency and cadence bounds (a tight-cadence short-window site is
+  dropped by a span bound, a long-baseline sparse one kept — the exact complement of
+  the cases `--max-revisit` selects) and adds no field to the `site-coverage` contract
+  (a filter input, like the recency and cadence bounds), so no schema moved. **With it
+  the discovery moat selects on all *four* axes it reports — depth, recency, cadence
+  *and* baseline span.** See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

@@ -1320,6 +1320,7 @@ class CatalogIndex:
         active_since: DateLike = None,
         active_before: DateLike = None,
         max_revisit_days: float | None = None,
+        min_span_days: float | None = None,
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1404,12 +1405,30 @@ class CatalogIndex:
         series' cadence under ``"comparable"``), orthogonal to the recency filters,
         and dropping a site with fewer than two passes in the gated series. ``None``
         applies no cadence filter; a non-positive value is a ``ValueError``.
+
+        ``min_span_days`` keeps only sites imaged over *at least this long* -- a
+        baseline filter on each site's observation **span** (whole days from first
+        dated pass to last). Like the cadence filter it is applied in Python rather
+        than SQL: under ``"comparable"`` the span is over the largest
+        single-polarization subset the document JSON defines (not a column
+        expression), and keeping the two rankings byte-identical is worth more than a
+        SQL ``HAVING`` on the raw case alone, so it uses the same
+        :func:`umbra_py.coverage._passes_span` the pool path does on the same per-task
+        items this method already reads, and drops the raw-count SQL ``LIMIT`` when
+        set (as the comparable ranking and the cadence filter do) so a long-baseline
+        site outside the raw top-``top`` is promoted rather than truncated before the
+        filter runs. Gated on the same depth ``rank_by`` measures (the analysable
+        series' span under ``"comparable"``), orthogonal to the recency and cadence
+        filters, and dropping a site with fewer than two passes in the gated series.
+        ``None`` applies no span filter; a non-positive value is a ``ValueError``.
         """
         from .coverage import (  # noqa: PLC0415
             _check_max_revisit,
+            _check_min_span,
             _check_ranking,
             _min_passes_depth,
             _passes_cadence,
+            _passes_span,
             _rank_sort_key,
             rank_site_coverage,
             site_coverage,
@@ -1417,6 +1436,7 @@ class CatalogIndex:
 
         _check_ranking(rank_by)
         _check_max_revisit(max_revisit_days)
+        _check_min_span(min_span_days)
         if top <= 0:
             return []
         since = _coerce_date(active_since)
@@ -1452,6 +1472,7 @@ class CatalogIndex:
                 active_since=active_since,
                 active_before=active_before,
                 max_revisit_days=max_revisit_days,
+                min_span_days=min_span_days,
             )
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
@@ -1488,9 +1509,13 @@ class CatalogIndex:
         )
         # The raw ranking picks the top ``top`` candidates in SQL and caps there;
         # the comparable ranking cannot (analysable depth is not a COUNT), and
-        # neither can a cadence filter (a worst-consecutive-gap is not a column), so
-        # either one reads every qualifying task and re-ranks/truncates in Python.
-        needs_full_scan = rank_by != "passes" or max_revisit_days is not None
+        # neither can a cadence filter (a worst-consecutive-gap is not a column) nor
+        # a span filter (kept in Python so the comparable-subset span matches the
+        # pool path exactly), so any of them reads every qualifying task and
+        # re-ranks/truncates in Python.
+        needs_full_scan = (
+            rank_by != "passes" or max_revisit_days is not None or min_span_days is not None
+        )
         if not needs_full_scan:
             candidate_sql += " LIMIT ?"
             candidate_params.append(top)
@@ -1512,6 +1537,14 @@ class CatalogIndex:
             # under ``"comparable"``. A site with no measurable cadence is dropped.
             if max_revisit_days is not None and not _passes_cadence(
                 passes, rank_by=rank_by, max_revisit_days=max_revisit_days
+            ):
+                continue
+            # Span filter (observation baseline), applied on the same items the
+            # summary reads and with the same ``_passes_span`` the pool path uses, so
+            # the two paths are byte-identical. Gated on the analysable subset under
+            # ``"comparable"``. A site with no measurable span is dropped.
+            if min_span_days is not None and not _passes_span(
+                passes, rank_by=rank_by, min_span_days=min_span_days
             ):
                 continue
             ranked.append(site_coverage(task, passes))

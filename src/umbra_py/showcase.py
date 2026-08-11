@@ -303,6 +303,7 @@ def select_featured_sites(
     active_since: DateLike = None,
     active_before: DateLike = None,
     max_revisit_days: float | None = None,
+    min_span_days: float | None = None,
 ) -> list[FeaturedSite]:
     """Choose the most repeat-imaged sites in ``items`` for the featured gallery.
 
@@ -372,6 +373,21 @@ def select_featured_sites(
         ``active_since`` / ``active_before`` and to ``start`` / ``end``. A site with
         fewer than two passes in the gated series has no measurable cadence and is
         dropped. ``None`` (the default) applies no cadence filter.
+    min_span_days:
+        Keep only sites imaged over *at least this long* -- a baseline filter on each
+        site's observation **span** (whole days from its first dated pass to its
+        last), so a series confined to a short window is dropped and a long-baseline
+        one kept. A different axis from ``max_revisit_days``: cadence is the worst
+        *gap* (how reliably a site is watched), span is the total *baseline* (how
+        long it has been watched at all), the window a slow change needs to be
+        visible in. It gates the same series ``rank_by`` measures
+        (:func:`umbra_py.coverage._passes_span`): under ``"comparable"`` the
+        *analysable* series' span (``comparable_span_days``), so off-polarization
+        passes bracketing the range cannot inflate the baseline past the series a
+        change verb can difference. It is orthogonal to ``active_since`` /
+        ``active_before``, to ``max_revisit_days`` and to ``start`` / ``end``. A site
+        with fewer than two passes in the gated series has no measurable span and is
+        dropped. ``None`` (the default) applies no span filter.
 
     Returns the sites best-first, each carrying its passes oldest-first.
     Deterministic and dependency-free -- it calls no renderer and no model.
@@ -388,15 +404,18 @@ def select_featured_sites(
     # either ranking (lazy import -- the default ``"passes"`` path needs neither).
     from .coverage import (  # noqa: PLC0415
         _check_max_revisit,
+        _check_min_span,
         _check_ranking,
         _largest_comparable_group,
         _min_passes_depth,
         _passes_cadence,
+        _passes_span,
         _rank_sort_key,
     )
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
+    _check_min_span(min_span_days)
     by_task: dict[str, list[UmbraItem]] = {}
     for item in items:
         if item.task and item.datetime is not None:
@@ -434,6 +453,16 @@ def select_featured_sites(
         # cadence in that series is dropped.
         if max_revisit_days is not None and not _passes_cadence(
             ordered, rank_by=rank_by, max_revisit_days=max_revisit_days
+        ):
+            continue
+        # Span gate: keep a site only if the series ``rank_by`` measures covers a
+        # long enough baseline (its first-to-last span is at least the bound). Gated
+        # on the same items the summary reduces, so this and the reported
+        # ``span_days`` cannot disagree -- and on the *analysable* subset under
+        # ``"comparable"`` (the baseline twin of ``max_revisit`` gating comparable
+        # cadence). A site with no measurable span in that series is dropped.
+        if min_span_days is not None and not _passes_span(
+            ordered, rank_by=rank_by, min_span_days=min_span_days
         ):
             continue
         comparable = len(_largest_comparable_group(ordered)) if rank_by == "comparable" else 0
