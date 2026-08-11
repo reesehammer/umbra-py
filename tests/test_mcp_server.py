@@ -241,6 +241,24 @@ def test_find_repeat_sites_rank_by_comparable_prefers_the_analysable_series(monk
     assert [s["task"] for s in by_comparable["sites"]] == ["Deep", "Broad"]
 
 
+def test_find_repeat_sites_active_since_filters_to_recent_sites(monkeypatch):
+    # Fresh's newest pass is 2024-07-08, Stale's is 2024-03-08 (the _site_pass
+    # `day` is the month digit); a cutoff between them keeps only the live site,
+    # with its full history intact.
+    pool = [
+        *[_site_pass("Fresh", d) for d in (5, 6, 7)],
+        *[_site_pass("Stale", d) for d in (1, 2, 3)],
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    out = ms.find_repeat_sites(local=False, active_since="2024-04-01")
+    assert [(s["task"], s["passes"]) for s in out["sites"]] == [("Fresh", 3)]
+
+
 def test_find_repeat_sites_rejects_unknown_rank_by():
     with pytest.raises(ValueError, match="rank_by must be one of"):
         ms.find_repeat_sites(rank_by="deepest", local=False)

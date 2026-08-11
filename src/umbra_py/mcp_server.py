@@ -402,6 +402,7 @@ def find_repeat_sites(
     top: int = 20,
     min_passes: int = 2,
     rank_by: str = "passes",
+    active_since: str | None = None,
     local: bool | None = None,
 ) -> dict[str, Any]:
     """Rank the archive's most repeat-imaged sites — where change detection has
@@ -442,6 +443,17 @@ def find_repeat_sites(
     polarization; prefer ``"comparable"`` when the next step is
     ``pick_change_interval`` / ``stack_stats``, which consume exactly that
     differenceable subset.
+
+    ``active_since`` keeps only sites still imaged *on or after* that date -- a
+    recency filter on each site's newest pass, so a deep series that stopped long
+    ago is dropped and an actively-revisited one is kept. Use it to find live
+    monitoring targets ("repeat-imaged sites still being collected"). It accepts an
+    ISO date (``"2024-06-01"``), a bare year/month, or a relative expression
+    (``"6 months ago"``), is orthogonal to ``rank_by`` / ``min_passes`` (it gates on
+    the site's latest pass, whatever depth the ranking measures), and differs from
+    ``start`` / ``end``: those bound which *passes* enter the pool (truncating every
+    series to a window), whereas this selects whole sites by recency and keeps each
+    survivor's full history.
 
     ``limit`` sizes the *live/token* pool only. On the local index a site's depth
     is measured **whole-archive** — one ``GROUP BY task`` over the entire index
@@ -515,6 +527,7 @@ def find_repeat_sites(
                 top=top,
                 min_passes=min_passes,
                 rank_by=rank_by,
+                active_since=active_since,
             )
         else:
             pool = list(
@@ -533,7 +546,9 @@ def find_repeat_sites(
                     limit=limit,
                 )
             )
-            sites = rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
+            sites = rank_site_coverage(
+                pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+            )
     finally:
         if isinstance(source, CatalogIndex):
             source.close()

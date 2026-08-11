@@ -307,6 +307,21 @@ def test_select_featured_sites_ranks_by_pass_count():
     assert [i.datetime.day for i in sites[0].items] == [4, 5, 6]
 
 
+def test_select_featured_sites_active_since_filters_by_recency():
+    """The recency filter drops a stale site by its newest pass and keeps each
+    survivor's full history (whole-site selection, not per-pass truncation)."""
+    items = [
+        *[_pass("Fresh", d) for d in (20, 21, 22)],  # newest 2024-01-22
+        *[_pass("Stale", d) for d in (1, 2, 3)],  # newest 2024-01-03
+    ]
+    kept = showcase.select_featured_sites(items, active_since="2024-01-10")
+    assert [s.task for s in kept] == ["Fresh"]
+    # A mid-series cutoff on Fresh's own range keeps all three passes (inclusive).
+    survive = showcase.select_featured_sites(items, active_since="2024-01-20")
+    assert [s.task for s in survive] == ["Fresh"]
+    assert [i.datetime.day for i in survive[0].items] == [20, 21, 22]
+
+
 def _pass_pol(task: str, day: int, pol: str) -> UmbraItem:
     """A featured-gallery pass carrying a polarization, so the comparable ranking
     (largest same-polarization dated subset) can be exercised."""

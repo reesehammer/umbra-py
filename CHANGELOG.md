@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`active_since`: a recency filter on the discovery moat, on every surface
+  (`showcase.py`, `coverage.py`, `index.py`, `cli/discover.py`, `serve.py`,
+  `mcp_server.py`, `tests/test_showcase.py`, `tests/test_coverage.py`,
+  `tests/test_index.py`, `tests/test_serve.py`, `tests/test_mcp_server.py`).**
+  The discovery moat could rank the archive's most repeat-imaged sites and report
+  each one's `first` / `last` dates, but it could not *select* the sites still
+  being imaged — the difference between a historical series and a live monitoring
+  target, which is exactly the site a curious analyst would want to task (§1's
+  funnel). `--start` / `--end` could not express it: those bound which *passes*
+  enter the pool, truncating every series to a window, so they answer "the recent
+  slice of every site" rather than "which whole sites are still active." `umbra
+  sites --active-since DATE` (and `find_repeat_sites(active_since=…)`, `GET`/`POST
+  /sites?active_since=`, and `CatalogIndex.rank_sites(active_since=…)` for
+  `--local`) keeps only sites whose **newest** dated pass is on or after `DATE`,
+  and keeps each survivor's *full* history — a whole-site recency gate, orthogonal
+  to `--rank-by` and `--min-passes` (it measures the site's latest pass, whatever
+  depth the ranking counts). It accepts anything `--start`/`--end` do (an ISO date,
+  a bare year/month, or a relative expression like `"6 months ago"`), reusing
+  `dates.parse_date_bound` rather than adding a second parser. It is single-sourced
+  through the two functions all four surfaces forward to:
+  `showcase.select_featured_sites` (the search-pool path, which `rank_site_coverage`
+  and the live/`--token` backends use) applies it in Python on each site's newest
+  pass, and `CatalogIndex.rank_sites` answers it whole-archive in the *same*
+  `GROUP BY` — a `HAVING … AND MAX(acq_date) >= ?` clause that costs nothing beyond
+  the group already computed and is exact under either ranking (a site's latest pass
+  does not depend on the polarization grouping `comparable` re-ranks by). A test
+  pins the index and pool paths byte-identical for every recency cutoff, so CLI,
+  agent tools, the hosted API and the featured gallery cannot disagree about which
+  sites are still active. On the HTTP surface a malformed date is a clean `400`
+  (coerced in the route, like `start`/`end`), and the `umbra sites` empty-result
+  message names the recency bound it applied. Adds no field to the `site-coverage`
+  contract (it is a filter input, like `min_passes` / `rank_by`), so no schema
+  moved. This adds the one discovery axis the moat lacked — *recency* — alongside
+  the depth (`passes` / `comparable`) and cadence it already reports.
 - **`--rank-by comparable` now also floors `--min-passes` on analysable depth, on
   every discovery surface (`coverage.py`, `showcase.py`, `index.py`,
   `cli/discover.py`, `serve.py`, `mcp_server.py`,

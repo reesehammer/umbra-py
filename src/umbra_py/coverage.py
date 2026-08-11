@@ -26,8 +26,12 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
+from typing import TYPE_CHECKING
 
 from .models import BBox, UmbraItem
+
+if TYPE_CHECKING:
+    from .catalog import DateLike
 
 #: The orderings :func:`rank_site_coverage` (and every discovery surface that
 #: forwards to it) can rank sites by. ``"passes"`` is the historical default --
@@ -347,6 +351,7 @@ def rank_site_coverage(
     top: int = 20,
     min_passes: int = 2,
     rank_by: str = "passes",
+    active_since: DateLike = None,
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
@@ -373,9 +378,21 @@ def rank_site_coverage(
     differenceable series is at least ``N`` passes deep" rather than "sites with
     ``N`` raw passes, ranked by their usable depth". Under ``"passes"`` it is the raw
     dated pass count, unchanged.
+
+    ``active_since`` keeps only sites still being imaged *on or after* that date --
+    a recency filter on each site's **newest** dated pass, so a deep series that
+    stopped long ago is dropped while an actively-revisited one survives (an ISO
+    date, a bare year/month, or a relative expression like ``"6 months ago"``; see
+    :func:`umbra_py.dates.parse_date_bound`). It is orthogonal to ``rank_by`` /
+    ``min_passes`` (it gates on the site's latest pass, whatever depth the ranking
+    measures) and distinct from ``start`` / ``end`` (those bound which *passes*
+    enter the pool; this selects whole sites by recency and keeps each survivor's
+    full history). ``None`` (the default) applies no recency filter.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
     _check_ranking(rank_by)
-    sites = select_featured_sites(items, count=top, min_passes=min_passes, rank_by=rank_by)
+    sites = select_featured_sites(
+        items, count=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+    )
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

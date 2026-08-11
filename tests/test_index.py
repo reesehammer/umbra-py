@@ -1893,10 +1893,16 @@ def _rank_sites_pool_baseline(idx, **filters):
     unlimited search yields, exactly as the live path would."""
     from umbra_py.coverage import rank_site_coverage
 
+    # Ranking-layer arguments (not search filters) are forwarded to the ranker;
+    # everything else scopes the pool the search returns.
     top = filters.pop("top", 20)
     min_passes = filters.pop("min_passes", 2)
+    rank_by = filters.pop("rank_by", "passes")
+    active_since = filters.pop("active_since", None)
     pool = list(idx.search(limit=None, **filters))
-    return rank_site_coverage(pool, top=top, min_passes=min_passes)
+    return rank_site_coverage(
+        pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+    )
 
 
 def test_rank_sites_orders_by_depth_across_whole_index(tmp_path):
@@ -1930,6 +1936,11 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"area": "alph"},
             {"area": "gama", "fuzzy": True},
             {"product_types": ["SICD"]},
+            # active_since gates each group on its newest pass in the same HAVING
+            # clause; it must equal the pool ranker's whole-site recency gate.
+            {"active_since": "2024-01-04"},
+            {"active_since": "2024-01-06"},
+            {"active_since": "2024-01-10"},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters
@@ -1948,6 +1959,34 @@ def test_rank_sites_matches_uncapped_pool_for_exact_filters(tmp_path):
         polygon = {"intersects": [[(-1.0, -1.0), (-1.0, 2.0), (2.0, 2.0), (2.0, -1.0)]]}
         for filters in ({"polarizations": ["VV"]}, {"max_incidence": 90.0}, polygon):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters))
+
+
+def test_rank_sites_active_since_filters_whole_archive_by_recency(tmp_path):
+    """active_since drops a deep-but-stale site and keeps an actively-imaged one,
+    across the whole index, while retaining every pass of a survivor."""
+    pool = [
+        *[_site_item("Fresh", d) for d in (7, 8, 9)],  # newest 2024-01-09
+        *[_site_item("Stale", d) for d in (1, 2, 3)],  # newest 2024-01-03
+    ]
+    with _index(tmp_path, pool) as idx:
+        all_sites = idx.rank_sites()
+        recent = idx.rank_sites(active_since="2024-01-05")
+        boundary = idx.rank_sites(active_since="2024-01-09")  # Fresh's own newest
+    assert [s.task for s in all_sites] == ["Fresh", "Stale"]
+    assert [(s.task, s.passes) for s in recent] == [("Fresh", 3)]  # full history kept
+    assert [s.task for s in boundary] == ["Fresh"]  # on-or-after is inclusive
+
+
+def test_rank_sites_active_since_on_the_exact_filter_branch(tmp_path):
+    """When a polarization filter forces the uncapped-pool branch, active_since is
+    forwarded to the pool ranker, so it still filters by recency."""
+    pool = [
+        *[_site_item("Fresh", d, pols=["VV"]) for d in (7, 8, 9)],
+        *[_site_item("Stale", d, pols=["VV"]) for d in (1, 2, 3)],
+    ]
+    with _index(tmp_path, pool) as idx:
+        recent = idx.rank_sites(polarizations=["VV"], active_since="2024-01-05")
+    assert [(s.task, s.passes) for s in recent] == [("Fresh", 3)]
 
 
 def test_rank_sites_by_comparable_reranks_whole_archive(tmp_path):

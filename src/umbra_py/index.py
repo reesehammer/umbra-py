@@ -1317,6 +1317,7 @@ class CatalogIndex:
         top: int = 20,
         min_passes: int = 2,
         rank_by: str = "passes",
+        active_since: DateLike = None,
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1367,6 +1368,17 @@ class CatalogIndex:
         --min-passes N`` returns only sites whose differenceable series is at least
         ``N`` passes deep. Under ``"passes"`` the SQL floor is exact and this and the
         pool path qualify a site identically.
+
+        ``active_since`` keeps only sites still imaged *on or after* that date -- a
+        recency filter on each site's **newest** dated pass. It is answered in the
+        same ``HAVING`` clause the pass-count floor is (``MAX(acq_date) >= ?``), so
+        it costs nothing beyond the group already computed and is exact under either
+        ranking (a site's latest pass is independent of the polarization grouping
+        ``"comparable"`` re-ranks by). Whole-archive like the rest of this method,
+        and byte-identical to the pool path's :func:`umbra_py.coverage.rank_site_coverage`
+        recency gate. It is orthogonal to ``start`` / ``end`` (those bound which
+        *rows* the ``GROUP BY`` counts; this selects whole sites by their latest and
+        keeps every counted pass in the summary). ``None`` applies no recency filter.
         """
         from .coverage import (  # noqa: PLC0415
             _check_ranking,
@@ -1379,6 +1391,7 @@ class CatalogIndex:
         _check_ranking(rank_by)
         if top <= 0:
             return []
+        since = _coerce_date(active_since)
 
         if (
             intersects is not None
@@ -1400,7 +1413,9 @@ class CatalogIndex:
                     max_resolution=max_resolution,
                 )
             )
-            return rank_site_coverage(pool, top=top, min_passes=min_passes, rank_by=rank_by)
+            return rank_site_coverage(
+                pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+            )
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
         # Raw-count ranking picks the candidates in SQL and caps at ``top``; the
@@ -1411,11 +1426,21 @@ class CatalogIndex:
         # never above the raw count, so no qualifying task is dropped -- and the true
         # ``min_passes`` floor (on ``comparable_passes``) is applied in Python once
         # the documents are read, before the re-rank and truncation.
-        candidate_sql = (
-            f"SELECT task FROM items{where} GROUP BY task "
-            "HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC, task ASC"
-        )
+        # ``active_since`` gates the same group on its newest dated pass
+        # (``MAX(acq_date) >= ?``), exact under either ranking -- a site's latest
+        # pass does not depend on the comparable grouping -- and the SQL twin of the
+        # pool path's recency gate. ``acq_date`` is a NULL-skipping ``MAX``, so a
+        # group with no dated ``acq_date`` yields NULL and is dropped (``NULL >= ?``
+        # is never true), which matches ``select_featured_sites`` dropping a site
+        # with no datable newest pass.
+        having = "HAVING COUNT(*) >= ?"
         candidate_params: list[object] = [*params, min_passes]
+        if since is not None:
+            having += " AND MAX(acq_date) >= ?"
+            candidate_params.append(since.isoformat())
+        candidate_sql = (
+            f"SELECT task FROM items{where} GROUP BY task {having} ORDER BY COUNT(*) DESC, task ASC"
+        )
         if rank_by == "passes":
             candidate_sql += " LIMIT ?"
             candidate_params.append(top)
