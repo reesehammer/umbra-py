@@ -941,11 +941,35 @@ from:
   `_temporal_rank_figures`), pinned byte-identical by the index-vs-pool parity test. It
   adds no field to the `site-coverage` contract (a ranking input, like `rank_by`'s
   existing values), so no schema moved. **With them the discovery moat *ranks* on every
-  axis it *filters* on — depth, recency and baseline — not only on depth. Open, and
-  smaller:** a `"cadence"` ordering (tightest-revisit first) is the one figure reported
-  but neither filtered nor ranked on both sides; it waits for a consumer, since a worst-
-  or typical-gap ordering has a less obvious default than recency or span. See the
-  CHANGELOG.
+  axis it *filters* on — depth, recency and baseline — not only on depth.**
+  ~~**Open, and smaller:** a `"cadence"` ordering (tightest-revisit first) is the one
+  figure reported but neither filtered nor ranked on both sides; it waits for a consumer,
+  since a worst- or typical-gap ordering has a less obvious default than recency or
+  span.~~ **shipped** — `rank_by="cadence"` adds the cadence ordering on every surface
+  at once (`umbra sites --rank-by`, `find_repeat_sites`, `GET`/`POST /sites`, and
+  `CatalogIndex.rank_sites` for `--local`): it orders sites by each site's **typical
+  revisit gap**, tightest first — the most-frequently-imaged site, the head of a
+  monitoring list. The "less obvious default" this entry deferred was resolved rather
+  than dodged: it reads the *median* gap (`median_revisit_days`), not the worst one,
+  because a ranking should surface the site imaged reliably often and a worst-case
+  ordering is dominated by a single outage — one long hiatus would bury an otherwise
+  excellently-imaged series, which is exactly why `median_revisit` shipped as the
+  "softer, more common question" the worst-case `max_revisit` gate could not ask. The
+  worst-case reading stays a hard *filter* (`max_revisit`, "never blind for longer than
+  N days"); the ranking orders by the habitual cadence. Like `"recency"` / `"span"` it
+  reads a whole-site figure independent of the polarization grouping, is applied before
+  the top-`N` truncation (a tightly-revisited site outside the raw top-`N` is promoted,
+  not truncated first), and is single-sourced through the same `SITE_RANKINGS` set,
+  `_rank_sort_key` and `_temporal_rank_figures` — extended to carry the median gap
+  beside `last` / `span_days` — so the pool and whole-archive index paths cannot
+  disagree (pinned byte-identical by the index-vs-pool parity test). It is the one
+  temporal key that sorts a figure *ascending* (a smaller gap is a better-imaged site),
+  ties broken by raw depth then task like the others, with an unmeasurable cadence
+  (a single-pass site under `min_passes=1`) sorting last. It adds no field to the
+  `site-coverage` contract (a ranking input, like the other `rank_by` values), so no
+  schema moved. **With it the discovery moat ranks on *every* axis it filters on —
+  depth, recency, baseline *and* cadence — closing the last rank-vs-filter gap the
+  moat had.** See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

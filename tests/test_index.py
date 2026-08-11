@@ -1950,6 +1950,20 @@ def test_rank_sites_recency_ranking_is_whole_archive(tmp_path):
         assert [s.task for s in idx.rank_sites(rank_by="span")] == ["Deep", "Recent"]
 
 
+def test_rank_sites_cadence_ranking_is_whole_archive(tmp_path):
+    """The cadence ranking measures a site's typical (median) revisit gap over the
+    whole index, so a shallow but tightly-revisited site is promoted past a deeper but
+    slowly-revisited one at top=1 -- the raw-count LIMIT is dropped, exactly as the
+    recency/span rankings are, and the median gap (not the worst) is what it reads."""
+    pool = [
+        *[_site_item("Deep", d) for d in (1, 8, 15, 22, 29)],  # deepest, gaps of 7 (median 7)
+        *[_site_item("Tight", d) for d in (1, 2, 3)],  # shallow, gaps 1,1 (median 1)
+    ]
+    with _index(tmp_path, pool) as idx:
+        assert idx.rank_sites(top=1)[0].task == "Deep"
+        assert idx.rank_sites(top=1, rank_by="cadence")[0].task == "Tight"
+
+
 def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
     """The cheap GROUP-BY path is exactly the uncapped-pool ranking, for every
     SQL-expressible filter (date / bbox / area / product)."""
@@ -2033,10 +2047,13 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             # filter. Alpha newest 9 span 8, Beta newest 6 span 4, Gamma newest 4 span 1.
             {"rank_by": "recency"},
             {"rank_by": "span"},
+            {"rank_by": "cadence"},
             {"rank_by": "recency", "top": 1},
             {"rank_by": "span", "top": 1},
+            {"rank_by": "cadence", "top": 1},
             {"rank_by": "recency", "active_since": "2024-01-05"},
             {"rank_by": "span", "min_span_days": 2},
+            {"rank_by": "cadence", "median_revisit_days": 5},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters

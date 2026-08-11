@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`rank_by="cadence"`: rank the discovery moat by typical revisit cadence, closing
+  the last rank-vs-filter gap so the moat now *orders* on every axis it *selects* on, on
+  every surface (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`,
+  `mcp_server.py`, `tests/test_coverage.py`, `tests/test_index.py`, `tests/test_serve.py`,
+  `tests/test_mcp_server.py`).** After `rank_by="recency"` / `"span"` the discovery
+  answer ranked on depth, recency and baseline but not on *cadence* — the one figure it
+  reported (and filtered on, via `--max-revisit` / `--median-revisit`) yet could not
+  order by — so a monitoring user could not ask for "the most-frequently-imaged sites,
+  in order." `umbra sites --rank-by cadence` (and `find_repeat_sites(rank_by="cadence")`,
+  `GET`/`POST /sites?rank_by=cadence`, and `CatalogIndex.rank_sites(rank_by="cadence")`
+  for `--local`) orders sites by each site's **typical revisit gap**, tightest first —
+  the head of a monitoring list. The "less obvious default" the deferral flagged
+  (worst-case vs typical gap) was resolved rather than dodged: it reads the *median* gap
+  (`median_revisit_days`), not the worst one, because a ranking should surface the site
+  imaged reliably *often* and a worst-case ordering is dominated by a single outage — one
+  long hiatus would bury an otherwise excellently-imaged series, which is exactly why
+  `median_revisit` shipped as the "softer, more common question" the worst-case
+  `max_revisit` gate could not ask. The worst-case reading stays a hard *filter*
+  (`--max-revisit`, "never blind for longer than N days"); the ranking orders by the
+  habitual cadence. Like `recency` / `span` it reads a whole-site figure independent of
+  the polarization grouping, is applied *before* the top-`N` truncation (a
+  tightly-revisited site outside the raw top-`N` is promoted, not truncated first), and
+  is single-sourced through the same `SITE_RANKINGS` set, `_rank_sort_key` and
+  `_temporal_rank_figures` — the last extended to carry the median gap beside `last` /
+  `span_days`, so the pool and whole-archive index paths cannot disagree (pinned
+  byte-identical by the index-vs-pool parity test; the index path drops its raw-count
+  SQL `LIMIT` and re-ranks in Python since a median-consecutive-gap is not a column). It
+  is the one temporal key that sorts a figure *ascending* (a smaller gap is a
+  better-imaged site), ties broken by raw depth then task like the others, with an
+  unmeasurable cadence (a single-pass site under `min_passes=1`) sorting last. An unknown
+  ranking stays a self-describing `ValueError` / `400` naming the accepted set. It adds no
+  field to the `site-coverage` contract (a ranking input, like the other `rank_by`
+  values), so no schema moved. **With it the discovery moat ranks on every axis it filters
+  on — depth, recency, baseline *and* cadence.**
 - **`rank_by="recency"` / `rank_by="span"`: rank the discovery moat by the temporal
   axes it already filters on, so it now *orders* on every axis it *selects* on rather
   than only on depth, on every surface (`coverage.py`, `showcase.py`, `index.py`,

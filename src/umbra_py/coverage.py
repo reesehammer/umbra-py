@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from .catalog import DateLike
 
 #: The orderings :func:`rank_site_coverage` (and every discovery surface that
-#: forwards to it) can rank sites by. The first two rank by *depth*; the last two
+#: forwards to it) can rank sites by. The first two rank by *depth*; the last three
 #: by a *temporal* figure the discovery answer already reports and can already
 #: filter on -- so the moat now ranks on every axis it filters on, not only on
 #: depth.
@@ -58,12 +58,22 @@ if TYPE_CHECKING:
 #: buries under a deeper series that stopped years ago. ``"span"`` orders by each
 #: site's observation **baseline** (the ``span_days`` a summary reports),
 #: longest-watched first -- the window a *slow* change (subsidence, construction,
-#: deforestation) needs to be visible in. Both order by a whole-site figure
-#: independent of the polarization grouping (recency and baseline are facts about
-#: the site's activity, not about one differenceable subset), with ties broken by
-#: raw depth then task name for full determinism; ``min_passes`` still qualifies a
-#: site on the depth ``rank_by`` would measure under ``"passes"`` (raw pass count).
-SITE_RANKINGS: tuple[str, ...] = ("passes", "comparable", "recency", "span")
+#: deforestation) needs to be visible in. ``"cadence"`` orders by each site's
+#: **typical revisit gap** (the ``median_revisit_days`` a summary reports),
+#: tightest-first -- the most-frequently-imaged site, the natural head of a
+#: monitoring list. It reads the *median* gap rather than the worst one on purpose:
+#: a ranking should surface the site imaged reliably often, and the worst-case gap
+#: is dominated by a single outage (one long hiatus would bury an otherwise
+#: excellently-imaged series), which is exactly why ``median_revisit`` shipped as
+#: the "softer, more common question" the worst-case ``max_revisit`` gate could not
+#: ask. The worst-case reading stays a hard *filter* (``max_revisit``, "never blind
+#: for longer than N days"); ranking's job is to order by the habitual cadence. All
+#: three temporal orders read a whole-site figure independent of the polarization
+#: grouping (recency, baseline and habitual cadence are facts about the site's
+#: activity, not about one differenceable subset), with ties broken by raw depth
+#: then task name for full determinism; ``min_passes`` still qualifies a site on the
+#: depth ``rank_by`` would measure under ``"passes"`` (raw pass count).
+SITE_RANKINGS: tuple[str, ...] = ("passes", "comparable", "recency", "span", "cadence")
 
 
 def _check_ranking(rank_by: str) -> None:
@@ -81,6 +91,7 @@ def _rank_sort_key(
     rank_by: str,
     last: date | None = None,
     span_days: int | None = None,
+    median_revisit_days: float | None = None,
 ) -> tuple[object, ...]:
     """The deterministic sort key for one site under ``rank_by``.
 
@@ -91,18 +102,24 @@ def _rank_sort_key(
     by task name for full determinism. ``"recency"`` orders by the site's newest
     dated pass (``last``), most recent first, and ``"span"`` by its observation
     baseline (``span_days``), longest first; both break ties by raw pass count then
-    task name. All four are ascending over negated figures, so a plain ``sort`` puts
-    the best site first.
+    task name. ``"cadence"`` orders by the site's *typical* revisit gap
+    (``median_revisit_days``), **tightest first** -- the one temporal key that sorts
+    a figure ascending rather than descending (a smaller gap is a more frequently
+    imaged site), so it is not negated; its ties break by raw pass count then task
+    name like the others. The three depth/descending keys are ascending over negated
+    figures, so a plain ``sort`` puts the best site first for all five.
 
-    ``last`` and ``span_days`` are the whole-site figures :class:`SiteCoverage`
-    reports; a caller passes them only for the temporal rankings (the depth rankings
-    ignore them). ``last`` is always present for a ranking candidate (it has at least
-    one dated pass), so the ``date.min`` fallback is unreachable and only keeps the
-    key typed. ``span_days`` is ``None`` for a site with fewer than two dated passes;
-    such a site has no measurable baseline, so it sorts *after* every measured-span
-    site (treated as ``-1`` day) rather than erroring -- a ``"span"`` ranking stays a
-    total order. Single-sourced so :func:`select_featured_sites` (ranking
-    ``FeaturedSite`` before summarising) and
+    ``last``, ``span_days`` and ``median_revisit_days`` are the whole-site figures
+    :class:`SiteCoverage` reports; a caller passes them only for the temporal rankings
+    (the depth rankings ignore them). ``last`` is always present for a ranking
+    candidate (it has at least one dated pass), so the ``date.min`` fallback is
+    unreachable and only keeps the key typed. ``span_days`` and
+    ``median_revisit_days`` are ``None`` for a site with fewer than two dated passes;
+    such a site has no measurable baseline or cadence, so it sorts *after* every
+    measured site -- ``span_days`` treated as ``-1`` day (a "span" ranking is longest
+    first), ``median_revisit_days`` as ``+inf`` days (a "cadence" ranking is tightest
+    first) -- rather than erroring, so each ranking stays a total order. Single-sourced
+    so :func:`select_featured_sites` (ranking ``FeaturedSite`` before summarising) and
     :meth:`umbra_py.index.CatalogIndex.rank_sites` (ranking summarised
     :class:`SiteCoverage` records) cannot pick a different order.
     """
@@ -112,6 +129,9 @@ def _rank_sort_key(
         return (-(last or date.min).toordinal(), -passes, task)
     if rank_by == "span":
         return (-(span_days if span_days is not None else -1), -passes, task)
+    if rank_by == "cadence":
+        gap = median_revisit_days if median_revisit_days is not None else float("inf")
+        return (gap, -passes, task)
     return (-passes, task)
 
 
@@ -509,23 +529,28 @@ def _revisit_days(dates: Sequence[datetime]) -> list[float]:
     ]
 
 
-def _temporal_rank_figures(items: Iterable[UmbraItem]) -> tuple[date | None, int | None]:
-    """The ``(newest-pass date, span in days)`` a ``"recency"`` / ``"span"`` ranking
-    sorts on, computed exactly as :func:`site_coverage` reduces ``last`` / ``span_days``.
+def _temporal_rank_figures(
+    items: Iterable[UmbraItem],
+) -> tuple[date | None, int | None, float | None]:
+    """The ``(newest-pass date, span in days, median revisit gap in days)`` a
+    ``"recency"`` / ``"span"`` / ``"cadence"`` ranking sorts on, computed exactly as
+    :func:`site_coverage` reduces ``last`` / ``span_days`` / ``median_revisit_days``.
 
     Reducing these from the items in one shared place is what lets the pool path
     (:func:`umbra_py.showcase.select_featured_sites`, which ranks
     :class:`umbra_py.showcase.FeaturedSite` before summarising) feed
     :func:`_rank_sort_key` the same figures the index path reads back off a
     :class:`SiteCoverage` -- so the two rankings cannot disagree. Returns
-    ``(None, None)`` for a site with no dated pass, and a ``None`` span for one with a
-    single dated pass (no baseline to measure), matching the summary fields.
+    ``(None, None, None)`` for a site with no dated pass, and a ``None`` span *and*
+    median for one with a single dated pass (no baseline or gap to measure), matching
+    the summary fields.
     """
     dated = sorted(i.datetime for i in items if i.datetime is not None)
     if not dated:
-        return None, None
+        return None, None, None
     span = (dated[-1] - dated[0]).days if len(dated) >= 2 else None
-    return dated[-1].date(), span
+    gaps = _revisit_days(dated)
+    return dated[-1].date(), span, (median(gaps) if gaps else None)
 
 
 def site_coverage(
@@ -628,21 +653,28 @@ def rank_site_coverage(
     dated subset a change verb can actually difference); the two coincide when every
     dated pass of every site shares one polarization and diverge when a raw count
     overstates what is analysable, which is exactly when the discovery answer should
-    prefer the deeper differenceable series. The two *temporal* rankings are
+    prefer the deeper differenceable series. The three *temporal* rankings are
     ``"recency"`` (each site's **newest** dated pass first -- the still-active site a
     monitoring or tasking user wants, which a depth ranking buries under a deeper
-    series that has gone dormant) and ``"span"`` (each site's observation
-    **baseline** first -- the long-watched site a *slow* change needs), ordering by
-    the whole-site ``last`` / ``span_days`` a summary reports, ties broken by raw
-    depth then task. So the moat now ranks on every axis it already filters on
-    (recency via ``active_*``, baseline via ``min_span`` / ``max_span``), not only on
-    depth. ``select_featured_sites`` applies the chosen key *before* truncating to
-    ``top``, so a site the ranking would promote is not dropped by a raw-count prefix
-    first (a recently-active or long-baseline site outside the raw top-``top`` still
+    series that has gone dormant), ``"span"`` (each site's observation **baseline**
+    first -- the long-watched site a *slow* change needs) and ``"cadence"`` (each
+    site's **typical** revisit gap, tightest first -- the most-frequently-imaged site,
+    the head of a monitoring list). The first two order by the whole-site ``last`` /
+    ``span_days`` a summary reports; ``"cadence"`` by the whole-site
+    ``median_revisit_days`` -- the *median* gap, not the worst one, because a ranking
+    should surface the site imaged reliably often and the worst-case gap is dominated
+    by a single outage (which is why the worst-case reading stays a hard *filter*,
+    ``max_revisit``, rather than a ranking). All three break ties by raw depth then
+    task. So the moat now ranks on every axis it already filters on (recency via
+    ``active_*``, baseline via ``min_span`` / ``max_span``, cadence via
+    ``max_revisit`` / ``median_revisit``), not only on depth. ``select_featured_sites``
+    applies the chosen key *before* truncating to ``top``, so a site the ranking would
+    promote is not dropped by a raw-count prefix first (a recently-active,
+    long-baseline or tightly-revisited site outside the raw top-``top`` still
     surfaces). ``min_passes`` qualifies a site on the depth ``rank_by`` measures --
-    raw pass count under ``"passes"`` / ``"recency"`` / ``"span"``, analysable depth
-    under ``"comparable"`` -- so a temporal ranking still keeps only sites deep enough
-    to have a series worth ordering.
+    raw pass count under ``"passes"`` / ``"recency"`` / ``"span"`` / ``"cadence"``,
+    analysable depth under ``"comparable"`` -- so a temporal ranking still keeps only
+    sites deep enough to have a series worth ordering.
 
     ``min_passes`` measures the same depth ``rank_by`` does (:func:`_min_passes_depth`):
     under ``"comparable"`` a site must have at least ``min_passes`` *comparable*

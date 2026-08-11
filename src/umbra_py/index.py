@@ -1361,18 +1361,19 @@ class CatalogIndex:
         depends on each pass's polarization inside the document JSON and so is not a
         ``COUNT``: every qualifying task's documents are read and summarised, then
         re-ranked by the analysable subset and truncated to ``top``. The *temporal*
-        rankings ``"recency"`` (newest dated pass first) and ``"span"`` (longest
-        observation baseline first) are likewise not the SQL ``COUNT`` order -- the
-        top-by-count tasks are not the top-by-recency or top-by-span -- so they take
-        the same read-every-task-then-re-rank path (the raw-count ``LIMIT`` is dropped
-        when the ranking is not ``"passes"``, so a recently-active or long-baseline
-        site outside the raw top-``top`` is not truncated before it can be promoted).
-        That is heavier than the raw path (it reads every repeat-imaged task rather
-        than the top ``top``), but still whole-archive and correct. All four rankings
-        share :func:`umbra_py.coverage._rank_sort_key`, and the temporal pair reads
-        the ``last`` / ``span_days`` off the same summarised :class:`SiteCoverage` the
-        pool path reduces from the passes, so this and the pool path order every
-        ranking identically.
+        rankings ``"recency"`` (newest dated pass first), ``"span"`` (longest
+        observation baseline first) and ``"cadence"`` (tightest typical revisit gap
+        first) are likewise not the SQL ``COUNT`` order -- the top-by-count tasks are
+        not the top-by-recency, -span or -cadence -- so they take the same
+        read-every-task-then-re-rank path (the raw-count ``LIMIT`` is dropped when the
+        ranking is not ``"passes"``, so a recently-active, long-baseline or
+        tightly-revisited site outside the raw top-``top`` is not truncated before it
+        can be promoted). That is heavier than the raw path (it reads every
+        repeat-imaged task rather than the top ``top``), but still whole-archive and
+        correct. All five rankings share :func:`umbra_py.coverage._rank_sort_key`, and
+        the temporal trio reads the ``last`` / ``span_days`` / ``median_revisit_days``
+        off the same summarised :class:`SiteCoverage` the pool path reduces from the
+        passes, so this and the pool path order every ranking identically.
 
         ``min_passes`` gates on the same depth ``rank_by`` ranks by
         (:func:`umbra_py.coverage._min_passes_depth`): under ``"comparable"`` the
@@ -1590,12 +1591,13 @@ class CatalogIndex:
         # The raw ranking picks the top ``top`` candidates in SQL and caps there; any
         # other ranking cannot (its order is not the SQL ``COUNT`` order) -- the
         # comparable ranking (analysable depth is not a COUNT) and the temporal ones
-        # (``recency`` orders by ``MAX(acq_date)``, ``span`` by the dated range, so the
-        # top-by-count candidates are not the top-by-recency/span), nor can a cadence
-        # filter (a worst-consecutive-gap is not a column) or a span filter (kept in
-        # Python so the comparable-subset span matches the pool path exactly). Any of
-        # them reads every qualifying task and re-ranks/truncates in Python. ``rank_by
-        # != "passes"`` covers every non-default ranking, including the temporal pair.
+        # (``recency`` orders by ``MAX(acq_date)``, ``span`` by the dated range, and
+        # ``cadence`` by a median-consecutive-gap that is not a column at all, so the
+        # top-by-count candidates are not the top-by-recency/span/cadence), nor can a
+        # cadence filter (a worst-consecutive-gap is not a column) or a span filter
+        # (kept in Python so the comparable-subset span matches the pool path exactly).
+        # Any of them reads every qualifying task and re-ranks/truncates in Python.
+        # ``rank_by != "passes"`` covers every non-default ranking, including the trio.
         needs_full_scan = (
             rank_by != "passes"
             or max_revisit_days is not None
@@ -1683,9 +1685,11 @@ class CatalogIndex:
                     # summary already computed them from the same passes the pool path
                     # reduces via ``_temporal_rank_figures``, so parsing them back here
                     # is byte-identical to that path (a ranking candidate always has a
-                    # dated ``last``; ``span_days`` is ``None`` for a single-pass site).
+                    # dated ``last``; ``span_days`` / ``median_revisit_days`` are
+                    # ``None`` for a single-pass site).
                     last=date.fromisoformat(c.last) if c.last else None,
                     span_days=c.span_days,
+                    median_revisit_days=c.median_revisit_days,
                 )
             )
             ranked = ranked[:top]

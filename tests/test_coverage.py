@@ -534,6 +534,85 @@ def test_span_ranking_sorts_an_unmeasurable_baseline_last():
     assert ranked[-1].span_days is None
 
 
+def test_rank_by_cadence_orders_by_typical_revisit_gap():
+    # Tightest typical (median) revisit first: Bursty median 1, Tight median 2,
+    # Loose median 10 -- so the most-frequently-imaged site heads the list, which a
+    # depth order (all three are equally deep here) cannot express.
+    pool = [
+        *[_pass("Tight", d) for d in (1, 3, 5, 7)],  # gaps 2,2,2 -> median 2
+        *[_pass("Loose", d) for d in (1, 11, 21, 31)],  # gaps 10,10,10 -> median 10
+        *[_pass("Bursty", d) for d in (1, 2, 3, 30)],  # gaps 1,1,27 -> median 1
+    ]
+    ranked = rank_site_coverage(pool, rank_by="cadence")
+    assert [s.task for s in ranked] == ["Bursty", "Tight", "Loose"]
+
+
+def test_rank_by_cadence_reads_the_median_gap_not_the_worst():
+    # The design decision made visible: Bursty is imaged tightly then has one long
+    # outage (worst gap 27), Steady is uniformly looser (every 5 days, worst gap 5).
+    # A cadence ranking puts Bursty first because its *typical* gap is smaller -- a
+    # single outage does not bury an otherwise reliably-imaged series. (A worst-case
+    # ranking would invert them; that reading is the --max-revisit filter's job.)
+    pool = [
+        *[_pass("Bursty", d) for d in (1, 2, 3, 30)],  # median 1, worst 27
+        *[_pass("Steady", d) for d in (1, 6, 11, 16)],  # median 5, worst 5
+    ]
+    ranked = rank_site_coverage(pool, rank_by="cadence")
+    assert [s.task for s in ranked] == ["Bursty", "Steady"]
+    assert (ranked[0].median_revisit_days, ranked[0].max_revisit_days) == (1.0, 27.0)
+
+
+def test_rank_by_cadence_promotes_a_tight_site_past_the_raw_top():
+    # A shallow but tightly-revisited site must surface at top=1 under cadence ranking
+    # even though a deeper site has more raw passes -- the key is applied before the
+    # truncation, so the tight site is not dropped by the raw-count cap first.
+    pool = [
+        *[_pass("Deep", d) for d in (1, 8, 15, 22, 29)],  # deepest, gaps of 7 -> median 7
+        *[_pass("Tight", d) for d in (1, 2, 3)],  # shallow, gaps 1,1 -> median 1
+    ]
+    assert rank_site_coverage(pool, top=1, rank_by="passes")[0].task == "Deep"
+    assert rank_site_coverage(pool, top=1, rank_by="cadence")[0].task == "Tight"
+
+
+def test_rank_by_cadence_breaks_ties_by_depth_then_task():
+    # Two sites imaged on a 2-day cadence (identical median gap) -- the deeper one wins
+    # the tie, and equal depth would fall back to task name (the same secondary key the
+    # recency/span rankings use).
+    pool = [
+        *[_pass("Shallow", d) for d in (10, 12)],  # passes 2, median 2
+        *[_pass("Deeper", d) for d in (1, 3, 5)],  # passes 3, same median 2
+    ]
+    assert [s.task for s in rank_site_coverage(pool, rank_by="cadence")] == ["Deeper", "Shallow"]
+
+
+def test_cadence_ranking_sorts_an_unmeasurable_cadence_last():
+    # With min_passes=1 a single-pass site qualifies but has no measurable cadence
+    # (median None); a cadence ranking still returns a total order, sorting it after
+    # every site with a real cadence (treated as +inf days) rather than erroring.
+    pool = [*[_pass("Two", d) for d in (1, 3)], _pass("One", 5)]
+    ranked = rank_site_coverage(pool, rank_by="cadence", min_passes=1)
+    assert [s.task for s in ranked] == ["Two", "One"]
+    assert ranked[-1].median_revisit_days is None
+
+
+def test_rank_by_cadence_uses_whole_site_median_under_comparable():
+    # The cadence ranking reads the whole-site median gap even under rank_by=comparable,
+    # matching recency/span (temporal figures are facts about the site's activity, not
+    # about one differenceable subset). Mixed is imaged tightly overall (every 2 days)
+    # but its VV-only comparable series is sparse; it still ranks by the tight whole-site
+    # cadence. (min_passes counts comparable depth under comparable, so both sites keep a
+    # 2-pass VV series to qualify.)
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 3, pols=["HH"]),
+        _pass("Mixed", 5, pols=["VV"]),  # whole-site gaps 2,2 -> median 2; VV subset gap 4
+        *[_pass("Loose", d, pols=["VV"]) for d in (1, 7, 13)],  # median 6
+    ]
+    ranked = rank_site_coverage(pool, rank_by="cadence", min_passes=2)
+    assert [s.task for s in ranked] == ["Mixed", "Loose"]
+    assert ranked[0].median_revisit_days == 2.0
+
+
 def test_min_passes_counts_comparable_depth_under_comparable_ranking():
     # "Mixed" has three dated passes but each in a different polarization, so its
     # differenceable series is one pass deep (comparable_passes == 1). Under the raw
