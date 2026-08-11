@@ -1319,6 +1319,8 @@ class CatalogIndex:
         rank_by: str = "passes",
         active_since: DateLike = None,
         active_before: DateLike = None,
+        first_since: DateLike = None,
+        first_before: DateLike = None,
         max_revisit_days: float | None = None,
         min_span_days: float | None = None,
         max_span_days: float | None = None,
@@ -1391,6 +1393,23 @@ class CatalogIndex:
         its last day (symmetric with ``end``). Byte-identical to the pool path's
         upper-recency gate. ``None`` applies no upper bound.
 
+        ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
+        ``active_*`` pair -- they gate each site's **earliest** dated pass rather than
+        its newest, selecting **newly-appeared** series (``first_since``, first pass on
+        or after the date) and **long-established** ones (``first_before``, first pass
+        on or before it); set together they bound the onset to a window. Like the
+        recency pair they are pure SQL aggregates, answered by ``MIN(acq_date) >= ?`` /
+        ``MIN(acq_date) <= ?`` clauses in the same ``HAVING`` -- costing nothing beyond
+        the group already computed and exact under either ranking (a site's earliest
+        pass, like its latest, does not depend on the polarization grouping
+        ``"comparable"`` re-ranks by), so unlike the cadence and span filters they do
+        *not* force the raw-count ``LIMIT`` to be dropped. ``MIN`` skips NULL
+        ``acq_date``, so a group with no dated pass yields NULL and is dropped
+        (``NULL >= ?`` / ``NULL <= ?`` is never true), matching ``select_featured_sites``
+        dropping a site with no datable pass. ``first_before`` snaps a span expression
+        to its last day (symmetric with ``active_before`` / ``end``). Byte-identical to
+        the pool path's onset gate. ``None`` applies no onset filter.
+
         ``max_revisit_days`` keeps only sites revisited *at least this often* -- a
         cadence filter on each site's **worst-case** revisit gap. Unlike the recency
         and depth filters it is *not* a SQL aggregate: the worst gap is between
@@ -1458,6 +1477,10 @@ class CatalogIndex:
         # ``active_before`` snaps a span expression to its last day (``is_end``),
         # symmetric with ``end`` and with the pool path's upper-recency gate.
         before = _coerce_date(active_before, is_end=True)
+        # The onset bounds gate the *earliest* pass (``MIN(acq_date)``); ``first_before``
+        # snaps to a span's last day like ``active_before``, ``first_since`` to its first.
+        first_since_date = _coerce_date(first_since)
+        first_before_date = _coerce_date(first_before, is_end=True)
 
         if (
             intersects is not None
@@ -1486,6 +1509,8 @@ class CatalogIndex:
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                first_since=first_since,
+                first_before=first_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
                 max_span_days=max_span_days,
@@ -1512,6 +1537,13 @@ class CatalogIndex:
         # together bound the site's latest pass to a window. A group with no dated
         # ``acq_date`` yields NULL, and ``NULL <= ?`` is never true, so it is dropped
         # either way -- matching ``select_featured_sites`` dropping an undatable site.
+        # ``first_since`` / ``first_before`` gate the same group on its *earliest*
+        # dated pass (``MIN(acq_date)``), the onset twins of the ``MAX(acq_date)``
+        # recency clauses: a site whose first pass predates ``first_since`` (not
+        # newly-appeared) or postdates ``first_before`` (not long-established) is
+        # dropped. ``MIN`` skips NULL, so an undatable group yields NULL and is dropped
+        # either way, matching ``select_featured_sites``. Pure aggregates like the
+        # recency pair, so they need no full scan.
         having = "HAVING COUNT(*) >= ?"
         candidate_params: list[object] = [*params, min_passes]
         if since is not None:
@@ -1520,6 +1552,12 @@ class CatalogIndex:
         if before is not None:
             having += " AND MAX(acq_date) <= ?"
             candidate_params.append(before.isoformat())
+        if first_since_date is not None:
+            having += " AND MIN(acq_date) >= ?"
+            candidate_params.append(first_since_date.isoformat())
+        if first_before_date is not None:
+            having += " AND MIN(acq_date) <= ?"
+            candidate_params.append(first_before_date.isoformat())
         candidate_sql = (
             f"SELECT task FROM items{where} GROUP BY task {having} ORDER BY COUNT(*) DESC, task ASC"
         )

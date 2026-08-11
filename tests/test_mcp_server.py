@@ -281,6 +281,31 @@ def test_find_repeat_sites_active_before_filters_to_dormant_sites(monkeypatch):
     assert [s["task"] for s in window["sites"]] == ["Fresh"]
 
 
+def test_find_repeat_sites_first_since_before_filters_by_onset(monkeypatch):
+    # The onset (first-seen) twins of the active_* pair, gating each site's earliest
+    # pass. Fresh's earliest is 2024-05-08, Stale's is 2024-01-08 (the _site_pass
+    # `day` is the month digit).
+    pool = [
+        *[_site_pass("Fresh", d) for d in (5, 6, 7)],  # first 2024-05-08
+        *[_site_pass("Stale", d) for d in (1, 2, 3)],  # first 2024-01-08
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    # first_since keeps the newly-appeared series (later onset), with full history.
+    newly = ms.find_repeat_sites(local=False, first_since="2024-03-01")
+    assert [(s["task"], s["passes"]) for s in newly["sites"]] == [("Fresh", 3)]
+    # first_before keeps the long-established one (earlier onset).
+    established = ms.find_repeat_sites(local=False, first_before="2024-03-01")
+    assert [(s["task"], s["passes"]) for s in established["sites"]] == [("Stale", 3)]
+    # Set together they bound the onset to a window.
+    window = ms.find_repeat_sites(local=False, first_since="2024-03-01", first_before="2024-06-01")
+    assert [s["task"] for s in window["sites"]] == ["Fresh"]
+
+
 def test_find_repeat_sites_max_revisit_filters_to_reliably_imaged_sites(monkeypatch):
     # Tight is imaged monthly (worst gap ~31 days); Gappy has a half-year hole. A
     # 60-day cadence bound keeps the monitorable site and drops the gappy one.

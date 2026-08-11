@@ -603,6 +603,94 @@ def test_active_before_none_applies_no_filter():
 
 
 # --------------------------------------------------------------------------- #
+# first_since / first_before: the onset (first-seen) filters -- the twins of the
+# active_* pair, gating a site's *earliest* pass rather than its newest
+# --------------------------------------------------------------------------- #
+def test_first_since_keeps_only_newly_appeared_sites():
+    # New's earliest pass is 2024-01-10, Old's is 2024-01-01; a cutoff between them
+    # drops the long-established series and keeps the newly-appeared one.
+    pool = [
+        *[_pass("New", d) for d in (10, 11, 12)],
+        *[_pass("Old", d) for d in (1, 2, 3)],
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["New", "Old"]
+    assert [s.task for s in rank_site_coverage(pool, first_since="2024-01-05")] == ["New"]
+
+
+def test_first_since_is_boundary_inclusive_and_keeps_full_history():
+    # A site whose earliest pass falls exactly on the cutoff is kept (on or after),
+    # and every pass is retained -- the onset gate selects whole sites, it does not
+    # truncate. One day past the earliest pass drops the site entirely.
+    pool = [_pass("New", d) for d in (10, 15, 20)]
+    [site] = rank_site_coverage(pool, first_since="2024-01-10")
+    assert site.task == "New"
+    assert site.passes == 3
+    assert site.last == "2024-01-20"  # later passes retained
+    assert rank_site_coverage(pool, first_since="2024-01-11") == []
+
+
+def test_first_before_keeps_only_long_established_sites():
+    # The complement of first_since: a cutoff between the two series' earliest passes
+    # keeps the long-established (Old) site and drops the newly-appeared (New) one.
+    pool = [
+        *[_pass("New", d) for d in (10, 11, 12)],
+        *[_pass("Old", d) for d in (1, 2, 3)],
+    ]
+    assert [s.task for s in rank_site_coverage(pool, first_before="2024-01-05")] == ["Old"]
+
+
+def test_first_before_snaps_a_span_to_its_last_day():
+    # A bare month snaps to its last day (2024-01-31, is_end), so a mid-month earliest
+    # pass is on or before it -- symmetric with active_before / --end. Snapping to the
+    # first day instead would wrongly drop it.
+    pool = [_pass("Jan", 15), _pass("Jan", 16)]  # earliest 2024-01-15
+    assert [s.task for s in rank_site_coverage(pool, first_before="2024-01")] == ["Jan"]
+
+
+def test_first_since_and_before_bound_the_onset_to_a_window():
+    # Set together they select sites whose *earliest* pass falls within [since, before].
+    pool = [
+        *[_pass("StartedEarly", d) for d in (1, 20)],  # first 2024-01-01, below the window
+        *[_pass("StartedMid", d) for d in (10, 22)],  # first 2024-01-10, inside
+        *[_pass("StartedLate", d) for d in (25, 26)],  # first 2024-01-25, above the window
+    ]
+    kept = rank_site_coverage(pool, first_since="2024-01-05", first_before="2024-01-20")
+    assert [s.task for s in kept] == ["StartedMid"]
+
+
+def test_first_since_is_orthogonal_to_the_active_recency_filters():
+    # Onset (when a site started) and recency (whether it is still going) are
+    # independent axes. Both series start on 2024-01-01, so neither is "newly
+    # appeared" -- first_since drops both regardless of their differing recency,
+    # which active_since alone could not express.
+    pool = [
+        _pass("StillActive", 1),
+        _pass("StillActive", 30),  # newest 2024-01-30
+        _pass("WentDormant", 1),
+        _pass("WentDormant", 3),  # newest 2024-01-03
+    ]
+    # active_since keeps only the still-active series (its newest pass is recent)...
+    assert [s.task for s in rank_site_coverage(pool, active_since="2024-01-10")] == ["StillActive"]
+    # ...but first_since gates the *earliest* pass, and both started on the 1st, so a
+    # later onset cutoff drops both -- a selection the recency axis cannot make.
+    assert rank_site_coverage(pool, first_since="2024-01-05") == []
+    # And first_since=X with active_before=Y finds series that appeared after X and
+    # had already gone dormant by Y -- the two axes composing.
+    pool2 = [
+        *[_pass("NewDormant", d) for d in (10, 12)],  # first 10th, newest 12th (dormant by 20th)
+        *[_pass("NewActive", d) for d in (10, 28)],  # first 10th, newest 28th (still active)
+    ]
+    kept = rank_site_coverage(pool2, first_since="2024-01-05", active_before="2024-01-20")
+    assert [s.task for s in kept] == ["NewDormant"]
+
+
+def test_first_since_before_none_applies_no_filter():
+    pool = [_pass("Any", d) for d in (1, 2)]
+    kept = rank_site_coverage(pool, first_since=None, first_before=None)
+    assert [s.task for s in kept] == ["Any"]
+
+
+# --------------------------------------------------------------------------- #
 # max_revisit: the worst-case cadence filter (reliably-imaged sites)
 # --------------------------------------------------------------------------- #
 def test_max_revisit_keeps_only_reliably_revisited_sites():
@@ -938,6 +1026,48 @@ def test_sites_cli_active_window_empty_result_names_both_bounds(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "last imaged between 2024-06-01 and 2024-12-01" in result.output
     assert "--active-since" in result.output and "--active-before" in result.output
+
+
+def test_sites_cli_first_since_filters_to_newly_appeared_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("New", d) for d in (10, 11, 12)],  # first 2024-01-10
+        *[_pass("Old", d) for d in (1, 2, 3)],  # first 2024-01-01
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--first-since", "2024-01-05"])
+    assert result.exit_code == 0, result.output
+    assert "New" in result.output
+    assert "Old" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_first_before_filters_to_established_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("New", d) for d in (10, 11, 12)],
+        *[_pass("Old", d) for d in (1, 2, 3)],
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--first-before", "2024-01-05"])
+    assert result.exit_code == 0, result.output
+    assert "Old" in result.output
+    assert "New" not in result.output
+
+
+def test_sites_cli_first_window_empty_result_names_both_bounds(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Old", d) for d in (1, 2, 3)]  # first 2024-01-01, outside the window
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(
+        cli, ["sites", "--first-since", "2024-06-01", "--first-before", "2024-12-01"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "first imaged between 2024-06-01 and 2024-12-01" in result.output
+    assert "--first-since" in result.output and "--first-before" in result.output
 
 
 def test_sites_cli_max_revisit_filters_to_reliably_imaged_sites(monkeypatch):

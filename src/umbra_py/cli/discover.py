@@ -353,6 +353,25 @@ def _print_site_coverage(site) -> None:
     "2024 is 'last imaged on or before 2024-12-31'), symmetric with --end.",
 )
 @click.option(
+    "--first-since",
+    default=None,
+    help="Keep only sites FIRST imaged ON OR AFTER this date -- an onset filter on "
+    "each site's earliest pass, selecting newly-appeared series (ones that entered "
+    "the archive recently), where --active-since gates the newest pass (still live). "
+    "Same grammar as --active-since. Orthogonal to the --active-* recency filters: a "
+    "site can be new and still active, or new and already dormant.",
+)
+@click.option(
+    "--first-before",
+    default=None,
+    help="Keep only sites FIRST imaged ON OR BEFORE this date -- the complement of "
+    "--first-since (and the onset twin of --active-before), selecting long-established "
+    "series watched since before then. Set both to bound the onset to a window "
+    "(--first-since A --first-before B keeps sites first imaged between A and B). A "
+    "bare year/month covers the whole period (--first-before 2024 is 'first imaged on "
+    "or before 2024-12-31'), symmetric with --active-before / --end.",
+)
+@click.option(
     "--max-revisit",
     type=float,
     default=None,
@@ -410,6 +429,8 @@ def sites(
     rank_by,
     active_since,
     active_before,
+    first_since,
+    first_before,
     max_revisit,
     min_span,
     max_span,
@@ -460,6 +481,13 @@ def sites(
     --active-before is the complement (sites last imaged on or before a date, i.e.
     dormant series); set both to select sites whose newest pass falls within a
     window.
+
+    --first-since / --first-before are the onset twins of the --active-* pair: they
+    gate each site's *earliest* pass rather than its newest, so --first-since keeps
+    newly-appeared series (first imaged on or after a date) and --first-before keeps
+    long-established ones (first imaged on or before it) -- set both to bound the
+    onset to a window. Orthogonal to the --active-* recency filters, since when a
+    site started and whether it is still going are independent.
 
     --max-revisit keeps only sites revisited at least that often -- a cadence filter
     on each site's worst-case gap (in days), so a series with any stretch longer than
@@ -516,6 +544,8 @@ def sites(
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                first_since=first_since,
+                first_before=first_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
                 max_span_days=max_span,
@@ -536,6 +566,8 @@ def sites(
             rank_by=rank_by,
             active_since=active_since,
             active_before=active_before,
+            first_since=first_since,
+            first_before=first_before,
             max_revisit_days=max_revisit,
             min_span_days=min_span,
             max_span_days=max_span,
@@ -559,6 +591,14 @@ def sites(
             recency = f" last imaged on/before {active_before}"
         else:
             recency = ""
+        if first_since and first_before:
+            onset = f" first imaged between {first_since} and {first_before}"
+        elif first_since:
+            onset = f" first imaged on/after {first_since}"
+        elif first_before:
+            onset = f" first imaged on/before {first_before}"
+        else:
+            onset = ""
         cadence = f", revisited within {max_revisit:g}d" if max_revisit is not None else ""
         if min_span is not None and max_span is not None:
             baseline = f", imaged over {min_span:g}-{max_span:g}d"
@@ -573,6 +613,8 @@ def sites(
             for flag, value in (
                 ("--active-since", active_since),
                 ("--active-before", active_before),
+                ("--first-since", first_since),
+                ("--first-before", first_before),
                 ("--max-revisit", max_revisit),
                 ("--min-span", min_span),
                 ("--max-span", max_span),
@@ -581,7 +623,7 @@ def sites(
         ]
         loosen = f" or {' / '.join(loosen_flags)}" if loosen_flags else ""
         click.echo(
-            f"No site in {where} has {min_passes}+ {depth}{recency}{cadence}{baseline}. "
+            f"No site in {where} has {min_passes}+ {depth}{recency}{onset}{cadence}{baseline}. "
             f"{widen}, or lower --min-passes{loosen}."
         )
         return

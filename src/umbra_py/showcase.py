@@ -302,6 +302,8 @@ def select_featured_sites(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    first_since: DateLike = None,
+    first_before: DateLike = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
     max_span_days: float | None = None,
@@ -362,6 +364,23 @@ def select_featured_sites(
         Like ``active_since`` it gates on the whole site's latest pass, independent
         of ``rank_by`` / ``min_passes`` and of ``start`` / ``end``. ``None`` (the
         default) applies no upper recency bound.
+    first_since:
+        The onset (first-seen) twin of ``active_since``: keep only sites whose
+        **earliest** dated pass is *on or after* this date -- a **newly-appeared**
+        series, one that entered the archive recently -- where ``active_since`` gates
+        the newest pass (is it still being imaged). Same grammar as ``active_since``.
+        It gates on the whole site's earliest pass (the ``first`` a coverage summary
+        reports), independent of ``rank_by`` / ``min_passes`` and distinct from
+        ``start`` / ``end``. ``None`` (the default) applies no onset filter.
+    first_before:
+        The complement of ``first_since`` (and the onset twin of ``active_before``):
+        keep only sites whose **earliest** dated pass is *on or before* this date -- a
+        **long-established** series, watched since before then. Set with ``first_since``
+        it bounds the onset to a window (``first_since <= first <= first_before``),
+        exactly as ``active_since`` / ``active_before`` bound the newest pass. A span
+        expression snaps to its *last* day (``first_before="2024"`` is "first imaged on
+        or before 2024-12-31"), symmetric with ``active_before`` / ``end``. ``None``
+        (the default) applies no lower onset bound.
     max_revisit_days:
         Keep only sites revisited *at least this often* -- a cadence filter on each
         site's **worst-case** revisit gap, so a series with any stretch longer than
@@ -413,6 +432,11 @@ def select_featured_sites(
     # ``active_before`` snaps a span expression to its last day (``is_end``), so a
     # bare year/month bounds the whole named period -- symmetric with ``end``.
     before = _coerce_date(active_before, is_end=True)
+    # The onset (first-seen) bounds gate the *earliest* pass, snapping the same way:
+    # ``first_since`` to a span's first day, ``first_before`` to its last (so a bare
+    # year/month bounds the whole named period), symmetric with the recency pair.
+    first_since_date = _coerce_date(first_since)
+    first_before_date = _coerce_date(first_before, is_end=True)
     # Single-sourced with the discovery layer: the same key builder and the same
     # comparable-group definition, so the featured gallery, ``umbra sites`` and the
     # index ranker cannot disagree about what "most repeat-imaged" means under
@@ -461,6 +485,19 @@ def select_featured_sites(
         if since is not None and newest < since:
             continue
         if before is not None and newest > before:
+            continue
+        # Onset gate: select a site by its *earliest* dated pass -- the ``first`` a
+        # summary reports. ``ordered`` is oldest-first and every member is dated
+        # (filtered above), so the first pass is the earliest. ``first_since`` drops a
+        # site whose earliest predates the lower cutoff (keeping newly-appeared series);
+        # ``first_before`` drops one whose earliest is after the upper cutoff (keeping
+        # long-established ones), so the two together keep sites whose first pass falls
+        # within the window. Independent of the recency gate above: a site can be new
+        # *and* still active, or old *and* dormant, so the two axes select orthogonally.
+        earliest = (ordered[0].datetime or datetime.min).date()
+        if first_since_date is not None and earliest < first_since_date:
+            continue
+        if first_before_date is not None and earliest > first_before_date:
             continue
         # Cadence gate: keep a site only if the series ``rank_by`` measures is
         # revisited at least this often (its worst gap is at most the bound). Gated

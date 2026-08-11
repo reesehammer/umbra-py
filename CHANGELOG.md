@@ -7,6 +7,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`first_since` / `first_before`: the onset (first-seen) axis on the discovery moat,
+  selecting newly-appeared and long-established sites and completing the recency axis to
+  two-sided on *both* the earliest and the newest pass, on every surface (`coverage.py`,
+  `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`, `mcp_server.py`,
+  `tests/test_coverage.py`, `tests/test_showcase.py`, `tests/test_index.py`,
+  `tests/test_serve.py`, `tests/test_mcp_server.py`).** The discovery moat reported each
+  site's activity interval as `first` / `last`, and it could *select* on the newest pass
+  from both sides — `active_since` (still being imaged) and `active_before` (dormant) —
+  but the *earliest* pass, a site's **onset**, could only be reported, never selected on.
+  So the moat could not answer "which repeat-imaged sites **newly appeared** in the
+  archive after date X?" (a fresh tasking target) or "which have been watched **since
+  before** X?" (a long-established baseline). `umbra sites --first-since DATE` (and
+  `find_repeat_sites(first_since=…)`, `GET`/`POST /sites?first_since=`, and
+  `CatalogIndex.rank_sites(first_since=…)` for `--local`) keeps only sites whose
+  **earliest** dated pass is on or after `DATE` — the newly-appeared series — and
+  `--first-before DATE` only those whose first pass is on or before it — the
+  long-established series; set together they bound the onset to a window
+  (`--first-since A --first-before B`), symmetric with `--active-since --active-before`
+  bounding the newest pass. They are the exact onset twins of the `active_*` pair —
+  `first_before` snaps a bare year/month to its last day like `active_before` / `--end`
+  — and **orthogonal** to it, since when a site *started* and whether it is still *going*
+  are independent axes: `--first-since X --active-before Y` finds series that appeared
+  after X and had already gone dormant by Y, a selection neither axis alone can make.
+  They gate the whole site's earliest pass independent of `--rank-by` / `--min-passes`
+  and distinct from `--start` / `--end` (which bound which *passes* enter the pool,
+  whereas these select whole sites by onset and keep each survivor's full history).
+  Single-sourced through the same two functions every other discovery filter is —
+  `showcase.select_featured_sites` (the pool path) and `CatalogIndex.rank_sites` (the
+  whole-archive index) — where, being pure SQL aggregates like the recency pair, they are
+  answered by twin `MIN(acq_date) >= ?` / `MIN(acq_date) <= ?` clauses in the *same*
+  `GROUP BY` (costing nothing beyond the group already computed, and — unlike the cadence
+  and span filters — needing no full scan since `MIN` is a column aggregate), pinned
+  byte-identical to the pool path by the index-vs-pool parity test for every cutoff and
+  window. A group with no dated pass yields NULL and is dropped either way, matching the
+  pool path dropping a site with no datable pass. They add no field to the
+  `site-coverage` contract (filter inputs, like the recency bounds), so no schema moved.
+  **With them the discovery moat's recency axis is two-sided on both ends of a site's
+  activity interval — onset (`first_since` / `first_before`) and recency (`active_since` /
+  `active_before`) — so it now selects on depth, onset, recency, cadence and a bounded
+  baseline span, matching every figure it reports.**
 - **`max_span`: the upper observation-baseline bound on the discovery moat, selecting
   the short-lived sites and completing the baseline axis to a two-sided window, on
   every surface (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`,
