@@ -703,6 +703,22 @@ def test_sites_active_before_bad_date_is_a_client_error(sites_index):
     assert client.get("/sites?active_before=not-a-date").status_code == 400
 
 
+def test_sites_max_revisit_keeps_only_reliably_imaged_sites(sites_client):
+    # Alpha's passes are 10 days apart (worst gap 10); Beta's are 4 days apart. A
+    # 5-day cadence bound keeps the reliably-imaged Beta and drops Alpha.
+    tight = sites_client.get("/sites?max_revisit=5").json()
+    assert [s["task"] for s in tight["sites"]] == ["Beta"]
+    # A bound wide enough for Alpha's 10-day gap keeps both.
+    both = sites_client.get("/sites?max_revisit=10").json()
+    assert [s["task"] for s in both["sites"]] == ["Alpha", "Beta"]
+
+
+def test_sites_non_positive_max_revisit_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    # gt=0 on the query rejects a non-positive cadence bound (FastAPI validation).
+    assert client.get("/sites?max_revisit=0").status_code == 422
+
+
 def test_sites_filters_by_bbox(sites_client):
     # A bbox far from the sample footprint leaves an empty pool.
     empty = sites_client.get("/sites?bbox=0,0,1,1").json()
@@ -856,6 +872,18 @@ def test_post_sites_filters_by_active_before_and_window(sites_client):
 def test_post_sites_active_before_bad_date_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"active_before": "nope"}).status_code == 400
+
+
+def test_post_sites_filters_by_max_revisit(sites_client):
+    # The POST twin honours the cadence bound exactly as GET: a 5-day bound keeps
+    # Beta (4-day gaps) and drops Alpha (10-day gaps).
+    tight = sites_client.post("/sites", json={"max_revisit": 5}).json()
+    assert [s["task"] for s in tight["sites"]] == ["Beta"]
+
+
+def test_post_sites_non_positive_max_revisit_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"max_revisit": 0}).status_code == 400
 
 
 def test_post_sites_filters_by_area_top_level_and_query(sites_client):

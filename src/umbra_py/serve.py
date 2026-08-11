@@ -942,6 +942,7 @@ def run_sites(
     rank_by: str = "passes",
     active_since: DateLike = None,
     active_before: DateLike = None,
+    max_revisit_days: float | None = None,
 ) -> list[SiteCoverage]:
     """Rank the most repeat-imaged sites in a filtered pool of the archive.
 
@@ -993,10 +994,17 @@ def run_sites(
     ``MAX(acq_date) <= ?`` clause) and pool rankers unchanged, so with ``active_since``
     the two bound the site's latest pass to a window exactly as ``umbra sites
     --active-since --active-before`` does.
+
+    ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
+    filter on each site's **worst-case** revisit gap (in days) -- forwarded to the
+    index and pool rankers unchanged, so this endpoint filters exactly as ``umbra
+    sites --max-revisit`` does: on the analysable series under ``rank_by="comparable"``,
+    orthogonally to the recency filters. ``None`` applies no cadence filter.
     """
-    from .coverage import _check_ranking, rank_site_coverage
+    from .coverage import _check_max_revisit, _check_ranking, rank_site_coverage
 
     _check_ranking(rank_by)
+    _check_max_revisit(max_revisit_days)
     top_n = _clamp_top(top)
     min_p = max(1, int(min_passes))
 
@@ -1018,6 +1026,7 @@ def run_sites(
             rank_by=rank_by,
             active_since=active_since,
             active_before=active_before,
+            max_revisit_days=max_revisit_days,
         )
 
     pool = list(
@@ -1043,6 +1052,7 @@ def run_sites(
         rank_by=rank_by,
         active_since=active_since,
         active_before=active_before,
+        max_revisit_days=max_revisit_days,
     )
 
 
@@ -2817,6 +2827,18 @@ def build_app(
                 "2024-12-31'), symmetric with the datetime end"
             ),
         ),
+        max_revisit: float | None = Query(
+            default=None,
+            gt=0,
+            description=(
+                "Keep only sites revisited at least this often -- a cadence filter on "
+                "each site's worst-case revisit gap (in days), so a series with any "
+                "stretch longer than this between consecutive passes is dropped. Gates "
+                "the cadence rank_by measures (the usable series' worst gap under "
+                "rank_by=comparable); orthogonal to the active_since/before recency "
+                "filters"
+            ),
+        ),
     ) -> JSONResponse:
         """Rank the archive's most repeat-imaged sites — discovery before analysis.
 
@@ -2887,6 +2909,7 @@ def build_app(
                 rank_by=rank_by,
                 active_since=resolved_active_since,
                 active_before=resolved_active_before,
+                max_revisit_days=max_revisit,
             )
         finally:
             _close(source)
@@ -2919,7 +2942,9 @@ def build_app(
         the pool only on a ``--live`` backend, and ``top`` / ``min_passes`` cap
         and qualify the ranking as on ``GET``. ``active_since`` (a top-level field)
         keeps only sites still imaged on or after that date, and ``active_before``
-        its complement (sites last imaged on or before it), exactly as on ``GET``.
+        its complement (sites last imaged on or before it); ``max_revisit`` (days)
+        keeps only sites revisited at least that often -- all top-level fields,
+        exactly as on ``GET``.
         """
         if body.get("intersects") is not None and body.get("bbox") is not None:
             raise HTTPException(
@@ -2957,9 +2982,12 @@ def build_app(
             resolved_active_since = _coerce_date(body.get("active_since"))
             # ``is_end`` snaps a span to its last day, like the datetime end bound.
             resolved_active_before = _coerce_date(body.get("active_before"), is_end=True)
-            from .coverage import _check_ranking  # noqa: PLC0415
+            max_revisit = _opt_float(body.get("max_revisit"), "max_revisit")
+            from .coverage import _check_max_revisit, _check_ranking  # noqa: PLC0415
 
             _check_ranking(rank_by)
+            # A non-positive cadence bound is a clean 400 here, like GET's gt=0.
+            _check_max_revisit(max_revisit)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         fuzzy = bool(body.get("fuzzy", False))
@@ -2984,6 +3012,7 @@ def build_app(
                 rank_by=rank_by,
                 active_since=resolved_active_since,
                 active_before=resolved_active_before,
+                max_revisit_days=max_revisit,
             )
         finally:
             _close(source)

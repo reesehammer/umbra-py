@@ -1319,6 +1319,7 @@ class CatalogIndex:
         rank_by: str = "passes",
         active_since: DateLike = None,
         active_before: DateLike = None,
+        max_revisit_days: float | None = None,
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1387,16 +1388,35 @@ class CatalogIndex:
         the two bound the site's latest pass to a window. A span expression snaps to
         its last day (symmetric with ``end``). Byte-identical to the pool path's
         upper-recency gate. ``None`` applies no upper bound.
+
+        ``max_revisit_days`` keeps only sites revisited *at least this often* -- a
+        cadence filter on each site's **worst-case** revisit gap. Unlike the recency
+        and depth filters it is *not* a SQL aggregate: the worst gap is between
+        *consecutive* passes (and, under ``"comparable"``, over the largest
+        single-polarization subset the document JSON defines), which no ``HAVING``
+        clause on a column expresses. It is applied in Python on the same per-task
+        items this method already reads to summarise, using the same
+        :func:`umbra_py.coverage._passes_cadence` the pool path uses -- so the two are
+        byte-identical -- and when it is set the raw-count SQL ``LIMIT`` is dropped
+        (as it is for the comparable ranking), because a site that passes the cadence
+        filter but sits just outside the raw top-``top`` must not be truncated before
+        the filter runs. Gated on the same depth ``rank_by`` measures (the analysable
+        series' cadence under ``"comparable"``), orthogonal to the recency filters,
+        and dropping a site with fewer than two passes in the gated series. ``None``
+        applies no cadence filter; a non-positive value is a ``ValueError``.
         """
         from .coverage import (  # noqa: PLC0415
+            _check_max_revisit,
             _check_ranking,
             _min_passes_depth,
+            _passes_cadence,
             _rank_sort_key,
             rank_site_coverage,
             site_coverage,
         )
 
         _check_ranking(rank_by)
+        _check_max_revisit(max_revisit_days)
         if top <= 0:
             return []
         since = _coerce_date(active_since)
@@ -1431,6 +1451,7 @@ class CatalogIndex:
                 rank_by=rank_by,
                 active_since=active_since,
                 active_before=active_before,
+                max_revisit_days=max_revisit_days,
             )
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
@@ -1465,7 +1486,12 @@ class CatalogIndex:
         candidate_sql = (
             f"SELECT task FROM items{where} GROUP BY task {having} ORDER BY COUNT(*) DESC, task ASC"
         )
-        if rank_by == "passes":
+        # The raw ranking picks the top ``top`` candidates in SQL and caps there;
+        # the comparable ranking cannot (analysable depth is not a COUNT), and
+        # neither can a cadence filter (a worst-consecutive-gap is not a column), so
+        # either one reads every qualifying task and re-ranks/truncates in Python.
+        needs_full_scan = rank_by != "passes" or max_revisit_days is not None
+        if not needs_full_scan:
             candidate_sql += " LIMIT ?"
             candidate_params.append(top)
         candidates = self._conn.execute(candidate_sql, candidate_params).fetchall()
@@ -1480,21 +1506,35 @@ class CatalogIndex:
                 item = UmbraItem.from_dict(json.loads(doc), href=href)
                 item.place = place
                 passes.append(item)
+            # Cadence filter (worst-case revisit gap), applied on the same items the
+            # summary reads and with the same ``_passes_cadence`` the pool path uses,
+            # so the two paths are byte-identical. Gated on the analysable subset
+            # under ``"comparable"``. A site with no measurable cadence is dropped.
+            if max_revisit_days is not None and not _passes_cadence(
+                passes, rank_by=rank_by, max_revisit_days=max_revisit_days
+            ):
+                continue
             ranked.append(site_coverage(task, passes))
-        if rank_by != "passes":
-            # Qualify on the same depth the ranking uses (``_min_passes_depth``): a
-            # site whose raw count cleared the SQL floor but whose comparable series
-            # is shallower than ``min_passes`` is dropped rather than ranked last, so
-            # ``--rank-by comparable --min-passes N`` is whole-archive *and* honest
-            # about analysable depth on both the qualification and the ordering.
-            ranked = [
-                c
-                for c in ranked
-                if _min_passes_depth(
-                    comparable_passes=c.comparable_passes, passes=c.passes, rank_by=rank_by
-                )
-                >= min_passes
-            ]
+        if needs_full_scan:
+            if rank_by != "passes":
+                # Qualify on the same depth the ranking uses (``_min_passes_depth``):
+                # a site whose raw count cleared the SQL floor but whose comparable
+                # series is shallower than ``min_passes`` is dropped rather than
+                # ranked last, so ``--rank-by comparable --min-passes N`` is
+                # whole-archive *and* honest about analysable depth.
+                ranked = [
+                    c
+                    for c in ranked
+                    if _min_passes_depth(
+                        comparable_passes=c.comparable_passes, passes=c.passes, rank_by=rank_by
+                    )
+                    >= min_passes
+                ]
+            # Re-rank and cap: the comparable ranking needs the sort (its order is not
+            # the SQL COUNT order); the raw ranking with a cadence filter dropped the
+            # SQL ``LIMIT``, so it needs the truncation. Sorting by ``_rank_sort_key``
+            # under ``"passes"`` reproduces the SQL ``COUNT DESC, task ASC`` order, so
+            # it is a no-op there beyond making the cap correct.
             ranked.sort(
                 key=lambda c: _rank_sort_key(
                     comparable_passes=c.comparable_passes,

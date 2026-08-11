@@ -603,6 +603,82 @@ def test_active_before_none_applies_no_filter():
 
 
 # --------------------------------------------------------------------------- #
+# max_revisit: the worst-case cadence filter (reliably-imaged sites)
+# --------------------------------------------------------------------------- #
+def test_max_revisit_keeps_only_reliably_revisited_sites():
+    # Steady's worst gap is 6 days; Gappy's is 15. A 10-day cadence bound keeps the
+    # reliably-imaged site and drops the one with a long blind spot -- even though
+    # both have the same pass count and the same median gap.
+    pool = [
+        *[_pass("Steady", d) for d in (1, 7, 13, 19)],  # gaps 6,6,6 -> worst 6
+        *[_pass("Gappy", d) for d in (1, 7, 13, 28)],  # gaps 6,6,15 -> worst 15
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["Gappy", "Steady"]
+    assert [s.task for s in rank_site_coverage(pool, max_revisit_days=10)] == ["Steady"]
+
+
+def test_max_revisit_is_boundary_inclusive():
+    # A site whose worst gap falls exactly on the bound is kept (at most, not below).
+    pool = [_pass("Six", d) for d in (1, 7, 13)]  # worst gap 6
+    assert [s.task for s in rank_site_coverage(pool, max_revisit_days=6)] == ["Six"]
+    assert rank_site_coverage(pool, max_revisit_days=5.9) == []
+
+
+def test_max_revisit_drops_a_site_with_no_measurable_cadence():
+    # A single-pass site has no revisit gap, so it cannot be confirmed to meet any
+    # cadence requirement and is dropped -- the same way active_since drops a site
+    # with no datable pass (min_passes=1 admits it only when no cadence bound is set).
+    pool = [_pass("Lonely", 1)]
+    assert [s.task for s in rank_site_coverage(pool, min_passes=1)] == ["Lonely"]
+    assert rank_site_coverage(pool, min_passes=1, max_revisit_days=30) == []
+
+
+def test_max_revisit_gates_the_comparable_cadence_under_comparable_ranking():
+    # A VV series on days 1 and 20 (a 19-day gap) with a lone HH pass at day 10
+    # between them: the raw cadence reads a tight 10-day worst gap, but the series a
+    # change verb can actually difference (VV only) has a 19-day hole the HH pass
+    # does nothing to close. Under 'passes' the raw 10 clears a 12-day bound; under
+    # 'comparable' the analysable 19 does not -- the cadence twin of min_passes
+    # measuring comparable depth.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 10, pols=["HH"]),
+        _pass("Mixed", 20, pols=["VV"]),
+    ]
+    assert [s.task for s in rank_site_coverage(pool, max_revisit_days=12)] == ["Mixed"]
+    assert rank_site_coverage(pool, max_revisit_days=12, rank_by="comparable") == []
+    # A bound wide enough for the 19-day VV gap keeps it under either ranking.
+    assert [
+        s.task for s in rank_site_coverage(pool, max_revisit_days=20, rank_by="comparable")
+    ] == ["Mixed"]
+
+
+def test_max_revisit_is_orthogonal_to_recency_and_promotes_past_the_top():
+    # A cadence bound selects on the gap, not on depth or recency: a shallow but
+    # tightly-imaged site survives a bound a deep-but-gappy one fails, and it is not
+    # truncated away by a small --top before the filter runs (the whole-archive
+    # correction the index path also makes).
+    pool = [
+        *[_pass("DeepGappy", d) for d in (1, 2, 3, 30)],  # 4 passes, worst gap 27
+        *[_pass("Tight", d) for d in (10, 12)],  # 2 passes, worst gap 2
+    ]
+    # Without the cadence filter DeepGappy ranks first (more passes); with top=1 it
+    # would be the only one returned. The cadence bound drops it and keeps Tight.
+    assert [s.task for s in rank_site_coverage(pool, top=1)] == ["DeepGappy"]
+    assert [s.task for s in rank_site_coverage(pool, top=1, max_revisit_days=5)] == ["Tight"]
+
+
+def test_max_revisit_none_applies_no_filter_and_non_positive_is_rejected():
+    import pytest
+
+    pool = [_pass("Any", d) for d in (1, 30)]  # worst gap 29
+    assert [s.task for s in rank_site_coverage(pool, max_revisit_days=None)] == ["Any"]
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError, match="max_revisit_days must be positive"):
+            rank_site_coverage(pool, max_revisit_days=bad)
+
+
+# --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
 def _patch_gather(monkeypatch, pool):
@@ -684,6 +760,32 @@ def test_sites_cli_active_window_empty_result_names_both_bounds(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "last imaged between 2024-06-01 and 2024-12-01" in result.output
     assert "--active-since" in result.output and "--active-before" in result.output
+
+
+def test_sites_cli_max_revisit_filters_to_reliably_imaged_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Steady", d) for d in (1, 7, 13)],  # worst gap 6
+        *[_pass("Gappy", d) for d in (1, 7, 28)],  # worst gap 21
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--max-revisit", "10"])
+    assert result.exit_code == 0, result.output
+    assert "Steady" in result.output
+    assert "Gappy" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_max_revisit_empty_result_names_the_cadence_bound(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [_pass("Gappy", d) for d in (1, 7, 28)]  # worst gap 21
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--max-revisit", "10"])
+    assert result.exit_code == 0, result.output
+    assert "revisited within 10d" in result.output
+    assert "--max-revisit" in result.output  # the cadence bound is offered to loosen
 
 
 def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):
