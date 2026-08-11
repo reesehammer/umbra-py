@@ -1446,13 +1446,23 @@ Follow-ons that build on it, none a blocker:
     are all left off the echo alike, so a caller that wants to record what it asked
     for reads it from its own request. Add all four together if a consumer ever
     needs the round-trip, rather than singling out this one.
-  - **It gates on the site's *newest* pass, so there is no "quiet since" or
-    activity-*window* query.** `active_since` answers "still imaged since X"; the
-    complements — sites whose activity *stopped* before a date (`active_before` on
-    `MAX(acq_date)`), or those first seen after one (`MIN(acq_date)`) — are the same
-    one-clause shape and wait for a caller who wants them. A site's activity
-    interval is already reported as `first` / `last`; only the *selection* on it is
-    one-sided today.
+  - ~~**It gates on the site's *newest* pass, so there is no "quiet since" or
+    activity-*window* query.**~~ **shipped for `active_before`** — `active_before`
+    (`MAX(acq_date) <= ?`) is the twin upper bound on the same axis, on every surface
+    (`umbra sites --active-before`, `find_repeat_sites`, `GET`/`POST /sites`,
+    `CatalogIndex.rank_sites`), so the moat now selects dormant series ("stopped
+    imaging") and, set with `active_since`, sites whose newest pass falls within a
+    window. It reuses `active_since`'s exact single-sourcing and byte-identical
+    SQL-vs-pool pinning, snapping a span expression to its last day (symmetric with
+    `end`, where `active_since` snaps to the first day). See the CHANGELOG. What is
+    still open, and smaller:
+    - **The `MIN(acq_date)` complement is not selected on.** A "first seen after"
+      filter (a site whose *earliest* pass is on or after a date — a newly-appeared
+      series) is the same one-clause shape on `MIN(acq_date)` rather than `MAX`, but
+      answers a different question ("when did this site start?" vs "is it still
+      going?") and waits for a caller who wants it. A site's activity interval is
+      reported as `first` / `last`; the selection is now two-sided on `last` and
+      unselected on `first`.
   - **On the HTTP surface `active_since` accepts a relative expression, unlike the
     strict-ISO `datetime` filter.** `_coerce_date` resolves `"6 months ago"` on
     `GET`/`POST /sites`, which is convenient and matches the CLI, but it is a

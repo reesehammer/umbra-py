@@ -1318,6 +1318,7 @@ class CatalogIndex:
         min_passes: int = 2,
         rank_by: str = "passes",
         active_since: DateLike = None,
+        active_before: DateLike = None,
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1379,6 +1380,13 @@ class CatalogIndex:
         recency gate. It is orthogonal to ``start`` / ``end`` (those bound which
         *rows* the ``GROUP BY`` counts; this selects whole sites by their latest and
         keeps every counted pass in the summary). ``None`` applies no recency filter.
+
+        ``active_before`` is the complement -- keep only sites whose newest dated
+        pass is *on or before* that date (a dormant series), answered by the twin
+        ``MAX(acq_date) <= ?`` clause in the same ``HAVING``, so with ``active_since``
+        the two bound the site's latest pass to a window. A span expression snaps to
+        its last day (symmetric with ``end``). Byte-identical to the pool path's
+        upper-recency gate. ``None`` applies no upper bound.
         """
         from .coverage import (  # noqa: PLC0415
             _check_ranking,
@@ -1392,6 +1400,9 @@ class CatalogIndex:
         if top <= 0:
             return []
         since = _coerce_date(active_since)
+        # ``active_before`` snaps a span expression to its last day (``is_end``),
+        # symmetric with ``end`` and with the pool path's upper-recency gate.
+        before = _coerce_date(active_before, is_end=True)
 
         if (
             intersects is not None
@@ -1414,7 +1425,12 @@ class CatalogIndex:
                 )
             )
             return rank_site_coverage(
-                pool, top=top, min_passes=min_passes, rank_by=rank_by, active_since=active_since
+                pool,
+                top=top,
+                min_passes=min_passes,
+                rank_by=rank_by,
+                active_since=active_since,
+                active_before=active_before,
             )
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
@@ -1433,11 +1449,19 @@ class CatalogIndex:
         # group with no dated ``acq_date`` yields NULL and is dropped (``NULL >= ?``
         # is never true), which matches ``select_featured_sites`` dropping a site
         # with no datable newest pass.
+        # ``active_before`` is the twin upper bound (``MAX(acq_date) <= ?``): a group
+        # whose newest dated pass is after the cutoff is dropped, so the two clauses
+        # together bound the site's latest pass to a window. A group with no dated
+        # ``acq_date`` yields NULL, and ``NULL <= ?`` is never true, so it is dropped
+        # either way -- matching ``select_featured_sites`` dropping an undatable site.
         having = "HAVING COUNT(*) >= ?"
         candidate_params: list[object] = [*params, min_passes]
         if since is not None:
             having += " AND MAX(acq_date) >= ?"
             candidate_params.append(since.isoformat())
+        if before is not None:
+            having += " AND MAX(acq_date) <= ?"
+            candidate_params.append(before.isoformat())
         candidate_sql = (
             f"SELECT task FROM items{where} GROUP BY task {having} ORDER BY COUNT(*) DESC, task ASC"
         )

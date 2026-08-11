@@ -941,6 +941,7 @@ def run_sites(
     min_passes: int = SITES_MIN_PASSES,
     rank_by: str = "passes",
     active_since: DateLike = None,
+    active_before: DateLike = None,
 ) -> list[SiteCoverage]:
     """Rank the most repeat-imaged sites in a filtered pool of the archive.
 
@@ -986,6 +987,12 @@ def run_sites(
     unchanged, so this endpoint filters exactly as ``umbra sites --active-since``
     does, orthogonally to ``rank_by`` / ``min_passes`` and distinct from ``start`` /
     ``end`` (which bound the passes rather than select whole sites).
+
+    ``active_before`` is the complement -- keep only sites whose newest pass is *on
+    or before* that date (a dormant series) -- forwarded to the index (a twin
+    ``MAX(acq_date) <= ?`` clause) and pool rankers unchanged, so with ``active_since``
+    the two bound the site's latest pass to a window exactly as ``umbra sites
+    --active-since --active-before`` does.
     """
     from .coverage import _check_ranking, rank_site_coverage
 
@@ -1010,6 +1017,7 @@ def run_sites(
             min_passes=min_p,
             rank_by=rank_by,
             active_since=active_since,
+            active_before=active_before,
         )
 
     pool = list(
@@ -1029,7 +1037,12 @@ def run_sites(
         )
     )
     return rank_site_coverage(
-        pool, top=top_n, min_passes=min_p, rank_by=rank_by, active_since=active_since
+        pool,
+        top=top_n,
+        min_passes=min_p,
+        rank_by=rank_by,
+        active_since=active_since,
+        active_before=active_before,
     )
 
 
@@ -2794,6 +2807,16 @@ def build_app(
                 "keeps each survivor's full history"
             ),
         ),
+        active_before: str | None = Query(
+            default=None,
+            description=(
+                "The complement of active_since: keep only sites last imaged on or "
+                "before this date (a dormant series). Set both to select sites whose "
+                "newest pass falls within a window. Same grammar, but a bare "
+                "year/month covers the whole period (2024 is 'on or before "
+                "2024-12-31'), symmetric with the datetime end"
+            ),
+        ),
     ) -> JSONResponse:
         """Rank the archive's most repeat-imaged sites — discovery before analysis.
 
@@ -2835,6 +2858,9 @@ def build_app(
             # Coerce here (not in run_sites) so a malformed date is a clean 400,
             # like start/end; a relative expression ('6 months ago') resolves too.
             resolved_active_since = _coerce_date(active_since)
+            # ``is_end`` snaps a span (a bare year/month) to its last day, so an
+            # upper recency bound covers the whole named period, like the end bound.
+            resolved_active_before = _coerce_date(active_before, is_end=True)
             from .coverage import _check_ranking  # noqa: PLC0415
 
             _check_ranking(rank_by)
@@ -2860,6 +2886,7 @@ def build_app(
                 min_passes=min_passes,
                 rank_by=rank_by,
                 active_since=resolved_active_since,
+                active_before=resolved_active_before,
             )
         finally:
             _close(source)
@@ -2891,7 +2918,8 @@ def build_app(
         top-level field overrides the same field in ``query``); ``limit`` sizes
         the pool only on a ``--live`` backend, and ``top`` / ``min_passes`` cap
         and qualify the ranking as on ``GET``. ``active_since`` (a top-level field)
-        keeps only sites still imaged on or after that date, exactly as on ``GET``.
+        keeps only sites still imaged on or after that date, and ``active_before``
+        its complement (sites last imaged on or before it), exactly as on ``GET``.
         """
         if body.get("intersects") is not None and body.get("bbox") is not None:
             raise HTTPException(
@@ -2927,6 +2955,8 @@ def build_app(
             # Coerce here so a malformed date is a 400, like start/end; accepts an
             # ISO date, a bare year/month or a relative expression ('6 months ago').
             resolved_active_since = _coerce_date(body.get("active_since"))
+            # ``is_end`` snaps a span to its last day, like the datetime end bound.
+            resolved_active_before = _coerce_date(body.get("active_before"), is_end=True)
             from .coverage import _check_ranking  # noqa: PLC0415
 
             _check_ranking(rank_by)
@@ -2953,6 +2983,7 @@ def build_app(
                 min_passes=min_passes if min_passes is not None else SITES_MIN_PASSES,
                 rank_by=rank_by,
                 active_since=resolved_active_since,
+                active_before=resolved_active_before,
             )
         finally:
             _close(source)

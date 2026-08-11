@@ -680,6 +680,29 @@ def test_sites_active_since_bad_date_is_a_client_error(sites_index):
     assert client.get("/sites?active_since=not-a-date").status_code == 400
 
 
+def test_sites_active_before_keeps_only_dormant_sites(sites_client):
+    # The complement of active_since: a cutoff between the two sites' newest passes
+    # keeps the stale one (Alpha, newest 2024-01-21) and drops the live one (Beta,
+    # newest 2024-02-05) -- the whole-site "stopped imaging" filter.
+    body = sites_client.get("/sites?active_before=2024-01-25").json()
+    assert [s["task"] for s in body["sites"]] == ["Alpha"]
+    # A bare month snaps to its last day (is_end), so 2024-01 keeps Alpha too.
+    month = sites_client.get("/sites?active_before=2024-01").json()
+    assert [s["task"] for s in month["sites"]] == ["Alpha"]
+
+
+def test_sites_active_window_bounds_the_newest_pass(sites_client):
+    # active_since and active_before together bound the site's latest pass to a
+    # window: [2024-01-25, 2024-02-28] excludes Alpha (too old) and keeps Beta.
+    body = sites_client.get("/sites?active_since=2024-01-25&active_before=2024-02-28").json()
+    assert [s["task"] for s in body["sites"]] == ["Beta"]
+
+
+def test_sites_active_before_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.get("/sites?active_before=not-a-date").status_code == 400
+
+
 def test_sites_filters_by_bbox(sites_client):
     # A bbox far from the sample footprint leaves an empty pool.
     empty = sites_client.get("/sites?bbox=0,0,1,1").json()
@@ -818,6 +841,21 @@ def test_post_sites_filters_by_active_since(sites_client):
 def test_post_sites_active_since_bad_date_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"active_since": "nope"}).status_code == 400
+
+
+def test_post_sites_filters_by_active_before_and_window(sites_client):
+    # The POST twin honours the upper recency bound and the window exactly as GET.
+    dormant = sites_client.post("/sites", json={"active_before": "2024-01-25"}).json()
+    assert [s["task"] for s in dormant["sites"]] == ["Alpha"]
+    window = sites_client.post(
+        "/sites", json={"active_since": "2024-01-25", "active_before": "2024-02-28"}
+    ).json()
+    assert [s["task"] for s in window["sites"]] == ["Beta"]
+
+
+def test_post_sites_active_before_bad_date_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"active_before": "nope"}).status_code == 400
 
 
 def test_post_sites_filters_by_area_top_level_and_query(sites_client):
