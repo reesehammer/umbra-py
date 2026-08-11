@@ -1321,6 +1321,7 @@ class CatalogIndex:
         active_before: DateLike = None,
         max_revisit_days: float | None = None,
         min_span_days: float | None = None,
+        max_span_days: float | None = None,
     ) -> list[SiteCoverage]:
         """Rank the most repeat-imaged sites across the *whole* index.
 
@@ -1421,13 +1422,26 @@ class CatalogIndex:
         series' span under ``"comparable"``), orthogonal to the recency and cadence
         filters, and dropping a site with fewer than two passes in the gated series.
         ``None`` applies no span filter; a non-positive value is a ``ValueError``.
+
+        ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites
+        imaged over *at most this long* (a short-lived series), the complement of the
+        floor, and set with it a window bounding each site's baseline
+        (``min_span_days <= span <= max_span_days``), as ``active_since`` /
+        ``active_before`` bound the newest pass. Like the floor it is applied in Python
+        with the same :func:`umbra_py.coverage._passes_max_span` the pool path uses (so
+        the two paths stay byte-identical), gated on the analysable subset under
+        ``"comparable"``, drops the raw-count SQL ``LIMIT`` when set, and drops a site
+        with no measurable span so the window admits only a confirmed baseline.
+        ``None`` applies no span ceiling; a non-positive value is a ``ValueError``.
         """
         from .coverage import (  # noqa: PLC0415
             _check_max_revisit,
+            _check_max_span,
             _check_min_span,
             _check_ranking,
             _min_passes_depth,
             _passes_cadence,
+            _passes_max_span,
             _passes_span,
             _rank_sort_key,
             rank_site_coverage,
@@ -1437,6 +1451,7 @@ class CatalogIndex:
         _check_ranking(rank_by)
         _check_max_revisit(max_revisit_days)
         _check_min_span(min_span_days)
+        _check_max_span(max_span_days)
         if top <= 0:
             return []
         since = _coerce_date(active_since)
@@ -1473,6 +1488,7 @@ class CatalogIndex:
                 active_before=active_before,
                 max_revisit_days=max_revisit_days,
                 min_span_days=min_span_days,
+                max_span_days=max_span_days,
             )
 
         where, params = self._ranking_where(bbox, start, end, product_types, area, fuzzy)
@@ -1514,7 +1530,10 @@ class CatalogIndex:
         # pool path exactly), so any of them reads every qualifying task and
         # re-ranks/truncates in Python.
         needs_full_scan = (
-            rank_by != "passes" or max_revisit_days is not None or min_span_days is not None
+            rank_by != "passes"
+            or max_revisit_days is not None
+            or min_span_days is not None
+            or max_span_days is not None
         )
         if not needs_full_scan:
             candidate_sql += " LIMIT ?"
@@ -1545,6 +1564,15 @@ class CatalogIndex:
             # ``"comparable"``. A site with no measurable span is dropped.
             if min_span_days is not None and not _passes_span(
                 passes, rank_by=rank_by, min_span_days=min_span_days
+            ):
+                continue
+            # Span ceiling (upper baseline bound), the upper twin of the floor above,
+            # applied on the same items with the same ``_passes_max_span`` the pool path
+            # uses, so the two paths stay byte-identical. Gated on the analysable subset
+            # under ``"comparable"``. A site with no measurable span is dropped, so a
+            # ``min_span``/``max_span`` window admits only a confirmed baseline.
+            if max_span_days is not None and not _passes_max_span(
+                passes, rank_by=rank_by, max_span_days=max_span_days
             ):
                 continue
             ranked.append(site_coverage(task, passes))

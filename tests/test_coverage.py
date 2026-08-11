@@ -773,6 +773,90 @@ def test_min_span_and_max_revisit_are_independent_axes():
 
 
 # --------------------------------------------------------------------------- #
+# max_span: the observation-baseline ceiling (short-lived sites)
+# --------------------------------------------------------------------------- #
+def test_max_span_keeps_only_short_baseline_sites():
+    # The mirror of the min_span test: max_span selects the *complement* -- a
+    # short-window burst is kept and a long-baseline series dropped. Long spans 29
+    # days, Short spans 2; a 10-day ceiling keeps Short and drops Long.
+    pool = [
+        *[_pass("Long", d) for d in (1, 15, 30)],  # span 29
+        *[_pass("Short", d) for d in (1, 2, 3)],  # span 2
+    ]
+    assert [s.task for s in rank_site_coverage(pool)] == ["Long", "Short"]
+    assert [s.task for s in rank_site_coverage(pool, max_span_days=10)] == ["Short"]
+
+
+def test_max_span_is_boundary_inclusive():
+    # A site whose span falls exactly on the ceiling is kept (at most, not below).
+    pool = [_pass("Nine", d) for d in (1, 10)]  # span 9
+    assert [s.task for s in rank_site_coverage(pool, max_span_days=9)] == ["Nine"]
+    assert rank_site_coverage(pool, max_span_days=8.9) == []
+
+
+def test_max_span_and_min_span_bound_the_baseline_to_a_window():
+    # Set together, the floor and the ceiling keep only sites whose span falls inside
+    # the window -- exactly as active_since/active_before bound the newest pass. Mid
+    # (span 10) is in [5, 20]; Short (span 2) is below it and Long (span 29) above.
+    pool = [
+        *[_pass("Short", d) for d in (1, 3)],  # span 2
+        *[_pass("Mid", d) for d in (1, 11)],  # span 10
+        *[_pass("Long", d) for d in (1, 30)],  # span 29
+    ]
+    assert [s.task for s in rank_site_coverage(pool, min_span_days=5, max_span_days=20)] == ["Mid"]
+    # An inverted window (floor above ceiling) admits nothing, no error -- like an
+    # inverted active_since/active_before window.
+    assert rank_site_coverage(pool, min_span_days=20, max_span_days=5) == []
+
+
+def test_max_span_drops_a_site_with_no_measurable_span():
+    # A single-pass site has no confirmed baseline, so a ceiling drops it too -- the
+    # same rule the floor applies, which is what lets the two compose as a window that
+    # admits only a confirmed span (min_passes=1 admits it only with no span bound).
+    pool = [_pass("Lonely", 1)]
+    assert [s.task for s in rank_site_coverage(pool, min_passes=1)] == ["Lonely"]
+    assert rank_site_coverage(pool, min_passes=1, max_span_days=5) == []
+
+
+def test_max_span_gates_the_comparable_span_under_comparable_ranking():
+    # A VV pair on days 1 and 10 (span 9) with a lone HH pass at day 30: the raw dated
+    # series spans 29 days, but the differenceable (VV) series spans just 9. A 20-day
+    # ceiling rejects the raw 29 under 'passes' yet keeps the analysable 9 under
+    # 'comparable' -- off-polarization passes cannot inflate a baseline past a ceiling.
+    pool = [
+        _pass("Mixed", 1, pols=["VV"]),
+        _pass("Mixed", 10, pols=["VV"]),
+        _pass("Mixed", 30, pols=["HH"]),
+    ]
+    assert rank_site_coverage(pool, max_span_days=20) == []
+    assert [s.task for s in rank_site_coverage(pool, max_span_days=20, rank_by="comparable")] == [
+        "Mixed"
+    ]
+
+
+def test_max_span_promotes_a_short_baseline_site_past_the_top():
+    # A ceiling selects on span, not depth: a shallow short-window site survives a
+    # ceiling a deep long-baseline one fails, and it is not truncated away by a small
+    # --top before the filter runs -- the mirror of the min_span promotion test.
+    pool = [
+        *[_pass("LongDeep", d) for d in (1, 10, 20, 30)],  # 4 passes, span 29
+        *[_pass("ShortSparse", d) for d in (1, 3)],  # 2 passes, span 2
+    ]
+    assert [s.task for s in rank_site_coverage(pool, top=1)] == ["LongDeep"]
+    assert [s.task for s in rank_site_coverage(pool, top=1, max_span_days=5)] == ["ShortSparse"]
+
+
+def test_max_span_none_applies_no_filter_and_non_positive_is_rejected():
+    import pytest
+
+    pool = [_pass("Any", d) for d in (1, 2)]  # span 1
+    assert [s.task for s in rank_site_coverage(pool, max_span_days=None)] == ["Any"]
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError, match="max_span_days must be positive"):
+            rank_site_coverage(pool, max_span_days=bad)
+
+
+# --------------------------------------------------------------------------- #
 # umbra sites CLI
 # --------------------------------------------------------------------------- #
 def _patch_gather(monkeypatch, pool):
@@ -906,6 +990,34 @@ def test_sites_cli_min_span_empty_result_names_the_baseline_bound(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "imaged over 10d+" in result.output
     assert "--min-span" in result.output  # the baseline bound is offered to loosen
+
+
+def test_sites_cli_max_span_filters_to_short_baseline_sites(monkeypatch):
+    from umbra_py.cli import cli
+
+    pool = [
+        *[_pass("Long", d) for d in (1, 15, 30)],  # span 29
+        *[_pass("Short", d) for d in (1, 2, 3)],  # span 2
+    ]
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--max-span", "10"])
+    assert result.exit_code == 0, result.output
+    assert "Short" in result.output
+    assert "Long" not in result.output
+    assert "1 site(s), best-covered first." in result.output
+
+
+def test_sites_cli_span_window_names_both_bounds_when_empty(monkeypatch):
+    from umbra_py.cli import cli
+
+    # A window that admits nothing names the range it asked for and offers both bounds.
+    pool = [_pass("Long", d) for d in (1, 15, 30)]  # span 29
+    _patch_gather(monkeypatch, pool)
+    result = CliRunner().invoke(cli, ["sites", "--min-span", "5", "--max-span", "10"])
+    assert result.exit_code == 0, result.output
+    assert "imaged over 5-10d" in result.output
+    assert "--min-span" in result.output
+    assert "--max-span" in result.output
 
 
 def test_sites_cli_notes_usable_depth_only_when_it_undercuts_the_raw_count(monkeypatch):

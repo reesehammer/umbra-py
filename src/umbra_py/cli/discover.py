@@ -377,6 +377,17 @@ def _print_site_coverage(site) -> None:
     "default, the usable (comparable) series' span under --rank-by comparable. "
     "Orthogonal to --active-since / --active-before / --max-revisit.",
 )
+@click.option(
+    "--max-span",
+    type=float,
+    default=None,
+    help="Keep only sites imaged over AT MOST this long -- the upper twin of --min-span, "
+    "selecting a short-lived series (a burst of imaging, now over) rather than a "
+    "long-baseline one. Set with --min-span to bound the baseline to a window "
+    "(--min-span A --max-span B keeps sites whose span is between A and B days), as "
+    "--active-since / --active-before bound the newest pass. Counts the span --rank-by "
+    "measures (the usable series' span under --rank-by comparable).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -401,6 +412,7 @@ def sites(
     active_before,
     max_revisit,
     min_span,
+    max_span,
     as_json,
     local,
     db_path,
@@ -462,7 +474,10 @@ def sites(
     deforestation) that needs a long window to show. It is a different axis from
     --max-revisit (cadence is the worst gap; span is the total baseline), counts the
     span --rank-by measures (the usable series' span under --rank-by comparable), and
-    is orthogonal to the --active-* and --max-revisit filters.
+    is orthogonal to the --active-* and --max-revisit filters. --max-span is its upper
+    twin (sites imaged over at most that long, a short-lived series); set both to bound
+    each site's baseline to a window, as --active-since / --active-before do the newest
+    pass.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -503,6 +518,7 @@ def sites(
                 active_before=active_before,
                 max_revisit_days=max_revisit,
                 min_span_days=min_span,
+                max_span_days=max_span,
                 **filters,
             )
         pool_size = None
@@ -522,6 +538,7 @@ def sites(
             active_before=active_before,
             max_revisit_days=max_revisit,
             min_span_days=min_span,
+            max_span_days=max_span,
         )
         pool_size = len(pool)
     if as_json:
@@ -543,7 +560,14 @@ def sites(
         else:
             recency = ""
         cadence = f", revisited within {max_revisit:g}d" if max_revisit is not None else ""
-        baseline = f", imaged over {min_span:g}d+" if min_span is not None else ""
+        if min_span is not None and max_span is not None:
+            baseline = f", imaged over {min_span:g}-{max_span:g}d"
+        elif min_span is not None:
+            baseline = f", imaged over {min_span:g}d+"
+        elif max_span is not None:
+            baseline = f", imaged over up to {max_span:g}d"
+        else:
+            baseline = ""
         loosen_flags = [
             flag
             for flag, value in (
@@ -551,6 +575,7 @@ def sites(
                 ("--active-before", active_before),
                 ("--max-revisit", max_revisit),
                 ("--min-span", min_span),
+                ("--max-span", max_span),
             )
             if value is not None and value != ""
         ]

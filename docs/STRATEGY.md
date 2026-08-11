@@ -851,6 +851,27 @@ from:
   (a filter input, like the recency and cadence bounds), so no schema moved. **With it
   the discovery moat selects on all *four* axes it reports — depth, recency, cadence
   *and* baseline span.** See the CHANGELOG.
+  ~~**Open:** the baseline axis was gated on one side only — a site's span being *at
+  least* `N` days (long-baseline targets) — so the moat could not select the
+  *short-lived* series (a burst of intensive imaging over a narrow window, now over),
+  nor bound a site's baseline to a window the way `active_since` / `active_before`
+  bound its newest pass.~~ **shipped** — `max_span` adds the twin upper bound on the
+  same axis, on every surface at once (`umbra sites --max-span`, `find_repeat_sites`,
+  `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for `--local`): it keeps only
+  sites whose observation span is *at most* `N` days, and set with `--min-span` the two
+  bound the baseline to a window (`min_span <= span <= max_span`), symmetric with the
+  recency pair. It reuses `min_span`'s exact machinery — the same two single-sourced
+  functions (`select_featured_sites` and `CatalogIndex.rank_sites`, the index path
+  applying the identical `_passes_max_span` in Python since the comparable-subset span
+  is not a SQL aggregate, and dropping the raw-count `LIMIT` when set so a
+  short-baseline site outside the raw top-`top` is promoted), pinned byte-for-byte
+  identical between the SQL and pool paths for every cutoff and window — and like the
+  floor gates the *analysable* series' span under `--rank-by comparable` and drops a
+  site with no measurable span, so the window admits only a confirmed baseline. It adds
+  no field to the `site-coverage` contract (a filter input, like `min_span` and the
+  recency bounds), so no schema moved. **With it the baseline axis is two-sided — a
+  floor, a ceiling, or a window — matching the recency axis, so the moat now selects on
+  depth, recency, cadence and a *bounded* baseline span.** See the CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

@@ -126,6 +126,21 @@ def _check_min_span(min_span_days: float | None) -> None:
         raise ValueError(f"min_span_days must be positive (days), got {min_span_days!r}")
 
 
+def _check_max_span(max_span_days: float | None) -> None:
+    """Reject a non-positive ``max_span`` baseline bound.
+
+    The upper twin of :func:`_check_min_span`: a site's observation span between two
+    distinct passes is always positive, so a non-positive ceiling could only ever
+    keep the degenerate same-day-only case (or nothing at all) -- not the honest
+    "short-lived series" a ceiling is for -- which is the silent-no-op-adjacent
+    surprise the rest of this surface refuses. ``None`` disables the filter (the
+    default). Shared by every discovery surface so they cannot disagree about what a
+    span bound is, exactly as :func:`_check_min_span` is for ``min_span``.
+    """
+    if max_span_days is not None and max_span_days <= 0:
+        raise ValueError(f"max_span_days must be positive (days), got {max_span_days!r}")
+
+
 def _passes_cadence(items: Iterable[UmbraItem], *, rank_by: str, max_revisit_days: float) -> bool:
     """Whether the series ``rank_by`` measures is revisited at least this often.
 
@@ -190,6 +205,39 @@ def _passes_span(items: Iterable[UmbraItem], *, rank_by: str, min_span_days: flo
     if len(dates) < 2:
         return False
     return (dates[-1] - dates[0]).days >= min_span_days
+
+
+def _passes_max_span(items: Iterable[UmbraItem], *, rank_by: str, max_span_days: float) -> bool:
+    """Whether the series ``rank_by`` measures spans at most this long.
+
+    The upper twin of :func:`_passes_span`: same series, same figure, but a *ceiling*
+    on the baseline rather than a floor. Under ``"comparable"`` it gates the largest
+    single-polarization dated subset (:func:`_largest_comparable_group`); under
+    ``"passes"`` the whole dated series. Returns ``True`` iff that series' baseline --
+    its ``span_days`` / ``comparable_span_days`` figure, whole days from its first
+    dated pass to its last -- is at most ``max_span_days`` days.
+
+    It selects the complement of ``min_span``: where a floor keeps the long-baseline
+    series a *slow* change needs, a ceiling keeps the *short-lived* one -- a burst of
+    imaging over a narrow window, now over. Set with ``min_span`` the two bound the
+    baseline to a window (``min_span_days <= span <= max_span_days``), exactly as
+    ``active_since`` / ``active_before`` bound the newest pass to one.
+
+    A series with fewer than two dated passes has no measurable span, so it *fails* --
+    the same rule :func:`_passes_span` applies, which is what lets ``min_span`` and
+    ``max_span`` compose as a clean window (both admit only a *confirmed* span) rather
+    than one dropping the unmeasurable and the other keeping it. The span is computed
+    exactly as :func:`site_coverage` reduces ``span_days``, so filtering here can never
+    disagree with the :attr:`SiteCoverage.span_days` a summary reports -- which is what
+    lets the pool path (gating items in :func:`umbra_py.showcase.select_featured_sites`)
+    and the index path (gating the same items in
+    :meth:`umbra_py.index.CatalogIndex.rank_sites`) stay byte-identical.
+    """
+    series = _largest_comparable_group(items) if rank_by == "comparable" else items
+    dates = sorted(i.datetime for i in series if i.datetime is not None)
+    if len(dates) < 2:
+        return False
+    return (dates[-1] - dates[0]).days <= max_span_days
 
 
 @dataclass(frozen=True)
@@ -449,6 +497,7 @@ def rank_site_coverage(
     active_before: DateLike = None,
     max_revisit_days: float | None = None,
     min_span_days: float | None = None,
+    max_span_days: float | None = None,
 ) -> list[SiteCoverage]:
     """The most repeat-imaged sites in ``items``, best-first, each summarised.
 
@@ -526,12 +575,28 @@ def rank_site_coverage(
     than two passes in the gated series has no measurable span and is dropped.
     ``None`` (the default) applies no span filter; a non-positive value is a
     ``ValueError``.
+
+    ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites imaged
+    over *at most this long*, so a short-window series is kept and a long-baseline one
+    dropped. It selects the complement of ``min_span_days`` (the *short-lived* series,
+    a burst of imaging now over, rather than the long-baseline one a slow change
+    needs), and set with ``min_span_days`` the two bound each site's baseline to a
+    window (``min_span_days <= span <= max_span_days``), exactly as ``active_since`` /
+    ``active_before`` bound the newest pass to one. It measures the same series
+    ``rank_by`` does (:func:`_passes_max_span`): under ``"comparable"`` the *analysable*
+    series' span, so off-polarization passes bracketing the range cannot make a site's
+    baseline read longer -- and so escape a ceiling -- than the series a change verb
+    can difference. Like ``min_span_days`` it drops a site with fewer than two passes
+    in the gated series (no confirmed baseline to admit), which is what lets the two
+    compose as a clean window. ``None`` (the default) applies no span ceiling; a
+    non-positive value is a ``ValueError``.
     """
     from .showcase import select_featured_sites  # noqa: PLC0415
 
     _check_ranking(rank_by)
     _check_max_revisit(max_revisit_days)
     _check_min_span(min_span_days)
+    _check_max_span(max_span_days)
     sites = select_featured_sites(
         items,
         count=top,
@@ -541,5 +606,6 @@ def rank_site_coverage(
         active_before=active_before,
         max_revisit_days=max_revisit_days,
         min_span_days=min_span_days,
+        max_span_days=max_span_days,
     )
     return [site_coverage(s.task, s.items, label=s.label) for s in sites]

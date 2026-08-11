@@ -1510,12 +1510,23 @@ Follow-ons that build on it, none a blocker:
   byte-identical to the pool path) and drops the raw-count SQL `LIMIT` when set, so a
   long-baseline site outside the raw top-`top` is promoted. See the CHANGELOG. What is
   still open, and smaller:
-  - **A `max_span` upper bound is not selected on.** The complement — keep only sites
-    whose baseline is at most `N` days (a *short-lived* series, imaged intensively then
-    stopped) — is the same one-comparison shape on `<=` rather than `>=`, and set with
-    `--min-span` would bound the baseline to a window. It answers a different question
-    ("a burst of interest, now over") and waits for a caller who wants it; the span is
-    now selected on one side (a floor) and reported two-sided as `first` / `last`.
+  - ~~**A `max_span` upper bound is not selected on.**~~ **shipped** — `max_span`
+    (`coverage._passes_max_span`, the `<=` twin of `_passes_span`) keeps only sites whose
+    baseline is at most `N` days (a *short-lived* series, imaged intensively then
+    stopped), on every surface (`umbra sites --max-span`, `find_repeat_sites`,
+    `GET`/`POST /sites`, `CatalogIndex.rank_sites`), so set with `--min-span` the two
+    bound each site's baseline to a window (`min_span <= span <= max_span`), symmetric
+    with `active_since` / `active_before`. It reuses `min_span`'s exact single-sourcing
+    (the same `select_featured_sites` / `CatalogIndex.rank_sites` pair, the index path
+    applying the identical `_passes_max_span` in Python and dropping the raw-count
+    `LIMIT` when set so a short-baseline site outside the raw top-`top` is promoted,
+    pinned byte-identical between the SQL and pool paths for every cutoff and window),
+    gates the *analysable* series' span under `--rank-by comparable`, and drops a site
+    with no measurable span so the window admits only a confirmed baseline. It adds no
+    field to the `site-coverage` contract (a filter input, like the floor). See the
+    CHANGELOG. **With it the baseline axis is two-sided (floor / ceiling / window),
+    matching the recency axis — the discovery moat's four axes (depth, recency, cadence,
+    baseline) are complete.**
 
 ---
 
