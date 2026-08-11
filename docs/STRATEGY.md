@@ -918,6 +918,34 @@ from:
   recency bounds), so no schema moved. **With it the baseline axis is two-sided — a
   floor, a ceiling, or a window — matching the recency axis, so the moat now selects on
   depth, recency, cadence and a *bounded* baseline span.** See the CHANGELOG.
+- ~~The moat could *filter* sites on four axes (depth, recency, onset, cadence,
+  baseline) but only *rank* them by depth (raw `passes` or analysable `comparable`), so
+  a monitoring or tasking user (§1's funnel) who filtered by recency still read a list
+  ordered by pass count — a site imaged last week buried under a deeper series that
+  stopped years ago — and could not surface the longest-baseline sites (the ones a
+  *slow* change needs) first at all.~~ **shipped** — `rank_by="recency"` / `"span"` add
+  the two temporal orderings on every surface at once (`umbra sites --rank-by`,
+  `find_repeat_sites`, `GET`/`POST /sites`, and `CatalogIndex.rank_sites` for
+  `--local`): `"recency"` orders by each site's newest dated pass (most-recently-active
+  first — the still-active target to task), `"span"` by each site's observation baseline
+  (longest-watched first). Both order by the whole-site `last` / `span_days` a summary
+  already reports, ties broken by raw depth then task, with `min_passes` still
+  qualifying on depth — so a temporal order returns only sites with a series worth
+  ordering. The key is applied *before* the top-`N` truncation (a recently-active or
+  long-baseline site outside the raw top-`N` is promoted rather than truncated first,
+  the same whole-archive correction the `comparable` ranking made for analysable depth),
+  and single-sourced through the purpose-built extension point every ranking uses — the
+  `SITE_RANKINGS` set and the `_rank_sort_key` sort key, with the index path dropping
+  the raw-count `LIMIT` and re-ranking in Python over the summarised records (reading
+  `last` / `span_days` off the same `SiteCoverage` the pool path reduces via the shared
+  `_temporal_rank_figures`), pinned byte-identical by the index-vs-pool parity test. It
+  adds no field to the `site-coverage` contract (a ranking input, like `rank_by`'s
+  existing values), so no schema moved. **With them the discovery moat *ranks* on every
+  axis it *filters* on — depth, recency and baseline — not only on depth. Open, and
+  smaller:** a `"cadence"` ordering (tightest-revisit first) is the one figure reported
+  but neither filtered nor ranked on both sides; it waits for a consumer, since a worst-
+  or typical-gap ordering has a less obvious default than recency or span. See the
+  CHANGELOG.
 
 **Structural code debt (schedule, don't rush)**
 

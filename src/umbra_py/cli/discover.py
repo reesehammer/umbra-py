@@ -19,6 +19,7 @@ from .._spinner import OrbitSpinner
 from ..catalog import UmbraCatalog
 from ..constants import CANOPY_TOKEN_ENV, DATA_LICENSE, PRODUCT_ASSETS
 from ..context import llm_context
+from ..coverage import SITE_RANKINGS
 from ..exceptions import UmbraError
 from ..index import (
     CatalogIndex,
@@ -325,13 +326,16 @@ def _print_site_coverage(site) -> None:
 )
 @click.option(
     "--rank-by",
-    type=click.Choice(["passes", "comparable"]),
+    type=click.Choice(list(SITE_RANKINGS)),
     default="passes",
     show_default=True,
-    help="What to rank sites by: 'passes' (raw pass count) or 'comparable' (the "
-    "usable series' depth -- the largest same-polarization dated subset a change "
-    "verb can actually difference), so a deep single-polarization site is not "
-    "outranked by a broader mixed-polarization one it beats on analysable depth.",
+    help="What to order sites by. Depth: 'passes' (raw pass count) or 'comparable' "
+    "(the usable series' depth -- the largest same-polarization dated subset a change "
+    "verb can difference -- so a deep single-polarization site is not outranked by a "
+    "broader mixed one). Temporal: 'recency' (newest pass first -- the still-active "
+    "site to monitor or task) or 'span' (longest baseline first -- the site watched "
+    "long enough for slow change to show), ordering by the same figures --active-* "
+    "and --min-span / --max-span filter on. --min-passes still qualifies on depth.",
 )
 @click.option(
     "--active-since",
@@ -476,14 +480,19 @@ def sites(
     subset -- the selection to pipe straight into 'umbra change' / 'stack' without
     tripping the refusal.
 
-    --rank-by chooses the order: 'passes' (the default) ranks by raw pass count;
-    'comparable' ranks by that usable-series depth instead, so a deeply-imaged
-    single-polarization site is not outranked by a broader one whose passes a
-    change verb cannot difference together. --min-passes then counts that same
-    usable depth, so '--rank-by comparable --min-passes 3' returns only sites whose
-    differenceable series is at least three passes deep -- not sites with three raw
-    passes ranked by their usable depth. The two agree when every dated pass shares
-    one polarization.
+    --rank-by chooses the order. Two depth orders: 'passes' (the default) ranks by
+    raw pass count; 'comparable' ranks by that usable-series depth instead, so a
+    deeply-imaged single-polarization site is not outranked by a broader one whose
+    passes a change verb cannot difference together (and --min-passes then counts
+    that same usable depth, so '--rank-by comparable --min-passes 3' returns only
+    sites whose differenceable series is at least three passes deep). Two temporal
+    orders: 'recency' ranks by each site's newest pass (the still-active site to
+    monitor or task, which a depth order buries under a deeper but dormant series)
+    and 'span' by each site's observation baseline (the site watched long enough for
+    slow change to show) -- ordering by the same figures --active-* and
+    --min-span / --max-span filter on, so the discovery answer ranks on every axis it
+    filters on, not only on depth. A recently-active or long-baseline site outside
+    the raw top-N is promoted rather than truncated first.
 
     --active-since keeps only sites still imaged on or after a date (a recency
     filter on each site's newest pass), so a deep series that stopped long ago is
@@ -653,7 +662,11 @@ def sites(
         return
     for site in ranked:
         _print_site_coverage(site)
-    order = "deepest usable series" if rank_by == "comparable" else "best-covered"
+    order = {
+        "comparable": "deepest usable series",
+        "recency": "most recently active",
+        "span": "longest baseline",
+    }.get(rank_by, "best-covered")
     click.echo(f"{len(ranked)} site(s), {order} first.")
 
 

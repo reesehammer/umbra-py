@@ -439,6 +439,42 @@ def test_select_featured_sites_rank_by_comparable_uses_analysable_depth():
     assert [s.task for s in ranked] == ["Deep", "Broad"]
 
 
+def test_select_featured_sites_rank_by_recency_and_span_order_the_temporal_axes():
+    """rank_by='recency' orders by each site's newest pass and rank_by='span' by its
+    observation baseline -- the axes the moat already filters on -- while 'passes'
+    (the gallery default) still orders by raw pass count."""
+    items = [
+        *[_pass("Deep", d) for d in (1, 2, 3, 4, 5)],  # passes 5, newest 5, span 4
+        *[_pass("Recent", d) for d in (20, 21)],  # passes 2, newest 21, span 1
+        *[_pass("Wide", d) for d in (1, 28)],  # passes 2, newest 28, span 27
+    ]
+    assert [s.task for s in showcase.select_featured_sites(items)] == ["Deep", "Recent", "Wide"]
+    assert [s.task for s in showcase.select_featured_sites(items, rank_by="recency")] == [
+        "Wide",
+        "Recent",
+        "Deep",
+    ]
+    assert [s.task for s in showcase.select_featured_sites(items, rank_by="span")] == [
+        "Wide",
+        "Deep",
+        "Recent",
+    ]
+
+
+def test_select_featured_sites_recency_promotes_a_recent_site_past_the_count_cap():
+    """A shallow but recent site surfaces at count=1 under recency ranking even
+    though a deeper site has more raw passes -- the key is applied before the
+    truncation, matching the comparable ranking's promotion."""
+    items = [
+        *[_pass("Deep", d) for d in (1, 2, 3, 4, 5)],  # deepest, but oldest
+        *[_pass("Recent", d) for d in (20, 21)],  # newest
+    ]
+    assert [s.task for s in showcase.select_featured_sites(items, count=1)] == ["Deep"]
+    recent = showcase.select_featured_sites(items, count=1, rank_by="recency")
+    assert [s.task for s in recent] == ["Recent"]
+    assert [i.datetime.day for i in recent[0].items] == [20, 21]  # full history kept
+
+
 def test_select_featured_sites_min_passes_gates_comparable_depth_under_comparable():
     """Under rank_by='comparable', min_passes floors the usable (comparable) depth,
     not the raw count -- a site whose raw passes clear the floor but whose

@@ -1935,6 +1935,21 @@ def test_rank_sites_orders_by_depth_across_whole_index(tmp_path):
     assert [(s.task, s.passes) for s in ranked] == [("Deep", 4), ("Mid", 3), ("Shallow", 2)]
 
 
+def test_rank_sites_recency_ranking_is_whole_archive(tmp_path):
+    """The recency ranking measures a site's newest pass over the whole index, so a
+    shallow but recently-imaged site is promoted past a deeper but dormant one at
+    top=1 -- the raw-count LIMIT is dropped, exactly as the comparable ranking is."""
+    pool = [
+        *[_site_item("Deep", d) for d in (1, 2, 3, 4, 5)],  # deepest, oldest (newest 5)
+        *[_site_item("Recent", d) for d in (20, 21)],  # shallow, newest 21
+    ]
+    with _index(tmp_path, pool) as idx:
+        assert idx.rank_sites(top=1)[0].task == "Deep"
+        assert idx.rank_sites(top=1, rank_by="recency")[0].task == "Recent"
+        # Deep spans days 1-5 (baseline 4); Recent spans 20-21 (baseline 1).
+        assert [s.task for s in idx.rank_sites(rank_by="span")] == ["Deep", "Recent"]
+
+
 def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
     """The cheap GROUP-BY path is exactly the uncapped-pool ranking, for every
     SQL-expressible filter (date / bbox / area / product)."""
@@ -2011,6 +2026,17 @@ def test_rank_sites_matches_uncapped_pool_for_sql_filters(tmp_path):
             {"max_span_days": 8, "rank_by": "comparable"},
             # Floor and ceiling together bound the baseline to a window.
             {"min_span_days": 2, "max_span_days": 5},  # Beta only (span 4)
+            # The temporal rankings order by MAX(acq_date) / the dated range rather
+            # than COUNT, so they take the read-every-task-then-re-rank path (LIMIT
+            # dropped); the index and pool orderings must stay identical, including
+            # under top=1 (where the LIMIT-drop promotion happens) and combined with a
+            # filter. Alpha newest 9 span 8, Beta newest 6 span 4, Gamma newest 4 span 1.
+            {"rank_by": "recency"},
+            {"rank_by": "span"},
+            {"rank_by": "recency", "top": 1},
+            {"rank_by": "span", "top": 1},
+            {"rank_by": "recency", "active_since": "2024-01-05"},
+            {"rank_by": "span", "min_span_days": 2},
         ):
             assert idx.rank_sites(**filters) == _rank_sites_pool_baseline(idx, **dict(filters)), (
                 filters

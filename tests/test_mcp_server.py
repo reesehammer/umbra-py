@@ -241,6 +241,26 @@ def test_find_repeat_sites_rank_by_comparable_prefers_the_analysable_series(monk
     assert [s["task"] for s in by_comparable["sites"]] == ["Deep", "Broad"]
 
 
+def test_find_repeat_sites_rank_by_recency_orders_by_newest_pass(monkeypatch):
+    # Deep has more passes but stopped in March; Recent is shallow but imaged into
+    # June. The default depth order puts Deep first; recency ranking flips them
+    # (the still-active site is the tasking target), while min_passes still gates depth.
+    pool = [
+        *[_site_pass("Deep", d) for d in (1, 2, 3)],  # newest 2024-03-08
+        *[_site_pass("Recent", d) for d in (5, 6)],  # newest 2024-06-08
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    by_passes = ms.find_repeat_sites(local=False, rank_by="passes")
+    assert [s["task"] for s in by_passes["sites"]] == ["Deep", "Recent"]
+    by_recency = ms.find_repeat_sites(local=False, rank_by="recency")
+    assert [s["task"] for s in by_recency["sites"]] == ["Recent", "Deep"]
+
+
 def test_find_repeat_sites_active_since_filters_to_recent_sites(monkeypatch):
     # Fresh's newest pass is 2024-07-08, Stale's is 2024-03-08 (the _site_pass
     # `day` is the month digit); a cutoff between them keeps only the live site,

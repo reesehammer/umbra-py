@@ -1544,8 +1544,41 @@ Follow-ons that build on it, none a blocker:
     with no measurable span so the window admits only a confirmed baseline. It adds no
     field to the `site-coverage` contract (a filter input, like the floor). See the
     CHANGELOG. **With it the baseline axis is two-sided (floor / ceiling / window),
-    matching the recency axis — the discovery moat's four axes (depth, recency, cadence,
-    baseline) are complete.**
+    matching the recency axis — the discovery moat's four *filter* axes (depth, recency,
+    cadence, baseline) are complete.**
+- ~~**The moat filters on four axes but ranks on only one (depth).**~~ **shipped** —
+  `rank_by="recency"` / `"span"` order the discovery answer by each site's newest dated
+  pass and by its observation baseline, the two temporal figures the moat already
+  *filters* on (`active_*` for recency, `min_span` / `max_span` for baseline) but could
+  not *order* by — so a monitoring/tasking user who filtered by recency no longer reads
+  a list ordered by pass count, and the longest-baseline sites can be surfaced first.
+  On every surface (`umbra sites --rank-by recency|span`, `find_repeat_sites`,
+  `GET`/`POST /sites`, `CatalogIndex.rank_sites` for `--local`), single-sourced through
+  the same `SITE_RANKINGS` / `_rank_sort_key` extension point the `comparable` ranking
+  uses (extended with the `last` / `span_days` figures, read off the same `SiteCoverage`
+  the pool path reduces via the shared `coverage._temporal_rank_figures`), the index
+  path dropping the raw-count `LIMIT` and re-ranking in Python so a recently-active or
+  long-baseline site outside the raw top-`top` is promoted, pinned byte-identical to the
+  pool path by the parity test. Both order by the whole-site figure (recency and
+  baseline are facts about the site, not one polarization subset), with `min_passes`
+  still qualifying on depth; no field moved on the `site-coverage` contract (a ranking
+  input). See the CHANGELOG. What is still open, and smaller:
+  - **A `"cadence"` ordering is not added.** The moat reports each site's revisit
+    cadence (`max_revisit_days` / `median_revisit_days` and their comparable twins) and
+    filters on it, but there is no `rank_by="cadence"` to order by tightest revisit
+    first. Unlike recency (newest first) and span (longest first), a cadence order has
+    two defensible readings (worst gap vs typical gap) and a less obvious default, so it
+    waits for a consumer that wants one rather than being written on the symmetry. When
+    it lands it is one more `_rank_sort_key` branch reading a figure `SiteCoverage`
+    already carries, plus the whole-site-vs-comparable choice recency/span sidestepped.
+  - **The temporal rankings order by the whole-site figure, not the comparable one.**
+    `recency`/`span` sort on the site's `last` / `span_days`, deliberately independent of
+    `--rank-by comparable`'s analysable subset (a site's newest pass and baseline do not
+    depend on which polarization is deepest). A caller who wanted "rank by the
+    *analysable* series' recency/span" would need a `comparable_last` /
+    `comparable_span_days` read threaded into the sort key — the figures exist on the
+    summary (`comparable_span_days` already, a comparable-last would be new); it waits
+    for the same consumer, since the two coincide when a site is single-polarization.
 
 ---
 

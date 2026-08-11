@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from statistics import median
 from typing import TYPE_CHECKING
 
@@ -34,19 +34,36 @@ if TYPE_CHECKING:
     from .catalog import DateLike
 
 #: The orderings :func:`rank_site_coverage` (and every discovery surface that
-#: forwards to it) can rank sites by. ``"passes"`` is the historical default --
-#: raw pass count, most-imaged first -- which is what the static showcase's
-#: featured gallery wants (more acquisitions to precompute, whatever their
-#: polarization mix). ``"comparable"`` ranks by *analysable* depth instead: the
-#: ``comparable_passes`` figure, i.e. the largest single-polarization dated subset
-#: an analysis verb (``change`` / ``timescan`` / ``stack``, ``stack_stats``,
-#: ``change --narrate``) can actually difference. The two disagree exactly when a
-#: raw count overstates what is analysable -- a site whose passes span several
-#: polarizations, or carry undated passes -- so a shallow-but-broad site can
-#: outrank a deep single-polarization series under ``"passes"`` yet fall behind it
-#: under ``"comparable"``. The report has distinguished the two figures since the
-#: comparable-figure workstream; this lets the *ranking* distinguish them too.
-SITE_RANKINGS: tuple[str, ...] = ("passes", "comparable")
+#: forwards to it) can rank sites by. The first two rank by *depth*; the last two
+#: by a *temporal* figure the discovery answer already reports and can already
+#: filter on -- so the moat now ranks on every axis it filters on, not only on
+#: depth.
+#:
+#: ``"passes"`` is the historical default -- raw pass count, most-imaged first --
+#: which is what the static showcase's featured gallery wants (more acquisitions
+#: to precompute, whatever their polarization mix). ``"comparable"`` ranks by
+#: *analysable* depth instead: the ``comparable_passes`` figure, i.e. the largest
+#: single-polarization dated subset an analysis verb (``change`` / ``timescan`` /
+#: ``stack``, ``stack_stats``, ``change --narrate``) can actually difference. The
+#: two disagree exactly when a raw count overstates what is analysable -- a site
+#: whose passes span several polarizations, or carry undated passes -- so a
+#: shallow-but-broad site can outrank a deep single-polarization series under
+#: ``"passes"`` yet fall behind it under ``"comparable"``. The report has
+#: distinguished the two figures since the comparable-figure workstream; this lets
+#: the *ranking* distinguish them too.
+#:
+#: ``"recency"`` orders by each site's **newest** dated pass (the ``last`` a
+#: summary reports), most-recently-active first -- the site a monitoring or
+#: tasking user (STRATEGY.md §1's funnel) would reach for, which a depth ranking
+#: buries under a deeper series that stopped years ago. ``"span"`` orders by each
+#: site's observation **baseline** (the ``span_days`` a summary reports),
+#: longest-watched first -- the window a *slow* change (subsidence, construction,
+#: deforestation) needs to be visible in. Both order by a whole-site figure
+#: independent of the polarization grouping (recency and baseline are facts about
+#: the site's activity, not about one differenceable subset), with ties broken by
+#: raw depth then task name for full determinism; ``min_passes`` still qualifies a
+#: site on the depth ``rank_by`` would measure under ``"passes"`` (raw pass count).
+SITE_RANKINGS: tuple[str, ...] = ("passes", "comparable", "recency", "span")
 
 
 def _check_ranking(rank_by: str) -> None:
@@ -57,7 +74,13 @@ def _check_ranking(rank_by: str) -> None:
 
 
 def _rank_sort_key(
-    *, comparable_passes: int, passes: int, task: str, rank_by: str
+    *,
+    comparable_passes: int,
+    passes: int,
+    task: str,
+    rank_by: str,
+    last: date | None = None,
+    span_days: int | None = None,
 ) -> tuple[object, ...]:
     """The deterministic sort key for one site under ``rank_by``.
 
@@ -65,14 +88,30 @@ def _rank_sort_key(
     :func:`umbra_py.showcase.select_featured_sites` has always used). ``"comparable"``
     orders by analysable depth first, breaking ties by raw pass count (so among
     equally-analysable sites the one with more total context ranks higher) and then
-    by task name for full determinism. Both are ascending over negated counts, so a
-    plain ``sort`` puts the best-covered site first. Single-sourced so
-    :func:`select_featured_sites` (ranking ``FeaturedSite`` before summarising) and
+    by task name for full determinism. ``"recency"`` orders by the site's newest
+    dated pass (``last``), most recent first, and ``"span"`` by its observation
+    baseline (``span_days``), longest first; both break ties by raw pass count then
+    task name. All four are ascending over negated figures, so a plain ``sort`` puts
+    the best site first.
+
+    ``last`` and ``span_days`` are the whole-site figures :class:`SiteCoverage`
+    reports; a caller passes them only for the temporal rankings (the depth rankings
+    ignore them). ``last`` is always present for a ranking candidate (it has at least
+    one dated pass), so the ``date.min`` fallback is unreachable and only keeps the
+    key typed. ``span_days`` is ``None`` for a site with fewer than two dated passes;
+    such a site has no measurable baseline, so it sorts *after* every measured-span
+    site (treated as ``-1`` day) rather than erroring -- a ``"span"`` ranking stays a
+    total order. Single-sourced so :func:`select_featured_sites` (ranking
+    ``FeaturedSite`` before summarising) and
     :meth:`umbra_py.index.CatalogIndex.rank_sites` (ranking summarised
     :class:`SiteCoverage` records) cannot pick a different order.
     """
     if rank_by == "comparable":
         return (-comparable_passes, -passes, task)
+    if rank_by == "recency":
+        return (-(last or date.min).toordinal(), -passes, task)
+    if rank_by == "span":
+        return (-(span_days if span_days is not None else -1), -passes, task)
     return (-passes, task)
 
 
@@ -470,6 +509,25 @@ def _revisit_days(dates: Sequence[datetime]) -> list[float]:
     ]
 
 
+def _temporal_rank_figures(items: Iterable[UmbraItem]) -> tuple[date | None, int | None]:
+    """The ``(newest-pass date, span in days)`` a ``"recency"`` / ``"span"`` ranking
+    sorts on, computed exactly as :func:`site_coverage` reduces ``last`` / ``span_days``.
+
+    Reducing these from the items in one shared place is what lets the pool path
+    (:func:`umbra_py.showcase.select_featured_sites`, which ranks
+    :class:`umbra_py.showcase.FeaturedSite` before summarising) feed
+    :func:`_rank_sort_key` the same figures the index path reads back off a
+    :class:`SiteCoverage` -- so the two rankings cannot disagree. Returns
+    ``(None, None)`` for a site with no dated pass, and a ``None`` span for one with a
+    single dated pass (no baseline to measure), matching the summary fields.
+    """
+    dated = sorted(i.datetime for i in items if i.datetime is not None)
+    if not dated:
+        return None, None
+    span = (dated[-1] - dated[0]).days if len(dated) >= 2 else None
+    return dated[-1].date(), span
+
+
 def site_coverage(
     task: str, items: Sequence[UmbraItem], *, label: str | None = None
 ) -> SiteCoverage:
@@ -564,15 +622,27 @@ def rank_site_coverage(
     new here. Deterministic and offline: it calls no renderer, no model and no
     network.
 
-    ``rank_by`` is one of :data:`SITE_RANKINGS`: ``"passes"`` (the default -- raw
-    pass count) or ``"comparable"`` (the site's *analysable* depth, i.e. the
-    ``comparable_passes`` largest single-polarization dated subset a change verb can
-    actually difference). The two coincide when every dated pass of every site
-    shares one polarization; they diverge when a raw count overstates what is
-    analysable, which is exactly when the discovery answer should prefer the deeper
-    differenceable series. ``select_featured_sites`` applies the same key *before*
-    truncating to ``top``, so a deeply-analysable site outside the raw top-``top`` is
-    not dropped before the comparable ranking can promote it.
+    ``rank_by`` is one of :data:`SITE_RANKINGS`. The two *depth* rankings are
+    ``"passes"`` (the default -- raw pass count) and ``"comparable"`` (the site's
+    *analysable* depth, i.e. the ``comparable_passes`` largest single-polarization
+    dated subset a change verb can actually difference); the two coincide when every
+    dated pass of every site shares one polarization and diverge when a raw count
+    overstates what is analysable, which is exactly when the discovery answer should
+    prefer the deeper differenceable series. The two *temporal* rankings are
+    ``"recency"`` (each site's **newest** dated pass first -- the still-active site a
+    monitoring or tasking user wants, which a depth ranking buries under a deeper
+    series that has gone dormant) and ``"span"`` (each site's observation
+    **baseline** first -- the long-watched site a *slow* change needs), ordering by
+    the whole-site ``last`` / ``span_days`` a summary reports, ties broken by raw
+    depth then task. So the moat now ranks on every axis it already filters on
+    (recency via ``active_*``, baseline via ``min_span`` / ``max_span``), not only on
+    depth. ``select_featured_sites`` applies the chosen key *before* truncating to
+    ``top``, so a site the ranking would promote is not dropped by a raw-count prefix
+    first (a recently-active or long-baseline site outside the raw top-``top`` still
+    surfaces). ``min_passes`` qualifies a site on the depth ``rank_by`` measures --
+    raw pass count under ``"passes"`` / ``"recency"`` / ``"span"``, analysable depth
+    under ``"comparable"`` -- so a temporal ranking still keeps only sites deep enough
+    to have a series worth ordering.
 
     ``min_passes`` measures the same depth ``rank_by`` does (:func:`_min_passes_depth`):
     under ``"comparable"`` a site must have at least ``min_passes`` *comparable*
