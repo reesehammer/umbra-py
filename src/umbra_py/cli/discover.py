@@ -364,6 +364,19 @@ def _print_site_coverage(site) -> None:
     "default, the usable (comparable) series' worst gap under --rank-by comparable. "
     "Orthogonal to --active-since / --active-before.",
 )
+@click.option(
+    "--min-span",
+    type=float,
+    default=None,
+    help="Keep only sites imaged over AT LEAST this long -- a baseline filter on each "
+    "site's observation span (in days, first pass to last), so a series confined to a "
+    "short window is dropped and a long-baseline one kept: the discovery answer for "
+    "slow change (subsidence, construction, deforestation) that needs a long window to "
+    "show. A different axis from --max-revisit (cadence is the worst gap; span is the "
+    "total baseline). Counts the span --rank-by measures: the whole dated series by "
+    "default, the usable (comparable) series' span under --rank-by comparable. "
+    "Orthogonal to --active-since / --active-before / --max-revisit.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit one SiteCoverage JSON object per line.")
 @_shared._local_index_options
 @_shared._token_option
@@ -387,6 +400,7 @@ def sites(
     active_since,
     active_before,
     max_revisit,
+    min_span,
     as_json,
     local,
     db_path,
@@ -441,6 +455,14 @@ def sites(
     often enough to monitor?" It counts the cadence --rank-by measures (the usable
     series' worst gap under --rank-by comparable) and is orthogonal to the --active-*
     recency filters.
+
+    --min-span keeps only sites imaged over at least that long -- a baseline filter on
+    each site's observation span (in days, first pass to last), so a series confined to
+    a short window is dropped: the answer for slow change (subsidence, construction,
+    deforestation) that needs a long window to show. It is a different axis from
+    --max-revisit (cadence is the worst gap; span is the total baseline), counts the
+    span --rank-by measures (the usable series' span under --rank-by comparable), and
+    is orthogonal to the --active-* and --max-revisit filters.
     Runs against the open bucket, a --local index, or the Canopy archive
     (--token) -- the same backends as 'umbra search'. With --local the whole
     index is ranked directly (a GROUP BY task), so a site's depth is measured
@@ -480,6 +502,7 @@ def sites(
                 active_since=active_since,
                 active_before=active_before,
                 max_revisit_days=max_revisit,
+                min_span_days=min_span,
                 **filters,
             )
         pool_size = None
@@ -498,6 +521,7 @@ def sites(
             active_since=active_since,
             active_before=active_before,
             max_revisit_days=max_revisit,
+            min_span_days=min_span,
         )
         pool_size = len(pool)
     if as_json:
@@ -519,18 +543,20 @@ def sites(
         else:
             recency = ""
         cadence = f", revisited within {max_revisit:g}d" if max_revisit is not None else ""
+        baseline = f", imaged over {min_span:g}d+" if min_span is not None else ""
         loosen_flags = [
             flag
             for flag, value in (
                 ("--active-since", active_since),
                 ("--active-before", active_before),
                 ("--max-revisit", max_revisit),
+                ("--min-span", min_span),
             )
             if value is not None and value != ""
         ]
         loosen = f" or {' / '.join(loosen_flags)}" if loosen_flags else ""
         click.echo(
-            f"No site in {where} has {min_passes}+ {depth}{recency}{cadence}. "
+            f"No site in {where} has {min_passes}+ {depth}{recency}{cadence}{baseline}. "
             f"{widen}, or lower --min-passes{loosen}."
         )
         return

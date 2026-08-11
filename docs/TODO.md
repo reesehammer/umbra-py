@@ -1492,6 +1492,30 @@ Follow-ons that build on it, none a blocker:
     on a different figure and waits for a caller who wants "typically frequent" rather
     than "never blind for longer than N days." The report carries both, so the choice
     is only about which one the *filter* reads.
+- ~~**Nothing filters the discovery answer by observation baseline (span).**~~
+  **shipped** — `min_span` keeps only sites whose observation span (first dated pass to
+  last) is at least `N` days, on every surface (`umbra sites --min-span`,
+  `find_repeat_sites`, `GET`/`POST /sites`, `CatalogIndex.rank_sites`), so the moat now
+  selects the *long-baseline* sites — those watched over a long enough window for a
+  *slow* change (subsidence, construction, deforestation) to be visible — where before
+  it could only report each site's `span_days`. It is the baseline (duration) axis, a
+  genuine complement to cadence: `--max-revisit` bounds the worst *gap* (reliability),
+  `--min-span` the total *baseline* (duration), so a tight-cadence short-window site is
+  dropped by a span bound and a long-baseline sparse one kept. It measures the same
+  depth `--rank-by` does (`coverage._passes_span`, the baseline twin of
+  `_passes_cadence`): under `--rank-by comparable` the *analysable* series' span, so
+  off-polarization passes bracketing the range cannot inflate the baseline past the
+  differenceable series. Like the cadence bound the comparable-subset span is not a SQL
+  aggregate, so the index path applies the identical `_passes_span` in Python (pinned
+  byte-identical to the pool path) and drops the raw-count SQL `LIMIT` when set, so a
+  long-baseline site outside the raw top-`top` is promoted. See the CHANGELOG. What is
+  still open, and smaller:
+  - **A `max_span` upper bound is not selected on.** The complement — keep only sites
+    whose baseline is at most `N` days (a *short-lived* series, imaged intensively then
+    stopped) — is the same one-comparison shape on `<=` rather than `>=`, and set with
+    `--min-span` would bound the baseline to a window. It answers a different question
+    ("a burst of interest, now over") and waits for a caller who wants it; the span is
+    now selected on one side (a floor) and reported two-sided as `first` / `last`.
 
 ---
 

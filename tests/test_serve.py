@@ -719,6 +719,23 @@ def test_sites_non_positive_max_revisit_is_a_client_error(sites_index):
     assert client.get("/sites?max_revisit=0").status_code == 422
 
 
+def test_sites_min_span_keeps_only_long_baseline_sites(sites_client):
+    # Alpha spans 20 days (Jan 1 -> Jan 21); Beta spans 4 (Feb 1 -> Feb 5). A 10-day
+    # baseline bound keeps the long-baseline Alpha and drops the short-window Beta --
+    # the opposite selection from max_revisit, which drops Alpha's looser cadence.
+    long_baseline = sites_client.get("/sites?min_span=10").json()
+    assert [s["task"] for s in long_baseline["sites"]] == ["Alpha"]
+    # A bound Beta's 4-day span clears (boundary-inclusive) keeps both.
+    both = sites_client.get("/sites?min_span=4").json()
+    assert [s["task"] for s in both["sites"]] == ["Alpha", "Beta"]
+
+
+def test_sites_non_positive_min_span_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    # gt=0 on the query rejects a non-positive baseline bound (FastAPI validation).
+    assert client.get("/sites?min_span=0").status_code == 422
+
+
 def test_sites_filters_by_bbox(sites_client):
     # A bbox far from the sample footprint leaves an empty pool.
     empty = sites_client.get("/sites?bbox=0,0,1,1").json()
@@ -884,6 +901,18 @@ def test_post_sites_filters_by_max_revisit(sites_client):
 def test_post_sites_non_positive_max_revisit_is_a_client_error(sites_index):
     client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
     assert client.post("/sites", json={"max_revisit": 0}).status_code == 400
+
+
+def test_post_sites_filters_by_min_span(sites_client):
+    # The POST twin honours the baseline bound exactly as GET: a 10-day bound keeps
+    # Alpha (20-day span) and drops Beta (4-day span).
+    long_baseline = sites_client.post("/sites", json={"min_span": 10}).json()
+    assert [s["task"] for s in long_baseline["sites"]] == ["Alpha"]
+
+
+def test_post_sites_non_positive_min_span_is_a_client_error(sites_index):
+    client = TestClient(serve.build_app(sites_index), raise_server_exceptions=False)
+    assert client.post("/sites", json={"min_span": 0}).status_code == 400
 
 
 def test_post_sites_filters_by_area_top_level_and_query(sites_client):
