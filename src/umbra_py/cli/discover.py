@@ -333,9 +333,11 @@ def _print_site_coverage(site) -> None:
     "(the usable series' depth -- the largest same-polarization dated subset a change "
     "verb can difference -- so a deep single-polarization site is not outranked by a "
     "broader mixed one). Temporal: 'recency' (newest pass first -- the still-active "
-    "site to monitor or task) or 'span' (longest baseline first -- the site watched "
-    "long enough for slow change to show), ordering by the same figures --active-* "
-    "and --min-span / --max-span filter on. --min-passes still qualifies on depth.",
+    "site to monitor or task), 'span' (longest baseline first -- the site watched "
+    "long enough for slow change to show) or 'cadence' (tightest typical revisit "
+    "first -- the most-frequently-imaged site; the median gap, not the worst one), "
+    "ordering by the same figures --active-*, --min-span / --max-span and "
+    "--median-revisit filter on. --min-passes still qualifies on depth.",
 )
 @click.option(
     "--active-since",
@@ -485,14 +487,17 @@ def sites(
     deeply-imaged single-polarization site is not outranked by a broader one whose
     passes a change verb cannot difference together (and --min-passes then counts
     that same usable depth, so '--rank-by comparable --min-passes 3' returns only
-    sites whose differenceable series is at least three passes deep). Two temporal
+    sites whose differenceable series is at least three passes deep). Three temporal
     orders: 'recency' ranks by each site's newest pass (the still-active site to
-    monitor or task, which a depth order buries under a deeper but dormant series)
-    and 'span' by each site's observation baseline (the site watched long enough for
-    slow change to show) -- ordering by the same figures --active-* and
-    --min-span / --max-span filter on, so the discovery answer ranks on every axis it
-    filters on, not only on depth. A recently-active or long-baseline site outside
-    the raw top-N is promoted rather than truncated first.
+    monitor or task, which a depth order buries under a deeper but dormant series),
+    'span' by each site's observation baseline (the site watched long enough for
+    slow change to show), and 'cadence' by each site's typical revisit gap (tightest
+    first -- the most-frequently-imaged site; the median gap, not the worst one, so a
+    single outage does not bury an otherwise reliably-imaged series) -- ordering by
+    the same figures --active-*, --min-span / --max-span and --median-revisit filter
+    on, so the discovery answer ranks on every axis it filters on, not only on depth.
+    A recently-active, long-baseline or tightly-revisited site outside the raw top-N
+    is promoted rather than truncated first.
 
     --active-since keeps only sites still imaged on or after a date (a recency
     filter on each site's newest pass), so a deep series that stopped long ago is

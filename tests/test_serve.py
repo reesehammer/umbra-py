@@ -930,6 +930,19 @@ def test_sites_route_rank_by_recency_orders_by_newest_pass(sites_client):
     assert [s["task"] for s in by_recency_post] == ["Beta", "Alpha"]
 
 
+def test_sites_route_rank_by_cadence_orders_by_typical_revisit(sites_client):
+    # Alpha's passes are 10 days apart (median gap 10), Beta's 4 days apart (median 4),
+    # so cadence ranking puts the more-frequently-imaged Beta first even though Alpha
+    # has more passes (the default depth order). It reads the median gap, the same
+    # figure --median-revisit filters on.
+    assert [s["task"] for s in sites_client.get("/sites").json()["sites"]] == ["Alpha", "Beta"]
+    by_cadence = sites_client.get("/sites?rank_by=cadence").json()["sites"]
+    assert [s["task"] for s in by_cadence] == ["Beta", "Alpha"]
+    # POST honours the same ranking through the request body.
+    by_cadence_post = sites_client.post("/sites", json={"rank_by": "cadence"}).json()["sites"]
+    assert [s["task"] for s in by_cadence_post] == ["Beta", "Alpha"]
+
+
 # --------------------------------------------------------------------------
 # POST /sites (the GeoJSON-body twin of GET /sites)
 # --------------------------------------------------------------------------

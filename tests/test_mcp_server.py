@@ -261,6 +261,27 @@ def test_find_repeat_sites_rank_by_recency_orders_by_newest_pass(monkeypatch):
     assert [s["task"] for s in by_recency["sites"]] == ["Recent", "Deep"]
 
 
+def test_find_repeat_sites_rank_by_cadence_orders_by_typical_revisit(monkeypatch):
+    # Deep has more passes but is imaged only quarterly (median gap ~91 days); Tight
+    # is shallow but monthly (median gap ~31). The default depth order puts Deep first;
+    # cadence ranking flips them (the most-frequently-imaged site heads a monitoring
+    # list), reading the median gap the way --median-revisit filters on.
+    pool = [
+        *[_site_pass("Deep", d) for d in (1, 4, 7, 10)],  # quarterly, median ~91 days
+        *[_site_pass("Tight", d) for d in (1, 2)],  # monthly, median ~31 days
+    ]
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter(pool)
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    by_passes = ms.find_repeat_sites(local=False, rank_by="passes")
+    assert [s["task"] for s in by_passes["sites"]] == ["Deep", "Tight"]
+    by_cadence = ms.find_repeat_sites(local=False, rank_by="cadence")
+    assert [s["task"] for s in by_cadence["sites"]] == ["Tight", "Deep"]
+
+
 def test_find_repeat_sites_active_since_filters_to_recent_sites(monkeypatch):
     # Fresh's newest pass is 2024-07-08, Stale's is 2024-03-08 (the _site_pass
     # `day` is the month digit); a cutoff between them keeps only the live site,

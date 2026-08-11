@@ -339,12 +339,14 @@ def select_featured_sites(
         single-polarization dated subset a change verb can difference, so a
         broad-but-mixed site cannot outrank -- or, with ``min_passes``, qualify past
         -- a deeper single-polarization series). The *temporal* rankings are
-        ``"recency"`` (each site's newest dated pass first) and ``"span"`` (each
-        site's observation baseline first), ordering by the whole-site ``last`` /
-        ``span_days`` figures, ties broken by raw depth then task. The chosen key is
-        applied before the ``count`` truncation, so the ordering is over the whole
-        qualifying pool rather than a raw-ranked prefix of it (a recently-active or
-        long-baseline site outside the raw top-``count`` still surfaces).
+        ``"recency"`` (each site's newest dated pass first), ``"span"`` (each site's
+        observation baseline first) and ``"cadence"`` (each site's *typical* revisit
+        gap, tightest first -- the median gap, not the worst one), ordering by the
+        whole-site ``last`` / ``span_days`` / ``median_revisit_days`` figures, ties
+        broken by raw depth then task. The chosen key is applied before the ``count``
+        truncation, so the ordering is over the whole qualifying pool rather than a
+        raw-ranked prefix of it (a recently-active, long-baseline or tightly-revisited
+        site outside the raw top-``count`` still surfaces).
     active_since:
         Keep only sites still being imaged *on or after* this date -- a recency
         filter on the site's **newest** dated pass, so a deeply-imaged series that
@@ -568,13 +570,13 @@ def select_featured_sites(
         if depth >= min_passes:
             ranked.append((FeaturedSite(task=task, items=ordered), comparable))
 
-    # The temporal rankings ("recency" / "span") order by whole-site figures reduced
-    # from the site's own passes -- computed here by the same `_temporal_rank_figures`
-    # the index path reads back off a `SiteCoverage`, so the two paths cannot disagree.
-    # The depth rankings ignore them.
+    # The temporal rankings ("recency" / "span" / "cadence") order by whole-site
+    # figures reduced from the site's own passes -- computed here by the same
+    # `_temporal_rank_figures` the index path reads back off a `SiteCoverage`, so the
+    # two paths cannot disagree. The depth rankings ignore them.
     def _sort_key(pair: tuple[FeaturedSite, int]) -> tuple[object, ...]:
         site, comparable = pair
-        last, span_days = _temporal_rank_figures(site.items)
+        last, span_days, median_revisit_days = _temporal_rank_figures(site.items)
         return _rank_sort_key(
             comparable_passes=comparable,
             passes=len(site.items),
@@ -582,6 +584,7 @@ def select_featured_sites(
             rank_by=rank_by,
             last=last,
             span_days=span_days,
+            median_revisit_days=median_revisit_days,
         )
 
     ranked.sort(key=_sort_key)
