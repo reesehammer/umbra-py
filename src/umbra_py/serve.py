@@ -176,6 +176,7 @@ from .constants import (
     PRODUCT_TYPE_EXPLANATIONS,
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
+from .coverage import site_query_echo
 from .exceptions import MissingDependencyError
 from .index import CatalogIndex, default_index_path
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
@@ -1123,6 +1124,7 @@ def sites_result(
     *,
     resolved_bbox: BBox | None = None,
     resolved_area: str | None = None,
+    query: dict[str, Any] | None = None,
     self_href: str | None = None,
 ) -> dict[str, Any]:
     """Wrap ranked sites in the ``GET /sites`` response document.
@@ -1130,8 +1132,12 @@ def sites_result(
     Each entry of ``sites`` is a :meth:`~umbra_py.coverage.SiteCoverage.to_dict`
     (``docs/schemas/site-coverage.schema.json`` -- the same shape ``umbra sites
     --json`` and the ``find_repeat_sites`` agent tool emit), so the HTTP surface
-    reads the one contract the CLI and the agent tools already do. ``count`` and
-    the resolved query echo sit beside them, with the CC-BY ``attribution`` the
+    reads the one contract the CLI and the agent tools already do. ``count``, the
+    resolved geography (``resolved_bbox`` / ``resolved_area``) and the ``query``
+    echo of the ranking-and-selection inputs
+    (:func:`~umbra_py.coverage.site_query_echo`) sit beside them, so the answer is
+    self-describing -- a caller reads how it was ranked and filtered from the
+    response rather than from its own request -- with the CC-BY ``attribution`` the
     licence requires on every derived answer.
     """
     base = base_url.rstrip("/")
@@ -1142,6 +1148,7 @@ def sites_result(
         "count": len(sites),
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
         "resolved_area": resolved_area,
+        "query": query,
         "sites": [site.to_dict() for site in sites],
         "attribution": ATTRIBUTION,
         "links": links,
@@ -2339,6 +2346,28 @@ _SITES_RESPONSE: dict[str, Any] = {
                         "items": {"type": "number"},
                     },
                     "resolved_area": {"type": ["string", "null"]},
+                    "query": {
+                        "type": "object",
+                        "description": (
+                            "Echo of the ranking-and-selection inputs (the `rank_by` "
+                            "order, `top`/`min_passes`, and the recency/onset/cadence/"
+                            "baseline bounds), as the caller expressed them, so the "
+                            "answer records how it was ranked and filtered."
+                        ),
+                        "properties": {
+                            "rank_by": {"type": "string"},
+                            "top": {"type": "integer"},
+                            "min_passes": {"type": "integer"},
+                            "active_since": {"type": ["string", "null"]},
+                            "active_before": {"type": ["string", "null"]},
+                            "first_since": {"type": ["string", "null"]},
+                            "first_before": {"type": ["string", "null"]},
+                            "max_revisit_days": {"type": ["number", "null"]},
+                            "median_revisit_days": {"type": ["number", "null"]},
+                            "min_span_days": {"type": ["number", "null"]},
+                            "max_span_days": {"type": ["number", "null"]},
+                        },
+                    },
                     "sites": {
                         "type": "array",
                         "items": {"$ref": "#/components/schemas/SiteCoverage"},
@@ -3045,11 +3074,28 @@ def build_app(
         finally:
             _close(source)
         base = str(request.base_url).rstrip("/")
+        # Echo the ranking-and-selection inputs as the caller expressed them (the
+        # raw recency/onset expressions, not the coerced dates), so the answer says
+        # how it was ranked and filtered -- single-sourced with the agent tool.
+        query = site_query_echo(
+            rank_by=rank_by,
+            top=top,
+            min_passes=min_passes,
+            active_since=active_since,
+            active_before=active_before,
+            first_since=first_since,
+            first_before=first_before,
+            max_revisit_days=max_revisit,
+            median_revisit_days=median_revisit,
+            min_span_days=min_span,
+            max_span_days=max_span,
+        )
         result = sites_result(
             sites,
             str(request.base_url),
             resolved_bbox=parsed_bbox,
             resolved_area=area,
+            query=query,
             self_href=f"{base}/sites",
         )
         return JSONResponse(content=result)
@@ -3150,6 +3196,11 @@ def build_app(
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         fuzzy = bool(body.get("fuzzy", False))
+        # Default top/min_passes once, so the ranking and the query echo report the
+        # same effective values (the echo says what actually ranked, not what the
+        # body happened to omit).
+        eff_top = top if top is not None else SITES_DEFAULT_TOP
+        eff_min_passes = min_passes if min_passes is not None else SITES_MIN_PASSES
         source = _open()
         try:
             sites = run_sites(
@@ -3166,8 +3217,8 @@ def build_app(
                 max_incidence=max_incidence,
                 max_resolution=max_resolution,
                 limit=limit if limit is not None else SITES_POOL_LIMIT,
-                top=top if top is not None else SITES_DEFAULT_TOP,
-                min_passes=min_passes if min_passes is not None else SITES_MIN_PASSES,
+                top=eff_top,
+                min_passes=eff_min_passes,
                 rank_by=rank_by,
                 active_since=resolved_active_since,
                 active_before=resolved_active_before,
@@ -3181,11 +3232,28 @@ def build_app(
         finally:
             _close(source)
         base = str(request.base_url).rstrip("/")
+        # Echo the ranking-and-selection inputs as the body expressed them (the raw
+        # recency/onset expressions, not the coerced dates) -- single-sourced with
+        # GET /sites and the agent tool.
+        query = site_query_echo(
+            rank_by=rank_by,
+            top=eff_top,
+            min_passes=eff_min_passes,
+            active_since=body.get("active_since"),
+            active_before=body.get("active_before"),
+            first_since=body.get("first_since"),
+            first_before=body.get("first_before"),
+            max_revisit_days=max_revisit,
+            median_revisit_days=median_revisit,
+            min_span_days=min_span,
+            max_span_days=max_span,
+        )
         result = sites_result(
             sites,
             str(request.base_url),
             resolved_bbox=parsed_bbox,
             resolved_area=area,
+            query=query,
             self_href=f"{base}/sites",
         )
         return JSONResponse(content=result)

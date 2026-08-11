@@ -712,10 +712,6 @@ every surface (CLI, agent tools, HTTP), filters on depth / recency / onset /
 cadence / baseline, and ranks on depth / recency / span / cadence. Open
 follow-ons, none a blocker:
 
-- **The filter inputs are not echoed in the `find_repeat_sites` / `/sites`
-  response metadata.** The return carries the resolved `place` / `bbox` / `area`
-  but not `active_since`, `min_passes`, `rank_by` or `top`. Add all of them
-  together if a consumer ever needs the round-trip, rather than singling one out.
 - **On the HTTP surface the `active_*` / `first_*` filters accept a relative
   expression, unlike the strict-ISO `datetime` filter.** `_coerce_date` resolves
   `"6 months ago"` on `GET`/`POST /sites`, which matches the CLI but is a grammar

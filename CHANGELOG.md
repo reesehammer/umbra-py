@@ -7,6 +7,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Self-describing discovery answers: `find_repeat_sites` and `GET`/`POST /sites` now
+  echo a `query` object of the ranking-and-selection inputs, so an answer records *how*
+  it was ranked and filtered (`coverage.py`, `serve.py`, `mcp_server.py`,
+  `tests/test_serve.py`, `tests/test_mcp_server.py`).** The discovery surfaces already
+  echoed the *resolved geography* (`resolved_place` / `resolved_bbox` / `resolved_area`)
+  so a caller could see what a free-text place or task name resolved to, but the
+  *ranking* half — the `rank_by` order, the `top` cap and `min_passes` floor, and the
+  recency / onset / cadence / baseline bounds that decide which sites the answer contains
+  — was left off the echo, so an agent driving `find_repeat_sites → pick_change_interval
+  → narrate_change` (`STRATEGY.md` §3), or anything logging what it asked for, had to
+  read the selection from its own request. The new `query` object carries all eleven
+  inputs — `rank_by`, `top`, `min_passes`, `active_since`, `active_before`, `first_since`,
+  `first_before`, `max_revisit_days`, `median_revisit_days`, `min_span_days`,
+  `max_span_days` — with a `null` for any filter left unset (a stable shape, so two
+  answers carrying the same `query` echo were ranked and selected the same way). Dates
+  are echoed as the *raw expressions* the caller passed (`"6 months ago"` stays
+  `"6 months ago"`, not the day it resolved to), since "what did I ask for?" is the
+  question the echo answers; the HTTP surface echoes the request value the same way,
+  filling the `top` / `min_passes` defaults in so the echo says what actually ranked
+  rather than what the body omitted. It is single-sourced through one builder
+  (`coverage.site_query_echo`, exported from `umbra_py`) so the agent tool and the HTTP
+  surface cannot emit a different shape — the discovery moat's standing rule that no two
+  surfaces disagree about a ranking — and the `/sites` OpenAPI response documents the
+  object so a generated client reads it. The *pool* filters (`start` / `end` / `products`
+  / the SAR properties) and the resolved geography are deliberately not repeated: they
+  are the `search` contract and the `resolved_*` echo respectively, and this object is
+  the ranking-and-selection half those two do not cover. The `umbra sites --json` CLI is
+  unchanged: it streams one `SiteCoverage` record per line with no response wrapper, so
+  there is nowhere for an echo to sit. See `STRATEGY.md` §8 (design principle 5, "agents
+  are users").
 - **`rank_by="cadence"`: rank the discovery moat by typical revisit cadence, closing
   the last rank-vs-filter gap so the moat now *orders* on every axis it *selects* on, on
   every surface (`coverage.py`, `showcase.py`, `index.py`, `cli/discover.py`, `serve.py`,
