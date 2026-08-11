@@ -919,6 +919,17 @@ def test_sites_rejects_unknown_rank_by(sites_index):
     assert client.post("/sites", json={"rank_by": "bogus"}).status_code == 400
 
 
+def test_sites_route_rank_by_recency_orders_by_newest_pass(sites_client):
+    # Alpha's newest pass is 2024-01-21, Beta's is 2024-02-05, so recency ranking
+    # puts Beta first even though Alpha has more passes (the default depth order).
+    assert [s["task"] for s in sites_client.get("/sites").json()["sites"]] == ["Alpha", "Beta"]
+    by_recency = sites_client.get("/sites?rank_by=recency").json()["sites"]
+    assert [s["task"] for s in by_recency] == ["Beta", "Alpha"]
+    # POST honours the same ranking through the request body.
+    by_recency_post = sites_client.post("/sites", json={"rank_by": "recency"}).json()["sites"]
+    assert [s["task"] for s in by_recency_post] == ["Beta", "Alpha"]
+
+
 # --------------------------------------------------------------------------
 # POST /sites (the GeoJSON-body twin of GET /sites)
 # --------------------------------------------------------------------------

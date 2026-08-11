@@ -472,6 +472,68 @@ def test_rank_rejects_an_unknown_ranking():
         rank_site_coverage([_pass("Alpha", 1)], rank_by="deepest")
 
 
+# The temporal rankings: order by recency (newest pass) / span (baseline), the axes
+# the discovery answer already filters on -- so the moat ranks on every axis it filters.
+def _temporal_pool():
+    """Three sites the depth, recency and span orderings each rank differently:
+    Deep is deepest but oldest and short; Recent is shallow but newest; Wide is
+    shallow but the longest baseline (and, at day 28, also the newest)."""
+    return [
+        *[_pass("Deep", d) for d in (1, 2, 3, 4, 5)],  # passes 5, newest 5, span 4
+        *[_pass("Recent", d) for d in (20, 21)],  # passes 2, newest 21, span 1
+        *[_pass("Wide", d) for d in (1, 28)],  # passes 2, newest 28, span 27
+    ]
+
+
+def test_rank_by_recency_orders_by_newest_pass():
+    ranked = rank_site_coverage(_temporal_pool(), rank_by="recency")
+    # Newest dated pass first (Wide day 28, Recent day 21, Deep day 5) -- the depth
+    # leader (Deep) sinks to last because a recency order ignores how many passes.
+    assert [s.task for s in ranked] == ["Wide", "Recent", "Deep"]
+
+
+def test_rank_by_span_orders_by_observation_baseline():
+    ranked = rank_site_coverage(_temporal_pool(), rank_by="span")
+    # Longest baseline first (Wide span 27, Deep span 4, Recent span 1).
+    assert [s.task for s in ranked] == ["Wide", "Deep", "Recent"]
+
+
+def test_temporal_rankings_break_ties_by_depth_then_task():
+    # Two sites imaged on identical days (same newest, same span) -- the deeper one
+    # wins the tie, and equal depth would fall back to task name.
+    pool = [
+        *[_pass("Shallow", d) for d in (1, 10)],  # passes 2
+        *[_pass("Deeper", d) for d in (1, 5, 10)],  # passes 3, same newest/span
+    ]
+    for rank_by in ("recency", "span"):
+        assert [s.task for s in rank_site_coverage(pool, rank_by=rank_by)] == [
+            "Deeper",
+            "Shallow",
+        ], rank_by
+
+
+def test_rank_by_recency_promotes_a_recent_site_past_the_raw_top():
+    # A shallow but recent site must surface at top=1 under recency ranking even
+    # though a deeper site has more raw passes -- the key is applied before the
+    # truncation, so the recent site is not dropped by the raw-count cap first.
+    pool = [
+        *[_pass("Deep", d) for d in (1, 2, 3, 4, 5)],  # deepest, but oldest
+        *[_pass("Recent", d) for d in (20, 21)],  # newest
+    ]
+    assert rank_site_coverage(pool, top=1, rank_by="passes")[0].task == "Deep"
+    assert rank_site_coverage(pool, top=1, rank_by="recency")[0].task == "Recent"
+
+
+def test_span_ranking_sorts_an_unmeasurable_baseline_last():
+    # With min_passes=1 a single-pass site qualifies but has no measurable span
+    # (None); a span ranking still returns a total order, sorting it after every
+    # site with a real baseline rather than erroring.
+    pool = [*[_pass("Two", d) for d in (1, 3)], _pass("One", 5)]
+    ranked = rank_site_coverage(pool, rank_by="span", min_passes=1)
+    assert [s.task for s in ranked] == ["Two", "One"]
+    assert ranked[-1].span_days is None
+
+
 def test_min_passes_counts_comparable_depth_under_comparable_ranking():
     # "Mixed" has three dated passes but each in a different polarization, so its
     # differenceable series is one pass deep (comparable_passes == 1). Under the raw

@@ -449,7 +449,13 @@ def find_repeat_sites(
     passes deep. The two agree when every dated pass of every site shares one
     polarization; prefer ``"comparable"`` when the next step is
     ``pick_change_interval`` / ``stack_stats``, which consume exactly that
-    differenceable subset.
+    differenceable subset. Two *temporal* orders rank on the axes the filters below
+    select on: ``"recency"`` orders by each site's newest dated pass (the
+    still-active site to monitor or task, which a depth order buries under a deeper
+    but dormant series) and ``"span"`` by each site's observation baseline (the site
+    watched long enough for slow change to show). ``min_passes`` still qualifies a
+    site on raw depth under either, so a temporal order returns only sites with a
+    series worth ordering.
 
     ``active_since`` keeps only sites still imaged *on or after* that date -- a
     recency filter on each site's newest pass, so a deep series that stopped long

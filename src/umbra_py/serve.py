@@ -979,12 +979,16 @@ def run_sites(
     ranking: no renderer and no model (``STRATEGY.md`` §7's determinism boundary
     applied to discovery).
 
-    ``rank_by`` is one of :data:`umbra_py.coverage.SITE_RANKINGS`: ``"passes"``
-    (raw pass count, the default) or ``"comparable"`` (the site's *analysable*
-    depth -- the largest same-polarization dated subset a change verb can
-    difference). It is forwarded unchanged to the index and pool rankers, so this
-    endpoint orders sites exactly as ``umbra sites --rank-by`` and the
-    ``find_repeat_sites`` agent tool do.
+    ``rank_by`` is one of :data:`umbra_py.coverage.SITE_RANKINGS`: the depth orders
+    ``"passes"`` (raw pass count, the default) and ``"comparable"`` (the site's
+    *analysable* depth -- the largest same-polarization dated subset a change verb
+    can difference), or the temporal orders ``"recency"`` (newest dated pass first --
+    the still-active monitoring/tasking target) and ``"span"`` (longest observation
+    baseline first -- the site watched long enough for slow change to show), which
+    order by the same figures ``active_since`` / ``active_before`` and
+    ``min_span`` / ``max_span`` filter on. It is forwarded unchanged to the index and
+    pool rankers, so this endpoint orders sites exactly as ``umbra sites --rank-by``
+    and the ``find_repeat_sites`` agent tool do.
 
     ``active_since`` keeps only sites still imaged *on or after* that date -- a
     recency filter on each site's newest pass (the discovery answer for "which
@@ -2857,9 +2861,12 @@ def build_app(
         rank_by: str = Query(
             default="passes",
             description=(
-                "Order sites by 'passes' (raw pass count) or 'comparable' (the "
-                "usable series' depth -- the largest same-polarization dated subset "
-                "a change verb can difference)"
+                "Order sites by depth -- 'passes' (raw pass count) or 'comparable' "
+                "(the usable series' depth, the largest same-polarization dated "
+                "subset a change verb can difference) -- or by a temporal axis: "
+                "'recency' (newest pass first, the still-active target) or 'span' "
+                "(longest baseline first, for slow change), ordering by the same "
+                "figures active_since/before and min_span/max_span filter on"
             ),
         ),
         active_since: str | None = Query(

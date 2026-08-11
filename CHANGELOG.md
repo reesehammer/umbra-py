@@ -7,6 +7,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`rank_by="recency"` / `rank_by="span"`: rank the discovery moat by the temporal
+  axes it already filters on, so it now *orders* on every axis it *selects* on rather
+  than only on depth, on every surface (`coverage.py`, `showcase.py`, `index.py`,
+  `cli/discover.py`, `serve.py`, `mcp_server.py`, `tests/test_coverage.py`,
+  `tests/test_showcase.py`, `tests/test_index.py`, `tests/test_serve.py`,
+  `tests/test_mcp_server.py`).** The repeat-imaged-site discovery answer could
+  *filter* on four axes — depth (`--min-passes` / `--rank-by comparable`), recency
+  (`--active-since` / `--active-before`), onset (`--first-since` / `--first-before`),
+  cadence (`--max-revisit` / `--median-revisit`) and baseline span (`--min-span` /
+  `--max-span`) — but it could only *rank* by depth (raw `passes` or analysable
+  `comparable`). So a monitoring or tasking user (STRATEGY.md §1's funnel) who wanted
+  "the most recently active deep sites" could filter by recency yet still read a list
+  ordered by raw pass count, with a site imaged last week buried under a deeper series
+  that stopped years ago; and there was no way at all to surface the longest-baseline
+  sites (the ones a *slow* change — subsidence, construction, deforestation — needs)
+  first. `umbra sites --rank-by recency` (and `find_repeat_sites(rank_by="recency")`,
+  `GET`/`POST /sites?rank_by=recency`, and `CatalogIndex.rank_sites(rank_by="recency")`
+  for `--local`) orders sites by each site's **newest** dated pass, most-recently-active
+  first; `--rank-by span` orders by each site's observation **baseline** (first dated
+  pass to last), longest-watched first. Both order by the whole-site `last` /
+  `span_days` figures a coverage summary already reports (recency and baseline are facts
+  about the site's activity, not about one differenceable polarization subset), with
+  ties broken by raw depth then task name for full determinism; `--min-passes` still
+  qualifies a site on the depth `--rank-by` would measure under `passes`, so a temporal
+  order returns only sites with a series worth ordering. The chosen key is applied
+  *before* the top-`N` truncation, so a recently-active or long-baseline site outside
+  the raw top-`N` is promoted rather than truncated first — the same
+  whole-archive-not-a-capped-prefix correction the `comparable` ranking made for
+  analysable depth. Single-sourced through the same purpose-built extension point every
+  ranking uses — the `SITE_RANKINGS` set, the `_rank_sort_key` sort key (extended with
+  the `last` / `span_days` figures it now needs), and the two ranking paths
+  `showcase.select_featured_sites` (pool) and `CatalogIndex.rank_sites` (whole-archive
+  index) — where, like the `comparable` ranking, the temporal orders are not the SQL
+  `COUNT` order, so the index path drops the raw-count `LIMIT` and re-ranks in Python
+  over the summarised records, reading the `last` / `span_days` off the same
+  `SiteCoverage` the pool path reduces from the passes via the shared
+  `coverage._temporal_rank_figures` (so the two paths cannot disagree, pinned
+  byte-identical by the index-vs-pool parity test). An unknown ranking stays a
+  self-describing `ValueError` / `400` naming the accepted set. It adds no field to the
+  `site-coverage` contract (a ranking input, like `rank_by`'s existing values), so no
+  schema moved. **With them the discovery moat ranks on every axis it filters on —
+  depth, recency and baseline — not only on depth.**
 - **`median_revisit`: the *typical*-cadence axis on the discovery moat, selecting sites
   *usually* imaged often (tolerating the odd long outage), the complement of
   `max_revisit`'s worst-case gate, on every surface (`coverage.py`, `showcase.py`,
