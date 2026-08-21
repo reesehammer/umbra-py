@@ -2,7 +2,7 @@ site_name: umbra-py
 site_description: >-
   A Python-first toolkit to make Umbra SAR open data easy to discover, load,
   download, and analyze.
-site_url: https://reesehammer.github.io/umbra-py/
+site_url: https://umbra-py.space/
 repo_url: https://github.com/reesehammer/umbra-py
 repo_name: reesehammer/umbra-py
 copyright: >-
@@ -81,6 +81,7 @@ nav:
   - Home: index.md
   - Install: install.md
   - Quickstart: quickstart.md
+  - Limitations: guides/limitations.md
   - Example notebooks: guides/notebooks.md
   - Deploy / self-host: deploy.md
   - CLI reference: cli.md

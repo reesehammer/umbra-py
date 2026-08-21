@@ -114,7 +114,7 @@ jobs:
           fi
           rm -rf site/showcase
           note="The docs deployed without site/showcase/, so \
-          https://reesehammer.github.io/umbra-py/showcase/ will 404 until a run \
+          https://umbra-py.space/showcase/ will 404 until a run \
           rebuilds it. Usual cause: the rolling 'catalog-index' release has no \
           catalog.db yet, so 'umbra index fetch' 404s — check the 'Publish \
           catalog index' workflow."

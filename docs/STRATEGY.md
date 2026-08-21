@@ -233,10 +233,12 @@ moat, machine-readable schemas, and the static Pages showcase have all shipped
 
 - **§5.6 — talk to Umbra.** The capstone conversation; every good outcome
   (docs link, registry listing, co-marketing, upstreaming) flows from it.
-- **§5.3 — ecosystem visibility.** The AWS `open-data-registry` PR, the STAC
-  Index listing, cutting the first `v0.1.0` release (which fires the automated
-  MCP-registry submission), the manual Anthropic MCP directory listing, minting
-  the Zenodo DOI, and registering the PyPI Trusted Publisher.
+- **§5.3 — ecosystem visibility / cut `v0.1.0`.** **In progress.** Docs and
+  the landing-page README now describe what actually shipped; the remaining
+  work is maintainer-only: register the PyPI Trusted Publisher, tag `v0.1.0`
+  (which fires the automated MCP-registry submission), the AWS
+  `open-data-registry` PR, the STAC Index listing, the manual Anthropic MCP
+  directory listing, and minting the Zenodo DOI.
 - **§5.2 — offer the index upstream** to Umbra.
 - **Stand up a public `umbra serve` instance.** Several features are
   code-complete but only useful once a public instance exists: the hosted

@@ -14,8 +14,9 @@ Treat **this** file as the source of truth.
 
 - **What it is:** `umbra-py` — a Python toolkit for discovering, downloading
   and working with [Umbra](https://umbra.space/open-data/) open SAR data.
-- **Status:** v0.1 / early alpha. Discovery + download core is shipped;
-  processing helpers are intentionally minimal.
+- **Status:** v0.1.0, first public release. Discovery, download, load,
+  convert, viz, chips, serve, and the agent front doors all ship. Not an
+  InSAR toolbox; see `docs_src/guides/limitations.md`.
 - **Language / Python:** Python 3.10+ (also tested on 3.11, 3.12).
 - **License:** Apache-2.0 (code); Umbra data is CC-BY-4.0.
 - **Package layout:** `src/umbra_py/` (importable as `umbra_py`).
@@ -50,7 +51,17 @@ src/umbra_py/
     explore.py       #   `mcp | serve | demo | tiles | showcase`: the commands that stand something up
     indexes.py       #   `index | semantic | embed`: the local SQLite sidecars
   constants.py       # bucket, STAC root URL, canonical product types
+  load.py            # to_xarray / to_stack / stack_stats: analysis-ready arrays and datacubes ([load], [dask])
   convert.py         # optional SICD -> slant-plane amplitude + (flat-earth or DEM terrain-orthorectified) geocoded COG, optionally RTC-flattened, radiometrically calibrated, noise-floor-subtracted, speckle-filtered and clipped to an area of interest (behind [convert] extra)
+  coverage.py        # SiteCoverage / umbra sites: rank the most repeat-imaged tasks
+  embed.py           # umbra embed: visual similarity sidecar ([ai]+[viz])
+  showcase.py        # umbra showcase: static Pages landing + featured composites
+  pmtiles.py         # umbra tiles: stdlib PMTiles v3 writer + MapLibre viewer
+  export.py          # stac-geoparquet export of a CatalogIndex ([export])
+  geocode.py         # Nominatim place-name geocoder (rate-limited)
+  dates.py           # parse_date_bound: ISO + relative date grammar
+  fuzzy.py           # deterministic task-name fuzzy match (no model)
+  dem.py / geoid.py  # Copernicus DEM tiles + EGM undulation fetch for convert --dem / --geoid
   preflight.py       # umbra preflight: read a SICD's XML metadata out of the NITF by HTTP range request (stdlib NITF header walk, no sarpy) and answer whether a product can support --calibrate / --noise-model measured / --rtc's SCPCOA geometry, before downloading it; a selection is read several products at a time (workers=, default 8) but consumed in selection order, since the chip run pairs verdicts against its items positionally
   chips.py           # umbra chips: cut scenes into fixed-size georeferenced ML training tiles + manifest ([load], no model call); --asset SICD geocodes each complex product via convert.py first ([convert]); --clip-bbox tiles (and converts) one area of interest; --preflight drops the passes whose metadata cannot support the request before downloading any of them (preflight.py); a run that left anything out writes a skipped.jsonl sidecar beside the manifest, so the dataset states its hole and not only the run that built it
   viz/               # rendering package; every name re-exported from `umbra_py.viz` (see its __init__ docstring)
@@ -87,7 +98,8 @@ tests/
   test_schemas.py    # every docs/schemas/*.json validated against a real payload from the surface that emits it
   test_mcp_registry.py # server.json and every documented `uvx ...` must be the command that actually starts umbra-mcp
   data/sample_item.json
-examples/            # planned notebooks (v0.2); see examples/README.md
+examples/            # notebooks 01–08 + Markdown guides; see examples/README.md
+docs_src/            # published user manual (mkdocs); not the internal docs/ ledger
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
 server.json          # MCP registry manifest for umbra-mcp; submitted by release.yml's publish-mcp job
@@ -96,7 +108,7 @@ docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged P
 ```
 
 **Discovery tips for agents:**
-- `grep -rn "<symbol>" src/ tests/` is reliable — the tree is small (~10 modules).
+- `grep -rn "<symbol>" src/ tests/` is reliable — the tree is still grep-sized.
 - Public API is whatever `src/umbra_py/__init__.py` re-exports. If you add a
   public name, add it to `__all__`.
 - The CLI subcommands are defined in the `cli/` package, grouped by what the

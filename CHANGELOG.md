@@ -7,6 +7,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+### Fixed
+
+## [0.1.0] — 2026-08-21
+
+First public release. Umbra publishes a 17+ TB open SAR archive with no search
+API; this package is the search, preview, load, and convert layer over it.
+
+**Discover.** `UmbraCatalog.search` walks the public S3 bucket with date
+pruning, task-name (`area=` / `--fuzzy`) matching, bbox / polygon /
+polarization / incidence / resolution filters, and a Canopy token path that
+reuses the same interface. `CatalogIndex` + `umbra index fetch` serve a
+weekly SQLite / stac-geoparquet / PMTiles snapshot so repeat search is local.
+`umbra sites` ranks the most repeat-imaged tasks.
+
+**Preview.** Range-request quicklooks, a full-res tile viewer, HTML galleries,
+Folium footprint / timeline / swipe maps, change and timescan composites, a
+stdlib `umbra demo` explorer, and a static Pages showcase.
+
+**Load.** `to_xarray` / `to_geotiff` stream a GEC window into xarray or a
+file. `to_stack` / `stack_stats` / `umbra stack` co-register a series onto
+one grid (eager or lazy/chunked) and reduce it to JSON, with provenance
+refusal when conversions disagree and an exact speckle detection floor.
+
+**Convert / chips.** `sicd_to_geocoded_cog` / `umbra convert` geocode a SICD
+(flat-earth or DEM, optional RTC, calibration, noise subtraction, speckle
+filter, `--clip-bbox`). `umbra preflight` reads SICD XML over HTTP before a
+download. `umbra chips` cuts georeferenced ML tiles with a manifest.
+
+**Serve / agents.** `umbra serve` is a read-only STAC API over the index.
+`umbra-mcp` (plus LangChain / LlamaIndex wrappers) exposes the same
+deterministic callables. `umbra ask` / `describe` / `embed` / `change
+--narrate` call a model only when asked. Every `--json` shape has a schema
+in `docs/schemas/`.
+
+What this is not: an InSAR / coherence toolbox; a hosted public API; a
+live-verified Canopy client; a MultiRTC replacement. See
+`docs_src/guides/limitations.md`.
+
+The detailed history of everything that landed on the way to this tag follows.
+
+### Added
+- **Docs site lives at `https://umbra-py.space/`.** `mkdocs.yml` `site_url`,
+  the README / index / deploy / showcase landing links, `pyproject.toml`
+  Homepage, and `CITATION.cff` `url` all point at the custom domain instead
+  of `reesehammer.github.io/umbra-py`. `docs_src/CNAME` ships with the Pages
+  artifact so a deploy cannot drop the domain mapping. `constants.DOCS_URL`
+  is the single source the showcase landing page reads.
+- **Launch docs: README is a landing page, `docs_src/` matches the public API,
+  and a limitations page states what v0.1.0 will not do.** The previous README
+  still called processing helpers "intentionally minimal" and the docs
+  quickstart called kwargs that do not exist (`product_type`, `decimation`,
+  `decibels`, `search(place=)`). `tests/test_docs_snippets.py` now parses
+  every ` ```python ` fence in the README and `docs_src/` and requires every
+  `umbra_py` name it imports to be public, so that rot fails CI. Local SAR
+  artifacts (`*.nitf`, root-level generated previews) are gitignored so a
+  release commit cannot pick them up.
 - **Self-describing discovery answers: `find_repeat_sites` and `GET`/`POST /sites` now
   echo a `query` object of the ranking-and-selection inputs, so an answer records *how*
   it was ranked and filtered (`coverage.py`, `serve.py`, `mcp_server.py`,

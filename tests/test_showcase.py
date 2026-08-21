@@ -23,7 +23,10 @@ from click.testing import CliRunner
 
 from umbra_py import pmtiles, showcase
 from umbra_py.cli import cli
+from umbra_py.constants import DOCS_URL
 from umbra_py.models import UmbraItem
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _item(item_id: str = "a", lon: float = -110.0, lat: float = 39.0) -> UmbraItem:
@@ -74,6 +77,16 @@ def _pass(task: str, day: int, *, place: str | None = None) -> UmbraItem:
 
 
 # --- landing page ---------------------------------------------------------
+def test_docs_url_matches_cname_and_mkdocs():
+    """The custom domain is one fact; CNAME, mkdocs, and the showcase must agree."""
+    assert showcase.DEFAULT_DOCS_URL == DOCS_URL
+    assert DOCS_URL == "https://umbra-py.space/"
+    cname = (REPO_ROOT / "docs_src" / "CNAME").read_text(encoding="utf-8").strip()
+    assert DOCS_URL.rstrip("/") == f"https://{cname}"
+    mkdocs = (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    assert f"site_url: {DOCS_URL}" in mkdocs
+
+
 def test_build_showcase_full_page():
     html = showcase.build_showcase(
         map_href="map.html",
@@ -91,9 +104,9 @@ def test_build_showcase_full_page():
     # Mandatory license attribution + the honesty disclaimer.
     assert "CC BY 4.0" in html
     assert "Not affiliated" in html
-    # Project links default to this repo / its Pages docs.
+    # Project links default to this repo / the published docs site.
     assert "github.com/reesehammer/umbra-py" in html
-    assert "reesehammer.github.io/umbra-py" in html
+    assert "umbra-py.space" in html
 
 
 def test_build_showcase_drops_absent_cards():
