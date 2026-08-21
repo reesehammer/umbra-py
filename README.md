@@ -149,18 +149,6 @@ CC BY 4.0 line above for any Umbra data you use.
 - [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security](SECURITY.md)
 - [Example notebooks](examples/) · [Limitations](https://umbra-py.space/guides/limitations/)
 
-## What's next
-
-Launch work, not new surface: list the package on the
-[AWS Open Data registry](https://registry.opendata.aws/umbra-open-data/) and
-[STAC Index](https://stacindex.org/); talk to Umbra about the name and
-offering the weekly index upstream; mint a Zenodo DOI with the first tag.
-A public `umbra serve` instance waits on that conversation. Live verification
-of the Canopy backend and of inferred noise models against a real calibrated
-product wait on a token / a scene that carries the metadata.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to get involved.
-
 ## Acknowledgements
 
 Built on the SAR open-source community, including
