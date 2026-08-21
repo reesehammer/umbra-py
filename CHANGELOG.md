@@ -10,6 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+## [0.1.1] — 2026-08-21
+
+PyPI long-description refresh. No runtime change.
+
+### Changed
+- Dropped the README **What's next** section (maintainer launch notes: Umbra
+  outreach, registry listings, Zenodo). Contributing stays under Community.
+  GitHub already had this via #242; this tag is what PyPI reads.
+
 ## [0.1.0] — 2026-08-21
 
 First public release. Umbra publishes a 17+ TB open SAR archive with no search
@@ -6481,5 +6490,6 @@ Initial release. Discovery + download core for Umbra's open SAR data.
   amplitude extraction from SICD.
 - Project scaffolding: Apache 2.0 license, packaging, CI, tests, and docs.
 
-[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.1
 [0.1.0]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.0

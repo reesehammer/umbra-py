@@ -3,7 +3,7 @@
   "name": "io.github.reesehammer/umbra-mcp",
   "title": "Umbra open SAR archive",
   "description": "Search, quicklook and measure Umbra's open SAR archive from any MCP client.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/reesehammer/umbra-py",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "umbra-py",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
