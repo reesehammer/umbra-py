@@ -180,7 +180,7 @@ That writes a self-contained directory:
   or a `.html` swipe map with `--featured-view swipe`).
 
 Every page is self-contained HTML, so it needs no extra and no backend. This is
-what the repository's own **[hosted showcase](https://reesehammer.github.io/umbra-py/showcase/)**
+what the repository's own **[hosted showcase](https://umbra-py.space/showcase/)**
 is: the `.github/workflows/docs.yml` Pages job runs `umbra showcase` after the
 mkdocs build and publishes `site/showcase/` beside the docs. Point `--pmtiles`
 at a locally built basemap instead of `--fetch-pmtiles` for an offline build, or

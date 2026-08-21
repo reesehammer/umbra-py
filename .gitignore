@@ -216,3 +216,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local session artifacts from working with Umbra products. These are not part
+# of the repository; a multi-GB SICD or a generated gallery must not land in a
+# release commit. Leading slashes keep the image/HTML rules at the repo root
+# so examples/ and docs_src/ are not swept up.
+.DS_Store
+*.nitf
+*.cphd
+sicd_cache/
+/gallery.html
+/galleryT.html
+/gallerya.html
+/swipe.html
+/swipe2.html
+/tswipe2.html
+/sfbay.html
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.tif
+/*.tiff

@@ -117,6 +117,10 @@ ALL_ASSETS = (*PRODUCT_ASSETS, METADATA_ASSET)
 #: GitHub repository that hosts this project and its rolling catalog snapshot.
 GITHUB_REPO = "reesehammer/umbra-py"
 
+#: Public documentation and showcase site (custom domain on GitHub Pages).
+#: Trailing slash matches ``mkdocs.yml`` ``site_url`` and the Pages deploy.
+DOCS_URL = "https://umbra-py.space/"
+
 #: Rolling GitHub release tag carrying the weekly-rebuilt catalog snapshots
 #: (see ``.github/workflows/publish-index.yml``).
 CATALOG_INDEX_RELEASE = "catalog-index"

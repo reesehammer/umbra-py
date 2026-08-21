@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import DateLike, _coerce_date
-from .constants import ATTRIBUTION, GITHUB_REPO
+from .constants import ATTRIBUTION, DOCS_URL, GITHUB_REPO
 from .models import UmbraItem
 
 #: Default landing-page copy. The pitch is the strategy thesis in one line --
@@ -84,12 +84,12 @@ DEFAULT_TAGLINE = (
     "no account, no install, no data download."
 )
 
-#: Project URLs the landing page links to. Derived from the one repo constant so
-#: a fork inherits its own links; the docs URL matches ``mkdocs.yml``'s
-#: ``site_url`` (GitHub Pages default for the repo).
-_OWNER, _NAME = GITHUB_REPO.split("/", 1)
+#: Project URLs the landing page links to. The repo URL is derived from
+#: :data:`~umbra_py.constants.GITHUB_REPO` so a fork inherits its own source
+#: link; the docs URL is the published site (:data:`~umbra_py.constants.DOCS_URL`),
+#: which must stay in step with ``mkdocs.yml`` ``site_url``.
 DEFAULT_REPO_URL = f"https://github.com/{GITHUB_REPO}"
-DEFAULT_DOCS_URL = f"https://{_OWNER}.github.io/{_NAME}/"
+DEFAULT_DOCS_URL = DOCS_URL
 
 #: Default number of sites the featured gallery precomputes, and the number of
 #: passes composited into each. Two frames is the two-colour change view

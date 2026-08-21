@@ -43,12 +43,37 @@ and offline. Please keep unit tests offline by mocking HTTP (see
 ## Good first issues
 
 Look for the `good first issue` and `help wanted` labels on the issue tracker.
-Great starter areas:
+The original starter list (metadata accessors, Folium helpers, notebooks) has
+shipped. Useful remaining work is tracked in [`docs/TODO.md`](docs/TODO.md).
+Good entry points today:
 
-- More metadata accessors / nicer summaries on `UmbraItem`.
-- Footprint visualization helpers (Folium/Leaflet) behind the `viz` extra.
-- Example notebooks (`examples/`).
-- Expanding live-catalog test coverage.
+- A docs snippet or notebook that drifted from the public API
+  (`tests/test_docs_snippets.py` / `tests/test_examples.py` catch this).
+- A `network`-marked smoke test of the Canopy backend, once a
+  `UMBRA_CANOPY_TOKEN` is available.
+- Running `umbra convert --noise-check` against a real product that carries
+  an `ABSOLUTE` `NoisePoly` (open products generally do not).
+
+## Cutting a release
+
+Version is single-sourced from `umbra_py.__version__`. The tag must be
+`vX.Y.Z` matching that value — `.github/workflows/release.yml` refuses a
+mismatch, then publishes to PyPI (Trusted Publisher) and submits
+`server.json` to the MCP registry.
+
+1. Register the PyPI Trusted Publisher *before* the first tag (GitHub repo
+   `reesehammer/umbra-py`, workflow `release.yml`, environment `pypi`).
+2. Move `CHANGELOG.md`'s `[Unreleased]` notes under `## [X.Y.Z] — YYYY-MM-DD`
+   with a short first-screen summary above the detailed bullets. Leave
+   Unreleased empty.
+3. Set `date-released:` in `CITATION.cff` (and `doi:` after Zenodo mints one).
+4. `ruff check . && ruff format --check . && pytest -q` is green.
+5. Create a GitHub Release on tag `vX.Y.Z`. The Release body is the short
+   CHANGELOG narrative, not the full file.
+6. Confirm `pip install umbra-py` from a clean venv, then `umbra --version`.
+
+Do not retag if PyPI publish fails — fix Trusted Publisher and re-run the
+job.
 
 ## Reporting bugs
 

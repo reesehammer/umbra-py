@@ -122,7 +122,8 @@ docs = [
 all = ["umbra-py[convert,load,viz,export]"]
 
 [project.urls]
-Homepage = "https://github.com/reesehammer/umbra-py"
+Homepage = "https://umbra-py.space/"
+Documentation = "https://umbra-py.space/"
 Repository = "https://github.com/reesehammer/umbra-py"
 Issues = "https://github.com/reesehammer/umbra-py/issues"
 "Umbra Open Data" = "https://umbra.space/open-data/"

@@ -13,9 +13,10 @@ type: software
 authors:
   - name: "umbra-py contributors"
 version: 0.1.0
+date-released: "2026-08-21"
 license: Apache-2.0
 repository-code: "https://github.com/reesehammer/umbra-py"
-url: "https://github.com/reesehammer/umbra-py"
+url: "https://umbra-py.space/"
 keywords:
   - sar
   - synthetic-aperture-radar

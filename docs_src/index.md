@@ -12,14 +12,16 @@ approachable as working with Sentinel-1 or Landsat.
 
 !!! tip "Try it now — no install"
     Browse and search the whole open archive from your browser in the
-    **[live showcase](https://reesehammer.github.io/umbra-py/showcase/)**: a
+    **[live showcase](https://umbra-py.space/showcase/)**: a
     zoomable whole-catalog map and an
     interactive explorer, hosted on GitHub Pages, no account or download
     required. Build your own with [`umbra showcase`](cli.md).
 
 !!! note "Status"
-    v0.1 / early alpha. The discovery + download core works against Umbra's
-    live catalog today; processing helpers are minimal and growing.
+    **v0.1.0, first public release.** Discovery, download, xarray loading,
+    SICD → geocoded COG, change composites, chips, a local STAC API, and an
+    MCP server all ship. This is not an InSAR toolbox — see
+    [limitations](guides/limitations.md). Not affiliated with Umbra Lab, Inc.
 
 ## What it gives you
 
