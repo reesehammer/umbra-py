@@ -17,7 +17,7 @@ arrays without writing the same 500 lines of glue first.
 · **Showcase:** [browse the archive in the browser](https://umbra-py.space/showcase/)
 (no install)
 
-> **Status:** v0.1.0, first public release. Discovery, download, xarray loading,
+> **Status:** v0.1.1. Discovery, download, xarray loading,
 > SICD → geocoded COG, change/timescan composites, chips, a local STAC API, and
 > an MCP server all ship. This is **not** an InSAR toolbox (phase is not
 > preserved through convert). Not affiliated with Umbra Lab, Inc.

@@ -18,7 +18,7 @@ approachable as working with Sentinel-1 or Landsat.
     required. Build your own with [`umbra showcase`](cli.md).
 
 !!! note "Status"
-    **v0.1.0, first public release.** Discovery, download, xarray loading,
+    **v0.1.1.** Discovery, download, xarray loading,
     SICD → geocoded COG, change composites, chips, a local STAC API, and an
     MCP server all ship. This is not an InSAR toolbox — see
     [limitations](guides/limitations.md). Not affiliated with Umbra Lab, Inc.

@@ -12,7 +12,7 @@ abstract: "A Python-first toolkit to make Umbra SAR open data easy to discover, 
 type: software
 authors:
   - name: "umbra-py contributors"
-version: 0.1.0
+version: 0.1.1
 date-released: "2026-08-21"
 license: Apache-2.0
 repository-code: "https://github.com/reesehammer/umbra-py"
