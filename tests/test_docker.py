@@ -1,7 +1,7 @@
 """Guards for the container entrypoint and the Railway first-deploy config.
 
-The hosted MCP path is a pair of files a dashboard will override wrongly if
-they drift: ``railway.toml``'s start command (Railway replaces the image
+The hosted STAC+MCP path is a pair of files a dashboard will override wrongly
+if they drift: ``railway.toml``'s start command (Railway replaces the image
 ``ENTRYPOINT`` in exec form) and ``Dockerfile.mcp`` (the default image only
 has ``[serve]``). Parsing them is enough — no Docker daemon, no Railway
 account. Same spirit as ``test_mcp_registry.py``.
@@ -36,7 +36,7 @@ def _instruction_body(path: Path) -> list[str]:
             continue
         if line.startswith("ARG UMBRA_EXTRAS"):
             continue
-        if line == 'CMD ["mcp"]':
+        if line.startswith("CMD ["):
             continue
         lines.append(line)
     return lines
@@ -48,21 +48,23 @@ def test_railway_points_at_the_mcp_dockerfile():
     assert _toml_string(text, "healthcheckPath") == "/healthz"
 
 
-def test_railway_start_command_hands_mcp_to_the_entrypoint():
-    """Bare ``mcp`` is not on PATH; Railway would exec a missing binary."""
+def test_railway_start_command_hands_public_serve_to_the_entrypoint():
+    """Bare ``serve`` is not on PATH; Railway would exec a missing binary."""
     cmd = _toml_string(RAILWAY.read_text(encoding="utf-8"), "startCommand")
+    assert cmd != "serve"
     assert cmd != "mcp"
     assert "docker-entrypoint.sh" in cmd
-    assert cmd.endswith(" mcp'") or cmd.endswith(" mcp")
+    assert "serve --public" in cmd
 
 
-def test_mcp_dockerfile_bakes_mcp_extras_and_cmd():
+def test_mcp_dockerfile_bakes_serve_and_mcp_and_public_cmd():
     text = DOCKERFILE_MCP.read_text(encoding="utf-8")
     match = re.search(r"^ARG UMBRA_EXTRAS=(\S+)", text, re.MULTILINE)
     assert match, "Dockerfile.mcp must set ARG UMBRA_EXTRAS"
     extras = {part.strip() for part in match.group(1).split(",")}
     assert "mcp" in extras
-    assert 'CMD ["mcp"]' in text
+    assert "serve" in extras
+    assert 'CMD ["serve", "--public"]' in text
     assert "ENTRYPOINT" in text
 
 
@@ -109,3 +111,6 @@ def test_deploy_docs_do_not_advertise_bare_mcp_start_command():
     assert "Dockerfile.mcp" in text
     assert "Start command:** `mcp`" not in text
     assert "railway.internal" in text
+    assert "umbra serve --public" in text
+    assert "/search" in text
+    assert "pystac-client" in text or "pystac_client" in text

@@ -148,7 +148,11 @@ Two design commitments carry over from the rest of the package:
   fallback exists for convenience but is intentionally slow.
 
 Run it with ``umbra serve`` (needs the ``serve`` extra:
-``pip install 'umbra-py[serve]'``).
+``pip install 'umbra-py[serve]'``). ``umbra serve --public`` is the hosted
+community instance: STAC search and Streamable HTTP MCP on one process
+(``POST /mcp``), artifacts off so this host does not proxy Umbra COGs, a
+per-client request cap, CC-BY license headers, and a refuse of Canopy / model
+keys and of a live S3 walk. Railway's start command is that flag.
 """
 
 from __future__ import annotations
@@ -159,7 +163,9 @@ import itertools
 import json
 import os
 import threading
+import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -171,6 +177,7 @@ from ._geometry import Geometry, parse_geometry
 from .catalog import DateLike, _coerce_date
 from .constants import (
     ATTRIBUTION,
+    CANOPY_TOKEN_ENV,
     DATA_LICENSE,
     PRODUCT_ASSETS,
     PRODUCT_TYPE_EXPLANATIONS,
@@ -219,6 +226,37 @@ CONFORMANCE_CLASSES = (
 #: Default page size, and the ceiling a client can request via ``limit``.
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 10_000
+
+#: Per-client request cap for ``umbra serve --public``. Search is a local SQL
+#: read; the cap exists so a tiny shared host cannot be scraped into a DoS, and
+#: so MCP render tools that *do* stream Umbra COGs cannot be burst without
+#: bound. ``0`` disables it. Overridable with ``--rate-limit``.
+PUBLIC_RATE_LIMIT = 120
+PUBLIC_RATE_WINDOW_S = 60.0
+
+#: Paths a probe or a human hits before any query; never count them against
+#: the cap (a health check that 429s is worse than a scraper).
+RATE_LIMIT_EXEMPT_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
+
+#: Env vars a public instance must not hold. Canopy is the commercial archive
+#: (STRATEGY.md §6: don't position against it); model keys would turn MCP's
+#: opt-in describe/narrate tools into an open wallet.
+PUBLIC_SECRET_ENV = (
+    CANOPY_TOKEN_ENV,
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+)
+
+#: Umbra's open-data program page; sent as ``Link: rel=license`` so a client
+#: that never reads the collection document still gets the attribution rule.
+LICENSE_URL = "https://umbra.space/open-data/"
+
+#: Appended to the landing-page description when ``public=True``.
+COMMUNITY_INSTANCE_NOTE = (
+    "Unofficial community instance, not an Umbra product. Asset hrefs point "
+    f"at Umbra's public bucket -- stream them directly. {ATTRIBUTION}"
+)
 
 #: ``GET /sites`` defaults: the live-backend pool size (``limit``, bounded by
 #: :data:`MAX_LIMIT`; ignored on an index, which ranks the whole archive), how
@@ -535,6 +573,8 @@ def landing_page(
     stack_execution: StackExecution | None = None,
     narrate: bool = False,
     narrate_policy: Mapping[str, Any] | None = None,
+    mcp: bool = False,
+    public: bool = False,
 ) -> dict[str, Any]:
     """The STAC API landing page (a STAC ``Catalog`` with conformance + links).
 
@@ -564,6 +604,18 @@ def landing_page(
         _link("data", f"{base}/collections"),
         _link("search", f"{base}/search", type=geojson, method="GET", title="STAC search"),
         _link("search", f"{base}/search", type=geojson, method="POST", title="STAC search"),
+    ]
+    if mcp:
+        links.append(
+            _link(
+                "mcp",
+                f"{base}/mcp",
+                type="application/json",
+                method="POST",
+                title="Streamable HTTP MCP (same catalog, agent front door)",
+            )
+        )
+    links += [
         _link(
             "sites",
             f"{base}/sites",
@@ -665,17 +717,20 @@ def landing_page(
                     **narrate_extra,
                 )
             )
+    description = (
+        "A read-only STAC API over Umbra's open SAR archive, served by "
+        "umbra-py from a local catalog index. Umbra publishes a static STAC "
+        "catalog and no search API; this façade restores /search for the "
+        f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION}"
+    )
+    if public:
+        description = f"{description} {COMMUNITY_INSTANCE_NOTE}"
     return {
         "type": "Catalog",
         "stac_version": STAC_VERSION,
         "id": COLLECTION_ID,
         "title": "Umbra Open Data STAC API",
-        "description": (
-            "A read-only STAC API over Umbra's open SAR archive, served by "
-            "umbra-py from a local catalog index. Umbra publishes a static STAC "
-            "catalog and no search API; this façade restores /search for the "
-            f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION}"
-        ),
+        "description": description,
         "conformsTo": list(CONFORMANCE_CLASSES),
         "links": links,
     }
@@ -1852,6 +1907,73 @@ class ClientNarrationBudget:
             return max(0, self._limit - self._counts.get(client, 0))
 
 
+def public_secret_names() -> list[str]:
+    """Env vars a public instance is holding that it must not.
+
+    Empty means the process is safe to expose. Checked at ``serve()`` startup
+    for ``public=True``, not in :func:`build_app`, so tests can construct a
+    public app on a developer machine that happens to have a model key.
+    """
+    return [name for name in PUBLIC_SECRET_ENV if os.environ.get(name)]
+
+
+class RateLimiter:
+    """Sliding-window per-client request cap (stdlib, no extra).
+
+    A public unauthenticated instance is a shared SQLite reader plus, when MCP
+    is mounted, the render tools that stream Umbra COGs. ``limit`` requests per
+    ``window_s`` seconds per :func:`client_identity` is the cheap abuse brake.
+    ``max_clients`` bounds the tracking dict so a rotating-identity adversary
+    cannot grow it without bound (evict the least-recently-seen).
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        window_s: float = PUBLIC_RATE_WINDOW_S,
+        *,
+        max_clients: int = 10_000,
+        time_fn: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if limit < 1:
+            raise ValueError("rate limit must be >= 1 (pass None/0 to disable)")
+        self.limit = limit
+        self.window_s = window_s
+        self.max_clients = max_clients
+        self._time = time_fn
+        self._lock = threading.Lock()
+        self._hits: dict[str, deque[float]] = {}
+
+    def hit(self, client: str) -> tuple[bool, int, int]:
+        """Record one request.
+
+        Returns ``(allowed, remaining, retry_after_s)``. ``retry_after_s`` is
+        ``0`` when the request is allowed.
+        """
+        now = self._time()
+        cutoff = now - self.window_s
+        with self._lock:
+            q = self._hits.get(client)
+            if q is None:
+                q = deque()
+                self._hits[client] = q
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= self.limit:
+                retry = max(1, int(q[0] + self.window_s - now + 0.999))
+                return False, 0, retry
+            q.append(now)
+            if len(self._hits) > self.max_clients:
+                oldest = min(
+                    (k for k in self._hits if k != client),
+                    key=lambda k: self._hits[k][-1] if self._hits[k] else 0,
+                    default=None,
+                )
+                if oldest is not None:
+                    del self._hits[oldest]
+            return True, self.limit - len(q), 0
+
+
 @dataclass(frozen=True)
 class NarrationAllowlist:
     """Which acquisitions a public narration endpoint will spend a model call on.
@@ -2398,6 +2520,9 @@ def build_app(
     narration_allow_bbox: BBox | None = None,
     cache_dir: str | os.PathLike | None = None,
     job_executor: Any | None = None,
+    mcp: bool = False,
+    public: bool = False,
+    rate_limit: int | None = None,
 ) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
@@ -2430,10 +2555,30 @@ def build_app(
     e.g. a :class:`~concurrent.futures.ThreadPoolExecutor`); it defaults to a
     small thread pool, and a test can inject :class:`_InlineJobExecutor` to run
     jobs synchronously. Requires the ``serve`` extra.
+
+    ``mcp=True`` mounts Streamable HTTP MCP at ``/mcp`` on this same app (needs
+    the ``mcp`` extra) so one process is both front doors. ``public=True`` is
+    the hosted-community bundle: artifacts off, MCP on, a per-client rate
+    limit (:data:`PUBLIC_RATE_LIMIT` unless ``rate_limit`` is set; ``0``
+    disables it), CC-BY license headers, and a refuse of ``live=True``. Secret
+    env vars are checked in :func:`serve`, not here, so tests can build a
+    public app on a machine that happens to have a model key.
     """
     fastapi = _require_serve()
     from fastapi import Body, HTTPException, Query, Request, Response
     from fastapi.responses import JSONResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    if public:
+        if live:
+            raise ValueError(
+                "A public instance cannot serve a live S3 walk; fetch the "
+                "published index instead (the §6 crawl-polite guardrail)."
+            )
+        artifacts = False
+        mcp = True
+        if rate_limit is None:
+            rate_limit = PUBLIC_RATE_LIMIT
 
     # This module uses ``from __future__ import annotations``, so the route
     # handlers' annotations are strings that FastAPI resolves against the
@@ -2471,13 +2616,33 @@ def build_app(
             max_workers=ARTIFACT_JOB_WORKERS, thread_name_prefix="umbra-render"
         )
 
+    mcp_asgi = None
+    if mcp:
+        from .mcp_server import build_server as _build_mcp_server
+
+        mcp_asgi = _build_mcp_server().streamable_http_app(
+            streamable_http_path="/mcp",
+            stateless_http=True,
+        )
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
-        yield
-        # Drain the background render pool on shutdown so a stopping server does
-        # not hang on (or leak) in-flight renders.
-        if job_executor is not None:
-            job_executor.shutdown(wait=False)
+        # MCP's session manager (even in stateless HTTP) starts in its lifespan;
+        # run it around the STAC app so ``POST /mcp`` is live for the same
+        # process that answers ``/search``.
+        mcp_life = (
+            mcp_asgi.router.lifespan_context(mcp_asgi)
+            if mcp_asgi is not None and mcp_asgi.router.lifespan_context is not None
+            else nullcontext()
+        )
+        async with mcp_life:
+            try:
+                yield
+            finally:
+                # Drain the background render pool on shutdown so a stopping
+                # server does not hang on (or leak) in-flight renders.
+                if job_executor is not None:
+                    job_executor.shutdown(wait=False)
 
     app = fastapi.FastAPI(
         title="Umbra Open Data STAC API",
@@ -2500,7 +2665,61 @@ def build_app(
         allow_origins=["*"],
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=[
+            "Link",
+            "Retry-After",
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-Umbra-Attribution",
+            "X-Umbra-License",
+        ],
     )
+
+    limiter = RateLimiter(rate_limit) if rate_limit else None
+
+    class _GuardMiddleware(BaseHTTPMiddleware):
+        """CC-BY headers on every response; optional per-client request cap."""
+
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            path = request.url.path
+            remaining: int | None = None
+            if (
+                limiter is not None
+                and request.method != "OPTIONS"
+                and path not in RATE_LIMIT_EXEMPT_PATHS
+            ):
+                allowed, remaining, retry_after = limiter.hit(client_identity(request))
+                if not allowed:
+                    return JSONResponse(
+                        {
+                            "error": "RateLimited",
+                            "message": (
+                                f"Rate limit exceeded ({limiter.limit} requests "
+                                f"per {int(limiter.window_s)}s)."
+                            ),
+                            "hint": f"Retry after {retry_after} seconds.",
+                        },
+                        status_code=429,
+                        headers={
+                            "Retry-After": str(retry_after),
+                            "X-RateLimit-Limit": str(limiter.limit),
+                            "X-RateLimit-Remaining": "0",
+                            "X-Umbra-License": DATA_LICENSE,
+                            "X-Umbra-Attribution": ATTRIBUTION,
+                            "Link": f'<{LICENSE_URL}>; rel="license"',
+                        },
+                    )
+            response = await call_next(request)
+            response.headers["X-Umbra-License"] = DATA_LICENSE
+            response.headers["X-Umbra-Attribution"] = ATTRIBUTION
+            response.headers["Link"] = f'<{LICENSE_URL}>; rel="license"'
+            if limiter is not None:
+                response.headers.setdefault("X-RateLimit-Limit", str(limiter.limit))
+                if remaining is not None:
+                    response.headers.setdefault("X-RateLimit-Remaining", str(remaining))
+            return response
+
+    app.add_middleware(_GuardMiddleware)
 
     def _open():
         try:
@@ -2538,6 +2757,8 @@ def build_app(
             stack_execution=stack_execution,
             narrate=renderers.narrate is not None,
             narrate_policy=narration_policy,
+            mcp=mcp,
+            public=public,
         )
 
     @app.get("/conformance", tags=["STAC"])
@@ -3884,6 +4105,11 @@ def build_app(
 
     app.openapi = _openapi
 
+    # Catch-all last so FastAPI's ``/search`` / ``/healthz`` / ``/docs`` win;
+    # unmatched ``POST /mcp`` falls through to the MCP Starlette app.
+    if mcp_asgi is not None:
+        app.mount("/", mcp_asgi)
+
     return app
 
 
@@ -3901,6 +4127,10 @@ def serve(
     narration_allow_bbox: BBox | None = None,
     cache_dir: str | os.PathLike | None = None,
     log_level: str = "info",
+    mcp: bool = False,
+    public: bool = False,
+    rate_limit: int | None = None,
+    proxy_headers: bool = False,
 ) -> None:
     """Build the app and run it with uvicorn (blocking). Requires ``serve``."""
     _require_serve()
@@ -3913,6 +4143,17 @@ def serve(
             hint="pip install 'umbra-py[serve]'",
         ) from exc
 
+    if public:
+        secrets = public_secret_names()
+        if secrets:
+            raise ValueError(
+                "A public instance must not hold "
+                + ", ".join(secrets)
+                + ". Unset them (Canopy is the commercial archive; model keys "
+                "would spend on every describe/narrate tool call)."
+            )
+        proxy_headers = True
+
     app = build_app(
         index_path,
         live=live,
@@ -3923,5 +4164,17 @@ def serve(
         narration_client_limit=narration_client_limit,
         narration_allow_bbox=narration_allow_bbox,
         cache_dir=cache_dir,
+        mcp=mcp,
+        public=public,
+        rate_limit=rate_limit,
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    run_kw: dict[str, Any] = {"host": host, "port": port, "log_level": log_level}
+    if proxy_headers:
+        # Railway (and any TLS-terminating proxy) is the socket peer; without
+        # this the per-client rate limit collapses to one bucket. Honouring
+        # forwarded-for from *untrusted* clients would make the cap evadable,
+        # so this is opt-in -- ``--public`` turns it on because that host is
+        # always behind a proxy.
+        run_kw["proxy_headers"] = True
+        run_kw["forwarded_allow_ips"] = "*"
+    uvicorn.run(app, **run_kw)

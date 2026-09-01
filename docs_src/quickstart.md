@@ -2,7 +2,9 @@
 
 The fastest start is the weekly catalog snapshot, then a local search. A live
 walk of the public bucket (`UmbraCatalog().search` / `umbra search` without
-`--local`) works but is slow — Umbra publishes no STAC API.
+`--local`) works but is slow — Umbra publishes no STAC API. A community
+instance of `umbra serve` restores one; see [Deploy](deploy.md) to point
+`pystac-client` at it with no local install.
 
 ## Python
 

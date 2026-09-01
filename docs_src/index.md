@@ -19,9 +19,10 @@ approachable as working with Sentinel-1 or Landsat.
 
 !!! note "Status"
     **v0.1.1.** Discovery, download, xarray loading,
-    SICD → geocoded COG, change composites, chips, a local STAC API, and an
-    MCP server all ship. This is not an InSAR toolbox — see
-    [limitations](guides/limitations.md). Not affiliated with Umbra Lab, Inc.
+    SICD → geocoded COG, change composites, chips, a STAC API
+    (`umbra serve`, with a community host), and an MCP server all ship.
+    This is not an InSAR toolbox — see [limitations](guides/limitations.md).
+    Not affiliated with Umbra Lab, Inc.
 
 ## What it gives you
 
@@ -38,8 +39,9 @@ approachable as working with Sentinel-1 or Landsat.
   browser viewers, before/after swipes, change composites, and time scans.
 - **ML prep** — cut scenes into georeferenced training chips with metadata.
 - **AI-native surfaces** — an MCP server (`umbra-mcp`), a read-only STAC API
-  (`umbra serve`), native LangChain / LlamaIndex tools, plus model-backed
-  natural-language search, scene description, and visual similarity.
+  (`umbra serve`, hosted with MCP on the same Railway URL), native LangChain /
+  LlamaIndex tools, plus model-backed natural-language search, scene
+  description, and visual similarity.
 
 ## Next steps
 

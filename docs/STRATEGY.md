@@ -240,12 +240,13 @@ moat, machine-readable schemas, and the static Pages showcase have all shipped
   `open-data-registry` PR, the STAC Index listing, the manual Anthropic MCP
   directory listing, and minting the Zenodo DOI.
 - **§5.2 — offer the index upstream** to Umbra.
-- **Stand up a public `umbra serve` instance.** Several features are
-  code-complete but only useful once a public instance exists: the hosted
-  discovery moat (`GET`/`POST /sites`), live change narration (Mode B,
-  `POST /artifacts/narrate` with its per-client and allowlist caps), and the
-  provenance preflight. Gated on the §6 guardrail (talk to Umbra first) and an
-  egress/COG-streaming policy decision.
+- **Public `umbra serve` instance.** **Shipped** as `umbra serve --public`
+  (Railway start command): STAC search + MCP on one URL, artifacts off so
+  this host does not proxy Umbra COGs, per-client rate limit, CC-BY headers,
+  refuse of Canopy/model keys and of a live S3 walk. Live change narration
+  and `/artifacts/*` stay off on the public host (the egress policy);
+  `GET`/`POST /sites` is on. Optional follow-on: a custom domain and a
+  STAC Index listing of the URL.
 
 **Deferred engineering (waits on data, tokens, or evidence)**
 

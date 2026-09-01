@@ -590,9 +590,11 @@ follow-ons, none a blocker:
   don't: they move a pixel's *position*, not its value, and `to_stack` re-grids
   everything anyway. Add them to `MEASUREMENT_PROVENANCE_KEYS` if a DEM mix ever
   produces misregistration worth failing on.
-- **A hosted instance is still the missing half of the provenance preflight.**
-  `POST /artifacts/provenance` makes the preflight free for a client with nothing
-  installed, which is only worth something once a public `umbra serve` exists.
+- **The public instance does not mount `/artifacts/provenance`.**
+  `umbra serve --public` turns artifacts off so the host does not proxy Umbra
+  COGs; provenance is one of those routes. A self-hosted `umbra serve` (with
+  `viz`/`load`) still answers it. Turning it on for the community host is an
+  egress-policy change, not a missing endpoint.
 - **`/artifacts/change`, `timescan` and `swipe` have no preflight.** They draw
   rather than measure, so they never refuse a mix. The one composite-path caller
   that *does* quote decibels is `render_change_png`, and it has no HTTP surface.
@@ -731,18 +733,24 @@ follow-ons, none a blocker:
 ## Grow the `umbra serve` STAC API (a hosted instance)
 
 - **Surfaced in:** the `umbra serve` STAC API PR.
-- **Code:** `src/umbra_py/serve.py`, `pyproject.toml` (`[serve]` extra).
+- **Code:** `src/umbra_py/serve.py`, `pyproject.toml` (`[serve]` extra),
+  `railway.toml`, `Dockerfile.mcp`.
 
-The read-only STAC API is shipped (landing / conformance / collections / items /
-`GET`+`POST /search`, `GET`+`POST /sites`, the artifact render routes and `POST
-/artifacts/stats` + `provenance`, async jobs, the STAC Query extension). Open
-follow-on:
+The read-only STAC API is shipped, and the hosted community instance is
+`umbra serve --public` (Railway's start command): STAC search + MCP on one
+URL, artifacts off, per-client rate limit, CC-BY headers, refuse of
+Canopy / model keys and of a live S3 walk. Open follow-ons, none a blocker:
 
-- **A hosted community instance.** The local-first server has no operational cost;
-  a public instance is a policy decision (COG-streaming egress) that would make
-  the archive queryable with zero install — pair it with the static demo front
-  end `umbra showcase` already builds. Gated on the `STRATEGY.md` §6 guardrail
-  (talk to Umbra first).
+- **A stable hostname.** The docs use `https://<your-service>.up.railway.app`
+  until a custom domain (for example under `umbra-py.space`) is pointed at
+  the service. The start command does not encode a hostname.
+- **STAC Index listing.** Once the public URL is stable, list it on
+  [stacindex.org](https://stacindex.org/) so generic STAC clients discover
+  the open catalog without finding this repo first.
+- **Watch MCP render egress.** STAC search does not proxy rasters; MCP
+  `quicklook` / `change_composite` / `timescan` still stream Umbra COGs
+  through the host. Tighten `--rate-limit` or drop `viz` from the image
+  if that ever shows up on a bill.
 
 ---
 

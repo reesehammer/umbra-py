@@ -3,8 +3,9 @@
 #
 # Default behaviour: fetch the published catalog index on first boot (unless one
 # is already present on the /data volume, or fetching is disabled), then run the
-# read-only STAC API. Pass `mcp` as the first argument to serve Streamable HTTP
-# MCP instead (`umbra mcp --http`).
+# read-only STAC API. Pass `serve --public` for the hosted community instance
+# (STAC + MCP on one process). Pass `mcp` as the first argument to serve
+# Streamable HTTP MCP alone (`umbra mcp --http`).
 #
 # Environment variables:
 #   UMBRA_HOST         Interface to bind      (default 0.0.0.0)

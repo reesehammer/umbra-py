@@ -3,10 +3,54 @@
 Umbra publishes a static STAC catalog and *no* search API, so the standard STAC
 tooling (`pystac-client`, the QGIS STAC plugin, `stac-browser`, leafmap) has
 nothing to query. [`umbra serve`](cli.md) restores that missing endpoint — a
-read-only STAC API over a local catalog index. This page covers standing it up
-as a container so no local Python install is needed.
+read-only STAC API over a local catalog index.
 
-## One command
+A **community instance** of that API is hosted on Railway (`umbra serve
+--public`): STAC search at the service root and Streamable HTTP MCP at `/mcp`,
+on one URL. This page covers using that instance, then standing up your own.
+
+## Hosted community API (no install)
+
+Generate a public domain on the Railway service (**Settings → Networking →
+Generate Domain**). `.railway.internal` is private mesh DNS and is not
+reachable from a laptop or from Claude.
+
+```bash
+# STAC search — any STAC API client
+curl "https://<your-service>.up.railway.app/search?limit=2"
+curl "https://<your-service>.up.railway.app/sites?top=5"
+# OpenAPI
+open "https://<your-service>.up.railway.app/docs"
+```
+
+```python
+from pystac_client import Client
+
+api = Client.open("https://<your-service>.up.railway.app/")
+for item in api.search(collections=["umbra-open-data"], max_items=3).items():
+    print(item.id, item.datetime)
+```
+
+Claude Desktop / Code remote MCP (same host):
+
+```json
+{
+  "mcpServers": {
+    "umbra": {
+      "url": "https://<your-service>.up.railway.app/mcp"
+    }
+  }
+}
+```
+
+This is an unofficial community host of Umbra's *open* data, not an Umbra
+product. Search is served from the weekly catalog snapshot. Asset `href`s
+point at Umbra's public S3 bucket — the API does not proxy rasters (that is
+the COG-streaming guardrail). Attribute [CC BY 4.0](https://umbra.space/open-data/).
+A per-client rate limit (120 requests/minute) returns `429` with `Retry-After`.
+Do not set `UMBRA_CANOPY_TOKEN` or model API keys on this instance.
+
+## Self-host (one command)
 
 The repository ships a `Dockerfile` and a `docker-compose.yml`. `docker compose
 up` builds the image, fetches the published catalog index snapshot on first boot
@@ -251,11 +295,15 @@ scene, and a site whose asset won't render is skipped with a warning rather than
 failing the build. Without `--featured` the showcase is unchanged and stays
 stdlib-only.
 
-## Remote MCP (Railway)
+## Remote STAC + MCP (Railway)
 
-`umbra mcp` is stdio by default (Claude Desktop / `uvx --from 'umbra-py[mcp]' umbra-mcp`).
-`--http` serves the **same tools** over Streamable HTTP so a client can connect
-to a URL instead of spawning a process:
+`umbra serve --public` is the hosted community bundle: STAC search at `/` and
+Streamable HTTP MCP at `/mcp`, artifacts off, a per-client rate limit, CC-BY
+license headers, and a refuse of `--live` and of Canopy / model API keys.
+
+`umbra mcp` is still stdio by default (Claude Desktop / `uvx --from 'umbra-py[mcp]' umbra-mcp`).
+`--http` serves MCP **alone** (no STAC) so a client can connect to a URL
+without the `serve` extra:
 
 ```bash
 umbra mcp --http --host 0.0.0.0 --port 8000
@@ -267,19 +315,24 @@ umbra mcp --http --host 0.0.0.0 --port 8000
 
 ### Docker
 
-The image entrypoint treats a first argument of `mcp` like `serve`: fetch the
-published catalog index on first boot, then listen. `Dockerfile.mcp` bakes the
-MCP extra (and `viz` for quicklook / change / timescan pictures):
+The image entrypoint treats `serve --public` like `serve`: fetch the published
+catalog index on first boot, then listen. `Dockerfile.mcp` bakes the `mcp`,
+`viz` and `serve` extras:
 
 ```bash
-docker build -f Dockerfile.mcp -t umbra-py:mcp .
-docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:mcp
+docker build -f Dockerfile.mcp -t umbra-py:public .
+docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:public
+# STAC: http://127.0.0.1:8000/search
+# MCP:  POST http://127.0.0.1:8000/mcp
 ```
+
+Pass `mcp` as the first argument for MCP-only (no STAC).
 
 ### Railway
 
 The repo ships `railway.toml` and `Dockerfile.mcp`. Create a service from this
-GitHub repo and deploy; extras and the start command are already in those files.
+GitHub repo and deploy; extras and the start command (`serve --public`) are
+already in those files.
 
 A volume is **not** required for the first boot. `/data` is writable in the
 image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
@@ -289,27 +342,19 @@ even when a Railway Volume is attached. The volume itself is root-owned; the
 entrypoint `chown`s it and drops to `umbra` so `catalog.db` can be written.
 
 `*.railway.internal` is Railway's **private** mesh DNS — only other services in
-the same project can reach it. Claude and the Anthropic directory cannot.
-After a green deploy: **Settings → Networking → Generate Domain**, then point
-clients at `https://<generated>.up.railway.app/mcp` (or a custom domain).
+the same project can reach it. Claude, the Anthropic directory, and
+`pystac-client` cannot. After a green deploy: **Settings → Networking →
+Generate Domain**, then point STAC clients at
+`https://<generated>.up.railway.app/` and MCP clients at
+`https://<generated>.up.railway.app/mcp` (or a custom domain).
 
-If a previous deploy crashed with `exec: mcp: not found`, Railway replaced the
-image entrypoint with a bare `mcp`. `railway.toml` now wraps the entrypoint;
-you do not need a start command in the dashboard.
+If a previous deploy crashed with `exec: mcp: not found` or `exec: serve: not
+found`, Railway replaced the image entrypoint with a bare command.
+`railway.toml` now wraps the entrypoint; you do not need a start command in
+the dashboard.
 
-Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance.
+Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance —
+`--public` refuses to start if they are set.
 
-Claude Desktop / Code remote MCP:
-
-```json
-{
-  "mcpServers": {
-    "umbra": {
-      "url": "https://<your-service>.up.railway.app/mcp"
-    }
-  }
-}
-```
-
-This is an unofficial community host of Umbra's *open* data, not an Umbra
-product. Quicklooks stream their COGs; keep an eye on egress.
+MCP render tools (quicklook / change / timescan) still stream Umbra COGs
+through this host; keep an eye on egress. STAC search does not.

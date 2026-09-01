@@ -18,7 +18,7 @@ from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
 from ..models import UmbraItem
 from ..pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
-from ..serve import STACK_SCHEDULERS
+from ..serve import PUBLIC_RATE_LIMIT, STACK_SCHEDULERS, public_secret_names
 from ..showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
 from . import _shared
 from ._root import cli
@@ -89,11 +89,36 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
 )
 @click.option(
     "--artifacts/--no-artifacts",
-    default=True,
-    show_default=True,
+    default=None,
     help="Mount the on-demand artifact endpoints (/artifacts/quicklook, /change, "
-    "/timescan, /swipe, /stats). Use --no-artifacts for a public instance that "
-    "wants to bound COG-streaming egress.",
+    "/timescan, /swipe, /stats). Default: on. Off under --public, so this host "
+    "does not proxy Umbra COGs -- clients stream asset hrefs from S3 themselves.",
+)
+@click.option(
+    "--mcp",
+    is_flag=True,
+    help="Mount Streamable HTTP MCP at POST /mcp on this same process (needs "
+    "the 'mcp' extra). --public implies this.",
+)
+@click.option(
+    "--public",
+    is_flag=True,
+    help="Hosted community instance: STAC search + MCP on one URL, artifacts "
+    "off, per-client rate limit, CC-BY license headers, proxy headers, and a "
+    "refuse of --live and of Canopy / model API keys. Railway's start command.",
+)
+@click.option(
+    "--rate-limit",
+    type=int,
+    default=None,
+    help="Per-client requests per minute (sliding window). 0 disables. "
+    f"Default off; {PUBLIC_RATE_LIMIT} under --public.",
+)
+@click.option(
+    "--proxy-headers",
+    is_flag=True,
+    help="Trust X-Forwarded-For from the reverse proxy so the per-client rate "
+    "limit sees real clients. --public turns this on (Railway is always proxied).",
 )
 @click.option(
     "--stack-lazy",
@@ -172,6 +197,10 @@ def serve(
     index_path,
     live,
     artifacts,
+    mcp,
+    public,
+    rate_limit,
+    proxy_headers,
     stack_lazy,
     stack_chunk_size,
     stack_scheduler,
@@ -227,6 +256,38 @@ def serve(
     from ..serve import StackExecution, parse_bbox
     from ..serve import serve as run_stac_server
 
+    if public:
+        if live:
+            raise click.UsageError(
+                "--public cannot be combined with --live: a public instance "
+                "serves the published catalog index, not a live S3 walk."
+            )
+        if artifacts is True:
+            raise click.UsageError(
+                "--public cannot enable /artifacts (that would proxy Umbra "
+                "COGs through this host). Drop --artifacts, or drop --public."
+            )
+        if narrate:
+            raise click.UsageError(
+                "--public cannot enable --narrate (a model key on a public "
+                "instance is an open wallet). Drop --narrate, or drop --public."
+            )
+        artifacts = False
+        mcp = True
+        if rate_limit is None:
+            rate_limit = PUBLIC_RATE_LIMIT
+        proxy_headers = True
+        secrets = public_secret_names()
+        if secrets:
+            raise click.ClickException(
+                "A public instance must not hold "
+                + ", ".join(secrets)
+                + ". Unset them (Canopy is the commercial archive; model keys "
+                "would spend on every describe/narrate tool call)."
+            )
+    elif artifacts is None:
+        artifacts = True
+
     try:
         execution = StackExecution(
             lazy=stack_lazy, chunk_size=stack_chunk_size, scheduler=stack_scheduler
@@ -261,6 +322,11 @@ def serve(
         )
 
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
+    if public:
+        cap = f"{rate_limit}/min" if rate_limit else "off"
+        click.echo(f"  public mode: artifacts off, MCP at /mcp, rate limit {cap}, CC-BY headers on")
+    elif mcp:
+        click.echo("  MCP: POST /mcp (Streamable HTTP)")
     if artifacts:
         click.echo(f"  /artifacts/stats datacube: {execution.describe()}")
         # The client-visible consequence of the policy, and it cuts both ways:
@@ -294,8 +360,12 @@ def serve(
             narration_client_limit=narrate_client_limit,
             narration_allow_bbox=narrate_bbox,
             cache_dir=cache_dir,
+            mcp=mcp,
+            public=public,
+            rate_limit=rate_limit,
+            proxy_headers=proxy_headers,
         )
-    except MissingDependencyError as exc:
+    except (MissingDependencyError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

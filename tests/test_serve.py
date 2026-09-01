@@ -12,6 +12,7 @@ directly, without a running server.
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 
@@ -72,6 +73,16 @@ def test_landing_page_is_a_conformant_catalog():
     assert {"self", "root", "conformance", "data", "search", "service-desc"} <= rels
     # No trailing double-slash from base_url normalisation.
     assert all("//collections" not in link["href"] for link in page["links"])
+    assert "mcp" not in rels
+    assert "Unofficial community instance" not in page["description"]
+
+
+def test_landing_page_public_advertises_mcp_and_community_note():
+    page = serve.landing_page("http://localhost:8000/", mcp=True, public=True)
+    assert "Unofficial community instance" in page["description"]
+    mcp_link = next(link for link in page["links"] if link["rel"] == "mcp")
+    assert mcp_link["href"] == "http://localhost:8000/mcp"
+    assert mcp_link["method"] == "POST"
 
 
 def test_collection_carries_license_and_temporal_extent():
@@ -2389,6 +2400,145 @@ def test_serve_cli_rejects_a_chunk_size_without_lazy(monkeypatch):
     result = CliRunner().invoke(cli, ["serve", "--stack-chunk-size", "512"])
     assert result.exit_code == 2
     assert "chunk_size needs lazy" in result.output
+
+
+def test_serve_cli_public_bundles_the_guardrails(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    for name in serve.PUBLIC_SECRET_ENV:
+        monkeypatch.delenv(name, raising=False)
+    seen: dict = {}
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: seen.update(kwargs))
+    result = CliRunner().invoke(cli, ["serve", "--public"])
+    assert result.exit_code == 0, result.output
+    assert seen["public"] is True
+    assert seen["mcp"] is True
+    assert seen["artifacts"] is False
+    assert seen["rate_limit"] == serve.PUBLIC_RATE_LIMIT
+    assert seen["proxy_headers"] is True
+    assert "public mode" in result.output
+    assert "MCP at /mcp" in result.output
+
+
+def test_serve_cli_public_rejects_a_model_key(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: pytest.fail("should not have started"))
+    result = CliRunner().invoke(cli, ["serve", "--public"])
+    assert result.exit_code != 0
+    assert "ANTHROPIC_API_KEY" in result.output
+
+
+def test_serve_cli_public_rejects_live_and_artifacts(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    monkeypatch.setattr(serve, "serve", lambda **kwargs: pytest.fail("should not have started"))
+    live = CliRunner().invoke(cli, ["serve", "--public", "--live"])
+    assert live.exit_code == 2
+    assert "--live" in live.output
+    arts = CliRunner().invoke(cli, ["serve", "--public", "--artifacts"])
+    assert arts.exit_code == 2
+    assert "/artifacts" in arts.output
+
+
+def test_public_secret_names_lists_configured_keys(monkeypatch):
+    monkeypatch.delenv("UMBRA_CANOPY_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert serve.public_secret_names() == []
+    monkeypatch.setenv("UMBRA_CANOPY_TOKEN", "secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert serve.public_secret_names() == ["UMBRA_CANOPY_TOKEN", "ANTHROPIC_API_KEY"]
+
+
+def test_rate_limiter_allows_then_blocks():
+    clock = {"now": 0.0}
+    limiter = serve.RateLimiter(limit=2, window_s=10, time_fn=lambda: clock["now"])
+    assert limiter.hit("ip:1")[0] is True
+    assert limiter.hit("ip:1")[0] is True
+    allowed, remaining, retry = limiter.hit("ip:1")
+    assert allowed is False
+    assert remaining == 0
+    assert retry >= 1
+    # A different client is unaffected.
+    assert limiter.hit("ip:2")[0] is True
+    # After the window rolls, the first client is allowed again.
+    clock["now"] = 10.1
+    assert limiter.hit("ip:1")[0] is True
+
+
+def test_license_headers_are_on_every_response(client):
+    resp = client.get("/")
+    assert resp.headers.get("X-Umbra-License") == "CC-BY-4.0"
+    assert "Contains Umbra open data" in resp.headers.get("X-Umbra-Attribution", "")
+    assert 'rel="license"' in resp.headers.get("Link", "")
+
+
+def test_public_policy_disables_artifacts_and_rate_limits(index_path, tmp_path):
+    """STAC-side guardrails do not need the mcp extra (public=True would)."""
+    app = serve.build_app(
+        index_path,
+        artifacts=False,
+        rate_limit=2,
+        public=False,
+        cache_dir=tmp_path / "art",
+    )
+    client = TestClient(app)
+    page = client.get("/").json()
+    rels = {link["rel"] for link in page["links"]}
+    assert "quicklook" not in rels
+    assert client.get("/artifacts/quicklook/item-0.png").status_code == 404
+
+    limited = serve.build_app(
+        index_path, artifacts=False, rate_limit=2, cache_dir=tmp_path / "art2"
+    )
+    searcher = TestClient(limited)
+    assert searcher.get("/search?limit=1").status_code == 200
+    assert searcher.get("/search?limit=1").status_code == 200
+    blocked = searcher.get("/search?limit=1")
+    assert blocked.status_code == 429
+    assert blocked.json()["error"] == "RateLimited"
+    assert blocked.headers.get("Retry-After")
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_app_mounts_mcp_and_notes_the_community_instance(index_path, tmp_path):
+    app = serve.build_app(index_path, public=True, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        page = client.get("/").json()
+        assert "Unofficial community instance" in page["description"]
+        rels = {link["rel"] for link in page["links"]}
+        assert "mcp" in rels
+        assert "quicklook" not in rels
+        assert client.get("/artifacts/quicklook/item-0.png").status_code == 404
+        assert client.get("/search?limit=1").status_code == 200
+        health = client.get("/healthz")
+        assert health.status_code == 200
+        assert health.json()["ready"] is True
+        # Mounted, not a STAC 404 -- the MCP handler answers this path.
+        assert client.post("/mcp").status_code != 404
+
+
+def test_rate_limit_does_not_count_healthz(index_path, tmp_path):
+    app = serve.build_app(index_path, artifacts=False, rate_limit=1, cache_dir=tmp_path / "art")
+    client = TestClient(app)
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/search?limit=1").status_code == 200
+    assert client.get("/search?limit=1").status_code == 429
+
+
+def test_public_refuses_a_live_backend(index_path):
+    with pytest.raises(ValueError, match="live S3 walk"):
+        serve.build_app(index_path, public=True, live=True)
 
 
 def test_landing_advertises_artifacts_when_enabled(art_client):
