@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "umbra-py"
 dynamic = ["version"]
-description = "A Python-first toolkit to make Umbra SAR open data easy to discover, load, download, and analyze."
+description = "Search, preview, load, and convert Umbra open SAR. Umbra ships no search API; umbra-py is that layer, plus a community STAC API and MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

@@ -1,7 +1,7 @@
 site_name: umbra-py
 site_description: >-
-  A Python-first toolkit to make Umbra SAR open data easy to discover, load,
-  download, and analyze.
+  Search, preview, load, and convert Umbra open SAR. Umbra ships no search
+  API; umbra-py is that layer, plus a community STAC API and MCP server.
 site_url: https://umbra-py.space/
 repo_url: https://github.com/reesehammer/umbra-py
 repo_name: reesehammer/umbra-py

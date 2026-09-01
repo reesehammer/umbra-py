@@ -1,14 +1,12 @@
 # umbra-py
 
-**A Python-first toolkit to make [Umbra](https://umbra.space/open-data/) SAR
-open data easy to discover, load, download, and analyze.**
+**Search, preview, load, and convert [Umbra](https://umbra.space/open-data/)
+open SAR data.**
 
-Umbra publishes very-high-resolution (down to ~16–25 cm) synthetic aperture
-radar (SAR) imagery as open data under a permissive **CC BY 4.0** license. The
-data is excellent, but getting started is hard: it ships in specialized formats
-(SICD, SIDD, CPHD, GEC), is indexed by a large static STAC catalog, and the
-existing tooling is low-level. `umbra-py` makes working with it feel as
-approachable as working with Sentinel-1 or Landsat.
+Umbra publishes 16–25 cm SAR as **CC BY 4.0** open data, but **no search
+API** — only a static STAC tree on S3. `umbra-py` is that layer, so the
+archive feels as approachable as Sentinel-1 or Landsat. A community STAC
+API (`umbra serve`) and MCP server sit on the same host.
 
 !!! tip "Try it now — no install"
     Browse and search the whole open archive from your browser in the
