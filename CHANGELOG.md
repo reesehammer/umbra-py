@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and failed `ruff format --check`.
 
 ### Fixed
+- **Railway Metal builder: drop the Dockerfile `VOLUME` instruction.** The
+  builder rejects `VOLUME ["/data"]` (`use Railway Volumes`) even when a
+  Railway Volume is already mounted at `/data`. `/data` stays a normal
+  directory the image user owns; mount it at run time.
 - **Railway first deploy no longer execs a missing `mcp` binary.** Railway's
   start command replaces the image `ENTRYPOINT` in exec form, so
   `startCommand = "mcp"` never reached the entrypoint. `railway.toml` now

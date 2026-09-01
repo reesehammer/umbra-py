@@ -69,6 +69,13 @@ def test_dockerfiles_stay_in_lockstep():
     assert _instruction_body(DOCKERFILE) == _instruction_body(DOCKERFILE_MCP)
 
 
+def test_dockerfiles_do_not_declare_volume():
+    """Railway's Metal builder rejects Dockerfile VOLUME; mount /data at run time."""
+    for path in (DOCKERFILE, DOCKERFILE_MCP):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"^\s*VOLUME\b", text, re.MULTILINE), path
+
+
 def test_entrypoint_treats_mcp_like_serve():
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert '[ "$1" = "mcp" ]' in text
