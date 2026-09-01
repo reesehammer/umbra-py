@@ -11,12 +11,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stdio stays the default (`umbra-mcp` / Claude Desktop / `uvx`). `--http`
   serves the same tools at `POST /mcp` with `GET /healthz` for orchestrators.
   `$PORT` / `$UMBRA_PORT` / `$UMBRA_HOST` bind a container; Railway's
-  `railway.toml` starts `mcp` so the image entrypoint fetches the catalog
-  index then listens on `$PORT`. Stateless HTTP is on (no sticky sessions).
+  `railway.toml` + `Dockerfile.mcp` fetch the catalog index then listen
+  on `$PORT`. Stateless HTTP is on (no sticky sessions).
   The `umbra-mcp` console script still takes no argv, so a client that
   appends the package identifier keeps working.
 
 ### Fixed
+- **Railway first deploy no longer execs a missing `mcp` binary.** Railway's
+  start command replaces the image `ENTRYPOINT` in exec form, so
+  `startCommand = "mcp"` never reached the entrypoint. `railway.toml` now
+  wraps `/usr/local/bin/docker-entrypoint.sh mcp`, and `Dockerfile.mcp`
+  bakes `UMBRA_EXTRAS=mcp,viz` so a first boot needs no UI build-arg and
+  no `/data` volume (the published index is ~17 MB). Generate a public
+  `*.up.railway.app` domain — `.railway.internal` is private mesh DNS.
 
 ## [0.1.1] — 2026-08-21
 
