@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
-# Entrypoint for the umbra-py serve image.
+# Entrypoint for the umbra-py image.
 #
 # Default behaviour: fetch the published catalog index on first boot (unless one
 # is already present on the /data volume, or fetching is disabled), then run the
-# read-only STAC API bound to all interfaces so it is reachable from the host.
+# read-only STAC API. Pass `mcp` as the first argument to serve Streamable HTTP
+# MCP instead (`umbra mcp --http`).
 #
 # Environment variables:
 #   UMBRA_HOST         Interface to bind      (default 0.0.0.0)
@@ -22,29 +23,39 @@
 set -eu
 
 # Passthrough: `docker run IMAGE <umbra subcommand>` runs the CLI directly.
-# Only a bare run (no args) or an explicit `serve` goes through the serve flow.
-if [ "$#" -gt 0 ] && [ "$1" != "serve" ]; then
+# Bare run or explicit `serve` → STAC API. Explicit `mcp` → Streamable HTTP MCP.
+if [ "$#" -gt 0 ] && [ "$1" != "serve" ] && [ "$1" != "mcp" ]; then
     exec umbra "$@"
 fi
-# Drop a leading literal "serve" so we can layer in our own defaults.
-if [ "$#" -gt 0 ] && [ "$1" = "serve" ]; then
+
+MODE=serve
+if [ "$#" -gt 0 ] && [ "$1" = "mcp" ]; then
+    MODE=mcp
+    shift
+elif [ "$#" -gt 0 ] && [ "$1" = "serve" ]; then
     shift
 fi
 
 HOST="${UMBRA_HOST:-0.0.0.0}"
-PORT="${UMBRA_PORT:-8000}"
+# Railway injects PORT; fall back to UMBRA_PORT then 8000.
+PORT="${PORT:-${UMBRA_PORT:-8000}}"
 
-# `UMBRA_SERVE_ARGS` and any positional args are forwarded to `umbra serve`.
-# shellcheck disable=SC2086
-set -- ${UMBRA_SERVE_ARGS:-} "$@"
+if [ "$MODE" = "serve" ]; then
+    # `UMBRA_SERVE_ARGS` and any leftover args are forwarded to `umbra serve`.
+    # shellcheck disable=SC2086
+    set -- ${UMBRA_SERVE_ARGS:-} "$@"
+fi
 
 if [ "${UMBRA_SERVE_LIVE:-0}" = "1" ]; then
-    echo "umbra serve: live S3 walk per request (no index)."
+    echo "umbra ${MODE}: live S3 walk per request (no index)."
+    if [ "$MODE" = "mcp" ]; then
+        exec umbra mcp --http --host "$HOST" --port "$PORT" "$@"
+    fi
     exec umbra serve --host "$HOST" --port "$PORT" --live "$@"
 fi
 
 # Fetch the published snapshot on first boot unless disabled or already present.
-# This leaves the serve args in "$@" untouched for the final exec below.
+# This leaves the serve/mcp args in "$@" untouched for the final exec below.
 INDEX_DB="${UMBRA_INDEX_DB:-${XDG_CACHE_HOME:-$HOME/.cache}/umbra-py/catalog.db}"
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ ! -f "$INDEX_DB" ]; then
     echo "No catalog index at $INDEX_DB; fetching the published snapshot..."
@@ -55,8 +66,15 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ ! -f "$INDEX_DB" ]; then
     fi
     if [ "${FETCH_FAILED:-0}" = "1" ]; then
         echo "Index fetch failed; falling back to a live S3 walk (slow)." >&2
+        if [ "$MODE" = "mcp" ]; then
+            exec umbra mcp --http --host "$HOST" --port "$PORT"
+        fi
         exec umbra serve --host "$HOST" --port "$PORT" --live
     fi
 fi
 
+if [ "$MODE" = "mcp" ]; then
+    echo "umbra mcp: Streamable HTTP on ${HOST}:${PORT}/mcp"
+    exec umbra mcp --http --host "$HOST" --port "$PORT" "$@"
+fi
 exec umbra serve --host "$HOST" --port "$PORT" "$@"

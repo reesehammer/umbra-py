@@ -10,6 +10,9 @@
 #     docker build -t umbra-py .
 # Build with on-demand render endpoints (adds the `viz` stack -- rasterio etc.):
 #     docker build --build-arg UMBRA_EXTRAS=serve,viz -t umbra-py:full .
+# Hosted MCP (Streamable HTTP; Railway):
+#     docker build --build-arg UMBRA_EXTRAS=mcp,viz -t umbra-py:mcp .
+#     docker run -p 8000:8000 -v umbra-data:/data umbra-py:mcp mcp
 # Add `load` for the numeric `/artifacts/stats` endpoint, and `dask` if you also
 # want to run it lazily (`UMBRA_SERVE_ARGS="--stack-lazy"`, see deploy.md):
 #     docker build --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .

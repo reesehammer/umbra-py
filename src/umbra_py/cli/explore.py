@@ -8,6 +8,7 @@ PMTiles archive, and the static showcase that composes them.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,20 +25,48 @@ from ._root import cli
 
 
 @cli.command()
-def mcp() -> None:
-    """Run the umbra Model Context Protocol server (stdio transport).
+@click.option(
+    "--http",
+    is_flag=True,
+    help="Serve Streamable HTTP instead of stdio (POST /mcp). For a host "
+    "like Railway; Claude Desktop keeps using stdio via 'umbra-mcp'.",
+)
+@click.option(
+    "--host",
+    default=None,
+    help="Bind address for --http (default: $UMBRA_HOST or 127.0.0.1). Use 0.0.0.0 in a container.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help="Port for --http (default: $PORT, then $UMBRA_PORT, then 8000). Railway injects PORT.",
+)
+@click.option(
+    "--path",
+    default="/mcp",
+    show_default=True,
+    help="URL path of the Streamable HTTP endpoint.",
+)
+def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
+    """Run the umbra Model Context Protocol server.
 
-    Exposes search / geocode / quicklook / change / timescan as MCP tools so an
-    MCP client (Claude Desktop / Code and others) can drive the archive in
-    natural language. Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``);
-    also runnable as ``umbra-mcp``, or with nothing installed as
-    ``uvx --from 'umbra-py[mcp]' umbra-mcp``.
+    Default is stdio (Claude Desktop / ``uvx --from 'umbra-py[mcp]' umbra-mcp``).
+    ``--http`` serves the same tools over Streamable HTTP so a remote client
+    can connect to a URL. Requires the ``mcp`` extra.
     """
     from ..exceptions import MissingDependencyError
-    from ..mcp_server import main as run_server
+    from ..mcp_server import run as run_server
 
     try:
-        run_server()
+        if http:
+            bind_host = host or os.environ.get("UMBRA_HOST") or "127.0.0.1"
+            if port is None:
+                raw = os.environ.get("PORT") or os.environ.get("UMBRA_PORT") or "8000"
+                port = int(raw)
+            run_server(http=True, host=bind_host, port=port, path=path)
+        else:
+            run_server()
     except MissingDependencyError as exc:
         raise click.ClickException(str(exc)) from exc
 

@@ -109,9 +109,9 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
 
 That command is published to the [MCP registry](https://registry.modelcontextprotocol.io/)
-as `io.github.reesehammer/umbra-mcp`. A local STAC API is `umbra serve` (needs
-`[serve]`); `docker compose up` is the one-command form. There is no public
-hosted instance yet.
+as `io.github.reesehammer/umbra-mcp`. `umbra mcp --http` serves the same tools
+over Streamable HTTP (`POST /mcp`) for a host like Railway. A local STAC API
+is `umbra serve` (needs `[serve]`); `docker compose up` is the one-command form.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 

@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`umbra mcp --http`: Streamable HTTP transport for a hosted MCP server.**
+  stdio stays the default (`umbra-mcp` / Claude Desktop / `uvx`). `--http`
+  serves the same tools at `POST /mcp` with `GET /healthz` for orchestrators.
+  `$PORT` / `$UMBRA_PORT` / `$UMBRA_HOST` bind a container; Railway's
+  `railway.toml` starts `mcp` so the image entrypoint fetches the catalog
+  index then listens on `$PORT`. Stateless HTTP is on (no sticky sessions).
+  The `umbra-mcp` console script still takes no argv, so a client that
+  appends the package identifier keeps working.
 
 ### Fixed
 

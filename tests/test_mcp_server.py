@@ -94,6 +94,69 @@ def test_context_resource_matches_llm_context():
     assert payload == llm_context()
 
 
+def test_build_server_registers_healthz_http_route():
+    server = ms.build_server()
+    paths = [route.path for route in server._custom_starlette_routes]
+    assert "/healthz" in paths
+
+
+def test_run_stdio_is_the_default(monkeypatch):
+    seen: dict = {}
+
+    class _Stub:
+        def run(self, transport: str = "stdio", **kwargs: object) -> None:
+            seen["transport"] = transport
+            seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(ms, "build_server", lambda: _Stub())
+    ms.run()
+    assert seen["transport"] == "stdio"
+    assert seen["kwargs"] == {}
+
+
+def test_run_http_uses_streamable_http(monkeypatch):
+    seen: dict = {}
+
+    class _Stub:
+        def run(self, transport: str = "stdio", **kwargs: object) -> None:
+            seen["transport"] = transport
+            seen.update(kwargs)
+
+    monkeypatch.setattr(ms, "build_server", lambda: _Stub())
+    ms.run(http=True, host="0.0.0.0", port=9999, path="/mcp")
+    assert seen["transport"] == "streamable-http"
+    assert seen["host"] == "0.0.0.0"
+    assert seen["port"] == 9999
+    assert seen["streamable_http_path"] == "/mcp"
+    assert seen["stateless_http"] is True
+
+
+def test_cli_mcp_http_flag_forwards_bind(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    seen: dict = {}
+    monkeypatch.setattr(ms, "run", lambda **kwargs: seen.update(kwargs))
+    result = CliRunner().invoke(cli, ["mcp", "--http", "--host", "0.0.0.0", "--port", "9000"])
+    assert result.exit_code == 0, result.output
+    assert seen == {"http": True, "host": "0.0.0.0", "port": 9000, "path": "/mcp"}
+
+
+def test_cli_mcp_http_reads_railway_port_env(monkeypatch):
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    seen: dict = {}
+    monkeypatch.setattr(ms, "run", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setenv("PORT", "8080")
+    result = CliRunner().invoke(cli, ["mcp", "--http"])
+    assert result.exit_code == 0, result.output
+    assert seen["http"] is True
+    assert seen["port"] == 8080
+
+
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
