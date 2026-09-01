@@ -38,6 +38,11 @@ def _instruction_body(path: Path) -> list[str]:
             continue
         if line.startswith("CMD ["):
             continue
+        # Public image hardcodes extras so a Railway build-arg cannot drop
+        # FastAPI; the generic image keeps the ARG. The install line differs
+        # on purpose.
+        if line.startswith("RUN pip install"):
+            continue
         lines.append(line)
     return lines
 
@@ -58,12 +63,15 @@ def test_railway_start_command_hands_public_serve_to_the_entrypoint():
 
 
 def test_mcp_dockerfile_bakes_serve_and_mcp_and_public_cmd():
+    """Extras are a literal pip install, not ARG -- a Railway UI build-arg of
+    UMBRA_EXTRAS=mcp,viz would otherwise ship without FastAPI."""
     text = DOCKERFILE_MCP.read_text(encoding="utf-8")
-    match = re.search(r"^ARG UMBRA_EXTRAS=(\S+)", text, re.MULTILINE)
-    assert match, "Dockerfile.mcp must set ARG UMBRA_EXTRAS"
+    match = re.search(r'^RUN pip install "\.\[([^\]]+)\]"', text, re.MULTILINE)
+    assert match, "Dockerfile.mcp must pip install extras as a literal list"
     extras = {part.strip() for part in match.group(1).split(",")}
     assert "mcp" in extras
     assert "serve" in extras
+    assert "${UMBRA_EXTRAS}" not in text
     assert 'CMD ["serve", "--public"]' in text
     assert "ENTRYPOINT" in text
 

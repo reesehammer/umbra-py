@@ -353,6 +353,10 @@ found`, Railway replaced the image entrypoint with a bare command.
 `railway.toml` now wraps the entrypoint; you do not need a start command in
 the dashboard.
 
+Do **not** set a `UMBRA_EXTRAS` build argument in the Railway UI. The public
+image hardcodes `mcp,viz,serve`. An old `mcp,viz` arg drops FastAPI and
+`umbra serve --public` exits with "needs the 'serve' extra".
+
 Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance —
 `--public` refuses to start if they are set.
 

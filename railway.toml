@@ -2,8 +2,9 @@
 #
 # Railway's startCommand replaces the image ENTRYPOINT in exec form, so the
 # flag has to be handed to the entrypoint -- a bare `serve` is not on PATH
-# as a binary. Dockerfile.mcp bakes UMBRA_EXTRAS=mcp,viz,serve; no UI
-# build-arg is required.
+# as a binary. Dockerfile.mcp hardcodes pip install ".[mcp,viz,serve]"; do
+# not set a UMBRA_EXTRAS build-arg in the Railway UI (it used to override
+# the image to MCP-only and crash `umbra serve --public`).
 #
 # One URL, two front doors:
 #   https://<service>.up.railway.app/        STAC API (`/search`, `/docs`)
