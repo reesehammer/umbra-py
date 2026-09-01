@@ -23,8 +23,9 @@ umbra quicklook "<item-json-url>" --out scene.png
 ```python
 from umbra_py import UmbraCatalog, save_quicklook
 
-item = next(UmbraCatalog().search(start="2024-02-08", end="2024-02-08",
-                                  product_types=["GEC"], limit=1))
+item = next(
+    UmbraCatalog().search(start="2024-02-08", end="2024-02-08", product_types=["GEC"], limit=1)
+)
 save_quicklook(item, "scene.png")
 ```
 
@@ -156,11 +157,16 @@ umbra quicklook "<url>" --out big.png \
 from umbra_py import UmbraCatalog, save_quicklook
 
 catalog = UmbraCatalog()
-for i, item in enumerate(catalog.search(
-    bbox=(-118.42, 33.90, -118.36, 33.96),   # LAX
-    start="2024-01-01", end="2024-12-31",
-    product_types=["GEC"], max_per_task=1, limit=10,
-)):
+for i, item in enumerate(
+    catalog.search(
+        bbox=(-118.42, 33.90, -118.36, 33.96),  # LAX
+        start="2024-01-01",
+        end="2024-12-31",
+        product_types=["GEC"],
+        max_per_task=1,
+        limit=10,
+    )
+):
     save_quicklook(item, f"lax_{i:02d}.png", db=True, colormap="magma")
 ```
 
@@ -169,7 +175,7 @@ for i, item in enumerate(catalog.search(
 ```python
 from umbra_py import quicklook
 
-img = quicklook(item, db=True, max_size=1024)   # a PIL.Image
+img = quicklook(item, db=True, max_size=1024)  # a PIL.Image
 img.rotate(90).save("rotated.png")
 ```
 

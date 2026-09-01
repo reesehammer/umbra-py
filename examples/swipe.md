@@ -59,7 +59,7 @@ from umbra_py import UmbraCatalog, save_swipe_map, select_change_frames
 
 catalog = UmbraCatalog()
 found = list(catalog.search(area="Centerfield", start="2024-01-01", end="2024-12-31"))
-before, after = select_change_frames(found, frames=2)   # earliest, latest
+before, after = select_change_frames(found, frames=2)  # earliest, latest
 
 save_swipe_map(before, after, "swipe.html", db=True)
 ```

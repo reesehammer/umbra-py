@@ -50,9 +50,14 @@ umbra change "<earlier-url>" "<later-url>" --out change.png
 from umbra_py import UmbraCatalog, save_change_composite, select_change_frames
 
 # Auto-select frames from a site's passes...
-passes = list(UmbraCatalog().search(
-    area="Centerfield", product_types=["GEC"], start="2024-01-01", end="2024-12-31",
-))
+passes = list(
+    UmbraCatalog().search(
+        area="Centerfield",
+        product_types=["GEC"],
+        start="2024-01-01",
+        end="2024-12-31",
+    )
+)
 save_change_composite(select_change_frames(passes, frames=2), "change.png", db=True)
 
 # ...or hand-pick and pass them straight through (oldest first).
@@ -82,9 +87,14 @@ umbra change --area "Centerfield" --start 2024-01-01 --end 2024-12-31 \
 ```python
 from umbra_py import UmbraCatalog, save_change_animation
 
-series = list(UmbraCatalog().search(
-    area="Centerfield", product_types=["GEC"], start="2024-01-01", end="2024-12-31",
-))
+series = list(
+    UmbraCatalog().search(
+        area="Centerfield",
+        product_types=["GEC"],
+        start="2024-01-01",
+        end="2024-12-31",
+    )
+)
 save_change_animation(series, "lapse.gif", db=True, fps=2)
 ```
 
@@ -219,8 +229,10 @@ from umbra_py import UmbraCatalog, save_change_composite
 
 passes = sorted(
     UmbraCatalog().search(
-        area="Centerfield", product_types=["GEC"],
-        start="2024-01-01", end="2024-12-31",
+        area="Centerfield",
+        product_types=["GEC"],
+        start="2024-01-01",
+        end="2024-12-31",
     ),
     key=lambda i: i.datetime,  # oldest → newest
 )
