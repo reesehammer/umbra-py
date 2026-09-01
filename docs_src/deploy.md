@@ -266,31 +266,36 @@ umbra mcp --http --host 0.0.0.0 --port 8000
 ### Docker
 
 The image entrypoint treats a first argument of `mcp` like `serve`: fetch the
-published catalog index on first boot, then listen. Build with the MCP extra
-(and `viz` if you want quicklook / change / timescan pictures):
+published catalog index on first boot, then listen. `Dockerfile.mcp` bakes the
+MCP extra (and `viz` for quicklook / change / timescan pictures):
 
 ```bash
-docker build --build-arg UMBRA_EXTRAS=mcp,viz -t umbra-py:mcp .
-docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:mcp mcp
+docker build -f Dockerfile.mcp -t umbra-py:mcp .
+docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:mcp
 ```
 
 ### Railway
 
-The repo ships `railway.toml`. Create a service from this GitHub repo, then:
+The repo ships `railway.toml` and `Dockerfile.mcp`. Create a service from this
+GitHub repo and deploy; extras and the start command are already in those files.
 
-1. **Build:** Dockerfile at the repo root. Set a Docker **build argument**
-   `UMBRA_EXTRAS=mcp,viz` (the default image only has `[serve]`, which cannot
-   start `umbra mcp`).
-2. **Start command:** `mcp` (already in `railway.toml`). The entrypoint
-   fetches `catalog.db` if missing and binds `0.0.0.0:$PORT`.
-3. **Healthcheck:** `GET /healthz` (timeout ≥ a few minutes on first boot;
-   the index download is large).
-4. **Volume (optional):** mount `/data` so the index survives deploys.
-5. **Do not** set `UMBRA_CANOPY_TOKEN` or model API keys on a public
-   instance.
+A volume is **not** required for the first boot. `/data` is writable in the
+image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). Attach
+a volume at `/data` after the service is green if you want that index to
+survive the next deploy.
 
-Point a client at `https://<your-service>.up.railway.app/mcp` (or a custom
-domain). Claude Desktop / Code remote MCP:
+`*.railway.internal` is Railway's **private** mesh DNS — only other services in
+the same project can reach it. Claude and the Anthropic directory cannot.
+After a green deploy: **Settings → Networking → Generate Domain**, then point
+clients at `https://<generated>.up.railway.app/mcp` (or a custom domain).
+
+If a previous deploy crashed with `exec: mcp: not found`, Railway replaced the
+image entrypoint with a bare `mcp`. `railway.toml` now wraps the entrypoint;
+you do not need a start command in the dashboard.
+
+Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance.
+
+Claude Desktop / Code remote MCP:
 
 ```json
 {
