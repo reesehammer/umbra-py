@@ -25,6 +25,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and failed `ruff format --check`.
 
 ### Fixed
+- **Railway Volume at `/data` is writable by the image user.** A Railway
+  Volume is root-owned and hides the image's `chown`, so first boot failed
+  with `PermissionError: '/data/umbra-py'` and fell back to a live S3 walk.
+  The entrypoint now `chown`s `/data` as root and drops to `umbra` (uid
+  10001) before `umbra index fetch`.
 - **Railway Metal builder: drop the Dockerfile `VOLUME` instruction.** The
   builder rejects `VOLUME ["/data"]` (`use Railway Volumes`) even when a
   Railway Volume is already mounted at `/data`. `/data` stays a normal

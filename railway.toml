@@ -5,8 +5,8 @@
 # Dockerfile.mcp bakes UMBRA_EXTRAS=mcp,viz; no UI build-arg is required.
 #
 # `/data` is writable without a volume. A Railway Volume mounted at /data
-# keeps catalog.db across deploys. Do not add a Dockerfile VOLUME — the
-# Metal builder rejects it.
+# keeps catalog.db across deploys (the entrypoint chowns it, then drops
+# to umbra). Do not add a Dockerfile VOLUME — the Metal builder rejects it.
 # Do not set UMBRA_CANOPY_TOKEN or model API keys on a public instance.
 #
 # `.railway.internal` is private mesh DNS. Generate a public domain for

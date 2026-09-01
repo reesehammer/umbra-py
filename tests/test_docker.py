@@ -9,6 +9,7 @@ account. Same spirit as ``test_mcp_registry.py``.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -82,6 +83,25 @@ def test_entrypoint_treats_mcp_like_serve():
     assert 'PORT="${PORT:-${UMBRA_PORT:-8000}}"' in text
     assert "umbra mcp --http" in text
     assert "XDG_CACHE_HOME" in text or "INDEX_DB" in text
+
+
+def test_entrypoint_chowns_data_and_drops_root_before_umbra():
+    """Railway Volumes are root-owned; fetch must not run as root or as a
+    user who cannot mkdir /data/umbra-py."""
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    drop_at = text.index("os.setuid")
+    assert "chown -R umbra:umbra" in text[:drop_at]
+    assert drop_at < text.index("umbra index fetch")
+    assert drop_at < text.index("exec umbra")
+    for path in (DOCKERFILE, DOCKERFILE_MCP):
+        assert not re.search(r"^USER umbra\s*$", path.read_text(encoding="utf-8"), re.M), path
+    snippet = re.search(
+        r"exec python -c '(.*?)' /usr/local/bin/docker-entrypoint.sh",
+        text,
+        re.S,
+    )
+    assert snippet, "entrypoint must drop privileges with python -c"
+    ast.parse(snippet.group(1))
 
 
 def test_deploy_docs_do_not_advertise_bare_mcp_start_command():

@@ -44,8 +44,10 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
   can answer queries yet (readiness — the first-boot fetch may still be in
   flight). It is wired to a Docker `HEALTHCHECK` and is exactly what a Kubernetes
   liveness/readiness probe wants.
-- **Runs unprivileged.** The process runs as a non-root user that owns only the
-  `/data` volume.
+- **Runs unprivileged.** The entrypoint starts as root only long enough to
+  `chown` a mounted `/data` (Railway Volumes are root-owned and hide the
+  image's `chown`), then drops to uid 10001 (`umbra`) before any `umbra`
+  command.
 - **Doubles as the CLI.** Any other command runs the full CLI:
   `docker run --rm umbra-py search --area "Beet Piler" --limit 5`.
 
@@ -283,7 +285,8 @@ A volume is **not** required for the first boot. `/data` is writable in the
 image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
 Railway Volume mounted at `/data` keeps that index across deploys. Do **not**
 put `VOLUME ["/data"]` in the Dockerfile — Railway's Metal builder rejects it
-even when a Railway Volume is attached.
+even when a Railway Volume is attached. The volume itself is root-owned; the
+entrypoint `chown`s it and drops to `umbra` so `catalog.db` can be written.
 
 `*.railway.internal` is Railway's **private** mesh DNS — only other services in
 the same project can reach it. Claude and the Anthropic directory cannot.
