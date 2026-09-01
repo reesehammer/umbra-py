@@ -280,9 +280,10 @@ The repo ships `railway.toml` and `Dockerfile.mcp`. Create a service from this
 GitHub repo and deploy; extras and the start command are already in those files.
 
 A volume is **not** required for the first boot. `/data` is writable in the
-image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). Attach
-a volume at `/data` after the service is green if you want that index to
-survive the next deploy.
+image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
+Railway Volume mounted at `/data` keeps that index across deploys. Do **not**
+put `VOLUME ["/data"]` in the Dockerfile — Railway's Metal builder rejects it
+even when a Railway Volume is attached.
 
 `*.railway.internal` is Railway's **private** mesh DNS — only other services in
 the same project can reach it. Claude and the Anthropic directory cannot.

@@ -49,12 +49,13 @@ RUN pip install ".[${UMBRA_EXTRAS}]"
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Run unprivileged and own the data volume.
+# Run unprivileged and own /data. Do not declare VOLUME: Railway's Metal
+# builder rejects it ("use Railway Volumes"). Mount /data at run time
+# (`docker run -v`, compose, or a Railway Volume).
 RUN useradd --create-home --uid 10001 umbra \
     && mkdir -p /data \
     && chown -R umbra:umbra /data
 USER umbra
-VOLUME ["/data"]
 
 EXPOSE 8000
 
