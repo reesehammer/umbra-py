@@ -162,6 +162,17 @@ def test_appending_the_identifier_would_still_start_the_server():
     assert list(inspect.signature(main).parameters) == []
 
 
+def test_umbra_mcp_help_documents_http():
+    from click.testing import CliRunner
+
+    from umbra_py.cli import cli
+
+    result = CliRunner().invoke(cli, ["mcp", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--http" in result.output
+    assert "Streamable HTTP" in result.output
+
+
 def test_the_declared_environment_variables_are_ones_the_package_reads():
     """A declared variable a client sets and nothing consumes is a lie."""
     sources = "\n".join(

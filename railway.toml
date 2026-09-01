@@ -1,0 +1,20 @@
+# Hosted Streamable-HTTP MCP (`umbra mcp --http`).
+#
+# In the Railway service:
+#   Settings → Build → Dockerfile path: Dockerfile
+#   Docker build arg: UMBRA_EXTRAS=mcp,viz
+#   Custom start command is not needed: this file's startCommand is `mcp`,
+#   which the image entrypoint turns into index-fetch + HTTP MCP on $PORT.
+#
+# Optional volume mount at /data so catalog.db survives deploys.
+# Do not set UMBRA_CANOPY_TOKEN or model API keys on a public instance.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "mcp"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"

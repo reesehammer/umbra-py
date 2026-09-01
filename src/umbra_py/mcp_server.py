@@ -26,11 +26,13 @@ designed. Two design commitments carry over from the rest of the package:
 
 Run it with ``uvx --from 'umbra-py[mcp]' umbra-mcp`` (nothing installed),
 ``umbra mcp`` or ``python -m umbra_py.mcp_server`` (stdio transport either
-way). Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``) -- which is
+way). ``umbra mcp --http`` serves Streamable HTTP instead (``/mcp``, plus
+``GET /healthz``) so a host like Railway can expose the same tools at a URL.
+Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``) -- which is
 why the zero-install form needs ``--from``: this console script lives in the
 ``umbra-py`` distribution, so handing its name to ``uvx`` alone would look for a
 distribution called ``umbra-mcp`` (there is none) and would not install the
-extra either. ``server.json`` publishes the same command to the MCP registry.
+extra either. ``server.json`` publishes the stdio command to the MCP registry.
 """
 
 from __future__ import annotations
@@ -1418,9 +1420,35 @@ def narrate_change(
     return narration.to_dict()
 
 
+def run(
+    *,
+    http: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    path: str = "/mcp",
+) -> None:
+    """Start the MCP server.
+
+    stdio (the default) is what ``umbra-mcp`` / Claude Desktop speak. ``http``
+    serves Streamable HTTP so a remote client can POST to ``path``. Stateless
+    HTTP is on for the hosted case (Railway has no sticky sessions).
+    """
+    server = build_server()
+    if not http:
+        server.run()
+        return
+    server.run(
+        transport="streamable-http",
+        host=host,
+        port=port,
+        streamable_http_path=path,
+        stateless_http=True,
+    )
+
+
 def main() -> None:
-    """Entry point for the ``umbra-mcp`` console script / ``umbra mcp``."""
-    build_server().run()
+    """Entry point for the ``umbra-mcp`` console script (stdio, no argv)."""
+    run()
 
 
 def build_server() -> MCPServer:
@@ -1466,6 +1494,14 @@ def build_server() -> MCPServer:
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
+
+    @server.custom_route("/healthz", methods=["GET"], name="healthz")
+    async def _healthz(request: Any) -> Any:
+        # Public, unauthenticated. Railway / Docker HEALTHCHECK hit this;
+        # it is not an MCP tool. Starlette arrives with the mcp extra.
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({"ok": True})
 
     for fn in (
         search_catalog,

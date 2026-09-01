@@ -248,3 +248,59 @@ This is the one step that needs the `viz` extra
 scene, and a site whose asset won't render is skipped with a warning rather than
 failing the build. Without `--featured` the showcase is unchanged and stays
 stdlib-only.
+
+## Remote MCP (Railway)
+
+`umbra mcp` is stdio by default (Claude Desktop / `uvx --from 'umbra-py[mcp]' umbra-mcp`).
+`--http` serves the **same tools** over Streamable HTTP so a client can connect
+to a URL instead of spawning a process:
+
+```bash
+umbra mcp --http --host 0.0.0.0 --port 8000
+# POST http://127.0.0.1:8000/mcp
+# GET  http://127.0.0.1:8000/healthz
+```
+
+`$PORT` (Railway) or `$UMBRA_PORT` is used when `--port` is omitted.
+
+### Docker
+
+The image entrypoint treats a first argument of `mcp` like `serve`: fetch the
+published catalog index on first boot, then listen. Build with the MCP extra
+(and `viz` if you want quicklook / change / timescan pictures):
+
+```bash
+docker build --build-arg UMBRA_EXTRAS=mcp,viz -t umbra-py:mcp .
+docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:mcp mcp
+```
+
+### Railway
+
+The repo ships `railway.toml`. Create a service from this GitHub repo, then:
+
+1. **Build:** Dockerfile at the repo root. Set a Docker **build argument**
+   `UMBRA_EXTRAS=mcp,viz` (the default image only has `[serve]`, which cannot
+   start `umbra mcp`).
+2. **Start command:** `mcp` (already in `railway.toml`). The entrypoint
+   fetches `catalog.db` if missing and binds `0.0.0.0:$PORT`.
+3. **Healthcheck:** `GET /healthz` (timeout ≥ a few minutes on first boot;
+   the index download is large).
+4. **Volume (optional):** mount `/data` so the index survives deploys.
+5. **Do not** set `UMBRA_CANOPY_TOKEN` or model API keys on a public
+   instance.
+
+Point a client at `https://<your-service>.up.railway.app/mcp` (or a custom
+domain). Claude Desktop / Code remote MCP:
+
+```json
+{
+  "mcpServers": {
+    "umbra": {
+      "url": "https://<your-service>.up.railway.app/mcp"
+    }
+  }
+}
+```
+
+This is an unofficial community host of Umbra's *open* data, not an Umbra
+product. Quicklooks stream their COGs; keep an eye on egress.
