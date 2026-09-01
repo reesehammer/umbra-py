@@ -132,7 +132,9 @@ exposes the same forward geocoder the CLI uses:
 ```python
 from umbra_py import geocode_place
 
-bbox, label = geocode_place("California")   # ((-124.4, 32.5, -114.1, 42.0), "California, United States")
+bbox, label = geocode_place(
+    "California"
+)  # ((-124.4, 32.5, -114.1, 42.0), "California, United States")
 items = list(catalog.search(bbox=bbox, start="2024-01-01", end="2024-12-31"))
 ```
 

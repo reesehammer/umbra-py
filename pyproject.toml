@@ -99,12 +99,12 @@ dev = [
     # `referencing` registry, which is how the render manifest's `stats` key
     # resolves its cross-file `$ref` to the stats schema without a network fetch.
     "jsonschema>=4.18",
-    # Capped below 0.16: ruff 0.16.0 began formatting fenced code blocks inside
-    # Markdown, which reformats the snippets in `examples/*.md` (and other .md)
-    # that were written against earlier ruff, turning `ruff format --check .`
-    # red on an unrelated file set. Cap keeps CI tooling deterministic; lift it
-    # deliberately in a dedicated PR that also reformats the Markdown examples.
-    "ruff>=0.4,<0.16",
+    # Floor at 0.16: that release began formatting fenced code blocks inside
+    # Markdown, and the `examples/*.md` snippets were reformatted against it.
+    # Cap below 0.17 so the next formatter change cannot turn `ruff format
+    # --check .` red on an unrelated file set; lift it in a dedicated PR that
+    # also reformats.
+    "ruff>=0.16,<0.17",
     "mypy>=1.8",
     "types-requests>=2.28",
     "types-defusedxml>=0.7",

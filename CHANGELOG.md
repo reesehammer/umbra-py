@@ -16,6 +16,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The `umbra-mcp` console script still takes no argv, so a client that
   appends the package identifier keeps working.
 
+### Changed
+- **Dev extra now requires ruff 0.16.** Ruff 0.16 formats fenced code
+  blocks inside Markdown, which the previous `<0.16` cap was there to
+  keep off CI. The pin is now `ruff>=0.16,<0.17` and the
+  `examples/*.md` snippets are reformatted against that formatter.
+  Replaces Dependabot #240, which lifted the cap without the reformat
+  and failed `ruff format --check`.
+
 ### Fixed
 - **Railway first deploy no longer execs a missing `mcp` binary.** Railway's
   start command replaces the image `ENTRYPOINT` in exec form, so
@@ -6018,7 +6026,7 @@ The detailed history of everything that landed on the way to this tag follows.
   ```python
   from umbra_py import CatalogIndex
 
-  with CatalogIndex.from_release() as index:   # download + open
+  with CatalogIndex.from_release() as index:  # download + open
       for item in index.search(area="centerfield"):
           print(item.summary())
   ```
@@ -6072,7 +6080,8 @@ The detailed history of everything that landed on the way to this tag follows.
 
   ```python
   from umbra_py import view
-  view(item, db=True)                    # opens the browser
+
+  view(item, db=True)  # opens the browser
   ```
 
   The contrast stretch is computed once over a whole-scene overview and shared
@@ -6097,8 +6106,8 @@ The detailed history of everything that landed on the way to this tag follows.
   from umbra_py import CatalogIndex
 
   with CatalogIndex("umbra.db") as index:
-      index.build(area="centerfield")            # walk S3 once, persist
-      list(index.search(area="centerfield"))     # local, no network
+      index.build(area="centerfield")  # walk S3 once, persist
+      list(index.search(area="centerfield"))  # local, no network
   ```
 
   Run `umbra index build` (or `CatalogIndex.build()`) with **no filters to
@@ -6193,6 +6202,7 @@ The detailed history of everything that landed on the way to this tag follows.
 
   ```python
   from umbra_py import UmbraCatalog, ItemCollection
+
   results = ItemCollection(UmbraCatalog().search(area="rome", limit=8))
   results  # -> gallery of metadata cards (offline, core install, no network)
   ```

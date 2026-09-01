@@ -67,12 +67,12 @@ from umbra_py import UmbraCatalog
 catalog = UmbraCatalog()
 items = list(
     catalog.search(
-        bbox=(-122.6, 37.5, -122.2, 37.9),   # spatial filter: SF Bay Area
-        start="2024-01-01",                  # inclusive date bounds (str or date)
+        bbox=(-122.6, 37.5, -122.2, 37.9),  # spatial filter: SF Bay Area
+        start="2024-01-01",  # inclusive date bounds (str or date)
         end="2024-03-31",
-        product_types=["GEC"],               # keep only items with a GEC GeoTIFF
-        limit=50,                            # stop after this many matches
-        max_per_task=1,                      # one acquisition per tasking campaign
+        product_types=["GEC"],  # keep only items with a GEC GeoTIFF
+        limit=50,  # stop after this many matches
+        max_per_task=1,  # one acquisition per tasking campaign
     )
 )
 ```
@@ -108,13 +108,13 @@ A few notes that matter for cartographic results:
 ```python
 m = footprint_map(
     items,
-    tiles="OpenStreetMap",   # basemap: any Folium-recognised tile name or URL
-    color="#ff5500",         # polygon outline + centroid marker colour
-    weight=2,                # polygon outline width in pixels
-    fill_opacity=0.15,       # polygon fill opacity (0 = outline only)
-    zoom_start=None,         # initial zoom level; ignored if items have a bbox
-    imagery=False,           # render the SAR image overlay (§5)
-    imagery_kwargs=None,     # per-overlay kwargs, see §5
+    tiles="OpenStreetMap",  # basemap: any Folium-recognised tile name or URL
+    color="#ff5500",  # polygon outline + centroid marker colour
+    weight=2,  # polygon outline width in pixels
+    fill_opacity=0.15,  # polygon fill opacity (0 = outline only)
+    zoom_start=None,  # initial zoom level; ignored if items have a bbox
+    imagery=False,  # render the SAR image overlay (§5)
+    imagery_kwargs=None,  # per-overlay kwargs, see §5
 )
 ```
 
@@ -167,10 +167,10 @@ m = footprint_map(
     items,
     imagery=True,
     imagery_kwargs={
-        "max_size": 2048,            # max pixel dim per overlay (default 1024)
-        "percentile": (2.0, 98.0),   # contrast stretch percentiles
-        "opacity": 1.0,              # overlay opacity 0..1
-        "asset": "GEC",              # asset key (rarely changed)
+        "max_size": 2048,  # max pixel dim per overlay (default 1024)
+        "percentile": (2.0, 98.0),  # contrast stretch percentiles
+        "opacity": 1.0,  # overlay opacity 0..1
+        "asset": "GEC",  # asset key (rarely changed)
     },
 )
 ```
@@ -217,8 +217,8 @@ click. The map weighs ~30 KB regardless of how many items it carries.
 m = footprint_map(
     items,
     lazy_imagery=True,
-    lazy_imagery_percentile=(2.0, 98.0),   # contrast stretch (same default)
-    lazy_imagery_asset="GEC",              # asset key (rarely changed)
+    lazy_imagery_percentile=(2.0, 98.0),  # contrast stretch (same default)
+    lazy_imagery_asset="GEC",  # asset key (rarely changed)
 )
 m.save("lazy.html")
 ```
@@ -299,8 +299,8 @@ feed into any 2D-aware GIS tool:
 
 ```python
 item = items[0]
-feature = item.to_geojson()           # dict
-print(feature["geometry"]["type"])    # 'Polygon'
+feature = item.to_geojson()  # dict
+print(feature["geometry"]["type"])  # 'Polygon'
 print(feature["properties"]["id"])
 ```
 
@@ -339,14 +339,17 @@ coverage accumulate over your requested window.
 ```python
 from umbra_py import UmbraCatalog, timeline_map
 
-items = list(UmbraCatalog().search(
-    start="2024-01-01", end="2024-06-30",
-    product_types=["GEC"],
-    max_per_task=1,
-    limit=200,
-))
+items = list(
+    UmbraCatalog().search(
+        start="2024-01-01",
+        end="2024-06-30",
+        product_types=["GEC"],
+        max_per_task=1,
+        limit=200,
+    )
+)
 
-m = timeline_map(items, period="P7D")   # one tick = one week
+m = timeline_map(items, period="P7D")  # one tick = one week
 m.save("coverage.html")
 ```
 
@@ -484,12 +487,15 @@ Plot every revisit of a tasking campaign on a single map. Useful for
 spotting how a site changed across the archive.
 
 ```python
-items = list(catalog.search(
-    bbox=(-118.42, 33.90, -118.36, 33.96),   # LAX
-    start="2024-01-01", end="2024-12-31",
-    product_types=["GEC"],
-    limit=200,
-))
+items = list(
+    catalog.search(
+        bbox=(-118.42, 33.90, -118.36, 33.96),  # LAX
+        start="2024-01-01",
+        end="2024-12-31",
+        product_types=["GEC"],
+        limit=200,
+    )
+)
 m = footprint_map(items, color="#0066cc", fill_opacity=0.05, imagery=False)
 m.save("lax_revisits.html")
 ```
@@ -500,14 +506,18 @@ One acquisition per tasking campaign, world-wide, no imagery (just
 footprints) — a quick overview of where Umbra has been collecting.
 
 ```python
-items = list(catalog.search(
-    start="2024-06-01", end="2024-06-30",
-    product_types=["GEC"],
-    max_per_task=1,
-    limit=300,
-))
-save_footprint_map(items, "june_2024.html", tiles="CartoDB dark_matter",
-                   color="#00ff88", fill_opacity=0.3)
+items = list(
+    catalog.search(
+        start="2024-06-01",
+        end="2024-06-30",
+        product_types=["GEC"],
+        max_per_task=1,
+        limit=300,
+    )
+)
+save_footprint_map(
+    items, "june_2024.html", tiles="CartoDB dark_matter", color="#00ff88", fill_opacity=0.3
+)
 ```
 
 ### High-fidelity SAR look at one acquisition
@@ -515,12 +525,11 @@ save_footprint_map(items, "june_2024.html", tiles="CartoDB dark_matter",
 Maximum overlay resolution, minimal map decoration.
 
 ```python
-item = next(catalog.search(start="2024-02-08", end="2024-02-08",
-                           product_types=["GEC"], limit=1))
+item = next(catalog.search(start="2024-02-08", end="2024-02-08", product_types=["GEC"], limit=1))
 m = footprint_map(
     [item],
     tiles="CartoDB positron",
-    fill_opacity=0,                       # no fill — let the imagery speak
+    fill_opacity=0,  # no fill — let the imagery speak
     weight=1,
     imagery=True,
     imagery_kwargs={"max_size": 4096, "percentile": (1.0, 99.0)},
@@ -536,7 +545,7 @@ from umbra_py import items_to_featurecollection
 
 gdf = gpd.GeoDataFrame.from_features(items_to_featurecollection(items)["features"])
 gdf.set_crs("EPSG:4326", inplace=True)
-gdf.explore()        # geopandas' own folium-backed map, with full pandas tooling
+gdf.explore()  # geopandas' own folium-backed map, with full pandas tooling
 ```
 
 ---

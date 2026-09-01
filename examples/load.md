@@ -27,8 +27,8 @@ from umbra_py import UmbraCatalog, to_xarray
 
 item = next(iter(UmbraCatalog().search(start="2024-02-08", end="2024-02-08", limit=1)))
 
-da = to_xarray(item, max_size=2048)   # cap the longest side; decimates via overviews
-print(da)                             # a 2D DataArray, dims ("y", "x")
+da = to_xarray(item, max_size=2048)  # cap the longest side; decimates via overviews
+print(da)  # a 2D DataArray, dims ("y", "x")
 ```
 
 `max_size` is worth setting for a first look: a full-resolution Umbra scene can
@@ -42,11 +42,11 @@ resolution (pair that with a `bbox`, below).
 The array carries its georeferencing with it:
 
 ```python
-da.dims              # ("y", "x")
-da.attrs["crs"]      # e.g. "EPSG:32618" — the raster's native CRS
+da.dims  # ("y", "x")
+da.attrs["crs"]  # e.g. "EPSG:32618" — the raster's native CRS
 da.attrs["transform"]  # affine transform, 6-tuple
-da.attrs["bounds"]   # (left, bottom, right, top) in that CRS
-da.attrs["units"]    # "amplitude" (or "dB" when db=True)
+da.attrs["bounds"]  # (left, bottom, right, top) in that CRS
+da.attrs["units"]  # "amplitude" (or "dB" when db=True)
 da.attrs["item_id"], da.attrs["datetime"], da.attrs["platform"]
 da.attrs["attribution"]  # "Contains Umbra open data, licensed under CC BY 4.0."
 ```
@@ -55,7 +55,7 @@ The `y` axis descends (north-up) and `x` ascends, both as cell-center
 coordinates — so slicing by coordinate works the way you'd expect:
 
 ```python
-da.sel(x=slice(x0, x1), y=slice(y0, y1))   # note y is descending
+da.sel(x=slice(x0, x1), y=slice(y0, y1))  # note y is descending
 ```
 
 If you have [`rioxarray`](https://corteva.github.io/rioxarray/) installed, attach
@@ -116,7 +116,7 @@ non-positive pixels it can't represent:
 
 ```python
 db = to_xarray(item, max_size=2048, db=True)
-db.plot.imshow(cmap="gray")          # xarray's matplotlib accessor
+db.plot.imshow(cmap="gray")  # xarray's matplotlib accessor
 ```
 
 By default (`masked=True`) nodata and non-positive pixels become `NaN` so they
