@@ -31,8 +31,9 @@ amplitude, not a calibrated backscatter coefficient.
 
 There is no STAC API on the open bucket. `UmbraCatalog.search` paginates S3
 listings and is slow on an unconstrained query — that is why
-`umbra index fetch` / `CatalogIndex.from_release()` exist. Prefer `--local`
-for anything you will run more than once.
+`umbra index fetch` / `CatalogIndex.from_release()` exist, and why the
+community `umbra serve --public` host exists (see [Deploy](../deploy.md)).
+Prefer `--local` for anything you will run more than once.
 
 `area=` is a task-directory name, not a geocoded place. `--place` (CLI only)
 geocodes via Nominatim to a **rectangle**, so it can include nearby ground
@@ -54,11 +55,15 @@ arrays. They have not been cross-checked against
 [MultiRTC](https://github.com/MultiSAR/MultiRTC). Over extreme relief, or
 when you need a survey-grade RTC product, compare before you publish numbers.
 
-## No public hosted API
+## Community STAC API, not an Umbra product
 
-`umbra serve` and `docker compose up` stand up a read-only STAC API on
-your machine. There is no community instance. A public one is a policy
-decision (COG-streaming egress) and waits on talking to Umbra.
+Umbra's open catalog is still a static tree with no official search API.
+`umbra serve --public` (the Railway host) is an unofficial community
+instance: STAC search + MCP on one URL, artifacts off so this host does
+not proxy rasters, a per-client rate limit, and CC-BY license headers.
+Asset `href`s point at Umbra's public bucket — stream them yourself.
+Do not set a Canopy token or a model key on that instance. See
+[Deploy](../deploy.md).
 
 ## AI is opt-in and never implicit
 

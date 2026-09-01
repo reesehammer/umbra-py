@@ -1,16 +1,19 @@
-# Hosted Streamable-HTTP MCP (`umbra mcp --http`). Same recipe as Dockerfile;
-# extras and the default command differ so a Railway first deploy needs no
-# UI build-arg and no start-command override of the image ENTRYPOINT.
+# Hosted community STAC API + Streamable-HTTP MCP (`umbra serve --public`).
+# Same recipe as Dockerfile; extras and the default command differ so a
+# Railway first deploy needs no UI build-arg and no start-command override
+# of the image ENTRYPOINT.
 #
-#     docker build -f Dockerfile.mcp -t umbra-py:mcp .
-#     docker run -p 8000:8000 -v umbra-data:/data umbra-py:mcp
+#     docker build -f Dockerfile.mcp -t umbra-py:public .
+#     docker run -p 8000:8000 -v umbra-data:/data umbra-py:public
+#     # STAC at http://localhost:8000/search  MCP at http://localhost:8000/mcp
 #
 # `/data` is writable without a volume (the published catalog.db is ~17 MB).
 # Mount a volume there after the service is green so later deploys skip the fetch.
 FROM python:3.12-slim AS runtime
 
-# `mcp` pulls `viz` (see pyproject); both named so a future split still renders.
-ARG UMBRA_EXTRAS=mcp,viz
+# `mcp` pulls `viz` (see pyproject); `serve` is FastAPI. Named separately so a
+# future split of the extras still renders and still speaks STAC.
+ARG UMBRA_EXTRAS=mcp,viz,serve
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -56,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('UMBRA_PORT','8000'), timeout=4).status==200 else 1)"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["mcp"]
+CMD ["serve", "--public"]

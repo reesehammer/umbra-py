@@ -18,9 +18,10 @@ arrays without writing the same 500 lines of glue first.
 (no install)
 
 > **Status:** v0.1.1. Discovery, download, xarray loading,
-> SICD → geocoded COG, change/timescan composites, chips, a local STAC API, and
-> an MCP server all ship. This is **not** an InSAR toolbox (phase is not
-> preserved through convert). Not affiliated with Umbra Lab, Inc.
+> SICD → geocoded COG, change/timescan composites, chips, a STAC API
+> (`umbra serve`, with a community host), and an MCP server all ship. This is
+> **not** an InSAR toolbox (phase is not preserved through convert). Not
+> affiliated with Umbra Lab, Inc.
 
 ## Install
 
@@ -109,9 +110,11 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
 
 That command is published to the [MCP registry](https://registry.modelcontextprotocol.io/)
-as `io.github.reesehammer/umbra-mcp`. `umbra mcp --http` serves the same tools
-over Streamable HTTP (`POST /mcp`) for a host like Railway. A local STAC API
-is `umbra serve` (needs `[serve]`); `docker compose up` is the one-command form.
+as `io.github.reesehammer/umbra-mcp`. A community host serves the same tools
+over Streamable HTTP (`POST /mcp`) **and** a read-only STAC API (`/search`,
+`/docs`) on one URL — `umbra serve --public`. Point `pystac-client` at the
+Railway public domain; see [Deploy](https://umbra-py.space/deploy/).
+`docker compose up` is the one-command self-host.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 

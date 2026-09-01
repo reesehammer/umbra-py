@@ -27,7 +27,8 @@ designed. Two design commitments carry over from the rest of the package:
 Run it with ``uvx --from 'umbra-py[mcp]' umbra-mcp`` (nothing installed),
 ``umbra mcp`` or ``python -m umbra_py.mcp_server`` (stdio transport either
 way). ``umbra mcp --http`` serves Streamable HTTP instead (``/mcp``, plus
-``GET /healthz``) so a host like Railway can expose the same tools at a URL.
+``GET /healthz``). The hosted community instance is ``umbra serve --public``:
+the same ``/mcp`` plus a STAC API on one process.
 Requires the ``mcp`` extra (``pip install 'umbra-py[mcp]'``) -- which is
 why the zero-install form needs ``--from``: this console script lives in the
 ``umbra-py`` distribution, so handing its name to ``uvx`` alone would look for a

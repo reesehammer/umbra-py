@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Hosted community STAC API on the same Railway URL as MCP
+  (`umbra serve --public`).** One process serves STAC search
+  (`/search`, `/collections`, `/sites`, `/docs`) and Streamable HTTP MCP
+  (`POST /mcp`). Public-instance guardrails: artifacts off (clients stream
+  asset hrefs from Umbra S3 themselves), a per-client rate limit (120/min,
+  `429` + `Retry-After`), CC-BY license headers on every response, uvicorn
+  proxy headers so the cap sees real clients, and a refuse of `--live`,
+  `--artifacts`, `--narrate`, `UMBRA_CANOPY_TOKEN`, and model API keys.
+  `railway.toml` / `Dockerfile.mcp` start `serve --public`. Pair with the
+  static showcase at `https://umbra-py.space/showcase/`.
 - **`umbra mcp --http`: Streamable HTTP transport for a hosted MCP server.**
   stdio stays the default (`umbra-mcp` / Claude Desktop / `uvx`). `--http`
   serves the same tools at `POST /mcp` with `GET /healthz` for orchestrators.

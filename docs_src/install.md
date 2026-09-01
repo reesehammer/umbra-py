@@ -32,6 +32,7 @@ Requires **Python 3.10+**.
 | Make maps, galleries, quicklooks             | `umbra-py[viz]`        |
 | Export the catalog to GeoParquet             | `umbra-py[export]`     |
 | Serve a STAC API                             | `umbra-py[serve]`      |
+| Host STAC + MCP (`umbra serve --public`)     | `umbra-py[serve,mcp]`  |
 | Drive the catalog from an LLM / agent        | `umbra-py[mcp]`, `[langchain]`, or `[llamaindex]` |
 | Natural-language search / scene description  | `umbra-py[ai]`         |
 
