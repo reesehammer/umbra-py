@@ -22,6 +22,22 @@
 #   docker run --rm umbra-py search --area "Beet Piler" --limit 5
 set -eu
 
+# Host mounts of /data (Railway Volumes, docker -v) are root-owned and hide
+# the image's chown, so `umbra` cannot mkdir /data/umbra-py. Take ownership
+# then drop to umbra before any umbra command. No gosu: python:slim has Python.
+if [ "$(id -u)" -eq 0 ]; then
+    data_root="${XDG_CACHE_HOME:-/data}"
+    mkdir -p "$data_root"
+    chown -R umbra:umbra "$data_root"
+    exec python -c 'import os, pwd, sys
+u = pwd.getpwnam("umbra")
+os.environ["HOME"] = u.pw_dir
+os.initgroups(u.pw_name, u.pw_gid)
+os.setgid(u.pw_gid)
+os.setuid(u.pw_uid)
+os.execv(sys.argv[1], sys.argv[1:])' /usr/local/bin/docker-entrypoint.sh "$@"
+fi
+
 # Passthrough: `docker run IMAGE <umbra subcommand>` runs the CLI directly.
 # Bare run or explicit `serve` → STAC API. Explicit `mcp` → Streamable HTTP MCP.
 if [ "$#" -gt 0 ] && [ "$1" != "serve" ] && [ "$1" != "mcp" ]; then
