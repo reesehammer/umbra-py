@@ -35,6 +35,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and failed `ruff format --check`.
 
 ### Fixed
+- **Railway `umbra serve --public` no longer dies for want of FastAPI.**
+  `Dockerfile.mcp` installed extras from `ARG UMBRA_EXTRAS`, so a dashboard
+  build-arg left over from the MCP-only host (`mcp,viz`) overrode the new
+  default and shipped an image without `[serve]`. The public Dockerfile now
+  hardcodes `pip install ".[mcp,viz,serve]"`.
 - **Railway Volume at `/data` is writable by the image user.** A Railway
   Volume is root-owned and hides the image's `chown`, so first boot failed
   with `PermissionError: '/data/umbra-py'` and fell back to a live S3 walk.

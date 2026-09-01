@@ -11,9 +11,12 @@
 # Mount a volume there after the service is green so later deploys skip the fetch.
 FROM python:3.12-slim AS runtime
 
-# `mcp` pulls `viz` (see pyproject); `serve` is FastAPI. Named separately so a
-# future split of the extras still renders and still speaks STAC.
-ARG UMBRA_EXTRAS=mcp,viz,serve
+# Extras are hardcoded, not an ARG. A Railway dashboard build-arg of
+# UMBRA_EXTRAS=mcp,viz (left over from the MCP-only host) would otherwise
+# override the default and ship an image without FastAPI -- `umbra serve
+# --public` then crashes with "needs the 'serve' extra".
+# `mcp` pulls `viz`; `serve` is FastAPI. Named separately so a future split
+# of the extras still renders and still speaks STAC.
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -37,7 +40,7 @@ COPY src ./src
 # needs, not documentation.
 COPY docs/schemas ./docs/schemas
 
-RUN pip install ".[${UMBRA_EXTRAS}]"
+RUN pip install ".[mcp,viz,serve]"
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
