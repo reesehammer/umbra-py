@@ -16,7 +16,7 @@ API (`umbra serve`) and MCP server sit on the same host.
     required. Build your own with [`umbra showcase`](cli.md).
 
 !!! note "Status"
-    **v0.1.1.** Discovery, download, xarray loading,
+    **v0.1.2.** Discovery, download, xarray loading,
     SICD → geocoded COG, change composites, chips, a STAC API
     (`umbra serve`, with a community host), and an MCP server all ship.
     This is not an InSAR toolbox — see [limitations](guides/limitations.md).

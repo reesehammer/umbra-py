@@ -12,8 +12,8 @@ abstract: "Search, preview, load, and convert Umbra open SAR. Umbra ships no sea
 type: software
 authors:
   - name: "umbra-py contributors"
-version: 0.1.1
-date-released: "2026-08-21"
+version: 0.1.2
+date-released: "2026-09-02"
 license: Apache-2.0
 repository-code: "https://github.com/reesehammer/umbra-py"
 url: "https://umbra-py.space/"
