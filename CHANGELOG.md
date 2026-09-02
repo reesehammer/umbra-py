@@ -27,6 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   appends the package identifier keeps working.
 
 ### Changed
+- **Public one-liners name the gap, not just the toolkit.** PyPI / docs /
+  GitHub / MCP-registry descriptions now lead with "Umbra ships no search
+  API" and the community STAC API + MCP, instead of "a local STAC API via
+  `umbra serve`". The MCP registry blurb is still ≤100 characters.
 - **Dev extra now requires ruff 0.16.** Ruff 0.16 formats fenced code
   blocks inside Markdown, which the previous `<0.16` cap was there to
   keep off CI. The pin is now `ruff>=0.16,<0.17` and the

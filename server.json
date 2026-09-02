@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.reesehammer/umbra-mcp",
   "title": "Umbra open SAR archive",
-  "description": "Search, quicklook and measure Umbra's open SAR archive from any MCP client.",
+  "description": "Search, preview, and measure Umbra open SAR from any MCP client. Umbra ships no search API.",
   "version": "0.1.1",
   "repository": {
     "url": "https://github.com/reesehammer/umbra-py",

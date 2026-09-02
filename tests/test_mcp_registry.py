@@ -100,6 +100,8 @@ def test_server_json_has_the_fields_the_registry_requires():
     assert server["name"] == SERVER_NAME
     # The registry caps the description at 100 characters.
     assert 1 <= len(server["description"]) <= 100
+    # The listing has to name the gap: Umbra ships no search API.
+    assert "no search API" in server["description"]
     assert server["repository"] == {
         "url": "https://github.com/reesehammer/umbra-py",
         "source": "github",

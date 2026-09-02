@@ -6,12 +6,14 @@
 [![codecov](https://codecov.io/gh/reesehammer/umbra-py/branch/main/graph/badge.svg)](https://codecov.io/gh/reesehammer/umbra-py)
 [![Docs](https://img.shields.io/badge/docs-umbra--py.space-informational.svg)](https://umbra-py.space/)
 
-**A Python toolkit to discover, preview, load, and analyze [Umbra](https://umbra.space/open-data/) open SAR data.**
+**Search, preview, load, and convert [Umbra](https://umbra.space/open-data/) open SAR data.**
 
-Umbra publishes 16–25 cm synthetic aperture radar as CC BY 4.0 open data, but
-there is no search API — only a 17+ TB S3 bucket and a static STAC tree.
-`umbra-py` is the missing layer: search, preview, download, and analysis-ready
-arrays without writing the same 500 lines of glue first.
+Umbra publishes 16–25 cm SAR as CC BY 4.0 open data, but **no search API** —
+only a 17+ TB S3 bucket and a static STAC tree. `umbra-py` is that layer:
+search, preview, download, and analysis-ready arrays without the usual 500
+lines of glue. A community STAC API (`umbra serve`) and MCP server sit on
+the same host, so `pystac-client` and Claude can query the archive with
+nothing installed.
 
 📖 **Docs:** [umbra-py.space](https://umbra-py.space/)
 · **Showcase:** [browse the archive in the browser](https://umbra-py.space/showcase/)

@@ -8,7 +8,7 @@
 cff-version: 1.2.0
 message: "If you use umbra-py in your research, please cite it as below."
 title: umbra-py
-abstract: "A Python-first toolkit to make Umbra SAR open data easy to discover, load, download, and analyze."
+abstract: "Search, preview, load, and convert Umbra open SAR. Umbra ships no search API; umbra-py is that layer, plus a community STAC API and MCP server."
 type: software
 authors:
   - name: "umbra-py contributors"
