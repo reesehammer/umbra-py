@@ -737,14 +737,12 @@ follow-ons, none a blocker:
   `railway.toml`, `Dockerfile.mcp`.
 
 The read-only STAC API is shipped, and the hosted community instance is
-`umbra serve --public` (Railway's start command): STAC search + MCP on one
-URL, artifacts off, per-client rate limit, CC-BY headers, refuse of
-Canopy / model keys and of a live S3 walk. Open follow-ons, none a blocker:
+`umbra serve --public` at `https://api.umbra-py.space/` (Railway's start
+command): STAC search + MCP on one URL, artifacts off, per-client rate
+limit, CC-BY headers, refuse of Canopy / model keys and of a live S3 walk.
+Open follow-ons, none a blocker:
 
-- **A stable hostname.** The docs use `https://<your-service>.up.railway.app`
-  until a custom domain (for example under `umbra-py.space`) is pointed at
-  the service. The start command does not encode a hostname.
-- **STAC Index listing.** Once the public URL is stable, list it on
+- **STAC Index listing.** List `https://api.umbra-py.space/` on
   [stacindex.org](https://stacindex.org/) so generic STAC clients discover
   the open catalog without finding this repo first.
 - **Watch MCP render egress.** STAC search does not proxy rasters; MCP

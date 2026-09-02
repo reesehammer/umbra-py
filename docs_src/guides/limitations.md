@@ -58,9 +58,10 @@ when you need a survey-grade RTC product, compare before you publish numbers.
 ## Community STAC API, not an Umbra product
 
 Umbra's open catalog is still a static tree with no official search API.
-`umbra serve --public` (the Railway host) is an unofficial community
-instance: STAC search + MCP on one URL, artifacts off so this host does
-not proxy rasters, a per-client rate limit, and CC-BY license headers.
+`umbra serve --public` ([https://api.umbra-py.space/](https://api.umbra-py.space/))
+is an unofficial community instance: STAC search + MCP on one URL,
+artifacts off so this host does not proxy rasters, a per-client rate
+limit, and CC-BY license headers.
 Asset `href`s point at Umbra's public bucket — stream them yourself.
 Do not set a Canopy token or a model key on that instance. See
 [Deploy](../deploy.md).

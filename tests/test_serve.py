@@ -2525,6 +2525,37 @@ def test_public_app_mounts_mcp_and_notes_the_community_instance(index_path, tmp_
         assert health.json()["ready"] is True
         # Mounted, not a STAC 404 -- the MCP handler answers this path.
         assert client.post("/mcp").status_code != 404
+        # The community URL's Host header must not hit the SDK's localhost-only
+        # DNS-rebinding allowlist (421 Invalid Host header). Content-Type is
+        # required so the Host check runs at all (it sits behind it).
+        public_host = client.post(
+            "/mcp",
+            headers={"host": "api.umbra-py.space", "content-type": "application/json"},
+            content=b"{}",
+        )
+        assert public_host.status_code != 421
+        assert public_host.text != "Invalid Host header"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_local_mcp_mount_rejects_a_non_localhost_host(index_path, tmp_path):
+    """``umbra serve --mcp`` (not --public) keeps the SDK localhost allowlist."""
+    app = serve.build_app(index_path, mcp=True, artifacts=False, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        json_headers = {"content-type": "application/json"}
+        rejected = client.post(
+            "/mcp",
+            headers={**json_headers, "host": "api.umbra-py.space"},
+            content=b"{}",
+        )
+        assert rejected.status_code == 421
+        assert rejected.text == "Invalid Host header"
+        allowed = client.post(
+            "/mcp",
+            headers={**json_headers, "host": "localhost:8000"},
+            content=b"{}",
+        )
+        assert allowed.status_code != 421
 
 
 def test_rate_limit_does_not_count_healthz(index_path, tmp_path):
