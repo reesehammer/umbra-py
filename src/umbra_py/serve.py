@@ -2620,10 +2620,19 @@ def build_app(
     if mcp:
         from .mcp_server import build_server as _build_mcp_server
 
-        mcp_asgi = _build_mcp_server().streamable_http_app(
-            streamable_http_path="/mcp",
-            stateless_http=True,
-        )
+        mcp_kw: dict[str, Any] = {
+            "streamable_http_path": "/mcp",
+            "stateless_http": True,
+        }
+        if public:
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            # Reverse-proxied public host: the SDK's default localhost-only
+            # DNS-rebinding allowlist 421s Host: api.umbra-py.space.
+            mcp_kw["transport_security"] = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            )
+        mcp_asgi = _build_mcp_server().streamable_http_app(**mcp_kw)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):

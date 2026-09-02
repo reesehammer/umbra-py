@@ -5,28 +5,28 @@ tooling (`pystac-client`, the QGIS STAC plugin, `stac-browser`, leafmap) has
 nothing to query. [`umbra serve`](cli.md) restores that missing endpoint — a
 read-only STAC API over a local catalog index.
 
-A **community instance** of that API is hosted on Railway (`umbra serve
+A **community instance** of that API is hosted at
+[https://api.umbra-py.space/](https://api.umbra-py.space/) (`umbra serve
 --public`): STAC search at the service root and Streamable HTTP MCP at `/mcp`,
 on one URL. This page covers using that instance, then standing up your own.
 
 ## Hosted community API (no install)
 
-Generate a public domain on the Railway service (**Settings → Networking →
-Generate Domain**). `.railway.internal` is private mesh DNS and is not
-reachable from a laptop or from Claude.
+The public instance is at **[https://api.umbra-py.space/](https://api.umbra-py.space/)**:
+STAC search at the service root and Streamable HTTP MCP at `/mcp`, on one URL.
 
 ```bash
 # STAC search — any STAC API client
-curl "https://<your-service>.up.railway.app/search?limit=2"
-curl "https://<your-service>.up.railway.app/sites?top=5"
+curl "https://api.umbra-py.space/search?limit=2"
+curl "https://api.umbra-py.space/sites?top=5"
 # OpenAPI
-open "https://<your-service>.up.railway.app/docs"
+open "https://api.umbra-py.space/docs"
 ```
 
 ```python
 from pystac_client import Client
 
-api = Client.open("https://<your-service>.up.railway.app/")
+api = Client.open("https://api.umbra-py.space/")
 for item in api.search(collections=["umbra-open-data"], max_items=3).items():
     print(item.id, item.datetime)
 ```
@@ -37,7 +37,7 @@ Claude Desktop / Code remote MCP (same host):
 {
   "mcpServers": {
     "umbra": {
-      "url": "https://<your-service>.up.railway.app/mcp"
+      "url": "https://api.umbra-py.space/mcp"
     }
   }
 }

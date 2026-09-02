@@ -18,7 +18,8 @@ API (`umbra serve`) and MCP server sit on the same host.
 !!! note "Status"
     **v0.1.2.** Discovery, download, xarray loading,
     SICD → geocoded COG, change composites, chips, a STAC API
-    (`umbra serve`, with a community host), and an MCP server all ship.
+    (`umbra serve`, hosted at [https://api.umbra-py.space/](https://api.umbra-py.space/)),
+    and an MCP server all ship.
     This is not an InSAR toolbox — see [limitations](guides/limitations.md).
     Not affiliated with Umbra Lab, Inc.
 
@@ -37,7 +38,7 @@ API (`umbra serve`) and MCP server sit on the same host.
   browser viewers, before/after swipes, change composites, and time scans.
 - **ML prep** — cut scenes into georeferenced training chips with metadata.
 - **AI-native surfaces** — an MCP server (`umbra-mcp`), a read-only STAC API
-  (`umbra serve`, hosted with MCP on the same Railway URL), native LangChain /
+  (`umbra serve`, hosted at [https://api.umbra-py.space/](https://api.umbra-py.space/)), native LangChain /
   LlamaIndex tools, plus model-backed natural-language search, scene
   description, and visual similarity.
 

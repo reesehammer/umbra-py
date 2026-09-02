@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Document the public community STAC/MCP host.** Deploy, README, and the
+  docs homepage now use `https://api.umbra-py.space/` instead of Railway
+  placeholders. Self-host / operator Railway instructions are unchanged.
+
+### Fixed
+- **`umbra serve --public` accepts MCP requests addressed to a public
+  hostname.** The MCP SDK auto-installs a localhost-only DNS-rebinding Host
+  allowlist when `streamable_http_app()` is left at `host=127.0.0.1`, so
+  `POST https://api.umbra-py.space/mcp` returned `421 Invalid Host header`
+  while STAC on the same process answered 200. Public mode now disables that
+  check (the reverse proxy already owns Host). Local `umbra serve --mcp`
+  keeps the localhost allowlist.
+
 ## [0.1.2] — 2026-09-02
 
 Hosted community STAC API next to MCP. Umbra still ships no search API;
