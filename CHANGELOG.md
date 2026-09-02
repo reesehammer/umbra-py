@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-09-02
+
+Hosted community STAC API next to MCP. Umbra still ships no search API;
+`umbra serve --public` is that layer on one URL (STAC at `/search`, MCP at
+`/mcp`). Railway start, volume, and extras bugs that kept the public
+instance from booting are fixed. Listings name the gap.
+
 ### Added
 - **Hosted community STAC API on the same Railway URL as MCP
   (`umbra serve --public`).** One process serves STAC search
@@ -6543,6 +6550,7 @@ Initial release. Discovery + download core for Umbra's open SAR data.
   amplitude extraction from SICD.
 - Project scaffolding: Apache 2.0 license, packaging, CI, tests, and docs.
 
-[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.2
 [0.1.1]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.1
 [0.1.0]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.0

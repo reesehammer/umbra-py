@@ -19,7 +19,7 @@ nothing installed.
 · **Showcase:** [browse the archive in the browser](https://umbra-py.space/showcase/)
 (no install)
 
-> **Status:** v0.1.1. Discovery, download, xarray loading,
+> **Status:** v0.1.2. Discovery, download, xarray loading,
 > SICD → geocoded COG, change/timescan composites, chips, a STAC API
 > (`umbra serve`, with a community host), and an MCP server all ship. This is
 > **not** an InSAR toolbox (phase is not preserved through convert). Not
