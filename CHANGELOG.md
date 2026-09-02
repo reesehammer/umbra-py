@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Document the public community STAC/MCP host.** Deploy, README, and the
+  docs homepage now use `https://api.umbra-py.space/` instead of Railway
+  placeholders. Self-host / operator Railway instructions are unchanged.
+
 ## [0.1.2] — 2026-09-02
 
 Hosted community STAC API next to MCP. Umbra still ships no search API;

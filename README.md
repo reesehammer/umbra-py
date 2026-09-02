@@ -114,8 +114,8 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 That command is published to the [MCP registry](https://registry.modelcontextprotocol.io/)
 as `io.github.reesehammer/umbra-mcp`. A community host serves the same tools
 over Streamable HTTP (`POST /mcp`) **and** a read-only STAC API (`/search`,
-`/docs`) on one URL — `umbra serve --public`. Point `pystac-client` at the
-Railway public domain; see [Deploy](https://umbra-py.space/deploy/).
+`/docs`) on one URL — [https://api.umbra-py.space/](https://api.umbra-py.space/).
+Point `pystac-client` at that host; see [Deploy](https://umbra-py.space/deploy/).
 `docker compose up` is the one-command self-host.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
