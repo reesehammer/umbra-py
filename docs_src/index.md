@@ -47,6 +47,7 @@ API (`umbra serve`) and MCP server sit on the same host.
 - [Install](install.md) the right extras for what you need.
 - Work through the [Quickstart](quickstart.md).
 - Explore the [example notebooks](guides/notebooks.md).
+- Connect [Claude Desktop or Claude Code](mcp.md) to the hosted MCP.
 - Reach for the [CLI reference](cli.md) or the API reference in the sidebar.
 
 ## License & attribution
