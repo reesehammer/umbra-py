@@ -94,7 +94,30 @@ See [limitations](https://umbra-py.space/guides/limitations/).
 **Chip** scenes into georeferenced ML tiles: `umbra chips --area Centerfield
 --out chips/`.
 
-**Drive it from an agent.** Zero-install MCP server:
+**Drive it from an agent.** Copy-paste recipes for Claude Desktop and Claude
+Code: [Connect Claude (MCP)](https://umbra-py.space/mcp/).
+
+Zero-install remote MCP (no `uvx`):
+
+```bash
+# Claude Code
+claude mcp add --transport http umbra https://api.umbra-py.space/mcp --scope user
+```
+
+```json
+{
+  "mcpServers": {
+    "umbra": {
+      "url": "https://api.umbra-py.space/mcp"
+    }
+  }
+}
+```
+
+Paste that JSON into Claude Desktop (`claude_desktop_config.json`). Claude
+Code needs `"type": "http"` on the same URL — see the MCP page.
+
+Local stdio (server on your machine):
 
 ```bash
 uvx --from 'umbra-py[mcp]' umbra-mcp
@@ -112,10 +135,8 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
 
 That command is published to the [MCP registry](https://registry.modelcontextprotocol.io/)
-as `io.github.reesehammer/umbra-mcp`. A community host serves the same tools
-over Streamable HTTP (`POST /mcp`) **and** a read-only STAC API (`/search`,
-`/docs`) on one URL — [https://api.umbra-py.space/](https://api.umbra-py.space/).
-Point `pystac-client` at that host; see [Deploy](https://umbra-py.space/deploy/).
+as `io.github.reesehammer/umbra-mcp`. STAC for `pystac-client` / QGIS is
+[https://api.umbra-py.space/](https://api.umbra-py.space/) (not `/mcp`).
 `docker compose up` is the one-command self-host.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
