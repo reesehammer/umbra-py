@@ -84,6 +84,7 @@ nav:
   - Limitations: guides/limitations.md
   - Example notebooks: guides/notebooks.md
   - Deploy / self-host: deploy.md
+  - Connect Claude (MCP): mcp.md
   - CLI reference: cli.md
   - API reference:
       - Catalog search: reference/catalog.md
