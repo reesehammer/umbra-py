@@ -45,6 +45,8 @@ _EXPECTED_NAMES = {
     "find_similar_text",
     "describe_scene",
     "narrate_change",
+    "stamp_description",
+    "stamp_narration",
     "quicklook",
     "change_composite",
     "timescan",
@@ -186,7 +188,7 @@ def test_quicklook_tool_returns_png_artifact(sample_item_dict, monkeypatch):
         {"type": "tool_call", "name": "quicklook", "args": {"url": ITEM_URL}, "id": "call-1"}
     )
     # The caption is the human-readable content; the PNG bytes ride on .artifact.
-    assert msg.content.endswith(lc.ATTRIBUTION)
+    assert lc.ATTRIBUTION in msg.content
     assert isinstance(msg.artifact, bytes)
     assert msg.artifact.startswith(b"\x89PNG")
 

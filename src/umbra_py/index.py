@@ -1716,6 +1716,26 @@ class CatalogIndex:
         item.place = place
         return item
 
+    def get_by_href(self, href: str) -> UmbraItem | None:
+        """Return the indexed item with this STAC sidecar URL, or ``None``.
+
+        The href-keyed complement to :meth:`get`. MCP tools that take a
+        ``stac_href`` from ``search_catalog`` look the snapshot up here so
+        they do not re-fetch a live sidecar that may have grown extra
+        assets or different product filenames than the index the search
+        already answered from.
+        """
+        row = self._conn.execute(
+            "SELECT href, doc, place FROM items WHERE href = ? LIMIT 1",
+            (href,),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_href, doc, place = row
+        item = UmbraItem.from_dict(json.loads(doc), href=stored_href)
+        item.place = place
+        return item
+
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
         span, number of distinct tasks, how many items carry a baked place label

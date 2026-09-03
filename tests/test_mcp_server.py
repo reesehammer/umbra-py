@@ -69,6 +69,8 @@ def test_build_server_registers_expected_surface():
         "find_similar_text",
         "describe_scene",
         "narrate_change",
+        "stamp_description",
+        "stamp_narration",
     }
     resources = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert resources == {"umbra://context", "umbra://index/stats"}
@@ -753,7 +755,8 @@ def test_quicklook_returns_image_block(sample_item_dict, monkeypatch):
     monkeypatch.setattr(viz, "quicklook", lambda item, **kw: PILImage.new("RGB", (4, 4), (1, 2, 3)))
     out = ms.quicklook(ITEM_URL)
     assert isinstance(out[0], Image)
-    assert out[1].endswith(ms.ATTRIBUTION)  # caption carries the attribution line
+    assert ms.ATTRIBUTION in out[1]
+    assert '"source":"rendered"' in out[1]
 
 
 def _tiny_png(width: int = 128, height: int = 128) -> bytes:
@@ -785,9 +788,11 @@ def test_quicklook_prefers_a_baked_preview(sample_item_dict, monkeypatch, tmp_pa
 
     monkeypatch.setattr(viz, "quicklook", boom)
 
-    out = ms.quicklook(ITEM_URL)
+    out = ms.quicklook(ITEM_URL, max_size=1024)
     assert isinstance(out[0], Image)
-    assert "baked" in out[1]
+    assert "BAKED PREVIEW" in out[1]
+    assert "max_size=1024 was ignored" in out[1]
+    assert '"substituted":true' in out[1]
     assert out[0].data == baked
 
 
@@ -836,7 +841,7 @@ def test_image_tools_reach_the_client_as_image_blocks(sample_item_dict, monkeypa
     assert not result.is_error, result.content
     kinds = [type(block).__name__ for block in result.content]
     assert kinds == ["ImageContent", "TextContent"], kinds
-    assert result.content[1].text.endswith(ms.ATTRIBUTION)
+    assert ms.ATTRIBUTION in result.content[1].text
 
 
 def test_json_tools_keep_structured_output():
@@ -1671,10 +1676,68 @@ def test_describe_scene_without_key_returns_a_reading_kit(sample_item_dict, monk
 
     out = ms.describe_scene(ITEM_URL, preview="render")
     assert isinstance(out[0], Image)
-    assert "YOU are the vision" in out[1]
+    assert "stamp_description" in out[1]
+    assert "unvalidated" in out[1]
     assert "summary" in out[1]
     assert sample_item_dict["id"] in out[1]
     assert ms.AI_PROVENANCE in out[1]
+    assert "YOU are the vision" not in out[1]
+
+
+def test_stamp_description_validates_and_stamps():
+    out = ms.stamp_description(
+        {
+            "summary": "A bright grid of buildings beside a dark river.",
+            "observed_features": ["building grid"],
+            "confidence": "medium",
+            "caveats": [],
+        },
+        item_id="scene-1",
+        asset="GEC",
+        image={
+            "source": "baked",
+            "asset": "GEC",
+            "width": 128,
+            "height": 128,
+            "requested_max_size": 1024,
+            "db": True,
+        },
+    )
+    assert out["summary"].startswith("A bright grid")
+    assert out["item_id"] == "scene-1"
+    assert out["attribution"]
+    assert out["provenance"]
+    assert out["model"] == "client-kit"
+    assert out["image"]["source"] == "baked"
+    assert out["image"]["width"] == 128
+    assert any("128x128 px preview" in c for c in out["caveats"])
+
+
+def test_stamp_description_rejects_an_empty_summary():
+    with pytest.raises(Exception, match="summary"):
+        ms.stamp_description({"summary": "  "})
+
+
+@responses.activate
+def test_get_item_prefers_the_catalog_index_snapshot(sample_item_dict, monkeypatch, tmp_path):
+    """Live sidecars can grow extra assets or different GEC filenames; search
+    already answered from the index, so get_item must not contradict it."""
+    from umbra_py.index import CatalogIndex
+
+    indexed = copy.deepcopy(sample_item_dict)
+    live = copy.deepcopy(sample_item_dict)
+    live["assets"]["GEC"]["href"] = indexed["assets"]["GEC"]["href"].replace("02-10-11", "02-10-19")
+    db_path = tmp_path / "catalog.db"
+    with CatalogIndex(db_path) as index:
+        index.add(UmbraItem.from_dict(indexed, href=ITEM_URL))
+        index.commit()
+    monkeypatch.setattr(ms, "default_index_path", lambda: db_path)
+    responses.add(responses.GET, ITEM_URL, json=live, status=200)
+
+    card = ms.get_item(ITEM_URL)
+    gec = next(p for p in card["products"] if p["type"] == "GEC")
+    assert "02-10-11" in gec["url"]
+    assert "02-10-19" not in gec["url"]
 
 
 @responses.activate
@@ -1835,6 +1898,8 @@ def test_narrate_change_without_key_returns_a_reading_kit(sample_item_dict, monk
 
     out = ms.narrate_change([first_url, second_url])
     assert isinstance(out[0], Image)
-    assert "YOU are the vision" in out[1]
+    assert "stamp_narration" in out[1]
+    assert "unvalidated" in out[1]
     assert "changes" in out[1]
     assert ms.AI_PROVENANCE in out[1]
+    assert "YOU are the vision" not in out[1]

@@ -204,6 +204,16 @@ def test_get_missing_id_returns_none(tmp_path):
         assert idx.get("nope") is None
 
 
+def test_get_by_href_returns_item(tmp_path):
+    with _index(tmp_path) as idx:
+        item = idx.get("a")
+        assert item is not None
+        same = idx.get_by_href(item.href)
+        assert same is not None
+        assert same.id == item.id
+        assert idx.get_by_href("https://example.invalid/missing.json") is None
+
+
 def test_get_uses_the_id_index(tmp_path):
     # The keyed lookup rides an index; adding it is additive (no schema bump),
     # so a legacy or reopened database gains it too.
