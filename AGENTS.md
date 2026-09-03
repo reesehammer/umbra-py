@@ -309,7 +309,7 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
    `self.properties`. → verify: `pytest tests/test_models.py`.
 2. If user-facing, include it in `metadata_summary()` / `summary()`. → verify:
    summary string contains the new value.
-3. CHANGELOG entry under **Unreleased**.
+3. CHANGELOG entry under **Unreleased** (user-facing, 1–3 sentences; see §9).
 
 ### Add a new CLI flag
 1. Add the `@click.option` in the `cli/` module that owns the subcommand, next
@@ -374,7 +374,13 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   - What changed and why.
   - Any new public API (functions, CLI flags, env vars).
   - Test plan (what you ran; what a reviewer should run).
-  - A `CHANGELOG.md` entry under **Unreleased** for any user-visible change.
+- **CHANGELOG.md:** one bullet under **Unreleased** for any user-visible
+  change (new public surface, behavior change, bug a user could hit).
+  One to three sentences: name the CLI flag / function / schema and say
+  what the user can do now, or what broke. File lists, test names,
+  rejected alternatives, and `STRATEGY.md` citations belong in the PR
+  body, not here. Internal-only work (refactors, test-only, docs that
+  don't change a public recipe) gets no entry.
 - **Scoping out follow-ups:** if you defer something to keep the PR small
   (latent bug, missing test, adjacent refactor), add an entry to
   [`docs/TODO.md`](docs/TODO.md) in the same PR. The PR body alone is too easy to lose.

@@ -36,7 +36,13 @@ and offline. Please keep unit tests offline by mocking HTTP (see
   function that needs them (see `umbra_py/convert.py`).
 - **Match existing style.** `ruff` enforces formatting and import order; run it
   before pushing.
-- **Add a test** for new behavior, and a `CHANGELOG.md` entry under "Unreleased".
+- **Add a test** for new behavior.
+- **Changelog.** User-visible changes get a `CHANGELOG.md` entry under
+  "Unreleased": one to three sentences naming the public surface (CLI flag,
+  function, schema) and what the user can do now, or what broke. File lists,
+  test names, and design rationale belong in the PR body. Internal-only work
+  (refactors, test-only, docs that don't change a public recipe) gets no
+  entry.
 - **Be correct about SAR.** This is a domain where silent errors are easy. If a
   transform or parameter choice matters, say so in a docstring.
 
@@ -64,8 +70,8 @@ mismatch, then publishes to PyPI (Trusted Publisher) and submits
 1. Register the PyPI Trusted Publisher *before* the first tag (GitHub repo
    `reesehammer/umbra-py`, workflow `release.yml`, environment `pypi`).
 2. Move `CHANGELOG.md`'s `[Unreleased]` notes under `## [X.Y.Z] — YYYY-MM-DD`
-   with a short first-screen summary above the detailed bullets. Leave
-   Unreleased empty.
+   with a short first-screen summary above the bullets. Leave Unreleased
+   empty. Do not expand the bullets into a development diary.
 3. Set `date-released:` in `CITATION.cff` (and `doi:` after Zenodo mints one).
 4. `ruff check . && ruff format --check . && pytest -q` is green.
 5. Create a GitHub Release on tag `vX.Y.Z`. The Release body is the short
