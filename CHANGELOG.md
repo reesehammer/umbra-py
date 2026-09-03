@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Connect Claude (MCP) docs.** Copy-paste recipes for Claude Desktop and
+  Claude Code against `https://api.umbra-py.space/mcp`, plus local `uvx`
+  stdio. Claude Code needs `"type": "http"` (or `claude mcp add --transport
+  http`); Desktop uses the `url` JSON. Linked from Home, README, and Deploy.
+
 ### Changed
 - **Document the public community STAC/MCP host.** Deploy, README, and the
   docs homepage now use `https://api.umbra-py.space/` instead of Railway
