@@ -31,7 +31,13 @@ for item in api.search(collections=["umbra-open-data"], max_items=3).items():
     print(item.id, item.datetime)
 ```
 
-Claude Desktop / Code remote MCP (same host):
+**MCP** is a different path on the same host. Copy-paste for Claude Desktop
+and Claude Code: [Connect Claude (MCP)](mcp.md).
+
+```bash
+# Claude Code (remote). Desktop uses the JSON below — do not omit type in Code.
+claude mcp add --transport http umbra https://api.umbra-py.space/mcp --scope user
+```
 
 ```json
 {
