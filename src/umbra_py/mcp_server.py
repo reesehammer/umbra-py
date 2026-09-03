@@ -934,8 +934,11 @@ def _preview_caption(
         lines.append(
             "For a higher-resolution render (typically 1024 px, or any "
             "max_size), run a local server that streams the GeoTIFF: "
-            "uvx --from 'umbra-py[mcp]' umbra-mcp — or download the GEC href "
-            "from get_item and open it locally (QGIS, rasterio)."
+            "uvx --from 'umbra-py[mcp]' umbra-mcp."
+        )
+        lines.append(
+            "Or download the GEC href from get_item and open it locally "
+            "(QGIS, rasterio)."
         )
     else:
         lines.append(f"Rendered quicklook of {item.id} ({record['asset']}).")
