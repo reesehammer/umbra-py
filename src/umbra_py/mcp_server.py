@@ -11,18 +11,21 @@ The tools are thin wrappers over the existing public API — the CLI subcommands
 already map 1:1 to library functions, so the tool inventory was already
 designed. Two design commitments carry over from the rest of the package:
 
-- **Deterministic core, AI at the edges.** Almost nothing here calls a model:
-  the server searches, geocodes, downloads and renders; the *client's* model
-  plans and narrates. The one deliberate, opt-in exception is ``describe_scene``
-  (the C2 VLM reading), which consults a vision model only when an ``[ai]`` key
-  is configured — and even it holds the boundary: a model output never becomes a
-  coordinate, a URL, or a filter without passing through this deterministic
-  layer, and every reading is validated and stamped as an AI interpretation.
+- **Deterministic core, AI at the edges.** The server searches, geocodes,
+  downloads and renders; the *client's* model plans and narrates. A public
+  community host holds no vision key (that would be an open wallet), so
+  ``describe_scene`` / ``narrate_change`` return a *reading kit* — the PNG, the
+  packaged SAR-literacy prompt, and the JSON schema — and the client's already-
+  running model does the reading. A local stdio server with an ``[ai]`` key
+  still consults a vision model itself. Either way a model output never becomes
+  a coordinate, a URL, or a filter without passing through this deterministic
+  layer, and every server-side reading is stamped as an AI interpretation.
 - **Images are the API.** ``quicklook``/``change_composite``/``timescan``
-  return the rendered PNG as an MCP image content block, so the model *sees*
-  the radar scene — the differentiator over geo servers that return only JSON.
-  Compact context cards (:meth:`UmbraItem.to_llm_context`), not full STAC JSON,
-  are returned from search to protect the client's context window.
+  return the PNG as an MCP image content block, so the model *sees* the radar
+  scene. On a public host ``quicklook`` serves a baked catalog preview (no COG
+  proxy); tools that must stream Umbra GeoTIFFs refuse with a local-server
+  hint. Compact context cards (:meth:`UmbraItem.to_llm_context`), not full STAC
+  JSON, are returned from search to protect the client's context window.
 
 Run it with ``uvx --from 'umbra-py[mcp]' umbra-mcp`` (nothing installed),
 ``umbra mcp`` or ``python -m umbra_py.mcp_server`` (stdio transport either
@@ -46,7 +49,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
-from .constants import ATTRIBUTION, CANOPY_TOKEN_ENV, DATA_LICENSE
+from .constants import (
+    AI_PROVENANCE,
+    ATTRIBUTION,
+    CANOPY_TOKEN_ENV,
+    DATA_LICENSE,
+    POLARIZATION_CAVEAT,
+)
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import MissingDependencyError
@@ -96,6 +105,58 @@ def _png_bytes(image: Any) -> bytes:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
+
+
+#: ``umbra serve --public`` sets this to ``"0"`` so MCP tools that would stream
+#: Umbra COGs through the host refuse instead of proxying the archive. Local
+#: stdio / self-hosted MCP leave it unset (streaming allowed). Tests override
+#: via :func:`configure`.
+COG_STREAMING_ENV = "UMBRA_MCP_COG_STREAMING"
+
+_cog_streaming_override: bool | None = None
+
+
+def configure(*, cog_streaming: bool | None = None) -> None:
+    """Set process-wide MCP policy for this Python process.
+
+    ``cog_streaming=False`` is the public-host guardrail (do not proxy Umbra
+    COGs). ``None`` (the default) falls back to :data:`COG_STREAMING_ENV`.
+    """
+    global _cog_streaming_override
+    _cog_streaming_override = cog_streaming
+
+
+def _cog_streaming_allowed() -> bool:
+    if _cog_streaming_override is not None:
+        return _cog_streaming_override
+    raw = os.environ.get(COG_STREAMING_ENV, "1")
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _model_key_configured() -> bool:
+    """Whether a vision/chat key is set — the same trio ``describe`` / ``narrate`` use."""
+    return any(
+        os.environ.get(var) for var in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
+    )
+
+
+_COG_REFUSAL = (
+    "{tool} streams Umbra COGs (GeoTIFF overviews) through this host. "
+    "The public community instance does not proxy the archive — asset hrefs "
+    "from get_item point at Umbra's public S3 bucket for you to open locally "
+    "(QGIS, rasterio, or a local `uvx --from 'umbra-py[mcp]' umbra-mcp` server). "
+    "For a picture of one scene here, call quicklook: it serves a baked preview "
+    "from the catalog index, with no COG proxy. change_composite, timescan, "
+    "stack_stats, stack_provenance, pick_change_interval, narrate_change and "
+    "find_similar need a local server."
+)
+
+
+def _require_cog_streaming(tool: str) -> None:
+    """Refuse tools that would proxy Umbra rasters on a public instance."""
+    if _cog_streaming_allowed():
+        return
+    raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
 def _canopy_token() -> str | None:
@@ -213,15 +274,21 @@ def _resolve_semantic_area(
     Raises :class:`FileNotFoundError` if the semantic index has not been built,
     and (via :func:`~umbra_py.semantic.default_embedder`)
     :class:`~umbra_py.MissingDependencyError` when no embedding key is configured,
-    so it never runs implicitly.
+    so it never runs implicitly. Prefer ``search_catalog(area=..., fuzzy=True)``
+    or :func:`find_repeat_sites` when the query shares words with a task name
+    (``"beet piler"``); this path is for descriptions that share none.
     """
     from . import semantic as sem
 
     path = sem.default_semantic_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No semantic index at {path}. Build one first with 'umbra semantic "
-            "build' (natural-language 'describe the site' search needs it)."
+            f"No semantic index at {path}. For a site name you roughly know "
+            "(e.g. 'beet piler'), call search_catalog(area=..., fuzzy=True) or "
+            "find_repeat_sites(area=...) instead — those are deterministic and "
+            "need no embedding key. semantic=True is for a description that "
+            "shares no words with the task label (e.g. 'grain storage north "
+            "dakota') and needs 'umbra semantic build' plus an embedding key."
         )
     embedder = sem.default_embedder(model=model)
     with sem.SemanticTaskIndex(path) as index:
@@ -266,7 +333,8 @@ def search_catalog(
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
     task (site) name (set ``fuzzy`` to match it loosely -- word-order- and
     punctuation-independent and typo-tolerant, resolved deterministically with
-    no model call, so ``"utah centerfield"`` still reaches ``"Centerfield,
+    no model call, so ``"beet piler"`` still reaches ``"Beet Piler - ND"`` and
+    ``"utah centerfield"`` still reaches ``"Centerfield,
     Utah"``; set ``semantic`` instead to treat ``area`` as a plain-language
     *description* of a site whose name you don't know and resolve it to the
     closest task names by *meaning* via the prebuilt embedding index, so
@@ -300,7 +368,10 @@ def search_catalog(
     full STAC JSON, to protect the context window; call ``get_item`` for one
     item's full metadata.
 
-    ``semantic=True`` requires a task-embedding index built ahead of time with
+    Prefer ``fuzzy=True`` (or :func:`find_repeat_sites`) when ``area`` shares
+    words with a task name; that path is deterministic and needs no key.
+    ``semantic=True`` is only for a description that shares **no** tokens with
+    the label. It requires a task-embedding index built ahead of time with
     ``umbra semantic build`` and a user-supplied embedding key (``OPENAI_API_KEY``,
     optionally ``OPENAI_BASE_URL`` / ``UMBRA_EMBED_MODEL``); it raises a helpful
     setup error otherwise, so it never runs implicitly. The only model call is
@@ -427,7 +498,9 @@ def find_repeat_sites(
     tool ranks them, so ``find_repeat_sites → pick_change_interval →
     narrate_change`` is a complete chain a model can drive with no site known in
     advance — the deterministic answer to "where is there something to look at?"
-    (``STRATEGY.md`` §3's discovery moat; no model is called).
+    (``STRATEGY.md`` §3's discovery moat; no model is called). Reach for this
+    (or ``search_catalog(area=..., fuzzy=True)``) before ``semantic=True`` when
+    the site name is roughly known.
 
     The filters scope the *pool* of acquisitions the ranking is computed over,
     and are the same ones ``search_catalog`` takes: ``bbox``
@@ -755,21 +828,99 @@ def index_stats() -> dict[str, Any]:
     return stats
 
 
-def quicklook(url: str, asset: str = "GEC", db: bool = False, max_size: int = 1024) -> list[Any]:
-    """Render a scene's quicklook PNG and return it as an image block.
+def _try_baked_quicklook(item: UmbraItem, *, asset: str) -> tuple[bytes, str] | None:
+    """Return ``(png, note)`` if the index has a preview of this product."""
+    lookup = _baked_previews()
+    if lookup is None:
+        return None
+    baked = lookup(item.id)
+    if baked is None:
+        return None
+    from .describe import BAKED_PREVIEW_ASSET, _png_size
 
-    Streams the cloud-optimized product at ``url`` (default the analysis-ready
-    ``GEC``), applies a SAR-appropriate stretch (set ``db=True`` for a decibel
-    stretch), and returns the image so the model *sees* the radar scene, plus a
-    text block with the scene id and attribution.
+    recorded = (baked.asset or "").upper()
+    assumed = recorded or BAKED_PREVIEW_ASSET
+    if asset.upper() != assumed:
+        return None
+    size = _png_size(baked.png)
+    dim = f"{size[0]}x{size[1]} px " if size else ""
+    return baked.png, f"{dim}baked dB preview"
+
+
+def _baked_preview_missing(item_id: str) -> str:
+    return (
+        f"No baked preview for {item_id} in the local catalog index. Fetch the "
+        "published sidecar with 'umbra index fetch-thumbnails' (or bake with "
+        "'umbra index bake-thumbnails'). On the public community host, that "
+        "sidecar is what lets quicklook return a picture without proxying Umbra "
+        "COGs; a local `uvx --from 'umbra-py[mcp]' umbra-mcp` server can also "
+        "stream a fresh render."
+    )
+
+
+def _quicklook_png(
+    item: UmbraItem,
+    *,
+    asset: str = "GEC",
+    db: bool = False,
+    max_size: int = 1024,
+    preview: str = "auto",
+) -> tuple[bytes, str]:
+    """PNG bytes and caption for one scene, preferring a baked preview.
+
+    Shared by the MCP image block and the LangChain / LlamaIndex render tools
+    so all three front doors get the public-host baked path. ``preview`` is
+    ``"auto"`` (baked if present, else stream), ``"baked"`` (refuse if missing)
+    or ``"render"`` (always stream). A baked preview is always the decibel
+    stretch; a linear request still uses it and the caption says so.
     """
-    _, Image = _require_mcp()
+    from .describe import PREVIEW_SOURCES
+
+    if preview not in PREVIEW_SOURCES:
+        raise ValueError(
+            f"Unknown preview source {preview!r}. Choose one of {', '.join(PREVIEW_SOURCES)}."
+        )
+    if preview != "render":
+        baked = _try_baked_quicklook(item, asset=asset)
+        if baked is not None:
+            png, note = baked
+            if not db:
+                note += " (decibel stretch; requested linear)"
+            caption = f"Quicklook of {item.id} ({asset}, {note}). {ATTRIBUTION}"
+            return png, caption
+        if preview == "baked":
+            raise ValueError(_baked_preview_missing(item.id))
+    _require_cog_streaming("quicklook")
     from . import viz
 
-    item = _fetch_item(url)
     image = viz.quicklook(item, asset=asset, db=db, max_size=max_size)
     caption = f"Quicklook of {item.id} ({asset}). {ATTRIBUTION}"
-    return [Image(data=_png_bytes(image), format="png"), caption]
+    return _png_bytes(image), caption
+
+
+def quicklook(
+    url: str,
+    asset: str = "GEC",
+    db: bool = False,
+    max_size: int = 1024,
+    preview: str = "auto",
+) -> list[Any]:
+    """Return a scene's quicklook PNG as an image block.
+
+    Prefers a baked catalog preview (``preview="auto"``, the default) so a
+    public host can show the radar scene without proxying Umbra COGs and
+    without the ``[viz]`` extra. ``preview="baked"`` refuses rather than
+    stream; ``preview="render"`` always streams a fresh cloud-optimized
+    overview (needs ``[viz]``, and is refused on ``umbra serve --public``).
+    ``db=True`` requests a decibel stretch on a fresh render; a baked
+    preview is already decibel-stretched and is used anyway, with a note
+    in the caption. Returns the image so the model *sees* the scene, plus
+    a text block with the scene id and attribution.
+    """
+    _, Image = _require_mcp()
+    item = _fetch_item(url)
+    png, caption = _quicklook_png(item, asset=asset, db=db, max_size=max_size, preview=preview)
+    return [Image(data=png, format="png"), caption]
 
 
 def change_composite(
@@ -785,6 +936,7 @@ def change_composite(
     no polarization metadata so same-polarization could not be *verified*, a
     structured caution text block naming that gap.
     """
+    _require_cog_streaming("change_composite")
     _, Image = _require_mcp()
     from . import viz
 
@@ -814,6 +966,7 @@ def timescan(
     temporal statistics so bright/colored areas are *where activity happened*
     over the series. Returns the image block plus attribution.
     """
+    _require_cog_streaming("timescan")
     _, Image = _require_mcp()
     from . import viz
 
@@ -827,7 +980,9 @@ def timescan(
 
 #: The tools whose answer *is* the picture -- they return MCP content blocks
 #: rather than JSON, so :func:`build_server` registers them without structured
-#: output (see the comment there).
+#: output (see the comment there). ``describe_scene`` / ``narrate_change`` are
+#: added there too: they are defined later, and the no-key kit path returns an
+#: image block.
 _IMAGE_TOOLS = (quicklook, change_composite, timescan)
 
 
@@ -903,6 +1058,7 @@ def stack_stats(
     value is relative to the same ground on another date, and look geometry moves
     backscatter too.
     """
+    _require_cog_streaming("stack_stats")
     from .load import stack_stats as _stack_stats
     from .load import to_stack
 
@@ -962,6 +1118,7 @@ def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
     trivially: every pass reads as ``"(unrecorded)"``, which is one value, so
     ``agrees`` is true and ``shared`` is empty. **No model is called.**
     """
+    _require_cog_streaming("stack_provenance")
     from .load import stack_provenance as _stack_provenance
 
     items = [_fetch_item(u) for u in urls]
@@ -1016,6 +1173,7 @@ def pick_change_interval(
     ``change_threshold_db`` match ``stack_stats``. Refuses to mix polarizations
     (HH vs VV are not comparable). Requires the ``load`` extra.
     """
+    _require_cog_streaming("pick_change_interval")
     from .load import best_change_interval
 
     items = [_fetch_item(u) for u in urls]
@@ -1218,6 +1376,7 @@ def find_similar(
     hand it to ``get_item`` / ``quicklook`` / ``change_composite`` next) plus the
     attribution line.
     """
+    _require_cog_streaming("find_similar")
     from . import embed as emb
 
     path = emb.default_scene_embed_path()
@@ -1298,71 +1457,132 @@ def _baked_previews() -> Callable[[str], BakedPreview | None] | None:
     return lookup
 
 
+def _describe_kit_text(item: UmbraItem, scene_image: Any, image_png: bytes) -> str:
+    """Instruction block for the client's model when this host holds no vision key."""
+    from .describe import build_describe_messages
+
+    card = item.to_llm_context()
+    card.setdefault("polarization_caveat", POLARIZATION_CAVEAT)
+    messages = build_describe_messages(card, image_png)
+    size = f"{scene_image.width}x{scene_image.height} px " if scene_image.width else ""
+    source = "baked preview" if scene_image.source == "baked" else "rendered quicklook"
+    return (
+        "This server has no vision API key (a public community host cannot hold "
+        "one — that would bill the operator for every call). YOU are the vision "
+        "model.\n\n"
+        f"The attached image is a {size}{source} of {item.id} "
+        f"({scene_image.asset}, db={scene_image.db}). {ATTRIBUTION}\n\n"
+        "Read it using the SAR rules in the system prompt below. Return ONE JSON "
+        "object with keys summary (string), observed_features (array of strings), "
+        "confidence (low|medium|high), and caveats (array of strings). Do not "
+        "invent coordinates, dates, or measurements — the metadata card is ground "
+        "truth. Keep the attribution line with any derived product.\n\n"
+        f"## System prompt\n{messages['system']}\n\n"
+        f"## User prompt\n{messages['user']}\n\n"
+        f"{AI_PROVENANCE}"
+    )
+
+
+def _narrate_kit_text(items: list[UmbraItem], stats: Any, image_png: bytes, asset: str) -> str:
+    """Instruction block for a client-side change narration (no server vision key)."""
+    from .narrate import _change_card, build_narrate_messages
+
+    card = _change_card(items, asset)
+    messages = build_narrate_messages(card, stats, image_png)
+    ids = ", ".join(it.id for it in items)
+    return (
+        "This server has no vision API key (a public community host cannot hold "
+        "one — that would bill the operator for every call). YOU are the vision "
+        "model.\n\n"
+        f"The attached image is a change composite of {ids} "
+        f"(green = appeared, magenta = vanished, grey = unchanged). {ATTRIBUTION}\n\n"
+        "Narrate ONLY change the per-block dB grid in the user prompt supports. "
+        "Return ONE JSON object with keys summary (string), changes (array of "
+        "strings), confidence (low|medium|high), and caveats (array of strings). "
+        "Do not invent a change the numbers do not show, and do not invent "
+        "coordinates. Keep the attribution line with any derived product.\n\n"
+        f"## System prompt\n{messages['system']}\n\n"
+        f"## User prompt\n{messages['user']}\n\n"
+        f"{AI_PROVENANCE}"
+    )
+
+
 def describe_scene(
     url: str,
     asset: str = "GEC",
     db: bool = True,
     max_size: int = 1024,
     model: str | None = None,
-    preview: str = "render",
-) -> dict[str, Any]:
-    """Return a grounded, plain-language reading of the SAR scene at ``url``.
+    preview: str = "auto",
+) -> dict[str, Any] | list[Any]:
+    """Return a SAR-literate reading of the scene at ``url``.
 
     This is the C2 "VLM-in-the-loop" capability (``umbra describe``) on the MCP
-    surface: it renders the acquisition's quicklook, sends that picture plus the
-    item's :meth:`~umbra_py.UmbraItem.to_llm_context` metadata card to a vision
-    model behind the packaged SAR-literacy prompt, and returns a validated
-    ``{summary, observed_features[], confidence, caveats[]}`` reading. The value
-    over the client simply looking at a ``quicklook`` image itself is the packaged
-    prompt: it encodes the SAR reading rules a general model lacks (brightness is
-    backscatter not sunlight, speckle is not structure, a dark patch may be radar
-    shadow not water, one frame is not change), so the radar is read correctly.
+    surface. The picture and the metadata card are produced deterministically;
+    a model only interprets them. How that model is reached depends on whether
+    this process holds a vision key:
 
-    **This is the one tool on the server that consults a model** — every other
-    tool is deterministic. It is a deliberate, opt-in exception that preserves the
-    boundary the rest of the package holds (``docs/STRATEGY.md`` §7):
-    the picture and the metadata are produced deterministically, the model **only
-    interprets** (its reply passes the deterministic ``parse_description``
-    boundary — it never becomes a coordinate, a URL, or a filter), and every
-    reading is stamped with the CC-BY attribution and an ``AI_PROVENANCE`` note so
-    a model's reading of radar is never mistaken for a measurement.
+    - **No key** (the public community host, and any local server without
+      ``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` / ``OPENAI_API_KEY``):
+      returns the PNG as an MCP image block plus a reading kit — the packaged
+      SAR-literacy prompt, the metadata card, and the JSON schema. **You** (the
+      client's already-running vision model) do the reading. No server-side
+      model call, no operator bill.
+    - **Key configured** (local stdio with a user-supplied key): sends the
+      picture to that vision model, validates the reply through
+      ``parse_description``, and returns a provenance-stamped
+      ``{summary, observed_features[], confidence, caveats[]}`` object.
 
-    It requires the ``[ai]`` extra plus a user-supplied vision key
-    (``ANTHROPIC_API_KEY``, ``OPENROUTER_API_KEY``, or ``OPENAI_API_KEY``,
-    optionally ``OPENAI_BASE_URL`` / ``UMBRA_DESCRIBE_MODEL``), and the ``[viz]``
-    extra for the render; it raises a helpful setup error when no key is
-    configured, so it never runs implicitly.
-    ``db=True`` (the default) reads the decibel stretch — the radiometrically
-    correct SAR look; ``asset`` picks which product's quicklook to read (default
-    ``GEC``); ``model`` overrides the configured model. To *see* the same scene the
-    reading is of, call :func:`quicklook` on the same ``url``.
+    The packaged prompt is the value over just looking at ``quicklook``:
+    brightness is backscatter not sunlight, speckle is not structure, a dark
+    patch may be radar shadow not water, one frame is not change.
 
-    ``preview`` says where the picture comes from: ``"render"`` (the default)
-    streams a fresh quicklook from S3, while ``"baked"`` and ``"auto"`` read the
-    small preview already cached in this server's catalog index (``umbra index
-    fetch-thumbnails``) -- no range read per call, and no ``[viz]`` extra needed
-    on the server at all. It is a smaller picture than ``max_size`` asks for, so
-    the returned ``image`` record says which was read and the reading carries a
-    caveat about the detail it could not have seen; ``"baked"`` refuses (naming
-    the fix) rather than silently rendering, ``"auto"`` renders what is missing.
+    ``preview`` defaults to ``"auto"``: a baked catalog preview if this server
+    has one (no COG proxy, no ``[viz]`` extra), else a fresh render. ``"baked"``
+    refuses when the preview is missing; ``"render"`` always streams (refused
+    on the public host). ``db=True`` (the default) is the radiometrically
+    correct SAR look.
     """
     # Import the function directly: ``umbra_py.describe`` the attribute is the
     # re-exported function, not the submodule, so ``from . import describe`` would
     # bind the function. Its body still resolves ``default_describer`` / the render
     # from its own module globals, so the [ai]-key gating and offline stubbing work.
     from .describe import describe as _describe_scene
+    from .describe import render_quicklook_png
 
     item = _fetch_item(url)
-    description = _describe_scene(
+    previews = _baked_previews() if preview != "render" else None
+
+    def _render(it: UmbraItem) -> bytes:
+        _require_cog_streaming("describe_scene")
+        return render_quicklook_png(it, asset=asset, max_size=max_size, db=db)
+
+    if _model_key_configured():
+        description = _describe_scene(
+            item,
+            model=model,
+            asset=asset,
+            max_size=max_size,
+            db=db,
+            preview=preview,
+            previews=previews,
+            render=_render,
+        )
+        return description.to_dict()
+
+    from .describe import _obtain_image
+
+    png, scene_image = _obtain_image(
         item,
-        model=model,
+        preview=preview,
+        previews=previews,
+        render=_render,
         asset=asset,
         max_size=max_size,
         db=db,
-        preview=preview,
-        previews=_baked_previews() if preview != "render" else None,
     )
-    return description.to_dict()
+    _, Image = _require_mcp()
+    return [Image(data=png, format="png"), _describe_kit_text(item, scene_image, png)]
 
 
 def narrate_change(
@@ -1371,41 +1591,26 @@ def narrate_change(
     db: bool = False,
     max_size: int = 1024,
     model: str | None = None,
-) -> dict[str, Any]:
-    """Return a grounded, plain-language reading of *what changed* between passes.
+) -> dict[str, Any] | list[Any]:
+    """Return a grounded reading of *what changed* between passes.
 
-    This is the second half of the C2 "VLM-in-the-loop" capability (``umbra change
-    --narrate``) on the MCP surface, the sibling of :func:`describe_scene`. Where
-    ``describe_scene`` has a model read *one* scene, this narrates the *change*
-    between two or three passes of the *same* site: it renders the change composite
-    (green = appeared, magenta = vanished) *and* computes a deterministic coarse
-    grid of signed backscatter change in decibels, hands both the picture and the
-    numbers to a vision model behind the packaged SAR-literacy prompt, and returns
-    a validated ``{summary, changes[], confidence, caveats[]}`` narration. Pass the
-    STAC URLs in time order; the passes must share one polarization (HH vs VV are
-    not comparable), so mixed-polarization input is refused.
+    Sibling of :func:`describe_scene`. The composite and the per-block dB grid
+    are produced deterministically; a model only narrates change those numbers
+    support. Pass the STAC URLs in time order; mixed polarizations are refused.
 
-    The value over the client simply calling :func:`change_composite` itself is the
-    numeric grounding: the model is told to narrate *only* change the per-block dB
-    grid supports, so it cannot invent a change the pixels do not show, and the grid
-    rides along in ``change_stats`` so every statement is auditable against a number
-    a human (or a test) can recompute.
+    This tool **streams Umbra COGs** to build the composite, so a public
+    community host refuses it (use a local ``uvx --from 'umbra-py[mcp]'
+    umbra-mcp`` server, or describe each pass with :func:`describe_scene` /
+    :func:`quicklook` on baked previews). On a local server:
 
-    Like :func:`describe_scene`, this **consults a model** — the deliberate, opt-in
-    exception to the server's determinism boundary (``docs/STRATEGY.md``
-    §7): the composite and the dB grid are produced deterministically, the model
-    **only interprets** (its reply passes the ``parse_narration`` boundary — nothing
-    it says becomes a coordinate, a URL, or a measurement; the measurements are the
-    grid's), and every narration is stamped with the CC-BY attribution and an
-    ``AI_PROVENANCE`` note so a model's reading of radar is never mistaken for
-    ground truth. It requires the ``[ai]`` extra plus a user-supplied vision key
-    (``ANTHROPIC_API_KEY``, ``OPENROUTER_API_KEY``, or ``OPENAI_API_KEY``,
-    optionally ``OPENAI_BASE_URL`` / ``UMBRA_NARRATE_MODEL``) and the ``[viz]``
-    extra for the render; it raises a helpful setup error when no key is
-    configured, so it never runs implicitly. To
-    *see* the composite the narration is of, call :func:`change_composite` on the
-    same URLs.
+    - **No vision key:** returns the composite as an MCP image block plus a
+      reading kit (SAR change primer, the dB grid, the JSON schema). **You**
+      (the client's model) narrate, grounded in the numbers.
+    - **Key configured:** sends picture + grid to that vision model, validates
+      through ``parse_narration``, and returns a provenance-stamped
+      ``{summary, changes[], confidence, caveats[], change_stats}`` object.
     """
+    _require_cog_streaming("narrate_change")
     # Import the function directly (as ``describe_scene`` does): the re-exported
     # ``umbra_py.narrate`` attribute is the function, so ``from .narrate import
     # narrate`` binds it while its body still resolves ``default_narrator`` / the
@@ -1417,8 +1622,17 @@ def narrate_change(
     if len(items) < 2:
         raise ValueError("narrate_change needs at least two item URLs.")
     _require_same_polarization(items)
-    narration = _narrate_change(items, model=model, asset=asset, max_size=max_size, db=db)
-    return narration.to_dict()
+
+    if _model_key_configured():
+        narration = _narrate_change(items, model=model, asset=asset, max_size=max_size, db=db)
+        return narration.to_dict()
+
+    from .narrate import render_change_png
+
+    png, stats = render_change_png(items, asset=asset, max_size=max_size, db=db)
+    _, Image = _require_mcp()
+    caption = _narrate_kit_text(items, stats, png, asset)
+    return [Image(data=png, format="png"), caption]
 
 
 def run(
@@ -1487,11 +1701,13 @@ def build_server() -> MCPServer:
             "that is, when it is not. pick_change_interval scans a whole series "
             "and names the two passes whose change stands clearest of the speckle "
             "floor, so a long series can feed narrate_change without a model "
-            "choosing the frames. describe_scene "
-            "returns a SAR-literate model reading of a scene, and narrate_change "
-            "reads what changed between passes grounded in a per-block decibel grid "
-            "(the two tools that consult a model, and only when an [ai] key is "
-            "configured). All data "
+            "choosing the frames. describe_scene returns a SAR-literate reading "
+            "of a scene: with no server vision key it hands you the picture plus "
+            "the packaged SAR primer (you read it); with a key it calls a vision "
+            "model. narrate_change does the same for change, grounded in a "
+            "per-block decibel grid — and on a public host it is refused, because "
+            "it would proxy Umbra COGs. Prefer search_catalog(area=..., fuzzy=True) "
+            "or find_repeat_sites before semantic=True. All data "
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
@@ -1523,14 +1739,14 @@ def build_server() -> MCPServer:
         describe_scene,
         narrate_change,
     ):
-        # The three tools that answer with a picture return MCP content blocks
-        # (an `Image` plus a caption), not JSON. The SDK derives a structured-
+        # Tools that answer with a picture return MCP content blocks (an
+        # `Image` plus a caption), not JSON. The SDK derives a structured-
         # output schema from the return annotation and then serialises the
         # result against it -- which cannot represent an `Image`, so every call
         # raised `ToolError: Unable to serialize unknown type`. Opting them out
         # is what lets the radar scene reach the client at all; the JSON tools
         # keep structured output, which is worth having for them.
-        image_tool = fn in _IMAGE_TOOLS
+        image_tool = fn in _IMAGE_TOOLS or fn in (describe_scene, narrate_change)
         server.add_tool(fn, structured_output=False if image_tool else None)
 
     @server.resource(
@@ -1649,13 +1865,13 @@ def build_server() -> MCPServer:
     )
     def describe_scene_prompt(url: str) -> str:
         return (
-            f"Read the SAR acquisition at {url} using the umbra tools (the reading "
-            "needs an [ai] vision key configured on the server):\n"
-            f"1. quicklook(url='{url}') so you can see the radar scene yourself.\n"
-            f"2. describe_scene(url='{url}') — a vision model reads it behind the "
-            "packaged SAR-literacy prompt and returns a grounded "
-            "{summary, observed_features, confidence, caveats} object stamped as an "
-            "AI interpretation with the CC-BY attribution.\n"
+            f"Read the SAR acquisition at {url} using the umbra tools:\n"
+            f"1. quicklook(url='{url}') so you can see the radar scene yourself "
+            "(baked preview on the public host; a fresh render on a local server).\n"
+            f"2. describe_scene(url='{url}') — if this server has a vision key it "
+            "returns a grounded {{summary, observed_features, confidence, caveats}} "
+            "object; if not, it returns the picture plus the packaged SAR-literacy "
+            "prompt and you (the client's model) produce that JSON.\n"
             "3. Present the reading, noting it is an AI interpretation of radar (not "
             "a measurement) and keeping the attribution line. Remember SAR rules: "
             "bright is backscatter not sunlight, a dark patch may be shadow not "
@@ -1669,20 +1885,23 @@ def build_server() -> MCPServer:
     def narrate_change_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
         window = f" between {start} and {end}" if start or end else ""
         return (
-            f"Report what changed at '{place}'{window} using the umbra tools (the "
-            "reading needs an [ai] vision key configured on the server):\n"
+            f"Report what changed at '{place}'{window} using the umbra tools:\n"
             f"1. search_catalog(place='{place}'"
             f"{f', start={start!r}' if start else ''}"
             f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
             "2. Pick the two or three most recent passes of the same polarization "
             "(see each card's polarization_caveat).\n"
-            "3. change_composite(urls=[...]) on their stac_href URLs so you can see "
-            "the green (appeared) / magenta (vanished) change.\n"
-            "4. narrate_change(urls=[...]) on the same URLs — a vision model narrates "
-            "*what* changed, grounded in the per-block decibel grid returned as "
-            "change_stats, so every statement cites a number and none is invented.\n"
-            "5. Present the narration, noting it is an AI interpretation of radar "
-            "change (not a measurement), citing the change_stats blocks, and keeping "
+            "3. On a local server, change_composite(urls=[...]) on their stac_href "
+            "URLs so you can see the green (appeared) / magenta (vanished) change, "
+            "then narrate_change(urls=[...]) — with no server vision key that "
+            "returns the composite plus the dB grid and you narrate; with a key "
+            "it returns a stamped {{summary, changes, change_stats}} object. On "
+            "the public host those two tools are refused (they would proxy Umbra "
+            "COGs): quicklook / describe_scene each pass instead, using baked "
+            "previews, and say what you can from the pictures without claiming "
+            "a measured change.\n"
+            "4. Present the narration as an AI interpretation of radar change "
+            "(not a measurement), citing any change_stats blocks, and keeping "
             "the attribution line."
         )
 
@@ -1708,17 +1927,20 @@ def build_server() -> MCPServer:
     def search_by_description(description: str) -> str:
         return (
             f"Find Umbra acquisitions of the site described as '{description}' when "
-            "you don't know its exact task name (needs a semantic index built with "
-            "'umbra semantic build'):\n"
-            f"1. search_catalog(area='{description}', semantic=True) — it resolves the "
-            "description to the closest task names by meaning, searches the best one, "
-            "and returns resolved_area plus the ranked semantic_matches.\n"
-            "2. If count is 0 and semantic_matches is empty, report that nothing "
-            "matched the description (or that the index has not been built) and stop.\n"
-            "3. If resolved_area looks wrong, re-run search_catalog with area set to a "
-            "better candidate from semantic_matches and fuzzy=False.\n"
-            "4. Summarize the acquisitions found (products, dates, resolutions), noting "
-            "which task name the description resolved to and keeping the attribution line."
+            "you don't know its exact task name:\n"
+            f"1. If the description shares words with a likely task name (e.g. "
+            "'beet piler'), try search_catalog(area='{description}', fuzzy=True) "
+            "and/or find_repeat_sites(area='{description}', fuzzy=True) first — "
+            "those are deterministic and need no embedding index or API key.\n"
+            f"2. Only if that misses because the words do not appear in any task "
+            "label, try search_catalog(area='{description}', semantic=True). That "
+            "needs a semantic index ('umbra semantic build') and an embedding key, "
+            "which a public host will not have.\n"
+            "3. If semantic returns count 0, report that nothing matched (or that "
+            "the index has not been built) rather than inventing a site.\n"
+            "4. Summarize the acquisitions found (products, dates, resolutions), "
+            "noting which task name the description resolved to and keeping the "
+            "attribution line."
         )
 
     return server

@@ -2619,6 +2619,10 @@ def build_app(
     mcp_asgi = None
     if mcp:
         from .mcp_server import build_server as _build_mcp_server
+        from .mcp_server import configure as _configure_mcp
+
+        # Public mode must not proxy Umbra COGs through MCP render tools.
+        _configure_mcp(cog_streaming=False if public else None)
 
         mcp_kw: dict[str, Any] = {
             "streamable_http_path": "/mcp",

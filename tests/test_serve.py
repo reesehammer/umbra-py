@@ -2512,6 +2512,9 @@ def test_public_policy_disables_artifacts_and_rate_limits(index_path, tmp_path):
 @pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
 def test_public_app_mounts_mcp_and_notes_the_community_instance(index_path, tmp_path):
     app = serve.build_app(index_path, public=True, cache_dir=tmp_path / "art")
+    from umbra_py import mcp_server as ms
+
+    assert not ms._cog_streaming_allowed()
     with TestClient(app) as client:
         page = client.get("/").json()
         assert "Unofficial community instance" in page["description"]

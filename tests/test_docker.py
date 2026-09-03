@@ -102,6 +102,7 @@ def test_entrypoint_chowns_data_and_drops_root_before_umbra():
     drop_at = text.index("os.setuid")
     assert "chown -R umbra:umbra" in text[:drop_at]
     assert drop_at < text.index("umbra index fetch")
+    assert drop_at < text.index("umbra index fetch-thumbnails")
     assert drop_at < text.index("exec umbra")
     for path in (DOCKERFILE, DOCKERFILE_MCP):
         assert not re.search(r"^USER umbra\s*$", path.read_text(encoding="utf-8"), re.M), path

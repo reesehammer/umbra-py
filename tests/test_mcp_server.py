@@ -756,6 +756,62 @@ def test_quicklook_returns_image_block(sample_item_dict, monkeypatch):
     assert out[1].endswith(ms.ATTRIBUTION)  # caption carries the attribution line
 
 
+def _tiny_png(width: int = 128, height: int = 128) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height)
+    )
+
+
+@responses.activate
+def test_quicklook_prefers_a_baked_preview(sample_item_dict, monkeypatch, tmp_path):
+    """``preview="auto"`` (the default) reads the index, so a public host can
+    show a scene without streaming a COG."""
+    from umbra_py.index import CatalogIndex
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    baked = _tiny_png()
+    db_path = tmp_path / "catalog.db"
+    with CatalogIndex(db_path) as index:
+        index.add(UmbraItem.from_dict(sample_item_dict, href=ITEM_URL))
+        index.commit()
+        index.bake_thumbnails(renderer=lambda _item: baked)
+        index.commit()
+    monkeypatch.setattr(ms, "default_index_path", lambda: db_path)
+
+    def boom(*_a, **_k):
+        raise AssertionError("streamed a COG that was already baked")
+
+    import umbra_py.viz as viz
+
+    monkeypatch.setattr(viz, "quicklook", boom)
+
+    out = ms.quicklook(ITEM_URL)
+    assert isinstance(out[0], Image)
+    assert "baked" in out[1]
+    assert out[0].data == baked
+
+
+@responses.activate
+def test_quicklook_public_host_refuses_to_stream_a_cog(sample_item_dict, monkeypatch, tmp_path):
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
+    ms.configure(cog_streaming=False)
+    with pytest.raises(ValueError, match="does not proxy"):
+        ms.quicklook(ITEM_URL, preview="render")
+
+
+def test_public_host_refuses_cog_tools():
+    ms.configure(cog_streaming=False)
+    with pytest.raises(ValueError, match="does not proxy"):
+        ms.change_composite(["http://example/a", "http://example/b"])
+    with pytest.raises(ValueError, match="does not proxy"):
+        ms.stack_stats(["http://example/a", "http://example/b"])
+    with pytest.raises(ValueError, match="does not proxy"):
+        ms.stack_provenance(["http://example/a", "http://example/b"])
+    with pytest.raises(ValueError, match="does not proxy"):
+        ms.narrate_change(["http://example/a", "http://example/b"])
+
+
 @responses.activate
 def test_image_tools_reach_the_client_as_image_blocks(sample_item_dict, monkeypatch):
     """Regression: the picture has to survive the *server*, not just the function.
@@ -789,7 +845,13 @@ def test_json_tools_keep_structured_output():
     server = ms.build_server()
     schemas = {t.name: t.output_schema for t in asyncio.run(server.list_tools())}
 
-    for name in ("quicklook", "change_composite", "timescan"):
+    for name in (
+        "quicklook",
+        "change_composite",
+        "timescan",
+        "describe_scene",
+        "narrate_change",
+    ):
         assert schemas[name] is None, name
     for name in ("search_catalog", "get_item", "stack_stats", "stack_provenance"):
         assert schemas[name] is not None, name
@@ -1578,8 +1640,9 @@ def test_describe_scene_returns_validated_reading(sample_item_dict, monkeypatch)
         return describer
 
     monkeypatch.setattr(dsc, "default_describer", _fake_describer)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    out = ms.describe_scene(ITEM_URL)
+    out = ms.describe_scene(ITEM_URL, preview="render")
     assert out["item_id"] == sample_item_dict["id"]
     assert out["summary"].startswith("A bright grid")
     assert out["observed_features"] == ["bright building grid", "dark river"]
@@ -1594,18 +1657,24 @@ def test_describe_scene_returns_validated_reading(sample_item_dict, monkeypatch)
 
 
 @responses.activate
-def test_describe_scene_without_key_raises_setup_error(sample_item_dict, monkeypatch):
+def test_describe_scene_without_key_returns_a_reading_kit(sample_item_dict, monkeypatch):
+    """No server key → the client's model reads the picture. Never a setup error."""
     import umbra_py.describe  # noqa: F401  (ensure the submodule is imported)
 
     dsc = sys.modules["umbra_py.describe"]
 
     responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
     monkeypatch.setattr(dsc, "render_quicklook_png", lambda item, **kw: b"png-bytes")
-    # No key configured -> the default describer refuses rather than running implicitly.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(MissingDependencyError, match="vision model API key"):
-        ms.describe_scene(ITEM_URL)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    out = ms.describe_scene(ITEM_URL, preview="render")
+    assert isinstance(out[0], Image)
+    assert "YOU are the vision" in out[1]
+    assert "summary" in out[1]
+    assert sample_item_dict["id"] in out[1]
+    assert ms.AI_PROVENANCE in out[1]
 
 
 @responses.activate
@@ -1635,6 +1704,7 @@ def test_describe_scene_reads_the_servers_baked_preview(sample_item_dict, monkey
     monkeypatch.setattr(
         dsc, "default_describer", lambda **k: lambda m: json.dumps({"summary": "A quiet river."})
     )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     out = ms.describe_scene(ITEM_URL, preview="auto")
     assert out["summary"] == "A quiet river."
@@ -1712,6 +1782,7 @@ def test_narrate_change_returns_validated_narration(sample_item_dict, monkeypatc
         return narrator
 
     monkeypatch.setattr(nar, "default_narrator", _fake_narrator)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     out = ms.narrate_change([first_url, second_url])
     assert out["summary"].startswith("The northwest corner brightened")
@@ -1748,19 +1819,22 @@ def test_narrate_change_refuses_mixed_polarization(sample_item_dict):
 
 
 @responses.activate
-def test_narrate_change_without_key_raises_setup_error(sample_item_dict, monkeypatch):
+def test_narrate_change_without_key_returns_a_reading_kit(sample_item_dict, monkeypatch):
     import umbra_py.narrate  # noqa: F401  (ensure the submodule is imported)
 
     nar = sys.modules["umbra_py.narrate"]
 
     first_url, second_url = _two_pass_urls(sample_item_dict)
-    # Render is stubbed, but no key is configured -> the default narrator refuses
-    # rather than running implicitly.
     stats = nar.ChangeStats(
         grid_rows=1, grid_cols=1, change_threshold_db=3.0, bounds=(0.0, 0.0, 1.0, 1.0)
     )
     monkeypatch.setattr(nar, "render_change_png", lambda items, **kw: (b"png-bytes", stats))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(MissingDependencyError, match="vision model API key"):
-        ms.narrate_change([first_url, second_url])
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    out = ms.narrate_change([first_url, second_url])
+    assert isinstance(out[0], Image)
+    assert "YOU are the vision" in out[1]
+    assert "changes" in out[1]
+    assert ms.AI_PROVENANCE in out[1]

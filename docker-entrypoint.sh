@@ -90,6 +90,14 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ ! -f "$INDEX_DB" ]; then
     fi
 fi
 
+# Baked SAR previews so MCP quicklook / describe_scene work without proxying
+# Umbra COGs. catalog.db -> catalog.thumbs.db sits beside the index.
+THUMBS_DB="${INDEX_DB%.db}.thumbs.db"
+if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ] && [ ! -f "$THUMBS_DB" ]; then
+    echo "No thumbnail sidecar at $THUMBS_DB; fetching published baked previews..."
+    umbra index fetch-thumbnails || echo "Thumbnail fetch failed; baked quicklooks unavailable." >&2
+fi
+
 if [ "$MODE" = "mcp" ]; then
     echo "umbra mcp: Streamable HTTP on ${HOST}:${PORT}/mcp"
     exec umbra mcp --http --host "$HOST" --port "$PORT" "$@"

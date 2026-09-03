@@ -13,13 +13,12 @@ new business logic here** — every tool is a thin adapter over the exact same
 deterministic callables the MCP server exposes (:mod:`umbra_py.mcp_server`), so
 the two front doors can never drift:
 
-- **Deterministic core, AI at the edges.** Almost nothing here calls a model:
-  the tools search, geocode, download and render; the *agent's* model plans and
-  narrates. The two deliberate, opt-in exceptions are ``describe_scene`` (the C2
-  VLM reading of one scene) and ``narrate_change`` (the C2 number-grounded VLM
-  reading of *what changed* between passes), which consult a vision model only
-  when an ``[ai]`` key is configured — and even then a model output never becomes
-  a coordinate, a URL, or a filter without passing through the deterministic
+- **Deterministic core, AI at the edges.** The tools search, geocode, download
+  and render; the *agent's* model plans and narrates. ``describe_scene`` /
+  ``narrate_change`` consult a vision model only when an ``[ai]`` key is
+  configured; without one they return a reading kit (prompt + schema) so the
+  agent's own model does the reading. A model output never becomes a
+  coordinate, a URL, or a filter without passing through the deterministic
   layer first.
 - **Images are the API.** The ``quicklook`` / ``change_composite`` / ``timescan``
   tools return the rendered PNG as a LangChain *tool artifact*
@@ -47,6 +46,7 @@ framework) and the ``viz`` extra the render tools need.
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 from . import mcp_server as _mcp
@@ -102,21 +102,25 @@ def _require_langchain():
 # --------------------------------------------------------------------------
 
 
-def quicklook(url: str, asset: str = "GEC", db: bool = False, max_size: int = 1024):
+def quicklook(
+    url: str,
+    asset: str = "GEC",
+    db: bool = False,
+    max_size: int = 1024,
+    preview: str = "auto",
+):
     """Render a scene's quicklook PNG and return it as a tool artifact.
 
-    Streams the cloud-optimized product at ``url`` (default the analysis-ready
-    ``GEC``), applies a SAR-appropriate stretch (set ``db=True`` for a decibel
-    stretch), and returns ``(caption, png_bytes)`` — the PNG rides on the
-    ToolMessage's ``.artifact`` so a multimodal model downstream *sees* the radar
-    scene, and the caption carries the scene id and the mandatory attribution.
+    Prefers a baked catalog preview (``preview="auto"``) so a host without COG
+    streaming can still return a picture. ``preview="render"`` streams the
+    cloud-optimized product (needs ``[viz]``). Returns ``(caption, png_bytes)``
+    — the PNG rides on the ToolMessage's ``.artifact`` so a multimodal model
+    downstream *sees* the radar scene, and the caption carries the scene id
+    and the mandatory attribution.
     """
-    from . import viz
-
     item = _mcp._fetch_item(url)
-    image = viz.quicklook(item, asset=asset, db=db, max_size=max_size)
-    caption = f"Quicklook of {item.id} ({asset}). {ATTRIBUTION}"
-    return caption, _mcp._png_bytes(image)
+    png, caption = _mcp._quicklook_png(item, asset=asset, db=db, max_size=max_size, preview=preview)
+    return caption, png
 
 
 def change_composite(urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024):
@@ -129,6 +133,7 @@ def change_composite(urls: list[str], asset: str = "GEC", db: bool = False, max_
     the PNG rides on the ToolMessage's ``.artifact`` and the caption names the
     color semantics and the attribution.
     """
+    _mcp._require_cog_streaming("change_composite")
     from . import viz
 
     items = [_mcp._fetch_item(u) for u in urls]
@@ -151,6 +156,7 @@ def timescan(urls: list[str], asset: str = "GEC", db: bool = False, max_size: in
     over the series. Returns ``(caption, png_bytes)`` — the PNG rides on the
     ToolMessage's ``.artifact`` and the caption carries the attribution.
     """
+    _mcp._require_cog_streaming("timescan")
     from . import viz
 
     items = [_mcp._fetch_item(u) for u in urls]
@@ -161,7 +167,36 @@ def timescan(urls: list[str], asset: str = "GEC", db: bool = False, max_size: in
     return caption, _mcp._png_bytes(image)
 
 
-# The JSON-returning tools, shared verbatim with the MCP server (compact context
+def _unwrap_reading_kit(out):
+    """MCP kit path returns ``[Image, text]``; LangChain JSON tools want a dict."""
+    if isinstance(out, list):
+        text = "\n".join(block for block in out if isinstance(block, str))
+        return {
+            "mode": "kit",
+            "instruction": text,
+            "hint": (
+                "This server has no vision key, so the reading is yours. "
+                "Call quicklook on the same URL to see the scene, then follow "
+                "the instruction (SAR primer + JSON schema)."
+            ),
+        }
+    return out
+
+
+def _kit_safe(fn):
+    """Adapter so ``describe_scene`` / ``narrate_change`` stay JSON tools here."""
+
+    def wrapped(*args, **kwargs):
+        return _unwrap_reading_kit(fn(*args, **kwargs))
+
+    wrapped.__name__ = fn.__name__
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__annotations__ = getattr(fn, "__annotations__", {})
+    wrapped.__signature__ = inspect.signature(fn)
+    return wrapped
+
+
+# The JSON-returning tools, shared with the MCP server (compact context
 # cards, geocoding, index status, time-series statistics and the provenance
 # preflight that says whether a series is one measurement, downloads, standing
 # watch, similarity search, and the two opt-in VLM readings). Each gates its own
@@ -207,7 +242,10 @@ def umbra_tools(*, include_render: bool = True) -> list[BaseTool]:
     """
     StructuredTool = _require_langchain()
 
-    tools: list[BaseTool] = [StructuredTool.from_function(fn) for fn in _JSON_TOOLS]
+    json_fns = [
+        _kit_safe(fn) if fn in (describe_scene, narrate_change) else fn for fn in _JSON_TOOLS
+    ]
+    tools: list[BaseTool] = [StructuredTool.from_function(fn) for fn in json_fns]
     if include_render:
         tools += [
             StructuredTool.from_function(fn, response_format="content_and_artifact")
