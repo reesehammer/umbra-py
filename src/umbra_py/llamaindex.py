@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import mcp_server as _mcp
 from .constants import ATTRIBUTION
@@ -208,15 +208,22 @@ def _unwrap_reading_kit(out):
 
 
 def _kit_safe(fn):
-    """Adapter so ``describe_scene`` / ``narrate_change`` stay JSON tools here."""
+    """Adapter so ``describe_scene`` / ``narrate_change`` stay JSON tools here.
+
+    The wrapper always returns a dict, so the copied signature must not
+    advertise the MCP kit's image-block list.
+    """
 
     def wrapped(*args, **kwargs):
         return _unwrap_reading_kit(fn(*args, **kwargs))
 
     wrapped.__name__ = fn.__name__
     wrapped.__doc__ = fn.__doc__
-    wrapped.__annotations__ = getattr(fn, "__annotations__", {})
-    wrapped.__signature__ = inspect.signature(fn)
+    sig = inspect.signature(fn)
+    wrapped.__signature__ = sig.replace(return_annotation=dict[str, Any])
+    ann = dict(getattr(fn, "__annotations__", {}))
+    ann["return"] = dict[str, Any]
+    wrapped.__annotations__ = ann
     return wrapped
 
 
