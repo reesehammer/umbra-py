@@ -925,14 +925,17 @@ def _preview_caption(
     if record["source"] == "baked":
         dim = f"{record['width']}x{record['height']} px " if record.get("width") else ""
         asked = record["requested_max_size"]
+        lines.append(f"BAKED PREVIEW: {dim}dB {record['asset']} of {item.id}.")
+        if record.get("substituted"):
+            lines.append(
+                f"max_size={asked} was ignored — the cached thumbnail is smaller "
+                "than requested. Do not claim structure finer than these pixels."
+            )
         lines.append(
-            f"BAKED PREVIEW (not a {asked} px render): {dim}dB {record['asset']} of {item.id}."
-        )
-        lines.append(
-            f"max_size={asked} was ignored. This host served a cached thumbnail "
-            "from the catalog index rather than streaming the GeoTIFF. Do not "
-            "claim structure finer than these pixels. For a full-size render, "
-            "run a local server: uvx --from 'umbra-py[mcp]' umbra-mcp"
+            "For a higher-resolution render (typically 1024 px, or any "
+            "max_size), run a local server that streams the GeoTIFF: "
+            "uvx --from 'umbra-py[mcp]' umbra-mcp — or download the GEC href "
+            "from get_item and open it locally (QGIS, rasterio)."
         )
     else:
         lines.append(f"Rendered quicklook of {item.id} ({record['asset']}).")
@@ -998,14 +1001,16 @@ def quicklook(
 
     Prefers a baked catalog preview (``preview="auto"``, the default) so a
     public host can show the radar scene without proxying Umbra COGs.
-    **A baked preview is typically 128 px.** ``max_size`` applies only to a
-    fresh ``preview="render"`` stream; when a cached thumbnail is served
-    instead, the caption says so in plain language *and* as a JSON
+    **A baked preview is typically 512 px** (the published weekly sidecar).
+    ``max_size`` applies only to a fresh ``preview="render"`` stream; when a
+    cached thumbnail is smaller than requested, the caption says
+    ``max_size`` was ignored *and* includes a JSON
     ``{"image": {source, width, height, requested_max_size, substituted}}``
-    sidecar — it does not silently honour a 1024/2048 request with a 128 px
-    picture. ``preview="baked"`` refuses rather than stream;
-    ``preview="render"`` always streams (needs ``[viz]``, refused on
-    ``umbra serve --public``).
+    sidecar. For a higher-resolution picture (typically 1024 px), run a
+    local ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server, or download the
+    GEC href from ``get_item``. ``preview="baked"`` refuses rather than
+    stream; ``preview="render"`` always streams (needs ``[viz]``, refused
+    on ``umbra serve --public``).
     """
     _, Image = _require_mcp()
     item = _fetch_item(url)
@@ -1635,8 +1640,8 @@ def describe_scene(
       :func:`stamp_description` — that is the validation boundary
       (provenance-stamped ``{summary, observed_features, confidence,
       caveats}``). Until you stamp it, your prose is not pipeline output.
-      A baked preview is typically 128 px; the kit names that and
-      ``max_size`` is ignored.
+      A baked preview is typically 512 px; the kit names the size and
+      that a local server can stream a higher-resolution GeoTIFF.
     - **Key configured** (local stdio): sends the picture to that vision
       model, validates through ``parse_description``, and returns the
       stamped object directly.
@@ -1885,8 +1890,10 @@ def build_server() -> MCPServer:
             "(picture + SAR rules); call stamp_description on the JSON you "
             "produce so the reading is validated and provenance-stamped — "
             "unvalidated prose is not pipeline output. With a key it calls a "
-            "vision model. A baked quicklook is typically 128 px; the caption "
-            "says when max_size was ignored. narrate_change does the same for "
+            "vision model. A baked quicklook is typically 512 px; the caption "
+            "says when max_size was ignored and that a local "
+            "`uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a "
+            "higher-resolution GeoTIFF. narrate_change does the same for "
             "change (stamp_narration), grounded in a per-block decibel grid — "
             "and on a public host it is refused, because it would proxy Umbra "
             "COGs. Prefer search_catalog(area=..., fuzzy=True) "
@@ -2052,8 +2059,11 @@ def build_server() -> MCPServer:
         return (
             f"Read the SAR acquisition at {url} using the umbra tools:\n"
             f"1. quicklook(url='{url}') so you can see the radar scene. If the "
-            "caption says BAKED PREVIEW, that is a ~128 px thumbnail and "
-            "max_size was ignored — do not claim finer structure.\n"
+            "caption says BAKED PREVIEW, that is a cached catalog thumbnail "
+            "(typically 512 px) and a local "
+            "`uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a "
+            "higher-resolution GeoTIFF. Do not claim finer structure than "
+            "the pixels you were shown.\n"
             f"2. describe_scene(url='{url}'). With a server vision key it returns "
             "a stamped {{summary, observed_features, confidence, caveats}} object. "
             "Without one it returns a reading kit: produce that JSON, then call "

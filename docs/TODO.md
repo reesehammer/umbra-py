@@ -132,7 +132,8 @@ into the published weekly snapshot. Open follow-ons, none a blocker:
   needs to query/sort on it in SQL rather than compute it per row.
 - **The published thumbnail sidecar has no total cap.** Each weekly run adds up
   to `--limit` (1500) previews and never drops any, so `catalog.thumbs.db` grows
-  monotonically toward whole-catalog coverage (~10–20 KB per 128 px scene). That
+  monotonically toward whole-catalog coverage (~10–20 KB per 128 px scene,
+  more at the published 512 px bake). That
   is the intended trajectory (and the download is opt-in), but if it gets
   unwieldy the smallest fix is an export-side bound —
   `export_thumbnails(limit=…, newest_first=True)` — so the published file keeps

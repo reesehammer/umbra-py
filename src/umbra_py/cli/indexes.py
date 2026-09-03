@@ -19,6 +19,7 @@ from ..constants import PRODUCT_ASSETS
 from ..exceptions import UmbraError
 from ..export import export_geoparquet
 from ..index import (
+    PUBLISHED_THUMBNAIL_SIZE,
     CatalogIndex,
     default_thumbs_path,
     fetch_prebuilt_thumbnails,
@@ -283,9 +284,10 @@ def index_bake(db_path, limit, by_site, zoom) -> None:
 @click.option(
     "--size",
     type=int,
-    default=256,
+    default=PUBLISHED_THUMBNAIL_SIZE,
     show_default=True,
-    help="Longest edge of the baked PNG, in pixels.",
+    help="Longest edge of the baked PNG, in pixels (512 matches the published "
+    "weekly sidecar; a local MCP server can still stream a larger render).",
 )
 @click.option(
     "--asset",

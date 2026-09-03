@@ -147,9 +147,13 @@ jobs:
       #   - It is *bounded*. --limit caps the scenes streamed per run and
       #     --newest-first spends that budget on the freshest passes, which are
       #     what a demo or a monitoring view opens on; the rest are picked up
-      #     over subsequent runs. --size 128 keeps a preview a preview: the
-      #     sidecar is a separate, opt-in asset precisely because pixels dwarf
-      #     the metadata every `umbra index fetch` already pays for.
+      #     over subsequent runs. --size 512 is large enough to read a scene in
+      #     an MCP client; a full-res render still wants a local COG stream.
+      #     bake_thumbnails upgrades a smaller recorded bake, so the weekly
+      #     bump from 128 px actually replaces the old sidecar instead of
+      #     leaving it in place. The sidecar is a separate, opt-in asset
+      #     because pixels dwarf the metadata every `umbra index fetch`
+      #     already pays for.
       #
       # Non-blocking, and split from the upload below so a run that times out
       # mid-bake still publishes what it (and every earlier run) baked.
@@ -160,7 +164,7 @@ jobs:
           pip install -e ".[viz]"
           umbra index fetch-thumbnails --db catalog.db || true
           umbra index bake-thumbnails --db catalog.db \
-            --size 128 --newest-first --limit 1500
+            --size 512 --newest-first --limit 1500
 
       - name: Publish the thumbnail sidecar (non-blocking)
         if: always()
@@ -185,7 +189,7 @@ jobs:
             *)
               gh release edit catalog-index --notes "$body
 
-          - \`catalog.thumbs.db\` — baked SAR quicklook PNGs (128 px) for \`umbra index fetch-thumbnails\`: merge them into a local \`catalog.db\` and every preview reads local bytes instead of streaming a COG overview per scene. Baked newest-first and topped up weekly, so the most recent passes are covered first."
+          - \`catalog.thumbs.db\` — baked SAR quicklook PNGs (512 px) for \`umbra index fetch-thumbnails\`: merge them into a local \`catalog.db\` and every preview reads local bytes instead of streaming a COG overview per scene. Baked newest-first and topped up weekly, so the most recent passes are covered first."
               ;;
           esac
 

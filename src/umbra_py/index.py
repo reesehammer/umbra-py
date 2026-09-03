@@ -63,6 +63,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: versioning was landed to enable.
 _SCHEMA_VERSION = 4
 
+#: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
+#: default for :meth:`CatalogIndex.bake_thumbnails`. 512 px is large enough
+#: to read a scene in an MCP client; a full-resolution render still wants a
+#: local COG stream (typically 1024 px).
+PUBLISHED_THUMBNAIL_SIZE = 512
+
 #: How long (milliseconds) a connection waits for a lock held by another
 #: connection before raising ``sqlite3.OperationalError: database is locked``.
 #: The index is now a *shared* artifact -- a running ``umbra serve`` (or a demo,
@@ -737,7 +743,7 @@ class CatalogIndex:
         renderer: Callable[[UmbraItem], bytes | None] | None = None,
         *,
         asset: str = "GEC",
-        max_size: int = 256,
+        max_size: int = PUBLISHED_THUMBNAIL_SIZE,
         limit: int | None = None,
         newest_first: bool = False,
         progress: Callable[[int], None] | None = None,
@@ -755,13 +761,15 @@ class CatalogIndex:
         server endpoint that wraps it -- is an instant, offline file read.
 
         It is the render-side sibling of :meth:`bake_places`, and shares its
-        discipline: **idempotent** (only items whose ``thumbnail`` is still
-        ``NULL`` are rendered, so a re-run bakes just what was added since), with
-        ``limit`` capping how many are rendered this call (to bake a large
-        catalog in bounded batches). An item whose asset can't be rendered (no
-        ``asset``, a decode error, a network blip) is skipped -- its thumbnail
-        stays ``NULL`` so a later run retries it -- and one bad scene never
-        aborts the batch, mirroring the gallery contact sheet.
+        discipline: **idempotent** (items whose ``thumbnail`` is still ``NULL``,
+        *or* whose recorded ``thumbnail_size`` is smaller than this call's
+        ``max_size``, are rendered -- so a weekly bump from 128 px to 512 px
+        actually upgrades the sidecar instead of leaving the old bake in
+        place), with ``limit`` capping how many are rendered this call (to bake
+        a large catalog in bounded batches). An item whose asset can't be
+        rendered (no ``asset``, a decode error, a network blip) is skipped --
+        its thumbnail stays as it was so a later run retries it -- and one bad
+        scene never aborts the batch, mirroring the gallery contact sheet.
 
         ``newest_first`` chooses *which* acquisitions a capped run spends its
         budget on: by default the batch is taken in ``href`` order, which is
@@ -803,10 +811,12 @@ class CatalogIndex:
         order = "acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
         rows = self._conn.execute(
             "SELECT href, doc, place FROM items "
-            "WHERE thumbnail IS NULL AND href IN "
-            "(SELECT href FROM item_assets WHERE asset = ?) "
+            "WHERE href IN (SELECT href FROM item_assets WHERE asset = ?) "
+            "AND (thumbnail IS NULL OR "
+            "(thumbnail_asset = ? AND thumbnail_size IS NOT NULL "
+            "AND thumbnail_size < ?)) "
             f"ORDER BY {order}",
-            (asset.upper(),),
+            (asset.upper(), asset.upper(), max_size),
         ).fetchall()
         if limit is not None:
             rows = rows[:limit]
@@ -930,7 +940,7 @@ class CatalogIndex:
         sidecar's own record makes safe: when both sides say what they are and
         the incoming preview is a *larger* bake of the *same* product, it wins.
         That is the case the published sidecar creates, since it is baked at
-        128 px where ``umbra index bake-thumbnails`` defaults to 256: a merge
+        :data:`PUBLISHED_THUMBNAIL_SIZE` (512 px): a merge
         used to keep whichever arrived first, which made the resolution of a
         preview a fact about the order two commands were run in. Where either
         side is unrecorded the two are not comparable and the local bake stays.

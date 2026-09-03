@@ -792,6 +792,8 @@ def test_quicklook_prefers_a_baked_preview(sample_item_dict, monkeypatch, tmp_pa
     assert isinstance(out[0], Image)
     assert "BAKED PREVIEW" in out[1]
     assert "max_size=1024 was ignored" in out[1]
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in out[1]
+    assert "higher-resolution" in out[1]
     assert '"substituted":true' in out[1]
     assert out[0].data == baked
 

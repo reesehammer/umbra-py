@@ -37,7 +37,7 @@
     },
     "caveats": {
       "type": "array",
-      "description": "Short phrases qualifying the reading. Model-authored, plus the deterministic one a smaller picture adds: a baked preview is 128–256 px where a render defaults to 1024, and that caveat names what the model could not have seen at that size.",
+      "description": "Short phrases qualifying the reading. Model-authored, plus the deterministic one a smaller picture adds: a baked preview is 512 px (the published sidecar) where a render defaults to 1024, and that caveat names what the model could not have seen at that size.",
       "items": { "type": "string" }
     },
     "model": {

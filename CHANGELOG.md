@@ -28,11 +28,19 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   pipeline output.
 
 ### Changed
-- **Baked MCP previews say when `max_size` was ignored.** A 128 px catalog
+- **Published catalog thumbnails are 512 px.** The weekly `catalog.thumbs.db`
+  bake (`umbra index bake-thumbnails --size 512`) is large enough to read a
+  scene in an MCP client. `bake_thumbnails` upgrades a smaller recorded
+  bake, so the bump from 128 px actually replaces the old sidecar. MCP
+  captions still say when `max_size` was ignored and that a local
+  `uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a higher-
+  resolution GeoTIFF (typically 1024 px), or you can download the GEC
+  href from `get_item`.
+- **Baked MCP previews say when `max_size` was ignored.** A catalog
   thumbnail is no longer captioned as a quiet "baked" substitute: the
-  caption leads with `BAKED PREVIEW (not a 1024 px render)`, names that
-  `max_size` was ignored, and includes a JSON `image` record
-  (`source`, `width`, `height`, `requested_max_size`, `substituted`).
+  caption leads with `BAKED PREVIEW`, names that `max_size` was ignored
+  when the cache is smaller than requested, and includes a JSON `image`
+  record (`source`, `width`, `height`, `requested_max_size`, `substituted`).
 - **`get_item` / `quicklook` / `describe_scene` prefer the catalog index.**
   Re-fetching the live STAC sidecar made those tools disagree with
   `search_catalog` (different GEC filenames, extra product types, `s3://`

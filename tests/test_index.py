@@ -1276,6 +1276,16 @@ def test_bake_thumbnails_is_idempotent(tmp_path):
         assert rendered == []
 
 
+def test_bake_thumbnails_upgrades_a_smaller_preview(tmp_path):
+    """A weekly size bump must replace the old bake, not leave 128 px in place."""
+    with _index(tmp_path) as idx:
+        assert idx.bake_thumbnails(lambda item: b"small", max_size=128) == 3
+        assert idx.get_preview("a") == BakedPreview(png=b"small", asset="GEC", max_size=128)
+        assert idx.bake_thumbnails(lambda item: b"big", max_size=512) == 3
+        assert idx.get_preview("a") == BakedPreview(png=b"big", asset="GEC", max_size=512)
+        assert idx.bake_thumbnails(lambda item: b"again", max_size=512) == 0
+
+
 def test_bake_thumbnails_limit_batches(tmp_path):
     with _index(tmp_path) as idx:
         render, _ = _counting_renderer()

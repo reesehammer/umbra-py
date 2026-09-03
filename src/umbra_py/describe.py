@@ -51,8 +51,9 @@ quicklook instead: no range read, no ``rasterio``, and the whole C2 capability
 becomes available from local bytes on an install that has only the ``[ai]`` extra.
 
 It is opt-in rather than automatic because it changes *what the model was shown*:
-a baked preview is a 128--256 px decibel-stretched quicklook, where a render
-defaults to 1024 px of whichever asset was asked for. Two consequences, both
+a baked preview is a 512 px (published sidecar) or locally-baked
+decibel-stretched quicklook, where a render defaults to 1024 px of whichever
+asset was asked for. Two consequences, both
 handled here rather than left to the caller:
 
 - A request a baked preview cannot answer (a picture of another product,
@@ -66,7 +67,7 @@ handled here rather than left to the caller:
 - Every description records the picture it was read from (:class:`SceneImage`, on
   ``SceneDescription.image``), and a preview smaller than the render that was
   asked for adds a deterministic caveat saying so -- the library's own, never the
-  model's. A reading of a 128 px preview is not the same evidence as a reading of
+  model's. A reading of a 512 px preview is not the same evidence as a reading of
   a 1024 px render, and a description that does not say which cannot be compared
   with one that read the other.
 """
@@ -171,9 +172,10 @@ class SceneImage:
     so they are what the model saw rather than what was requested), and
     ``max_size`` / ``asset`` / ``db`` are the render settings the call asked for.
 
-    The pair matters because they can disagree: a baked preview is 128--256 px
-    where ``max_size`` defaults to 1024, and the reading of a scene at those two
-    scales is not the same evidence. ``width`` is ``None`` only when the bytes
+    The pair matters because they can disagree: a baked preview is 512 px
+    (the published sidecar) where ``max_size`` defaults to 1024, and the
+    reading of a scene at those two scales is not the same evidence.
+    ``width`` is ``None`` only when the bytes
     are not a PNG this can measure (an injected renderer in a test); the source
     is still recorded, since which cache a picture came from is the part a reader
     cannot recover afterwards.
