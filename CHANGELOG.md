@@ -11,8 +11,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Claude Code against `https://api.umbra-py.space/mcp`, plus local `uvx`
   stdio. Claude Code needs `"type": "http"` (or `claude mcp add --transport
   http`); Desktop uses the `url` JSON. Linked from Home, README, and Deploy.
+- **MCP reading kits, no server vision key.** On a host without
+  `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` (including
+  the public community instance), `describe_scene` returns the quicklook PNG
+  plus the packaged SAR-literacy prompt and JSON schema so the *client's*
+  already-running model does the reading. `narrate_change` does the same
+  with the change composite and the per-block dB grid, on a host that is
+  allowed to stream COGs. A local stdio server with a user-supplied key
+  still calls a vision model itself. The public host never holds a key.
 
 ### Changed
+- **Public MCP `quicklook` serves baked catalog previews.** `preview="auto"`
+  (the default) reads `catalog.thumbs.db` so the community host can show a
+  scene without proxying Umbra GeoTIFFs. Tools that must stream COGs
+  (`change_composite`, `timescan`, `stack_stats`, `stack_provenance`,
+  `pick_change_interval`, `narrate_change`, `find_similar`) refuse on
+  `umbra serve --public` with a local-server hint. The image entrypoint
+  fetches the published thumbnail sidecar on first boot next to the index.
+- **MCP search prefers fuzzy / `find_repeat_sites` over `semantic=True`.**
+  A query that shares words with a task name (`"beet piler"`) is a
+  deterministic `fuzzy=True` match; `semantic=True` is only for
+  descriptions that share no tokens, and says so when the embedding index
+  or key is missing.
 - **Document the public community STAC/MCP host.** Deploy, README, and the
   docs homepage now use `https://api.umbra-py.space/` instead of Railway
   placeholders. Self-host / operator Railway instructions are unchanged.

@@ -84,7 +84,10 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
 - **Fetches the published index on first boot.** The entrypoint runs
   [`umbra index fetch`](cli.md) into the `/data` volume before starting the
   server, so a fresh container is queryable in seconds rather than after a full
-  bucket walk. Subsequent starts reuse the cached index.
+  bucket walk. Subsequent starts reuse the cached index. If the thumbnail
+  sidecar is missing it also runs [`umbra index fetch-thumbnails`](cli.md), so
+  MCP `quicklook` / `describe_scene` can return baked previews without
+  proxying Umbra COGs.
 - **Persists to a volume.** The catalog index, any fetched snapshot and the
   render-artifact cache all live under `/data` (the image sets
   `XDG_CACHE_HOME=/data`), so restarts are instant and the archive is never

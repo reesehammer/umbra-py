@@ -16,14 +16,12 @@ callable the MCP server exposes (:mod:`umbra_py.mcp_server`), and the render too
 are thin native reimplementations over the same shared helpers, so all three front
 doors present one inventory and can never drift:
 
-- **Deterministic core, AI at the edges.** Almost nothing here calls a model:
-  the tools search, geocode, download and render; the *agent's* model plans and
-  narrates. The two deliberate, opt-in exceptions are ``describe_scene`` (the C2
-  VLM reading of one scene) and ``narrate_change`` (the C2 number-grounded VLM
-  reading of *what changed* between passes), which consult a vision model only
-  when an ``[ai]`` key is configured — and even then a model output never becomes
-  a coordinate, a URL, or a filter without passing through the deterministic
-  layer first.
+- **Deterministic core, AI at the edges.** The tools search, geocode, download
+  and render; the *agent's* model plans and narrates. ``describe_scene`` /
+  ``narrate_change`` consult a vision model only when an ``[ai]`` key is
+  configured; without one they return a reading kit so the agent's own model
+  does the reading. A model output never becomes a coordinate, a URL, or a
+  filter without passing through the deterministic layer first.
 - **Images are the API.** The ``quicklook`` / ``change_composite`` / ``timescan``
   tools return a :class:`RenderResult`: its string form is the caption a
   text-only agent reads, and the raw PNG rides on ``.png`` (surfaced as the
@@ -49,8 +47,9 @@ identical deterministic callables.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import mcp_server as _mcp
 from .constants import ATTRIBUTION
@@ -124,21 +123,24 @@ class RenderResult:
 # --------------------------------------------------------------------------
 
 
-def quicklook(url: str, asset: str = "GEC", db: bool = False, max_size: int = 1024) -> RenderResult:
+def quicklook(
+    url: str,
+    asset: str = "GEC",
+    db: bool = False,
+    max_size: int = 1024,
+    preview: str = "auto",
+) -> RenderResult:
     """Render a scene's quicklook PNG and return it as a RenderResult.
 
-    Streams the cloud-optimized product at ``url`` (default the analysis-ready
-    ``GEC``), applies a SAR-appropriate stretch (set ``db=True`` for a decibel
-    stretch), and returns a :class:`RenderResult` — its ``.png`` carries the raw
-    bytes so a multimodal model downstream *sees* the radar scene, and its caption
-    carries the scene id and the mandatory attribution.
+    Prefers a baked catalog preview (``preview="auto"``) so a host without COG
+    streaming can still return a picture. Returns a :class:`RenderResult` — its
+    ``.png`` carries the raw bytes so a multimodal model downstream *sees* the
+    radar scene, and its caption carries the scene id and the mandatory
+    attribution.
     """
-    from . import viz
-
     item = _mcp._fetch_item(url)
-    image = viz.quicklook(item, asset=asset, db=db, max_size=max_size)
-    caption = f"Quicklook of {item.id} ({asset}). {ATTRIBUTION}"
-    return RenderResult(caption, _mcp._png_bytes(image))
+    png, caption = _mcp._quicklook_png(item, asset=asset, db=db, max_size=max_size, preview=preview)
+    return RenderResult(caption, png)
 
 
 def change_composite(
@@ -153,6 +155,7 @@ def change_composite(
     its ``.png`` carries the raw bytes and its caption names the color semantics
     and the attribution.
     """
+    _mcp._require_cog_streaming("change_composite")
     from . import viz
 
     items = [_mcp._fetch_item(u) for u in urls]
@@ -177,6 +180,7 @@ def timescan(
     over the series. Returns a :class:`RenderResult` — its ``.png`` carries the
     raw bytes and its caption carries the attribution.
     """
+    _mcp._require_cog_streaming("timescan")
     from . import viz
 
     items = [_mcp._fetch_item(u) for u in urls]
@@ -187,7 +191,43 @@ def timescan(
     return RenderResult(caption, _mcp._png_bytes(image))
 
 
-# The JSON-returning tools, shared verbatim with the MCP server (compact context
+def _unwrap_reading_kit(out):
+    """MCP kit path returns ``[Image, text]``; LlamaIndex JSON tools want a dict."""
+    if isinstance(out, list):
+        text = "\n".join(block for block in out if isinstance(block, str))
+        return {
+            "mode": "kit",
+            "instruction": text,
+            "hint": (
+                "This server has no vision key, so the reading is yours. "
+                "Call quicklook on the same URL to see the scene, then follow "
+                "the instruction (SAR primer + JSON schema)."
+            ),
+        }
+    return out
+
+
+def _kit_safe(fn):
+    """Adapter so ``describe_scene`` / ``narrate_change`` stay JSON tools here.
+
+    The wrapper always returns a dict, so the copied signature must not
+    advertise the MCP kit's image-block list.
+    """
+
+    def wrapped(*args, **kwargs):
+        return _unwrap_reading_kit(fn(*args, **kwargs))
+
+    wrapped.__name__ = fn.__name__
+    wrapped.__doc__ = fn.__doc__
+    sig = inspect.signature(fn)
+    wrapped.__signature__ = sig.replace(return_annotation=dict[str, Any])
+    ann = dict(getattr(fn, "__annotations__", {}))
+    ann["return"] = dict[str, Any]
+    wrapped.__annotations__ = ann
+    return wrapped
+
+
+# The JSON-returning tools, shared with the MCP server (compact context
 # cards, geocoding, index status, time-series statistics and the provenance
 # preflight that says whether a series is one measurement, downloads, standing
 # watch, similarity search, and the two opt-in VLM readings). Each gates its own
@@ -235,7 +275,7 @@ def umbra_tools(*, include_render: bool = True) -> list[FunctionTool]:
     """
     FunctionTool = _require_llamaindex()
 
-    fns = list(_JSON_TOOLS)
+    fns = [_kit_safe(fn) if fn in (describe_scene, narrate_change) else fn for fn in _JSON_TOOLS]
     if include_render:
         fns += list(_RENDER_TOOLS)
     return [FunctionTool.from_defaults(fn=fn) for fn in fns]

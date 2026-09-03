@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,3 +39,12 @@ def command_argv(spec):
 @pytest.fixture
 def sample_item_dict() -> dict:
     return json.loads((DATA_DIR / "sample_item.json").read_text())
+
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_cog_policy():
+    """Public-host COG refusal is process-wide; do not leak it across tests."""
+    yield
+    mod = sys.modules.get("umbra_py.mcp_server")
+    if mod is not None:
+        mod.configure(cog_streaming=None)

@@ -287,6 +287,7 @@ def test_narrate_change_tool_returns_validated_narration(sample_item_dict, monke
         return narrator
 
     monkeypatch.setattr(nar, "default_narrator", _fake_narrator)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     narrate = _tool(lc.umbra_tools(), "narrate_change")
     out = narrate.invoke({"urls": [first_url, second_url]})

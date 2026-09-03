@@ -17,6 +17,16 @@ This is an unofficial community host of Umbra's *open* data (CC BY 4.0), not
 an Umbra product. No account. 120 requests/minute (`429` + `Retry-After`).
 Do not send `UMBRA_CANOPY_TOKEN` or model API keys at this URL.
 
+On this host, `quicklook` and `describe_scene` serve **baked catalog previews**
+(small PNGs shipped with the weekly index). Your Claude session is the vision
+model: `describe_scene` returns the picture plus a SAR-literacy prompt, and
+you read it. Tools that would stream Umbra GeoTIFFs through the host
+(`change_composite`, `timescan`, `stack_stats`, `narrate_change`, …) refuse
+and tell you to run a local server or open the asset `href` from `get_item`.
+For a site name you roughly know (`beet piler`), use `search_catalog(area=…,
+fuzzy=True)` or `find_repeat_sites` — not `semantic=True` (that needs an
+embedding key this host does not hold).
+
 ## Claude Code (recommended: one command)
 
 Remote Streamable HTTP. Claude Code calls this transport `http`:
@@ -121,8 +131,11 @@ The same command is published to the
 
 Optional env on *local* stdio only: `UMBRA_INDEX_DB` (fetched catalog
 snapshot — without it each search walks S3), `UMBRA_CANOPY_TOKEN` (paid
-archive), `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (opt-in `describe` /
-`narrate` tools).
+archive), `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (optional: with a key,
+`describe_scene` / `narrate_change` call a vision model on the server;
+without one they return a reading kit for the client's model). Fetch
+thumbnails (`umbra index fetch-thumbnails`) so `quicklook` can serve a
+picture without streaming a COG.
 
 ## Self-host
 

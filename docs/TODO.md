@@ -745,10 +745,6 @@ Open follow-ons, none a blocker:
 - **STAC Index listing.** List `https://api.umbra-py.space/` on
   [stacindex.org](https://stacindex.org/) so generic STAC clients discover
   the open catalog without finding this repo first.
-- **Watch MCP render egress.** STAC search does not proxy rasters; MCP
-  `quicklook` / `change_composite` / `timescan` still stream Umbra COGs
-  through the host. Tighten `--rate-limit` or drop `viz` from the image
-  if that ever shows up on a bill.
 
 ---
 

@@ -47,7 +47,7 @@
         },
         {
           "name": "ANTHROPIC_API_KEY",
-          "description": "Enables the two opt-in model tools, describe_scene and narrate_change. Every other tool is deterministic and calls no model.",
+          "description": "Optional. With a key, describe_scene and narrate_change call a vision model on the server. Without one they return a reading kit (picture + SAR primer) so the client's own model does the reading. A public host must not set this.",
           "isRequired": false,
           "isSecret": true
         },
