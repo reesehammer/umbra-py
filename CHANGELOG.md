@@ -10,6 +10,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **ISR / research cookbook.** New `examples/09_isr_training_set.ipynb` walks
+  CatalogIndex search (VV / incidence filters) → size-check → chips for an
+  Umbra open-data training set, with a [Used in research](https://umbra-py.space/guides/research/)
+  guide citing ProSR. README chips callout points at SR / ATR-style benchmarks.
 - **Connect Claude (MCP) docs.** Copy-paste recipes for Claude Desktop and
   Claude Code against `https://api.umbra-py.space/mcp`, plus local `uvx`
   stdio. Claude Code needs `"type": "http"` (or `claude mcp add --transport
