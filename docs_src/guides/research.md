@@ -12,7 +12,7 @@ about **502 Umbra SLC** acquisitions into roughly **132k patches at 0.25 m** as
 an ISR super-resolution benchmark. Code and data notes live at
 [KAIST-VICLab/ProSR](https://github.com/KAIST-VICLab/ProSR).
 
-um\u0062ra-py does **not** reimplement ProSR or any diffusion / SR model. It covers
+umbra-py does **not** reimplement ProSR or any diffusion / SR model. It covers
 the data path those papers need: filtered search, size-aware download, SICD →
 geocoded COG conversion, and georeferenced ML chips.
 
