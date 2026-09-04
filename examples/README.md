@@ -45,6 +45,11 @@ They stream from Umbra's public bucket, so run them with network access.
   reduce the cube to an answer with `stack_stats` — how much the site moved, in
   km², *where* it moved, and whether it drifted or stepped — and map the
   baseline-to-latest dB delta (`load` extra; matplotlib optional for the map).
+- [`09_isr_training_set.ipynb`](09_isr_training_set.ipynb) — ISR / SR training-set
+  cookbook: assemble an open Umbra corpus without crawling S3 — index search
+  with polarization + incidence filters, HEAD size-check multi-GB SICDs (no
+  download in the notebook), then chip a GEC for a self-checking runnable path
+  inspired by ProSR (`load` extra; optional SICD→COG path points at 07).
 
 The committed notebooks ship with **cleared outputs**. `tests/test_examples.py`
 validates them offline on every CI run (well-formed, code cells parse, every
