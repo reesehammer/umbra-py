@@ -45,9 +45,9 @@ walk of the bucket (`umbra search` without `--local`) works but is slow.
 
 ```bash
 pip install "umbra-py[viz,load]"
-umbra index fetch
-umbra search --local --area Centerfield --product GEC --limit 3
-umbra gallery --local --area Centerfield --limit 6 --out gallery.html --db
+umbria index fetch
+umbria search --local --area Centerfield --product GEC --limit 3
+umbria gallery --local --area Centerfield --limit 6 --out gallery.html --db
 ```
 
 ```python
@@ -91,8 +91,10 @@ Needs `[convert]`. Open products generally have no radiometric metadata, so
 `--calibrate` / `--noise-model measured` refuse rather than invent numbers.
 See [limitations](https://umbra-py.space/guides/limitations/).
 
-**Chip** scenes into georeferenced ML tiles: `umbra chips --area Centerfield
---out chips/`.
+**Chip** scenes into georeferenced ML tiles for SR / ATR-style benchmarks from
+open Umbra GEC/SICD: `umbra chips --area Centerfield --out chips/`. See the
+[ISR training-set cookbook](https://github.com/reesehammer/umbra-py/blob/main/examples/09_isr_training_set.ipynb)
+and [Used in research](https://umbra-py.space/guides/research/).
 
 **Drive it from an agent.** Copy-paste recipes for Claude Desktop and Claude
 Code: [Connect Claude (MCP)](https://umbra-py.space/mcp/).
