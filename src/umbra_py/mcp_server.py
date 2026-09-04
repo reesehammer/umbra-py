@@ -93,8 +93,30 @@ def _require_mcp():
 # --------------------------------------------------------------------------
 
 
+def _item_from_index(url: str) -> UmbraItem | None:
+    """Load ``url`` from the local catalog index, or ``None`` if it is not there."""
+    path = default_index_path()
+    if not path.exists():
+        return None
+    with CatalogIndex(path) as index:
+        item = index.get_by_href(url)
+        if item is None and "://" not in url:
+            item = index.get(url)
+        return item
+
+
 def _fetch_item(url: str) -> UmbraItem:
-    """Fetch and parse a single STAC item from its JSON URL."""
+    """Load one STAC item, preferring the local catalog index.
+
+    Search on a hosted instance is index-backed. Re-fetching the live sidecar
+    for ``get_item`` / ``quicklook`` / ``describe_scene`` made those tools
+    disagree with ``search_catalog`` (newer asset filenames, extra product
+    types, ``s3://`` hrefs). When the index has this href, every tool sees
+    the same snapshot.
+    """
+    indexed = _item_from_index(url)
+    if indexed is not None:
+        return indexed
     from ._http import get_json
 
     return UmbraItem.from_dict(get_json(url), href=url)
@@ -770,7 +792,10 @@ def get_item(url: str) -> dict[str, Any]:
     """Return the full context card for one item.
 
     Without a Canopy token configured, ``url`` is the JSON URL of an open-data
-    STAC sidecar, read directly. When the server is configured with a token
+    STAC sidecar. When a local catalog index contains that href, the indexed
+    snapshot is returned — the same document ``search_catalog`` already
+    answered from — rather than a live re-fetch that can disagree on asset
+    filenames or product types. When the server is configured with a token
     (``$UMBRA_CANOPY_TOKEN``) and ``url`` is a bare acquisition id (no ``://``),
     it is instead looked up in Umbra's authenticated commercial archive by a
     keyed STAC search — the retrieval complement to ``search_catalog`` over the
@@ -828,23 +853,21 @@ def index_stats() -> dict[str, Any]:
     return stats
 
 
-def _try_baked_quicklook(item: UmbraItem, *, asset: str) -> tuple[bytes, str] | None:
-    """Return ``(png, note)`` if the index has a preview of this product."""
+def _try_baked_quicklook(item: UmbraItem, *, asset: str) -> bytes | None:
+    """Return PNG bytes if the index has a preview of this product."""
     lookup = _baked_previews()
     if lookup is None:
         return None
     baked = lookup(item.id)
     if baked is None:
         return None
-    from .describe import BAKED_PREVIEW_ASSET, _png_size
+    from .describe import BAKED_PREVIEW_ASSET
 
     recorded = (baked.asset or "").upper()
     assumed = recorded or BAKED_PREVIEW_ASSET
     if asset.upper() != assumed:
         return None
-    size = _png_size(baked.png)
-    dim = f"{size[0]}x{size[1]} px " if size else ""
-    return baked.png, f"{dim}baked dB preview"
+    return baked.png
 
 
 def _baked_preview_missing(item_id: str) -> str:
@@ -856,6 +879,71 @@ def _baked_preview_missing(item_id: str) -> str:
         "COGs; a local `uvx --from 'umbra-py[mcp]' umbra-mcp` server can also "
         "stream a fresh render."
     )
+
+
+def _image_record(
+    png: bytes,
+    *,
+    source: str,
+    asset: str,
+    requested_max_size: int,
+    db: bool,
+) -> dict[str, Any]:
+    """Machine-readable record of which picture was actually returned."""
+    from .describe import _png_size
+
+    size = _png_size(png)
+    width, height = size if size else (None, None)
+    substituted = source == "baked" and (width is None or width < requested_max_size)
+    reason = None
+    if source == "baked":
+        reason = (
+            "cached catalog thumbnail; this host does not stream Umbra COGs"
+            if not _cog_streaming_allowed()
+            else "cached catalog thumbnail preferred over a fresh COG stream"
+        )
+    return {
+        "source": source,
+        "asset": asset.upper(),
+        "width": width,
+        "height": height,
+        "requested_max_size": requested_max_size,
+        "db": db,
+        "substituted": bool(substituted),
+        "reason": reason,
+    }
+
+
+def _preview_caption(
+    item: UmbraItem,
+    record: dict[str, Any],
+    *,
+    extra: str | None = None,
+) -> str:
+    """Human caption plus a JSON sidecar so an agent can see a substitution."""
+    lines: list[str] = []
+    if record["source"] == "baked":
+        dim = f"{record['width']}x{record['height']} px " if record.get("width") else ""
+        asked = record["requested_max_size"]
+        lines.append(f"BAKED PREVIEW: {dim}dB {record['asset']} of {item.id}.")
+        if record.get("substituted"):
+            lines.append(
+                f"max_size={asked} was ignored — the cached thumbnail is smaller "
+                "than requested. Do not claim structure finer than these pixels."
+            )
+        lines.append(
+            "For a higher-resolution render (typically 1024 px, or any "
+            "max_size), run a local server that streams the GeoTIFF: "
+            "uvx --from 'umbra-py[mcp]' umbra-mcp."
+        )
+        lines.append("Or download the GEC href from get_item and open it locally (QGIS, rasterio).")
+    else:
+        lines.append(f"Rendered quicklook of {item.id} ({record['asset']}).")
+    if extra:
+        lines.append(extra)
+    lines.append(ATTRIBUTION)
+    lines.append(json.dumps({"image": record}, separators=(",", ":")))
+    return "\n".join(lines)
 
 
 def _quicklook_png(
@@ -872,7 +960,8 @@ def _quicklook_png(
     so all three front doors get the public-host baked path. ``preview`` is
     ``"auto"`` (baked if present, else stream), ``"baked"`` (refuse if missing)
     or ``"render"`` (always stream). A baked preview is always the decibel
-    stretch; a linear request still uses it and the caption says so.
+    stretch; ``max_size`` applies only to a fresh render and is named in the
+    caption when it was ignored.
     """
     from .describe import PREVIEW_SOURCES
 
@@ -881,21 +970,24 @@ def _quicklook_png(
             f"Unknown preview source {preview!r}. Choose one of {', '.join(PREVIEW_SOURCES)}."
         )
     if preview != "render":
-        baked = _try_baked_quicklook(item, asset=asset)
-        if baked is not None:
-            png, note = baked
-            if not db:
-                note += " (decibel stretch; requested linear)"
-            caption = f"Quicklook of {item.id} ({asset}, {note}). {ATTRIBUTION}"
-            return png, caption
+        png = _try_baked_quicklook(item, asset=asset)
+        if png is not None:
+            extra = (
+                None if db else "Baked previews are always the decibel stretch (requested linear)."
+            )
+            record = _image_record(
+                png, source="baked", asset=asset, requested_max_size=max_size, db=True
+            )
+            return png, _preview_caption(item, record, extra=extra)
         if preview == "baked":
             raise ValueError(_baked_preview_missing(item.id))
     _require_cog_streaming("quicklook")
     from . import viz
 
     image = viz.quicklook(item, asset=asset, db=db, max_size=max_size)
-    caption = f"Quicklook of {item.id} ({asset}). {ATTRIBUTION}"
-    return _png_bytes(image), caption
+    png = _png_bytes(image)
+    record = _image_record(png, source="rendered", asset=asset, requested_max_size=max_size, db=db)
+    return png, _preview_caption(item, record)
 
 
 def quicklook(
@@ -908,14 +1000,17 @@ def quicklook(
     """Return a scene's quicklook PNG as an image block.
 
     Prefers a baked catalog preview (``preview="auto"``, the default) so a
-    public host can show the radar scene without proxying Umbra COGs and
-    without the ``[viz]`` extra. ``preview="baked"`` refuses rather than
-    stream; ``preview="render"`` always streams a fresh cloud-optimized
-    overview (needs ``[viz]``, and is refused on ``umbra serve --public``).
-    ``db=True`` requests a decibel stretch on a fresh render; a baked
-    preview is already decibel-stretched and is used anyway, with a note
-    in the caption. Returns the image so the model *sees* the scene, plus
-    a text block with the scene id and attribution.
+    public host can show the radar scene without proxying Umbra COGs.
+    **A baked preview is typically 512 px** (the published weekly sidecar).
+    ``max_size`` applies only to a fresh ``preview="render"`` stream; when a
+    cached thumbnail is smaller than requested, the caption says
+    ``max_size`` was ignored *and* includes a JSON
+    ``{"image": {source, width, height, requested_max_size, substituted}}``
+    sidecar. For a higher-resolution picture (typically 1024 px), run a
+    local ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server, or download the
+    GEC href from ``get_item``. ``preview="baked"`` refuses rather than
+    stream; ``preview="render"`` always streams (needs ``[viz]``, refused
+    on ``umbra serve --public``).
     """
     _, Image = _require_mcp()
     item = _fetch_item(url)
@@ -1457,53 +1552,71 @@ def _baked_previews() -> Callable[[str], BakedPreview | None] | None:
     return lookup
 
 
-def _describe_kit_text(item: UmbraItem, scene_image: Any, image_png: bytes) -> str:
-    """Instruction block for the client's model when this host holds no vision key."""
-    from .describe import build_describe_messages
+def _describe_kit_text(item: UmbraItem, record: dict[str, Any]) -> str:
+    """Instruction block for a client-side reading when this host holds no vision key."""
+    from .describe import _SAR_PRIMER
 
     card = item.to_llm_context()
     card.setdefault("polarization_caveat", POLARIZATION_CAVEAT)
-    messages = build_describe_messages(card, image_png)
-    size = f"{scene_image.width}x{scene_image.height} px " if scene_image.width else ""
-    source = "baked preview" if scene_image.source == "baked" else "rendered quicklook"
+    dim = f"{record['width']}x{record['height']} px " if record.get("width") else ""
+    asked = record.get("requested_max_size")
+    size_note = ""
+    if record.get("substituted"):
+        size_note = (
+            f" This is a {dim}baked thumbnail, not a {asked} px render; "
+            "max_size was ignored. Do not claim structure finer than these pixels."
+        )
     return (
-        "This server has no vision API key (a public community host cannot hold "
-        "one — that would bill the operator for every call). YOU are the vision "
-        "model.\n\n"
-        f"The attached image is a {size}{source} of {item.id} "
-        f"({scene_image.asset}, db={scene_image.db}). {ATTRIBUTION}\n\n"
-        "Read it using the SAR rules in the system prompt below. Return ONE JSON "
-        "object with keys summary (string), observed_features (array of strings), "
-        "confidence (low|medium|high), and caveats (array of strings). Do not "
-        "invent coordinates, dates, or measurements — the metadata card is ground "
-        "truth. Keep the attribution line with any derived product.\n\n"
-        f"## System prompt\n{messages['system']}\n\n"
-        f"## User prompt\n{messages['user']}\n\n"
-        f"{AI_PROVENANCE}"
+        "Reading kit — this host has no vision API key, so it does not call a "
+        "model. The attached image plus the SAR rules below are the evidence; "
+        "your next step is to produce the JSON and call stamp_description, "
+        "which is the validation boundary. Until you do, any prose you write "
+        "is your unvalidated look, not pipeline output.\n\n"
+        f"Picture: {dim}{record['source']} {record['asset']} of {item.id}."
+        f"{size_note}\n\n"
+        "Produce ONE JSON object with keys summary (string), observed_features "
+        "(array of strings), confidence (low|medium|high), caveats (array of "
+        "strings). Do not invent coordinates, dates, or measurements — the "
+        "metadata card is ground truth. Then call stamp_description("
+        f"reading=<that object>, item_id={item.id!r}, asset={record['asset']!r}, "
+        "image=<the image record below>) so the library can validate the shape "
+        "and stamp CC-BY + AI provenance.\n\n"
+        f"## SAR rules\n{_SAR_PRIMER}\n"
+        "## Metadata card (this server's catalog snapshot — do not contradict)\n"
+        f"{json.dumps(card, indent=2)}\n\n"
+        "## Image record (pass to stamp_description)\n"
+        f"{json.dumps(record, indent=2)}\n\n"
+        f"{ATTRIBUTION}\n{AI_PROVENANCE}"
     )
 
 
-def _narrate_kit_text(items: list[UmbraItem], stats: Any, image_png: bytes, asset: str) -> str:
+def _narrate_kit_text(items: list[UmbraItem], stats: Any, asset: str) -> str:
     """Instruction block for a client-side change narration (no server vision key)."""
-    from .narrate import _change_card, build_narrate_messages
+    from .describe import _SAR_PRIMER
+    from .narrate import _change_card
 
     card = _change_card(items, asset)
-    messages = build_narrate_messages(card, stats, image_png)
-    ids = ", ".join(it.id for it in items)
+    ids = [it.id for it in items]
+    grid = stats.to_dict() if hasattr(stats, "to_dict") else stats
     return (
-        "This server has no vision API key (a public community host cannot hold "
-        "one — that would bill the operator for every call). YOU are the vision "
-        "model.\n\n"
-        f"The attached image is a change composite of {ids} "
-        f"(green = appeared, magenta = vanished, grey = unchanged). {ATTRIBUTION}\n\n"
-        "Narrate ONLY change the per-block dB grid in the user prompt supports. "
-        "Return ONE JSON object with keys summary (string), changes (array of "
-        "strings), confidence (low|medium|high), and caveats (array of strings). "
-        "Do not invent a change the numbers do not show, and do not invent "
-        "coordinates. Keep the attribution line with any derived product.\n\n"
-        f"## System prompt\n{messages['system']}\n\n"
-        f"## User prompt\n{messages['user']}\n\n"
-        f"{AI_PROVENANCE}"
+        "Reading kit — this host has no vision API key, so it does not call a "
+        "model. The attached change composite and the dB grid below are the "
+        "evidence. Produce the JSON, then call stamp_narration to validate it "
+        "and stamp CC-BY + AI provenance. Until you do, any prose is your "
+        "unvalidated look, not pipeline output.\n\n"
+        f"Picture: change composite of {', '.join(ids)} "
+        "(green = appeared, magenta = vanished, grey = unchanged).\n\n"
+        "Narrate ONLY change the per-block dB grid supports. Produce ONE JSON "
+        "object with keys summary (string), changes (array of strings), "
+        "confidence (low|medium|high), caveats (array of strings). Then call "
+        f"stamp_narration(reading=<that object>, item_ids={ids!r}, "
+        f"asset={asset!r}, change_stats=<the grid below>).\n\n"
+        f"## SAR rules\n{_SAR_PRIMER}\n"
+        "## Acquisitions (ground truth)\n"
+        f"{json.dumps(card, indent=2)}\n\n"
+        "## Measured change (ground truth — do not invent numbers)\n"
+        f"{json.dumps(grid, indent=2)}\n\n"
+        f"{ATTRIBUTION}\n{AI_PROVENANCE}"
     )
 
 
@@ -1517,31 +1630,28 @@ def describe_scene(
 ) -> dict[str, Any] | list[Any]:
     """Return a SAR-literate reading of the scene at ``url``.
 
-    This is the C2 "VLM-in-the-loop" capability (``umbra describe``) on the MCP
-    surface. The picture and the metadata card are produced deterministically;
-    a model only interprets them. How that model is reached depends on whether
-    this process holds a vision key:
+    The picture and the metadata card are produced deterministically; a model
+    only interprets them. How that model is reached depends on whether this
+    process holds a vision key:
 
-    - **No key** (the public community host, and any local server without
-      ``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` / ``OPENAI_API_KEY``):
-      returns the PNG as an MCP image block plus a reading kit — the packaged
-      SAR-literacy prompt, the metadata card, and the JSON schema. **You** (the
-      client's already-running vision model) do the reading. No server-side
-      model call, no operator bill.
-    - **Key configured** (local stdio with a user-supplied key): sends the
-      picture to that vision model, validates the reply through
-      ``parse_description``, and returns a provenance-stamped
-      ``{summary, observed_features[], confidence, caveats[]}`` object.
+    - **No key** (the public community host): this tool does **not** call a
+      vision model. It returns the PNG plus a reading kit (SAR rules, the
+      metadata card, the JSON schema). Produce the JSON, then call
+      :func:`stamp_description` — that is the validation boundary
+      (provenance-stamped ``{summary, observed_features, confidence,
+      caveats}``). Until you stamp it, your prose is not pipeline output.
+      A baked preview is typically 512 px; the kit names the size and
+      that a local server can stream a higher-resolution GeoTIFF.
+    - **Key configured** (local stdio): sends the picture to that vision
+      model, validates through ``parse_description``, and returns the
+      stamped object directly.
 
-    The packaged prompt is the value over just looking at ``quicklook``:
+    The packaged SAR rules are the value over just looking at ``quicklook``:
     brightness is backscatter not sunlight, speckle is not structure, a dark
     patch may be radar shadow not water, one frame is not change.
 
     ``preview`` defaults to ``"auto"``: a baked catalog preview if this server
-    has one (no COG proxy, no ``[viz]`` extra), else a fresh render. ``"baked"``
-    refuses when the preview is missing; ``"render"`` always streams (refused
-    on the public host). ``db=True`` (the default) is the radiometrically
-    correct SAR look.
+    has one, else a fresh render. ``"render"`` is refused on the public host.
     """
     # Import the function directly: ``umbra_py.describe`` the attribute is the
     # re-exported function, not the submodule, so ``from . import describe`` would
@@ -1581,8 +1691,15 @@ def describe_scene(
         max_size=max_size,
         db=db,
     )
+    record = _image_record(
+        png,
+        source=scene_image.source,
+        asset=scene_image.asset,
+        requested_max_size=max_size,
+        db=scene_image.db,
+    )
     _, Image = _require_mcp()
-    return [Image(data=png, format="png"), _describe_kit_text(item, scene_image, png)]
+    return [Image(data=png, format="png"), _describe_kit_text(item, record)]
 
 
 def narrate_change(
@@ -1631,8 +1748,75 @@ def narrate_change(
 
     png, stats = render_change_png(items, asset=asset, max_size=max_size, db=db)
     _, Image = _require_mcp()
-    caption = _narrate_kit_text(items, stats, png, asset)
+    caption = _narrate_kit_text(items, stats, asset)
     return [Image(data=png, format="png"), caption]
+
+
+def stamp_description(
+    reading: dict[str, Any],
+    item_id: str | None = None,
+    asset: str = "GEC",
+    model: str | None = None,
+    image: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a client-produced scene reading and stamp provenance.
+
+    This is the interpretation boundary for the no-key kit path: you read the
+    picture ``describe_scene`` returned, produce
+    ``{summary, observed_features, confidence, caveats}``, and pass it here.
+    The library checks the shape, stamps CC-BY and the AI-interpretation
+    note (the model never sets those), and — when ``image`` is the record
+    from the kit — appends a deterministic caveat if the picture was a
+    smaller baked preview. Until this returns, the reading is unvalidated
+    prose, not pipeline output.
+    """
+    from .describe import SceneImage, _baked_preview_caveat, parse_description
+
+    description = parse_description(
+        reading,
+        item_id=item_id,
+        model=model or "client-kit",
+        asset=asset,
+    )
+    if image:
+        scene = SceneImage(
+            source=str(image.get("source") or "baked"),
+            asset=str(image.get("asset") or asset),
+            max_size=int(image.get("requested_max_size") or image.get("max_size") or 1024),
+            db=bool(image.get("db", True)),
+            width=int(image["width"]) if image.get("width") is not None else None,
+            height=int(image["height"]) if image.get("height") is not None else None,
+        )
+        description.image = scene
+        if scene.source == "baked" and (scene.width is None or scene.width < scene.max_size):
+            caveat = _baked_preview_caveat(scene)
+            if caveat not in description.caveats:
+                description.caveats.append(caveat)
+    return description.to_dict()
+
+
+def stamp_narration(
+    reading: dict[str, Any],
+    item_ids: list[str] | None = None,
+    asset: str = "GEC",
+    model: str | None = None,
+    change_stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a client-produced change narration and stamp provenance.
+
+    Sibling of :func:`stamp_description` for the no-key ``narrate_change``
+    kit. Pass the JSON you produced plus the ``change_stats`` grid from the
+    kit so the stamped object carries the numbers the prose was grounded in.
+    """
+    from .narrate import parse_narration
+
+    return parse_narration(
+        reading,
+        item_ids=item_ids,
+        change_stats=change_stats,
+        model=model or "client-kit",
+        asset=asset,
+    ).to_dict()
 
 
 def run(
@@ -1702,11 +1886,17 @@ def build_server() -> MCPServer:
             "and names the two passes whose change stands clearest of the speckle "
             "floor, so a long series can feed narrate_change without a model "
             "choosing the frames. describe_scene returns a SAR-literate reading "
-            "of a scene: with no server vision key it hands you the picture plus "
-            "the packaged SAR primer (you read it); with a key it calls a vision "
-            "model. narrate_change does the same for change, grounded in a "
-            "per-block decibel grid — and on a public host it is refused, because "
-            "it would proxy Umbra COGs. Prefer search_catalog(area=..., fuzzy=True) "
+            "of a scene: with no server vision key it returns a reading kit "
+            "(picture + SAR rules); call stamp_description on the JSON you "
+            "produce so the reading is validated and provenance-stamped — "
+            "unvalidated prose is not pipeline output. With a key it calls a "
+            "vision model. A baked quicklook is typically 512 px; the caption "
+            "says when max_size was ignored and that a local "
+            "`uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a "
+            "higher-resolution GeoTIFF. narrate_change does the same for "
+            "change (stamp_narration), grounded in a per-block decibel grid — "
+            "and on a public host it is refused, because it would proxy Umbra "
+            "COGs. Prefer search_catalog(area=..., fuzzy=True) "
             "or find_repeat_sites before semantic=True. All data "
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
@@ -1738,6 +1928,8 @@ def build_server() -> MCPServer:
         find_similar_text,
         describe_scene,
         narrate_change,
+        stamp_description,
+        stamp_narration,
     ):
         # Tools that answer with a picture return MCP content blocks (an
         # `Image` plus a caption), not JSON. The SDK derives a structured-
@@ -1866,16 +2058,21 @@ def build_server() -> MCPServer:
     def describe_scene_prompt(url: str) -> str:
         return (
             f"Read the SAR acquisition at {url} using the umbra tools:\n"
-            f"1. quicklook(url='{url}') so you can see the radar scene yourself "
-            "(baked preview on the public host; a fresh render on a local server).\n"
-            f"2. describe_scene(url='{url}') — if this server has a vision key it "
-            "returns a grounded {{summary, observed_features, confidence, caveats}} "
-            "object; if not, it returns the picture plus the packaged SAR-literacy "
-            "prompt and you (the client's model) produce that JSON.\n"
-            "3. Present the reading, noting it is an AI interpretation of radar (not "
-            "a measurement) and keeping the attribution line. Remember SAR rules: "
-            "bright is backscatter not sunlight, a dark patch may be shadow not "
-            "water, and one frame shows no change over time."
+            f"1. quicklook(url='{url}') so you can see the radar scene. If the "
+            "caption says BAKED PREVIEW, that is a cached catalog thumbnail "
+            "(typically 512 px) and a local "
+            "`uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a "
+            "higher-resolution GeoTIFF. Do not claim finer structure than "
+            "the pixels you were shown.\n"
+            f"2. describe_scene(url='{url}'). With a server vision key it returns "
+            "a stamped {{summary, observed_features, confidence, caveats}} object. "
+            "Without one it returns a reading kit: produce that JSON, then call "
+            "stamp_description(reading=..., item_id=..., image=<kit image record>) "
+            "before presenting it. Unstamped prose is not pipeline output.\n"
+            "3. Present the stamped reading, noting it is an AI interpretation of "
+            "radar (not a measurement) and keeping the attribution line. Remember "
+            "SAR rules: bright is backscatter not sunlight, a dark patch may be "
+            "shadow not water, and one frame shows no change over time."
         )
 
     @server.prompt(

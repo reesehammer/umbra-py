@@ -74,6 +74,8 @@ from .mcp_server import (  # noqa: F401 - re-exported for direct use
     search_catalog,
     stack_provenance,
     stack_stats,
+    stamp_description,
+    stamp_narration,
     watch_site,
 )
 
@@ -248,6 +250,8 @@ _JSON_TOOLS = (
     find_similar_text,
     describe_scene,
     narrate_change,
+    stamp_description,
+    stamp_narration,
 )
 
 # The "images are the API" render tools, returning a RenderResult (caption + PNG).
@@ -298,6 +302,8 @@ __all__ = [
     "find_similar_text",
     "describe_scene",
     "narrate_change",
+    "stamp_description",
+    "stamp_narration",
     "quicklook",
     "change_composite",
     "timescan",

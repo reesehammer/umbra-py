@@ -18,9 +18,16 @@ an Umbra product. No account. 120 requests/minute (`429` + `Retry-After`).
 Do not send `UMBRA_CANOPY_TOKEN` or model API keys at this URL.
 
 On this host, `quicklook` and `describe_scene` serve **baked catalog previews**
-(small PNGs shipped with the weekly index). Your Claude session is the vision
-model: `describe_scene` returns the picture plus a SAR-literacy prompt, and
-you read it. Tools that would stream Umbra GeoTIFFs through the host
+(typically 512 px, shipped with the weekly index). That is not a silent
+fallback: the caption says `BAKED PREVIEW` and, if you asked for a larger
+`max_size`, that it was ignored. For a higher-resolution render (typically
+1024 px), run a local `uvx --from 'umbra-py[mcp]' umbra-mcp` server, or
+download the GEC href from `get_item`.
+`describe_scene` does **not** call a vision model here (no key on the host).
+It returns the picture plus SAR rules; you produce the JSON and call
+`stamp_description` so the reading is validated and provenance-stamped.
+Unstamped prose is your look at a small thumbnail, not pipeline output.
+Tools that would stream Umbra GeoTIFFs through the host
 (`change_composite`, `timescan`, `stack_stats`, `narrate_change`, …) refuse
 and tell you to run a local server or open the asset `href` from `get_item`.
 For a site name you roughly know (`beet piler`), use `search_catalog(area=…,

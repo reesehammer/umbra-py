@@ -45,6 +45,8 @@ _EXPECTED_NAMES = {
     "find_similar_text",
     "describe_scene",
     "narrate_change",
+    "stamp_description",
+    "stamp_narration",
     "quicklook",
     "change_composite",
     "timescan",
@@ -178,7 +180,7 @@ def test_quicklook_tool_returns_png_render_result(sample_item_dict, monkeypatch)
     quicklook = _tool(li.umbra_tools(), "quicklook")
     out = quicklook.call(url=ITEM_URL)
     # The caption is the human-readable content; the PNG bytes ride on raw_output.
-    assert out.content.endswith(li.ATTRIBUTION)
+    assert li.ATTRIBUTION in out.content
     result = out.raw_output
     assert isinstance(result, li.RenderResult)
     assert str(result) == out.content

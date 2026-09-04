@@ -22,8 +22,29 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   with the change composite and the per-block dB grid, on a host that is
   allowed to stream COGs. A local stdio server with a user-supplied key
   still calls a vision model itself. The public host never holds a key.
+- **`stamp_description` / `stamp_narration` MCP tools.** After a reading kit,
+  these validate the JSON, stamp CC-BY and AI provenance, and (for a baked
+  preview) append a deterministic size caveat. Unstamped prose is not
+  pipeline output.
 
 ### Changed
+- **Published catalog thumbnails are 512 px.** The weekly `catalog.thumbs.db`
+  bake (`umbra index bake-thumbnails --size 512`) is large enough to read a
+  scene in an MCP client. `bake_thumbnails` upgrades a smaller recorded
+  bake, so the bump from 128 px actually replaces the old sidecar. MCP
+  captions still say when `max_size` was ignored and that a local
+  `uvx --from 'umbra-py[mcp]' umbra-mcp` server can stream a higher-
+  resolution GeoTIFF (typically 1024 px), or you can download the GEC
+  href from `get_item`.
+- **Baked MCP previews say when `max_size` was ignored.** A catalog
+  thumbnail is no longer captioned as a quiet "baked" substitute: the
+  caption leads with `BAKED PREVIEW`, names that `max_size` was ignored
+  when the cache is smaller than requested, and includes a JSON `image`
+  record (`source`, `width`, `height`, `requested_max_size`, `substituted`).
+- **`get_item` / `quicklook` / `describe_scene` prefer the catalog index.**
+  Re-fetching the live STAC sidecar made those tools disagree with
+  `search_catalog` (different GEC filenames, extra product types, `s3://`
+  hrefs). When the index has the href, every tool uses that snapshot.
 - **Public MCP `quicklook` serves baked catalog previews.** `preview="auto"`
   (the default) reads `catalog.thumbs.db` so the community host can show a
   scene without proxying Umbra GeoTIFFs. Tools that must stream COGs

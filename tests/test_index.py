@@ -204,6 +204,16 @@ def test_get_missing_id_returns_none(tmp_path):
         assert idx.get("nope") is None
 
 
+def test_get_by_href_returns_item(tmp_path):
+    with _index(tmp_path) as idx:
+        item = idx.get("a")
+        assert item is not None
+        same = idx.get_by_href(item.href)
+        assert same is not None
+        assert same.id == item.id
+        assert idx.get_by_href("https://example.invalid/missing.json") is None
+
+
 def test_get_uses_the_id_index(tmp_path):
     # The keyed lookup rides an index; adding it is additive (no schema bump),
     # so a legacy or reopened database gains it too.
@@ -1264,6 +1274,16 @@ def test_bake_thumbnails_is_idempotent(tmp_path):
         # A second run has nothing new to do -- no item is re-rendered.
         assert idx.bake_thumbnails(render) == 0
         assert rendered == []
+
+
+def test_bake_thumbnails_upgrades_a_smaller_preview(tmp_path):
+    """A weekly size bump must replace the old bake, not leave 128 px in place."""
+    with _index(tmp_path) as idx:
+        assert idx.bake_thumbnails(lambda item: b"small", max_size=128) == 3
+        assert idx.get_preview("a") == BakedPreview(png=b"small", asset="GEC", max_size=128)
+        assert idx.bake_thumbnails(lambda item: b"big", max_size=512) == 3
+        assert idx.get_preview("a") == BakedPreview(png=b"big", asset="GEC", max_size=512)
+        assert idx.bake_thumbnails(lambda item: b"again", max_size=512) == 0
 
 
 def test_bake_thumbnails_limit_batches(tmp_path):
