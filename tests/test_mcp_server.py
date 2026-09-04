@@ -819,6 +819,30 @@ def test_public_host_refuses_cog_tools():
         ms.narrate_change(["http://example/a", "http://example/b"])
 
 
+def test_public_host_cog_refusals_reach_the_client():
+    """Regression: MCP SDK 2 strips anything but ToolError to
+    ``Error executing tool <name>`` with the original on ``__cause__`` only.
+
+    Direct calls still raise ``ValueError`` (see
+    :func:`test_public_host_refuses_cog_tools`); the registered tool has to
+    convert that so the local-server hint survives ``server.call_tool``.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+    ms.configure(cog_streaming=False)
+    server = ms.build_server()
+    calls = (
+        ("change_composite", {"urls": ["http://example/a", "http://example/b"]}),
+        ("stack_stats", {"urls": ["http://example/a", "http://example/b"]}),
+        ("narrate_change", {"urls": ["http://example/a", "http://example/b"]}),
+    )
+    for name, arguments in calls:
+        with pytest.raises(ToolError, match="does not proxy") as excinfo:
+            asyncio.run(server.call_tool(name, arguments))
+        assert not isinstance(excinfo.value, UnexpectedToolError), name
+        assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in str(excinfo.value)
+
+
 @responses.activate
 def test_image_tools_reach_the_client_as_image_blocks(sample_item_dict, monkeypatch):
     """Regression: the picture has to survive the *server*, not just the function.

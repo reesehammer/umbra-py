@@ -65,6 +65,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **Public MCP COG refusals reach the client.** Tools that refuse to proxy
+  Umbra GeoTIFFs on `umbra serve --public` (`change_composite`, `timescan`,
+  `stack_stats`, `narrate_change`) used to arrive as
+  `Error executing tool <name>` with the local-server hint left on the
+  server. Anticipated `ValueError` / `UmbraError` now surface as MCP
+  `ToolError`, so the client sees why the tool refused.
 - **`umbra serve --public` accepts MCP requests addressed to a public
   hostname.** The MCP SDK auto-installs a localhost-only DNS-rebinding Host
   allowlist when `streamable_http_app()` is left at `host=127.0.0.1`, so
