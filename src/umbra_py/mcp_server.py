@@ -41,6 +41,7 @@ extra either. ``server.json`` publishes the stdio command to the MCP registry.
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import os
@@ -58,7 +59,7 @@ from .constants import (
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import MissingDependencyError
+from .exceptions import MissingDependencyError, UmbraError
 from .geocode import geocode_place as _geocode_place
 from .index import BakedPreview, CatalogIndex, default_index_path
 from .models import UmbraItem
@@ -179,6 +180,30 @@ def _require_cog_streaming(tool: str) -> None:
     if _cog_streaming_allowed():
         return
     raise ValueError(_COG_REFUSAL.format(tool=tool))
+
+
+def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool so anticipated failures reach the MCP client.
+
+    Shared helpers raise :class:`ValueError` / :class:`UmbraError` so they stay
+    unit-testable without the MCP extra. MCP SDK 2 treats anything other than
+    ``ToolError`` as a crash and strips the message to ``Error executing tool
+    <name>`` — which is how a public-host COG refusal arrived as that one line
+    and not the local-server hint. Converting at registration keeps the
+    callables themselves raising ``ValueError``.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except (ValueError, UmbraError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapped
 
 
 def _canopy_token() -> str | None:
@@ -1939,7 +1964,7 @@ def build_server() -> MCPServer:
         # is what lets the radar scene reach the client at all; the JSON tools
         # keep structured output, which is worth having for them.
         image_tool = fn in _IMAGE_TOOLS or fn in (describe_scene, narrate_change)
-        server.add_tool(fn, structured_output=False if image_tool else None)
+        server.add_tool(_as_mcp_tool(fn), structured_output=False if image_tool else None)
 
     @server.resource(
         "umbra://context",
