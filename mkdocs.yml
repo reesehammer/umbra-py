@@ -83,6 +83,7 @@ nav:
   - Quickstart: quickstart.md
   - Limitations: guides/limitations.md
   - Example notebooks: guides/notebooks.md
+  - Used in research: guides/research.md
   - Deploy / self-host: deploy.md
   - Connect Claude (MCP): mcp.md
   - CLI reference: cli.md
