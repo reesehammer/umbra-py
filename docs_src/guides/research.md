@@ -13,8 +13,11 @@ an ISR super-resolution benchmark. Code and data notes live at
 [KAIST-VICLab/ProSR](https://github.com/KAIST-VICLab/ProSR).
 
 umbra-py does **not** reimplement ProSR or any diffusion / SR model. It covers
-the data path those papers need: filtered search, size-aware download, SICD →
-geocoded COG conversion, and georeferenced ML chips.
+the data path those papers need: filtered search, size-aware download, and
+chips. ProSR tiled **slant-range** SLC amplitude (not map geometry) —
+`sicd_to_amplitude_geotiff` is the matching convert; `sicd_to_geocoded_cog`
+warps into ground-range and is a different product. GEC chips are the fast
+smoke stand-in, not a ProSR-equivalent training tensor.
 
 ## How umbra-py helps
 
@@ -23,10 +26,11 @@ geocoded COG conversion, and georeferenced ML chips.
   assembly does not crawl S3.
 - **Download** (`download_item`) after confirming asset size (e.g. HTTP `HEAD` /
   `Content-Length` on the asset `href`).
-- **Convert** (`sicd_to_geocoded_cog` / `umbra convert`) when you need SLC
-  amplitude on a map.
+- **Convert** (`sicd_to_amplitude_geotiff` / `umbra convert --slant-plane`) for
+  slant-plane SLC amplitude (the ProSR-like tensor); `sicd_to_geocoded_cog` /
+  `umbra convert` when you need that amplitude on a map instead.
 - **Chips** (`write_chips` / `umbra chips`) for georeferenced training tiles from
-  open GEC (or a converted SICD COG).
+  open GEC — a fast smoke stand-in, not ProSR's slant-range SLC patches.
 
 Walkthrough:
 [`examples/09_isr_training_set.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/09_isr_training_set.ipynb)
