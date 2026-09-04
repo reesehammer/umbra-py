@@ -45,9 +45,9 @@ walk of the bucket (`umbra search` without `--local`) works but is slow.
 
 ```bash
 pip install "umbra-py[viz,load]"
-umbria index fetch
-umbria search --local --area Centerfield --product GEC --limit 3
-umbria gallery --local --area Centerfield --limit 6 --out gallery.html --db
+umbra index fetch
+umbra search --local --area Centerfield --product GEC --limit 3
+umbra gallery --local --area Centerfield --limit 6 --out gallery.html --db
 ```
 
 ```python
