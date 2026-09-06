@@ -247,7 +247,26 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   core install stays small.
 - **SAR correctness matters.** Silent errors are easy in this domain. If a
   transform or parameter choice has consequences (units, slant vs ground
-  plane, dB scaling), say so in a docstring.
+  plane, dB scaling), say so in a docstring. When editing `convert.py`,
+  `load.py`, `_specfun.py`, `preflight.py`, `dem.py` / `geoid.py`,
+  `chips.py`, or `narrate.py`, lock these conventions rather than
+  re-deriving them:
+  - **Units.** SI. Amplitude dB is `20·log10(|z|)`; power dB is
+    `10·log10(P)`; they are the same measurement.
+  - **Order.** Noise subtraction (power domain) → RTC (multiplicative) →
+    radiometric calibration (multiplicative).
+  - **Reference areas.** `sigma0` = unit ground; `beta0` = slant plane;
+    `gamma0` = perpendicular-to-look; `rcs` = m².
+  - **Heights.** SICD projects HAE (ellipsoid). Copernicus DEM heights are
+    geoid. `--geoid` adds undulation; without it the DEM is used as-is.
+  - **RTC models.** `cosine` = 3-D local incidence; `area` = range-plane
+    foreshortening; `gamma` = facet-area `nz`; `facet` = image-space
+    layover (the only model that sees folding).
+  - **Metadata honesty.** Umbra's open products generally have no
+    `Radiometric` block. A calibration or measured-noise request the
+    product cannot support raises; do not invent a plausible number.
+  - **Not InSAR.** SICD/CPHD are phase-preserving *inputs*, not
+    interferograms — see `docs_src/guides/limitations.md`.
 - **Deterministic core, AI at the edges.** The library searches, downloads and
   renders deterministically and offline-testably; it must never call a language
   model implicitly. Anything that *invokes* a model (describe/narrate/NL-search)
@@ -297,6 +316,16 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   `pytestmark = pytest.mark.network`. They only run on `pytest -m network`.
 - **Every new behavior gets a test.** Every bug fix gets a regression test
   first (red), then the fix (green).
+- **Physics-sensitive PRs need a physics test.** A change in `convert.py`,
+  `load.py`, `_specfun.py`, `preflight.py`, `dem.py` / `geoid.py`,
+  `chips.py`, or `narrate.py` is not done just because the new branch is green.
+  Add (or point at an existing) test that would fail if the *physics* were
+  wrong: a limiting case (flat terrain → RTC factor = 1; missing
+  `Radiometric` raises), an exact identity (`20·log10(|z|)` is
+  `10·log10(P)`; subtract-then-scale vs scale-then-subtract), or a
+  symmetry (uniform DEM translation does not change RTC on a flat plane).
+  An implementation-only assertion (a GeoTIFF tag string, a CLI flag
+  parsed) is useful but not sufficient.
 - **Don't pin to live data IDs** in offline tests — they can disappear from
   the public catalog.
 
