@@ -139,8 +139,8 @@ pytest -m network
 pytest --cov=umbra_py --cov-report=term-missing --cov-fail-under=88
 
 # Try the CLI
-umbria --help
-umbria search --start 2024-02-08 --end 2024-02-08 --limit 3
+umbra --help
+umbra search --start 2024-02-08 --end 2024-02-08 --limit 3
 ```
 
 If any of the above fails on a clean checkout, that's a real bug — surface it
