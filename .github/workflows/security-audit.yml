@@ -61,8 +61,20 @@ jobs:
       # because its *only* added failure here was that un-auditable local package;
       # a real CVE in any third-party dependency still fails the job, since
       # pip-audit exits non-zero on any finding whether or not --strict is set.
+      #
+      # --ignore-vuln PYSEC-2026-3740 (CVE-2026-81726 / GHSA-8mgp-746c-j5xp):
+      # nltk arrives only via the optional [llamaindex] extra -> llama-index-core,
+      # which uses nltk for punkt sentence tokenization. umbra-py never imports
+      # nltk and never calls the six model-artifact APIs the advisory names
+      # (TransitionParser, AveragedPerceptron, PerceptronTagger.save_to_json,
+      # save_maxent_params). Those APIs bypass nltk.pathsec when ENFORCE=True
+      # and the caller supplies an out-of-root model path -- a sandbox this
+      # project does not use. No patched PyPI release exists yet (latest is
+      # 3.10.3; the fix is on nltk develop). Drop this ignore and floor
+      # nltk>= the patched release on the llamaindex extra when one ships
+      # (see docs/TODO.md).
       - name: Audit installed dependencies
-        run: pip-audit --skip-editable --desc
+        run: pip-audit --skip-editable --desc --ignore-vuln PYSEC-2026-3740
 
       - name: Open or update a tracking issue on failure
         if: failure()
