@@ -10,6 +10,11 @@
 #
 # Build context is the repo root (`..`) so Dockerfile COPY src / docs/schemas
 # still work; the Dockerfile itself lives beside this compose file.
+#
+# Pin project name so relocating this file under deploy/ does not rename the
+# default Compose project (and thus the `umbra-data` volume) to `deploy_*`.
+name: umbra-py
+
 services:
   umbra-serve:
     build:
