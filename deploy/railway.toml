@@ -1,0 +1,31 @@
+# Hosted community STAC API + Streamable-HTTP MCP (`umbra serve --public`).
+#
+# Lives under deploy/; dockerfilePath is still repo-root-relative.
+# Railway's startCommand replaces the image ENTRYPOINT in exec form, so the
+# flag has to be handed to the entrypoint -- a bare `serve` is not on PATH
+# as a binary. Dockerfile.mcp hardcodes pip install ".[mcp,viz,serve]"; do
+# not set a UMBRA_EXTRAS build-arg in the Railway UI (it used to override
+# the image to MCP-only and crash `umbra serve --public`).
+#
+# One URL, two front doors:
+#   https://<service>.up.railway.app/        STAC API (`/search`, `/docs`)
+#   https://<service>.up.railway.app/mcp     Streamable HTTP MCP
+#
+# `/data` is writable without a volume. A Railway Volume mounted at /data
+# keeps catalog.db across deploys (the entrypoint chowns it, then drops
+# to umbra). Do not add a Dockerfile VOLUME — the Metal builder rejects it.
+# Do not set UMBRA_CANOPY_TOKEN or model API keys on a public instance
+# (`--public` refuses to start if they are set).
+#
+# `.railway.internal` is private mesh DNS. Generate a public domain
+# (`https://<service>.up.railway.app`).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "deploy/Dockerfile.mcp"
+
+[deploy]
+startCommand = "/bin/sh -c 'exec /usr/local/bin/docker-entrypoint.sh serve --public'"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"

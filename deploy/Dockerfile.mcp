@@ -1,0 +1,66 @@
+# Hosted community STAC API + Streamable-HTTP MCP (`umbra serve --public`).
+# Same recipe as Dockerfile; extras and the default command differ so a
+# Railway first deploy needs no UI build-arg and no start-command override
+# of the image ENTRYPOINT.
+#
+# Build from the repository root:
+#     docker build -f deploy/Dockerfile.mcp -t umbra-py:public .
+#     docker run -p 8000:8000 -v umbra-data:/data umbra-py:public
+#     # STAC at http://localhost:8000/search  MCP at http://localhost:8000/mcp
+#
+# `/data` is writable without a volume (the published catalog.db is ~17 MB).
+# Mount a volume there after the service is green so later deploys skip the fetch.
+FROM python:3.12-slim AS runtime
+
+# Extras are hardcoded, not an ARG. A Railway dashboard build-arg of
+# UMBRA_EXTRAS=mcp,viz (left over from the MCP-only host) would otherwise
+# override the default and ship an image without FastAPI -- `umbra serve
+# --public` then crashes with "needs the 'serve' extra".
+# `mcp` pulls `viz`; `serve` is FastAPI. Named separately so a future split
+# of the extras still renders and still speaks STAC.
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # The catalog index, artifact cache and any fetched snapshot live here, on a
+    # volume, so they survive `docker run` restarts and `umbra index fetch` runs
+    # only once. `default_index_path()` honours $XDG_CACHE_HOME.
+    XDG_CACHE_HOME=/data \
+    UMBRA_HOST=0.0.0.0 \
+    UMBRA_PORT=8000
+
+WORKDIR /app
+
+# Copy only what the wheel build needs (see .dockerignore) so the layer caches
+# on source changes, not on unrelated repo churn.
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+# The published JSON contracts, which the wheel force-includes as package data
+# so `umbra serve` can put them in its generated OpenAPI document. An installed
+# package has no checkout to fall back to, so these are part of what the build
+# needs, not documentation.
+COPY docs/schemas ./docs/schemas
+
+RUN pip install ".[mcp,viz,serve]"
+
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Create the umbra user (uid 10001). Stay root at start: a Railway Volume
+# mounted at /data is root-owned and hides the image chown. The entrypoint
+# chowns /data then drops to umbra before any umbra command.
+# Do not declare VOLUME: Railway's Metal builder rejects it.
+RUN useradd --create-home --uid 10001 umbra \
+    && mkdir -p /data \
+    && chown -R umbra:umbra /data
+
+EXPOSE 8000
+
+# Liveness/readiness for orchestrators. `/healthz` returns 200 once the HTTP
+# server is up; the entrypoint fetches the index before starting uvicorn, so a
+# healthy container is a ready one.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('UMBRA_PORT','8000'), timeout=4).status==200 else 1)"]
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["serve", "--public"]
