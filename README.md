@@ -139,7 +139,7 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 That command is published to the [MCP registry](https://registry.modelcontextprotocol.io/)
 as `io.github.reesehammer/umbra-mcp`. STAC for `pystac-client` / QGIS is
 [https://api.umbra-py.space/](https://api.umbra-py.space/) (not `/mcp`).
-`docker compose up` is the one-command self-host.
+`docker compose -f deploy/docker-compose.yml up` is the one-command self-host.
 
 <!-- mcp-name: io.github.reesehammer/umbra-mcp -->
 
@@ -171,6 +171,19 @@ are independent and compatible.
 Machine-readable metadata lives in [CITATION.cff](CITATION.cff). GitHub
 renders it as a **"Cite this repository"** button. Please also honor the
 CC BY 4.0 line above for any Umbra data you use.
+
+## Repo layout
+
+| Path | Role |
+|------|------|
+| `src/umbra_py/` | Package source |
+| `docs_src/` | Published user manual (mkdocs → [umbra-py.space](https://umbra-py.space/)) |
+| `docs/schemas/` | Public JSON contracts (also in the wheel) |
+| `docs/TODO.md`, `docs/STRATEGY.md` | Maintainer ledger / strategy |
+| `deploy/` | Dockerfiles, `docker-compose.yml`, entrypoint |
+| `railway.toml` | Railway Config-as-Code (`dockerfilePath` → `deploy/Dockerfile.mcp`) |
+
+Self-host: `docker compose -f deploy/docker-compose.yml up` (build context stays the repo root). More in [`docs/README.md`](docs/README.md) and the [deploy guide](https://umbra-py.space/deploy/).
 
 ## Community
 

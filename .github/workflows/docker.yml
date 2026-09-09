@@ -22,13 +22,13 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build image (serve extra)
-        run: docker build --build-arg UMBRA_EXTRAS=serve -t umbra-py:ci .
+        run: docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve -t umbra-py:ci .
 
       - name: CLI passthrough works
         run: docker run --rm umbra-py:ci --version
 
       - name: Validate compose file
-        run: docker compose config >/dev/null
+        run: docker compose -f deploy/docker-compose.yml config >/dev/null
 
       - name: Start the server (live mode -- no external network)
         run: docker run -d --name umbra-serve -e UMBRA_SERVE_LIVE=1 -p 8000:8000 umbra-py:ci

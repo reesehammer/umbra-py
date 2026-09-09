@@ -30,3 +30,4 @@ site
 *.parquet
 *.pmtiles
 CHANGELOG.md
+# deploy/ stays in the context: Dockerfiles COPY deploy/docker-entrypoint.sh

@@ -1,15 +1,25 @@
 # One-command self-hosting of the Umbra STAC API.
 #
-#     docker compose up
+# From the repository root:
+#     docker compose -f deploy/docker-compose.yml up
 #
 # Brings up `umbra serve` on http://localhost:8000 (OpenAPI docs at /docs,
 # health at /healthz). On first boot it fetches the published catalog index
 # snapshot into the named `umbra-data` volume, so subsequent starts are instant
 # and the S3 archive is never re-crawled.
+#
+# Build context is the repo root (`..`) so Dockerfile COPY src / docs/schemas
+# still work; the Dockerfile itself lives beside this compose file.
+#
+# Pin project name so relocating this file under deploy/ does not rename the
+# default Compose project (and thus the `umbra-data` volume) to `deploy_*`.
+name: umbra-py
+
 services:
   umbra-serve:
     build:
-      context: .
+      context: ..
+      dockerfile: deploy/Dockerfile
       # Swap to `serve,viz` to also enable the on-demand /artifacts render
       # endpoints (pulls in rasterio/matplotlib -- a larger image).
       args:

@@ -32,6 +32,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   pipeline output.
 
 ### Changed
+- **Docker files live under `deploy/`.** `Dockerfile`, `Dockerfile.mcp`,
+  `docker-entrypoint.sh`, and `docker-compose.yml` moved out of the repo root.
+  `railway.toml` stays at the root (default Railway discovery) with
+  `dockerfilePath = "deploy/Dockerfile.mcp"`. Image build context stays the
+  repository root (`docker build -f deploy/Dockerfile … .` /
+  `docker compose -f deploy/docker-compose.yml up`).
 - **Published catalog thumbnails are 512 px.** The weekly `catalog.thumbs.db`
   bake (`umbra index bake-thumbnails --size 512`) is large enough to read a
   scene in an MCP client. `bake_thumbnails` upgrades a smaller recorded

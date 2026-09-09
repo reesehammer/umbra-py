@@ -1,22 +1,26 @@
-# Hosted community STAC API + Streamable-HTTP MCP (`umbra serve --public`).
-# Same recipe as Dockerfile; extras and the default command differ so a
-# Railway first deploy needs no UI build-arg and no start-command override
-# of the image ENTRYPOINT.
+# One-command self-hosting of the read-only Umbra STAC API (`umbra serve`).
 #
-#     docker build -f Dockerfile.mcp -t umbra-py:public .
+# Umbra publishes a static STAC catalog and no search API; this image turns
+# umbra-py into that missing search API bridge with a single `docker run`.
+# On first boot the entrypoint fetches the published catalog index snapshot
+# (no multi-minute S3 crawl) and then serves `/search`, `/collections`, the
+# OpenAPI docs at `/docs`, and a `/healthz` probe.
+#
+# Build from the repository root (context stays `.` so COPY src / docs/schemas work):
+#     docker build -f deploy/Dockerfile -t umbra-py .
+# Build with on-demand render endpoints (adds the `viz` stack -- rasterio etc.):
+#     docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz -t umbra-py:full .
+# Hosted STAC + MCP (Railway uses deploy/Dockerfile.mcp, extras baked in):
+#     docker build -f deploy/Dockerfile.mcp -t umbra-py:public .
 #     docker run -p 8000:8000 -v umbra-data:/data umbra-py:public
-#     # STAC at http://localhost:8000/search  MCP at http://localhost:8000/mcp
-#
-# `/data` is writable without a volume (the published catalog.db is ~17 MB).
-# Mount a volume there after the service is green so later deploys skip the fetch.
+# Add `load` for the numeric `/artifacts/stats` endpoint, and `dask` if you also
+# want to run it lazily (`UMBRA_SERVE_ARGS="--stack-lazy"`, see deploy.md):
+#     docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
 FROM python:3.12-slim AS runtime
 
-# Extras are hardcoded, not an ARG. A Railway dashboard build-arg of
-# UMBRA_EXTRAS=mcp,viz (left over from the MCP-only host) would otherwise
-# override the default and ship an image without FastAPI -- `umbra serve
-# --public` then crashes with "needs the 'serve' extra".
-# `mcp` pulls `viz`; `serve` is FastAPI. Named separately so a future split
-# of the extras still renders and still speaks STAC.
+# Which optional extras to install. Default keeps the image small and the STAC
+# API fast; `serve,viz` adds the on-demand `/artifacts/...` render endpoints.
+ARG UMBRA_EXTRAS=serve
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -40,9 +44,9 @@ COPY src ./src
 # needs, not documentation.
 COPY docs/schemas ./docs/schemas
 
-RUN pip install ".[mcp,viz,serve]"
+RUN pip install ".[${UMBRA_EXTRAS}]"
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Create the umbra user (uid 10001). Stay root at start: a Railway Volume
@@ -62,4 +66,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('UMBRA_PORT','8000'), timeout=4).status==200 else 1)"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["serve", "--public"]
