@@ -340,11 +340,11 @@ Pass `mcp` as the first argument for MCP-only (no STAC).
 
 ### Railway
 
-The repo ships `deploy/railway.toml` and `deploy/Dockerfile.mcp`. Create a
-service from this GitHub repo and deploy; extras and the start command
-(`serve --public`) are already in those files. Point Railway at
-`deploy/railway.toml` (or set Dockerfile path to `deploy/Dockerfile.mcp`) if
-the service still looks for a root config.
+The repo ships root `railway.toml` (default Config-as-Code discovery — no
+custom Config File Path) and `deploy/Dockerfile.mcp`. Create a service from
+this GitHub repo and deploy; extras and the start command (`serve --public`)
+are already in those files. `railway.toml` sets `dockerfilePath` to
+`deploy/Dockerfile.mcp`.
 
 A volume is **not** required for the first boot. `/data` is writable in the
 image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
@@ -362,7 +362,7 @@ Generate Domain**, then point STAC clients at
 
 If a previous deploy crashed with `exec: mcp: not found` or `exec: serve: not
 found`, Railway replaced the image entrypoint with a bare command.
-`deploy/railway.toml` now wraps the entrypoint; you do not need a start command in
+`railway.toml` now wraps the entrypoint; you do not need a start command in
 the dashboard.
 
 Do **not** set a `UMBRA_EXTRAS` build argument in the Railway UI. The public
