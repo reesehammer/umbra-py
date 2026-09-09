@@ -106,7 +106,8 @@ server.json          # MCP registry manifest for umbra-mcp; submitted by release
 docs/schemas/        # the published JSON contracts for every `--json` surface (public API); shipped in the wheel too, read with `umbra_py.schemas`
 docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged PRs
 docs/README.md       # clarifies docs_src vs docs/schemas vs TODO/STRATEGY vs deploy/
-deploy/              # Dockerfiles, docker-compose.yml, docker-entrypoint.sh, railway.toml (build context = repo root)
+deploy/              # Dockerfiles, docker-compose.yml, docker-entrypoint.sh (build context = repo root)
+railway.toml         # Railway Config-as-Code (dockerfilePath → deploy/Dockerfile.mcp)
 ```
 
 **Discovery tips for agents:**
