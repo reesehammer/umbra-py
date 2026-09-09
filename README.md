@@ -180,7 +180,8 @@ CC BY 4.0 line above for any Umbra data you use.
 | `docs_src/` | Published user manual (mkdocs → [umbra-py.space](https://umbra-py.space/)) |
 | `docs/schemas/` | Public JSON contracts (also in the wheel) |
 | `docs/TODO.md`, `docs/STRATEGY.md` | Maintainer ledger / strategy |
-| `deploy/` | Dockerfiles, `docker-compose.yml`, entrypoint, `railway.toml` |
+| `deploy/` | Dockerfiles, `docker-compose.yml`, entrypoint |
+| `railway.toml` | Railway Config-as-Code (`dockerfilePath` → `deploy/Dockerfile.mcp`) |
 
 Self-host: `docker compose -f deploy/docker-compose.yml up` (build context stays the repo root). More in [`docs/README.md`](docs/README.md) and the [deploy guide](https://umbra-py.space/deploy/).
 
