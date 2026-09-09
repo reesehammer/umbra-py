@@ -58,12 +58,13 @@ Do not set `UMBRA_CANOPY_TOKEN` or model API keys on this instance.
 
 ## Self-host (one command)
 
-The repository ships a `Dockerfile` and a `docker-compose.yml`. `docker compose
-up` builds the image, fetches the published catalog index snapshot on first boot
-(no multi-minute S3 crawl), and serves the STAC API:
+The repository ships Dockerfiles and compose under [`deploy/`](https://github.com/reesehammer/umbra-py/tree/main/deploy).
+`docker compose -f deploy/docker-compose.yml up` builds the image (context =
+repo root), fetches the published catalog index snapshot on first boot (no
+multi-minute S3 crawl), and serves the STAC API:
 
 ```bash
-docker compose up            # http://localhost:8000  (OpenAPI docs at /docs)
+docker compose -f deploy/docker-compose.yml up   # http://localhost:8000  (/docs)
 ```
 
 Point any STAC API client at it:
@@ -75,7 +76,7 @@ curl http://localhost:8000/search?limit=2
 Or with plain Docker:
 
 ```bash
-docker build -t umbra-py .
+docker build -f deploy/Dockerfile -t umbra-py .
 docker run -p 8000:8000 -v umbra-data:/data umbra-py
 ```
 
@@ -129,7 +130,7 @@ API alone; the on-demand `/artifacts/...` render endpoints return a clear "viz
 extra not installed" error. To enable them, build with the `viz` stack:
 
 ```bash
-docker build --build-arg UMBRA_EXTRAS=serve,viz -t umbra-py:full .
+docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz -t umbra-py:full .
 ```
 
 or set `UMBRA_EXTRAS: serve,viz` under the compose `build.args`. For a public
@@ -149,7 +150,7 @@ measure a long series a slice at a time instead, add the `dask` extra and turn
 the lazy path on for the instance:
 
 ```bash
-docker build --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
+docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
 docker run --rm -p 8000:8000 -v umbra-data:/data \
   -e UMBRA_SERVE_ARGS="--stack-lazy --stack-chunk-size 1024" umbra-py:full
 ```
@@ -325,11 +326,11 @@ umbra mcp --http --host 0.0.0.0 --port 8000
 ### Docker
 
 The image entrypoint treats `serve --public` like `serve`: fetch the published
-catalog index on first boot, then listen. `Dockerfile.mcp` bakes the `mcp`,
-`viz` and `serve` extras:
+catalog index on first boot, then listen. `deploy/Dockerfile.mcp` bakes the
+`mcp`, `viz` and `serve` extras:
 
 ```bash
-docker build -f Dockerfile.mcp -t umbra-py:public .
+docker build -f deploy/Dockerfile.mcp -t umbra-py:public .
 docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:public
 # STAC: http://127.0.0.1:8000/search
 # MCP:  POST http://127.0.0.1:8000/mcp
@@ -339,9 +340,11 @@ Pass `mcp` as the first argument for MCP-only (no STAC).
 
 ### Railway
 
-The repo ships `railway.toml` and `Dockerfile.mcp`. Create a service from this
-GitHub repo and deploy; extras and the start command (`serve --public`) are
-already in those files.
+The repo ships `deploy/railway.toml` and `deploy/Dockerfile.mcp`. Create a
+service from this GitHub repo and deploy; extras and the start command
+(`serve --public`) are already in those files. Point Railway at
+`deploy/railway.toml` (or set Dockerfile path to `deploy/Dockerfile.mcp`) if
+the service still looks for a root config.
 
 A volume is **not** required for the first boot. `/data` is writable in the
 image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
@@ -359,7 +362,7 @@ Generate Domain**, then point STAC clients at
 
 If a previous deploy crashed with `exec: mcp: not found` or `exec: serve: not
 found`, Railway replaced the image entrypoint with a bare command.
-`railway.toml` now wraps the entrypoint; you do not need a start command in
+`deploy/railway.toml` now wraps the entrypoint; you do not need a start command in
 the dashboard.
 
 Do **not** set a `UMBRA_EXTRAS` build argument in the Railway UI. The public
