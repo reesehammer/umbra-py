@@ -12,7 +12,7 @@ still open.
 
 ## Drop the NLTK PYSEC-2026-3740 pip-audit ignore when a patched release ships
 
-- **Surfaced in:** the scheduled audit that opened #261.
+- **Surfaced in:** the pip-audit ignore for #261 (#263).
 - **Code:** `.github/workflows/security-audit.yml` (`--ignore-vuln
   PYSEC-2026-3740`), `pyproject.toml` (`llamaindex` extra).
 
