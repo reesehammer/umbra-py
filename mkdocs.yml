@@ -9,9 +9,12 @@ copyright: >-
   Documentation licensed Apache-2.0. Umbra imagery is CC BY 4.0
   &copy; Umbra Lab, Inc.
 
-# The strategy/analysis Markdown under docs/ is internal planning, not the user
-# manual; the published site is authored separately here.
-docs_dir: docs_src
+# Published user manual. JSON contracts in docs/schemas/ are package data
+# (excluded from the site); maintainer STRATEGY/TODO live under .github/.
+docs_dir: docs
+exclude_docs: |
+  /README.md
+  schemas/
 
 theme:
   name: material

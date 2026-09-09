@@ -52,7 +52,7 @@ Design, in the repo's grain:
 * **License propagation.** The mandatory CC-BY attribution rides on the landing
   page, exactly as it does on every other visual artifact.
 
-Was the G7 gap / ``docs/STRATEGY.md`` §8's "GitHub Pages deploy of the
+Was the G7 gap / ``.github/STRATEGY.md`` §8's "GitHub Pages deploy of the
 static ``umbra demo`` / ``catalog.pmtiles`` showcase" (and, for the featured
 gallery, its "precompute showcase artifacts for ~6-10 curated sites" R4
 follow-on).

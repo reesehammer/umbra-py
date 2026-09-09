@@ -177,9 +177,9 @@ CC BY 4.0 line above for any Umbra data you use.
 | Path | Role |
 |------|------|
 | `src/umbra_py/` | Package source |
-| `docs_src/` | Published user manual (mkdocs → [umbra-py.space](https://umbra-py.space/)) |
+| `docs/` | Published user manual (mkdocs → [umbra-py.space](https://umbra-py.space/)) |
 | `docs/schemas/` | Public JSON contracts (also in the wheel) |
-| `docs/TODO.md`, `docs/STRATEGY.md` | Maintainer ledger / strategy |
+| `.github/TODO.md`, `.github/STRATEGY.md` | Maintainer ledger / strategy |
 | `deploy/` | Dockerfiles, `docker-compose.yml`, entrypoint |
 | `railway.toml` | Railway Config-as-Code (`dockerfilePath` → `deploy/Dockerfile.mcp`) |
 

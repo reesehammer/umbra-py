@@ -81,10 +81,11 @@ def test_docs_url_matches_cname_and_mkdocs():
     """The custom domain is one fact; CNAME, mkdocs, and the showcase must agree."""
     assert showcase.DEFAULT_DOCS_URL == DOCS_URL
     assert DOCS_URL == "https://umbra-py.space/"
-    cname = (REPO_ROOT / "docs_src" / "CNAME").read_text(encoding="utf-8").strip()
+    cname = (REPO_ROOT / "docs" / "CNAME").read_text(encoding="utf-8").strip()
     assert DOCS_URL.rstrip("/") == f"https://{cname}"
     mkdocs = (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     assert f"site_url: {DOCS_URL}" in mkdocs
+    assert "\ndocs_dir: docs\n" in mkdocs
 
 
 def test_build_showcase_full_page():

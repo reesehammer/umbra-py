@@ -5,7 +5,7 @@ search result and cutting each scene into fixed-size, georeferenced tiles with a
 manifest that carries the metadata a training pipeline needs (look angle,
 resolution, polarization, license). This is the data-loading layer for SAR
 foundation-model and change-detection research (the C4 workstream,
-``docs/STRATEGY.md`` 5.5) -- the audience most likely to contribute back and
+``.github/STRATEGY.md`` 5.5) -- the audience most likely to contribute back and
 the one that turns free Umbra pixels into demand for Umbra pixels.
 
 Design, following the package's determinism boundary (``docs/AGENTS.md``):

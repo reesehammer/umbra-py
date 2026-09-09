@@ -1,4 +1,4 @@
-"""Offline guards for Python fences in the README and docs_src/.
+"""Offline guards for Python fences in the README and docs/.
 
 The notebooks already have this discipline (``tests/test_examples.py``). The
 docs site and the landing-page README are the other copy-paste surface, and
@@ -18,15 +18,27 @@ import pytest
 import umbra_py
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCS_SRC = REPO_ROOT / "docs_src"
+DOCS = REPO_ROOT / "docs"
 README = REPO_ROOT / "README.md"
 
 PUBLIC_NAMES = set(umbra_py.__all__)
 
 _FENCE = re.compile(r"```(?:python|py)\n(.*?)```", re.DOTALL)
 
+
+def _published_markdown() -> tuple[Path, ...]:
+    """Mkdocs pages only: skip the folder README and the JSON-contract tree."""
+    pages = []
+    for path in sorted(DOCS.rglob("*.md")):
+        rel = path.relative_to(DOCS).as_posix()
+        if rel == "README.md" or rel.startswith("schemas/"):
+            continue
+        pages.append(path)
+    return tuple(pages)
+
+
 # Markdown files whose Python fences are part of the public copy-paste surface.
-DOC_PAGES = (README, *sorted(DOCS_SRC.rglob("*.md")))
+DOC_PAGES = (README, *_published_markdown())
 
 
 def _fences(path: Path) -> list[str]:
@@ -35,7 +47,7 @@ def _fences(path: Path) -> list[str]:
 
 def test_doc_pages_exist():
     assert README.is_file()
-    assert any(DOCS_SRC.rglob("*.md")), "no Markdown under docs_src/"
+    assert _published_markdown(), "no Markdown under docs/"
 
 
 @pytest.mark.parametrize("path", DOC_PAGES, ids=lambda p: p.relative_to(REPO_ROOT).as_posix())

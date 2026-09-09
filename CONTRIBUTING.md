@@ -50,7 +50,7 @@ and offline. Please keep unit tests offline by mocking HTTP (see
 
 Look for the `good first issue` and `help wanted` labels on the issue tracker.
 The original starter list (metadata accessors, Folium helpers, notebooks) has
-shipped. Useful remaining work is tracked in [`docs/TODO.md`](docs/TODO.md).
+shipped. Useful remaining work is tracked in [`.github/TODO.md`](.github/TODO.md).
 Good entry points today:
 
 - A docs snippet or notebook that drifted from the public API

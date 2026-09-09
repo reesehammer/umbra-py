@@ -2,7 +2,7 @@
 between two SAR passes, grounded in a deterministic per-block dB-delta sidecar.
 
 This is the second Tier C "VLM-in-the-loop" capability (C2; see
-``docs/STRATEGY.md``), the sibling of :mod:`umbra_py.describe`.
+``.github/STRATEGY.md``), the sibling of :mod:`umbra_py.describe`.
 Where ``umbra describe`` has a model *read one scene*, ``umbra change --narrate``
 has a model *narrate the change* between two acquisitions of the same site: it
 renders the change composite (the classic green-appeared / magenta-vanished
@@ -26,7 +26,7 @@ test) can recompute. Narration cites numbers, not vibes.
 
 How it stays honest
 -------------------
-The library's determinism boundary (``docs/STRATEGY.md`` §7)
+The library's determinism boundary (``.github/STRATEGY.md`` §7)
 holds exactly as it does for :mod:`umbra_py.describe`:
 
 1. **The picture and the numbers are produced deterministically.** The composite
