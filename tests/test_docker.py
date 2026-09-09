@@ -22,6 +22,7 @@ DEPLOY = REPO_ROOT / "deploy"
 DOCKERFILE = DEPLOY / "Dockerfile"
 DOCKERFILE_MCP = DEPLOY / "Dockerfile.mcp"
 ENTRYPOINT = DEPLOY / "docker-entrypoint.sh"
+COMPOSE = DEPLOY / "docker-compose.yml"
 RAILWAY = REPO_ROOT / "railway.toml"
 DEPLOY_DOCS = REPO_ROOT / "docs_src" / "deploy.md"
 
@@ -56,6 +57,19 @@ def test_railway_points_at_the_mcp_dockerfile():
     text = RAILWAY.read_text(encoding="utf-8")
     assert _toml_string(text, "dockerfilePath") == "deploy/Dockerfile.mcp"
     assert _toml_string(text, "healthcheckPath") == "/healthz"
+
+
+def test_railway_lives_at_repo_root_not_under_deploy():
+    assert RAILWAY.is_file()
+    assert not (DEPLOY / "railway.toml").exists()
+
+
+def test_compose_pins_project_name_and_root_build_context():
+    """Relocating compose under deploy/ must not rename the project volume."""
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert re.search(r"^name:\s*umbra-py\s*$", text, re.MULTILINE)
+    assert re.search(r"^\s*context:\s*\.\.\s*$", text, re.MULTILINE)
+    assert re.search(r"^\s*dockerfile:\s*deploy/Dockerfile\s*$", text, re.MULTILINE)
 
 
 def test_railway_start_command_hands_public_serve_to_the_entrypoint():
@@ -122,7 +136,7 @@ def test_entrypoint_chowns_data_and_drops_root_before_umbra():
 
 def test_deploy_docs_do_not_advertise_bare_mcp_start_command():
     text = DEPLOY_DOCS.read_text(encoding="utf-8")
-    assert "Dockerfile.mcp" in text
+    assert "deploy/Dockerfile.mcp" in text
     assert "Start command:** `mcp`" not in text
     assert "railway.internal" in text
     assert "umbra serve --public" in text
