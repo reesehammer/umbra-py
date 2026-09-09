@@ -2169,7 +2169,7 @@ def stats_frames(items: list[UmbraItem]) -> list[UmbraItem]:
 # overview returns in seconds, which is the honest first slice. But a large
 # ``max_size`` or a long timescan can take tens of seconds, and a synchronous
 # request holds a worker for the whole render. The productized shape
-# (``docs/TODO.md``) is a small job queue: a
+# (``.github/TODO.md``) is a small job queue: a
 # request can opt in to ``"async": true``, get a ``202 Accepted`` + a job id
 # back immediately, poll ``GET /jobs/{id}`` for status, and fetch the finished
 # artifact from ``GET /jobs/{id}/result``. There is no separate result store --
@@ -3942,7 +3942,7 @@ def build_app(
             caveats -- grounded in the deterministic per-block decibel grid *and*
             the speckle detection floor, so the model reports change only where it
             stands clear of interference. The determinism boundary
-            (``docs/STRATEGY.md`` §7) holds: the picture and the numbers are
+            (``.github/STRATEGY.md`` §7) holds: the picture and the numbers are
             computed offline, and the model only interprets them.
 
             **The two capabilities compose.** Two or three passes are narrated

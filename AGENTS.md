@@ -16,7 +16,7 @@ Treat **this** file as the source of truth.
   and working with [Umbra](https://umbra.space/open-data/) open SAR data.
 - **Status:** v0.1.2. Discovery, download, load,
   convert, viz, chips, serve, and the agent front doors all ship. Not an
-  InSAR toolbox; see `docs_src/guides/limitations.md`.
+  InSAR toolbox; see `docs/guides/limitations.md`.
 - **Language / Python:** Python 3.10+ (also tested on 3.11, 3.12).
 - **License:** Apache-2.0 (code); Umbra data is CC-BY-4.0.
 - **Package layout:** `src/umbra_py/` (importable as `umbra_py`).
@@ -99,13 +99,14 @@ tests/
   test_mcp_registry.py # server.json and every documented `uvx ...` must be the command that actually starts umbra-mcp
   data/sample_item.json
 examples/            # notebooks 01–08 + Markdown guides; see examples/README.md
-docs_src/            # published user manual (mkdocs); not the internal docs/ ledger
+docs/                # published user manual (mkdocs → umbra-py.space)
 .github/workflows/ci.yml  # lint + format check + offline pytest (matrix 3.10/3.11/3.12) + mypy + all-extras coverage gate
 pyproject.toml       # deps, extras, ruff + pytest config
 server.json          # MCP registry manifest for umbra-mcp; submitted by release.yml's publish-mcp job
 docs/schemas/        # the published JSON contracts for every `--json` surface (public API); shipped in the wheel too, read with `umbra_py.schemas`
-docs/TODO.md         # ledger of follow-ups intentionally scoped out of merged PRs
-docs/README.md       # clarifies docs_src vs docs/schemas vs TODO/STRATEGY vs deploy/
+.github/TODO.md      # ledger of follow-ups intentionally scoped out of merged PRs
+.github/STRATEGY.md  # design principles (internal)
+docs/README.md       # clarifies published docs vs schemas vs .github TODO/STRATEGY vs deploy/
 deploy/              # Dockerfiles, docker-compose.yml, docker-entrypoint.sh (build context = repo root)
 railway.toml         # Railway Config-as-Code (dockerfilePath → deploy/Dockerfile.mcp)
 ```
@@ -190,7 +191,7 @@ If yes, simplify.
 - Don't "improve" adjacent code, comments, formatting, or naming — even when
   you'd do it differently. Match existing style.
 - If you spot unrelated dead code or a latent bug, **mention it** in your
-  reply and add an entry to [`docs/TODO.md`](docs/TODO.md) (link to the PR that
+  reply and add an entry to [`.github/TODO.md`](.github/TODO.md) (link to the PR that
   surfaced it, point at the code, sketch the fix). Don't delete or fix it
   inline.
 - **Clean up your own orphans only:** if your edit removes the last use of
@@ -269,14 +270,14 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
     `Radiometric` block. A calibration or measured-noise request the
     product cannot support raises; do not invent a plausible number.
   - **Not InSAR.** SICD/CPHD are phase-preserving *inputs*, not
-    interferograms — see `docs_src/guides/limitations.md`.
+    interferograms — see `docs/guides/limitations.md`.
 - **Deterministic core, AI at the edges.** The library searches, downloads and
   renders deterministically and offline-testably; it must never call a language
   model implicitly. Anything that *invokes* a model (describe/narrate/NL-search)
   belongs behind a future `[ai]` extra and runs only when the user asks. The
   AI-*legible* surface — `UmbraItem.to_llm_context()`, `llm_context()`,
   `__geo_interface__`, `--json` output — is pure data with no model call, so it
-  stays in the core. See the design principles in `docs/STRATEGY.md` §7.
+  stays in the core. See the design principles in `.github/STRATEGY.md` §7.
 
 ---
 
@@ -415,7 +416,7 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   don't change a public recipe) gets no entry.
 - **Scoping out follow-ups:** if you defer something to keep the PR small
   (latent bug, missing test, adjacent refactor), add an entry to
-  [`docs/TODO.md`](docs/TODO.md) in the same PR. The PR body alone is too easy to lose.
+  [`.github/TODO.md`](.github/TODO.md) in the same PR. The PR body alone is too easy to lose.
   When a follow-up PR closes one out, delete the entry.
 - Pre-commit hooks (`.pre-commit-config.yaml`) run ruff + a few sanity checks.
   Don't bypass with `--no-verify` — fix the root cause.

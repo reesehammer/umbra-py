@@ -77,5 +77,5 @@ own. The core search / download / render path never calls a model.
 
 - [Quickstart](../quickstart.md) — the five-minute path.
 - [Install](../install.md) — which extra you need.
-- [`docs/TODO.md`](https://github.com/reesehammer/umbra-py/blob/main/docs/TODO.md)
+- [`.github/TODO.md`](https://github.com/reesehammer/umbra-py/blob/main/.github/TODO.md)
   — follow-ons that were scoped out of merged PRs on purpose.

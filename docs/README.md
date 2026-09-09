@@ -1,13 +1,13 @@
 # docs/
 
-This directory is **not** the published user manual. Layout for newcomers:
+This is the published user manual (mkdocs → [umbra-py.space](https://umbra-py.space/)).
 
 | Path | Role |
 |------|------|
-| [`docs_src/`](../docs_src/) | Published mkdocs site → [umbra-py.space](https://umbra-py.space/) |
-| [`docs/schemas/`](schemas/) | Public JSON contracts (also packaged in the wheel as `umbra_py/_schemas`) |
-| [`docs/TODO.md`](TODO.md), [`docs/STRATEGY.md`](STRATEGY.md) | Maintainer ledger / strategy (internal) |
+| `docs/*.md`, `guides/`, `reference/` | Mkdocs pages (`docs_dir: docs`) |
+| [`schemas/`](schemas/) | Public JSON contracts (also packaged in the wheel as `umbra_py/_schemas`) |
+| [`.github/TODO.md`](../.github/TODO.md), [`.github/STRATEGY.md`](../.github/STRATEGY.md) | Maintainer ledger / strategy (internal; not part of the site) |
 | [`deploy/`](../deploy/) | Dockerfiles, compose, entrypoint |
 | [`railway.toml`](../railway.toml) | Railway Config-as-Code (root; `dockerfilePath` → `deploy/Dockerfile.mcp`) |
 
-See also the **Repo layout** section in [`README.md`](../README.md).
+`README.md` and `schemas/` are excluded from the mkdocs build. See also the **Repo layout** section in [`README.md`](../README.md).

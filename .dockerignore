@@ -17,13 +17,16 @@ dist
 *.egg-info
 tests
 examples
-# The planning docs, but *not* `docs/schemas/`: the wheel force-includes those
-# as package data (`umbra_py/_schemas/`) so `umbra serve` can put the published
-# contracts in its generated OpenAPI document, and an installed package has no
-# checkout to fall back to. Excluding them fails the build outright, which is
-# the honest failure for an image whose /openapi.json would otherwise raise.
-docs/*.md
-docs_src
+# The published mkdocs pages, but *not* `docs/schemas/`: the wheel force-includes
+# those as package data (`umbra_py/_schemas/`) so `umbra serve` can put the
+# published contracts in its generated OpenAPI document, and an installed
+# package has no checkout to fall back to. Excluding them fails the build
+# outright, which is the honest failure for an image whose /openapi.json would
+# otherwise raise. `docs/*` + re-include is the pattern that lets schemas back
+# in; `docs/**` would exclude the directory itself and block the exception.
+docs/*
+!docs/schemas
+!docs/schemas/**
 mkdocs.yml
 site
 *.db

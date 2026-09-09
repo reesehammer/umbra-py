@@ -4,7 +4,7 @@
 the loop. This module resolves human date expressions to concrete
 :class:`datetime.date` bounds with plain calendar arithmetic -- the
 deterministic first step of the C1 natural-language search direction (see
-``docs/STRATEGY.md``): natural language in, an exact date out,
+``.github/STRATEGY.md``): natural language in, an exact date out,
 no LLM at runtime, fully offline-testable. It sits inside the library's
 determinism boundary (the core never calls a model), so every command that
 takes ``--start`` / ``--end`` -- ``search``, ``index build``, ``change``,

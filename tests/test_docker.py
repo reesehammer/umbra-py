@@ -24,7 +24,7 @@ DOCKERFILE_MCP = DEPLOY / "Dockerfile.mcp"
 ENTRYPOINT = DEPLOY / "docker-entrypoint.sh"
 COMPOSE = DEPLOY / "docker-compose.yml"
 RAILWAY = REPO_ROOT / "railway.toml"
-DEPLOY_DOCS = REPO_ROOT / "docs_src" / "deploy.md"
+DEPLOY_DOCS = REPO_ROOT / "docs" / "deploy.md"
 
 
 def _toml_string(text: str, key: str) -> str:

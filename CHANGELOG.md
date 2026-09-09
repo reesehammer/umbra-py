@@ -32,6 +32,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   pipeline output.
 
 ### Changed
+- **Published user manual lives in `docs/`.** `docs_src/` is gone; mkdocs
+  `docs_dir` is `docs/`. Maintainer `STRATEGY.md` and `TODO.md` moved to
+  `.github/`. JSON contracts stay at `docs/schemas/` (unchanged path, still
+  packaged in the wheel).
 - **Docker files live under `deploy/`.** `Dockerfile`, `Dockerfile.mcp`,
   `docker-entrypoint.sh`, and `docker-compose.yml` moved out of the repo root.
   `railway.toml` stays at the root (default Railway discovery) with
