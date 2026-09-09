@@ -10,6 +10,28 @@ still open.
 
 ---
 
+## Drop the NLTK PYSEC-2026-3740 pip-audit ignore when a patched release ships
+
+- **Surfaced in:** the scheduled audit that opened #261.
+- **Code:** `.github/workflows/security-audit.yml` (`--ignore-vuln
+  PYSEC-2026-3740`), `pyproject.toml` (`llamaindex` extra).
+
+`pip-audit` flags `nltk==3.10.3` for PYSEC-2026-3740 / CVE-2026-81726 /
+GHSA-8mgp-746c-j5xp (model-artifact APIs bypass `pathsec`). nltk is a
+transitive of the optional `[llamaindex]` extra (`llama-index-core`); umbra-py
+never imports it and never calls those APIs. No patched PyPI release exists
+yet (latest is 3.10.3; the fix is on nltk `develop` as `2a92b71`). The audit
+job documents `--ignore-vuln PYSEC-2026-3740` until then.
+
+When NLTK ships a release after 3.10.3 that contains that fix:
+
+1. Drop `--ignore-vuln PYSEC-2026-3740` from `security-audit.yml`.
+2. Floor `nltk>=` that release on the `llamaindex` extra in `pyproject.toml`
+   so the extra cannot resolve back to 3.10.3.
+3. Delete this entry.
+
+---
+
 ## Narrated change in the demo store (both modes shipped — `STRATEGY.md` §8)
 
 - **Surfaced in:** the narration detection-floor PR (#193).
