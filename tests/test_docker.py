@@ -5,6 +5,8 @@ if they drift: ``railway.toml``'s start command (Railway replaces the image
 ``ENTRYPOINT`` in exec form) and ``Dockerfile.mcp`` (the default image only
 has ``[serve]``). Parsing them is enough — no Docker daemon, no Railway
 account. Same spirit as ``test_mcp_registry.py``.
+
+Deploy files live under ``deploy/``; paths below are repo-root-relative.
 """
 
 from __future__ import annotations
@@ -14,10 +16,11 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCKERFILE = REPO_ROOT / "Dockerfile"
-DOCKERFILE_MCP = REPO_ROOT / "Dockerfile.mcp"
-ENTRYPOINT = REPO_ROOT / "docker-entrypoint.sh"
-RAILWAY = REPO_ROOT / "railway.toml"
+DEPLOY = REPO_ROOT / "deploy"
+DOCKERFILE = DEPLOY / "Dockerfile"
+DOCKERFILE_MCP = DEPLOY / "Dockerfile.mcp"
+ENTRYPOINT = DEPLOY / "docker-entrypoint.sh"
+RAILWAY = DEPLOY / "railway.toml"
 DEPLOY_DOCS = REPO_ROOT / "docs_src" / "deploy.md"
 
 
@@ -49,7 +52,7 @@ def _instruction_body(path: Path) -> list[str]:
 
 def test_railway_points_at_the_mcp_dockerfile():
     text = RAILWAY.read_text(encoding="utf-8")
-    assert _toml_string(text, "dockerfilePath") == "Dockerfile.mcp"
+    assert _toml_string(text, "dockerfilePath") == "deploy/Dockerfile.mcp"
     assert _toml_string(text, "healthcheckPath") == "/healthz"
 
 
