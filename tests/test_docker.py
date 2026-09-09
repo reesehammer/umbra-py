@@ -6,7 +6,9 @@ if they drift: ``railway.toml``'s start command (Railway replaces the image
 has ``[serve]``). Parsing them is enough — no Docker daemon, no Railway
 account. Same spirit as ``test_mcp_registry.py``.
 
-Deploy files live under ``deploy/``; paths below are repo-root-relative.
+Dockerfiles / compose / entrypoint live under ``deploy/``; ``railway.toml``
+stays at the repo root for default Railway discovery. Paths below are
+repo-root-relative.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ DEPLOY = REPO_ROOT / "deploy"
 DOCKERFILE = DEPLOY / "Dockerfile"
 DOCKERFILE_MCP = DEPLOY / "Dockerfile.mcp"
 ENTRYPOINT = DEPLOY / "docker-entrypoint.sh"
-RAILWAY = DEPLOY / "railway.toml"
+RAILWAY = REPO_ROOT / "railway.toml"
 DEPLOY_DOCS = REPO_ROOT / "docs_src" / "deploy.md"
 
 
