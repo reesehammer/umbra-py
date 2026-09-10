@@ -1,9 +1,9 @@
 """``umbra change --narrate``: a vision-language reading of *what changed*
 between two SAR passes, grounded in a deterministic per-block dB-delta sidecar.
 
-This is the second Tier C "VLM-in-the-loop" capability (C2; see
-``.github/STRATEGY.md``), the sibling of :mod:`umbra_py.describe`.
-Where ``umbra describe`` has a model *read one scene*, ``umbra change --narrate``
+This is the second Tier C "VLM-in-the-loop" capability (C2), the sibling of
+:mod:`umbra_py.describe`. Where ``umbra describe`` has a model *read one scene*,
+``umbra change --narrate``
 has a model *narrate the change* between two acquisitions of the same site: it
 renders the change composite (the classic green-appeared / magenta-vanished
 image), computes a coarse grid of signed backscatter change in decibels, and
@@ -26,8 +26,8 @@ test) can recompute. Narration cites numbers, not vibes.
 
 How it stays honest
 -------------------
-The library's determinism boundary (``.github/STRATEGY.md`` §7)
-holds exactly as it does for :mod:`umbra_py.describe`:
+The library's determinism boundary holds exactly as it does for
+:mod:`umbra_py.describe`:
 
 1. **The picture and the numbers are produced deterministically.** The composite
    is the same :func:`umbra_py.change_composite` render; the dB grid is plain

@@ -10,7 +10,7 @@ copyright: >-
   &copy; Umbra Lab, Inc.
 
 # Published user manual. JSON contracts in docs/schemas/ are package data
-# (excluded from the site); maintainer STRATEGY/TODO live under .github/.
+# (excluded from the site); the maintainer TODO ledger lives under .github/.
 docs_dir: docs
 exclude_docs: |
   /README.md

@@ -51,7 +51,6 @@ DOCUMENTED_IN = (
     "README.md",
     "llms.txt",
     "llms-full.txt",
-    ".github/STRATEGY.md",
     ".github/TODO.md",
     "src/umbra_py/mcp_server.py",
     "src/umbra_py/llms_txt.py",

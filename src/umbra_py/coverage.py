@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 #:
 #: ``"recency"`` orders by each site's **newest** dated pass (the ``last`` a
 #: summary reports), most-recently-active first -- the site a monitoring or
-#: tasking user (STRATEGY.md §1's funnel) would reach for, which a depth ranking
+#: tasking user (the open-data-to-tasking funnel) would reach for, which a depth ranking
 #: buries under a deeper series that stopped years ago. ``"span"`` orders by each
 #: site's observation **baseline** (the ``span_days`` a summary reports),
 #: longest-watched first -- the window a *slow* change (subsidence, construction,
@@ -120,7 +120,7 @@ def site_query_echo(
     ``min_passes`` floor, and the recency / onset / cadence / baseline bounds that
     decide which sites the answer contains. Emitting them makes the discovery
     response round-trippable -- a caller (an agent driving ``find_repeat_sites ->
-    pick_change_interval -> narrate_change``, ``STRATEGY.md`` §3, or anything that
+    pick_change_interval -> narrate_change``, or anything that
     records what it asked for) reads the selection from the answer rather than from
     its own request, and two answers carrying the same ``query`` echo were ranked
     and selected the same way.

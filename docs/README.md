@@ -6,7 +6,7 @@ This is the published user manual (mkdocs → [umbra-py.space](https://umbra-py.
 |------|------|
 | `docs/*.md`, `guides/`, `reference/` | Mkdocs pages (`docs_dir: docs`) |
 | [`schemas/`](schemas/) | Public JSON contracts (also packaged in the wheel as `umbra_py/_schemas`) |
-| [`.github/TODO.md`](../.github/TODO.md), [`.github/STRATEGY.md`](../.github/STRATEGY.md) | Maintainer ledger / strategy (internal; not part of the site) |
+| [`.github/TODO.md`](../.github/TODO.md) | Maintainer ledger of scoped-out follow-ups (internal; not part of the site) |
 | [`deploy/`](../deploy/) | Dockerfiles, compose, entrypoint |
 | [`railway.toml`](../railway.toml) | Railway Config-as-Code (root; `dockerfilePath` → `deploy/Dockerfile.mcp`) |
 

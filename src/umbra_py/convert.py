@@ -3,7 +3,7 @@
 Umbra's ``GEC`` asset is already a geocoded cloud-optimized GeoTIFF and needs no
 conversion. The complex products (``SICD``/``CPHD``) live in the radar slant
 plane; getting them onto a map is the format gap that generates the most
-support burden (`STRATEGY.md` 5.5). This module provides two well-defined steps:
+support burden. This module provides two well-defined steps:
 
 * :func:`sicd_to_amplitude_geotiff` — a quick, *ungeoreferenced* detected
   amplitude image in the slant plane, for inspection.
@@ -3546,7 +3546,7 @@ def sicd_to_geocoded_cog(
         ``Radiometric`` block, and asking for a calibration the metadata cannot
         support is a self-describing error rather than a plausible-looking
         number. :func:`sicd_calibration_types` reports what a given file
-        supports. MultiRTC interop remains deferred (`STRATEGY.md` 5.5).
+        supports. MultiRTC interop remains deferred.
     noise_subtract:
         If true, subtract the receiver's own thermal-noise floor — the SICD's
         ``Radiometric.NoiseLevel.NoisePoly``, evaluated per pixel — from the

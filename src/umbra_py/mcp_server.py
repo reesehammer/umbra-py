@@ -545,7 +545,7 @@ def find_repeat_sites(
     tool ranks them, so ``find_repeat_sites → pick_change_interval →
     narrate_change`` is a complete chain a model can drive with no site known in
     advance — the deterministic answer to "where is there something to look at?"
-    (``STRATEGY.md`` §3's discovery moat; no model is called). Reach for this
+    (the discovery moat; no model is called). Reach for this
     (or ``search_catalog(area=..., fuzzy=True)``) before ``semantic=True`` when
     the site name is roughly known.
 
@@ -724,8 +724,8 @@ def find_repeat_sites(
             # The index can answer a site's *whole-archive* depth as a GROUP BY
             # task, so route through rank_sites rather than re-listing a
             # limit-capped pool -- a deeply-imaged site is ranked by all its passes
-            # rather than by whatever the first `limit` rows admitted (the drop-in
-            # `STRATEGY.md` §8 names, the same one `umbra sites --local` and
+            # rather than by whatever the first `limit` rows admitted (the
+            # whole-archive drop-in, the same one `umbra sites --local` and
             # `GET /sites` already use). `limit` sizes only the live/token pool.
             sites = source.rank_sites(
                 bbox=resolved_bbox,
@@ -1264,8 +1264,8 @@ def pick_change_interval(
     ``to_stack`` cube, reduces it with ``stack_stats``, and returns the *one*
     consecutive pass-pair whose measured change stands **furthest clear of the
     speckle detection floor** — the pair a reader should look at first. No model
-    is called: a number picks the frames (``STRATEGY.md`` §7's determinism
-    boundary applied to frame selection), so the choice is reproducible and safe
+    is called: a number picks the frames (the determinism boundary applied to
+    frame selection), so the choice is reproducible and safe
     to quote.
 
     Why this exists as its own tool: ``narrate_change`` reads a *pair* of passes,

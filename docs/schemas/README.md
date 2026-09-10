@@ -66,9 +66,8 @@ $ UMBRA_JSON=1 umbra map ...
 {"error": "MissingDependencyError", "message": "'folium' is required for interactive maps. Install the extra with: pip install \"umbra-py[viz]\"", "hint": "pip install \"umbra-py[viz]\""}
 ```
 
-The `hint` is `null` when no single recovery step applies. See
-[`STRATEGY.md` §7](../STRATEGY.md#7-design-principles-to-hold-onto) for the
-rationale ("agents are users; users are agents").
+The `hint` is `null` when no single recovery step applies. The rationale is
+that agents are users and users are agents.
 
 ## The measurement documents
 
