@@ -136,9 +136,20 @@ jobs:
       # sits a couple of points below the current figure so ordinary branch
       # fluctuation across Python patch releases doesn't turn CI red. The XML
       # report feeds the Codecov badge in the README.
+      #
+      # ubuntu-latest public runners have 4 vCPUs. `-n auto` spends them;
+      # `--dist loadfile` keeps each test module on one worker so GDAL /
+      # matplotlib / TestClient fixtures stay process-local. `MPLBACKEND=Agg`
+      # stops matplotlib probing for a display. `--durations=20` names
+      # whatever still dominates if the job drifts past ~60s.
       - name: Test (offline, all extras) with coverage
+        env:
+          MPLBACKEND: Agg
         run: >-
           pytest -q
+          -n auto
+          --dist loadfile
+          --durations=20
           --cov=umbra_py
           --cov-report=term-missing
           --cov-report=xml
