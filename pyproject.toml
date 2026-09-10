@@ -87,6 +87,10 @@ llamaindex = ["llama-index-core>=0.11", "umbra-py[viz]"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
+    # `test-all-extras` in CI runs ~2400 tests on a 4-vCPU runner; xdist is
+    # what actually uses the other three cores. Not in pytest addopts so a
+    # local `pytest -q` stays serial and the core matrix stays comparable.
+    "pytest-xdist>=3.6",
     "responses>=0.23",
     "httpx>=0.27",
     # `tests/test_workflows.py` reads .github/workflows/*.yml to check every
