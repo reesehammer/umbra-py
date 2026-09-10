@@ -239,7 +239,7 @@ PUBLIC_RATE_WINDOW_S = 60.0
 RATE_LIMIT_EXEMPT_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
 
 #: Env vars a public instance must not hold. Canopy is the commercial archive
-#: (STRATEGY.md §6: don't position against it); model keys would turn MCP's
+#: (don't position against it); model keys would turn MCP's
 #: opt-in describe/narrate tools into an open wallet.
 PUBLIC_SECRET_ENV = (
     CANOPY_TOKEN_ENV,
@@ -1017,8 +1017,8 @@ def run_sites(
     On the normal (index) backend the ranking is **whole-archive**: a site's
     depth is one ``GROUP BY task`` :meth:`CatalogIndex.rank_sites` answers over the
     index's entire contents, so a deeply-imaged site is ranked by all its passes
-    rather than by the arbitrary window a pool cap admits -- the drop-in
-    ``STRATEGY.md`` §8 names, so ``GET /sites`` no longer under-counts a deep site
+    rather than by the arbitrary window a pool cap admits -- the whole-archive
+    drop-in, so ``GET /sites`` no longer under-counts a deep site
     whose passes fall outside the first ``limit`` rows. ``limit`` sizes only the
     live-backend pool: a live :class:`~umbra_py.catalog.UmbraCatalog` (``umbra serve
     --live``) has no index to group over, so it re-lists a single capped
@@ -1032,8 +1032,8 @@ def run_sites(
     selector and summariser) -- the same one ``umbra sites``, the
     ``find_repeat_sites`` agent tool and the static showcase's featured gallery
     use, so no two surfaces disagree about what "most repeat-imaged" means. Pure
-    ranking: no renderer and no model (``STRATEGY.md`` §7's determinism boundary
-    applied to discovery).
+    ranking: no renderer and no model (the determinism boundary applied to
+    discovery).
 
     ``rank_by`` is one of :data:`umbra_py.coverage.SITE_RANKINGS`: the depth orders
     ``"passes"`` (raw pass count, the default) and ``"comparable"`` (the site's
@@ -3941,9 +3941,9 @@ def build_app(
             concrete changes the numbers support, a confidence and SAR-specific
             caveats -- grounded in the deterministic per-block decibel grid *and*
             the speckle detection floor, so the model reports change only where it
-            stands clear of interference. The determinism boundary
-            (``.github/STRATEGY.md`` §7) holds: the picture and the numbers are
-            computed offline, and the model only interprets them.
+            stands clear of interference. The determinism boundary holds: the
+            picture and the numbers are computed offline, and the model only
+            interprets them.
 
             **The two capabilities compose.** Two or three passes are narrated
             directly. A **longer series is scanned first**

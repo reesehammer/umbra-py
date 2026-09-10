@@ -105,8 +105,7 @@ pyproject.toml       # deps, extras, ruff + pytest config
 server.json          # MCP registry manifest for umbra-mcp; submitted by release.yml's publish-mcp job
 docs/schemas/        # the published JSON contracts for every `--json` surface (public API); shipped in the wheel too, read with `umbra_py.schemas`
 .github/TODO.md      # ledger of follow-ups intentionally scoped out of merged PRs
-.github/STRATEGY.md  # design principles (internal)
-docs/README.md       # clarifies published docs vs schemas vs .github TODO/STRATEGY vs deploy/
+docs/README.md       # clarifies published docs vs schemas vs .github TODO vs deploy/
 deploy/              # Dockerfiles, docker-compose.yml, docker-entrypoint.sh (build context = repo root)
 railway.toml         # Railway Config-as-Code (dockerfilePath → deploy/Dockerfile.mcp)
 ```
@@ -277,7 +276,7 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
   belongs behind a future `[ai]` extra and runs only when the user asks. The
   AI-*legible* surface — `UmbraItem.to_llm_context()`, `llm_context()`,
   `__geo_interface__`, `--json` output — is pure data with no model call, so it
-  stays in the core. See the design principles in `.github/STRATEGY.md` §7.
+  stays in the core.
 
 ---
 
@@ -410,10 +409,10 @@ This is a SAR / geospatial project. A few facts that matter when writing code:
 - **CHANGELOG.md:** one bullet under **Unreleased** for any user-visible
   change (new public surface, behavior change, bug a user could hit).
   One to three sentences: name the CLI flag / function / schema and say
-  what the user can do now, or what broke. File lists, test names,
-  rejected alternatives, and `STRATEGY.md` citations belong in the PR
-  body, not here. Internal-only work (refactors, test-only, docs that
-  don't change a public recipe) gets no entry.
+  what the user can do now, or what broke. File lists, test names, and
+  rejected alternatives belong in the PR body, not here. Internal-only
+  work (refactors, test-only, docs that don't change a public recipe)
+  gets no entry.
 - **Scoping out follow-ups:** if you defer something to keep the PR small
   (latent bug, missing test, adjacent refactor), add an entry to
   [`.github/TODO.md`](.github/TODO.md) in the same PR. The PR body alone is too easy to lose.

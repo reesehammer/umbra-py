@@ -9,8 +9,8 @@ framework's loop) supplies the "when"; :func:`watch` supplies the idempotent
 finds three new acquisitions says exactly which three -- every time, without
 re-alerting on acquisitions a previous run already reported.
 
-Design, following the package's determinism boundary
-(``.github/STRATEGY.md`` §7; the C3 monitoring workstream):
+Design, following the package's determinism boundary (the C3 monitoring
+workstream):
 
 - **The search source is injected.** :func:`watch` takes anything with a
   :meth:`search` mirroring :meth:`UmbraCatalog.search` -- a live

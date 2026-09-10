@@ -1,8 +1,8 @@
 """``umbra ask``: natural-language search that a model *plans* and the library
 *executes* deterministically.
 
-This is the capstone of the C1 natural-language-search direction (see
-``.github/STRATEGY.md``). The two earlier steps stayed entirely
+This is the capstone of the C1 natural-language-search direction. The two
+earlier steps stayed entirely
 inside the library's determinism boundary -- relative dates
 (:mod:`umbra_py.dates`) and fuzzy task matching (:mod:`umbra_py.fuzzy`) turn
 natural language into a filter with *no model call*. ``umbra ask`` is the honest

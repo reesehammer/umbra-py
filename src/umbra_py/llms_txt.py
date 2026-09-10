@@ -240,10 +240,6 @@ def llms_txt() -> str:
     lines.append("## Optional")
     lines.append("")
     lines.append(
-        f"- [Strategy]({_RAW_BASE}/.github/STRATEGY.md): where the project sits in "
-        "the SAR ecosystem and why."
-    )
-    lines.append(
         f"- [Open follow-ons]({_RAW_BASE}/.github/TODO.md): the ledger of work "
         "intentionally scoped out of merged PRs."
     )
