@@ -32,13 +32,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   pipeline output.
 
 ### Changed
-- **Maintainer strategy is no longer in the repository.** `.github/STRATEGY.md`
-  is removed; `llms.txt` no longer links it. Design rationale is internal.
-  The TODO ledger stays at `.github/TODO.md`.
 - **Published user manual lives in `docs/`.** `docs_src/` is gone; mkdocs
-  `docs_dir` is `docs/`. Maintainer `TODO.md` lives in `.github/`. JSON
-  contracts stay at `docs/schemas/` (unchanged path, still packaged in the
-  wheel).
+  `docs_dir` is `docs/`. Maintainer `STRATEGY.md` and `TODO.md` moved to
+  `.github/`. JSON contracts stay at `docs/schemas/` (unchanged path, still
+  packaged in the wheel).
 - **Docker files live under `deploy/`.** `Dockerfile`, `Dockerfile.mcp`,
   `docker-entrypoint.sh`, and `docker-compose.yml` moved out of the repo root.
   `railway.toml` stays at the root (default Railway discovery) with
