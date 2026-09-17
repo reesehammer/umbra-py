@@ -83,13 +83,16 @@ PRODUCT_TYPE_EXPLANATIONS: dict[str, str] = {
         "image in NITF. Map-projected like GEC but in the standard NGA format."
     ),
     "SICD": (
-        "Sensor Independent Complex Data: full complex data in the slant "
-        "plane (not map-projected). Needed for interferometry and advanced "
-        "processing; not a display image."
+        "Sensor Independent Complex Data: full complex pixels in the radar "
+        "slant plane (NITF, not map-projected). Download it for "
+        "phase-preserving work; umbra convert writes amplitude only and "
+        "discards phase. Open Umbra SICDs are RGAZIM/PFA, not RGZERO."
     ),
     "CPHD": (
-        "Compensated Phase History Data: the raw signal phase history, the "
-        "least-processed product. For signal-level work, not for viewing."
+        "Compensated Phase History Data: the raw signal phase history before "
+        "image formation. For custom formation outside umbra-py, not for "
+        "viewing. umbra-py classifies and downloads it; it does not form an "
+        "image, and convert does not read CPHD."
     ),
 }
 

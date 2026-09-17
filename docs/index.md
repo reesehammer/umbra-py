@@ -31,8 +31,10 @@ API (`umbra serve`) and MCP server sit on the same host.
   offline repeats.
 - **Download** — resume-safe HTTPS downloads with integrity verification.
 - **Convert** — turn a complex SICD product into a map-ready, geocoded
-  cloud-optimized GeoTIFF (`umbra convert`), with optional DEM terrain
-  orthorectification, geoid correction, and radiometric terrain flattening.
+  cloud-optimized GeoTIFF (`umbra convert`). **Amplitude only** — phase is
+  discarded. Optional DEM terrain orthorectification, geoid correction, and
+  radiometric terrain flattening. For phase-preserving SICD/CPHD download,
+  see [Complex products](guides/complex-downstream.md).
 - **Load** — read a clipped/decimated scene straight into `xarray`.
 - **Visualize** — interactive Folium maps, HTML thumbnail galleries, full-res
   browser viewers, before/after swipes, change composites, and time scans.
@@ -47,6 +49,8 @@ API (`umbra serve`) and MCP server sit on the same host.
 - [Install](install.md) the right extras for what you need.
 - Work through the [Quickstart](quickstart.md).
 - Explore the [example notebooks](guides/notebooks.md).
+- Need phase? [Complex products (SICD/CPHD)](guides/complex-downstream.md)
+  — download and stop; convert discards phase.
 - See how open Umbra data shows up in [research](guides/research.md) (ProSR-inspired ISR cookbook).
 - Connect [Claude Desktop or Claude Code](mcp.md) to the hosted MCP.
 - Reach for the [CLI reference](cli.md) or the API reference in the sidebar.

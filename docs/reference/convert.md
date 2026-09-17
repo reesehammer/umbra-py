@@ -1,9 +1,14 @@
 # Convert: SICD → geocoded COG
 
 Turn a complex SICD product into a north-up, map-ready cloud-optimized GeoTIFF
-using SICD's own image-projection model. Optional DEM terrain
-orthorectification, geoid correction, and radiometric terrain flattening are
-documented in [Terrain](terrain.md). Requires the `[convert]` extra.
+using SICD's own image-projection model. Both converters detect **amplitude**
+and **discard phase** — this is not an InSAR or coherence path. If you need
+the complex pixels, download the SICD and stop; see
+[Complex products (SICD/CPHD)](../guides/complex-downstream.md).
+
+Optional DEM terrain orthorectification, geoid correction, and radiometric
+terrain flattening are documented in [Terrain](terrain.md). Requires the
+`[convert]` extra.
 
 Both converters also take `calibration=` — one of `sigma0`, `beta0`, `gamma0`
 or `rcs` — which scales pixel power by the SICD's own `Radiometric` scale

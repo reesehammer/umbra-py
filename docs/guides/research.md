@@ -37,6 +37,11 @@ Walkthrough:
 (search → size-check → chip). Chip mechanics alone:
 [`examples/05_detection_chips.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/05_detection_chips.ipynb).
 
+That path is **amplitude**. `umbra convert` / `sicd_to_amplitude_geotiff`
+discard phase. For a phase-preserving SICD/CPHD stack (download and stop;
+open Umbra SICD is RGAZIM/PFA), see
+[Complex products (SICD/CPHD)](complex-downstream.md).
+
 ## License & affiliation
 
 Umbra open imagery is **CC BY 4.0** — attribute *"Contains Umbra open data,

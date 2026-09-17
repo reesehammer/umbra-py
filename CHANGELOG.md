@@ -10,6 +10,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Complex SICD/CPHD handoff guide.** New
+  [`docs/guides/complex-downstream.md`](docs/guides/complex-downstream.md)
+  for phase-preserving downstream processors: open Umbra SICD is
+  RGAZIM/PFA (not Capella RGZERO); fetch the index, search
+  `--product SICD` / `CPHD`, size-check with HTTP `HEAD`, download, and
+  stop. `umbra convert` writes amplitude only. Limitations and product-type
+  blurbs say so.
 - **ISR / research cookbook.** New `examples/09_isr_training_set.ipynb` walks
   CatalogIndex search (VV / incidence filters) → size-check → chips for an
   Umbra open-data training set, with a [Used in research](https://umbra-py.space/guides/research/)

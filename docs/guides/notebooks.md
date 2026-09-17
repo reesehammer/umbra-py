@@ -13,9 +13,13 @@ where it can be and points at Umbra's live catalog where it must be.
 | 04 | [`04_amplitude_time_series.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/04_amplitude_time_series.ipynb) | Build an amplitude time series across passes. |
 | 05 | [`05_detection_chips.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/05_detection_chips.ipynb) | Cut a scene into georeferenced ML training chips. |
 | 06 | [`06_site_monitoring.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/06_site_monitoring.ipynb) | A standing-analyst monitoring loop over a site. |
-| 07 | [`07_sicd_amplitude.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/07_sicd_amplitude.ipynb) | Extract amplitude from a complex SICD product. |
+| 07 | [`07_sicd_amplitude.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/07_sicd_amplitude.ipynb) | Extract **amplitude** from a complex SICD (`umbra convert` discards phase). |
 | 08 | [`08_time_series_datacube.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/08_time_series_datacube.ipynb) | Co-register a site's passes into a datacube, then reduce it to a measured answer. |
 | 09 | [`09_isr_training_set.ipynb`](https://github.com/reesehammer/umbra-py/blob/main/examples/09_isr_training_set.ipynb) | ISR / SR training-set cookbook: index search, SICD size-check, GEC chips (ProSR-inspired). |
+
+Need the complex pixels themselves rather than a geocoded amplitude GeoTIFF?
+[Complex products (SICD/CPHD)](complex-downstream.md) is the handoff:
+index → search `--product SICD` / `CPHD` → size-check → download → stop.
 
 Run them locally with the matching extras installed, e.g.:
 
