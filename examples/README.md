@@ -34,11 +34,12 @@ They stream from Umbra's public bucket, so run them with network access.
   image — the copy-pasteable recipe for SAR-based site monitoring on a schedule
   (`viz` extra).
 - [`07_sicd_amplitude.ipynb`](07_sicd_amplitude.ipynb) — geocode the *complex*
-  product: detect a SICD's amplitude in the slant plane, then warp it onto a
+  product as **amplitude**: detect a SICD in the slant plane, then warp it onto a
   map-ready EPSG:4326 cloud-optimized GeoTIFF with `sicd_to_geocoded_cog` (using
   SICD's own image-projection model), and confirm it lands on the acquisition's
   catalog footprint — the one-call answer to "my SICD won't open on a map"
-  (`convert` extra).
+  (`convert` extra). Phase is discarded; for a complex-product handoff see
+  [`docs/guides/complex-downstream.md`](../docs/guides/complex-downstream.md).
 - [`08_time_series_datacube.ipynb`](08_time_series_datacube.ipynb) — the
   measured version of `04`: co-register a site's passes onto one equal-area grid
   with `to_stack` (the shared grid `stackstac`/`odc-stac` can't build here), then

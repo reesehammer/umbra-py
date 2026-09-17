@@ -52,6 +52,10 @@ from umbra_py import sicd_to_geocoded_cog
 sicd_to_geocoded_cog("scene.nitf", "scene_geocoded.tif", dem="auto")
 ```
 
+This writes **amplitude** and discards phase. If you need the complex
+pixels, download the SICD and stop — see
+[Complex products (SICD/CPHD)](guides/complex-downstream.md).
+
 Open products generally carry no `Radiometric` block, so `calibration=` and a
 measured noise floor will refuse rather than invent numbers. See
 [limitations](guides/limitations.md).

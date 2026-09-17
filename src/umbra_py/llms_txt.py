@@ -235,6 +235,12 @@ def llms_txt() -> str:
         "linting and the test workflow."
     )
     lines.append(f"- [Changelog]({_RAW_BASE}/CHANGELOG.md): what has shipped, most recent first.")
+    lines.append(
+        "- Need phase? Open Umbra SICD is RGAZIM/PFA (not RGZERO). "
+        "`umbra convert` discards phase. Search `--product SICD` / `CPHD`, "
+        "HEAD the size, download, and stop "
+        f"([complex-downstream]({_RAW_BASE}/docs/guides/complex-downstream.md))."
+    )
     lines.append("")
 
     lines.append("## Optional")
@@ -282,6 +288,12 @@ def llms_full_txt() -> str:
     for name in PRODUCT_ASSETS:
         explanation = PRODUCT_TYPE_EXPLANATIONS.get(name, "")
         lines.append(f"- **{name}** — {explanation}")
+    lines.append("")
+    lines.append(
+        "Open Umbra SICD is spotlight / RGAZIM / PFA, not Capella-style RGZERO. "
+        "`umbra convert` writes amplitude only — if you need phase, download "
+        "SICD or CPHD and stop. See docs/guides/complex-downstream.md."
+    )
     lines.append("")
     lines.append(f"Polarization caveat: {POLARIZATION_CAVEAT}")
     lines.append("")

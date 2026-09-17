@@ -10,6 +10,29 @@ still open.
 
 ---
 
+## Preflight `Grid/Type` and `ImageFormAlgo` (complex-downstream R2)
+
+- **Surfaced in:** the complex SICD/CPHD handoff docs.
+- **Code:** `src/umbra_py/preflight.py`, `umbra preflight`.
+
+The docs now state that open Umbra SICD is RGAZIM/PFA, but preflight does not
+yet read `Grid/Type` or `ImageFormation/ImageFormAlgo` from the SICD XML.
+Smallest change: surface those two fields on `SicdCapabilities` / `umbra
+preflight` so a downstream processor can reject the wrong class (RGZERO vs
+RGAZIM) before downloading. Keep it a metadata fact, not a converter.
+
+## Complex-product notebook (R3)
+
+- **Surfaced in:** the complex SICD/CPHD handoff docs.
+- **Code:** `examples/`, `docs/guides/complex-downstream.md`.
+
+A runnable notebook for the phase-preserving recipe (index search → HEAD →
+download, no convert) waits on a concrete AOI from the isce3-benchmark work.
+Do not invent a site; the guide's CLI/Python sketch is the stand-in until
+then.
+
+---
+
 ## Drop the NLTK PYSEC-2026-3740 pip-audit ignore when a patched release ships
 
 - **Surfaced in:** the pip-audit ignore for #261 (#263).

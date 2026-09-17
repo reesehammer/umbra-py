@@ -22,6 +22,7 @@ Determinism boundary: the core library is deterministic and never calls a model.
 - [AGENTS.md](https://raw.githubusercontent.com/reesehammer/umbra-py/main/AGENTS.md): the contributor-agent guide -- how to *modify* the library (repo map, conventions, testing rules).
 - [CONTRIBUTING.md](https://raw.githubusercontent.com/reesehammer/umbra-py/main/CONTRIBUTING.md): development setup, linting and the test workflow.
 - [Changelog](https://raw.githubusercontent.com/reesehammer/umbra-py/main/CHANGELOG.md): what has shipped, most recent first.
+- Need phase? Open Umbra SICD is RGAZIM/PFA (not RGZERO). `umbra convert` discards phase. Search `--product SICD` / `CPHD`, HEAD the size, download, and stop ([complex-downstream](https://raw.githubusercontent.com/reesehammer/umbra-py/main/docs/guides/complex-downstream.md)).
 
 ## Optional
 

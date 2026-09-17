@@ -6,11 +6,19 @@ has not yet checked on real products.
 
 ## Not an InSAR toolbox
 
-`SICD` and `CPHD` are classified and downloadable. `umbra convert` detects
-**amplitude** and writes a geocoded GeoTIFF — the phase is discarded. There
-is no interferogram, no coherence, no perpendicular-baseline filter, and no
-CPHD image formation. If you need phase-preserving work, download the SICD
-and use [sarpy](https://github.com/ngageoint/sarpy) (or similar) directly.
+`SICD` and `CPHD` are classified and downloadable. That is the whole
+phase-preserving path in umbra-py: **search, size-check, download, stop.**
+
+`umbra convert` detects **amplitude** and writes a geocoded GeoTIFF — the
+phase is discarded. There is no interferogram, no coherence, no
+perpendicular-baseline filter, no CPHD image formation, and no PFA →
+range-Doppler rewrite.
+
+Open Umbra SICDs are **spotlight / RGAZIM / Polar Format (PFA)**, not
+Capella-style RGZERO stripmap. A processor that only ingests RGZERO should
+reject them. If you need the complex pixels, download the SICD (or CPHD)
+and hand it to [sarpy](https://github.com/ngageoint/sarpy) or another
+downstream tool — see [Complex products (SICD/CPHD)](complex-downstream.md).
 
 ## Radiometry on the open archive
 
@@ -75,7 +83,9 @@ own. The core search / download / render path never calls a model.
 
 ## What to read next
 
-- [Quickstart](../quickstart.md) — the five-minute path.
+- [Complex products (SICD/CPHD)](complex-downstream.md) — phase-preserving
+  handoff: index → search → HEAD → download → stop.
+- [Quickstart](../quickstart.md) — the five-minute path (GEC / convert).
 - [Install](../install.md) — which extra you need.
 - [`.github/TODO.md`](https://github.com/reesehammer/umbra-py/blob/main/.github/TODO.md)
   — follow-ons that were scoped out of merged PRs on purpose.

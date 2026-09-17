@@ -86,10 +86,12 @@ or `umbra change --area Centerfield --out change.png`.
 **Load** a geocoded GEC into xarray or a GeoTIFF (`to_xarray`, `to_geotiff`,
 `to_stack`). Needs `[load]`.
 
-**Convert** a SICD to a north-up COG (`sicd_to_geocoded_cog`, `umbra convert`).
-Needs `[convert]`. Open products generally have no radiometric metadata, so
-`--calibrate` / `--noise-model measured` refuse rather than invent numbers.
-See [limitations](https://umbra-py.space/guides/limitations/).
+**Convert** a SICD to a north-up **amplitude** COG (`sicd_to_geocoded_cog`,
+`umbra convert`) — phase is discarded. Needs `[convert]`. Open products
+generally have no radiometric metadata, so `--calibrate` / `--noise-model
+measured` refuse rather than invent numbers. See
+[limitations](https://umbra-py.space/guides/limitations/) and the
+[complex-product handoff](https://umbra-py.space/guides/complex-downstream/).
 
 **Chip** scenes into georeferenced ML tiles for SR / ATR-style benchmarks from
 open Umbra GEC/SICD: `umbra chips --area Centerfield --out chips/`. See the
@@ -150,11 +152,13 @@ as `io.github.reesehammer/umbra-mcp`. STAC for `pystac-client` / QGIS is
 | `GEC`  | Geocoded cloud-optimized GeoTIFF | Map-ready imagery. **Start here.** |
 | `CSI`  | Color sub-aperture GeoTIFF | Quick-look RGB, not a measurement |
 | `SIDD` | Geocoded detected image (NITF) | Detected imagery in a standard format |
-| `SICD` | Complex data in the radar slant plane (NITF) | Phase-preserving work, InSAR *inputs* |
-| `CPHD` | Compensated phase history | Custom image formation |
+| `SICD` | Complex slant-plane image (NITF). Open archive: RGAZIM/PFA. | Phase-preserving downstream. Download; do not convert. |
+| `CPHD` | Compensated phase history | Custom image formation *outside* umbra-py |
 
-`umbra-py` downloads SICD/CPHD and can geocode a SICD to amplitude. It does
-not form interferograms or compute coherence.
+`umbra-py` downloads SICD/CPHD. `umbra convert` geocodes a SICD to
+**amplitude** and discards phase. It does not form interferograms or
+compute coherence. For a processor that needs the complex pixels, see
+[Complex products (SICD/CPHD)](https://umbra-py.space/guides/complex-downstream/).
 
 ## Data license & attribution
 
