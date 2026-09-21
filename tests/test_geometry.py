@@ -272,7 +272,7 @@ def fake_bucket(monkeypatch):
     monkeypatch.setattr(
         UmbraCatalog,
         "_list_prefix",
-        lambda self, p: (top, []) if p == "sar-data/tasks/" else (_ for _ in ()).throw(KeyError(p)),
+        lambda self, p: (top, []) if p == "sar-data/tasks/" else ([], []),
     )
     monkeypatch.setattr(UmbraCatalog, "_stream_keys", lambda self, p: iter(keys[p]))
 

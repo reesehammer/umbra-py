@@ -14,9 +14,9 @@ Ordered easiest-to-use first (GEC) to rawest (CPHD). Prefer GEC unless the task 
 - **CSI** — Color Sub-aperture Image: a quick-look RGB GeoTIFF that colorizes sub-aperture/frequency content. Good for eyeballing a scene, not for radiometric measurement.
 - **SIDD** — Sensor Independent Derived Data: a geocoded, detected (amplitude) image in NITF. Map-projected like GEC but in the standard NGA format.
 - **SICD** — Sensor Independent Complex Data: full complex pixels in the radar slant plane (NITF, not map-projected). Download it for phase-preserving work; umbra convert writes amplitude only and discards phase. Open Umbra SICDs are RGAZIM/PFA, not RGZERO.
-- **CPHD** — Compensated Phase History Data: the raw signal phase history before image formation. For custom formation outside umbra-py, not for viewing. umbra-py classifies and downloads it; it does not form an image, and convert does not read CPHD.
+- **CPHD** — Compensated Phase History Data: the raw signal phase history before image formation. For custom formation outside umbra-py (including GPU backprojection), not for viewing. umbra-py classifies and downloads it; it does not form an image or run backprojection, and convert does not read CPHD.
 
-Open Umbra SICD is spotlight / RGAZIM / PFA, not Capella-style RGZERO. `umbra convert` writes amplitude only — if you need phase, download SICD or CPHD and stop. See docs/guides/complex-downstream.md.
+Open Umbra SICD is spotlight / RGAZIM / PFA, not Capella-style RGZERO. `umbra convert` writes amplitude only — if you need phase, download SICD or CPHD and stop. CPHD is compensated phase history for a former outside umbra-py (GPU backprojection included); convert does not read it. See docs/guides/complex-downstream.md.
 
 Polarization caveat: Polarizations are not interchangeable: an HH scene and a VV scene of the same place measure different scattering and must not be differenced for change detection. Compare like polarization with like.
 

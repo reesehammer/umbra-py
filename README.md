@@ -153,7 +153,7 @@ as `io.github.reesehammer/umbra-mcp`. STAC for `pystac-client` / QGIS is
 | `CSI`  | Color sub-aperture GeoTIFF | Quick-look RGB, not a measurement |
 | `SIDD` | Geocoded detected image (NITF) | Detected imagery in a standard format |
 | `SICD` | Complex slant-plane image (NITF). Open archive: RGAZIM/PFA. | Phase-preserving downstream. Download; do not convert. |
-| `CPHD` | Compensated phase history | Custom image formation *outside* umbra-py |
+| `CPHD` | Compensated phase history | Custom formation *outside* umbra-py (download; do not convert). Not an image. |
 
 `umbra-py` downloads SICD/CPHD. `umbra convert` geocodes a SICD to
 **amplitude** and discards phase. It does not form interferograms or

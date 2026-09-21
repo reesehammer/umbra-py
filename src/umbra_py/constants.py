@@ -90,9 +90,10 @@ PRODUCT_TYPE_EXPLANATIONS: dict[str, str] = {
     ),
     "CPHD": (
         "Compensated Phase History Data: the raw signal phase history before "
-        "image formation. For custom formation outside umbra-py, not for "
-        "viewing. umbra-py classifies and downloads it; it does not form an "
-        "image, and convert does not read CPHD."
+        "image formation. For custom formation outside umbra-py (including "
+        "GPU backprojection), not for viewing. umbra-py classifies and "
+        "downloads it; it does not form an image or run backprojection, and "
+        "convert does not read CPHD."
     ),
 }
 

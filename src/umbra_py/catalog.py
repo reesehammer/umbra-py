@@ -1,16 +1,24 @@
 """Search Umbra's published open SAR data.
 
-Umbra publishes each acquisition under
-``s3://umbra-open-data-catalog/sar-data/tasks/<task>/[<uuid>/]<acquisition>/``,
-with a ``*.stac.v2.json`` sidecar next to the binary products. The legacy
-``stac/`` tree of ``catalog.json`` files lists thousands of items, but most
-reference data that was never actually published — searching it returns
-items whose download URLs don't resolve.
+Umbra publishes each acquisition under one of two public prefixes:
 
-:class:`UmbraCatalog` walks the live ``sar-data/tasks/`` prefix directly
-via paginated S3 listings. Acquisition directory names start with the
-acquisition date (``YYYY-MM-DD-HH-MM-SS_PLATFORM``), so a search bounded by
-``start`` / ``end`` prunes whole subtrees without fetching them.
+- ``sar-data/tasks/<task>/[<uuid>/]<acquisition>/`` — named campaigns
+  (``Centerfield, Utah``, …)
+- ``sar-data/task-data/<task-id>/<acquisition>/`` — UUID-keyed collects
+  (the bulk of the open archive, including CPHD used for formation
+  elsewhere)
+
+each with a ``*.stac.v2.json`` sidecar next to the binary products. The
+legacy ``stac/`` tree of ``catalog.json`` files lists thousands of items,
+but most reference data that was never actually published — searching it
+returns items whose download URLs don't resolve.
+
+:class:`UmbraCatalog` walks both live prefixes via paginated S3 listings
+(named ``tasks/`` first, then ``task-data/``). Acquisition directory names
+start with the acquisition date (``YYYY-MM-DD-HH-MM-SS_PLATFORM``), so a
+search bounded by ``start`` / ``end`` prunes whole subtrees without
+fetching them. ``task-data/`` is thousands of UUID directories; prefer
+``CatalogIndex`` / ``umbra search --local`` for a repeat query.
 """
 
 from __future__ import annotations
@@ -39,6 +47,12 @@ DateLike = str | date | datetime | None
 
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 _TASKS_PREFIX = "sar-data/tasks/"
+#: UUID-keyed sibling of :data:`_TASKS_PREFIX`. Same bucket, different tree;
+#: a collect published only here is invisible if the walker lists ``tasks/``
+#: alone. Named tasks are listed first so a ``limit=1`` search still lands
+#: in the small named tree.
+_TASK_DATA_PREFIX = "sar-data/task-data/"
+_DATA_PREFIXES = (_TASKS_PREFIX, _TASK_DATA_PREFIX)
 # Acquisition directories look like 2025-12-06-07-52-28_UMBRA-10/. We use the
 # leading YYYY-MM-DD both to identify the acquisition component of a key and
 # to prune by date.
@@ -92,10 +106,17 @@ def _acq_date(prefix: str) -> date | None:
 
 
 def _task_name(task_prefix: str) -> str:
-    """Task directory name (the AOI label) from a ``sar-data/tasks/<name>/``
-    prefix, e.g. ``"Centerfield, Utah"``. S3 keys are unencoded, so the name
-    carries its literal spaces / commas."""
-    return task_prefix[len(_TASKS_PREFIX) :].rstrip("/")
+    """Task directory name from a ``sar-data/tasks/<name>/`` or
+    ``sar-data/task-data/<id>/`` prefix.
+
+    Named campaigns keep the human label (``"Centerfield, Utah"``); UUID
+    collects keep the task id. S3 keys are unencoded, so a named task
+    carries its literal spaces / commas.
+    """
+    for prefix in _DATA_PREFIXES:
+        if task_prefix.startswith(prefix):
+            return task_prefix[len(prefix) :].rstrip("/")
+    return task_prefix.rstrip("/")
 
 
 def _datetime_interval(start: date | None, end: date | None) -> str | None:
@@ -311,20 +332,24 @@ class UmbraCatalog:
             Inclusive acquisition-date bounds. Accepts ``date`` /
             ``datetime`` objects or ISO ``YYYY-MM-DD`` strings. The walker
             still has to list each task to discover what's published in
-            range, so even a narrow window takes a few seconds; provide
-            ``limit`` to stop as soon as you have enough.
+            range. Named ``tasks/`` is tens of directories; ``task-data/``
+            is thousands of UUID directories, so an unconstrained live
+            walk is slow -- provide ``limit`` to stop as soon as you have
+            enough, and prefer a local index for repeats.
         product_types:
             Keep only items exposing at least one of these assets
             (e.g. ``["GEC"]``).
         area:
             Case-insensitive substring matched against each
-            ``sar-data/tasks/<task>/`` directory name. Umbra files every
-            pass of a site under one named task directory (e.g.
-            ``"Centerfield, Utah"``), so ``area="centerfield"`` returns
-            just that site's acquisitions. Non-matching task directories
-            are skipped *before* they're listed, so this also makes the
-            search much faster -- the ergonomic way to gather the
-            co-located passes a change composite needs.
+            ``sar-data/tasks/<task>/`` or ``sar-data/task-data/<id>/``
+            directory name. Named campaigns (e.g. ``"Centerfield, Utah"``)
+            live under ``tasks/``; UUID collects live under ``task-data/``.
+            ``area="centerfield"`` returns just that named site's
+            acquisitions. Non-matching task directories are skipped
+            *before* they're listed, so this also makes the search much
+            faster -- the ergonomic way to gather the co-located passes a
+            change composite needs. Place / bbox search is what finds a
+            UUID collect whose directory name is not a place.
         fuzzy:
             Widen ``area`` from a literal substring to a deterministic
             token-wise fuzzy match (:func:`umbra_py.fuzzy.task_matches`):
@@ -352,11 +377,11 @@ class UmbraCatalog:
             Stop after yielding this many items.
         max_per_task:
             Cap the number of items yielded from any one
-            ``sar-data/tasks/<task>/`` directory. Each task is a tasking
-            campaign over the same area, so ``max_per_task=1`` swaps the
-            usual "every revisit of a few sites" output for "one
-            acquisition per distinct site" -- much better diversity on a
-            map.
+            ``sar-data/tasks/<task>/`` or ``sar-data/task-data/<id>/``
+            directory. Each task is a tasking campaign over the same
+            area, so ``max_per_task=1`` swaps the usual "every revisit of
+            a few sites" output for "one acquisition per distinct site"
+            -- much better diversity on a map.
 
         Notes
         -----
@@ -392,7 +417,10 @@ class UmbraCatalog:
             )
             return
 
-        task_subdirs, _ = self._list_prefix(_TASKS_PREFIX)
+        task_subdirs: list[str] = []
+        for data_prefix in _DATA_PREFIXES:
+            subdirs, _ = self._list_prefix(data_prefix)
+            task_subdirs.extend(subdirs)
         if area:
             task_subdirs = [
                 t for t in task_subdirs if task_matches(area, _task_name(t), fuzzy=fuzzy)
@@ -663,8 +691,9 @@ class UmbraCatalog:
 
         Named task directories like ``Allegiant Stadium`` and
         ``Atmospheric-River_Nov-2025`` show up under ``sar-data/tasks/``
-        and contain characters that must be percent-encoded for CURL /
-        rasterio to fetch them.
+        (UUID collects under ``sar-data/task-data/``) and contain
+        characters that must be percent-encoded for CURL / rasterio to
+        fetch them.
         """
         return f"{self._list_base}/{quote(key, safe='/')}"
 

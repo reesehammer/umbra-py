@@ -177,7 +177,11 @@ def test_index_and_live_paths_agree(tmp_path, monkeypatch):
     # search() loop is what applies matches_filters, so this proves the live
     # path and the index path share one predicate.
     cat = UmbraCatalog()
-    monkeypatch.setattr(cat, "_list_prefix", lambda prefix: (["sar-data/tasks/SiteA/"], []))
+    monkeypatch.setattr(
+        cat,
+        "_list_prefix",
+        lambda prefix: (["sar-data/tasks/SiteA/"], []) if prefix == "sar-data/tasks/" else ([], []),
+    )
     monkeypatch.setattr(cat, "_walk_task", lambda prefix, start, end: iter(_ALL))
     live_ids = sorted(i.id for i in cat.search(polarizations=["VV"], max_incidence=30.0))
     assert live_ids == index_ids == ["vv-low"]
