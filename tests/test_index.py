@@ -161,10 +161,12 @@ def test_fuzzy_agrees_across_live_and_index_paths(tmp_path):
     prefixes = [f"sar-data/tasks/{t}/" for t in by_task]
 
     cat = UmbraCatalog()
-    cat._list_prefix = lambda prefix: (prefixes, [])  # type: ignore[assignment]
+    cat._list_prefix = (  # type: ignore[assignment]
+        lambda prefix: (prefixes, []) if prefix == "sar-data/tasks/" else ([], [])
+    )
     cat._walk_task = (
         lambda prefix, start, end: iter(  # type: ignore[assignment]
-            by_task[prefix[len("sar-data/tasks/") :].rstrip("/")]
+            by_task.get(prefix[len("sar-data/tasks/") :].rstrip("/"), [])
         )
     )
 

@@ -7,6 +7,7 @@ small and makes the objects trivial to construct in tests.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -103,11 +104,12 @@ def _bbox_overlaps(a: BBox, b: BBox) -> bool:
     return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
 
 
-# Current Umbra STAC items publish every asset with href="". The asset *key*
-# is the v1-style filename (e.g. "<base>_MM.tif"); the actual file on S3 lives
-# at sar-data/tasks/<umbra:task_id>/<base>/<base>_<PRODUCT>.<ext>. The map
-# below converts the v1 suffix to the on-disk suffix. Longest entries first so
-# "_CSI_SIDD_MM" doesn't get eaten by the "_MM" rule.
+# Current Umbra STAC items publish every asset with href="" or an s3:// URL
+# into a private bucket. The asset *key* is the v1-style filename (e.g.
+# "<base>_MM.tif"); the public file sits next to the sidecar as
+# <sidecar-stem>_<PRODUCT>.<ext> under sar-data/tasks/ or sar-data/task-data/.
+# The map below converts the v1 suffix to the on-disk suffix. Longest entries
+# first so "_CSI_SIDD_MM" doesn't get eaten by the "_MM" rule.
 _V1_TO_DISK_SUFFIX: tuple[tuple[str, str], ...] = (
     ("_CSI_SIDD_MM.nitf", "_CSI-SIDD.nitf"),
     ("_SICD_MM.nitf", "_SICD.nitf"),
@@ -116,6 +118,45 @@ _V1_TO_DISK_SUFFIX: tuple[tuple[str, str], ...] = (
     ("_MM.cphd", "_CPHD.cphd"),
     ("_MM.tif", "_GEC.tif"),
 )
+
+
+# Acquisition directories and sidecar stems look like
+# ``2026-02-20-03-03-38_UMBRA-07``. Same pattern catalog.py uses to identify
+# an acquisition component; kept here so models does not import catalog.
+_ACQ_STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
+
+
+def _sidecar_acquisition_stem(href: str) -> str | None:
+    """Acquisition stem from a ``*.stac.v2.json`` sidecar URL, if it looks like one.
+
+    Published products share that stem (``<stem>_CPHD.cphd`` next to
+    ``<stem>.stac.v2.json``). A sidecar named something else (``item.stac.v2.json``)
+    is not an acquisition id -- fall back to the asset key.
+    """
+    name = unquote(href.rsplit("/", 1)[-1].split("?", 1)[0])
+    marker = ".stac.v2.json"
+    if not name.endswith(marker):
+        return None
+    stem = name[: -len(marker)]
+    if stem and _ACQ_STEM_RE.match(stem):
+        return stem
+    return None
+
+
+def _disk_suffix(key: str) -> str | None:
+    """On-disk product suffix for a STAC asset key.
+
+    Accepts both v1 keys (``..._MM.cphd`` → ``_CPHD.cphd``) and already-
+    public names (``..._CPHD.cphd`` → ``_CPHD.cphd``). Returns ``None``
+    for sidecar metadata and other unrecognised files.
+    """
+    for v1, disk in _V1_TO_DISK_SUFFIX:
+        if key.endswith(v1):
+            return disk
+    for _, disk in _V1_TO_DISK_SUFFIX:
+        if key.endswith(disk):
+            return disk
+    return None
 
 
 def _public_basename(key: str) -> str | None:
@@ -128,6 +169,9 @@ def _public_basename(key: str) -> str | None:
     for v1, disk in _V1_TO_DISK_SUFFIX:
         if key.endswith(v1):
             return key[: -len(v1)] + disk
+    suffix = _disk_suffix(key)
+    if suffix is not None and key.endswith(suffix):
+        return key
     return None
 
 
@@ -263,21 +307,22 @@ class UmbraItem:
         """The Umbra task (AOI campaign) this acquisition belongs to.
 
         Umbra files every pass of a site under one ``sar-data/tasks/<task>/``
-        directory, so the task is the natural grouping for "the same place
-        over time". We read the task component straight from the item's
-        sidecar ``href`` (URL-decoded, e.g. ``"Centerfield, Utah"``), since
-        that carries the human-friendly label; when no usable href is present
-        we fall back to the ``umbra:task_id`` property. Returns ``None`` when
-        neither is available.
+        or ``sar-data/task-data/<task-id>/`` directory, so the task is the
+        natural grouping for "the same place over time". We read the task
+        component straight from the item's sidecar ``href`` (URL-decoded,
+        e.g. ``"Centerfield, Utah"``), since that carries the human-friendly
+        label on named campaigns; UUID collects keep the task id. When no
+        usable href is present we fall back to the ``umbra:task_id``
+        property. Returns ``None`` when neither is available.
         """
         href = self.href or ""
-        marker = "/sar-data/tasks/"
-        idx = href.find(marker)
-        if idx != -1:
-            rest = href[idx + len(marker) :]
-            first = rest.split("/", 1)[0]
-            if first:
-                return unquote(first)
+        for marker in ("/sar-data/tasks/", "/sar-data/task-data/"):
+            idx = href.find(marker)
+            if idx != -1:
+                rest = href[idx + len(marker) :]
+                first = rest.split("/", 1)[0]
+                if first:
+                    return unquote(first)
         task_id = self.properties.get("umbra:task_id")
         return str(task_id) if task_id else None
 
@@ -346,18 +391,27 @@ class UmbraItem:
         """Resolve an asset's public URL as a sibling of the item's sidecar.
 
         The downloadable products live next to the ``*.stac.v2.json`` sidecar
-        in the public bucket, so given the item's own (public) ``href`` and
-        the asset's v1-style key we can build the sibling URL directly. This
-        handles named-task layouts that a ``umbra:task_id``-only
+        in the public bucket and share that sidecar's acquisition stem
+        (``<stem>_CPHD.cphd`` next to ``<stem>.stac.v2.json``). STAC asset
+        keys sometimes carry a *processing* timestamp that is not the
+        on-disk name, so we take the suffix from the key (v1 or already-
+        public) and the stem from the sidecar. That also handles named-task
+        and ``task-data/`` layouts that a ``umbra:task_id``-only
         reconstruction can't. Returns ``None`` when there's no usable sidecar
         href or the key isn't recognised.
         """
         if not self.href or not self.href.startswith(("http://", "https://")):
             return None
+        suffix = _disk_suffix(key)
+        if suffix is None:
+            return None
+        base_dir = self.href.rsplit("/", 1)[0]
+        stem = _sidecar_acquisition_stem(self.href)
+        if stem is not None:
+            return f"{base_dir}/{stem}{suffix}"
         basename = _public_basename(key)
         if basename is None:
             return None
-        base_dir = self.href.rsplit("/", 1)[0]
         return f"{base_dir}/{basename}"
 
     def has_asset(self, name: str) -> bool:

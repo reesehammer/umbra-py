@@ -39,7 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     # Don't crawl Umbra's bucket from forks; schedules there stay off anyway.
     if: github.repository == 'reesehammer/umbra-py'
-    timeout-minutes: 120
+    # Named ``tasks/`` is tens of directories; ``task-data/`` is ~10k UUID
+    # collects. The crawl is still one LIST (+ sidecar GET) per task.
+    timeout-minutes: 240
     # Mapped here (not inline) so the optional embedding step can gate on the
     # secret being present via the `env` context, which `if:` can read.
     env:

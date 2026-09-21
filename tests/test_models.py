@@ -246,3 +246,95 @@ def test_task_falls_back_to_task_id_property():
 
 def test_task_is_none_when_unknown():
     assert UmbraItem(id="x").task is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "2026-02-20-03-03-29_UMBRA-07_MM.cphd",
+        "2026-02-20-03-03-38_UMBRA-07_CPHD.cphd",
+    ],
+)
+def test_cphd_v1_and_public_keys_classify(key):
+    """Both the v1 STAC key and the on-disk public name classify as CPHD."""
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "task-abc"},
+            "assets": {
+                key: {
+                    "href": "",
+                    "type": "application/octet-stream",
+                    "title": "CPHD",
+                }
+            },
+        }
+    )
+    assert item.available_assets == ["CPHD"]
+    assert item.asset_map["CPHD"] == key
+
+
+def test_task_reads_uuid_from_task_data_href():
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/"
+        "2026-02-20-03-03-38_UMBRA-07/2026-02-20-03-03-38_UMBRA-07.stac.v2.json"
+    )
+    item = UmbraItem.from_dict({"id": "x"}, href=sidecar)
+    assert item.task == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def test_asset_href_uses_sidecar_stem_when_stac_key_timestamp_differs():
+    """Published files share the sidecar's acquisition stem; STAC keys
+    sometimes carry a different processing timestamp. ``umbra download
+    <stac-url> --asset CPHD`` must still hit the on-disk object, including
+    under ``sar-data/task-data/``."""
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/"
+        "2026-02-20-03-03-38_UMBRA-07/2026-02-20-03-03-38_UMBRA-07.stac.v2.json"
+    )
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+            "assets": {
+                "2026-02-20-03-03-29_UMBRA-07_MM.cphd": {
+                    "href": (
+                        "s3://prod-prod-processed-sar-data/2026-02-20/abc/"
+                        "2026-02-20-03-03-29_UMBRA-07_MM.cphd"
+                    ),
+                    "type": "application/octet-stream",
+                    "title": "CPHD",
+                }
+            },
+        },
+        href=sidecar,
+    )
+    assert item.asset_href("CPHD") == (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/"
+        "2026-02-20-03-03-38_UMBRA-07/2026-02-20-03-03-38_UMBRA-07_CPHD.cphd"
+    )
+
+
+def test_asset_href_keeps_key_stem_when_sidecar_is_not_an_acquisition():
+    """A sidecar named ``item.stac.v2.json`` is not an acquisition id; the
+    public filename still comes from the v1 asset key."""
+    sidecar = "https://x.s3.amazonaws.com/sar-data/tasks/SiteA/t1/a1/item.stac.v2.json"
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {"umbra:task_id": "t1"},
+            "assets": {
+                "a1_MM.tif": {
+                    "href": "s3://private/a1_MM.tif",
+                    "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                }
+            },
+        },
+        href=sidecar,
+    )
+    assert item.asset_href("GEC") == (
+        "https://x.s3.amazonaws.com/sar-data/tasks/SiteA/t1/a1/a1_GEC.tif"
+    )

@@ -10,6 +10,26 @@ from umbra_py.catalog import _SIDECAR_WORKERS, UmbraCatalog, _acq_date, _task_na
 from umbra_py.exceptions import CatalogError
 
 
+def _list_roots(*task_prefixes: str):
+    """A ``_list_prefix`` double that serves each open-data root independently.
+
+    Prefixes under ``sar-data/task-data/`` are returned only when that root is
+    listed; everything else is served under ``sar-data/tasks/``. Unknown roots
+    are empty — the walker lists both, and a KeyError would abort the search.
+    """
+    tasks = [p for p in task_prefixes if not p.startswith("sar-data/task-data/")]
+    data = [p for p in task_prefixes if p.startswith("sar-data/task-data/")]
+
+    def fake(self, prefix):
+        if prefix == "sar-data/tasks/":
+            return (list(tasks), [])
+        if prefix == "sar-data/task-data/":
+            return (list(data), [])
+        return ([], [])
+
+    return fake
+
+
 @pytest.mark.parametrize(
     "name,expected",
     [
@@ -89,7 +109,7 @@ def fake_bucket(monkeypatch):
         listed.append(prefix)
         if prefix == "sar-data/tasks/":
             return (top_subdirs, [])
-        raise KeyError(prefix)
+        return ([], [])
 
     def fake_stream(self, prefix):
         streamed.append(prefix)
@@ -137,6 +157,14 @@ def test_search_uses_one_stream_per_task(fake_bucket):
     ]
 
 
+def test_search_lists_both_open_data_roots(fake_bucket):
+    """Named ``tasks/`` and UUID ``task-data/`` are both listed; an empty
+    ``task-data/`` root must not abort the named-task walk."""
+    list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
+    assert "sar-data/tasks/" in fake_bucket._listed
+    assert "sar-data/task-data/" in fake_bucket._listed
+
+
 def test_search_assets_have_public_urls(fake_bucket):
     [a] = list(fake_bucket.search(start="2024-01-15", end="2024-01-15"))
     href = a.asset_href("GEC")
@@ -168,7 +196,7 @@ def test_search_max_per_task_caps_revisits(monkeypatch):
     monkeypatch.setattr(
         UmbraCatalog,
         "_list_prefix",
-        lambda self, prefix: (["sar-data/tasks/site-a/", "sar-data/tasks/site-b/"], []),
+        _list_roots("sar-data/tasks/site-a/", "sar-data/tasks/site-b/"),
     )
     # Two revisits at site-a, one acquisition at site-b.
     task_keys = {
@@ -213,6 +241,44 @@ def test_search_max_per_task_caps_revisits(monkeypatch):
 
 def test_task_name_strips_prefix_and_slash():
     assert _task_name("sar-data/tasks/Centerfield, Utah/") == "Centerfield, Utah"
+    assert _task_name("sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/") == (
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    )
+
+
+def test_search_walks_task_data_cphd(monkeypatch):
+    """UUID collects under ``sar-data/task-data/`` are searchable by bbox and
+    classified as CPHD from the on-disk ``*_CPHD.cphd`` name (not only the
+    v1 ``*_MM.cphd`` STAC key)."""
+    task_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    task = f"sar-data/task-data/{task_id}/"
+    acq = "2026-02-20-03-03-38_UMBRA-07"
+    bbox = (-84.47, 33.61, -84.39, 33.67)
+    keys = [
+        f"{task}{acq}/{acq}.stac.v2.json",
+        f"{task}{acq}/{acq}_CPHD.cphd",
+        f"{task}{acq}/{acq}_GEC.tif",
+    ]
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", _list_roots(task))
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_stream_keys",
+        lambda self, prefix: iter(keys if prefix == task else []),
+    )
+    monkeypatch.setattr(
+        UmbraCatalog,
+        "_get",
+        lambda self, url: _sidecar("atl-cphd", "2026-02-20T03:03:38Z", bbox),
+    )
+    cat = UmbraCatalog()
+    items = list(cat.search(product_types=["CPHD"], bbox=bbox, limit=5))
+    assert [i.id for i in items] == ["atl-cphd"]
+    href = items[0].asset_href("CPHD")
+    assert href.endswith(f"{acq}_CPHD.cphd")
+    assert f"/sar-data/task-data/{task_id}/" in href
+    assert items[0].task == task_id
+    # Named-only ``area=`` does not invent a hit in the UUID tree.
+    assert list(cat.search(product_types=["CPHD"], area="Atlanta")) == []
 
 
 def test_search_area_filters_to_matching_task(fake_bucket):
@@ -244,7 +310,7 @@ def _one_task_catalog(monkeypatch, task_name):
     prefix = f"sar-data/tasks/{task_name}/"
     acq = "2024-01-15-10-00-00_UMBRA-04"
     keys = [f"{prefix}uuid/{acq}/{acq}.stac.v2.json", f"{prefix}uuid/{acq}/{acq}_GEC.tif"]
-    monkeypatch.setattr(UmbraCatalog, "_list_prefix", lambda self, p: ([prefix], []))
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", _list_roots(prefix))
     streamed: list[str] = []
 
     def fake_stream(self, p):
@@ -323,7 +389,7 @@ def test_search_url_encodes_spaces_in_task_names(monkeypatch):
     monkeypatch.setattr(
         UmbraCatalog,
         "_list_prefix",
-        lambda self, prefix: (["sar-data/tasks/Allegiant Stadium/"], []),
+        _list_roots("sar-data/tasks/Allegiant Stadium/"),
     )
     acq = "sar-data/tasks/Allegiant Stadium/uuid/2024-01-15-10-00-00_UMBRA-04"
     monkeypatch.setattr(
@@ -518,7 +584,7 @@ def _single_task_catalog(monkeypatch, stems, fake_get):
     keys: list[str] = []
     for s in stems:
         keys += [f"{task}{s}/{s}.stac.v2.json", f"{task}{s}/{s}_GEC.tif"]
-    monkeypatch.setattr(UmbraCatalog, "_list_prefix", lambda self, prefix: ([task], []))
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", _list_roots(task))
     monkeypatch.setattr(
         UmbraCatalog,
         "_stream_keys",

@@ -10,6 +10,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **`sar-data/task-data/` in the open-bucket walk.** `UmbraCatalog.search`
+  (and therefore `umbra index build` / the weekly snapshot) lists UUID
+  collects under `sar-data/task-data/` after the named `sar-data/tasks/`
+  tree. Place / bbox search can now find CPHD that was only published in
+  that tree. `umbra download <stac-url> --asset CPHD` reconstructs the
+  public filename from the sidecar stem, so a STAC key whose processing
+  timestamp differs from the on-disk `*_CPHD.cphd` still hits the object.
+- **CPHD for GPU backprojection.**
+  [`docs/guides/complex-downstream.md`](docs/guides/complex-downstream.md)
+  adds a MatX `sarbp`-shaped recipe: `--product CPHD` by place/bbox,
+  HEAD the size (often 10–30+ GiB), download, stop. umbra-py does not
+  form the image. Limitations and the CPHD product blurb say so.
 - **Complex SICD/CPHD handoff guide.** New
   [`docs/guides/complex-downstream.md`](docs/guides/complex-downstream.md)
   for phase-preserving downstream processors: open Umbra SICD is

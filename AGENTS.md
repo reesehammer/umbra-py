@@ -22,11 +22,13 @@ Treat **this** file as the source of truth.
 - **Package layout:** `src/umbra_py/` (importable as `umbra_py`).
 - **Console entry points:** `umbra` and `umbra-py` → `umbra_py.cli:main`.
 
-The data lives in a public S3 bucket under
-`sar-data/tasks/<task>/[<uuid>/]<acquisition>/`, with a `*.stac.v2.json`
-sidecar next to each acquisition's binary products. There is no STAC API
-or search endpoint — this library is the search layer, enumerating
-acquisitions via paginated S3 listings.
+The data lives in a public S3 bucket under two prefixes:
+`sar-data/tasks/<task>/[<uuid>/]<acquisition>/` (named campaigns) and
+`sar-data/task-data/<task-id>/<acquisition>/` (UUID collects — the bulk of
+the open archive, including CPHD). Each acquisition has a `*.stac.v2.json`
+sidecar next to its binary products. There is no STAC API or search
+endpoint — this library is the search layer, enumerating acquisitions via
+paginated S3 listings.
 
 ---
 
@@ -35,7 +37,7 @@ acquisitions via paginated S3 listings.
 ```
 src/umbra_py/
   __init__.py        # public API surface; update __all__ when adding exports
-  catalog.py         # UmbraCatalog: walks sar-data/tasks/ via S3 listings, prunes by date
+  catalog.py         # UmbraCatalog: walks sar-data/tasks/ and sar-data/task-data/ via S3 listings, prunes by date
   index.py           # CatalogIndex: local SQLite index of items for fast offline/repeat search
   models.py          # UmbraItem dataclass + asset classification + intersects_bbox / intersects_polygon
   _geometry.py       # stdlib-only GeoJSON polygon parsing + intersection primitives (the `intersects` search filter, no shapely)
@@ -226,12 +228,18 @@ Strong success criteria let you loop independently without check-ins.
 This is a SAR / geospatial project. A few facts that matter when writing code:
 
 - **No STAC API; we list S3 directly.** Acquisitions live under
-  `sar-data/tasks/<task>/[<uuid>/]<acquisition>/`, each with a
-  `*.stac.v2.json` sidecar. `UmbraCatalog._walk` paginates S3 listings
-  level by level, pruning acquisition directories whose date prefix
+  `sar-data/tasks/<task>/[<uuid>/]<acquisition>/` (named) and
+  `sar-data/task-data/<task-id>/<acquisition>/` (UUID; thousands of
+  directories). Each has a `*.stac.v2.json` sidecar.
+  `UmbraCatalog.search` paginates S3 listings level by level, pruning
+  acquisition directories whose date prefix
   (`YYYY-MM-DD-HH-MM-SS_PLATFORM`) falls outside the requested
   `start` / `end` range. **Do not** flatten this into "fetch
-  everything" — without date pruning the walk takes minutes.
+  everything" — without date pruning the walk takes minutes, and
+  `task-data/` is much larger than `tasks/`. Prefer `--local` / the
+  weekly index for repeats. Public files share the sidecar stem; STAC
+  asset keys may use a different processing timestamp (`*_MM.cphd` vs
+  on-disk `*_CPHD.cphd`).
 - **Product types** (canonical, ordered easiest → rawest):
   `GEC, CSI, SIDD, SICD, CPHD`. See `constants.py:PRODUCT_ASSETS` and
   the README table. `GEC` is a cloud-optimized GeoTIFF and is the default

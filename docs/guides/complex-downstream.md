@@ -1,7 +1,8 @@
 # Complex SICD/CPHD for downstream processors
 
 This page is for people who need **phase** — a SICD or CPHD as input to
-sarpy, isce3, a custom former, or any other processor outside umbra-py.
+sarpy, isce3, a GPU backprojector, a custom former, or any other
+processor outside umbra-py.
 
 umbra-py already **searches and downloads** those products. It does **not**
 re-form Polar Format geometry, load a complex array, or build an
@@ -95,10 +96,92 @@ download_item(items[0], dest_dir="./sicd", assets=["SICD"])
 Swap `"SICD"` for `"CPHD"` when you want phase history. After
 `download_item`, umbra-py is done.
 
+## CPHD for GPU backprojection (e.g. MatX `sarbp`)
+
+CPHD is compensated phase history **before** image formation. GPU / research
+formers (NVIDIA [MatX `examples/sarbp`](https://github.com/NVIDIA/MatX/tree/main/examples/sarbp)
+is one) need that file, not a geocoded amplitude GeoTIFF.
+
+umbra-py's job ends when a `.cphd` is on disk. It does **not** form the
+image, run backprojection, convert CPHD to `.sarbp`, or choose pulses /
+aperture / precision. `umbra convert` does not read CPHD.
+
+Open CPHD is often **10–30+ GiB**. Size-check before pulling. `--place`
+geocodes via Nominatim to a **rectangle**, so it can include nearby ground
+outside the named site; use `--bbox` / `--intersects` for a tight AOI.
+Do not treat one STAC id or S3 key as the forever demo file — collects
+move, the weekly index lags, and several CPHDs can sit near the same
+airport.
+
+The open bucket has two trees: named campaigns under `sar-data/tasks/`
+and UUID collects under `sar-data/task-data/`. Place / bbox search covers
+both. `--area` matches a task-directory name (a label or a UUID), not a
+geocoded place.
+
+```bash
+# Weekly snapshot (skip the live S3 walk — task-data/ is thousands of
+# UUID directories).
+umbra index fetch
+
+# Illustration place only. --place is a Nominatim rectangle.
+umbra search --local --product CPHD \
+  --place "Hartsfield-Jackson Atlanta International Airport" --limit 5
+# or:
+# umbra search --local --product CPHD --bbox -84.47,33.61,-84.39,33.67 --limit 5
+
+# HEAD the CPHD asset href from search (no `umbra head` verb) before
+# fetching tens of GiB.
+
+# Download only CPHD. Do NOT run `umbra convert`.
+umbra download <stac-item-url> --asset CPHD --dest ./cphd
+```
+
+Prefer `--local` after `index fetch`. If a known open collect is missing
+from the snapshot, omit `--local` (a live walk of `task-data/` is slow)
+or refresh the snapshot.
+
+```python
+import requests
+from umbra_py import CatalogIndex, download_item, geocode_place
+
+bbox, name = geocode_place("Hartsfield-Jackson Atlanta International Airport")
+print(name, bbox)
+
+with CatalogIndex.from_release() as index:
+    items = list(index.search(bbox=bbox, product_types=["CPHD"], limit=5))
+
+assert items, "no CPHD in this box — try a wider place, --area, or omit --local"
+href = items[0].asset_href("CPHD")
+head = requests.head(href, allow_redirects=True, timeout=60)
+head.raise_for_status()
+nbytes = int(head.headers["Content-Length"])
+print(items[0].id, f"{nbytes / (1024**3):.1f} GiB")
+
+# Multi-tens-of-GiB: download only after the size check.
+download_item(items[0], dest_dir="./cphd", assets=["CPHD"])
+# stop — hand the .cphd to the former (MatX: cphd_to_sarbp_input.py → sarbp)
+```
+
+MCP is the same verbs: `search_catalog(place=…, products=["CPHD"])` then
+`download_asset(…, asset="CPHD", confirm=False)` to size-check,
+`confirm=True` to pull.
+
+Then the former, unchanged. For MatX `sarbp`:
+
+```bash
+python cphd_to_sarbp_input.py ./cphd/*.cphd --image-size 8192 --aperture-angle 1.0 -o input_8k.sarbp
+./examples/sarbp input_8k.sarbp -o output_image.raw
+```
+
 ## After download
 
 - **[sarpy](https://github.com/ngageoint/sarpy)** — reference SICD / CPHD
   reader.
+- **GPU backprojection (not in umbra-py).** NVIDIA
+  [MatX `sar_bp` / `sarbp`](https://github.com/NVIDIA/MatX/tree/main/examples/sarbp)
+  forms an image from CPHD on the GPU after a sarpy-based
+  `cphd_to_sarbp_input.py` conversion. umbra-py only gets the `.cphd` onto
+  disk.
 - **PFA → range-Doppler (not in umbra-py).** Piyush S. Agram, [*Modifying
   Range-Doppler geometry frameworks to process Spotlight SAR imagery in
   Polar Format*](https://arxiv.org/abs/2503.07889) (2025), with public

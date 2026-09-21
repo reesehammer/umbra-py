@@ -9,10 +9,15 @@ has not yet checked on real products.
 `SICD` and `CPHD` are classified and downloadable. That is the whole
 phase-preserving path in umbra-py: **search, size-check, download, stop.**
 
-`umbra convert` detects **amplitude** and writes a geocoded GeoTIFF — the
-phase is discarded. There is no interferogram, no coherence, no
-perpendicular-baseline filter, no CPHD image formation, and no PFA →
-range-Doppler rewrite.
+`CPHD` is compensated phase history for **formation elsewhere** (a GPU
+backprojector, a custom former, sarpy). umbra-py does not form an image
+from it and does not run backprojection. `umbra convert` does not read
+CPHD.
+
+`umbra convert` detects **amplitude** from SICD and writes a geocoded
+GeoTIFF — the phase is discarded. There is no interferogram, no
+coherence, no perpendicular-baseline filter, and no PFA → range-Doppler
+rewrite.
 
 Open Umbra SICDs are **spotlight / RGAZIM / Polar Format (PFA)**, not
 Capella-style RGZERO stripmap. A processor that only ingests RGZERO should

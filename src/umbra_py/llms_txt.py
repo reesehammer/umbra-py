@@ -238,7 +238,9 @@ def llms_txt() -> str:
     lines.append(
         "- Need phase? Open Umbra SICD is RGAZIM/PFA (not RGZERO). "
         "`umbra convert` discards phase. Search `--product SICD` / `CPHD`, "
-        "HEAD the size, download, and stop "
+        "HEAD the size, download, and stop. CPHD is phase history for "
+        "formation elsewhere (GPU backprojection included); umbra-py does "
+        "not form the image "
         f"([complex-downstream]({_RAW_BASE}/docs/guides/complex-downstream.md))."
     )
     lines.append("")
@@ -292,7 +294,9 @@ def llms_full_txt() -> str:
     lines.append(
         "Open Umbra SICD is spotlight / RGAZIM / PFA, not Capella-style RGZERO. "
         "`umbra convert` writes amplitude only — if you need phase, download "
-        "SICD or CPHD and stop. See docs/guides/complex-downstream.md."
+        "SICD or CPHD and stop. CPHD is compensated phase history for a "
+        "former outside umbra-py (GPU backprojection included); convert does "
+        "not read it. See docs/guides/complex-downstream.md."
     )
     lines.append("")
     lines.append(f"Polarization caveat: {POLARIZATION_CAVEAT}")

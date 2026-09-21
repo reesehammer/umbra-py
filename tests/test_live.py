@@ -12,11 +12,10 @@ pytestmark = pytest.mark.network
 
 def test_search_returns_items():
     catalog = UmbraCatalog()
-    # The walker issues one paginated LIST per top-level task directory
-    # (~80 of them) before yielding anything, so even a single-day search
-    # against a real bucket takes tens of seconds. Use a wide window and
-    # limit=1 to keep this test bounded -- one item with downloadable data
-    # is enough to prove the v2 walker is reaching real acquisitions.
+    # The walker lists named ``sar-data/tasks/`` first (~80 directories),
+    # then ``sar-data/task-data/`` (~10k UUID directories). limit=1 with a
+    # 2024 window typically stops in the named tree. Do not drop the limit
+    # -- an unconstrained walk of task-data is minutes.
     items = list(catalog.search(start="2024-01-01", end="2024-12-31", limit=1))
     assert items
     item = items[0]

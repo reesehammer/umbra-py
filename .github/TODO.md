@@ -21,6 +21,18 @@ Smallest change: surface those two fields on `SicdCapabilities` / `umbra
 preflight` so a downstream processor can reject the wrong class (RGZERO vs
 RGAZIM) before downloading. Keep it a metadata fact, not a converter.
 
+## SICD XML asset can steal the NITF key on raw STAC load
+
+- **Surfaced in:** task-data CPHD discovery (MatX `sarbp` handoff).
+- **Code:** `src/umbra_py/models.py` (`asset_map` / `_classify_asset`).
+
+A sidecar whose assets include both `*_SICD_MM.nitf` and `*_SICD_MM.xml`
+classifies the XML as `SICD` too; later keys overwrite, so
+`umbra download <stac-url> --asset SICD` can resolve to the XML. The
+catalog walker rebuilds assets from listed S3 keys and is unaffected.
+Smallest change: skip non-product extensions (`.xml`) in
+`_classify_asset`, or prefer `.nitf` when two keys share a type.
+
 ## Complex-product notebook (R3)
 
 - **Surfaced in:** the complex SICD/CPHD handoff docs.
