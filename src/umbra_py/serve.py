@@ -185,7 +185,7 @@ from .constants import (
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
 from .exceptions import MissingDependencyError
-from .index import CatalogIndex, default_index_path, read_snapshot_state
+from .index import CatalogIndex, default_index_path, read_snapshot_state, snapshot_id
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem
 from .schemas import load_schema
@@ -2830,7 +2830,7 @@ def build_app(
                     ids = None
             src_path = getattr(source, "path", None)
             state = read_snapshot_state(src_path) if src_path is not None else None
-            snapshot = (state.get("etag") or state.get("last_modified")) if state else None
+            snapshot = snapshot_id(state)
             return health_document(
                 backend="index",
                 ready=True,

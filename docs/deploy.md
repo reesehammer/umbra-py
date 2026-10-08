@@ -88,10 +88,11 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
   bucket walk. Every later start runs `umbra index fetch --if-changed`: one
   `HEAD` request decides whether the weekly snapshot changed, and only then is
   it downloaded, validated and swapped in. If that check fails, the existing
-  index keeps serving. If the thumbnail
-  sidecar is missing it also runs [`umbra index fetch-thumbnails`](cli.md), so
-  MCP `quicklook` / `describe_scene` can return baked previews without
-  proxying Umbra COGs.
+  index keeps serving. It then runs
+  [`umbra index fetch-thumbnails --if-changed`](cli.md) the same way for the
+  baked-preview sidecar, re-merging it whenever the sidecar or the index
+  changed, so MCP `quicklook` / `describe_scene` can return baked previews
+  without proxying Umbra COGs. A failed check keeps the existing sidecar.
 - **Persists to a volume.** The catalog index, any fetched snapshot and the
   render-artifact cache all live under `/data` (the image sets
   `XDG_CACHE_HOME=/data`), so restarts are instant and the archive is never

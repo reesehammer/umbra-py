@@ -153,3 +153,15 @@ def test_entrypoint_refreshes_the_index_on_every_boot():
     assert "umbra index fetch --if-changed" in text
     assert '[ ! -f "$INDEX_DB" ]; then\n    echo "No catalog index' not in text
     assert "serving the existing index" in text
+
+
+def test_entrypoint_refreshes_the_thumbnail_sidecar_on_every_boot():
+    """Same volume, same bug: the sidecar was fetched only when missing, so a
+    stale catalog.thumbs.db was never replaced (or re-merged into a refreshed
+    index). A failed fetch must not stop the server from starting."""
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "umbra index fetch-thumbnails --if-changed ||" in text
+    assert '[ ! -f "$THUMBS_DB" ]' not in text
+    assert text.index("umbra index fetch --if-changed") < text.index(
+        "umbra index fetch-thumbnails --if-changed"
+    )
