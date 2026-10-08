@@ -85,7 +85,10 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
 - **Fetches the published index on first boot.** The entrypoint runs
   [`umbra index fetch`](cli.md) into the `/data` volume before starting the
   server, so a fresh container is queryable in seconds rather than after a full
-  bucket walk. Subsequent starts reuse the cached index. If the thumbnail
+  bucket walk. Every later start runs `umbra index fetch --if-changed`: one
+  `HEAD` request decides whether the weekly snapshot changed, and only then is
+  it downloaded, validated and swapped in. If that check fails, the existing
+  index keeps serving. If the thumbnail
   sidecar is missing it also runs [`umbra index fetch-thumbnails`](cli.md), so
   MCP `quicklook` / `describe_scene` can return baked previews without
   proxying Umbra COGs.
@@ -114,7 +117,7 @@ All behaviour is driven by environment variables (set them in the compose file's
 | ------------------- | --------- | ---------------------------------------------------------------------- |
 | `UMBRA_HOST`        | `0.0.0.0` | Interface the server binds to inside the container.                    |
 | `UMBRA_PORT`        | `8000`    | Port the server listens on.                                            |
-| `UMBRA_FETCH_INDEX` | `1`       | Fetch the published index on first boot; set to `0` to skip.           |
+| `UMBRA_FETCH_INDEX` | `1`       | Fetch the published index on boot, refreshing it when the snapshot changed; `0` skips. |
 | `UMBRA_SERVE_LIVE`  | unset     | `1` serves from a live S3 walk per request — no index (correct, slow). |
 | `UMBRA_INDEX_URL`   | unset     | Override the published-index asset URL (e.g. a fork or mirror).        |
 | `UMBRA_INDEX_DB`    | `/data/umbra-py/catalog.db` | Explicit index path.                                   |

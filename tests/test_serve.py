@@ -240,6 +240,22 @@ def test_healthz_reports_ready_index_with_item_count(client):
     assert body["items"] == 3
 
 
+def test_healthz_reports_freshness_fields(index_path):
+    # PRD P1-1/P1-4: distinct ids, build date and the snapshot identity let an
+    # outside monitor tell a stale hosted index from a current one.
+    import json as _json
+
+    from umbra_py.index import CatalogIndex, snapshot_state_path
+
+    with CatalogIndex(index_path) as idx:
+        idx.set_meta("built_at", "2026-10-05")
+    snapshot_state_path(index_path).write_text(_json.dumps({"etag": '"v1"'}))
+    body = TestClient(serve.build_app(index_path)).get("/healthz").json()
+    assert body["ids"] == 3
+    assert body["built_at"] == "2026-10-05"
+    assert body["snapshot"] == '"v1"'
+
+
 def test_healthz_is_alive_but_not_ready_without_an_index(tmp_path):
     # First-boot / missing-index: the server is up (200) but reports not-ready,
     # so a readiness probe holds traffic until the index fetch lands.

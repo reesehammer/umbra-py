@@ -48,6 +48,9 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
+      # Optional Railway project token. When set, the hosted API is redeployed
+      # after each publish so its entrypoint swaps in the new snapshot.
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -114,6 +117,27 @@ jobs:
           fi
           gh release upload catalog-index \
             catalog.db umbra-open-data.parquet --clobber
+
+      # Coverage parity (PRD P1-1): compare the index with a fresh listing of the
+      # bucket, by prefix, sidecar layout and product, and publish the report next
+      # to the snapshot. Non-blocking here; the gate is the last step of the job,
+      # so a coverage dip turns the run red without costing the derived artifacts.
+      - name: Coverage report (non-blocking)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umbra index coverage --db catalog.db --json coverage.json --markdown coverage.md
+          gh release upload catalog-index coverage.json coverage.md --clobber
+
+      # The hosted API keeps catalog.db on a persistent volume and refreshes it on
+      # boot (deploy/docker-entrypoint.sh), so a redeploy is what makes it load
+      # this snapshot. Optional: gated on the RAILWAY_TOKEN secret. The last
+      # step of the job confirms /healthz picked it up.
+      - name: Redeploy the hosted API (needs RAILWAY_TOKEN)
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        continue-on-error: true
+        run: npx -y @railway/cli@latest redeploy --service umbra-py --yes
 
       # Tile the whole catalog into a single-file vector basemap from the index
       # just built (--local, no second crawl), plus a MapLibre viewer pointed at
@@ -217,3 +241,20 @@ jobs:
           gh release edit catalog-index --notes "$(gh release view catalog-index --json body -q .body)
 
           - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."
+
+      - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        run: |
+          want="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
+          for _ in $(seq 1 40); do
+            got="$(curl -fsS https://api.umbra-py.space/healthz | python -c "import json, sys; print(json.load(sys.stdin).get('ids', ''))" || true)"
+            echo "healthz ids=${got:-?} want=${want}"
+            [ "$got" = "$want" ] && exit 0
+            sleep 30
+          done
+          echo "Hosted API did not pick up the new snapshot within 20 minutes." >&2
+          exit 1
+
+      - name: Coverage gate (99% of acquisitions with a sidecar)
+        run: |
+          python -c "import json, sys; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= 99 else 1)"
