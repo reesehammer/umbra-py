@@ -319,14 +319,74 @@ def snapshot_state_path(index_path: str | os.PathLike | None = None) -> Path:
     return base.with_name(f"{base.name}.source.json")
 
 
+def _normalize_etag(value: str | None) -> str | None:
+    """An ``ETag`` without its weak ``W/`` prefix or surrounding quotes.
+
+    The header arrives as ``"0x8DE..."`` (or ``W/"..."``); the state file and
+    ``/healthz`` carry the bare value. State written before normalization kept
+    the quotes, so both sides of a comparison go through here.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if value[:2] in ("W/", "w/"):
+        value = value[2:]
+    return value.strip('"') or None
+
+
 def read_snapshot_state(index_path: str | os.PathLike | None = None) -> dict[str, str] | None:
-    """The recorded snapshot identity of an index, or ``None`` if never recorded."""
+    """The recorded snapshot identity of an index, or ``None`` if never recorded.
+
+    Works for any file :func:`snapshot_state_path` can name, including the
+    thumbnail sidecar. The ``etag`` comes back normalized (no quotes).
+    """
     path = snapshot_state_path(index_path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("etag"), str):
+        data["etag"] = _normalize_etag(data["etag"])
+    return data
+
+
+def snapshot_id(state: dict[str, Any] | None) -> str | None:
+    """The single value that names a recorded snapshot (``ETag``, else ``Last-Modified``)."""
+    if not state:
+        return None
+    return state.get("etag") or state.get("last_modified")
+
+
+def _head_snapshot(sess: Any, src: str) -> tuple[str | None, str | None]:
+    """``HEAD`` a release asset; return its normalized ``ETag`` and ``Last-Modified``."""
+    try:
+        head = sess.head(src, allow_redirects=True, timeout=30)
+        head.raise_for_status()
+    except Exception as exc:  # requests.RequestException and friends
+        raise IndexRefreshError(f"Could not reach the published snapshot {src!r}: {exc}") from exc
+    return _normalize_etag(head.headers.get("ETag")), head.headers.get("Last-Modified")
+
+
+def _same_snapshot(
+    state: dict[str, Any] | None, src: str, etag: str | None, last_modified: str | None
+) -> bool:
+    return (
+        state is not None
+        and state.get("url") == src
+        and (etag or last_modified) is not None
+        and state.get("etag") == etag
+        and state.get("last_modified") == last_modified
+    )
+
+
+def _write_snapshot_state(dest: Path, fields: dict[str, Any]) -> None:
+    state_path = snapshot_state_path(dest)
+    tmp = state_path.with_name(state_path.name + ".tmp")
+    fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    tmp.write_text(json.dumps({**fields, "fetched_at": fetched_at}), encoding="utf-8")
+    os.replace(tmp, state_path)
 
 
 @dataclass
@@ -414,22 +474,9 @@ def refresh_from_release(
     dest = Path(path) if path is not None else default_index_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = url or CATALOG_INDEX_DB_URL
-    try:
-        head = sess.head(src, allow_redirects=True, timeout=30)
-        head.raise_for_status()
-    except Exception as exc:  # requests.RequestException and friends
-        raise IndexRefreshError(f"Could not reach the published snapshot {src!r}: {exc}") from exc
-    etag = head.headers.get("ETag")
-    last_modified = head.headers.get("Last-Modified")
+    etag, last_modified = _head_snapshot(sess, src)
     state = read_snapshot_state(dest)
-    same = (
-        state is not None
-        and state.get("url") == src
-        and (etag or last_modified) is not None
-        and state.get("etag") == etag
-        and state.get("last_modified") == last_modified
-    )
-    if dest.exists() and same and not force:
+    if dest.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
         return RefreshResult(dest, False, etag, last_modified, None, None, "unchanged")
 
     staging = dest.with_name(dest.name + ".next")
@@ -459,24 +506,98 @@ def refresh_from_release(
     _remove_sqlite_sidecars(staging)
     _remove_sqlite_sidecars(dest)
     os.replace(staging, dest)
-    state_path = snapshot_state_path(dest)
-    tmp = state_path.with_name(state_path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(
-            {
-                "url": src,
-                "etag": etag,
-                "last_modified": last_modified,
-                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "items": rows,
-                "built_at": built_at,
-            }
-        ),
-        encoding="utf-8",
+    _write_snapshot_state(
+        dest,
+        {
+            "url": src,
+            "etag": etag,
+            "last_modified": last_modified,
+            "items": rows,
+            "built_at": built_at,
+        },
     )
-    os.replace(tmp, state_path)
     reason = "fetched" if state is None else "changed"
     return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason)
+
+
+#: Index ``meta`` key naming the sidecar snapshot last merged into it, so
+#: ``umbra index fetch-thumbnails --if-changed`` can skip a no-op merge yet
+#: still re-merge into a freshly swapped-in ``catalog.db`` (which lacks it).
+THUMBS_SNAPSHOT_META_KEY = "thumbs_snapshot"
+
+
+def _validate_thumbs_sidecar(path: Path) -> int:
+    """Prove a downloaded ``catalog.thumbs.db`` is a readable, non-empty sidecar."""
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            rows = conn.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise IndexRefreshError(
+            f"Downloaded thumbnail sidecar {path} is not readable: {exc}"
+        ) from exc
+    if check != "ok":
+        raise IndexRefreshError(f"Downloaded thumbnail sidecar {path} failed quick_check: {check}")
+    if rows <= 0:
+        raise IndexRefreshError(f"Downloaded thumbnail sidecar {path} has no thumbnails.")
+    return rows
+
+
+def refresh_thumbnails_from_release(
+    dest: str | os.PathLike | None = None,
+    *,
+    url: str | None = None,
+    force: bool = False,
+    session: Any = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> RefreshResult:
+    """Replace the thumbnail sidecar with the published one only when it changed.
+
+    The ``catalog.thumbs.db`` counterpart of :func:`refresh_from_release`: one
+    ``HEAD`` compares the release asset's ``ETag`` / ``Last-Modified`` with the
+    state recorded beside the sidecar (``catalog.thumbs.db.source.json``), and
+    only a changed (or missing, or ``force``) sidecar is downloaded to
+    ``<name>.next``, checked to be a readable non-empty sidecar, and swapped in
+    atomically. ``dest`` defaults to :func:`default_thumbs_path`. ``items`` in
+    the result is the sidecar's thumbnail count. Raises
+    :class:`IndexRefreshError` (existing sidecar untouched) when the asset is
+    unreachable or the download fails validation. This only refreshes the
+    file; :meth:`CatalogIndex.import_thumbnails` merges it into an index.
+    """
+    from .constants import CATALOG_INDEX_THUMBS_URL  # noqa: PLC0415
+    from .download import download_url  # noqa: PLC0415
+
+    sess = session or default_session()
+    target = Path(dest) if dest is not None else default_thumbs_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = url or CATALOG_INDEX_THUMBS_URL
+    etag, last_modified = _head_snapshot(sess, src)
+    state = read_snapshot_state(target)
+    if target.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
+        return RefreshResult(target, False, etag, last_modified, None, None, "unchanged")
+
+    staging = target.with_name(target.name + ".next")
+    _remove_sqlite_sidecars(staging)
+    try:
+        download_url(src, staging, overwrite=True, session=sess, progress=progress)
+        rows = _validate_thumbs_sidecar(staging)
+    except Exception as exc:
+        staging.unlink(missing_ok=True)
+        _remove_sqlite_sidecars(staging)
+        if isinstance(exc, IndexRefreshError):
+            raise
+        raise IndexRefreshError(f"Could not download the thumbnail sidecar {src!r}: {exc}") from exc
+    _remove_sqlite_sidecars(staging)
+    _remove_sqlite_sidecars(target)
+    os.replace(staging, target)
+    _write_snapshot_state(
+        target, {"url": src, "etag": etag, "last_modified": last_modified, "items": rows}
+    )
+    reason = "fetched" if state is None else "changed"
+    return RefreshResult(target, True, etag, last_modified, rows, None, reason)
 
 
 def _index_acq_date(item: UmbraItem) -> date | None:

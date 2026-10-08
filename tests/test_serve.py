@@ -253,7 +253,19 @@ def test_healthz_reports_freshness_fields(index_path):
     body = TestClient(serve.build_app(index_path)).get("/healthz").json()
     assert body["ids"] == 3
     assert body["built_at"] == "2026-10-05"
-    assert body["snapshot"] == '"v1"'
+    assert body["snapshot"] == "v1"
+
+
+@pytest.mark.parametrize("stored", ['"0x8DE1"', 'W/"0x8DE1"', "0x8DE1"])
+def test_healthz_snapshot_has_no_etag_quotes(index_path, stored):
+    # State written before normalization kept the raw header's quotes.
+    import json as _json
+
+    from umbra_py.index import snapshot_state_path
+
+    snapshot_state_path(index_path).write_text(_json.dumps({"etag": stored}))
+    body = TestClient(serve.build_app(index_path)).get("/healthz").json()
+    assert body["snapshot"] == "0x8DE1"
 
 
 def test_healthz_is_alive_but_not_ready_without_an_index(tmp_path):

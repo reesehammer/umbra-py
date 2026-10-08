@@ -106,11 +106,19 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
 fi
 
 # Baked SAR previews so MCP quicklook / describe_scene work without proxying
-# Umbra COGs. catalog.db -> catalog.thumbs.db sits beside the index.
+# Umbra COGs. catalog.db -> catalog.thumbs.db sits beside the index. Refreshed
+# like the index: `--if-changed` downloads only a changed release asset, and
+# re-merges whenever the sidecar changed or the index above was swapped (the
+# published catalog.db carries no thumbnails). A failed check keeps and merges
+# the existing sidecar; no sidecar at all never blocks startup.
 THUMBS_DB="${INDEX_DB%.db}.thumbs.db"
-if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ] && [ ! -f "$THUMBS_DB" ]; then
-    echo "No thumbnail sidecar at $THUMBS_DB; fetching published baked previews..."
-    umbra index fetch-thumbnails || echo "Thumbnail fetch failed; baked quicklooks unavailable." >&2
+if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ]; then
+    if [ -f "$THUMBS_DB" ]; then
+        echo "Checking for newer published baked previews than $THUMBS_DB..."
+    else
+        echo "No thumbnail sidecar at $THUMBS_DB; fetching published baked previews..."
+    fi
+    umbra index fetch-thumbnails --if-changed || echo "Thumbnail fetch failed; baked quicklooks unavailable." >&2
 fi
 
 if [ "$MODE" = "mcp" ]; then

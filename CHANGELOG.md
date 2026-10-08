@@ -119,6 +119,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   persistent `/data` volume pinned the hosted API to its first boot. It now
   runs `umbra index fetch --if-changed` on every boot and keeps serving the
   existing index if the refresh fails.
+- **The image's baked previews refresh too.** `catalog.thumbs.db` was also
+  fetched only when missing, and a refreshed `catalog.db` lost its merged
+  previews. The entrypoint now runs the new
+  `umbra index fetch-thumbnails --if-changed` on every boot: it downloads a
+  changed sidecar and re-merges it whenever the sidecar or the index changed.
+  If the check fails, the existing sidecar is kept and merged.
+- **`/healthz` `snapshot` is the bare ETag.** It read `"\"0x...\""` (the raw
+  header's quotes); quotes and a weak `W/` prefix are now stripped, and
+  existing recorded state still compares as the same snapshot.
 - **Public MCP COG refusals reach the client.** Tools that refuse to proxy
   Umbra GeoTIFFs on `umbra serve --public` (`change_composite`, `timescan`,
   `stack_stats`, `narrate_change`) used to arrive as

@@ -21,6 +21,21 @@ Smallest change: surface those two fields on `SicdCapabilities` / `umbra
 preflight` so a downstream processor can reject the wrong class (RGZERO vs
 RGAZIM) before downloading. Keep it a metadata fact, not a converter.
 
+## Redeploy the hosted API after the thumbnail sidecar is published
+
+- **Surfaced in:** the thumbnail-sidecar refresh follow-up to
+  [#269](https://github.com/reesehammer/umbra-py/pull/269).
+- **Code:** `.github/workflows/publish-index.yml` (the "Redeploy the hosted
+  API" step runs before "Publish the thumbnail sidecar").
+
+The entrypoint now refreshes `catalog.thumbs.db` with
+`umbra index fetch-thumbnails --if-changed`, but the weekly workflow redeploys
+Railway right after uploading `catalog.db`, long before the bake uploads the
+new sidecar. That boot sees the previous week's sidecar ETag, so new previews
+reach the host only on the next restart. Smallest change: move the redeploy
+(and its `/healthz` confirmation) after the sidecar publish step, keeping it
+`if: always()` so a failed bake still redeploys the new index.
+
 ## SICD XML asset can steal the NITF key on raw STAC load
 
 - **Surfaced in:** task-data CPHD discovery (MatX `sarbp` handoff).

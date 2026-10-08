@@ -20,10 +20,14 @@ from ..exceptions import UmbraError
 from ..export import export_geoparquet
 from ..index import (
     PUBLISHED_THUMBNAIL_SIZE,
+    THUMBS_SNAPSHOT_META_KEY,
     CatalogIndex,
     default_thumbs_path,
     fetch_prebuilt_thumbnails,
+    read_snapshot_state,
     refresh_from_release,
+    refresh_thumbnails_from_release,
+    snapshot_id,
 )
 from ..models import UmbraItem
 from . import _shared
@@ -408,7 +412,14 @@ def index_export_thumbnails(db_path, out_path) -> None:
     is_flag=True,
     help="Replace thumbnails already baked locally (default: keep them).",
 )
-def index_fetch_thumbnails(db_path, src_path, url, overwrite) -> None:
+@click.option(
+    "--if-changed",
+    is_flag=True,
+    help="Download the sidecar only when the published one changed (ETag / Last-Modified), "
+    "and merge only when the sidecar or the index changed since the last merge. If the "
+    "check fails, the existing sidecar is kept and still merged.",
+)
+def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> None:
     """Download the published SAR thumbnails and merge them into the index.
 
     Every preview otherwise streams a scene's cloud-optimized GeoTIFF overview
@@ -427,6 +438,9 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite) -> None:
         raise click.ClickException(
             f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
         )
+    if if_changed and not src_path:
+        _fetch_thumbnails_if_changed(path, url, overwrite)
+        return
     if src_path:
         source = Path(src_path)
     else:
@@ -445,6 +459,42 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite) -> None:
         s = idx.stats()
     click.echo(
         f"Merged {applied} thumbnail(s) from {source}; {s['thumbnailed']} of "
+        f"{s['items']} acquisition(s) now have one. ({path})"
+    )
+
+
+def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -> None:
+    """``fetch-thumbnails --if-changed``: refresh the sidecar, merge when anything moved.
+
+    The published ``catalog.db`` carries no thumbnails, so a refreshed index
+    has lost what an earlier merge applied. The index records which sidecar
+    snapshot it last merged; a new sidecar, or a swapped-in index that lacks
+    the record, triggers the merge.
+    """
+    sidecar = default_thumbs_path(path)
+    try:
+        result = refresh_thumbnails_from_release(sidecar, url=url)
+    except UmbraError as exc:
+        if not sidecar.exists():
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Thumbnail refresh failed; keeping {sidecar}. ({exc})", err=True)
+    else:
+        if result.changed:
+            click.echo(
+                f"Refreshed thumbnail sidecar ({result.reason}): {result.items} thumbnail(s), "
+                f"snapshot {result.etag or result.last_modified}. ({sidecar})"
+            )
+    marker = snapshot_id(read_snapshot_state(sidecar))
+    with CatalogIndex(path) as idx:
+        if marker and not overwrite and idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == marker:
+            click.echo(f"Thumbnails are current (snapshot {marker}). ({path})")
+            return
+        applied = idx.import_thumbnails(sidecar, overwrite=overwrite)
+        if marker:
+            idx.set_meta(THUMBS_SNAPSHOT_META_KEY, marker)
+        s = idx.stats()
+    click.echo(
+        f"Merged {applied} thumbnail(s) from {sidecar}; {s['thumbnailed']} of "
         f"{s['items']} acquisition(s) now have one. ({path})"
     )
 
