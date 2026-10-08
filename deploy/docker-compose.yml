@@ -28,7 +28,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Fetch the published index on first boot (set to 0 to skip, or use
+      # Fetch the published index on boot, refreshing it when the weekly
+      # snapshot changed (set to 0 to skip, or use
       # UMBRA_SERVE_LIVE=1 to walk S3 per request with no index).
       UMBRA_FETCH_INDEX: "1"
       # UMBRA_SERVE_LIVE: "1"

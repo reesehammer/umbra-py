@@ -10,6 +10,22 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Legacy and `open-data/` collects in the open-bucket walk.**
+  `umbra index build` (and the weekly snapshot) now indexes 2023 to 2024
+  collects that ship only `<stem>_METADATA.json`, flat `tasks/ad hoc/<site>/`
+  files, sidecars misplaced in a `<stem>.stac.v2/` folder, and the
+  `open-data/` root. Legacy items get a stable minted id (uuid5 of
+  `umbra:collect_id`), not an Umbra id; every walked item carries
+  `umbra-py:products`, `umbra-py:cphd_sicd_pair` and `umbra-py:layout`.
+- **`umbra index coverage`.** Measures what share of the bucket's
+  acquisitions an index covers, by prefix, sidecar layout and product;
+  `--json` / `--markdown` write the report and `--min-pct` exits non-zero
+  below a threshold.
+- **`umbra index fetch --if-changed`.** Refreshes a local index only when the
+  published snapshot's ETag changed (one `HEAD` otherwise), validates the
+  download, refuses one under half the current size unless `--force`, and
+  swaps it in atomically; failures raise `IndexRefreshError`. `/healthz` adds
+  `ids` (distinct item ids), `built_at` and `snapshot`.
 - **`sar-data/task-data/` in the open-bucket walk.** `UmbraCatalog.search`
   (and therefore `umbra index build` / the weekly snapshot) lists UUID
   collects under `sar-data/task-data/` after the named `sar-data/tasks/`
@@ -98,6 +114,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **The Docker / Railway image no longer serves its first index forever.** The
+  entrypoint fetched the snapshot only when `catalog.db` was missing, so a
+  persistent `/data` volume pinned the hosted API to its first boot. It now
+  runs `umbra index fetch --if-changed` on every boot and keeps serving the
+  existing index if the refresh fails.
 - **Public MCP COG refusals reach the client.** Tools that refuse to proxy
   Umbra GeoTIFFs on `umbra serve --public` (`change_composite`, `timescan`,
   `stack_stats`, `narrate_change`) used to arrive as
