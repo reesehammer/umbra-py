@@ -316,7 +316,7 @@ class UmbraItem:
         property. Returns ``None`` when neither is available.
         """
         href = self.href or ""
-        for marker in ("/sar-data/tasks/", "/sar-data/task-data/"):
+        for marker in ("/sar-data/tasks/", "/sar-data/task-data/", "/open-data/"):
             idx = href.find(marker)
             if idx != -1:
                 rest = href[idx + len(marker) :]

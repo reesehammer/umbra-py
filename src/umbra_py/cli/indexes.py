@@ -23,6 +23,7 @@ from ..index import (
     CatalogIndex,
     default_thumbs_path,
     fetch_prebuilt_thumbnails,
+    refresh_from_release,
 )
 from ..models import UmbraItem
 from . import _shared
@@ -461,15 +462,45 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite) -> None:
     default=None,
     help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
 )
-def index_fetch(db_path, url) -> None:
+@click.option(
+    "--if-changed",
+    is_flag=True,
+    help="Only download when the published snapshot differs from the one this index "
+    "was fetched from (ETag / Last-Modified), validate it, then swap it in atomically. "
+    "Run it while no server holds the index open (the container entrypoint does).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="With --if-changed: download even if unchanged, and accept a snapshot much "
+    "smaller than the current index.",
+)
+def index_fetch(db_path, url, if_changed, force) -> None:
     """Download the published prebuilt catalog index for instant local search.
 
     Umbra has no STAC API, so the first 'umbra index build' crawls the whole
     bucket (minutes). This instead fetches the weekly-rebuilt snapshot from the
     project's rolling catalog-index GitHub release, so 'umbra search --local'
-    works immediately -- no crawl. Re-run any time to refresh.
+    works immediately -- no crawl. Re-run any time to refresh; '--if-changed'
+    makes that refresh a single HEAD request when nothing was rebuilt.
     """
     path = _shared._index_path(db_path)
+    if if_changed:
+        try:
+            result = refresh_from_release(path, url=url, force=force)
+        except UmbraError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if not result.changed:
+            click.echo(
+                f"Index is current (snapshot {result.etag or result.last_modified}). ({path})"
+            )
+            return
+        built_note = f", built {result.built_at}" if result.built_at else ""
+        click.echo(
+            f"Refreshed index ({result.reason}): {result.items} acquisition(s){built_note}, "
+            f"snapshot {result.etag or result.last_modified}. ({path})"
+        )
+        return
 
     with OrbitSpinner("Fetching prebuilt catalog index") as spinner:
 
@@ -487,6 +518,78 @@ def index_fetch(db_path, url) -> None:
         f"Fetched prebuilt index: {s['items']} acquisition(s){built_note}. ({path})\n"
         "Search it now with 'umbra search --local'."
     )
+
+
+@index.command("coverage")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to measure (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
+)
+@click.option(
+    "--keys",
+    "keys_path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Read the bucket listing from this file (one key per line, extra tab-separated "
+    "columns ignored) instead of listing the bucket live.",
+)
+@click.option(
+    "--save-keys",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Write the live bucket listing here for reuse.",
+)
+@click.option("--json", "json_path", default=None, help="Write the full report as JSON here.")
+@click.option("--markdown", "md_path", default=None, help="Write a Markdown summary here.")
+@click.option(
+    "--min-pct",
+    type=float,
+    default=None,
+    help="Exit non-zero when overall coverage of acquisitions with a sidecar is below "
+    "this percentage (e.g. 99).",
+)
+def index_coverage(db_path, keys_path, save_keys, json_path, md_path, min_pct) -> None:
+    """Measure what share of the open-data bucket an index covers.
+
+    Lists every object under sar-data/ and open-data/ (about 100 requests),
+    groups the keys into acquisitions exactly as the crawler does, and compares
+    them with the index by prefix (tasks/, task-data/, open-data/), sidecar
+    layout (v2, legacy _METADATA.json, none) and product. Acquisitions with no sidecar are
+    reported as unindexable rather than missing.
+    """
+    from .. import parity  # noqa: PLC0415
+
+    path = _shared._index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
+    if keys_path:
+        with open(keys_path, encoding="utf-8") as fh:
+            keys = [line.split("\t", 1)[0].rstrip("\n") for line in fh if line.strip()]
+    else:
+        with OrbitSpinner("Listing the open-data bucket"):
+            try:
+                keys = parity.list_bucket_keys()
+            except UmbraError as exc:
+                raise click.ClickException(str(exc)) from exc
+        if save_keys:
+            Path(save_keys).write_text("\n".join(keys) + "\n", encoding="utf-8")
+    with CatalogIndex(path) as idx:
+        report = parity.coverage_report(idx, keys)
+    parity.write_report(report, json_path, md_path)
+    t = report["totals"]
+    click.echo(
+        f"Coverage: {t['indexed']}/{t['bucket']} acquisitions ({t['pct']}%), "
+        f"{t['pct_indexable']}% of the {t['indexable']} with a sidecar."
+    )
+    for name, row in report["by_prefix"].items():
+        click.echo(f"  {name:<22} {row['indexed']:>6}/{row['bucket']:<6} {row['pct']}%")
+    if min_pct is not None and t["pct_indexable"] < min_pct:
+        raise click.ClickException(
+            f"Coverage {t['pct_indexable']}% is below the required {min_pct}% "
+            f"({report['missing_count']} acquisition(s) missing)."
+        )
 
 
 @index.command("export")

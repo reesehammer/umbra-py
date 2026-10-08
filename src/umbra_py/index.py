@@ -30,14 +30,15 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._geometry import Geometry, geometry_bbox
+from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
-from .exceptions import IndexSchemaError
+from .exceptions import IndexRefreshError, IndexSchemaError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem
 
@@ -304,6 +305,178 @@ def fetch_prebuilt_thumbnails(
     target.parent.mkdir(parents=True, exist_ok=True)
     download_url(url or CATALOG_INDEX_THUMBS_URL, target, overwrite=True, progress=progress)
     return target
+
+
+def snapshot_state_path(index_path: str | os.PathLike | None = None) -> Path:
+    """Where :func:`refresh_from_release` records which snapshot an index is.
+
+    A small JSON file beside the index (``catalog.db`` ->
+    ``catalog.db.source.json``) holding the release asset's ``ETag`` and
+    ``Last-Modified``, so a restart can tell "same snapshot" from "new weekly
+    rebuild" with one ``HEAD`` instead of re-downloading 90 MB.
+    """
+    base = Path(index_path) if index_path is not None else default_index_path()
+    return base.with_name(f"{base.name}.source.json")
+
+
+def read_snapshot_state(index_path: str | os.PathLike | None = None) -> dict[str, str] | None:
+    """The recorded snapshot identity of an index, or ``None`` if never recorded."""
+    path = snapshot_state_path(index_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+@dataclass
+class RefreshResult:
+    """Outcome of :func:`refresh_from_release`."""
+
+    path: Path
+    changed: bool
+    etag: str | None
+    last_modified: str | None
+    items: int | None
+    built_at: str | None
+    reason: str
+
+
+def _validate_snapshot(path: Path) -> tuple[int, str | None]:
+    """Open a downloaded snapshot and prove it is a usable index.
+
+    Raises :class:`IndexRefreshError` on a corrupt file, a schema this build
+    cannot read, or an empty items table. Returns ``(rows, built_at)``.
+    """
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            rows = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            row = conn.execute("SELECT value FROM meta WHERE key = 'built_at'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise IndexRefreshError(
+            f"Downloaded snapshot {path} is not a readable index: {exc}"
+        ) from exc
+    if check != "ok":
+        raise IndexRefreshError(f"Downloaded snapshot {path} failed quick_check: {check}")
+    if version > _SCHEMA_VERSION:
+        raise IndexRefreshError(
+            f"Downloaded snapshot has schema version {version}; this umbra-py reads "
+            f"up to {_SCHEMA_VERSION}. Upgrade umbra-py before refreshing."
+        )
+    if rows <= 0:
+        raise IndexRefreshError(f"Downloaded snapshot {path} has no items.")
+    return rows, (row[0] if row else None)
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        side = path.with_name(path.name + suffix)
+        try:
+            side.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def refresh_from_release(
+    path: str | os.PathLike | None = None,
+    *,
+    url: str | None = None,
+    force: bool = False,
+    min_ratio: float = 0.5,
+    session: Any = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> RefreshResult:
+    """Replace the index with the published snapshot only when it changed.
+
+    ``HEAD`` the release asset (following GitHub's redirect) and compare its
+    ``ETag`` / ``Last-Modified`` with what :func:`snapshot_state_path` recorded
+    for this index. Unchanged: return without downloading. Changed (or no index
+    yet, or ``force``): download beside the index to ``<name>.next``, prove it
+    is a readable, non-empty index of a schema this build understands, refuse
+    it if it has fewer than ``min_ratio`` of the current index's rows (a
+    truncated or broken rebuild should not silently shrink a serving index),
+    then swap it in with an atomic ``os.replace`` and record the new identity.
+
+    The swap removes the old file's ``-wal`` / ``-shm`` so the new database is
+    never paired with a stale write-ahead log. That makes it safe only while no
+    process holds the index open, which is why the container entrypoint runs it
+    *before* starting the server. Raises :class:`IndexRefreshError` (old index
+    untouched) when the download fails validation.
+    """
+    from .download import download_url  # noqa: PLC0415
+
+    sess = session or default_session()
+    dest = Path(path) if path is not None else default_index_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src = url or CATALOG_INDEX_DB_URL
+    try:
+        head = sess.head(src, allow_redirects=True, timeout=30)
+        head.raise_for_status()
+    except Exception as exc:  # requests.RequestException and friends
+        raise IndexRefreshError(f"Could not reach the published snapshot {src!r}: {exc}") from exc
+    etag = head.headers.get("ETag")
+    last_modified = head.headers.get("Last-Modified")
+    state = read_snapshot_state(dest)
+    same = (
+        state is not None
+        and state.get("url") == src
+        and (etag or last_modified) is not None
+        and state.get("etag") == etag
+        and state.get("last_modified") == last_modified
+    )
+    if dest.exists() and same and not force:
+        return RefreshResult(dest, False, etag, last_modified, None, None, "unchanged")
+
+    staging = dest.with_name(dest.name + ".next")
+    _remove_sqlite_sidecars(staging)
+    download_url(src, staging, overwrite=True, session=sess, progress=progress)
+    try:
+        rows, built_at = _validate_snapshot(staging)
+        if dest.exists() and not force:
+            try:
+                conn = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+                try:
+                    current = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError:
+                current = 0  # an unreadable current index is no reason to keep it
+            if current and rows < current * min_ratio:
+                raise IndexRefreshError(
+                    f"Published snapshot has {rows} items, under {min_ratio:.0%} of the "
+                    f"{current} already indexed; keeping the current index. Pass "
+                    "force=True (--force) to accept it anyway."
+                )
+    except IndexRefreshError:
+        staging.unlink(missing_ok=True)
+        _remove_sqlite_sidecars(staging)
+        raise
+    _remove_sqlite_sidecars(staging)
+    _remove_sqlite_sidecars(dest)
+    os.replace(staging, dest)
+    state_path = snapshot_state_path(dest)
+    tmp = state_path.with_name(state_path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "url": src,
+                "etag": etag,
+                "last_modified": last_modified,
+                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "items": rows,
+                "built_at": built_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.replace(tmp, state_path)
+    reason = "fetched" if state is None else "changed"
+    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason)
 
 
 def _index_acq_date(item: UmbraItem) -> date | None:
@@ -1745,6 +1918,11 @@ class CatalogIndex:
         item = UmbraItem.from_dict(json.loads(doc), href=stored_href)
         item.place = place
         return item
+
+    def distinct_ids(self) -> int:
+        """Number of distinct STAC item ids (rows can repeat an id when one
+        collect is published under both ``tasks/`` and ``task-data/``)."""
+        return self._conn.execute("SELECT COUNT(DISTINCT id) FROM items").fetchone()[0]
 
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date

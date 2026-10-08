@@ -54,6 +54,11 @@ class IndexSchemaError(UmbraError):
     """
 
 
+class IndexRefreshError(UmbraError):
+    """A published snapshot could not be fetched or failed validation; the
+    existing local index was left untouched."""
+
+
 class AssetNotFoundError(UmbraError):
     """Raised when a requested asset key is not present on an item."""
 

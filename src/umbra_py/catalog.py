@@ -8,10 +8,15 @@ Umbra publishes each acquisition under one of two public prefixes:
   (the bulk of the open archive, including CPHD used for formation
   elsewhere)
 
-each with a ``*.stac.v2.json`` sidecar next to the binary products. The
-legacy ``stac/`` tree of ``catalog.json`` files lists thousands of items,
-but most reference data that was never actually published — searching it
-returns items whose download URLs don't resolve.
+each with a ``*.stac.v2.json`` sidecar next to the binary products. Older
+(2023 to 2024) collects under ``tasks/`` carry only a legacy
+``<stem>_METADATA.json`` sidecar, sometimes with the products laid out flat in a
+site folder (``tasks/ad hoc/<site>/<stem>.tif``) instead of an acquisition
+directory; the walker indexes those too (see :func:`_acquisition_group` and
+:func:`stac_from_legacy_metadata`). The legacy ``stac/`` tree of
+``catalog.json`` files lists thousands of items, but most reference data that
+was never actually published — searching it returns items whose download URLs
+don't resolve.
 
 :class:`UmbraCatalog` walks both live prefixes via paginated S3 listings
 (named ``tasks/`` first, then ``task-data/``). Acquisition directory names
@@ -24,6 +29,7 @@ fetching them. ``task-data/`` is thousands of UUID directories; prefer
 from __future__ import annotations
 
 import re
+import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from datetime import date, datetime
@@ -52,11 +58,33 @@ _TASKS_PREFIX = "sar-data/tasks/"
 #: alone. Named tasks are listed first so a ``limit=1`` search still lands
 #: in the small named tree.
 _TASK_DATA_PREFIX = "sar-data/task-data/"
-_DATA_PREFIXES = (_TASKS_PREFIX, _TASK_DATA_PREFIX)
+#: A third, smaller UUID-keyed root (``open-data/<task-id>/<acquisition>/``,
+#: v2 sidecars, Dec 2025 onward). Some of its collects are also under
+#: ``task-data/``; the rest are published nowhere else.
+_OPEN_DATA_PREFIX = "open-data/"
+_DATA_PREFIXES = (_TASKS_PREFIX, _TASK_DATA_PREFIX, _OPEN_DATA_PREFIX)
 # Acquisition directories look like 2025-12-06-07-52-28_UMBRA-10/. We use the
 # leading YYYY-MM-DD both to identify the acquisition component of a key and
 # to prune by date.
 _ACQ_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-")
+#: A full acquisition stem (``2023-07-18-02-30-32_UMBRA-04``) at the start of a
+#: file name. The flat legacy layout has no acquisition directory, so the stem
+#: in the file name is what groups ``<stem>.tif`` with ``<stem>_SICD.nitf``.
+_ACQ_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_[A-Za-z0-9-]+?)(?=[_.])")
+#: The current per-acquisition STAC sidecar.
+_V2_SIDECAR_SUFFIX = ".stac.v2.json"
+#: The legacy (2023 to 2024) per-acquisition metadata sidecar. Not STAC; mapped
+#: to a STAC item by :func:`stac_from_legacy_metadata`.
+_LEGACY_SIDECAR_SUFFIX = "_METADATA.json"
+#: Some named tasks publish the v2 sidecar in a *sibling* directory named
+#: ``<stem>.stac.v2/`` (holding ``<stem>.stac.v2.stac.v2.json``) instead of next
+#: to the products in ``<stem>/``. Folding that suffix off the directory name
+#: puts the sidecar back in its acquisition's group.
+_MISPLACED_V2_DIR_SUFFIX = ".stac.v2"
+#: Namespace for the deterministic ids minted for legacy collects, which carry
+#: a collect id but no STAC item id. uuid5 over the collect id keeps the id
+#: stable across rebuilds and identical for a collect mirrored in two folders.
+_LEGACY_ID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://umbra-py.space/legacy-collect")
 
 # How many acquisition sidecars to fetch concurrently within one task. The
 # per-acquisition ``*.stac.v2.json`` GET is the one round trip in an otherwise
@@ -117,6 +145,128 @@ def _task_name(task_prefix: str) -> str:
         if task_prefix.startswith(prefix):
             return task_prefix[len(prefix) :].rstrip("/")
     return task_prefix.rstrip("/")
+
+
+def _acquisition_group(rel: str) -> tuple[str, str] | None:
+    """Group a key (relative to its task prefix) into its acquisition.
+
+    Returns ``(group, stem)``, where ``group`` is a task-relative id shared by
+    every file of one acquisition and ``stem`` is its
+    ``YYYY-MM-DD-HH-MM-SS_PLATFORM`` name, or ``None`` for a key that belongs
+    to no acquisition (stray bucket files). Three layouts are recognised:
+
+    - ``[<uuid>/]<stem>/<file>``: the acquisition directory is the first path
+      segment that starts with a date. A sibling ``<stem>.stac.v2/`` directory
+      (a misplaced v2 sidecar) folds into ``<stem>/``.
+    - ``<site>/[<uuid>/]<stem>[_PRODUCT].<ext>``: the flat legacy layout, with
+      no acquisition directory; the stem in the file name groups the files.
+    """
+    parts = rel.split("/")
+    for i, seg in enumerate(parts[:-1]):
+        if _ACQ_DATE_RE.match(seg):
+            name = (
+                seg[: -len(_MISPLACED_V2_DIR_SUFFIX)]
+                if seg.endswith(_MISPLACED_V2_DIR_SUFFIX)
+                else seg
+            )
+            return "/".join([*parts[:i], name]) + "/", name
+    m = _ACQ_STEM_RE.match(parts[-1])
+    if m:
+        stem = m.group(1)
+        return "/".join([*parts[:-1], stem]), stem
+    return None
+
+
+def _pick_sidecar(keys: list[str]) -> str | None:
+    """The sidecar to build an acquisition's item from: v2 STAC first, then the
+    legacy ``_METADATA.json``; ``None`` when the acquisition has neither."""
+    v2 = next((k for k in keys if k.endswith(_V2_SIDECAR_SUFFIX)), None)
+    if v2 is not None:
+        return v2
+    return next((k for k in keys if k.endswith(_LEGACY_SIDECAR_SUFFIX)), None)
+
+
+def _drop_z(geometry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A GeoJSON polygon with any third (height) coordinate removed."""
+    if not isinstance(geometry, dict) or geometry.get("type") != "Polygon":
+        return None
+    rings = geometry.get("coordinates") or []
+    out = [[[float(pt[0]), float(pt[1])] for pt in ring if len(pt) >= 2] for ring in rings]
+    if not out or not out[0]:
+        return None
+    return {"type": "Polygon", "coordinates": out}
+
+
+def _lower(value: Any) -> str | None:
+    return value.lower() if isinstance(value, str) else None
+
+
+def stac_from_legacy_metadata(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """Map a legacy ``*_METADATA.json`` document to a STAC item dict.
+
+    The 2023 to 2024 collects under ``sar-data/tasks/`` publish this Umbra
+    metadata format (``version`` 1.0.0, 1.1.0 or 2.0.0, all sharing the fields
+    read here) instead of a ``*.stac.v2.json`` sidecar. The mapping fills the
+    same STAC properties the v2 sidecars carry so every search filter
+    (date, footprint, polarization, incidence, resolution) treats legacy and v2
+    items alike. Incidence is ``angleIncidenceDegrees``, not the grazing angle.
+
+    The item id is a uuid5 of the collect id, since the legacy format has no
+    STAC item id; ``umbra:collect_id`` is kept so a legacy item links to any
+    reprocessed ``task-data/`` copy of the same collect. Returns ``None`` when
+    the document has no collect, start time or footprint.
+    """
+    collects = doc.get("collects") or []
+    if not collects or not isinstance(collects[0], dict):
+        return None
+    c = collects[0]
+    start = c.get("startAtUTC")
+    geometry = _drop_z(c.get("footprintPolygonLla"))
+    collect_id = c.get("id")
+    if not start or geometry is None or not collect_id:
+        return None
+    ring = geometry["coordinates"][0]
+    lons = [p[0] for p in ring]
+    lats = [p[1] for p in ring]
+    sat = doc.get("umbraSatelliteName")
+    platform = sat.replace("_", "-").title() if isinstance(sat, str) else None
+    gec = ((doc.get("derivedProducts") or {}).get("GEC") or [{}])[0] or {}
+    res = gec.get("groundResolution") or c.get("maxGroundResolution") or {}
+    freq = c.get("radarCenterFrequencyHz")
+    props: dict[str, Any] = {
+        "datetime": start,
+        "start_datetime": start,
+        "end_datetime": c.get("endAtUTC"),
+        "platform": platform,
+        "constellation": "umbra",
+        "sar:instrument_mode": doc.get("imagingMode"),
+        "sar:frequency_band": c.get("radarBand"),
+        "sar:center_frequency": freq / 1e9 if isinstance(freq, (int, float)) else None,
+        "sar:polarizations": list(c.get("polarizations") or []),
+        "sar:observation_direction": _lower(c.get("observationDirection")),
+        "sar:product_type": "GEC",
+        "sar:resolution_range": res.get("rangeMeters"),
+        "sar:resolution_azimuth": res.get("azimuthMeters"),
+        "sat:orbit_state": _lower(c.get("satelliteTrack")),
+        "view:incidence_angle": c.get("angleIncidenceDegrees"),
+        "view:azimuth": c.get("angleAzimuthDegrees"),
+        "umbra:collect_id": collect_id,
+        "umbra:task_id": c.get("taskId"),
+        "umbra:grazing_angle_degrees": c.get("angleGrazingDegrees"),
+        "umbra:slant_range_meters": c.get("slantRangeMeters"),
+        "umbra:product_sku": doc.get("productSku"),
+        "umbra:legacy_metadata_version": doc.get("version"),
+    }
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": str(uuid.uuid5(_LEGACY_ID_NAMESPACE, str(collect_id))),
+        "collection": "umbra-sar",
+        "geometry": geometry,
+        "bbox": [min(lons), min(lats), max(lons), max(lats)],
+        "properties": {k: v for k, v in props.items() if v is not None},
+        "links": [],
+    }
 
 
 def _datetime_interval(start: date | None, end: date | None) -> str | None:
@@ -615,32 +765,28 @@ class UmbraCatalog:
         """
         by_acq: dict[str, list[str]] = {}
         for key in self._stream_keys(task_prefix):
-            rel = key[len(task_prefix) :]
-            parts = rel.split("/")
-            # The acquisition component is the first segment matching the
-            # date pattern; skip anything without one (stray bucket junk).
-            acq_idx = next(
-                (i for i, p in enumerate(parts[:-1]) if _ACQ_DATE_RE.match(p)),
-                None,
-            )
-            if acq_idx is None:
+            # The acquisition is the first date-named directory, or (flat
+            # legacy layout) the stem of the file name; skip anything with
+            # neither (stray bucket junk). See _acquisition_group.
+            group = _acquisition_group(key[len(task_prefix) :])
+            if group is None:
                 continue
-            d = _acq_date(parts[acq_idx])
+            d = _acq_date(group[1])
             if start is not None and d is not None and d < start:
                 continue
             if end is not None and d is not None and d > end:
                 continue
-            acq_prefix = task_prefix + "/".join(parts[: acq_idx + 1]) + "/"
-            by_acq.setdefault(acq_prefix, []).append(key)
+            by_acq.setdefault(task_prefix + group[0], []).append(key)
 
-        # Collect the acquisitions that have a sidecar, sorted so output order is
-        # deterministic (older acquisitions first). Each still needs one sidecar
-        # GET -- the N+1 round trips in an otherwise single-LIST walk -- which
-        # _items_from_sidecars resolves concurrently while preserving this order.
+        # Collect the acquisitions that have a sidecar (v2 STAC, else legacy
+        # _METADATA.json), sorted so output order is deterministic (older
+        # acquisitions first). Each still needs one sidecar GET -- the N+1
+        # round trips in an otherwise single-LIST walk -- which
+        # _items_from_sidecars resolves concurrently while preserving order.
         pending: list[tuple[str, list[str], str]] = []
         for acq_prefix in sorted(by_acq):
             keys = by_acq[acq_prefix]
-            sidecar = next((k for k in keys if k.endswith(".stac.v2.json")), None)
+            sidecar = _pick_sidecar(keys)
             if sidecar is None:
                 continue
             pending.append((acq_prefix, keys, self._url_for(sidecar)))
@@ -712,10 +858,16 @@ class UmbraCatalog:
         rebuild them from the keys we just listed -- the returned hrefs
         always resolve.
         """
+        legacy = sidecar_url.endswith(_LEGACY_SIDECAR_SUFFIX)
+        if legacy:
+            stac = stac_from_legacy_metadata(doc)
+            if stac is None:
+                return None
+            doc = stac
         assets: dict[str, dict[str, Any]] = {}
         for key in files:
             basename = key.rsplit("/", 1)[-1]
-            if basename.endswith(".stac.v2.json"):
+            if basename.endswith(_V2_SIDECAR_SUFFIX):
                 continue
             assets[basename] = {
                 "href": self._url_for(key),
@@ -723,4 +875,16 @@ class UmbraCatalog:
             }
         if not assets:
             return None
-        return UmbraItem.from_dict({**doc, "assets": assets}, href=sidecar_url)
+        item = UmbraItem.from_dict({**doc, "assets": assets}, href=sidecar_url)
+        # Record what the collect actually ships, so a caller (and the parquet)
+        # can find a matched CPHD + SICD pair from one collect without
+        # re-classifying asset keys. Namespaced to umbra-py: not Umbra's field.
+        products = item.available_assets
+        item.properties = {
+            **item.properties,
+            "umbra-py:products": products,
+            "umbra-py:cphd_sicd_pair": "CPHD" in products and "SICD" in products,
+            "umbra-py:layout": "legacy" if legacy else "v2",
+        }
+        item.raw = {**item.raw, "properties": item.properties}
+        return item

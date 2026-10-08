@@ -1,16 +1,18 @@
 #!/usr/bin/env sh
 # Entrypoint for the umbra-py image.
 #
-# Default behaviour: fetch the published catalog index on first boot (unless one
-# is already present on the /data volume, or fetching is disabled), then run the
-# read-only STAC API. Pass `serve --public` for the hosted community instance
-# (STAC + MCP on one process). Pass `mcp` as the first argument to serve
+# Default behaviour: make sure the catalog index on the /data volume is the
+# latest published snapshot (download it on first boot; on later boots one HEAD
+# request decides whether the weekly rebuild changed it, and only then is the new
+# file downloaded, validated and swapped in), then run the read-only STAC API.
+# Pass `serve --public` for the hosted community instance (STAC + MCP on one
+# process). Pass `mcp` as the first argument to serve
 # Streamable HTTP MCP alone (`umbra mcp --http`).
 #
 # Environment variables:
 #   UMBRA_HOST         Interface to bind      (default 0.0.0.0)
 #   UMBRA_PORT         Port to listen on      (default 8000)
-#   UMBRA_FETCH_INDEX  Fetch the published index on first boot (default 1; "0" skips)
+#   UMBRA_FETCH_INDEX  Fetch / refresh the published index on boot (default 1; "0" skips)
 #   UMBRA_SERVE_LIVE   Serve from a live S3 walk per request instead of an index
 #                      ("1" enables; correct but slow, needs no index)
 #   UMBRA_INDEX_URL    Override the published-index asset URL (e.g. a fork/mirror)
@@ -71,17 +73,30 @@ if [ "${UMBRA_SERVE_LIVE:-0}" = "1" ]; then
     exec umbra serve --host "$HOST" --port "$PORT" --live "$@"
 fi
 
-# Fetch the published snapshot on first boot unless disabled or already present.
+# Fetch the published snapshot on first boot, and on every later boot refresh it
+# when the weekly rebuild changed it. A persistent volume keeps catalog.db across
+# deploys, so "fetch only when missing" pinned the hosted API to its first
+# snapshot forever; `--if-changed` compares the release asset's ETag with the one
+# recorded beside the index and downloads, validates and atomically swaps only
+# on a change. It runs here, before the server starts, because the swap is only
+# safe while nothing holds the index open.
 # This leaves the serve/mcp args in "$@" untouched for the final exec below.
 INDEX_DB="${UMBRA_INDEX_DB:-${XDG_CACHE_HOME:-$HOME/.cache}/umbra-py/catalog.db}"
-if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ ! -f "$INDEX_DB" ]; then
-    echo "No catalog index at $INDEX_DB; fetching the published snapshot..."
-    if [ -n "${UMBRA_INDEX_URL:-}" ]; then
-        umbra index fetch --url "$UMBRA_INDEX_URL" || FETCH_FAILED=1
+if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
+    if [ -f "$INDEX_DB" ]; then
+        echo "Checking for a newer published snapshot than $INDEX_DB..."
     else
-        umbra index fetch || FETCH_FAILED=1
+        echo "No catalog index at $INDEX_DB; fetching the published snapshot..."
     fi
-    if [ "${FETCH_FAILED:-0}" = "1" ]; then
+    if [ -n "${UMBRA_INDEX_URL:-}" ]; then
+        umbra index fetch --if-changed --url "$UMBRA_INDEX_URL" || FETCH_FAILED=1
+    else
+        umbra index fetch --if-changed || FETCH_FAILED=1
+    fi
+    if [ "${FETCH_FAILED:-0}" = "1" ] && [ -f "$INDEX_DB" ]; then
+        # A failed refresh never touches the existing index: keep serving it.
+        echo "Snapshot refresh failed; serving the existing index at $INDEX_DB." >&2
+    elif [ "${FETCH_FAILED:-0}" = "1" ]; then
         echo "Index fetch failed; falling back to a live S3 walk (slow)." >&2
         if [ "$MODE" = "mcp" ]; then
             exec umbra mcp --http --host "$HOST" --port "$PORT"

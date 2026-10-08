@@ -185,7 +185,7 @@ from .constants import (
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
 from .exceptions import MissingDependencyError
-from .index import CatalogIndex, default_index_path
+from .index import CatalogIndex, default_index_path, read_snapshot_state
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem
 from .schemas import load_schema
@@ -741,7 +741,15 @@ def conformance() -> dict[str, Any]:
     return {"conformsTo": list(CONFORMANCE_CLASSES)}
 
 
-def health_document(*, backend: str, ready: bool, items: int | None = None) -> dict[str, Any]:
+def health_document(
+    *,
+    backend: str,
+    ready: bool,
+    items: int | None = None,
+    ids: int | None = None,
+    built_at: str | None = None,
+    snapshot: str | None = None,
+) -> dict[str, Any]:
     """Build the ``/healthz`` liveness/readiness document.
 
     ``backend`` is ``"index"`` or ``"live"``; ``ready`` reports whether the
@@ -751,6 +759,11 @@ def health_document(*, backend: str, ready: bool, items: int | None = None) -> d
     Kubernetes probe can poll it cheaply -- the endpoint itself always returns
     ``200`` once the HTTP server is up (liveness), and ``ready`` distinguishes a
     server that is still waiting on its first-boot index fetch (readiness).
+
+    ``ids`` (distinct item ids), ``built_at`` (the index build date) and
+    ``snapshot`` (the published release asset's ETag the index was fetched
+    from) make freshness checkable from outside: a monitor compares ``ids`` and
+    ``snapshot`` with the latest weekly release. Each is omitted when unknown.
     """
     doc: dict[str, Any] = {
         "status": "ok" if ready else "starting",
@@ -760,6 +773,12 @@ def health_document(*, backend: str, ready: bool, items: int | None = None) -> d
     }
     if items is not None:
         doc["items"] = items
+    if ids is not None:
+        doc["ids"] = ids
+    if built_at is not None:
+        doc["built_at"] = built_at
+    if snapshot is not None:
+        doc["snapshot"] = snapshot
     return doc
 
 
@@ -2793,13 +2812,33 @@ def build_app(
             return health_document(backend="index", ready=False)
         try:
             items: int | None = None
+            ids: int | None = None
+            built_at: str | None = None
             stats = getattr(source, "stats", None)
             if stats is not None:
                 try:
-                    items = int(stats()["items"])
+                    s = stats()
+                    items = int(s["items"])
+                    built_at = s.get("built_at")
                 except (KeyError, TypeError, ValueError):
                     items = None
-            return health_document(backend="index", ready=True, items=items)
+            distinct = getattr(source, "distinct_ids", None)
+            if callable(distinct):
+                try:
+                    ids = int(distinct())
+                except (TypeError, ValueError):
+                    ids = None
+            src_path = getattr(source, "path", None)
+            state = read_snapshot_state(src_path) if src_path is not None else None
+            snapshot = (state.get("etag") or state.get("last_modified")) if state else None
+            return health_document(
+                backend="index",
+                ready=True,
+                items=items,
+                ids=ids,
+                built_at=built_at,
+                snapshot=snapshot,
+            )
         finally:
             _close(source)
 
