@@ -65,6 +65,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   these validate the JSON, stamp CC-BY and AI provenance, and (for a baked
   preview) append a deterministic size caveat. Unstamped prose is not
   pipeline output.
+- **One JSON log line per `POST /mcp`.** `umbra serve --mcp` / `--public`
+  logs the client IP, User-Agent, `mcp-protocol-version`, JSON-RPC method,
+  status and duration to stdout, plus `clientInfo` on `initialize` and the
+  tool name and argument key names (never values) on `tools/call`.
 
 ### Changed
 - **Published user manual lives in `docs/`.** `docs_src/` is gone; mkdocs
@@ -156,6 +160,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   while STAC on the same process answered 200. Public mode now disables that
   check (the reverse proxy already owns Host). Local `umbra serve --mcp`
   keeps the localhost allowlist.
+- **`download_asset` with an empty item id says what to do.** The MCP tool
+  used to answer `Item '' has no asset 'SICD'`; an empty or blank id now
+  fails up front with "An item id is required ...; call search_catalog first."
 
 ## [0.1.2] — 2026-09-02
 

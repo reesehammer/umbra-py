@@ -1338,6 +1338,11 @@ def download_asset(
     from ._http import DEFAULT_TIMEOUT, default_session
     from .download import download_asset as _download_asset
 
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(
+            "An item id is required (an item id or url from search_catalog); "
+            "call search_catalog first."
+        )
     item = _fetch_item(url)
     href = item.asset_href(asset)
 
