@@ -71,6 +71,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   tool name and argument key names (never values) on `tools/call`.
 
 ### Changed
+- **Container builds pull official Python from ECR Public.** `deploy/Dockerfile`
+  and `deploy/Dockerfile.mcp` default to
+  `public.ecr.aws/docker/library/python:3.12-slim` (the same official
+  `python:3.12-slim` tag) so CI and Railway are not blocked by anonymous
+  Docker Hub pulls. Override the registry with `--build-arg PYTHON_IMAGE=...`.
 - **Published user manual lives in `docs/`.** `docs_src/` is gone; mkdocs
   `docs_dir` is `docs/`. Maintainer `STRATEGY.md` and `TODO.md` moved to
   `.github/`. JSON contracts stay at `docs/schemas/` (unchanged path, still

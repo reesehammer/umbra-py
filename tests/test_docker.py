@@ -21,6 +21,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = REPO_ROOT / "deploy"
 DOCKERFILE = DEPLOY / "Dockerfile"
 DOCKERFILE_MCP = DEPLOY / "Dockerfile.mcp"
+# Docker publishes library/python on ECR Public under this tag.
+ECR_PYTHON = "public.ecr.aws/docker/library/python:3.12-slim"
 ENTRYPOINT = DEPLOY / "docker-entrypoint.sh"
 COMPOSE = DEPLOY / "docker-compose.yml"
 RAILWAY = REPO_ROOT / "railway.toml"
@@ -97,6 +99,22 @@ def test_mcp_dockerfile_bakes_serve_and_mcp_and_public_cmd():
 
 def test_dockerfiles_stay_in_lockstep():
     assert _instruction_body(DOCKERFILE) == _instruction_body(DOCKERFILE_MCP)
+
+
+def test_dockerfiles_pull_official_python_from_ecr_public():
+    """Anonymous Docker Hub pulls 429 and time out. Both images default to the
+    ECR Public copy of official python:3.12-slim, overridable by ARG."""
+    for path in (DOCKERFILE, DOCKERFILE_MCP):
+        text = path.read_text(encoding="utf-8")
+        assert f"ARG PYTHON_IMAGE={ECR_PYTHON}" in text
+        assert "FROM ${PYTHON_IMAGE} AS runtime" in text
+        assert not re.search(r"^FROM python:", text, re.MULTILINE), path
+
+
+def test_deploy_docs_name_the_ecr_python_image():
+    text = DEPLOY_DOCS.read_text(encoding="utf-8")
+    assert ECR_PYTHON in text
+    assert "PYTHON_IMAGE" in text
 
 
 def test_dockerfiles_do_not_declare_volume():

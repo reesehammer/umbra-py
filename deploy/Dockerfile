@@ -16,7 +16,11 @@
 # Add `load` for the numeric `/artifacts/stats` endpoint, and `dask` if you also
 # want to run it lazily (`UMBRA_SERVE_ARGS="--stack-lazy"`, see deploy.md):
 #     docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
-FROM python:3.12-slim AS runtime
+# Official CPython (`python:3.12-slim`) from Amazon ECR Public, where Docker
+# publishes Official Images. A build then does not depend on an anonymous
+# Docker Hub pull. Override with --build-arg PYTHON_IMAGE=...
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
+FROM ${PYTHON_IMAGE} AS runtime
 
 # Which optional extras to install. Default keeps the image small and the STAC
 # API fast; `serve,viz` adds the on-demand `/artifacts/...` render endpoints.
