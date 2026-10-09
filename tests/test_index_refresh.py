@@ -8,15 +8,21 @@ fetch only when no file existed, so the API stayed on its first snapshot.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+from collections import namedtuple
 
 import pytest
 import responses
 
-from umbra_py.exceptions import IndexRefreshError
+from umbra_py import index as index_mod
+from umbra_py.exceptions import IndexRefreshError, InsufficientSpaceError
 from umbra_py.index import (
+    THUMBS_SNAPSHOT_META_KEY,
     CatalogIndex,
     _normalize_etag,
+    _refresh_lock,
+    merge_thumbnails_atomically,
     read_snapshot_state,
     refresh_from_release,
     refresh_thumbnails_from_release,
@@ -46,7 +52,9 @@ def _db_bytes(tmp_path, name: str, n: int, built_at: str = "2026-10-05") -> byte
 
 def _serve(body: bytes, etag: str) -> None:
     headers = {"ETag": etag, "Last-Modified": "Mon, 05 Oct 2026 15:09:48 GMT"}
-    responses.add(responses.HEAD, URL, status=200, headers=headers)
+    responses.add(
+        responses.HEAD, URL, status=200, headers={**headers, "Content-Length": str(len(body))}
+    )
     responses.add(
         responses.GET,
         URL,
@@ -220,7 +228,12 @@ def _thumbs_bytes(tmp_path, name: str, png: bytes, n: int = 2) -> bytes:
 
 def _serve_thumbs(body: bytes, etag: str) -> None:
     headers = {"ETag": etag, "Last-Modified": "Mon, 05 Oct 2026 16:00:00 GMT"}
-    responses.add(responses.HEAD, THUMBS_URL, status=200, headers=headers)
+    responses.add(
+        responses.HEAD,
+        THUMBS_URL,
+        status=200,
+        headers={**headers, "Content-Length": str(len(body))},
+    )
     responses.add(
         responses.GET,
         THUMBS_URL,
@@ -354,3 +367,319 @@ def test_cli_if_changed_without_any_sidecar_fails_cleanly(tmp_path):
     result = _fetch_thumbs(db)
     assert result.exit_code != 0 and "Could not reach" in result.output
     assert not (tmp_path / "catalog.thumbs.db").exists()
+
+
+# -- disk safety: stale leftovers, free space, a disk that fills mid-merge ------
+
+_Usage = namedtuple("_Usage", "total used free")
+
+
+def _free_space(monkeypatch, free: int) -> None:
+    monkeypatch.setattr(index_mod.shutil, "disk_usage", lambda _path: _Usage(free, 0, free))
+
+
+def _thumbs_count(db) -> int:
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT COUNT(thumbnail) FROM items").fetchone()[0]
+    finally:
+        conn.close()
+
+
+@responses.activate
+def test_stale_refresh_leftovers_are_removed_before_downloading(tmp_path):
+    """An interrupted boot leaves a staged download, its resume sidecars and a
+    half-written merge copy; none is ever resumed, all of it fills the volume."""
+    dest = tmp_path / "catalog.db"
+    _serve(_db_bytes(tmp_path, "v1.db", 3), '"v1"')
+    refresh_from_release(dest, url=URL)
+    stale = {
+        "catalog.db.next": 4096,
+        "catalog.db.next.part": 1 << 20,
+        "catalog.db.next.part.etag": 6,
+        "catalog.db.next-journal": 512,
+        "catalog.db.merge": 2 << 20,
+        "catalog.db.merge-journal": 512,
+        "catalog.db.source.json.tmp": 10,
+    }
+    for name, size in stale.items():
+        (tmp_path / name).write_bytes(b"x" * size)
+    unrelated = tmp_path / "catalog.db.bak"
+    unrelated.write_bytes(b"keep me")
+
+    result = refresh_from_release(dest, url=URL)
+    assert result.reason == "unchanged"
+    assert result.cleaned == stale
+    assert not any((tmp_path / name).exists() for name in stale)
+    assert unrelated.read_bytes() == b"keep me"
+    assert _count(dest) == 3
+
+
+@responses.activate
+def test_cleanup_checkpoints_the_live_wal_instead_of_deleting_it(tmp_path):
+    """The live index's -wal may hold committed rows; a reader may hold it open."""
+    dest = tmp_path / "catalog.db"
+    _serve(_db_bytes(tmp_path, "v1.db", 3), '"v1"')
+    refresh_from_release(dest, url=URL)
+    reader = CatalogIndex(dest)  # a running server's connection
+    try:
+        writer = CatalogIndex(dest)
+        writer.add(_item(99))
+        writer.commit()  # committed, still only in the -wal
+        assert (tmp_path / "catalog.db-wal").stat().st_size > 0
+        refresh_from_release(dest, url=URL)
+        writer.close()
+        assert len(reader) == 4
+    finally:
+        reader.close()
+    assert _count(dest) == 4
+
+
+@responses.activate
+def test_cleanup_never_touches_a_refresh_in_progress(tmp_path):
+    dest = tmp_path / "catalog.db"
+    part = tmp_path / "catalog.db.next.part"
+    part.write_bytes(b"still downloading")
+    _serve(_db_bytes(tmp_path, "v1.db", 3), '"v1"')
+    with _refresh_lock(dest):
+        with pytest.raises(IndexRefreshError, match="in progress"):
+            refresh_from_release(dest, url=URL)
+    assert part.read_bytes() == b"still downloading"
+    assert not dest.exists()
+
+
+@responses.activate
+def test_unreadable_index_is_refetched_even_when_the_snapshot_is_unchanged(tmp_path):
+    """The incident: a full disk damaged catalog.db while its ETag stayed current."""
+    dest = tmp_path / "catalog.db"
+    body = _db_bytes(tmp_path, "v1.db", 3)
+    _serve(body, '"v1"')
+    refresh_from_release(dest, url=URL)
+    dest.write_bytes(b"\0" * 8192)
+    _serve(body, '"v1"')
+    result = refresh_from_release(dest, url=URL)
+    assert result.changed and result.reason == "unreadable"
+    assert _count(dest) == 3
+
+
+@responses.activate
+def test_index_download_is_skipped_without_room_for_its_content_length(tmp_path, monkeypatch):
+    dest = tmp_path / "catalog.db"
+    dest.write_bytes(_db_bytes(tmp_path, "old.db", 4))
+    body = _db_bytes(tmp_path, "new.db", 5)
+    _serve(body, '"v2"')
+    _free_space(monkeypatch, index_mod._FREE_SPACE_RESERVE + len(body) - 1)
+    with pytest.raises(InsufficientSpaceError, match="download catalog.db"):
+        refresh_from_release(dest, url=URL)
+    assert _gets(URL) == 0
+    assert _count(dest) == 4
+    assert not (tmp_path / "catalog.db.next.part").exists()
+
+    _free_space(monkeypatch, index_mod._FREE_SPACE_RESERVE + len(body))
+    assert refresh_from_release(dest, url=URL).items == 5
+
+
+@responses.activate
+def test_thumbs_download_is_skipped_without_room_and_the_old_sidecar_kept(tmp_path, monkeypatch):
+    dest = tmp_path / "catalog.thumbs.db"
+    old = _thumbs_bytes(tmp_path, "old", b"old")
+    dest.write_bytes(old)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v2", b"two", n=3), '"t2"')
+    _free_space(monkeypatch, 0)
+    with pytest.raises(InsufficientSpaceError):
+        refresh_thumbnails_from_release(dest, url=THUMBS_URL)
+    assert _gets(THUMBS_URL) == 0
+    assert dest.read_bytes() == old
+
+
+def test_merge_is_skipped_without_room_for_a_copy_plus_the_payload(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    _index(db)
+    png = b"one" * 1000
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", png))
+    payload = 2 * len(png)
+    assert index_mod._merge_growth(db, sidecar, overwrite=False) == (2, payload)
+    need = index_mod._db_bytes(db) + int(payload * (1 + index_mod._MERGE_HEADROOM))
+    _free_space(monkeypatch, need + index_mod._FREE_SPACE_RESERVE - 1)
+    before = db.read_bytes()
+    with pytest.raises(InsufficientSpaceError, match="merge catalog.thumbs.db"):
+        merge_thumbnails_atomically(db, sidecar)
+    assert db.read_bytes() == before
+    assert not (tmp_path / "catalog.db.merge").exists()
+
+    _free_space(monkeypatch, need + index_mod._FREE_SPACE_RESERVE)
+    assert merge_thumbnails_atomically(db, sidecar) == 2
+
+
+def test_merge_estimate_counts_only_the_rows_the_merge_will_write(tmp_path):
+    """A sidecar the index already holds costs a copy, not a second payload --
+    otherwise a 5 GB volume would refuse every sidecar-only re-merge."""
+    db = tmp_path / "catalog.db"
+    _index(db, n=3)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"x" * 5000, n=3))
+    assert index_mod._merge_growth(db, sidecar, overwrite=False) == (3, 15000)
+    merge_thumbnails_atomically(db, sidecar, snapshot="t1")
+    assert index_mod._merge_growth(db, sidecar, overwrite=False) == (0, 0)
+    assert index_mod._merge_growth(db, sidecar, overwrite=True) == (3, 15000)
+
+
+def test_a_merge_with_nothing_to_apply_records_the_snapshot_without_a_copy(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    _index(db, n=3)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"x" * 5000, n=3))
+    merge_thumbnails_atomically(db, sidecar, snapshot="t1")
+    _free_space(monkeypatch, 0)  # a copy could not fit; none is needed
+    assert merge_thumbnails_atomically(db, sidecar, snapshot="t2") == 0
+    with CatalogIndex(db) as idx:
+        assert idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == "t2"
+    assert _thumbs_count(db) == 3
+
+
+def _fill_disk_during_merge(monkeypatch, spare_pages: int = 0) -> None:
+    """Make the merge's UPDATEs hit SQLITE_FULL -- the production error,
+    ``database or disk is full`` -- once ``spare_pages`` more pages are used."""
+    real = index_mod._apply_thumbnails
+
+    def capped(conn, source, *, overwrite):
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        conn.execute(f"PRAGMA max_page_count = {pages + spare_pages}")
+        return real(conn, source, overwrite=overwrite)
+
+    monkeypatch.setattr(index_mod, "_apply_thumbnails", capped)
+
+
+def test_disk_full_during_merge_leaves_the_index_readable_and_unchanged(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    _index(db, n=4)
+    with CatalogIndex(db) as idx:
+        idx.bake_thumbnails(lambda item: b"old" if item.id == "id-0" else None)
+        idx.set_meta(THUMBS_SNAPSHOT_META_KEY, "t0")
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"\x89PNG" * 20_000, n=4))
+    _fill_disk_during_merge(monkeypatch, spare_pages=25)
+
+    with pytest.raises(IndexRefreshError, match="database or disk is full"):
+        merge_thumbnails_atomically(db, sidecar, overwrite=True, snapshot="t1")
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()
+    assert _count(db) == 4
+    assert _thumb(db) == b"old" and _thumbs_count(db) == 1
+    with CatalogIndex(db) as idx:
+        assert idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == "t0"
+    assert not (tmp_path / "catalog.db.merge").exists()
+
+
+def test_atomic_merge_applies_the_sidecar_and_records_its_snapshot(tmp_path):
+    db = tmp_path / "catalog.db"
+    _index(db, n=3)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"one", n=3))
+    assert merge_thumbnails_atomically(db, sidecar, snapshot="t1") == 3
+    assert _thumb(db) == b"one" and _thumbs_count(db) == 3
+    with CatalogIndex(db) as idx:
+        assert idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == "t1"
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("catalog.db")) == [
+        "catalog.db",
+        "catalog.db.lock",
+    ]
+
+
+def test_in_place_import_rolls_back_a_merge_that_fails_part_way(tmp_path):
+    """SQLite rolls back by itself on ``SQLITE_FULL``, but not on an error raised
+    between statements -- here a hand-built sidecar whose last row has no PNG.
+    ``import_thumbnails`` used to leave that transaction open, so the
+    ``with CatalogIndex(...)`` exit committed the rows already applied."""
+    db = tmp_path / "catalog.db"
+    _index(db, n=3)
+    sidecar = tmp_path / "foreign.thumbs.db"
+    conn = sqlite3.connect(sidecar)
+    conn.execute("CREATE TABLE thumbnails (href TEXT, id TEXT, png BLOB)")
+    conn.executemany(
+        "INSERT INTO thumbnails VALUES (?, ?, ?)",
+        [(f"https://h/{i}.stac.v2.json", f"id-{i}", b"one" if i < 2 else None) for i in range(3)],
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(TypeError):
+        with CatalogIndex(db) as idx:
+            idx.import_thumbnails(sidecar)
+    assert _thumbs_count(db) == 0
+
+
+@responses.activate
+def test_cli_disk_full_merge_fails_loudly_and_keeps_serving_the_index(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    _index(db)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"\x89PNG" * 20_000), '"t1"')
+    _fill_disk_during_merge(monkeypatch)
+    result = _fetch_thumbs(db)
+    assert result.exit_code != 0
+    assert "database or disk is full" in result.output and "left as it was" in result.output
+    assert _count(db) == 2 and _thumb(db) is None
+    assert (tmp_path / "catalog.thumbs.db").exists()
+
+    monkeypatch.undo()
+    retry = _fetch_thumbs(db)
+    assert retry.exit_code == 0, retry.output
+    assert _thumb(db) == b"\x89PNG" * 20_000
+
+
+@responses.activate
+def test_cli_merge_without_room_is_skipped_with_a_clear_line(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    _index(db)
+    (tmp_path / "catalog.thumbs.db").write_bytes(_thumbs_bytes(tmp_path, "old", b"old"))
+    responses.add(responses.HEAD, THUMBS_URL, status=503)
+    _free_space(monkeypatch, 0)
+    result = _fetch_thumbs(db)
+    assert result.exit_code != 0
+    assert "Not enough free space" in result.output
+    assert "to merge catalog.thumbs.db" in result.output
+    assert "Skipped; the current files were kept." in result.output
+    assert _count(db) == 2 and _thumb(db) is None
+
+
+def test_free_space_is_measured_on_the_index_directory(tmp_path, monkeypatch):
+    seen = []
+    real = shutil.disk_usage
+
+    def spy(path):
+        seen.append(path)
+        return real(path)
+
+    monkeypatch.setattr(index_mod.shutil, "disk_usage", spy)
+    db = tmp_path / "data" / "catalog.db"
+    db.parent.mkdir()
+    _index(db)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"one"))
+    merge_thumbnails_atomically(db, sidecar)
+    assert seen == [db.parent]
+
+
+def test_a_meta_only_merge_on_a_full_disk_raises_a_refresh_error(tmp_path, monkeypatch):
+    """Found replaying the incident: an index whose WAL already held the merged
+    rows took the no-copy path, and its one meta write escaped as a raw
+    ``sqlite3.OperationalError`` traceback instead of a clean refresh error."""
+    db = tmp_path / "catalog.db"
+    _index(db, n=2)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    sidecar.write_bytes(_thumbs_bytes(tmp_path, "v1", b"one"))
+    merge_thumbnails_atomically(db, sidecar, snapshot="t1")
+
+    def full(self, key, value):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(CatalogIndex, "set_meta", full)
+    with pytest.raises(IndexRefreshError, match="left as it was"):
+        merge_thumbnails_atomically(db, sidecar, snapshot="t2")
+    monkeypatch.undo()
+    with CatalogIndex(db) as idx:
+        assert idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == "t1"
