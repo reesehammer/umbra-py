@@ -1304,6 +1304,21 @@ def test_download_asset_confirm_gate(sample_item_dict):
     assert "confirm=true" in out["hint"]
 
 
+@pytest.mark.parametrize("url", ["", "   ", None])
+def test_download_asset_rejects_a_missing_item_id(url):
+    """Regression: an empty id reached ``asset_href`` as ``Item '' has no asset 'SICD'``."""
+    with pytest.raises(ValueError, match="item id is required.*call search_catalog first"):
+        ms.download_asset(url, "SICD")
+
+
+def test_download_asset_empty_id_reaches_the_client():
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server = ms.build_server()
+    with pytest.raises(ToolError, match="item id is required"):
+        asyncio.run(server.call_tool("download_asset", {"url": "", "asset": "SICD"}))
+
+
 # --------------------------------------------------------------------------
 # watch_site — the standing-analyst delta, over MCP
 # --------------------------------------------------------------------------
