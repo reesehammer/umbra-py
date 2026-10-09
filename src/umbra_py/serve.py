@@ -162,6 +162,7 @@ import io
 import itertools
 import json
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -184,8 +185,15 @@ from .constants import (
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
-from .exceptions import MissingDependencyError
-from .index import CatalogIndex, default_index_path, read_snapshot_state, snapshot_id
+from .exceptions import MissingDependencyError, UmbraError
+from .index import (
+    THUMBS_SNAPSHOT_META_KEY,
+    CatalogIndex,
+    default_index_path,
+    default_thumbs_path,
+    read_snapshot_state,
+    snapshot_id,
+)
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem
 from .schemas import load_schema
@@ -749,6 +757,8 @@ def health_document(
     ids: int | None = None,
     built_at: str | None = None,
     snapshot: str | None = None,
+    thumbnails: dict[str, Any] | None = None,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``/healthz`` liveness/readiness document.
 
@@ -764,13 +774,29 @@ def health_document(
     ``snapshot`` (the published release asset's ETag the index was fetched
     from) make freshness checkable from outside: a monitor compares ``ids`` and
     ``snapshot`` with the latest weekly release. Each is omitted when unknown.
+
+    ``thumbnails`` (index backend only) reports the baked previews: ``count``
+    thumbnailed acquisitions, ``snapshot`` (the sidecar snapshot last merged
+    into the index), ``sidecar_snapshot`` (the sidecar on disk beside it) and
+    ``merged`` (the two agree). A sidecar on disk that is not merged -- the boot
+    merge was skipped for space or failed -- sets top-level ``degraded``: the
+    index still serves, previews fall back to streaming or are missing.
+
+    ``error`` marks an index that exists but cannot be opened or read; the
+    route sends that document with a ``503``, the only non-2xx it returns.
     """
+    if error is not None:
+        status = "error"
+    else:
+        status = "ok" if ready else "starting"
     doc: dict[str, Any] = {
-        "status": "ok" if ready else "starting",
+        "status": status,
         "backend": backend,
         "ready": ready,
         "stac_version": STAC_VERSION,
     }
+    if error is not None:
+        doc["error"] = error
     if items is not None:
         doc["items"] = items
     if ids is not None:
@@ -779,6 +805,11 @@ def health_document(
         doc["built_at"] = built_at
     if snapshot is not None:
         doc["snapshot"] = snapshot
+    if thumbnails is not None:
+        doc["thumbnails"] = thumbnails
+        doc["degraded"] = thumbnails.get("sidecar_snapshot") is not None and not thumbnails.get(
+            "merged"
+        )
     return doc
 
 
@@ -2798,30 +2829,36 @@ def build_app(
         return conformance()
 
     @app.get("/healthz", tags=["Ops"])
-    def get_health() -> dict[str, Any]:
+    def get_health() -> Any:
         # Liveness + readiness for container orchestration (a Docker
-        # HEALTHCHECK, a Kubernetes probe). Returns 200 whenever the HTTP
-        # server is up; the body's `ready` reports whether the search backend
-        # can answer queries yet -- on first boot the published-index fetch may
-        # still be in flight, so a server can be alive but not yet ready.
+        # HEALTHCHECK, a Kubernetes probe). Returns 200 whenever the server can
+        # serve; the body's `ready` reports whether the search backend can
+        # answer queries yet -- on first boot the published-index fetch may
+        # still be in flight, so a server can be alive but not yet ready. A
+        # skipped or failed thumbnail merge is `degraded`, still 200. Only an
+        # index that exists but cannot be opened or read is a 503.
         if live:
             return health_document(backend="live", ready=True)
         try:
             source = open_source(index_path, live=False)
         except FileNotFoundError:
             return health_document(backend="index", ready=False)
+        except (sqlite3.DatabaseError, UmbraError) as exc:
+            return _unhealthy(exc)
         try:
             items: int | None = None
             ids: int | None = None
             built_at: str | None = None
+            thumbnailed: int | None = None
             stats = getattr(source, "stats", None)
             if stats is not None:
                 try:
                     s = stats()
                     items = int(s["items"])
                     built_at = s.get("built_at")
+                    thumbnailed = int(s["thumbnailed"])
                 except (KeyError, TypeError, ValueError):
-                    items = None
+                    pass
             distinct = getattr(source, "distinct_ids", None)
             if callable(distinct):
                 try:
@@ -2831,6 +2868,17 @@ def build_app(
             src_path = getattr(source, "path", None)
             state = read_snapshot_state(src_path) if src_path is not None else None
             snapshot = snapshot_id(state)
+            thumbnails = None
+            if src_path is not None and hasattr(source, "get_meta"):
+                sidecar = default_thumbs_path(src_path)
+                on_disk = snapshot_id(read_snapshot_state(sidecar)) if sidecar.exists() else None
+                merged = source.get_meta(THUMBS_SNAPSHOT_META_KEY)
+                thumbnails = {
+                    "count": thumbnailed,
+                    "snapshot": merged,
+                    "sidecar_snapshot": on_disk,
+                    "merged": on_disk is not None and merged == on_disk,
+                }
             return health_document(
                 backend="index",
                 ready=True,
@@ -2838,9 +2886,16 @@ def build_app(
                 ids=ids,
                 built_at=built_at,
                 snapshot=snapshot,
+                thumbnails=thumbnails,
             )
+        except sqlite3.DatabaseError as exc:
+            return _unhealthy(exc)
         finally:
             _close(source)
+
+    def _unhealthy(exc: Exception) -> Any:
+        doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
+        return JSONResponse(status_code=503, content=doc)
 
     @app.get("/collections", tags=["STAC"])
     def get_collections(request: Request) -> dict[str, Any]:
