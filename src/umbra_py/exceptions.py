@@ -59,6 +59,11 @@ class IndexRefreshError(UmbraError):
     existing local index was left untouched."""
 
 
+class InsufficientSpaceError(IndexRefreshError):
+    """A refresh step was skipped because its directory lacked the free space
+    it needs; the files it would have replaced were left as they were."""
+
+
 class AssetNotFoundError(UmbraError):
     """Raised when a requested asset key is not present on an item."""
 

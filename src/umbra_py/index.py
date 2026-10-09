@@ -27,9 +27,11 @@ from __future__ import annotations
 import heapq
 import json
 import os
+import shutil
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,7 +40,7 @@ from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
-from .exceptions import IndexRefreshError, IndexSchemaError
+from .exceptions import IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem
 
@@ -359,14 +361,19 @@ def snapshot_id(state: dict[str, Any] | None) -> str | None:
     return state.get("etag") or state.get("last_modified")
 
 
-def _head_snapshot(sess: Any, src: str) -> tuple[str | None, str | None]:
-    """``HEAD`` a release asset; return its normalized ``ETag`` and ``Last-Modified``."""
+def _head_snapshot(sess: Any, src: str) -> tuple[str | None, str | None, int | None]:
+    """``HEAD`` a release asset; return its normalized ``ETag``, ``Last-Modified``
+    and ``Content-Length`` (``None`` when absent or malformed)."""
     try:
         head = sess.head(src, allow_redirects=True, timeout=30)
         head.raise_for_status()
     except Exception as exc:  # requests.RequestException and friends
         raise IndexRefreshError(f"Could not reach the published snapshot {src!r}: {exc}") from exc
-    return _normalize_etag(head.headers.get("ETag")), head.headers.get("Last-Modified")
+    try:
+        length: int | None = int(head.headers["Content-Length"])
+    except (KeyError, TypeError, ValueError):
+        length = None
+    return _normalize_etag(head.headers.get("ETag")), head.headers.get("Last-Modified"), length
 
 
 def _same_snapshot(
@@ -400,6 +407,9 @@ class RefreshResult:
     items: int | None
     built_at: str | None
     reason: str
+    #: Stale scratch files an earlier refresh left behind and this one removed
+    #: before downloading (file name -> bytes freed).
+    cleaned: dict[str, int] = field(default_factory=dict)
 
 
 def _validate_snapshot(path: Path) -> tuple[int, str | None]:
@@ -442,6 +452,135 @@ def _remove_sqlite_sidecars(path: Path) -> None:
             pass
 
 
+#: Free space every refresh step leaves on the volume after its own estimate,
+#: so a step that fits exactly cannot leave the serving index unable to write
+#: its ``-shm`` / ``-wal`` (the ``disk I/O error`` a full volume produces).
+_FREE_SPACE_RESERVE = 64 * 1024 * 1024
+
+#: Slack on the merge estimate. The copy grows by the PNG bytes it writes;
+#: each blob's partly filled last overflow page and the ``meta`` write add a
+#: little on top.
+_MERGE_HEADROOM = 0.10
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1e6:,.0f} MB"
+
+
+def _require_free_space(directory: Path, need: int, step: str) -> None:
+    """Raise :class:`InsufficientSpaceError` unless ``directory`` has ``need`` bytes
+    plus :data:`_FREE_SPACE_RESERVE` free."""
+    free = shutil.disk_usage(directory).free
+    if free < need + _FREE_SPACE_RESERVE:
+        raise InsufficientSpaceError(
+            f"Not enough free space in {directory} to {step}: needs ~{_mb(need)} "
+            f"plus a {_mb(_FREE_SPACE_RESERVE)} reserve, {_mb(free)} free. "
+            "Skipped; the current files were kept.",
+            hint="Free space in that directory or grow the volume "
+            "(docs/deploy.md, 'Volume sizing').",
+        )
+
+
+def _db_bytes(path: Path) -> int:
+    """A database's footprint: the file plus any write-ahead log beside it."""
+    wal = path.with_name(path.name + "-wal")
+    return path.stat().st_size + (wal.stat().st_size if wal.exists() else 0)
+
+
+@contextmanager
+def _refresh_lock(path: Path) -> Iterator[None]:
+    """Hold ``<path>.lock`` for one refresh of ``path``.
+
+    Every scratch file :func:`_clean_leftovers` removes is written only under
+    this lock, so a cleanup can never delete a download or merge another
+    process is still writing. A second refresh of the same file raises instead
+    of waiting. Platforms without ``fcntl`` (Windows) take no lock; there, an
+    open file cannot be deleted anyway.
+    """
+    try:
+        import fcntl  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    lock_path = path.with_name(path.name + ".lock")
+    with open(lock_path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise IndexRefreshError(
+                f"Another refresh of {path} is in progress (holds {lock_path}); leaving it alone."
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _leftover_paths(path: Path) -> list[Path]:
+    """The scratch files a refresh or merge of ``path`` writes beside it.
+
+    Only names this module creates under :func:`_refresh_lock`: the staged
+    download (``.next``) and its resume sidecars, the merge copy (``.merge``),
+    the journals SQLite may leave beside either, and the state file's ``.tmp``.
+    Never ``path`` itself nor its own ``-wal`` / ``-shm`` / ``-journal``, which
+    belong to whoever has the live database open.
+    """
+    name = path.name
+    names = [f"{name}.next.part", f"{name}.next.part.etag", f"{name}.source.json.tmp"]
+    for staged in (f"{name}.next", f"{name}.merge"):
+        names += [staged, f"{staged}-wal", f"{staged}-shm", f"{staged}-journal"]
+    return [path.with_name(name) for name in names]
+
+
+def _clean_leftovers(path: Path) -> dict[str, int]:
+    """Remove what an interrupted refresh of ``path`` left behind; call under the lock.
+
+    A download killed mid-stream leaves ``.next.part`` (the full asset size for
+    the thumbnail sidecar), a merge that hit a full disk leaves its ``.merge``
+    copy, and neither is ever resumed by a later boot -- yet both count against
+    the same volume the next refresh needs. The live database's own write-ahead
+    log is not deleted (it may hold committed pages) but checkpointed through
+    SQLite, which folds committed frames in and truncates the file; a failed
+    merge's uncommitted tail is simply discarded. Returns name -> bytes freed.
+    """
+    removed: dict[str, int] = {}
+    for leftover in _leftover_paths(path):
+        try:
+            size = leftover.stat().st_size
+            leftover.unlink()
+        except FileNotFoundError:
+            continue
+        removed[leftover.name] = size
+    wal = path.with_name(path.name + "-wal")
+    if path.exists() and wal.exists() and wal.stat().st_size > 0:
+        before = wal.stat().st_size
+        try:
+            conn = sqlite3.connect(str(path))
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError:
+            pass  # a busy or unreadable index is the validation step's problem, not cleanup's
+        after = wal.stat().st_size if wal.exists() else 0
+        if after < before:
+            removed[wal.name] = before - after
+    return removed
+
+
+def _index_rows(path: Path) -> int | None:
+    """``COUNT(*)`` of an index's items, or ``None`` when it cannot be read at all."""
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return None
+
+
 def refresh_from_release(
     path: str | os.PathLike | None = None,
     *,
@@ -462,6 +601,16 @@ def refresh_from_release(
     truncated or broken rebuild should not silently shrink a serving index),
     then swap it in with an atomic ``os.replace`` and record the new identity.
 
+    An unchanged snapshot is still re-downloaded when the current file cannot
+    be read at all (reason ``"unreadable"``), so a volume that once filled up
+    and damaged the index heals on the next boot instead of serving errors.
+
+    Disk safety: first remove what an interrupted earlier refresh left beside
+    the index (:func:`_clean_leftovers`), then check the directory has room for
+    the asset's ``Content-Length`` before downloading; if not, raise
+    :class:`InsufficientSpaceError` and keep the current index. The swap
+    itself is a same-directory rename and needs no further space.
+
     The swap removes the old file's ``-wal`` / ``-shm`` so the new database is
     never paired with a stale write-ahead log. That makes it safe only while no
     process holds the index open, which is why the container entrypoint runs it
@@ -474,50 +623,52 @@ def refresh_from_release(
     dest = Path(path) if path is not None else default_index_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = url or CATALOG_INDEX_DB_URL
-    etag, last_modified = _head_snapshot(sess, src)
-    state = read_snapshot_state(dest)
-    if dest.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
-        return RefreshResult(dest, False, etag, last_modified, None, None, "unchanged")
+    with _refresh_lock(dest):
+        cleaned = _clean_leftovers(dest)
+        etag, last_modified, length = _head_snapshot(sess, src)
+        state = read_snapshot_state(dest)
+        existed = dest.exists()
+        current = _index_rows(dest) if existed else None
+        if existed and _same_snapshot(state, src, etag, last_modified) and not force:
+            if current is not None:
+                return RefreshResult(
+                    dest, False, etag, last_modified, None, None, "unchanged", cleaned
+                )
 
-    staging = dest.with_name(dest.name + ".next")
-    _remove_sqlite_sidecars(staging)
-    download_url(src, staging, overwrite=True, session=sess, progress=progress)
-    try:
-        rows, built_at = _validate_snapshot(staging)
-        if dest.exists() and not force:
-            try:
-                conn = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-                try:
-                    current = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-                finally:
-                    conn.close()
-            except sqlite3.DatabaseError:
-                current = 0  # an unreadable current index is no reason to keep it
-            if current and rows < current * min_ratio:
+        _require_free_space(dest.parent, length or 0, f"download {src.rsplit('/', 1)[-1]}")
+        staging = dest.with_name(dest.name + ".next")
+        try:
+            download_url(src, staging, overwrite=True, session=sess, progress=progress)
+            rows, built_at = _validate_snapshot(staging)
+            if current and not force and rows < current * min_ratio:
                 raise IndexRefreshError(
                     f"Published snapshot has {rows} items, under {min_ratio:.0%} of the "
                     f"{current} already indexed; keeping the current index. Pass "
                     "force=True (--force) to accept it anyway."
                 )
-    except IndexRefreshError:
-        staging.unlink(missing_ok=True)
+        except BaseException:
+            _clean_leftovers(dest)
+            raise
         _remove_sqlite_sidecars(staging)
-        raise
-    _remove_sqlite_sidecars(staging)
-    _remove_sqlite_sidecars(dest)
-    os.replace(staging, dest)
-    _write_snapshot_state(
-        dest,
-        {
-            "url": src,
-            "etag": etag,
-            "last_modified": last_modified,
-            "items": rows,
-            "built_at": built_at,
-        },
-    )
-    reason = "fetched" if state is None else "changed"
-    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason)
+        _remove_sqlite_sidecars(dest)
+        os.replace(staging, dest)
+        _write_snapshot_state(
+            dest,
+            {
+                "url": src,
+                "etag": etag,
+                "last_modified": last_modified,
+                "items": rows,
+                "built_at": built_at,
+            },
+        )
+    if state is None:
+        reason = "fetched"
+    elif existed and current is None:
+        reason = "unreadable"
+    else:
+        reason = "changed"
+    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason, cleaned)
 
 
 #: Index ``meta`` key naming the sidecar snapshot last merged into it, so
@@ -564,8 +715,13 @@ def refresh_thumbnails_from_release(
     atomically. ``dest`` defaults to :func:`default_thumbs_path`. ``items`` in
     the result is the sidecar's thumbnail count. Raises
     :class:`IndexRefreshError` (existing sidecar untouched) when the asset is
-    unreachable or the download fails validation. This only refreshes the
-    file; :meth:`CatalogIndex.import_thumbnails` merges it into an index.
+    unreachable or the download fails validation, and
+    :class:`InsufficientSpaceError` when the directory cannot hold the new
+    sidecar's ``Content-Length`` beside the current one (the old file stays
+    until the new one is proven, so both coexist for a moment). Stale scratch
+    files of earlier refreshes are removed first, as in
+    :func:`refresh_from_release`. This only refreshes the file;
+    :func:`merge_thumbnails_atomically` merges it into an index.
     """
     from .constants import CATALOG_INDEX_THUMBS_URL  # noqa: PLC0415
     from .download import download_url  # noqa: PLC0415
@@ -574,30 +730,200 @@ def refresh_thumbnails_from_release(
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     src = url or CATALOG_INDEX_THUMBS_URL
-    etag, last_modified = _head_snapshot(sess, src)
-    state = read_snapshot_state(target)
-    if target.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
-        return RefreshResult(target, False, etag, last_modified, None, None, "unchanged")
+    with _refresh_lock(target):
+        cleaned = _clean_leftovers(target)
+        etag, last_modified, length = _head_snapshot(sess, src)
+        state = read_snapshot_state(target)
+        if target.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
+            return RefreshResult(
+                target, False, etag, last_modified, None, None, "unchanged", cleaned
+            )
 
-    staging = target.with_name(target.name + ".next")
-    _remove_sqlite_sidecars(staging)
-    try:
-        download_url(src, staging, overwrite=True, session=sess, progress=progress)
-        rows = _validate_thumbs_sidecar(staging)
-    except Exception as exc:
-        staging.unlink(missing_ok=True)
+        _require_free_space(target.parent, length or 0, f"download {src.rsplit('/', 1)[-1]}")
+        staging = target.with_name(target.name + ".next")
+        try:
+            download_url(src, staging, overwrite=True, session=sess, progress=progress)
+            rows = _validate_thumbs_sidecar(staging)
+        except BaseException as exc:
+            _clean_leftovers(target)
+            if isinstance(exc, IndexRefreshError) or not isinstance(exc, Exception):
+                raise
+            raise IndexRefreshError(
+                f"Could not download the thumbnail sidecar {src!r}: {exc}"
+            ) from exc
         _remove_sqlite_sidecars(staging)
-        if isinstance(exc, IndexRefreshError):
-            raise
-        raise IndexRefreshError(f"Could not download the thumbnail sidecar {src!r}: {exc}") from exc
-    _remove_sqlite_sidecars(staging)
-    _remove_sqlite_sidecars(target)
-    os.replace(staging, target)
-    _write_snapshot_state(
-        target, {"url": src, "etag": etag, "last_modified": last_modified, "items": rows}
-    )
+        _remove_sqlite_sidecars(target)
+        os.replace(staging, target)
+        _write_snapshot_state(
+            target, {"url": src, "etag": etag, "last_modified": last_modified, "items": rows}
+        )
     reason = "fetched" if state is None else "changed"
-    return RefreshResult(target, True, etag, last_modified, rows, None, reason)
+    return RefreshResult(target, True, etag, last_modified, rows, None, reason, cleaned)
+
+
+def _apply_thumbnails(conn: sqlite3.Connection, source: Path, *, overwrite: bool) -> int:
+    """Run :meth:`CatalogIndex.import_thumbnails`' UPDATEs on ``conn``; no commit."""
+    side = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        try:
+            columns = {row[1] for row in side.execute("PRAGMA table_info(thumbnails)")}
+            # A sidecar published before the provenance columns existed reads
+            # as "unknown", which is what keeps it merging exactly as it did.
+            recorded = ", ".join(
+                col if col in columns else f"NULL AS {col}" for col in ("asset", "size")
+            )
+            rows = side.execute(f"SELECT href, png, {recorded} FROM thumbnails")
+        except sqlite3.DatabaseError as exc:  # not a sidecar, or unreadable
+            raise IndexSchemaError(
+                f"{source} is not an umbra-py thumbnail sidecar "
+                f"(no readable 'thumbnails' table): {exc}"
+            ) from exc
+        applied = 0
+        for href, png, asset, size in rows:
+            params: tuple[object, ...] = (sqlite3.Binary(png), asset, size, href)
+            if not overwrite:
+                params += (size, asset)
+            cur = conn.execute(
+                "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, thumbnail_size = ? "
+                f"WHERE href = ?{'' if overwrite else _KEEP_UNLESS_LARGER}",
+                params,
+            )
+            applied += cur.rowcount
+    finally:
+        side.close()
+    return applied
+
+
+def _merge_growth(dest: Path, source: Path, *, overwrite: bool) -> tuple[int | None, int]:
+    """``(rows, PNG bytes)`` a merge of ``source`` into ``dest`` will write.
+
+    The sidecar rows that match an indexed acquisition *and* that the merge rule
+    (:data:`_KEEP_UNLESS_LARGER`, or every match with ``overwrite``) would apply
+    -- so re-merging a sidecar the index already holds costs ~0, not the whole
+    file. ``length()`` of a BLOB reads only the record header, so this does no
+    blob I/O. Falls back to ``(None, sidecar file size)`` if the query fails.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+        try:
+            conn.execute("ATTACH DATABASE ? AS side", (f"file:{source}?mode=ro",))
+            columns = {row[1] for row in conn.execute("PRAGMA side.table_info(thumbnails)")}
+            size = "s.size" if "size" in columns else "NULL"
+            asset = "s.asset" if "asset" in columns else "NULL"
+            rule = (
+                "1"
+                if overwrite
+                else f"(i.thumbnail IS NULL OR ({size} > i.thumbnail_size "
+                f"AND i.thumbnail_asset IS {asset}))"
+            )
+            rows, size_bytes = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(s.png)), 0) FROM side.thumbnails s "
+                f"JOIN items i ON i.href = s.href WHERE {rule}"
+            ).fetchone()
+            return rows, size_bytes
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return None, source.stat().st_size
+
+
+def merge_thumbnails_atomically(
+    index_path: str | os.PathLike,
+    sidecar: str | os.PathLike,
+    *,
+    overwrite: bool = False,
+    snapshot: str | None = None,
+) -> int:
+    """Merge a thumbnail sidecar into an index so a failure leaves it as it was.
+
+    :meth:`CatalogIndex.import_thumbnails` updates the index in place, which
+    under write-ahead logging needs about *twice* the PNG payload free (every
+    changed page goes to the ``-wal`` first, then the checkpoint grows the main
+    file by the same amount). On the hosted volume that is ~2.4 GB for a
+    1.2 GB sidecar, and a disk that fills mid-checkpoint leaves the serving
+    index unable to open. This instead:
+
+    1. removes a ``.merge`` copy an earlier failed run left behind;
+    2. checks the directory has room for a copy of the index plus the PNG
+       bytes the merge will write (:func:`_merge_growth`, +10%) -- raising
+       :class:`InsufficientSpaceError`, index untouched, if not;
+    3. copies the index to ``<name>.merge`` with SQLite's online backup (which
+       includes pages still in the live ``-wal``) and applies the sidecar to the
+       copy with ``journal_mode = OFF`` -- the copy is disposable, so it needs
+       no rollback journal, which is what keeps the cost at one payload -- and
+       ``temp_store = MEMORY`` so no SQLite temp file lands on the volume
+       (or a small ``/tmp``); the merge is row-by-row UPDATEs and never sorts;
+    4. records ``snapshot`` under :data:`THUMBS_SNAPSHOT_META_KEY`, runs
+       ``PRAGMA quick_check`` and compares the row count with the original;
+    5. swaps the copy in with ``os.replace`` (a rename: no space needed).
+
+    When step 2 finds no row to apply (the index already holds everything
+    the sidecar would give it) no copy is made; only ``snapshot`` is recorded.
+
+    Any failure -- ``database or disk is full`` included -- deletes the copy and
+    raises :class:`IndexRefreshError`, leaving the index byte-for-byte as it
+    was. Like :func:`refresh_from_release`, the swap drops the old file's
+    ``-wal`` / ``-shm``, so run it only while no server holds the index open
+    (the container entrypoint does). Returns the number of thumbnails applied.
+    """
+    dest = Path(index_path)
+    source = Path(sidecar)
+    if not source.exists():
+        raise FileNotFoundError(f"No thumbnail sidecar at {source}")
+    with _refresh_lock(dest):
+        _clean_leftovers(dest)
+        rows_to_apply, growth = _merge_growth(dest, source, overwrite=overwrite)
+        if rows_to_apply == 0:
+            # Nothing to apply: a one-row meta write, which SQLite rolls back
+            # cleanly if even that cannot fit, beats copying the whole index.
+            try:
+                with CatalogIndex(dest) as live:
+                    if snapshot:
+                        live.set_meta(THUMBS_SNAPSHOT_META_KEY, snapshot)
+            except sqlite3.DatabaseError as exc:
+                raise IndexRefreshError(
+                    f"Recording the merged thumbnail snapshot in {dest} failed ({exc}); "
+                    "the index was left as it was."
+                ) from exc
+            return 0
+        need = _db_bytes(dest) + int(growth * (1 + _MERGE_HEADROOM))
+        _require_free_space(dest.parent, need, f"merge {source.name} into a copy of {dest.name}")
+        staging = dest.with_name(dest.name + ".merge")
+        try:
+            with CatalogIndex(dest) as live:
+                expected = len(live)
+                copy = sqlite3.connect(str(staging))
+                try:
+                    live._conn.backup(copy)
+                    copy.execute("PRAGMA journal_mode = OFF")
+                    copy.execute("PRAGMA temp_store = MEMORY")
+                    applied = _apply_thumbnails(copy, source, overwrite=overwrite)
+                    if snapshot:
+                        copy.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            (THUMBS_SNAPSHOT_META_KEY, snapshot),
+                        )
+                    copy.commit()
+                    check = copy.execute("PRAGMA quick_check").fetchone()[0]
+                    rows = copy.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+                finally:
+                    copy.close()
+            if check != "ok":
+                raise IndexRefreshError(f"Merged copy {staging} failed quick_check: {check}")
+            if rows != expected:
+                raise IndexRefreshError(
+                    f"Merged copy {staging} has {rows} items; the index has {expected}."
+                )
+        except BaseException as exc:
+            _clean_leftovers(dest)
+            if isinstance(exc, IndexRefreshError) or not isinstance(exc, Exception):
+                raise
+            raise IndexRefreshError(
+                f"Merging {source.name} into {dest.name} failed ({exc}); {dest} was left as it was."
+            ) from exc
+        _remove_sqlite_sidecars(dest)
+        os.replace(staging, dest)
+    return applied
 
 
 def _index_acq_date(item: UmbraItem) -> date | None:
@@ -1240,38 +1566,21 @@ class CatalogIndex:
         side is unrecorded the two are not comparable and the local bake stays.
         ``overwrite=True`` replaces unconditionally, as before. Returns the
         number of thumbnails applied.
+
+        The merge is one transaction: a failure part-way rolls back every row
+        it applied, not only the ones SQLite itself rolls back on ``database or
+        disk is full``. It runs in place,
+        so it needs about twice the sidecar's PNG payload free under WAL; the
+        boot refresh uses :func:`merge_thumbnails_atomically` instead.
         """
         source = Path(src)
         if not source.exists():
             raise FileNotFoundError(f"No thumbnail sidecar at {source}")
-        conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
         try:
-            try:
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(thumbnails)")}
-                # A sidecar published before the provenance columns existed reads
-                # as "unknown", which is what keeps it merging exactly as it did.
-                recorded = ", ".join(
-                    col if col in columns else f"NULL AS {col}" for col in ("asset", "size")
-                )
-                rows = conn.execute(f"SELECT href, png, {recorded} FROM thumbnails")
-            except sqlite3.DatabaseError as exc:  # not a sidecar, or unreadable
-                raise IndexSchemaError(
-                    f"{source} is not an umbra-py thumbnail sidecar "
-                    f"(no readable 'thumbnails' table): {exc}"
-                ) from exc
-            applied = 0
-            for href, png, asset, size in rows:
-                params: tuple[object, ...] = (sqlite3.Binary(png), asset, size, href)
-                if not overwrite:
-                    params += (size, asset)
-                cur = self._conn.execute(
-                    "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, thumbnail_size = ? "
-                    f"WHERE href = ?{'' if overwrite else _KEEP_UNLESS_LARGER}",
-                    params,
-                )
-                applied += cur.rowcount
-        finally:
-            conn.close()
+            applied = _apply_thumbnails(self._conn, source, overwrite=overwrite)
+        except BaseException:
+            self._conn.rollback()
+            raise
         self._conn.commit()
         return applied
 

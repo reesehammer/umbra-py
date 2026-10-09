@@ -82,6 +82,13 @@ fi
 # safe while nothing holds the index open.
 # This leaves the serve/mcp args in "$@" untouched for the final exec below.
 INDEX_DB="${UMBRA_INDEX_DB:-${XDG_CACHE_HOME:-$HOME/.cache}/umbra-py/catalog.db}"
+if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -d "$(dirname "$INDEX_DB")" ]; then
+    # What the refreshes below have to work with, so a full volume is
+    # diagnosable from the boot log rather than guessed at.
+    data_root="${XDG_CACHE_HOME:-$(dirname "$(dirname "$INDEX_DB")")}"
+    df -Ph "$data_root" | awk 'NR == 2 {print "Volume " $6 ": " $4 " free of " $2 "; largest entries:"}'
+    du -xah -d 2 "$data_root" 2>/dev/null | sort -rh | head -n 10 || true
+fi
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
     if [ -f "$INDEX_DB" ]; then
         echo "Checking for a newer published snapshot than $INDEX_DB..."
@@ -111,6 +118,11 @@ fi
 # re-merges whenever the sidecar changed or the index above was swapped (the
 # published catalog.db carries no thumbnails). A failed check keeps and merges
 # the existing sidecar; no sidecar at all never blocks startup.
+# Both refreshes are disk-safe: each first deletes the scratch files an
+# interrupted boot left (`.next`, `.next.part`, `.merge`, ...), checks free
+# space before downloading, and the merge writes a copy of catalog.db that is
+# swapped in only after it passes quick_check. A full volume skips the step
+# with a log line and keeps the current files; /healthz reports `degraded`.
 THUMBS_DB="${INDEX_DB%.db}.thumbs.db"
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ]; then
     if [ -f "$THUMBS_DB" ]; then
@@ -118,7 +130,7 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ]; then
     else
         echo "No thumbnail sidecar at $THUMBS_DB; fetching published baked previews..."
     fi
-    umbra index fetch-thumbnails --if-changed || echo "Thumbnail fetch failed; baked quicklooks unavailable." >&2
+    umbra index fetch-thumbnails --if-changed || echo "Thumbnail refresh incomplete; serving the index with the thumbnails it has." >&2
 fi
 
 if [ "$MODE" = "mcp" ]; then

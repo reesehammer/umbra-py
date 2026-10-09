@@ -16,7 +16,7 @@ import click
 
 from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
-from ..exceptions import UmbraError
+from ..exceptions import InsufficientSpaceError, UmbraError
 from ..export import export_geoparquet
 from ..index import (
     PUBLISHED_THUMBNAIL_SIZE,
@@ -24,6 +24,7 @@ from ..index import (
     CatalogIndex,
     default_thumbs_path,
     fetch_prebuilt_thumbnails,
+    merge_thumbnails_atomically,
     read_snapshot_state,
     refresh_from_release,
     refresh_thumbnails_from_release,
@@ -463,22 +464,38 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> Non
     )
 
 
+def _echo_cleaned(cleaned: dict[str, int], beside: Path) -> None:
+    if cleaned:
+        freed = sum(cleaned.values()) / 1e6
+        click.echo(
+            f"Freed stale refresh leftovers in {beside.parent} ({freed:,.0f} MB): "
+            + ", ".join(sorted(cleaned))
+        )
+
+
 def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -> None:
     """``fetch-thumbnails --if-changed``: refresh the sidecar, merge when anything moved.
 
     The published ``catalog.db`` carries no thumbnails, so a refreshed index
     has lost what an earlier merge applied. The index records which sidecar
     snapshot it last merged; a new sidecar, or a swapped-in index that lacks
-    the record, triggers the merge.
+    the record, triggers the merge. The merge goes into a copy that is swapped
+    in only once it checks out, so a full disk costs the new thumbnails, never
+    the index.
     """
     sidecar = default_thumbs_path(path)
     try:
         result = refresh_thumbnails_from_release(sidecar, url=url)
+    except InsufficientSpaceError as exc:
+        if not sidecar.exists():
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Skipped the thumbnail download; keeping {sidecar}. ({exc})", err=True)
     except UmbraError as exc:
         if not sidecar.exists():
             raise click.ClickException(str(exc)) from exc
         click.echo(f"Thumbnail refresh failed; keeping {sidecar}. ({exc})", err=True)
     else:
+        _echo_cleaned(result.cleaned, sidecar)
         if result.changed:
             click.echo(
                 f"Refreshed thumbnail sidecar ({result.reason}): {result.items} thumbnail(s), "
@@ -486,12 +503,15 @@ def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -
             )
     marker = snapshot_id(read_snapshot_state(sidecar))
     with CatalogIndex(path) as idx:
-        if marker and not overwrite and idx.get_meta(THUMBS_SNAPSHOT_META_KEY) == marker:
-            click.echo(f"Thumbnails are current (snapshot {marker}). ({path})")
-            return
-        applied = idx.import_thumbnails(sidecar, overwrite=overwrite)
-        if marker:
-            idx.set_meta(THUMBS_SNAPSHOT_META_KEY, marker)
+        merged = idx.get_meta(THUMBS_SNAPSHOT_META_KEY)
+    if marker and not overwrite and merged == marker:
+        click.echo(f"Thumbnails are current (snapshot {marker}). ({path})")
+        return
+    try:
+        applied = merge_thumbnails_atomically(path, sidecar, overwrite=overwrite, snapshot=marker)
+    except UmbraError as exc:
+        raise click.ClickException(str(exc)) from exc
+    with CatalogIndex(path) as idx:
         s = idx.stats()
     click.echo(
         f"Merged {applied} thumbnail(s) from {sidecar}; {s['thumbnailed']} of "
@@ -540,6 +560,7 @@ def index_fetch(db_path, url, if_changed, force) -> None:
             result = refresh_from_release(path, url=url, force=force)
         except UmbraError as exc:
             raise click.ClickException(str(exc)) from exc
+        _echo_cleaned(result.cleaned, path)
         if not result.changed:
             click.echo(
                 f"Index is current (snapshot {result.etag or result.last_modified}). ({path})"

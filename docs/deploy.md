@@ -93,6 +93,16 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
   baked-preview sidecar, re-merging it whenever the sidecar or the index
   changed, so MCP `quicklook` / `describe_scene` can return baked previews
   without proxying Umbra COGs. A failed check keeps the existing sidecar.
+- **Refreshes without filling the disk.** The boot first logs the volume's
+  free space and its largest entries. Each refresh then deletes the scratch
+  files an interrupted boot left behind (`*.next`, `*.next.part`,
+  `catalog.db.merge` and their journals). It folds the live index's `-wal`
+  back into the database, and checks free space before every download and
+  merge. The merge goes into a copy of `catalog.db` that replaces the index
+  only after it passes `PRAGMA quick_check`. A step that does not fit is
+  skipped with one log line (`Not enough free space ... Skipped; the current
+  files were kept.`), so a full volume costs fresh thumbnails, never the index.
+  See [Volume sizing](#volume-sizing).
 - **Persists to a volume.** The catalog index, any fetched snapshot and the
   render-artifact cache all live under `/data` (the image sets
   `XDG_CACHE_HOME=/data`), so restarts are instant and the archive is never
@@ -100,8 +110,13 @@ docker run -p 8000:8000 -v umbra-data:/data umbra-py
 - **Exposes a health probe.** `GET /healthz` returns `200` once the HTTP server
   is up (liveness); its body's `ready` flag reports whether the search backend
   can answer queries yet (readiness — the first-boot fetch may still be in
-  flight). It is wired to a Docker `HEALTHCHECK` and is exactly what a Kubernetes
-  liveness/readiness probe wants.
+  flight). Its `thumbnails` object (`count`, the merged `snapshot`, the
+  on-disk `sidecar_snapshot`, `merged`) and top-level `degraded` flag say
+  whether the boot's thumbnail merge landed. A skipped or failed merge is
+  still `200` with `degraded: true`. Only an index that exists but cannot be
+  opened is a `503` (`status: "error"`, with the SQLite `error`). It is wired
+  to a Docker `HEALTHCHECK` and is exactly what a Kubernetes liveness/readiness
+  probe wants.
 - **Runs unprivileged.** The entrypoint starts as root only long enough to
   `chown` a mounted `/data` (Railway Volumes are root-owned and hide the
   image's `chown`), then drops to uid 10001 (`umbra`) before any `umbra`
@@ -351,8 +366,9 @@ are already in those files. `railway.toml` sets `dockerfilePath` to
 `deploy/Dockerfile.mcp`.
 
 A volume is **not** required for the first boot. `/data` is writable in the
-image, and the published `catalog.db` is ~17 MB (seconds, not a crawl). A
-Railway Volume mounted at `/data` keeps that index across deploys. Do **not**
+image, and the published `catalog.db` is ~126 MB (seconds, not a crawl). A
+Railway Volume mounted at `/data` keeps that index, and the ~1.2 GB thumbnail
+sidecar, across deploys; size it with [Volume sizing](#volume-sizing). Do **not**
 put `VOLUME ["/data"]` in the Dockerfile — Railway's Metal builder rejects it
 even when a Railway Volume is attached. The volume itself is root-owned; the
 entrypoint `chown`s it and drops to `umbra` so `catalog.db` can be written.
@@ -379,6 +395,56 @@ Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance —
 MCP render tools (quicklook / change / timescan) still stream Umbra COGs
 through this host; keep an eye on egress. STAC search does not.
 
+### Volume sizing
+
+Everything the boot refresh writes lives in one directory on the volume
+(`/data/umbra-py`). As of October 2026:
+
+| File                     | Size                     | Notes                                                       |
+| ------------------------ | ------------------------ | ----------------------------------------------------------- |
+| `catalog.db` (published) | ~126 MB (17,960 items)   | What `umbra index fetch` downloads.                         |
+| `catalog.thumbs.db`      | ~1.2 GB (4,050 previews) | About 300 KB per 512 px preview. Grows with each weekly bake, by at most ~450 MB per week. |
+| `catalog.db` (merged)    | ~1.33 GB                 | The published index plus the sidecar's PNGs.                |
+
+With `I` the published index and `S` the sidecar, the refresh needs at its peak:
+
+- **Steady state:** `I + 2S`, about 2.5 GB (merged index + sidecar).
+- **Weekly boot (new index and new sidecar):** about `2I + 2S`, or 2.7 GB.
+  The new index is downloaded beside the old merged one, the new sidecar beside
+  the old one, and the merge copy is written beside the bare index.
+- **Worst case (the sidecar changed, the index did not):** about `2I + 3S`, or
+  3.9 GB. The merge copies the already-merged index.
+- Each step also keeps 64 MiB free so the server can still write its `-shm` /
+  `-wal`.
+
+**Recommendation: a 20 GB volume.** The 5 GB volume covers today's worst case
+(3.9 GB), but the sidecar grows by up to ~450 MB a week, so the worst case grows
+by up to ~1.35 GB a week. Fully baked (all ~18,000 acquisitions, ~5.3 GB
+sidecar), the weekly boot needs ~11 GB and the worst case ~16 GB. Below the
+need, the refresh degrades rather than breaks: it skips the thumbnail download
+or merge, serves the new index, and `/healthz` reports `degraded: true`. The
+weekly publish run then warns "Hosted API thumbnails not merged".
+
+The in-place merge older images ran needed the PNG payload twice over (once in
+the `-wal`, once as checkpoint growth), so `I + 3S` at peak. That is ~3.7 GB
+before anything else on the volume, and is how the October 9 boot filled the
+5 GB volume and left `catalog.db` unopenable (`disk I/O error`).
+
+**Recovering a volume an older image filled.** Its `catalog.db-wal` holds
+committed pages that cannot be folded back into the database without free
+space, and nothing else on the volume is a leftover. Either grow the volume
+and redeploy (the boot then checkpoints the `-wal` itself), or remove the index
+as a set and redeploy so the boot fetches a fresh one:
+
+```bash
+railway ssh --service umbra-py -- rm -f /data/umbra-py/catalog.db \
+  /data/umbra-py/catalog.db-wal /data/umbra-py/catalog.db-shm \
+  /data/umbra-py/catalog.db.source.json
+```
+
+Never delete the `-wal` alone: next to a part-checkpointed `catalog.db`, it is
+the only consistent copy.
+
 ### Weekly snapshot redeploy (`RAILWAY_TOKEN`)
 
 The weekly `publish-index.yml` workflow redeploys the hosted service once
@@ -387,7 +453,9 @@ the entrypoint's `--if-changed` refresh swaps both in. It redeploys whenever
 `catalog.db` was published, even if the thumbnail bake or upload failed. It
 then polls `https://api.umbra-py.space/healthz` for up to 30 minutes, until
 `snapshot` equals the ETag of the released `catalog.db`. The job fails if the
-redeploy fails or that snapshot never shows up.
+redeploy fails or that snapshot never shows up. It warns ("Hosted API
+thumbnails not merged") when the API is `degraded`, or when the sidecar it
+merged is not the released `catalog.thumbs.db`.
 
 The redeploy is `npx @railway/cli redeploy --service umbra-py --yes`, run with
 the repository secret **`RAILWAY_TOKEN`**:

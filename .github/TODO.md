@@ -21,6 +21,23 @@ Smallest change: surface those two fields on `SicdCapabilities` / `umbra
 preflight` so a downstream processor can reject the wrong class (RGZERO vs
 RGAZIM) before downloading. Keep it a metadata fact, not a converter.
 
+## Serve baked previews from `catalog.thumbs.db` instead of merging them
+
+- **Surfaced in:** the disk-safe boot refresh (the October 9 full-volume
+  incident on the hosted API).
+- **Code:** `src/umbra_py/index.py` (`merge_thumbnails_atomically`,
+  `CatalogIndex.get_thumbnail` / `get_preview`), `src/umbra_py/cli/indexes.py`
+  (`_fetch_thumbnails_if_changed`), `deploy/docker-entrypoint.sh`.
+
+The boot copies every PNG from the sidecar into `catalog.db`, so the hosted
+volume holds each preview twice (`I + 2S` steady, up to `2I + 3S` at the peak
+of a refresh; see `docs/deploy.md`, "Volume sizing"). Once fully baked, that is
+~16 GB for ~5 GB of previews. Smallest change: have `get_thumbnail` /
+`get_preview` fall back to the sidecar beside the index (`ATTACH` it read-only,
+keyed by `href`) when the `thumbnail` column is NULL. The boot then only swaps
+the sidecar, with no merge. Steady state drops to `I + S`, and the worst case to
+`I + 2S` (old and new sidecar side by side).
+
 ## SICD XML asset can steal the NITF key on raw STAC load
 
 - **Surfaced in:** task-data CPHD discovery (MatX `sarbp` handoff).

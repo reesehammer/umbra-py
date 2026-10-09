@@ -268,6 +268,75 @@ def test_healthz_snapshot_has_no_etag_quotes(index_path, stored):
     assert body["snapshot"] == "0x8DE1"
 
 
+def _sidecar_state(index_path, etag: str) -> None:
+    import json as _json
+
+    from umbra_py.index import default_thumbs_path, snapshot_state_path
+
+    sidecar = default_thumbs_path(index_path)
+    sidecar.write_bytes(b"")
+    snapshot_state_path(sidecar).write_text(_json.dumps({"etag": etag}))
+
+
+def test_healthz_reports_no_thumbnails_without_a_sidecar(client):
+    body = client.get("/healthz").json()
+    assert body["thumbnails"] == {
+        "count": 0,
+        "snapshot": None,
+        "sidecar_snapshot": None,
+        "merged": False,
+    }
+    assert body["degraded"] is False
+
+
+def test_healthz_reports_merged_thumbnails(index_path):
+    from umbra_py.index import THUMBS_SNAPSHOT_META_KEY
+
+    with CatalogIndex(index_path) as idx:
+        idx.bake_thumbnails(lambda item: b"png")
+        idx.set_meta(THUMBS_SNAPSHOT_META_KEY, "t1")
+    _sidecar_state(index_path, '"t1"')
+    resp = TestClient(serve.build_app(index_path)).get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["thumbnails"] == {
+        "count": 3,
+        "snapshot": "t1",
+        "sidecar_snapshot": "t1",
+        "merged": True,
+    }
+    assert body["degraded"] is False and body["status"] == "ok"
+
+
+def test_healthz_is_degraded_but_200_when_the_sidecar_was_not_merged(index_path):
+    # The incident: the boot downloaded a new sidecar, the merge hit a full disk,
+    # and the index serves on without it. That is degraded, not down.
+    from umbra_py.index import THUMBS_SNAPSHOT_META_KEY
+
+    with CatalogIndex(index_path) as idx:
+        idx.set_meta(THUMBS_SNAPSHOT_META_KEY, "t1")
+    _sidecar_state(index_path, "t2")
+    resp = TestClient(serve.build_app(index_path)).get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ready"] is True and body["items"] == 3
+    assert body["degraded"] is True
+    assert body["thumbnails"]["merged"] is False
+    assert body["thumbnails"]["snapshot"] == "t1"
+    assert body["thumbnails"]["sidecar_snapshot"] == "t2"
+
+
+def test_healthz_is_503_only_when_the_index_cannot_be_opened(tmp_path):
+    path = tmp_path / "catalog.db"
+    path.write_bytes(b"\0" * 8192)  # what a volume that filled mid-write can leave
+    client = TestClient(serve.build_app(path), raise_server_exceptions=False)
+    resp = client.get("/healthz")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "error" and body["ready"] is False
+    assert "DatabaseError" in body["error"]
+
+
 def test_healthz_is_alive_but_not_ready_without_an_index(tmp_path):
     # First-boot / missing-index: the server is up (200) but reports not-ready,
     # so a readiness probe holds traffic until the index fetch lands.

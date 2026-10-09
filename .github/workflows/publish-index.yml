@@ -183,9 +183,11 @@ jobs:
       #
       # Non-blocking, and split from the upload below so a run that times out
       # mid-bake still publishes what it (and every earlier run) baked.
+      # 75 minutes: the steps before this take about an hour and the confirm
+      # step polls for up to 30, which keeps the job well inside its 240.
       - name: Bake SAR thumbnails (incremental, non-blocking)
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 75
         run: |
           pip install -e ".[viz]"
           umbra index fetch-thumbnails --db catalog.db || true
@@ -267,7 +269,9 @@ jobs:
       # in) with the asset this run published; the acquisition count alone can't
       # tell a stale API from a fresh one when a week adds nothing. Polls for up
       # to 30 minutes: a boot downloads and merges the ~1.2 GB thumbnail sidecar
-      # before the server listens.
+      # before the server listens. Once the snapshot matches, a thumbnail merge
+      # the boot skipped or failed (healthz `degraded`, or a merged sidecar that
+      # is not the published one) is a warning: the index serves, previews lag.
       - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)
         if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' }}
         env:
@@ -284,13 +288,22 @@ jobs:
             exit 1
           fi
           want_ids="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
+          want_thumbs="$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_THUMBS_URL)[0] or '')" || true)"
           for _ in $(seq 1 60); do
-            healthz="$(curl -fsS --max-time 20 https://api.umbra-py.space/healthz | python -c "import json, sys; from umbra_py.index import _normalize_etag; d = json.load(sys.stdin); print(_normalize_etag(d.get('snapshot')) or '-', d.get('ids', '-'))" || true)"
-            got="${healthz% *}" ids="${healthz#* }"
-            echo "healthz snapshot=${got:-?} ids=${ids:-?}; want snapshot=${want} ids=${want_ids}"
+            healthz="$(curl -fsS --max-time 20 https://api.umbra-py.space/healthz | python -c "import json, sys; from umbra_py.index import _normalize_etag; d = json.load(sys.stdin); t = d.get('thumbnails') or {}; print(_normalize_etag(d.get('snapshot')) or '-', d.get('ids', '-'), t.get('snapshot') or '-', t.get('count', '-'), str(d.get('degraded', '-')).lower())" || true)"
+            # shellcheck disable=SC2086
+            set -- $healthz
+            got="${1:-}" ids="${2:-}" thumbs_got="${3:-}" thumbs_count="${4:-}" degraded="${5:-}"
+            echo "healthz snapshot=${got:-?} ids=${ids:-?} thumbs=${thumbs_got:-?} (${thumbs_count:-?} baked, degraded=${degraded:-?}); want snapshot=${want} ids=${want_ids} thumbs=${want_thumbs:-?}"
             if [ "$got" = "$want" ]; then
               if [ "$ids" != "$want_ids" ]; then
                 echo "::warning::Hosted API serves snapshot ${want} but reports ${ids} ids; the built index has ${want_ids}."
+              fi
+              if [ "$degraded" != "false" ] || { [ -n "$want_thumbs" ] && [ "$thumbs_got" != "$want_thumbs" ]; }; then
+                msg="Hosted API serves snapshot ${want}, but its thumbnail merge did not land: merged sidecar ${thumbs_got}, published ${want_thumbs:-unknown}, ${thumbs_count} baked, degraded=${degraded}. Search is unaffected; previews lag. Check the Railway boot log for 'Skipped the thumbnail' or 'disk is full' and the /data volume's free space (docs/deploy.md, Volume sizing)."
+                echo "::warning title=Hosted API thumbnails not merged::${msg}"
+                echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+                echo "> ${msg}" >> "$GITHUB_STEP_SUMMARY"
               fi
               echo "Hosted API serves snapshot ${want}." >> "$GITHUB_STEP_SUMMARY"
               exit 0

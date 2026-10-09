@@ -155,6 +155,14 @@ def test_entrypoint_refreshes_the_index_on_every_boot():
     assert "serving the existing index" in text
 
 
+def test_entrypoint_logs_free_space_before_refreshing():
+    """The Oct 9 incident filled the /data volume and nothing in the boot log
+    said what with; free space and the largest entries come first now."""
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "df -Ph" in text and "du -xah" in text
+    assert text.index("du -xah") < text.index("umbra index fetch --if-changed")
+
+
 def test_entrypoint_refreshes_the_thumbnail_sidecar_on_every_boot():
     """Same volume, same bug: the sidecar was fetched only when missing, so a
     stale catalog.thumbs.db was never replaced (or re-merged into a refreshed
