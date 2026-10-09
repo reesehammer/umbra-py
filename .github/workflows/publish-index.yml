@@ -48,8 +48,10 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
-      # Optional Railway project token. When set, the hosted API is redeployed
-      # after each publish so its entrypoint swaps in the new snapshot.
+      # Railway *project* token for the production environment (the CLI reads
+      # RAILWAY_TOKEN as a project token). When set, the hosted API is
+      # redeployed after each publish so its entrypoint swaps in the new
+      # snapshot; when unset, the run warns that the API still needs a restart.
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +94,7 @@ jobs:
       # the basemap, not the snapshot, so the upload of each artifact now sits
       # with the step that builds it.
       - name: Publish to the rolling catalog-index release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -117,6 +120,12 @@ jobs:
           fi
           gh release upload catalog-index \
             catalog.db umbra-open-data.parquet --clobber
+          # The released asset's ETag is what the hosted API reports as
+          # /healthz `snapshot` once it has swapped this index in; read it with
+          # the same HEAD + normalization the entrypoint's --if-changed uses.
+          etag="$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_DB_URL)[0] or '')" || true)"
+          echo "Published catalog.db snapshot: ${etag:-unknown}"
+          echo "etag=${etag}" >> "$GITHUB_OUTPUT"
 
       # Coverage parity (PRD P1-1): compare the index with a fresh listing of the
       # bucket, by prefix, sidecar layout and product, and publish the report next
@@ -129,15 +138,6 @@ jobs:
         run: |
           umbra index coverage --db catalog.db --json coverage.json --markdown coverage.md
           gh release upload catalog-index coverage.json coverage.md --clobber
-
-      # The hosted API keeps catalog.db on a persistent volume and refreshes it on
-      # boot (deploy/docker-entrypoint.sh), so a redeploy is what makes it load
-      # this snapshot. Optional: gated on the RAILWAY_TOKEN secret. The last
-      # step of the job confirms /healthz picked it up.
-      - name: Redeploy the hosted API (needs RAILWAY_TOKEN)
-        if: ${{ env.RAILWAY_TOKEN != '' }}
-        continue-on-error: true
-        run: npx -y @railway/cli@latest redeploy --service umbra-py --yes
 
       # Tile the whole catalog into a single-file vector basemap from the index
       # just built (--local, no second crawl), plus a MapLibre viewer pointed at
@@ -219,6 +219,27 @@ jobs:
               ;;
           esac
 
+      # The hosted API keeps catalog.db and catalog.thumbs.db on a persistent
+      # volume and refreshes both on boot (deploy/docker-entrypoint.sh), so a
+      # redeploy is what makes it load this snapshot. It sits after the sidecar
+      # publish so that boot sees this week's previews too, and runs whenever the
+      # index itself was published -- a failed or skipped bake/sidecar upload
+      # still redeploys the new index. The confirm step near the end of the job
+      # checks /healthz picked it up.
+      - name: Redeploy the hosted API
+        id: redeploy
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            msg="RAILWAY_TOKEN is not set: the hosted API (https://api.umbra-py.space) was NOT redeployed and still serves the previous snapshot. Restart the Railway service, or add the RAILWAY_TOKEN secret (see docs/deploy.md)."
+            echo "::warning title=Hosted API not redeployed::${msg}"
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ${msg}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npx -y @railway/cli@latest redeploy --service umbra-py --yes
+
       # Scene embeddings are model-derived and model-specific, so — unlike the
       # deterministic artifacts above — publishing them is opt-in: it needs a
       # multimodal (CLIP-family) embedding key and streams a quicklook per
@@ -242,17 +263,41 @@ jobs:
 
           - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."
 
+      # Compares /healthz `snapshot` (the ETag of the catalog.db the API swapped
+      # in) with the asset this run published; the acquisition count alone can't
+      # tell a stale API from a fresh one when a week adds nothing. Polls for up
+      # to 30 minutes: a boot downloads and merges the ~1.2 GB thumbnail sidecar
+      # before the server listens.
       - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)
-        if: ${{ env.RAILWAY_TOKEN != '' }}
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' }}
+        env:
+          REDEPLOY_OUTCOME: ${{ steps.redeploy.outcome }}
+          WANT_SNAPSHOT: ${{ steps.publish.outputs.etag }}
         run: |
-          want="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
-          for _ in $(seq 1 40); do
-            got="$(curl -fsS https://api.umbra-py.space/healthz | python -c "import json, sys; print(json.load(sys.stdin).get('ids', ''))" || true)"
-            echo "healthz ids=${got:-?} want=${want}"
-            [ "$got" = "$want" ] && exit 0
+          if [ "$REDEPLOY_OUTCOME" != "success" ]; then
+            echo "::error title=Hosted API not redeployed::Railway redeploy ${REDEPLOY_OUTCOME}; the hosted API still serves the previous snapshot and needs a restart."
+            exit 1
+          fi
+          want="${WANT_SNAPSHOT:-$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_DB_URL)[0] or '')")}"
+          if [ -z "$want" ]; then
+            echo "::error::Could not read the published catalog.db ETag to compare against." >&2
+            exit 1
+          fi
+          want_ids="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
+          for _ in $(seq 1 60); do
+            healthz="$(curl -fsS --max-time 20 https://api.umbra-py.space/healthz | python -c "import json, sys; from umbra_py.index import _normalize_etag; d = json.load(sys.stdin); print(_normalize_etag(d.get('snapshot')) or '-', d.get('ids', '-'))" || true)"
+            got="${healthz% *}" ids="${healthz#* }"
+            echo "healthz snapshot=${got:-?} ids=${ids:-?}; want snapshot=${want} ids=${want_ids}"
+            if [ "$got" = "$want" ]; then
+              if [ "$ids" != "$want_ids" ]; then
+                echo "::warning::Hosted API serves snapshot ${want} but reports ${ids} ids; the built index has ${want_ids}."
+              fi
+              echo "Hosted API serves snapshot ${want}." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             sleep 30
           done
-          echo "Hosted API did not pick up the new snapshot within 20 minutes." >&2
+          echo "::error title=Hosted API stale::https://api.umbra-py.space/healthz did not report snapshot ${want} within 30 minutes."
           exit 1
 
       - name: Coverage gate (99% of acquisitions with a sidecar)

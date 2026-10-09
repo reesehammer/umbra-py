@@ -378,3 +378,30 @@ Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance —
 
 MCP render tools (quicklook / change / timescan) still stream Umbra COGs
 through this host; keep an eye on egress. STAC search does not.
+
+### Weekly snapshot redeploy (`RAILWAY_TOKEN`)
+
+The weekly `publish-index.yml` workflow redeploys the hosted service once
+`catalog.db` and `catalog.thumbs.db` are on the `catalog-index` release, so
+the entrypoint's `--if-changed` refresh swaps both in. It redeploys whenever
+`catalog.db` was published, even if the thumbnail bake or upload failed. It
+then polls `https://api.umbra-py.space/healthz` for up to 30 minutes, until
+`snapshot` equals the ETag of the released `catalog.db`. The job fails if the
+redeploy fails or that snapshot never shows up.
+
+The redeploy is `npx @railway/cli redeploy --service umbra-py --yes`, run with
+the repository secret **`RAILWAY_TOKEN`**:
+
+- It must be a **project token** (project **Settings → Tokens**), created for
+  the environment that serves the API (`production`). The Railway CLI reads
+  `RAILWAY_TOKEN` as a project token: the project and environment come from
+  the token, so the workflow needs no project or environment ID. An account or
+  workspace API token belongs in `RAILWAY_API_TOKEN` instead and does not work
+  in this variable.
+- The service is selected by name, `umbra-py`, which is hardcoded in the
+  workflow. No service ID secret is needed. If you rename the service, update
+  the `--service` argument.
+
+Without the secret the run still publishes everything, but it emits a
+"Hosted API not redeployed" warning and a job-summary line. Restart the
+Railway service by hand to pick up the new snapshot.

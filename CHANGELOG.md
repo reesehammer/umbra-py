@@ -114,6 +114,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **The hosted API is redeployed onto the whole weekly snapshot.** The
+  publish workflow now redeploys Railway after both `catalog.db` and
+  `catalog.thumbs.db` are released, confirms `/healthz` `snapshot` matches the
+  released `catalog.db` ETag, and warns in the job summary when `RAILWAY_TOKEN`
+  is unset instead of silently skipping.
 - **The Docker / Railway image no longer serves its first index forever.** The
   entrypoint fetched the snapshot only when `catalog.db` was missing, so a
   persistent `/data` volume pinned the hosted API to its first boot. It now

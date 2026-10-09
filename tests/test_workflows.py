@@ -163,6 +163,32 @@ def test_the_scan_actually_found_the_published_commands():
     } <= scanned, scanned
 
 
+def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
+    """The hosted API boots onto whatever is released when it is redeployed.
+
+    A redeploy before the thumbnail sidecar upload booted last week's previews;
+    one gated on the token alone was a silent skip; a confirm that compared only
+    the acquisition count passed against a stale API whenever a week added
+    nothing. Pin the order, the gating and the snapshot comparison.
+    """
+    document = yaml.safe_load((WORKFLOW_DIR / "publish-index.yml").read_text())
+    steps = document["jobs"]["publish"]["steps"]
+    position = {step.get("id") or step.get("name"): i for i, step in enumerate(steps)}
+    redeploy, confirm = steps[position["redeploy"]], steps[position[CONFIRM_STEP]]
+
+    order = [position[key] for key in ("publish", THUMBS_STEP, "redeploy", CONFIRM_STEP)]
+    assert order == sorted(order), order
+    assert "steps.publish.outcome == 'success'" in redeploy["if"]
+    assert "!cancelled()" in redeploy["if"] and "RAILWAY_TOKEN" not in redeploy["if"]
+    assert "::warning" in redeploy["run"] and "GITHUB_STEP_SUMMARY" in redeploy["run"]
+    assert "steps.publish.outputs.etag" in confirm["env"]["WANT_SNAPSHOT"]
+    assert "'snapshot'" in confirm["run"]
+
+
+THUMBS_STEP = "Publish the thumbnail sidecar (non-blocking)"
+CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
+
+
 def test_the_drift_that_broke_the_publish_would_be_caught():
     """The exact failure this suite exists for, asserted rather than trusted."""
     command, args, _ = _resolve(["umbra", "tiles", "--local", "--db", "catalog.db"])
