@@ -114,6 +114,16 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **A full volume no longer breaks the boot refresh or the index.**
+  `umbra index fetch --if-changed` and `fetch-thumbnails --if-changed` remove
+  stale `.next` / `.next.part` / `.merge` leftovers and check free space before
+  each download and merge. A step that does not fit is skipped with an
+  `InsufficientSpaceError` line, and the current files are kept. The thumbnail
+  merge writes a copy that replaces `catalog.db` only after it passes
+  `quick_check`, and an unreadable index is re-fetched even when its snapshot is
+  current. `/healthz` adds `thumbnails` and `degraded` (still `200`) and returns
+  `503` only when the index cannot be opened; see `docs/deploy.md`, "Volume
+  sizing".
 - **The hosted API is redeployed onto the whole weekly snapshot.** The
   publish workflow now redeploys Railway after both `catalog.db` and
   `catalog.thumbs.db` are released, confirms `/healthz` `snapshot` matches the
