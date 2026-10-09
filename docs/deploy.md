@@ -80,6 +80,13 @@ docker build -f deploy/Dockerfile -t umbra-py .
 docker run -p 8000:8000 -v umbra-data:/data umbra-py
 ```
 
+Both Dockerfiles start from official `python:3.12-slim`, pulled from Amazon
+ECR Public (`public.ecr.aws/docker/library/python:3.12-slim`). Docker publishes
+Official Images there, so a build does not depend on an anonymous Docker Hub
+pull. Override the registry with `--build-arg PYTHON_IMAGE=...` and keep the
+`3.12-slim` tag. `deploy/Dockerfile.mcp` uses the same default, so Railway
+needs no build-arg for it.
+
 ## What the image does
 
 - **Fetches the published index on first boot.** The entrypoint runs
@@ -354,6 +361,10 @@ docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:public
 # STAC: http://127.0.0.1:8000/search
 # MCP:  POST http://127.0.0.1:8000/mcp
 ```
+
+The base image is the same `PYTHON_IMAGE` default as `deploy/Dockerfile`
+(official `python:3.12-slim` from `public.ecr.aws/docker/library/python:3.12-slim`).
+Leave that build-arg unset unless that registry is unreachable.
 
 Pass `mcp` as the first argument for MCP-only (no STAC).
 
