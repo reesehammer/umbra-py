@@ -4160,7 +4160,9 @@ def build_app(
     # Catch-all last so FastAPI's ``/search`` / ``/healthz`` / ``/docs`` win;
     # unmatched ``POST /mcp`` falls through to the MCP Starlette app.
     if mcp_asgi is not None:
-        app.mount("/", mcp_asgi)
+        from ._mcp_log import McpRequestLog
+
+        app.mount("/", McpRequestLog(mcp_asgi))
 
     return app
 
@@ -4221,6 +4223,28 @@ def serve(
         rate_limit=rate_limit,
     )
     run_kw: dict[str, Any] = {"host": host, "port": port, "log_level": log_level}
+    if mcp or public:
+        import copy
+
+        from uvicorn.config import LOGGING_CONFIG
+
+        from ._mcp_log import MCP_REQUEST_LOGGER
+
+        # The per-request MCP line is already JSON; emit it bare on stdout (next
+        # to uvicorn's access log) so a log platform parses it as structured.
+        log_config = copy.deepcopy(LOGGING_CONFIG)
+        log_config["formatters"]["mcp_request"] = {"format": "%(message)s"}
+        log_config["handlers"]["mcp_request"] = {
+            "formatter": "mcp_request",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stdout",
+        }
+        log_config["loggers"][MCP_REQUEST_LOGGER] = {
+            "handlers": ["mcp_request"],
+            "level": log_level.upper(),
+            "propagate": False,
+        }
+        run_kw["log_config"] = log_config
     if proxy_headers:
         # Railway (and any TLS-terminating proxy) is the socket peer; without
         # this the per-client rate limit collapses to one bucket. Honouring
