@@ -1,4 +1,8 @@
-"""Tests for the per-request ``POST /mcp`` log line (``umbra_py._mcp_log``)."""
+"""Tests for the per-request JSON log lines (``umbra_py._mcp_log``).
+
+``POST /mcp`` (``msg`` ``mcp_request``) and STAC ``GET``/``POST /search``
+(``msg`` ``stac_search``) share one logger.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +13,20 @@ import logging
 
 import pytest
 
-from umbra_py._mcp_log import MCP_LOG_BODY_LIMIT, MCP_REQUEST_LOGGER, McpRequestLog
+from umbra_py._mcp_log import (
+    MCP_LOG_BODY_LIMIT,
+    MCP_REQUEST_LOGGER,
+    McpRequestLog,
+    StacSearchLog,
+)
 
 
-def _scope(method: str = "POST", path: str = "/mcp", headers: dict | None = None) -> dict:
+def _scope(
+    method: str = "POST",
+    path: str = "/mcp",
+    headers: dict | None = None,
+    query: bytes = b"",
+) -> dict:
     headers = {
         "user-agent": "claude-code/2.1",
         "mcp-protocol-version": "2025-06-18",
@@ -25,6 +39,7 @@ def _scope(method: str = "POST", path: str = "/mcp", headers: dict | None = None
         "path": path,
         "client": ("203.0.113.7", 51234),
         "headers": [(k.encode(), v.encode()) for k, v in headers.items()],
+        "query_string": query,
     }
 
 
@@ -293,8 +308,12 @@ def test_build_app_logs_a_real_mcp_initialize(tmp_path, caplog):
 
 
 @pytest.mark.skipif(importlib.util.find_spec("uvicorn") is None, reason="serve extra")
-@pytest.mark.parametrize(("flags", "wired"), [({"public": True}, True), ({}, False)])
-def test_serve_routes_the_mcp_logger_to_stdout_as_bare_json(monkeypatch, flags, wired):
+@pytest.mark.parametrize("flags", [{}, {"mcp": True}, {"public": True}])
+def test_serve_routes_the_request_logger_to_stdout_as_bare_json(monkeypatch, flags):
+    """Plain STAC, ``--mcp`` and ``--public`` all emit the bare-JSON logger.
+
+    ``/search`` exists on every server, so the config is not gated on MCP.
+    """
     import uvicorn
 
     from umbra_py import serve
@@ -304,12 +323,326 @@ def test_serve_routes_the_mcp_logger_to_stdout_as_bare_json(monkeypatch, flags, 
     monkeypatch.setattr(serve, "public_secret_names", lambda: [])
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
     serve.serve(log_level="info", **flags)
-    if not wired:
-        assert "log_config" not in seen
-        return
     config = seen["log_config"]
     logger = config["loggers"][MCP_REQUEST_LOGGER]
     assert logger == {"handlers": ["mcp_request"], "level": "INFO", "propagate": False}
     assert config["handlers"]["mcp_request"]["stream"] == "ext://sys.stdout"
     assert config["formatters"]["mcp_request"] == {"format": "%(message)s"}
     assert "uvicorn.access" in config["loggers"]
+
+
+def _search(caplog, scope, chunks, *, status: int = 200):
+    downstream = _EchoApp(status)
+    with caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER):
+        sent = _run(StacSearchLog(downstream), scope, chunks)
+    return downstream, sent, _records(caplog)
+
+
+def test_get_search_logs_allowlisted_query_params_only(caplog):
+    scope = _scope(
+        method="GET",
+        path="/search",
+        headers={
+            "user-agent": "stac-client/1.2",
+            "authorization": "Bearer secret-token",
+            "cookie": "session=secret-cookie",
+            "x-forwarded-for": "198.51.100.9",
+        },
+        query=(
+            b"bbox=-68.1,10.4,-67.9,10.6"
+            b"&datetime=2024-01-01/2024-02-01"
+            b"&limit=10"
+            b"&collections=umbra-open-data"
+            b"&sortby=-datetime"
+            b"&intersects=%7B%22secret%22%3A%22hidden-polygon%22%7D"
+            b"&area=Classified+Site"
+            b"&token=hidden-token"
+        ),
+    )
+    _downstream, sent, records = _search(caplog, scope, [])
+    assert sent[0]["status"] == 200
+    (record,) = records
+    assert record["msg"] == "stac_search"
+    assert record["client_ip"] == "203.0.113.7"
+    assert record["user_agent"] == "stac-client/1.2"
+    assert record["method"] == "GET"
+    assert record["path"] == "/search"
+    assert record["bbox"] == "-68.1,10.4,-67.9,10.6"
+    assert record["datetime"] == "2024-01-01/2024-02-01"
+    assert record["limit"] == "10"
+    assert record["collections"] == "umbra-open-data"
+    assert record["sortby"] == "-datetime"
+    assert record["status"] == 200
+    assert isinstance(record["duration_ms"], float)
+    assert "body_keys" not in record
+    line = caplog.records[-1].getMessage()
+    assert "hidden-polygon" not in line
+    assert "Classified Site" not in line
+    assert "hidden-token" not in line
+    assert "secret-token" not in line
+    assert "secret-cookie" not in line
+    assert "198.51.100.9" not in line
+    assert "mcp_protocol_version" not in record
+    assert "intersects" not in record
+    assert "area" not in record
+    assert "token" not in record
+
+
+def test_get_search_does_not_read_the_body(caplog):
+    seen: dict = {}
+
+    async def downstream(scope, receive, send):
+        seen["receive"] = receive
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():  # pragma: no cover - GET logging must not pull a body
+        raise AssertionError("GET /search logging must not read the body")
+
+    async def send(message):
+        seen.setdefault("sent", []).append(message)
+
+    scope = _scope(method="GET", path="/search/", query=b"limit=3")
+    with caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER):
+        asyncio.run(StacSearchLog(downstream)(scope, receive, send))
+    assert seen["receive"] is receive
+    assert seen["sent"][0]["status"] == 204
+    (record,) = _records(caplog)
+    assert record["path"] == "/search/"
+    assert record["limit"] == "3"
+    assert record["status"] == 204
+    assert isinstance(record["duration_ms"], float)
+
+
+def test_post_search_logs_body_keys_never_values(caplog):
+    payload = {
+        "bbox": [-68.1, 10.4, -67.9, 10.6],
+        "intersects": {"type": "Polygon", "secret": "hidden-polygon"},
+        "limit": 987654,
+        "collections": ["umbra-open-data"],
+        "datetime": "2024-01-01/2024-02-01",
+        "ids": ["secret-item-id"],
+        "query": {"area": {"like": "Classified Site"}},
+        "sortby": [{"field": "properties.datetime", "direction": "desc"}],
+    }
+    body = json.dumps(payload).encode()
+    step = max(1, len(body) // 3)
+    chunks = [body[i : i + step] for i in range(0, len(body), step)]
+    scope = _scope(
+        method="POST",
+        path="/search",
+        query=b"limit=2&bbox=1,2,3,4&area=query-secret",
+    )
+    downstream, _sent, records = _search(caplog, scope, chunks, status=400)
+    assert downstream.body == body
+    (record,) = records
+    assert record["method"] == "POST"
+    assert record["path"] == "/search"
+    assert record["status"] == 400
+    assert isinstance(record["duration_ms"], float)
+    # Query-string allowlist still logs values; the body contributes names only.
+    assert record["limit"] == "2"
+    assert record["bbox"] == "1,2,3,4"
+    assert record["body_keys"] == [
+        "bbox",
+        "collections",
+        "datetime",
+        "ids",
+        "intersects",
+        "limit",
+        "query",
+        "sortby",
+    ]
+    line = caplog.records[-1].getMessage()
+    assert "hidden-polygon" not in line
+    assert "secret-item-id" not in line
+    assert "Classified Site" not in line
+    assert "query-secret" not in line
+    assert "987654" not in line
+    assert "properties.datetime" not in line
+    assert "-68.1" not in line
+
+
+def test_post_search_over_the_cap_is_not_parsed_but_replays_the_whole_body(caplog):
+    payload = {
+        "note": "LEAK-THIS-VALUE",
+        "bbox": [-68.1, 10.4, -67.9, 10.6],
+        "pad": "y" * (MCP_LOG_BODY_LIMIT * 2),
+    }
+    body = json.dumps(payload).encode()
+    assert len(body) > MCP_LOG_BODY_LIMIT
+    # Small chunks, so the peek stops with unread body left (the same rule as
+    # POST /mcp: one last chunk may cross the cap, and that is not "truncated"
+    # when it also finishes the body).
+    chunks = [body[i : i + 512] for i in range(0, len(body), 512)]
+    assert len(chunks) > (MCP_LOG_BODY_LIMIT // 512) + 1
+    downstream, _sent, records = _search(caplog, _scope(method="POST", path="/search"), chunks)
+    assert downstream.body == body
+    (record,) = records
+    assert record["body_truncated"] is True
+    assert "body_keys" not in record
+    assert record["status"] == 200
+    assert isinstance(record["duration_ms"], float)
+    assert "LEAK-THIS-VALUE" not in caplog.records[-1].getMessage()
+    assert "-68.1" not in caplog.records[-1].getMessage()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b'not json {"secret":"hidden-polygon"}', b'["hidden-polygon"]', b"null"],
+)
+def test_post_search_unparsed_body_does_not_log_the_bytes(caplog, raw):
+    downstream, _sent, records = _search(caplog, _scope(method="POST", path="/search"), [raw])
+    assert downstream.body == raw
+    (record,) = records
+    assert record["body_unparsed"] is True
+    assert "body_keys" not in record
+    assert "hidden-polygon" not in caplog.records[-1].getMessage()
+
+
+def test_post_search_empty_body_logs_no_keys(caplog):
+    downstream, _sent, records = _search(caplog, _scope(method="POST", path="/search"), [b""])
+    assert downstream.body == b""
+    (record,) = records
+    assert record["body_keys"] == []
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        _scope(method="GET", path="/collections"),
+        _scope(method="GET", path="/collections/umbra-open-data/items"),
+        _scope(method="POST", path="/items"),
+        _scope(method="POST", path="/search/items"),
+        _scope(method="POST", path="/mcp"),
+        _scope(method="PUT", path="/search"),
+        _scope(method="DELETE", path="/search"),
+        _scope(method="OPTIONS", path="/search"),
+        {"type": "lifespan"},
+    ],
+)
+def test_non_search_traffic_passes_through_unlogged(caplog, scope):
+    called = []
+
+    async def receive():  # pragma: no cover - the wrapper must not read these
+        raise AssertionError("the wrapper must not read this request")
+
+    async def send(message):  # pragma: no cover
+        pass
+
+    async def downstream(scope_, receive_, send_):
+        assert receive_ is receive and send_ is send
+        called.append(scope_)
+
+    with caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER):
+        asyncio.run(StacSearchLog(downstream)(scope, receive, send))
+    assert called == [scope]
+    assert _records(caplog) == []
+
+
+def test_search_downstream_failure_is_logged_as_500_and_reraised(caplog):
+    async def boom(scope, receive, send):
+        await receive()
+        raise RuntimeError("downstream broke")
+
+    with caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER):
+        with pytest.raises(RuntimeError, match="downstream broke"):
+            _run(
+                StacSearchLog(boom),
+                _scope(method="POST", path="/search"),
+                [b'{"bbox":[0,0,1,1]}'],
+            )
+    (record,) = _records(caplog)
+    assert record["body_keys"] == ["bbox"]
+    assert record["status"] == 500
+    line = caplog.records[-1].getMessage()
+    assert "0,0,1,1" not in line
+    assert "[0, 0, 1, 1]" not in line
+
+
+def test_search_logging_failure_never_breaks_the_request(caplog, monkeypatch):
+    import umbra_py._mcp_log as mod
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("log sink down")
+
+    monkeypatch.setattr(mod.logger, "info", broken)
+    body = b'{"bbox":[1,2,3,4],"secret":"hidden-polygon"}'
+    downstream = _EchoApp()
+    sent = _run(StacSearchLog(downstream), _scope(method="POST", path="/search"), [body])
+    assert sent[0]["status"] == 200
+    assert downstream.body == body
+    assert _records(caplog) == []
+
+
+@pytest.mark.skipif(importlib.util.find_spec("fastapi") is None, reason="serve extra")
+def test_build_app_logs_real_search_and_the_handler_sees_the_body(tmp_path, caplog):
+    """The middleware is on the app, and FastAPI still parses the replayed POST."""
+    import copy
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+    from umbra_py.index import CatalogIndex
+    from umbra_py.models import UmbraItem
+
+    sample = json.loads((Path(__file__).parent / "data" / "sample_item.json").read_text())
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path) as idx:
+        doc = copy.deepcopy(sample)
+        doc["id"] = "item-0"
+        idx.add(
+            UmbraItem.from_dict(
+                doc,
+                href=(
+                    "https://example.test/sar-data/tasks/Testville/"
+                    "2024-01-01-00-00-00_UMBRA-01/x.stac.v2.json"
+                ),
+            )
+        )
+    app = serve.build_app(path, artifacts=False)
+    assert app.user_middleware[0].cls is StacSearchLog
+
+    secret = "DoNotLogThisSecret"
+    with TestClient(app) as client, caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER):
+        listed = client.get(
+            "/search",
+            params={"limit": "1", "bbox": "-68.1,10.4,-67.9,10.6", "note": secret},
+        )
+        missed = client.post(
+            "/search",
+            json={"bbox": [0, 0, 1, 1], "secret_note": secret, "limit": 5},
+        )
+        health = client.get("/healthz")
+    assert listed.status_code == 200
+    assert listed.json()["context"]["returned"] == 1
+    assert missed.status_code == 200
+    # Far from the sample footprint: the bbox in the body was applied.
+    assert missed.json()["context"]["returned"] == 0
+    assert health.status_code == 200
+
+    records = _records(caplog)
+    assert [record["msg"] for record in records] == ["stac_search", "stac_search"]
+    get_record, post_record = records
+    assert get_record["method"] == "GET"
+    assert get_record["path"] == "/search"
+    assert get_record["bbox"] == "-68.1,10.4,-67.9,10.6"
+    assert get_record["limit"] == "1"
+    assert get_record["status"] == 200
+    assert isinstance(get_record["duration_ms"], float)
+    assert "area" not in get_record
+    assert post_record["method"] == "POST"
+    assert post_record["body_keys"] == ["bbox", "limit", "secret_note"]
+    assert post_record["status"] == 200
+    assert isinstance(post_record["duration_ms"], float)
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == MCP_REQUEST_LOGGER]
+    assert all(secret not in line for line in lines)
+
+
+@pytest.mark.skipif(not _HAS_SERVE_MCP, reason="serve + mcp extras")
+def test_public_app_installs_search_logging_too(tmp_path):
+    from umbra_py import serve
+
+    app = serve.build_app(tmp_path / "catalog.db", public=True)
+    assert app.user_middleware[0].cls is StacSearchLog

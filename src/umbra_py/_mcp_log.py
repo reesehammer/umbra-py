@@ -1,17 +1,26 @@
-"""One structured log line per ``POST /mcp`` on ``umbra serve --mcp`` / ``--public``.
+"""Structured one-line request logs for ``umbra serve``.
 
-The hosted MCP server is stateless, so uvicorn's access log (``POST /mcp 200``)
-is the only trace a request leaves: no client name or version, no tool name.
-:class:`McpRequestLog` wraps the mounted MCP ASGI app, peeks at the start of the
-JSON-RPC body, and logs a single JSON line once the response is done.
+Two lines share one logger (:data:`MCP_REQUEST_LOGGER`), which
+:func:`umbra_py.serve.serve` routes to stdout as bare JSON for every server —
+plain STAC, ``--mcp``, and ``--public``:
 
-What it logs is metadata only. For ``tools/call`` that is the tool name and the
-*key names* of its arguments, never their values (a place name or a bbox is the
-user's query, not ours to keep). It is a pure ASGI wrapper rather than a
-``BaseHTTPMiddleware`` so it can read at most :data:`MCP_LOG_BODY_LIMIT` bytes and
-replay exactly those messages to the MCP app, which then reads the rest of the
-body from the socket as if nothing had looked. A logging failure is swallowed:
-it must never turn a working request into an error.
+* :class:`McpRequestLog` — one line per ``POST /mcp`` (``msg`` is
+  ``mcp_request``), peeking at the JSON-RPC body.
+* :class:`StacSearchLog` — one line per ``GET`` or ``POST /search`` (``msg``
+  is ``stac_search``).
+
+What is logged is metadata. A search logs the client IP, user agent, HTTP
+method, path, status and duration, plus the query parameters ``bbox``,
+``datetime``, ``limit``, ``collections`` and ``sortby`` when the client sent
+them. A ``POST`` body contributes only its top-level key names
+(``body_keys``), never the values — a polygon or an id list is the user's
+query. Other query parameters, other headers, and the raw body are not logged.
+
+Both are pure ASGI wrappers rather than ``BaseHTTPMiddleware`` so a POST can
+read at most :data:`MCP_LOG_BODY_LIMIT` bytes and replay exactly those
+messages, after which the downstream app reads the rest of the body from the
+socket as if nothing had looked. A logging failure is swallowed: it must
+never turn a working request into an error.
 """
 
 from __future__ import annotations
@@ -21,22 +30,30 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
+from urllib.parse import parse_qsl
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+RecordBuilder = Callable[[bytes, bool], dict[str, Any]]
 
 #: The logger :func:`umbra_py.serve.serve` routes to stdout as bare JSON lines.
+#: Shared by the MCP and STAC ``/search`` lines; ``msg`` tells them apart.
 MCP_REQUEST_LOGGER = "umbra_py.mcp.requests"
 
 #: Bytes of request body read for logging. A JSON-RPC ``initialize`` or
-#: ``tools/call`` is a few hundred bytes; a larger body is logged without its
-#: method rather than buffered.
+#: ``tools/call``, or a STAC search body, is a few hundred bytes; a larger
+#: body is logged without being parsed rather than buffered.
 MCP_LOG_BODY_LIMIT = 8192
 
 _MAX_FIELD = 200
+
+#: Query parameters whose *values* may appear on a ``stac_search`` line.
+#: Anything else on the query string (an ``intersects`` polygon, an id, a
+#: free-text ``area``) stays off the line.
+_SEARCH_QUERY_PARAMS = ("bbox", "datetime", "limit", "collections", "sortby")
 
 logger = logging.getLogger(MCP_REQUEST_LOGGER)
 
@@ -46,6 +63,11 @@ def _clip(value: Any) -> str | None:
         return None
     text = str(value)
     return text if len(text) <= _MAX_FIELD else text[:_MAX_FIELD] + "..."
+
+
+def _client_ip(scope: Scope) -> str | None:
+    client = scope.get("client")
+    return _clip(client[0]) if client else None
 
 
 def _rpc_fields(message: Any) -> dict[str, Any]:
@@ -91,6 +113,121 @@ def _header(scope: Scope, name: bytes) -> str | None:
     return None
 
 
+def _is_search(scope: Scope) -> bool:
+    if scope.get("type") != "http" or scope.get("method") not in ("GET", "POST"):
+        return False
+    return str(scope.get("path", "")).rstrip("/") == "/search"
+
+
+def _search_query_fields(scope: Scope) -> dict[str, Any]:
+    """Allowlisted query values, decoded, in a stable order. Absent keys are omitted."""
+    raw = scope.get("query_string") or b""
+    text = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
+    grouped: dict[str, list[str]] = {}
+    for key, value in parse_qsl(text, keep_blank_values=True):
+        if key in _SEARCH_QUERY_PARAMS:
+            grouped.setdefault(key, []).append(value)
+    fields: dict[str, Any] = {}
+    for key in _SEARCH_QUERY_PARAMS:
+        values = grouped.get(key)
+        if not values:
+            continue
+        clipped = [_clip(value) or "" for value in values]
+        fields[key] = clipped[0] if len(clipped) == 1 else clipped
+    return fields
+
+
+def _search_body_fields(body: bytes, truncated: bool) -> dict[str, Any]:
+    """Top-level key names of a POST body. Values never leave this function."""
+    if truncated:
+        return {"body_truncated": True}
+    if not body.strip():
+        return {"body_keys": []}
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return {"body_unparsed": True}
+    if not isinstance(payload, dict):
+        return {"body_unparsed": True}
+    return {"body_keys": sorted(_clip(key) or "" for key in payload)}
+
+
+async def _buffer_body(receive: Receive, limit: int) -> tuple[list[Message], bytes, bool]:
+    """Read request messages until ``limit`` bytes, without pulling the rest.
+
+    The returned messages are what the caller replays. ``truncated`` is true
+    when the client still had body left, so the peeked bytes are not parsed —
+    a cut JSON value must not become a log field. One ASGI chunk larger than
+    ``limit`` is kept whole (the loop checks the size before the next read),
+    matching the original ``POST /mcp`` wrapper.
+    """
+    buffered: list[Message] = []
+    size = 0
+    more_body = True
+    while more_body and size < limit:
+        message = await receive()
+        buffered.append(message)
+        if message.get("type") != "http.request":
+            break
+        size += len(message.get("body", b""))
+        more_body = bool(message.get("more_body", False))
+    body = b"".join(
+        message.get("body", b"") for message in buffered if message.get("type") == "http.request"
+    )
+    return buffered, body, bool(more_body and size >= limit)
+
+
+def _replayer(buffered: list[Message], receive: Receive) -> Receive:
+    async def replay() -> Message:
+        if buffered:
+            return buffered.pop(0)
+        return await receive()
+
+    return replay
+
+
+async def _observe(
+    app: ASGIApp,
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    *,
+    read_body: bool,
+    body_limit: int,
+    build_record: RecordBuilder,
+) -> None:
+    """Call ``app``, then log one JSON line. Logging never fails the request."""
+    started = time.perf_counter()
+    body = b""
+    truncated = False
+    downstream_receive = receive
+    if read_body:
+        buffered, body, truncated = await _buffer_body(receive, body_limit)
+        downstream_receive = _replayer(buffered, receive)
+
+    status: int | None = None
+
+    async def capture(message: Message) -> None:
+        nonlocal status
+        if message.get("type") == "http.response.start":
+            status = message.get("status")
+        await send(message)
+
+    try:
+        await app(scope, downstream_receive, capture)
+    except Exception:
+        status = status or 500
+        raise
+    finally:
+        try:
+            record = build_record(body, truncated)
+            record["status"] = status
+            record["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            logger.info(json.dumps(record, separators=(",", ":")))
+        except Exception:
+            pass
+
+
 class McpRequestLog:
     """ASGI wrapper that logs each ``POST .../mcp`` and passes everything through.
 
@@ -113,56 +250,74 @@ class McpRequestLog:
         ):
             await self.app(scope, receive, send)
             return
+        await _observe(
+            self.app,
+            scope,
+            receive,
+            send,
+            read_body=True,
+            body_limit=self.body_limit,
+            build_record=lambda body, truncated: _mcp_record(scope, body, truncated),
+        )
 
-        started = time.perf_counter()
-        buffered: list[Message] = []
-        size = 0
-        more_body = True
-        while more_body and size < self.body_limit:
-            message = await receive()
-            buffered.append(message)
-            if message.get("type") != "http.request":
-                break
-            size += len(message.get("body", b""))
-            more_body = bool(message.get("more_body", False))
-        body = b"".join(m.get("body", b"") for m in buffered if m.get("type") == "http.request")
 
-        async def replay() -> Message:
-            if buffered:
-                return buffered.pop(0)
-            return await receive()
+def _mcp_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "level": "info",
+        "msg": "mcp_request",
+        "client_ip": _client_ip(scope),
+        "user_agent": _header(scope, b"user-agent"),
+        "mcp_protocol_version": _header(scope, b"mcp-protocol-version"),
+    }
+    record.update(_body_fields(body, truncated))
+    return record
 
-        status: int | None = None
 
-        async def capture(message: Message) -> None:
-            nonlocal status
-            if message.get("type") == "http.response.start":
-                status = message.get("status")
-            await send(message)
+class StacSearchLog:
+    """ASGI middleware that logs each ``GET`` or ``POST /search``.
 
-        try:
-            await self.app(scope, replay, capture)
-        except Exception:
-            status = status or 500
-            raise
-        finally:
-            self._log(scope, body, more_body and size >= self.body_limit, status, started)
+    Mounted on the FastAPI app (outermost user middleware) so the line records
+    the status the client actually got, including a rate-limit ``429``, and the
+    time spent in the guards in front of the route. ``GET`` is not read — its
+    allowlisted parameters are already on the query string. ``POST`` peeks at
+    the body the same way :class:`McpRequestLog` does and replays it, so the
+    search handler still sees every byte.
 
-    def _log(
-        self, scope: Scope, body: bytes, truncated: bool, status: int | None, started: float
-    ) -> None:
-        try:
-            client = scope.get("client")
-            record: dict[str, Any] = {
-                "level": "info",
-                "msg": "mcp_request",
-                "client_ip": _clip(client[0]) if client else None,
-                "user_agent": _header(scope, b"user-agent"),
-                "mcp_protocol_version": _header(scope, b"mcp-protocol-version"),
-            }
-            record.update(_body_fields(body, truncated))
-            record["status"] = status
-            record["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
-            logger.info(json.dumps(record, separators=(",", ":")))
-        except Exception:  # pragma: no cover - logging must never fail a request
-            pass
+    The client IP is the ASGI scope's client. uvicorn rewrites that from
+    ``X-Forwarded-For`` when it runs with ``--proxy-headers`` (``umbra serve
+    --public``); a plain ``umbra serve`` has no proxy, and the socket peer is
+    the client. This trusts the same address the rate limiter does and no other.
+    """
+
+    def __init__(self, app: ASGIApp, *, body_limit: int = MCP_LOG_BODY_LIMIT) -> None:
+        self.app = app
+        self.body_limit = body_limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not _is_search(scope):
+            await self.app(scope, receive, send)
+            return
+        await _observe(
+            self.app,
+            scope,
+            receive,
+            send,
+            read_body=scope.get("method") == "POST",
+            body_limit=self.body_limit,
+            build_record=lambda body, truncated: _search_record(scope, body, truncated),
+        )
+
+
+def _search_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "level": "info",
+        "msg": "stac_search",
+        "client_ip": _client_ip(scope),
+        "user_agent": _header(scope, b"user-agent"),
+        "method": scope.get("method"),
+        "path": scope.get("path"),
+    }
+    record.update(_search_query_fields(scope))
+    if scope.get("method") == "POST":
+        record.update(_search_body_fields(body, truncated))
+    return record

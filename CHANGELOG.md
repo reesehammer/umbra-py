@@ -10,6 +10,14 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **One JSON log line per STAC `/search`.** `umbra serve` (plain, `--mcp`,
+  and `--public`) logs each `GET` or `POST /search` to stdout: client IP,
+  User-Agent, HTTP method, path, status, duration, and the `bbox`,
+  `datetime`, `limit`, `collections`, and `sortby` query parameters when
+  the client sent them. A `POST` also logs the JSON body's key names
+  (`body_keys`) and never the values. The same bare-JSON logger as
+  `POST /mcp` is now configured for every `umbra serve`, not only when
+  MCP is mounted.
 - **Legacy and `open-data/` collects in the open-bucket walk.**
   `umbra index build` (and the weekly snapshot) now indexes 2023 to 2024
   collects that ship only `<stem>_METADATA.json`, flat `tasks/ad hoc/<site>/`
