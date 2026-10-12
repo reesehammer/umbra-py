@@ -2784,6 +2784,15 @@ def build_app(
 
     app.add_middleware(_GuardMiddleware)
 
+    # Outermost user middleware, so the line records the status the client
+    # actually got (including a rate-limit 429) and the time spent in the
+    # guards. Pure ASGI, same peek-and-replay cap as POST /mcp: a logging
+    # failure must not fail the search. Installed for every server — plain
+    # STAC, --mcp, and --public — because /search exists on all three.
+    from ._mcp_log import StacSearchLog
+
+    app.add_middleware(StacSearchLog)
+
     def _open():
         try:
             return open_source(index_path, live=live)
@@ -4278,28 +4287,29 @@ def serve(
         rate_limit=rate_limit,
     )
     run_kw: dict[str, Any] = {"host": host, "port": port, "log_level": log_level}
-    if mcp or public:
-        import copy
+    import copy
 
-        from uvicorn.config import LOGGING_CONFIG
+    from uvicorn.config import LOGGING_CONFIG
 
-        from ._mcp_log import MCP_REQUEST_LOGGER
+    from ._mcp_log import MCP_REQUEST_LOGGER
 
-        # The per-request MCP line is already JSON; emit it bare on stdout (next
-        # to uvicorn's access log) so a log platform parses it as structured.
-        log_config = copy.deepcopy(LOGGING_CONFIG)
-        log_config["formatters"]["mcp_request"] = {"format": "%(message)s"}
-        log_config["handlers"]["mcp_request"] = {
-            "formatter": "mcp_request",
-            "class": "logging.StreamHandler",
-            "stream": "ext://sys.stdout",
-        }
-        log_config["loggers"][MCP_REQUEST_LOGGER] = {
-            "handlers": ["mcp_request"],
-            "level": log_level.upper(),
-            "propagate": False,
-        }
-        run_kw["log_config"] = log_config
+    # The per-request lines (POST /mcp, GET/POST /search) are already JSON.
+    # Emit them bare on stdout beside uvicorn's access log for every server:
+    # a plain STAC process has /search, and --mcp / --public add /mcp. One
+    # logger carries both; ``msg`` tells them apart.
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    log_config["formatters"]["mcp_request"] = {"format": "%(message)s"}
+    log_config["handlers"]["mcp_request"] = {
+        "formatter": "mcp_request",
+        "class": "logging.StreamHandler",
+        "stream": "ext://sys.stdout",
+    }
+    log_config["loggers"][MCP_REQUEST_LOGGER] = {
+        "handlers": ["mcp_request"],
+        "level": log_level.upper(),
+        "propagate": False,
+    }
+    run_kw["log_config"] = log_config
     if proxy_headers:
         # Railway (and any TLS-terminating proxy) is the socket peer; without
         # this the per-client rate limit collapses to one bucket. Honouring
