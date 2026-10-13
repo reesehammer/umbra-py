@@ -16,7 +16,7 @@ import click
 
 from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
-from ..exceptions import InsufficientSpaceError, UmbraError
+from ..exceptions import IndexValidationError, InsufficientSpaceError, UmbraError
 from ..export import export_geoparquet
 from ..index import (
     PUBLISHED_THUMBNAIL_SIZE,
@@ -90,6 +90,12 @@ def index_build(db_path, bbox, place, intersects, start, end, area, fuzzy, limit
     With no scope flags this indexes the whole bucket, which lists every task
     and takes a while; pass --area/--bbox/--place/--intersects/--start/--end to
     index just the slice you care about.
+
+    After the walk, items dated before 2018-01-01 or more than a day ahead,
+    items with a missing or invalid footprint, and items with no public HTTPS
+    asset href or any private ``prod-prod-processed`` href are quarantined.
+    Duplicate ids are collapsed (latest ``updated`` or datetime, then the most
+    assets). A violation that is still present afterwards exits non-zero.
     """
     search_bbox, search_geometry = _shared._resolve_geography(bbox, place, intersects)
     path = _shared._index_path(db_path)
@@ -101,19 +107,29 @@ def index_build(db_path, bbox, place, intersects, start, end, area, fuzzy, limit
         def tally(n: int) -> None:
             spinner.label = f"Indexing {scope} ({n} so far)"
 
-        with CatalogIndex(path) as idx:
-            written = idx.build(
-                progress=tally,
-                bbox=search_bbox,
-                intersects=search_geometry,
-                start=start,
-                end=end,
-                area=area,
-                fuzzy=fuzzy,
-                limit=limit,
-            )
-            total = len(idx)
+        from ..validate import stored_validation  # noqa: PLC0415
+
+        try:
+            with CatalogIndex(path) as idx:
+                written = idx.build(
+                    progress=tally,
+                    bbox=search_bbox,
+                    intersects=search_geometry,
+                    start=start,
+                    end=end,
+                    area=area,
+                    fuzzy=fuzzy,
+                    limit=limit,
+                )
+                total = len(idx)
+                report = stored_validation(idx) or {}
+        except IndexValidationError as exc:
+            raise click.ClickException(str(exc)) from exc
     click.echo(f"Indexed {written} acquisition(s); index now holds {total}. ({path})")
+    click.echo(
+        f"Quarantined {report.get('quarantined_count', 0)} item(s); "
+        f"dropped {report.get('duplicates_dropped', 0)} duplicate id(s)."
+    )
 
 
 @index.command("update")
@@ -661,6 +677,63 @@ def index_coverage(db_path, keys_path, save_keys, json_path, md_path, min_pct) -
             f"Coverage {t['pct_indexable']}% is below the required {min_pct}% "
             f"({report['missing_count']} acquisition(s) missing)."
         )
+
+
+@index.command("validate")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    help="Index to check (default: $UMBRA_INDEX_DB or ~/.cache/umbra-py/catalog.db).",
+)
+@click.option(
+    "--parquet",
+    "parquet_path",
+    default=None,
+    type=click.Path(dir_okay=False, exists=True),
+    help="Also check this stac-geoparquet export (requires the export extra).",
+)
+@click.option("--json", "json_path", default=None, help="Write the validation report as JSON here.")
+@click.option("--markdown", "md_path", default=None, help="Write a Markdown summary here.")
+def index_validate(db_path, parquet_path, json_path, md_path) -> None:
+    """Re-check an index (and optional parquet) against the publish rules.
+
+    ``umbra index build`` already quarantines known-bad source items and
+    collapses duplicate ids. This command reads that record and checks the
+    rows that remain — and, with ``--parquet``, the exported file. Any
+    violation still present exits non-zero, which is what fails the weekly
+    publish before the snapshot is uploaded.
+    """
+    from ..exceptions import MissingDependencyError  # noqa: PLC0415
+    from ..validate import (  # noqa: PLC0415
+        assert_recheck_clean,
+        recheck_report,
+        write_validation_report,
+    )
+
+    path = _shared._index_path(db_path)
+    if not path.exists():
+        raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
+    try:
+        with CatalogIndex(path) as idx:
+            report = recheck_report(idx, parquet=parquet_path)
+    except MissingDependencyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    write_validation_report(report, json_path, md_path)
+    recheck = report["recheck"]
+    parquet_note = ""
+    if "parquet_violations" in recheck:
+        parquet_note = f" {len(recheck['parquet_violations'])} parquet violation(s)."
+    click.echo(
+        f"Quarantined {report.get('quarantined_count', 0)} item(s); "
+        f"dropped {report.get('duplicates_dropped', 0)} duplicate id(s); "
+        f"{len(recheck['index_violations'])} index violation(s) remain."
+        f"{parquet_note}"
+    )
+    try:
+        assert_recheck_clean(report)
+    except IndexValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @index.command("export")

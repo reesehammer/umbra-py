@@ -32,6 +32,7 @@ from .catalog import (
 )
 from .constants import PRODUCT_ASSETS, S3_BUCKET
 from .models import _classify_asset
+from .validate import render_validation_section, stored_validation
 
 #: The bucket roots published acquisitions live under.
 DATA_ROOTS = ("sar-data/", "open-data/")
@@ -215,6 +216,9 @@ def coverage_report(
         "missing_count": len(missing),
         "missing": missing[:missing_limit],
         "unindexable": unindexable,
+        # Quarantine / dedupe from the build that wrote this index (PRD P1-2).
+        # ``None`` on an index that predates that pass.
+        "validation": stored_validation(index),
     }
 
 
@@ -254,9 +258,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Missing: {report['missing_count']}. Unindexable (no sidecar): "
         f"{len(report['unindexable'])}.",
         "",
-        "Contains Umbra open data, licensed under CC BY 4.0.",
+        "## Validation",
         "",
     ]
+    validation = report.get("validation")
+    if isinstance(validation, dict):
+        lines.append(render_validation_section(validation).rstrip())
+    else:
+        lines.append("No quarantine record on this index.")
+    lines += ["", "Contains Umbra open data, licensed under CC BY 4.0.", ""]
     return "\n".join(lines)
 
 

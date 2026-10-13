@@ -100,6 +100,7 @@ from .indexes import (  # noqa: E402
     index_fetch_thumbnails,
     index_info,
     index_update,
+    index_validate,
     semantic,
     semantic_build,
     semantic_info,

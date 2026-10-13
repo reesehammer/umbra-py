@@ -1191,7 +1191,11 @@ class CatalogIndex:
 
         ``progress``, if given, is called with the running count of items
         written -- a full-bucket build lists every task and takes a while, so
-        the CLI uses this to show a live tally. Returns the total written.
+        the CLI uses this to show a live tally. Returns how many rows the walk
+        upserted, which can be more than :meth:`__len__` afterwards: known-bad
+        source items are quarantined and duplicate ids collapsed (see
+        :func:`umbra_py.validate.sanitize_index`). A violation that survives
+        that pass raises :class:`~umbra_py.exceptions.IndexValidationError`.
         """
         catalog = catalog or UmbraCatalog()
         written = 0
@@ -1207,6 +1211,12 @@ class CatalogIndex:
         # the crawl last ran.
         self.set_meta("built_at", date.today().isoformat())
         self._conn.commit()
+        # Quarantine after the walk, not during it: one future-dated sidecar
+        # must not abort the crawl. The re-check inside sanitize_index is what
+        # fails the build when a violation is still in the output.
+        from .validate import sanitize_index  # noqa: PLC0415
+
+        sanitize_index(self)
         return written
 
     def update(

@@ -18,6 +18,8 @@ name: Publish catalog index
 #                              MapLibre page — a whole-archive map, no crawl
 #   - catalog.html             a ready-to-open MapLibre GL viewer that reads the
 #                              published catalog.pmtiles by range request
+#   - index-validation.json    items quarantined or dropped as duplicate ids
+#   - index-validation.md      the same record in Markdown
 #   - catalog.thumbs.db        baked SAR quicklook PNGs, one per acquisition
 #                              (`umbra index fetch-thumbnails`): a separate,
 #                              opt-in sidecar so catalog.db stays small, topped
@@ -84,6 +86,18 @@ jobs:
       - name: Export stac-geoparquet
         run: umbra index export --db catalog.db --out umbra-open-data.parquet
 
+      # Publish rules (PRD P1-2). `umbra index build` already quarantined
+      # known-bad source rows and collapsed duplicate ids so this crawl does
+      # not die on them. Re-check the index and the parquet that are about to
+      # be uploaded; any remaining violation fails the job before the release
+      # is touched. The report is uploaded with the snapshot below, and the
+      # coverage report later repeats the same quarantine list.
+      - name: Validate the index and parquet
+        run: |
+          umbra index validate --db catalog.db \
+            --parquet umbra-open-data.parquet \
+            --json index-validation.json --markdown index-validation.md
+
       # Publish the crawl BEFORE deriving anything further from it. The order
       # matters: the first two runs of this workflow both died in the tiling
       # step below, and because that step ran first, a completed crawl, 2 725
@@ -106,6 +120,7 @@ jobs:
           - \`catalog.db\` — SQLite index for \`umbra search --local --db catalog.db\`, with reverse-geocoded place labels baked in, so maps, galleries and \`umbra demo\` show real place names with no render-time geocoding.
           - \`catalog.pmtiles\` — single-file whole-catalog vector basemap for \`umbra tiles --fetch\`; drop onto any static host or read by range request from a MapLibre page. Carries an \`acquisitions\` centroid layer at every zoom and a \`footprints\` polygon layer from zoom 6 up.
           - \`catalog.html\` — a ready-to-open MapLibre GL viewer over the published \`catalog.pmtiles\`.
+          - \`index-validation.json\` / \`index-validation.md\` — rows quarantined or dropped as duplicate ids before this snapshot was published.
 
           \`\`\`
           $summary
@@ -119,7 +134,8 @@ jobs:
               --title "Umbra open-data catalog index" --notes "$notes"
           fi
           gh release upload catalog-index \
-            catalog.db umbra-open-data.parquet --clobber
+            catalog.db umbra-open-data.parquet \
+            index-validation.json index-validation.md --clobber
           # The released asset's ETag is what the hosted API reports as
           # /healthz `snapshot` once it has swapped this index in; read it with
           # the same HEAD + normalization the entrypoint's --if-changed uses.
