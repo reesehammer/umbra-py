@@ -38,7 +38,9 @@ Umbra's **open** SICDs generally ship without a `Radiometric` block.
   (that needs a Canopy scene or equivalent).
 
 A published `GEC` is already a geocoded GeoTIFF. Its pixels are relative
-amplitude, not a calibrated backscatter coefficient.
+amplitude, not a calibrated backscatter coefficient. Open GEC is 8-bit
+display-scaled data with nodata 0 and a floor at DN 1. Mask nodata 0 before
+a threshold or a statistic, and use SICD or CSI when dynamic range matters.
 
 ## Search is a crawl unless you fetch the index
 
@@ -51,6 +53,22 @@ Prefer `--local` for anything you will run more than once.
 `area=` is a task-directory name, not a geocoded place. `--place` (CLI only)
 geocodes via Nominatim to a **rectangle**, so it can include nearby ground
 outside the named place.
+
+The index is what Umbra has published, rebuilt weekly. `umbra index info`
+(and `index_stats`) report `built_at` and `end`, the newest plausible
+acquisition. As of 2026-10-14 the published snapshot was built 2026-10-08
+and its newest plausible acquisition is 2026-09-13 (Nepal disaster coverage).
+Umbra open data arrives in irregular batches. A gap of weeks between that
+acquisition and today is normal, and it is not an umbra-py lag.
+
+A few upstream items carry impossible future dates (a `task-data` collect
+dated 2036-07-24, and others in 2035). `umbra index build` quarantines a
+datetime before 2018-01-01 or more than a day after the build and reports
+how many in `quarantined_future_count` — those rows are not in the index.
+A datetime that is after the item's own `properties.created`, or after
+`built_at` when `created` is missing, but still inside that window is kept,
+flagged `datetime_suspect`, and left out of `end`, `rank_by=recency`, and
+other latest-pass selections. The datetime is not rewritten.
 
 ## Canopy is the same interface, not a live-verified client
 

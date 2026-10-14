@@ -4,7 +4,7 @@
   "title": "umbra-py index-info object",
   "description": "The JSON object umbra-py prints to stdout when 'umbra index info --json' succeeds: a machine-readable summary of a local catalog index. Produced from CatalogIndex.stats() plus the database's path and size. Stable within a minor version.",
   "type": "object",
-  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at"],
+  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at", "datetime_suspect_count", "quarantined_future_count"],
   "additionalProperties": false,
   "examples": [
     {
@@ -16,7 +16,9 @@
       "tasks": 903,
       "labeled": 12874,
       "thumbnailed": 1500,
-      "built_at": "2026-01-13"
+      "built_at": "2026-01-13",
+      "datetime_suspect_count": 0,
+      "quarantined_future_count": 0
     }
   ],
   "properties": {
@@ -40,7 +42,7 @@
     },
     "end": {
       "type": ["string", "null"],
-      "description": "Latest indexed acquisition date (YYYY-MM-DD), or null when the index is empty."
+      "description": "Newest indexed acquisition date (YYYY-MM-DD) that is not datetime_suspect, or null when the index is empty or every dated row is suspect. Rows flagged datetime_suspect stay in items and are omitted here."
     },
     "tasks": {
       "type": "integer",
@@ -60,6 +62,16 @@
     "built_at": {
       "type": ["string", "null"],
       "description": "The date the index was last built (YYYY-MM-DD), or null for an index written before build stamping or hand-assembled."
+    },
+    "datetime_suspect_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Acquisitions kept in the index whose datetime is after properties.created, or after built_at when created is missing. They are excluded from end and from recency ranking."
+    },
+    "quarantined_future_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Source rows the last index build removed because a datetime was more than a day ahead of the build (the upstream 2035-2036 items). They are not in items. Zero when this index has no stored validation report."
     }
   }
 }

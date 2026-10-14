@@ -42,7 +42,7 @@ from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
 from .exceptions import IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
-from .models import BBox, UmbraItem
+from .models import BBox, UmbraItem, _parse_datetime
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .coverage import SiteCoverage
@@ -60,11 +60,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: ``items.thumbnail`` column (a baked SAR quicklook PNG; see
 #: :meth:`CatalogIndex.bake_thumbnails`). Version 4 added
 #: ``items.thumbnail_asset`` / ``items.thumbnail_size`` -- *what* that PNG is a
-#: picture of, which the index used to leave to be assumed. All are purely
-#: additive, so a lower-version (or legacy version-0) database is migrated in
-#: place by adding the missing columns -- exercising the migration path
-#: versioning was landed to enable.
-_SCHEMA_VERSION = 4
+#: picture of, which the index used to leave to be assumed. Version 5 added
+#: ``items.datetime_suspect``: the acquisition time is after ``properties.created``
+#: (or after ``built_at`` when created is missing). The row stays; latest-date
+#: and recency paths skip it. All are purely additive, so a lower-version (or
+#: legacy version-0) database is migrated in place by adding the missing columns
+#: -- exercising the migration path versioning was landed to enable.
+_SCHEMA_VERSION = 5
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
 #: default for :meth:`CatalogIndex.bake_thumbnails`. 512 px is large enough
@@ -85,10 +87,10 @@ PUBLISHED_THUMBNAIL_SIZE = 512
 _BUSY_TIMEOUT_MS = 5000
 
 #: The versions this build knows how to upgrade to :data:`_SCHEMA_VERSION` in
-#: place. Every step so far is additive (a new nullable column), handled
+#: place. Every step so far is additive (a new column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1, 2, 3})
+_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -105,7 +107,8 @@ CREATE TABLE IF NOT EXISTS items (
     place           TEXT,
     thumbnail       BLOB,
     thumbnail_asset TEXT,
-    thumbnail_size  INTEGER
+    thumbnail_size  INTEGER,
+    datetime_suspect INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -926,6 +929,35 @@ def merge_thumbnails_atomically(
     return applied
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _datetime_is_suspect(item: UmbraItem, built_at: date | None) -> bool:
+    """Whether ``item``'s acquisition time is after it was published.
+
+    Suspect when ``datetime`` is strictly after ``properties.created``. When
+    ``created`` is missing or unparseable, suspect when the acquisition's
+    calendar day is after ``built_at``. A missing datetime is not suspect.
+    This is the soft case that stays in the index: a datetime before 2018 or
+    more than a day after the build is quarantined instead
+    (:func:`umbra_py.validate.sanitize_index`) and never reaches this flag.
+    """
+    dt = item.datetime
+    if dt is None:
+        return False
+    dt = _as_utc(dt)
+    created_raw = item.properties.get("created")
+    created = _parse_datetime(created_raw) if isinstance(created_raw, str) else None
+    if created is not None:
+        return dt > _as_utc(created)
+    if built_at is None:
+        return False
+    return dt.date() > built_at
+
+
 def _index_acq_date(item: UmbraItem) -> date | None:
     """Acquisition date to prune on.
 
@@ -1064,6 +1096,10 @@ class CatalogIndex:
         if "thumbnail_asset" not in columns:  # v3 -> v4: what that PNG is a picture of
             self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail_asset TEXT")
             self._conn.execute("ALTER TABLE items ADD COLUMN thumbnail_size INTEGER")
+        if "datetime_suspect" not in columns:  # v4 -> v5: datetime after created / built_at
+            self._conn.execute(
+                "ALTER TABLE items ADD COLUMN datetime_suspect INTEGER NOT NULL DEFAULT 0"
+            )
 
     @classmethod
     def from_release(
@@ -1120,6 +1156,37 @@ class CatalogIndex:
         """Read a metadata note, or ``None`` if it was never set."""
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
+
+    def _flag_datetime_suspects(self) -> int:
+        """Mark rows whose datetime is after ``created`` (or after ``built_at``).
+
+        Called at the end of :meth:`build`, :meth:`update`, and a
+        :meth:`search_live` write-back, after ``built_at`` is stamped.
+        Quarantine has already removed datetimes more than a day ahead of the
+        build; this pass only flags what remains. The datetime in the stored
+        document is left as published. Returns how many rows are flagged.
+        """
+        raw = self.get_meta("built_at")
+        built = date.fromisoformat(raw) if raw else None
+        updates: list[tuple[int, str]] = []
+        flagged = 0
+        for href, doc in self._conn.execute("SELECT href, doc FROM items"):
+            item = UmbraItem.from_dict(json.loads(doc), href=href)
+            suspect = _datetime_is_suspect(item, built)
+            updates.append((1 if suspect else 0, href))
+            if suspect:
+                flagged += 1
+        self._conn.executemany("UPDATE items SET datetime_suspect = ? WHERE href = ?", updates)
+        self._conn.commit()
+        return flagged
+
+    def _item_from_row(
+        self, href: str, doc: str, place: str | None, suspect: int | None = 0
+    ) -> UmbraItem:
+        item = UmbraItem.from_dict(json.loads(doc), href=href)
+        item.place = place
+        item.datetime_suspect = bool(suspect)
+        return item
 
     # -- writing ---------------------------------------------------------------
 
@@ -1217,6 +1284,10 @@ class CatalogIndex:
         from .validate import sanitize_index  # noqa: PLC0415
 
         sanitize_index(self)
+        # After quarantine, so a 2036 row is recorded in the validation report
+        # and removed rather than kept as merely suspect. ``built_at`` is
+        # already stamped, which the missing-``created`` comparison needs.
+        self._flag_datetime_suspects()
         return written
 
     def update(
@@ -1265,7 +1336,9 @@ class CatalogIndex:
         if since is not None:
             start = _coerce_date(since)
         else:
-            max_acq = self._conn.execute("SELECT MAX(acq_date) FROM items").fetchone()[0]
+            max_acq = self._conn.execute(
+                "SELECT MAX(acq_date) FROM items WHERE datetime_suspect = 0"
+            ).fetchone()[0]
             if max_acq is None:
                 start = None  # empty index -> nothing to derive; do a full build
             else:
@@ -1287,6 +1360,7 @@ class CatalogIndex:
                 progress(scanned)
         self.set_meta("built_at", date.today().isoformat())
         self._conn.commit()
+        self._flag_datetime_suspects()
         return UpdateResult(scanned=scanned, added=added, refreshed=refreshed, start=start)
 
     def bake_places(
@@ -1438,7 +1512,11 @@ class CatalogIndex:
 
         # A NULL acq_date must not outrank a real one under newest-first, so it
         # is ordered last explicitly (SQLite sorts NULLs first on DESC).
-        order = "acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
+        # A suspect datetime is not a latest acquisition, so it does not jump
+        # a capped newest-first bake ahead of a plausible recent scene.
+        order = (
+            "datetime_suspect, acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
+        )
         rows = self._conn.execute(
             "SELECT href, doc, place FROM items "
             "WHERE href IN (SELECT href FROM item_assets WHERE asset = ?) "
@@ -1687,14 +1765,14 @@ class CatalogIndex:
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = (
-            f"SELECT href, doc, place FROM items{where} ORDER BY task IS NULL, task, acq_date, href"
+            "SELECT href, doc, place, datetime_suspect FROM items"
+            f"{where} ORDER BY task IS NULL, task, acq_date, href"
         )
 
         count = 0
         per_task: dict[str | None, int] = {}
-        for href, doc, place in self._conn.execute(sql, params):
-            item = UmbraItem.from_dict(json.loads(doc), href=href)
-            item.place = place
+        for href, doc, place, suspect in self._conn.execute(sql, params):
+            item = self._item_from_row(href, doc, place, suspect)
             if intersects is not None and not item.intersects_polygon(intersects):
                 continue
             if not item.matches_filters(
@@ -1778,7 +1856,9 @@ class CatalogIndex:
         # Freshness horizon: the newest acquisition the index already knows. The
         # live walk only needs to cover from there forward (minus the overlap),
         # but never older than the caller's own start bound.
-        max_acq = self._conn.execute("SELECT MAX(acq_date) FROM items").fetchone()[0]
+        max_acq = self._conn.execute(
+            "SELECT MAX(acq_date) FROM items WHERE datetime_suspect = 0"
+        ).fetchone()[0]
         delta_start: date | None
         if max_acq is not None:
             horizon = date.fromisoformat(max_acq) - timedelta(days=max(0, overlap_days))
@@ -1851,7 +1931,7 @@ class CatalogIndex:
         finally:
             if added_any:
                 self.set_meta("built_at", date.today().isoformat())
-                self.commit()
+                self._flag_datetime_suspects()
 
     def _ranking_where(
         self,
@@ -2110,6 +2190,7 @@ class CatalogIndex:
             _passes_max_span,
             _passes_median_revisit,
             _passes_span,
+            _plausible_last,
             _rank_sort_key,
             rank_site_coverage,
             site_coverage,
@@ -2196,11 +2277,14 @@ class CatalogIndex:
         # recency pair, so they need no full scan.
         having = "HAVING COUNT(*) >= ?"
         candidate_params: list[object] = [*params, min_passes]
+        # ``datetime_suspect`` is not a latest pass: the same exclusion the pool
+        # path applies via ``_plausible_last``, so the two gates stay identical.
+        plausible_max = "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END)"
         if since is not None:
-            having += " AND MAX(acq_date) >= ?"
+            having += f" AND {plausible_max} >= ?"
             candidate_params.append(since.isoformat())
         if before is not None:
-            having += " AND MAX(acq_date) <= ?"
+            having += f" AND {plausible_max} <= ?"
             candidate_params.append(before.isoformat())
         if first_since_date is not None:
             having += " AND MIN(acq_date) >= ?"
@@ -2234,15 +2318,16 @@ class CatalogIndex:
         candidates = self._conn.execute(candidate_sql, candidate_params).fetchall()
 
         ranked: list[SiteCoverage] = []
+        recency_last: dict[str, date | None] = {}
         for (task,) in candidates:
             passes = []
-            for href, doc, place in self._conn.execute(
-                f"SELECT href, doc, place FROM items{where} AND task = ? ORDER BY datetime, href",
+            for href, doc, place, suspect in self._conn.execute(
+                "SELECT href, doc, place, datetime_suspect FROM items"
+                f"{where} AND task = ? ORDER BY datetime, href",
                 [*params, task],
             ):
-                item = UmbraItem.from_dict(json.loads(doc), href=href)
-                item.place = place
-                passes.append(item)
+                passes.append(self._item_from_row(href, doc, place, suspect))
+            recency_last[task] = _plausible_last(passes)
             # Cadence filter (worst-case revisit gap), applied on the same items the
             # summary reads and with the same ``_passes_cadence`` the pool path uses,
             # so the two paths are byte-identical. Gated on the analysable subset
@@ -2304,13 +2389,15 @@ class CatalogIndex:
                     passes=c.passes,
                     task=c.task,
                     rank_by=rank_by,
-                    # The temporal rankings order by these whole-site figures; the
-                    # summary already computed them from the same passes the pool path
-                    # reduces via ``_temporal_rank_figures``, so parsing them back here
-                    # is byte-identical to that path (a ranking candidate always has a
-                    # dated ``last``; ``span_days`` / ``median_revisit_days`` are
-                    # ``None`` for a single-pass site).
-                    last=date.fromisoformat(c.last) if c.last else None,
+                    # Span and cadence read the summary, which matches
+                    # ``_temporal_rank_figures``. Recency reads ``_plausible_last``
+                    # instead, the same override ``select_featured_sites`` applies,
+                    # so a datetime_suspect stamp does not win "most recent".
+                    last=(
+                        recency_last.get(c.task)
+                        if rank_by == "recency"
+                        else (date.fromisoformat(c.last) if c.last else None)
+                    ),
                     span_days=c.span_days,
                     median_revisit_days=c.median_revisit_days,
                 )
@@ -2329,15 +2416,13 @@ class CatalogIndex:
         share an id, the first by ``href`` order is returned deterministically.
         """
         row = self._conn.execute(
-            "SELECT href, doc, place FROM items WHERE id = ? ORDER BY href LIMIT 1",
+            "SELECT href, doc, place, datetime_suspect FROM items "
+            "WHERE id = ? ORDER BY href LIMIT 1",
             (item_id,),
         ).fetchone()
         if row is None:
             return None
-        href, doc, place = row
-        item = UmbraItem.from_dict(json.loads(doc), href=href)
-        item.place = place
-        return item
+        return self._item_from_row(*row)
 
     def get_by_href(self, href: str) -> UmbraItem | None:
         """Return the indexed item with this STAC sidecar URL, or ``None``.
@@ -2349,15 +2434,12 @@ class CatalogIndex:
         already answered from.
         """
         row = self._conn.execute(
-            "SELECT href, doc, place FROM items WHERE href = ? LIMIT 1",
+            "SELECT href, doc, place, datetime_suspect FROM items WHERE href = ? LIMIT 1",
             (href,),
         ).fetchone()
         if row is None:
             return None
-        stored_href, doc, place = row
-        item = UmbraItem.from_dict(json.loads(doc), href=stored_href)
-        item.place = place
-        return item
+        return self._item_from_row(*row)
 
     def distinct_ids(self) -> int:
         """Number of distinct STAC item ids (rows can repeat an id when one
@@ -2370,11 +2452,24 @@ class CatalogIndex:
         (``labeled``; see :meth:`bake_places`), how many carry a baked quicklook
         thumbnail (``thumbnailed``; see :meth:`bake_thumbnails`), and the date the
         index was last built (``built_at``, ``None`` for an index written before
-        build stamping)."""
-        items, start, end, tasks, labeled, thumbnailed = self._conn.execute(
-            "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), COUNT(DISTINCT task), "
-            "COUNT(place), COUNT(thumbnail) FROM items"
+        build stamping).
+
+        ``end`` is the newest acquisition date that is not
+        ``datetime_suspect`` (a datetime after ``properties.created``, or after
+        ``built_at`` when created is missing). Those rows stay in ``items``.
+        ``datetime_suspect_count`` is how many are flagged.
+        ``quarantined_future_count`` is how many source rows the last build
+        dropped for a datetime more than a day ahead (see
+        :func:`umbra_py.validate.sanitize_index`); they are not in the index.
+        """
+        items, start, end, tasks, labeled, thumbnailed, suspects = self._conn.execute(
+            "SELECT COUNT(*), MIN(acq_date), "
+            "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END), "
+            "COUNT(DISTINCT task), COUNT(place), COUNT(thumbnail), "
+            "SUM(datetime_suspect) FROM items"
         ).fetchone()
+        from .validate import quarantined_future_count, stored_validation  # noqa: PLC0415
+
         return {
             "items": items,
             "start": start,
@@ -2383,4 +2478,6 @@ class CatalogIndex:
             "labeled": labeled,
             "thumbnailed": thumbnailed,
             "built_at": self.get_meta("built_at"),
+            "datetime_suspect_count": int(suspects or 0),
+            "quarantined_future_count": quarantined_future_count(stored_validation(self)),
         }

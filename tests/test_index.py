@@ -309,6 +309,159 @@ def test_build_reports_progress(tmp_path):
     assert seen == [1, 2, 3]
 
 
+def test_build_flags_datetime_after_created_and_reports_quarantined_future(tmp_path, monkeypatch):
+    """A 2036 item is quarantined; a datetime after ``created`` is kept and flagged.
+
+    Quarantine (datetime more than a day after the build) stays in force, so
+    the upstream-style 2036 row is not in the index. ``quarantined_future_count``
+    is what still reports it. A datetime after ``properties.created`` that is
+    inside the window, and a datetime after ``built_at`` with no ``created``,
+    stay and are excluded from ``end`` and from ``rank_by=recency``.
+    """
+    from datetime import date, datetime, timezone
+
+    import umbra_py.index as index_mod
+    import umbra_py.validate as validate_mod
+
+    class _Date(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 10, 14)
+
+    monkeypatch.setattr(index_mod, "date", _Date)
+    monkeypatch.setattr(
+        validate_mod,
+        "_now",
+        lambda now=None: datetime(2026, 10, 14, 12, tzinfo=timezone.utc),
+    )
+
+    def stamped(task, acq, item_id, dt, created=None):
+        item = _make_item(task, acq, item_id, dt, (0, 0, 1, 1))
+        if created is not None:
+            item.properties["created"] = created
+        return item
+
+    plausible = stamped(
+        "Plausible",
+        "2026-09-13-17-21-00_UMBRA-05",
+        "plausible-new",
+        "2026-09-13T17:21:00Z",
+        "2026-09-22T00:00:00Z",
+    )
+    plausible_old = stamped(
+        "Plausible",
+        "2024-01-15-10-00-00_UMBRA-04",
+        "plausible-old",
+        "2024-01-15T10:00:00Z",
+        "2024-01-20T00:00:00Z",
+    )
+    # datetime after created, still before build + 1 day: kept, flagged.
+    after_created = stamped(
+        "Suspect",
+        "2026-10-01-00-00-00_UMBRA-05",
+        "after-created",
+        "2026-10-01T00:00:00Z",
+        "2026-09-01T00:00:00Z",
+    )
+    suspect_old = stamped(
+        "Suspect",
+        "2024-06-01-00-00-00_UMBRA-04",
+        "suspect-old",
+        "2024-06-01T00:00:00Z",
+        "2024-06-02T00:00:00Z",
+    )
+    # created missing, acquisition day after built_at, inside the +1 day slack.
+    missing_created = stamped(
+        "NoCreated",
+        "2026-10-15-00-00-00_UMBRA-05",
+        "missing-created",
+        "2026-10-15T00:00:00Z",
+    )
+    # The upstream shape: folder and datetime in 2036, created years earlier.
+    future = stamped(
+        "Future",
+        "2036-07-24-06-32-35_UMBRA-05",
+        "task-data-2036",
+        "2036-07-24T06:32:35Z",
+        "2026-05-06T00:00:00Z",
+    )
+
+    class FakeCatalog:
+        def search(self, **kwargs):
+            return iter(
+                [
+                    plausible,
+                    plausible_old,
+                    after_created,
+                    suspect_old,
+                    missing_created,
+                    future,
+                ]
+            )
+
+    with CatalogIndex(tmp_path / "catalog.db") as idx:
+        idx.build(FakeCatalog())
+        stats = idx.stats()
+        ids = {item.id for item in idx.search()}
+        flagged = {item.id: item.datetime_suspect for item in idx.search()}
+        kept = idx.get("after-created")
+        ranked = [site.task for site in idx.rank_sites(rank_by="recency", min_passes=2)]
+
+    assert "task-data-2036" not in ids
+    assert stats["quarantined_future_count"] == 1
+    assert stats["end"] == "2026-09-13"
+    assert stats["start"] == "2024-01-15"
+    assert stats["datetime_suspect_count"] == 2
+    assert flagged["after-created"] is True
+    assert flagged["missing-created"] is True
+    assert flagged["plausible-new"] is False
+    assert kept is not None
+    assert kept.datetime is not None
+    assert kept.datetime.isoformat().startswith("2026-10-01")
+    assert kept.properties["created"] == "2026-09-01T00:00:00Z"
+    # Suspect's newest usable pass is 2024-06-01; Plausible's is 2026-09-13.
+    assert ranked[0] == "Plausible"
+
+
+def test_v4_index_gains_datetime_suspect_column(tmp_path):
+    """A version-4 index gains the flag column in place, defaulting to not suspect."""
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    v4 = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL, place TEXT, thumbnail BLOB,
+        thumbnail_asset TEXT, thumbnail_size INTEGER
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v4)
+    conn.execute(
+        "INSERT INTO items (href, id, doc) VALUES (?, ?, ?)",
+        ("h", "old", '{"id": "old", "properties": {}, "assets": {}}'),
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        cols = {row[1] for row in idx._conn.execute("PRAGMA table_info(items)")}
+        assert "datetime_suspect" in cols
+        assert idx.stats()["datetime_suspect_count"] == 0
+        assert idx.stats()["quarantined_future_count"] == 0
+        assert idx.get("old").datetime_suspect is False
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
 def test_build_stamps_built_at(tmp_path):
     """build() records today's date so `index info` can report staleness."""
     from datetime import date

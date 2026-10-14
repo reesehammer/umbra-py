@@ -596,6 +596,23 @@ def _revisit_days(dates: Sequence[datetime]) -> list[float]:
     ]
 
 
+def _plausible_last(items: Iterable[UmbraItem]) -> date | None:
+    """Newest acquisition date that is not ``datetime_suspect``.
+
+    A suspect stamp is a real pass (it still counts toward depth and span)
+    whose datetime is not a latest: it is after ``properties.created``, or
+    after the index ``built_at`` when created is missing. Recency ranking and
+    the active-since/before newest-pass gate use this date so that stamp
+    cannot make a site look current. ``None`` when every dated pass is suspect.
+    """
+    dates = [
+        item.datetime for item in items if item.datetime is not None and not item.datetime_suspect
+    ]
+    if not dates:
+        return None
+    return max(dates).date()
+
+
 def _temporal_rank_figures(
     items: Iterable[UmbraItem],
 ) -> tuple[date | None, int | None, float | None]:
@@ -607,7 +624,10 @@ def _temporal_rank_figures(
     (:func:`umbra_py.showcase.select_featured_sites`, which ranks
     :class:`umbra_py.showcase.FeaturedSite` before summarising) feed
     :func:`_rank_sort_key` the same figures the index path reads back off a
-    :class:`SiteCoverage` -- so the two rankings cannot disagree. Returns
+    :class:`SiteCoverage` -- so the two rankings cannot disagree. Recency
+    ranking then replaces that ``last`` with :func:`_plausible_last` on both
+    paths, so a ``datetime_suspect`` stamp does not win "most recent" while
+    the reported ``last`` still names it. Returns
     ``(None, None, None)`` for a site with no dated pass, and a ``None`` span *and*
     median for one with a single dated pass (no baseline or gap to measure), matching
     the summary fields.
