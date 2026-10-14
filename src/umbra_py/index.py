@@ -982,6 +982,27 @@ def _index_acq_date(item: UmbraItem) -> date | None:
     return dt.date() if dt else None
 
 
+def _search_sort_key(item: UmbraItem) -> tuple[object, ...]:
+    """Order key :meth:`CatalogIndex.search_live` merges on.
+
+    For a row that has a task this is the same order as :meth:`CatalogIndex.search`:
+    acquisition date, full timestamp, id, then href. ``id`` is the tiebreaker
+    when two passes share a timestamp, so an offset page cannot swap them.
+    Null tasks sort first here; the SQL ``ORDER BY task IS NULL`` sorts them
+    last.
+    """
+    acq = _index_acq_date(item)
+    when = item.datetime
+    return (
+        0 if item.task is None else 1,
+        item.task or "",
+        acq.isoformat() if acq else "",
+        when.isoformat() if when else "",
+        item.id or "",
+        item.href or "",
+    )
+
+
 def _escape_like(value: str) -> str:
     """Escape LIKE wildcards so an ``area`` substring matches literally.
 
@@ -1927,9 +1948,12 @@ class CatalogIndex:
             params += wanted
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        # Total order. ``id`` breaks a timestamp tie so offset pages cannot
+        # repeat or skip a pass that shares a task and a datetime with its
+        # neighbor. ``href`` is last so a duplicated id still sorts in one way.
         sql = (
             "SELECT href, doc, place, datetime_suspect, created, published FROM items"
-            f"{where} ORDER BY task IS NULL, task, acq_date, href"
+            f"{where} ORDER BY task IS NULL, task, acq_date, datetime, id, href"
         )
 
         count = 0
@@ -1986,7 +2010,7 @@ class CatalogIndex:
         horizon -- its maximum indexed ``acq_date`` minus ``overlap_days`` -- so
         the walk fetches sidecars only for recent passes rather than the whole
         catalog (the same pruning :meth:`update` relies on). The two streams are
-        merged in the usual ``(task, acq_date)`` order and de-duplicated by
+        merged in ``(task, acq_date, datetime, id, href)`` order and de-duplicated by
         sidecar href, so an acquisition the index already knows is never yielded
         twice; the result is what a single fresh search would return, without
         paying for a full crawl.
@@ -2045,18 +2069,16 @@ class CatalogIndex:
         }
         index_stream = self.search(start=start_d, **filters)  # type: ignore[arg-type]
         catalog = catalog or UmbraCatalog()
-        live_stream = catalog.search(start=delta_start, **filters)  # type: ignore[arg-type]
+        # The live walk is acquisition-prefix order, not (datetime, id). Sort
+        # this bounded delta so the merge sees the same total order as search().
+        live_stream = sorted(
+            catalog.search(start=delta_start, **filters),  # type: ignore[arg-type]
+            key=_search_sort_key,
+        )
 
-        def keyed(items: Iterator[UmbraItem], origin: str):
+        def keyed(items: Iterable[UmbraItem], origin: str):
             for it in items:
-                acq = _index_acq_date(it)
-                key = (
-                    0 if it.task is None else 1,
-                    it.task or "",
-                    acq.isoformat() if acq else "",
-                    it.href or "",
-                )
-                yield key, origin, it
+                yield _search_sort_key(it), origin, it
 
         merged = heapq.merge(
             keyed(index_stream, "index"),

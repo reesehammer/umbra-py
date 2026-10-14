@@ -943,6 +943,31 @@ def _pagination_hrefs(
     return prev_href, next_href
 
 
+def _body_with_token(body: Mapping[str, Any], token: int) -> dict[str, Any]:
+    """Copy ``body`` with ``token`` set once.
+
+    A POST page link's body is the original search body (STAC API Item Search).
+    Any ``token`` already on that body is dropped before the new one is set, so
+    the cursor is replaced rather than left in place beside a second one.
+    """
+    page = {key: value for key, value in body.items() if key != "token"}
+    page["token"] = token
+    return page
+
+
+def _result_link(rel: str, href: str, body: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A ``next`` or ``prev`` link. A body makes it POST; otherwise it is a GET."""
+    if body is None:
+        return _link(rel, href, type="application/geo+json", method="GET")
+    return _link(
+        rel,
+        href,
+        type="application/geo+json",
+        method="POST",
+        body=dict(body),
+    )
+
+
 def search_result(
     items: list[UmbraItem],
     base_url: str,
@@ -950,13 +975,17 @@ def search_result(
     returned: int | None = None,
     next_href: str | None = None,
     prev_href: str | None = None,
+    next_body: Mapping[str, Any] | None = None,
+    prev_body: Mapping[str, Any] | None = None,
     self_href: str | None = None,
 ) -> dict[str, Any]:
     """Wrap items in a STAC ``FeatureCollection`` (the ``/search`` response).
 
     Adds the STAC ``context`` block (returned/limit counts), a ``next`` link
     when the query paginated past this page, and a ``prev`` link when this
-    page is not the first.
+    page is not the first. A body on either link makes that link ``POST``
+    (the STAC shape for paging a POST ``/search``); without one the link is
+    a ``GET`` of ``href``.
     """
     base = base_url.rstrip("/")
     features = [item_to_stac(it, base_url) for it in items]
@@ -964,9 +993,9 @@ def search_result(
     if self_href:
         links.append(_link("self", self_href, type="application/geo+json"))
     if prev_href:
-        links.append(_link("prev", prev_href, type="application/geo+json", method="GET"))
+        links.append(_result_link("prev", prev_href, prev_body))
     if next_href:
-        links.append(_link("next", next_href, type="application/geo+json", method="GET"))
+        links.append(_result_link("next", next_href, next_body))
     return {
         "type": "FeatureCollection",
         "stac_version": STAC_VERSION,
@@ -1017,8 +1046,10 @@ def run_search(
     ``max_resolution`` are the SAR acquisition-property filters -- all pushed
     down to the backend's ``search`` (both :class:`CatalogIndex` and the live
     :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
-    deterministic offset paging over the source's stable ordering: we request
-    one extra item to decide whether a ``next`` link is warranted.
+    deterministic offset paging. The index orders by task, acquisition date,
+    datetime, then id (href last), so two passes that share a timestamp cannot
+    swap at a page boundary. One extra item is requested to decide whether a
+    ``next`` link is warranted.
     """
     limit = _clamp_limit(limit)
     offset = max(0, int(offset))
@@ -3226,18 +3257,22 @@ def build_app(
             )
         finally:
             _close(source)
-        # The body carries the search; the page links are GETs of this request's
-        # query, with ``token`` replaced rather than appended.
-        prev_href, next_href = _pagination_hrefs(
-            str(request.url), offset=offset, limit=limit, has_next=has_next
-        )
+        # STAC API Item Search: a POST page link is POST /search again, and its
+        # body is this request's body with ``token`` replaced. A GET of
+        # ``/search?token=N`` would drop limit, collections, and every other
+        # filter that lived only in the JSON.
+        search_href = f"{base}/search"
+        prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
+        next_body = _body_with_token(body, offset + limit) if has_next else None
         result = search_result(
             page,
             str(request.base_url),
             returned=len(page),
-            next_href=next_href,
-            prev_href=prev_href,
-            self_href=f"{base}/search",
+            next_href=search_href if next_body is not None else None,
+            prev_href=search_href if prev_body is not None else None,
+            next_body=next_body,
+            prev_body=prev_body,
+            self_href=search_href,
         )
         return JSONResponse(content=result, media_type=geojson)
 
