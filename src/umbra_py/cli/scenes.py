@@ -154,7 +154,10 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
     "human progress lines. Progress stays on stderr.",
 )
 def download(item_url, assets, dest, overwrite, as_json) -> None:
-    """Download asset(s) of an item given its STAC JSON URL.
+    """Download asset(s) of an item given its sidecar URL.
+
+    Accepts a ``*.stac.v2.json`` URL or a legacy ``*_METADATA.json`` URL
+    (2023 to 2024 collects that have no STAC sidecar).
 
     ``--json`` emits a machine-readable ``[{asset, path, bytes, sha256}, ...]``
     array (``docs/schemas/download.schema.json``) so an agent can verify each

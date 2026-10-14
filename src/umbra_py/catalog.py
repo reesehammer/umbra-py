@@ -34,7 +34,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from datetime import date, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import defusedxml.ElementTree as _defused_et
 import requests
@@ -131,6 +131,23 @@ def _acq_date(prefix: str) -> date | None:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
+
+
+def _task_relative(key: str) -> tuple[str, str] | None:
+    """``(task_prefix, key relative to it)`` for an object under a data root.
+
+    ``None`` when ``key`` is not ``<data-root><task>/<rest>`` — the shape every
+    acquisition the walker groups lives in.
+    """
+    for data_prefix in _DATA_PREFIXES:
+        if not key.startswith(data_prefix):
+            continue
+        rest = key[len(data_prefix) :]
+        task, sep, after = rest.partition("/")
+        if not sep or not task or not after:
+            return None
+        return f"{data_prefix}{task}/", after
+    return None
 
 
 def _task_name(task_prefix: str) -> str:
@@ -832,6 +849,30 @@ class UmbraCatalog:
                     if item is not None:
                         yield item
 
+    def _object_key(self, url: str) -> str | None:
+        """Object key for a public URL of this catalog's bucket, or ``None``.
+
+        Accepts the path-style URL :meth:`_url_for` emits
+        (``https://s3.<region>.amazonaws.com/<bucket>/<key>``) and the
+        virtual-hosted form some sidecar hrefs use
+        (``https://<bucket>.s3[.<region>].amazonaws.com/<key>``).
+        """
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None
+        host = parts.netloc.lower()
+        path = unquote(parts.path).lstrip("/")
+        bucket = self.bucket
+        if host in {f"s3.{self.region}.amazonaws.com", "s3.amazonaws.com"}:
+            prefix = f"{bucket}/"
+            return path[len(prefix) :] if path.startswith(prefix) else None
+        if host in {
+            f"{bucket}.s3.amazonaws.com",
+            f"{bucket}.s3.{self.region}.amazonaws.com",
+        }:
+            return path or None
+        return None
+
     def _url_for(self, key: str) -> str:
         """Build a public HTTPS URL for an S3 key, encoding spaces / unicode.
 
@@ -887,4 +928,56 @@ class UmbraCatalog:
             "umbra-py:layout": "legacy" if legacy else "v2",
         }
         item.raw = {**item.raw, "properties": item.properties}
+        return item
+
+    def _item_from_sidecar_url(self, url: str) -> UmbraItem:
+        """Build an item from one public sidecar URL.
+
+        A ``*.stac.v2.json`` document is already a STAC item. A legacy
+        ``*_METADATA.json`` document is not: the index walk maps it with
+        :func:`stac_from_legacy_metadata` and attaches the sibling product
+        keys it listed (:meth:`_item_from_sidecar`). A one-URL command has
+        no listing yet, so this lists the sidecar's directory and hands
+        those keys to the same method. The item then carries the CPHD,
+        SICD, GEC and any other siblings that directory actually holds.
+        """
+        bare = url.split("#", 1)[0].split("?", 1)[0]
+        if not bare.endswith(_LEGACY_SIDECAR_SUFFIX):
+            return UmbraItem.from_dict(self._get(bare), href=url)
+        # Reject a URL that is not this bucket before any request. A legacy
+        # sidecar is only meaningful next to the siblings we are about to list.
+        key = self._object_key(bare)
+        located = _task_relative(key) if key else None
+        if key is None or located is None:
+            raise CatalogError(
+                f"{url!r} is not a legacy metadata object in bucket {self.bucket!r}.",
+                hint=(
+                    "Pass the public https URL of the collect's "
+                    "<stem>_METADATA.json under sar-data/tasks/."
+                ),
+            )
+        task_prefix, rel = located
+        group = _acquisition_group(rel)
+        if group is None:
+            raise CatalogError(
+                f"Could not find an acquisition in legacy metadata URL {url!r}.",
+                hint="The object name should start with the collect's YYYY-MM-DD stem.",
+            )
+        parent = key.rsplit("/", 1)[0] + "/"
+        doc = self._get(bare)
+        _, files = self._list_prefix(parent)
+        siblings = [
+            k
+            for k in files
+            if k.startswith(task_prefix) and _acquisition_group(k[len(task_prefix) :]) == group
+        ]
+        item = self._item_from_sidecar(doc, task_prefix + group[0], siblings, bare)
+        if item is None:
+            raise CatalogError(
+                f"Legacy metadata {url!r} has no usable collect or no product files.",
+                hint=(
+                    "The document needs a collect id, start time and footprint, "
+                    "and the directory needs the product objects next to the sidecar."
+                ),
+            )
         return item

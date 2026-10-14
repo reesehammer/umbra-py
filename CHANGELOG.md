@@ -139,6 +139,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **`umbra download` accepts a legacy `_METADATA.json` URL.** Commands that
+  take a sidecar URL (`download`, `info`, `quicklook`, and the rest) used to
+  parse a 2023 to 2024 `<stem>_METADATA.json` as STAC and fail with `Item ''
+  has no asset 'SICD'`. Those URLs now use the same synthesis as `umbra
+  index build`, so the collect's CPHD, SICD, and GEC siblings are assets.
 - **A full volume no longer breaks the boot refresh or the index.**
   `umbra index fetch --if-changed` and `fetch-thumbnails --if-changed` remove
   stale `.next` / `.next.part` / `.merge` leftovers and check free space before
