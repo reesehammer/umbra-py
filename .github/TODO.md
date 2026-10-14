@@ -12,8 +12,8 @@ still open.
 
 ## `search_live` null-task order disagrees with `search`
 
-- **Surfaced in:** the POST `/search` pagination follow-up to
-  https://github.com/reesehammer/umbra-py/pull/282
+- **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/285
+  (follow-up to https://github.com/reesehammer/umbra-py/pull/282)
 - **Code:** `src/umbra_py/index.py` (`_search_sort_key`,
   `CatalogIndex.search`'s `ORDER BY`).
 
