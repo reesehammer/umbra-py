@@ -171,6 +171,32 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **Published thumbnails fit GitHub's 2 GiB release-asset limit.** The weekly
+  sidecar passed that limit and `gh release upload --clobber` deleted the
+  previous `catalog.thumbs.db` before GitHub rejected the replacement
+  (`size must be less than 2147483648`), so the asset 404'd. The workflow now
+  uploads `catalog.thumbs.manifest.json` and `catalog.thumbs.db.partNNN.<sha>`
+  parts under 1.5 GiB, checks that each asset is on the release, and fails
+  the job if it is not. `umbra index fetch-thumbnails` (and the container
+  entrypoint) reads the manifest and reassembles `catalog.thumbs.db`. A
+  release that still has only the single file keeps working.
+- **`POST /search` page links keep the request.** `next` and `prev` are
+  `POST /search` with the original JSON body and `token` set once (replaced,
+  not added again). The previous links were `GET /search?token=N` with no
+  body, so the next page dropped `limit`, `collections`, and the other
+  filters and used the default limit of 10. Search order is task, acquisition
+  date, datetime, then id, so two passes that share a timestamp do not swap
+  at a page boundary.
+- **GET search page links keep one `token` and the rest of the query.**
+  `next` and `prev` on `GET /search` and `GET /collections/{collection}/items`
+  replace any `token` already in the query instead of appending another, and
+  keep `bbox`, `datetime`, `collections`, `limit`, `ids`, `intersects`, and
+  the other parameters. A `prev` link is included when the page is not the
+  first.
+- **`GET /collections` no longer scans baked thumbnails for its time span.**
+  The extent comes from `CatalogIndex.temporal_extent()`, the same start and
+  end as `stats()` without reading thumbnail blobs, and is reused until the
+  index file changes.
 - **`umbra download` accepts a legacy `_METADATA.json` URL.** Commands that
   take a sidecar URL (`download`, `info`, `quicklook`, and the rest) used to
   parse a 2023 to 2024 `<stem>_METADATA.json` as STAC and fail with `Item ''

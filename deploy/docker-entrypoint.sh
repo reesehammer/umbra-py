@@ -113,11 +113,18 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
 fi
 
 # Baked SAR previews so MCP quicklook / describe_scene work without proxying
-# Umbra COGs. catalog.db -> catalog.thumbs.db sits beside the index. Refreshed
-# like the index: `--if-changed` downloads only a changed release asset, and
-# re-merges whenever the sidecar changed or the index above was swapped (the
-# published catalog.db carries no thumbnails). A failed check keeps and merges
-# the existing sidecar; no sidecar at all never blocks startup.
+# Umbra COGs. The local file is catalog.db -> catalog.thumbs.db beside the
+# index. The catalog-index release publishes that sqlite as
+# catalog.thumbs.manifest.json plus catalog.thumbs.db.partNNN.<sha> parts,
+# each under GitHub's 2 GiB asset limit. `umbra index fetch-thumbnails
+# --if-changed` (no --url) reads catalog.thumbs.manifest.json, downloads
+# those parts, and writes catalog.thumbs.db. A release with no manifest
+# still serves a single catalog.thumbs.db. Refreshed like the index:
+# `--if-changed` downloads only when that manifest (or the legacy asset)
+# changed, and re-merges whenever the sidecar changed or the index above
+# was swapped (the published catalog.db carries no thumbnails). A failed
+# check keeps and merges the existing sidecar; no sidecar at all never
+# blocks startup.
 # Both refreshes are disk-safe: each first deletes the scratch files an
 # interrupted boot left (`.next`, `.next.part`, `.merge`, ...), checks free
 # space before downloading, and the merge writes a copy of catalog.db that is

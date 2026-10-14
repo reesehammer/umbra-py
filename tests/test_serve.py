@@ -14,7 +14,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 
@@ -490,6 +492,412 @@ def test_search_paginates_with_next_link(client):
     page2 = client.get(href).json()
     assert len(page2["features"]) == 1
     assert not [link for link in page2["links"] if link["rel"] == "next"]
+
+
+def _token_values(href: str) -> list[str]:
+    return parse_qs(urlparse(href).query).get("token", [])
+
+
+def test_href_with_token_replaces_every_existing_token():
+    # Page 40 of the old builder carried token=1&token=2&...&token=39.
+    href = "https://api.example/search?limit=10&" + "&".join(f"token={i}" for i in range(1, 40))
+    out = serve._href_with_token(href, 40)
+    query = parse_qs(urlparse(out).query)
+    assert query["token"] == ["40"]
+    assert query["limit"] == ["10"]
+    assert out.count("token=") == 1
+
+
+def test_search_pagination_replaces_token_across_pages(client):
+    """Following next several times keeps exactly one token and the right page.
+
+    The request already has two ``token`` parameters. The server reads the
+    last one (offset 0). Each next link must replace them, not append a third,
+    and still walk the three items in order. ``prev`` does the same on the
+    way back.
+    """
+    href = "/search?limit=1&bbox=-69,10,-67,11&token=5&token=0"
+    ids: list[str] = []
+    next_seen = 0
+    body: dict | None = None
+    for _ in range(6):
+        body = client.get(href).json()
+        assert len(body["features"]) == 1
+        ids.append(body["features"][0]["id"])
+        prevs = [link for link in body["links"] if link["rel"] == "prev"]
+        if len(ids) == 1:
+            assert prevs == []
+        else:
+            assert len(prevs) == 1
+            prev_query = parse_qs(urlparse(prevs[0]["href"]).query)
+            assert prev_query["token"] == [str(len(ids) - 2)]
+            assert prev_query["bbox"] == ["-69,10,-67,11"]
+            assert prev_query["limit"] == ["1"]
+        nxt = [link for link in body["links"] if link["rel"] == "next"]
+        if not nxt:
+            break
+        next_seen += 1
+        raw = nxt[0]["href"]
+        query = parse_qs(urlparse(raw).query)
+        assert query["token"] == [str(len(ids))]
+        assert query["bbox"] == ["-69,10,-67,11"]
+        assert query["limit"] == ["1"]
+        assert raw.count("token=") == 1
+        href = raw.replace("http://testserver", "")
+    assert ids == ["item-0", "item-1", "item-2"]
+    assert next_seen == 2
+    assert body is not None
+    # Walk prev from the last page back to the first; still one token each.
+    back = [body["features"][0]["id"]]
+    for _ in range(4):
+        prevs = [link for link in body["links"] if link["rel"] == "prev"]
+        if not prevs:
+            break
+        raw = prevs[0]["href"]
+        assert _token_values(raw) == [str(len(ids) - len(back) - 1)]
+        assert raw.count("token=") == 1
+        body = client.get(raw.replace("http://testserver", "")).json()
+        back.append(body["features"][0]["id"])
+    assert back == ["item-2", "item-1", "item-0"]
+
+
+def _assert_post_page_link(link: dict, original: dict, token: int) -> None:
+    """A POST page link is POST /search with the original body and one token."""
+    assert link["method"] == "POST"
+    assert link.get("merge") is not True
+    parts = urlparse(link["href"])
+    assert parts.path == "/search"
+    assert parts.query == ""
+    assert "token=" not in link["href"]
+    body = link["body"]
+    assert [key for key in body if key == "token"] == ["token"]
+    assert body["token"] == token
+    assert isinstance(body["token"], int) and not isinstance(body["token"], bool)
+    assert json.dumps(body).count('"token"') == 1
+    assert set(body) == set(original) | {"token"}
+    for key, value in original.items():
+        if key == "token":
+            continue
+        assert body[key] == value
+
+
+def test_body_with_token_replaces_and_does_not_append():
+    original = {
+        "limit": 2,
+        "token": 0,
+        "bbox": [-69, 10, -67, 11],
+        "collections": ["umbra-open-data"],
+    }
+    page = serve._body_with_token(original, 4)
+    assert page["token"] == 4
+    assert page["limit"] == 2
+    assert page["collections"] == ["umbra-open-data"]
+    assert [key for key in page if key == "token"] == ["token"]
+    assert original["token"] == 0
+    again = serve._body_with_token(page, 6)
+    assert again["token"] == 6
+    assert [key for key in again if key == "token"] == ["token"]
+
+
+def test_post_search_pagination_replaces_token(client):
+    """POST page links carry the JSON body. Query-string tokens do not leak."""
+    original = {"limit": 1, "token": 0, "bbox": [-69, 10, -67, 11]}
+    resp = client.post(
+        "/search?limit=1&bbox=-69,10,-67,11&token=4&token=0",
+        json=original,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [f["id"] for f in body["features"]] == ["item-0"]
+    assert [link for link in body["links"] if link["rel"] == "prev"] == []
+    nxt = next(link for link in body["links"] if link["rel"] == "next")
+    _assert_post_page_link(nxt, original, 1)
+
+    ids = ["item-0"]
+    current = nxt["body"]
+    href = nxt["href"].replace("http://testserver", "")
+    for _ in range(5):
+        page = client.post(href, json=current).json()
+        ids.append(page["features"][0]["id"])
+        links = [link for link in page["links"] if link["rel"] == "next"]
+        if not links:
+            break
+        _assert_post_page_link(links[0], original, len(ids))
+        current = links[0]["body"]
+        href = links[0]["href"].replace("http://testserver", "")
+    assert ids == ["item-0", "item-1", "item-2"]
+
+    # A later page's prev link replaces token; the URL's token=9 is not the cursor.
+    mid = client.post("/search?limit=1&token=9", json={"limit": 1, "token": 1}).json()
+    assert mid["features"][0]["id"] == "item-1"
+    prev = next(link for link in mid["links"] if link["rel"] == "prev")
+    nxt = next(link for link in mid["links"] if link["rel"] == "next")
+    _assert_post_page_link(prev, {"limit": 1, "token": 1}, 0)
+    _assert_post_page_link(nxt, {"limit": 1, "token": 1}, 2)
+
+
+def _paging_href(task: str, day: str, tag: str) -> str:
+    return (
+        "https://umbra-open-data-catalog.s3.amazonaws.com/sar-data/tasks/"
+        f"{task}/{day}-00-00-00_UMBRA-{tag}/x.stac.v2.json"
+    )
+
+
+# Same task and acquisition date, so order is datetime then id. Href tags are
+# chosen so a href tiebreaker would disagree (h1 < h2 puts id-d before id-c;
+# id order and the timestamp tie put id-c first). Decoys fail exactly one filter.
+_PAGING_ROWS = [
+    ("id-b", "Harbor", "2024-06-01", "10:00:00", "h7", "keep"),
+    ("id-a", "Harbor", "2024-06-01", "11:00:00", "h6", "keep"),
+    ("id-d", "Harbor", "2024-06-01", "12:00:00", "h1", "keep"),
+    ("id-c", "Harbor", "2024-06-01", "12:00:00", "h2", "keep"),
+    ("id-f", "Harbor", "2024-06-01", "13:00:00", "h5", "keep"),
+    ("id-e", "Harbor", "2024-06-01", "14:00:00", "h4", "keep"),
+    ("id-g", "Harbor", "2024-06-01", "15:00:00", "h3", "keep"),
+    ("id-x", "Harbor", "2024-06-01", "16:00:00", "hx", "extra"),
+    ("id-far", "Harbor", "2024-06-01", "09:00:00", "hf", "far"),
+    ("id-inland", "Inland", "2024-06-01", "10:30:00", "hi", "inland"),
+    ("id-old", "Harbor", "2024-01-15", "08:00:00", "ho", "old"),
+    ("id-nogeoc", "Harbor", "2024-06-01", "12:30:00", "hn", "nogeoc"),
+]
+_SEARCH_ORDER = ["id-b", "id-a", "id-c", "id-d", "id-f", "id-e", "id-g"]
+_ITEMS_ORDER = [*_SEARCH_ORDER, "id-x"]
+_PAGING_LIMIT = 2
+_PAGING_BBOX = [-69, 10, -67, 11]
+_PAGING_POLYGON = {
+    "type": "Polygon",
+    "coordinates": [[[-69, 10], [-67, 10], [-67, 11], [-69, 11], [-69, 10]]],
+}
+
+
+@pytest.fixture
+def paging_client(tmp_path, sample_item_dict) -> TestClient:
+    path = tmp_path / "paging.db"
+    with CatalogIndex(path) as idx:
+        for item_id, task, day, time, tag, kind in _PAGING_ROWS:
+            doc = copy.deepcopy(sample_item_dict)
+            doc["id"] = item_id
+            doc["properties"]["datetime"] = f"{day}T{time}Z"
+            if kind == "far":
+                doc["bbox"] = [0.0, 0.0, 1.0, 1.0]
+                doc["geometry"] = {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                }
+            if kind == "nogeoc":
+                doc["assets"] = {"metadata": doc["assets"]["metadata"]}
+            idx.add(UmbraItem.from_dict(doc, href=_paging_href(task, day, tag)))
+    return TestClient(serve.build_app(path))
+
+
+def _feature_ids(page: dict) -> list[str]:
+    return [feature["id"] for feature in page["features"]]
+
+
+def _assert_page_sizes(pages: list[dict], limit: int) -> None:
+    assert len(pages) >= 3
+    for page in pages[:-1]:
+        assert len(page["features"]) == limit
+    assert 0 < len(pages[-1]["features"]) <= limit
+
+
+def _post_search_body() -> dict:
+    kept = {item_id for item_id, *_rest in _PAGING_ROWS if item_id != "id-x"}
+    return {
+        "limit": _PAGING_LIMIT,
+        "bbox": list(_PAGING_BBOX),
+        "datetime": "2024-06-01/2024-06-01",
+        "collections": [COLLECTION],
+        "ids": [item_id for item_id, *_rest in _PAGING_ROWS if item_id in kept],
+        "area": "Harbor",
+        "product_types": ["GEC"],
+        "fuzzy": False,
+    }
+
+
+def _walk_post(client: TestClient, original: dict) -> list[dict]:
+    href = "/search"
+    current = original
+    pages: list[dict] = []
+    for _ in range(12):
+        resp = client.post(href, json=current)
+        assert resp.status_code == 200, resp.text
+        page = resp.json()
+        pages.append(page)
+        offset = int(current.get("token") or 0)
+        prevs = [link for link in page["links"] if link["rel"] == "prev"]
+        nxt = [link for link in page["links"] if link["rel"] == "next"]
+        if offset == 0:
+            assert prevs == []
+        else:
+            assert len(prevs) == 1
+            _assert_post_page_link(prevs[0], original, max(0, offset - original["limit"]))
+        if not nxt:
+            break
+        assert len(nxt) == 1
+        _assert_post_page_link(nxt[0], original, offset + original["limit"])
+        href = nxt[0]["href"].replace("http://testserver", "")
+        current = nxt[0]["body"]
+    else:
+        raise AssertionError("POST /search paging did not finish")
+    return pages
+
+
+def _walk_post_back(client: TestClient, page: dict, original: dict) -> list[list[str]]:
+    back = [_feature_ids(page)]
+    for _ in range(12):
+        prevs = [link for link in page["links"] if link["rel"] == "prev"]
+        if not prevs:
+            break
+        _assert_post_page_link(prevs[0], original, prevs[0]["body"]["token"])
+        href = prevs[0]["href"].replace("http://testserver", "")
+        page = client.post(href, json=prevs[0]["body"]).json()
+        back.append(_feature_ids(page))
+    else:
+        raise AssertionError("POST /search prev walk did not finish")
+    return back
+
+
+def test_post_search_paging_keeps_filters_over_pages(paging_client):
+    """POST next/prev follow the body, one token, and cover the filtered set once."""
+    original = _post_search_body()
+    pages = _walk_post(paging_client, original)
+    got = [item_id for page in pages for item_id in _feature_ids(page)]
+    _assert_page_sizes(pages, original["limit"])
+    assert got == _SEARCH_ORDER
+    assert len(got) == len(set(got))
+    unpaged = {key: value for key, value in original.items() if key != "token"}
+    unpaged["limit"] = 100
+    full = _feature_ids(paging_client.post("/search", json=unpaged).json())
+    assert got == full
+    back = _walk_post_back(paging_client, pages[-1], original)
+    assert back == [_feature_ids(page) for page in reversed(pages)]
+
+
+def _query_of(href: str) -> dict[str, list[str]]:
+    return parse_qs(urlparse(href).query, keep_blank_values=True)
+
+
+def _assert_get_page_link(link: dict, original: dict[str, list[str]], token: int, path: str):
+    assert link["method"] == "GET"
+    assert "body" not in link
+    href = link["href"]
+    assert href.count("token=") == 1
+    assert urlparse(href).path == path
+    query = _query_of(href)
+    assert query["token"] == [str(token)]
+    assert set(query) == (set(original) - {"token"}) | {"token"}
+    for key, values in original.items():
+        if key == "token":
+            continue
+        assert query[key] == values
+
+
+def _walk_get(client: TestClient, first_href: str) -> list[dict]:
+    path = urlparse(first_href).path
+    original = _query_of(first_href)
+    limit = int(original["limit"][0])
+    href = first_href
+    pages: list[dict] = []
+    for _ in range(12):
+        resp = client.get(href)
+        assert resp.status_code == 200, resp.text
+        page = resp.json()
+        pages.append(page)
+        offset = int(_query_of(href).get("token", ["0"])[-1])
+        prevs = [link for link in page["links"] if link["rel"] == "prev"]
+        nxt = [link for link in page["links"] if link["rel"] == "next"]
+        if offset == 0:
+            assert prevs == []
+        else:
+            assert len(prevs) == 1
+            _assert_get_page_link(prevs[0], original, max(0, offset - limit), path)
+        if not nxt:
+            break
+        assert len(nxt) == 1
+        _assert_get_page_link(nxt[0], original, offset + limit, path)
+        href = nxt[0]["href"].replace("http://testserver", "")
+    else:
+        raise AssertionError("GET paging did not finish")
+    return pages
+
+
+def _walk_get_back(client: TestClient, page: dict, original: dict, path: str) -> list[list[str]]:
+    back = [_feature_ids(page)]
+    for _ in range(12):
+        prevs = [link for link in page["links"] if link["rel"] == "prev"]
+        if not prevs:
+            break
+        token = int(_query_of(prevs[0]["href"])["token"][0])
+        _assert_get_page_link(prevs[0], original, token, path)
+        page = client.get(prevs[0]["href"].replace("http://testserver", "")).json()
+        back.append(_feature_ids(page))
+    else:
+        raise AssertionError("GET prev walk did not finish")
+    return back
+
+
+def _assert_get_pages(client: TestClient, url: str, expected: list[str]) -> None:
+    first = client.get(url)
+    assert first.status_code == 200, first.text
+    request_url = str(first.request.url).replace("http://testserver", "")
+    pages = _walk_get(client, request_url)
+    got = [item_id for page in pages for item_id in _feature_ids(page)]
+    _assert_page_sizes(pages, int(_query_of(request_url)["limit"][0]))
+    assert got == expected
+    assert len(got) == len(set(got))
+    back = _walk_get_back(client, pages[-1], _query_of(request_url), urlparse(request_url).path)
+    assert back == [_feature_ids(page) for page in reversed(pages)]
+
+
+def test_get_search_paging_keeps_filters_over_pages(paging_client):
+    """GET /search next/prev keep every query param and one token."""
+    ids = ",".join(item_id for item_id, *_rest in _PAGING_ROWS if item_id != "id-x")
+    common = {
+        "limit": str(_PAGING_LIMIT),
+        "datetime": "2024-06-01/2024-06-01",
+        "collections": COLLECTION,
+        "ids": ids,
+        "area": "Harbor",
+        "product_types": "GEC",
+        "fuzzy": "false",
+    }
+    intersects = {
+        **common,
+        "intersects": json.dumps(_PAGING_POLYGON, separators=(",", ":")),
+    }
+    _assert_get_pages(paging_client, "/search?" + urlencode(intersects), _SEARCH_ORDER)
+    bbox = {**common, "bbox": "-69,10,-67,11"}
+    _assert_get_pages(paging_client, "/search?" + urlencode(bbox), _SEARCH_ORDER)
+
+
+def test_get_items_paging_keeps_filters_over_pages(paging_client):
+    """GET /collections/{id}/items next/prev keep the query and one token."""
+    url = (
+        f"/collections/{COLLECTION}/items?limit={_PAGING_LIMIT}"
+        "&bbox=-69,10,-67,11&datetime=2024-06-01/2024-06-01"
+        "&area=Harbor&product_types=GEC"
+    )
+    _assert_get_pages(paging_client, url, _ITEMS_ORDER)
+
+
+def test_collections_reuses_temporal_extent(client, index_path, monkeypatch):
+    calls = {"n": 0}
+    real = CatalogIndex.temporal_extent
+
+    def wrapped(self):
+        calls["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(CatalogIndex, "temporal_extent", wrapped)
+    first = client.get("/collections").json()["collections"][0]["extent"]["temporal"]
+    second = client.get(f"/collections/{COLLECTION}").json()["extent"]["temporal"]
+    assert first == second
+    assert calls["n"] == 1
+    st = index_path.stat()
+    os.utime(index_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    client.get("/collections")
+    assert calls["n"] == 2
 
 
 def test_post_search_matches_get_search(client):

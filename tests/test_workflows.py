@@ -176,16 +176,31 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     position = {step.get("id") or step.get("name"): i for i, step in enumerate(steps)}
     redeploy, confirm = steps[position["redeploy"]], steps[position[CONFIRM_STEP]]
 
-    order = [position[key] for key in ("publish", THUMBS_STEP, "redeploy", CONFIRM_STEP)]
+    order = [
+        position[key] for key in ("publish", THUMBS_STEP, VERIFY_STEP, "redeploy", CONFIRM_STEP)
+    ]
     assert order == sorted(order), order
     assert "steps.publish.outcome == 'success'" in redeploy["if"]
     assert "!cancelled()" in redeploy["if"] and "RAILWAY_TOKEN" not in redeploy["if"]
     assert "::warning" in redeploy["run"] and "GITHUB_STEP_SUMMARY" in redeploy["run"]
     assert "steps.publish.outputs.etag" in confirm["env"]["WANT_SNAPSHOT"]
     assert "'snapshot'" in confirm["run"]
+    assert "published_thumbs_snapshot" in confirm["run"]
+
+    thumbs, verify = steps[position[THUMBS_STEP]], steps[position[VERIFY_STEP]]
+    assert "continue-on-error" not in thumbs
+    assert "continue-on-error" not in verify
+    assert "!cancelled()" in thumbs["if"] and "!cancelled()" in verify["if"]
+    assert "pack_thumbnail_release" in thumbs["run"]
+    assert "publish_thumbnail_release" in thumbs["run"]
+    assert "--clobber" not in thumbs["run"]
+    assert "assert_remote_thumbnail_release" in verify["run"]
+    workflow = (WORKFLOW_DIR / "publish-index.yml").read_text(encoding="utf-8")
+    assert "catalog.thumbs.db --clobber" not in workflow
 
 
-THUMBS_STEP = "Publish the thumbnail sidecar (non-blocking)"
+THUMBS_STEP = "Publish the thumbnail sidecar"
+VERIFY_STEP = "Verify the thumbnail release assets"
 CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
 
 

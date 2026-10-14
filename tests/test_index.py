@@ -403,6 +403,7 @@ def test_build_flags_datetime_after_created_and_reports_quarantined_future(tmp_p
     with CatalogIndex(tmp_path / "catalog.db") as idx:
         idx.build(FakeCatalog())
         stats = idx.stats()
+        extent = idx.temporal_extent()
         ids = {item.id for item in idx.search()}
         flagged = {item.id: item.datetime_suspect for item in idx.search()}
         kept = idx.get("after-created")
@@ -412,6 +413,7 @@ def test_build_flags_datetime_after_created_and_reports_quarantined_future(tmp_p
     assert stats["quarantined_future_count"] == 1
     assert stats["end"] == "2026-09-13"
     assert stats["start"] == "2024-01-15"
+    assert extent == (stats["start"], stats["end"])
     assert stats["datetime_suspect_count"] == 2
     assert flagged["after-created"] is True
     assert flagged["missing-created"] is True
@@ -1983,22 +1985,27 @@ def test_default_thumbs_path_sits_beside_the_index(tmp_path):
 
 
 def test_fetch_prebuilt_thumbnails_downloads_the_release_asset(tmp_path, monkeypatch):
-    """The fetch helper targets the published sidecar and overwrites in place."""
+    """No manifest: the fetch helper still downloads the single sidecar asset."""
+    import responses
+
     from umbra_py import index as index_mod
-    from umbra_py.constants import CATALOG_INDEX_THUMBS_URL
 
-    seen = {}
-
-    def fake_download(url, dest, **kw):
-        seen["url"] = url
-        seen["overwrite"] = kw.get("overwrite")
-        Path(dest).write_bytes(b"sidecar")
-        return dest
-
-    monkeypatch.setattr("umbra_py.download.download_url", fake_download)
-    out = index_mod.fetch_prebuilt_thumbnails(tmp_path / "sub" / "catalog.thumbs.db")
+    manifest = "https://example.test/releases/download/catalog-index/catalog.thumbs.manifest.json"
+    thumbs = "https://example.test/releases/download/catalog-index/catalog.thumbs.db"
+    monkeypatch.setattr("umbra_py.constants.CATALOG_INDEX_THUMBS_MANIFEST_URL", manifest)
+    monkeypatch.setattr("umbra_py.constants.CATALOG_INDEX_THUMBS_URL", thumbs)
+    with responses.RequestsMock() as mocked:
+        mocked.add(responses.HEAD, manifest, status=404)
+        mocked.add(
+            responses.HEAD,
+            thumbs,
+            status=200,
+            headers={"ETag": '"t"', "Content-Length": "7"},
+        )
+        mocked.add(responses.GET, thumbs, body=b"sidecar", status=200)
+        out = index_mod.fetch_prebuilt_thumbnails(tmp_path / "sub" / "catalog.thumbs.db")
     assert out.read_bytes() == b"sidecar"
-    assert seen == {"url": CATALOG_INDEX_THUMBS_URL, "overwrite": True}
+    assert not (tmp_path / "sub" / "catalog.thumbs.db.next").exists()
 
 
 def test_cli_index_thumbnail_sidecar_round_trip(tmp_path, monkeypatch):

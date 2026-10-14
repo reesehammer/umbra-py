@@ -191,3 +191,18 @@ def test_entrypoint_refreshes_the_thumbnail_sidecar_on_every_boot():
     assert text.index("umbra index fetch --if-changed") < text.index(
         "umbra index fetch-thumbnails --if-changed"
     )
+
+
+def test_entrypoint_thumbnail_fetch_uses_the_manifest_asset_name():
+    """The boot command must download the asset the publish workflow uploads.
+
+    ``fetch-thumbnails`` with no ``--url`` reads ``catalog.thumbs.manifest.json``
+    and reassembles ``catalog.thumbs.db``. A hardcoded ``--url`` of the legacy
+    single asset would 404 once that file is no longer published.
+    """
+    from umbra_py.constants import CATALOG_THUMBS_MANIFEST_ASSET
+
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert CATALOG_THUMBS_MANIFEST_ASSET in text
+    fetch_line = next(line for line in text.splitlines() if "fetch-thumbnails" in line)
+    assert "--url" not in fetch_line

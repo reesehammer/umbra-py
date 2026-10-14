@@ -441,8 +441,10 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> Non
 
     Every preview otherwise streams a scene's cloud-optimized GeoTIFF overview
     from S3 at render time. The weekly workflow bakes them once and publishes
-    catalog.thumbs.db on the rolling catalog-index release; this fetches that
-    sidecar and fills the index's thumbnail column, so 'umbra serve's
+    catalog.thumbs.manifest.json (plus hash-named parts, reassembled into
+    catalog.thumbs.db) on the rolling catalog-index release. A release that
+    still has a single catalog.thumbs.db and no manifest is fetched as that
+    file. This fills the index's thumbnail column, so 'umbra serve's
     GET /artifacts/thumbnail/{id}.png, the 'umbra demo' preview and a --local
     gallery all read local bytes with no range read at all.
 

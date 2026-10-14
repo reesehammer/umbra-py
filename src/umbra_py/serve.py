@@ -173,6 +173,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ._geometry import Geometry, parse_geometry
 from .catalog import DateLike, _coerce_date
@@ -914,26 +915,87 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     return feature
 
 
+def _href_with_token(href: str, token: int) -> str:
+    """Return ``href`` with a single ``token`` query parameter set to ``token``.
+
+    Page links are built from the request URL, which already carries the token
+    that produced this page. Appending another ``token=`` leaves every earlier
+    page's token in the query, so page 40's URL holds 39 of them. The server
+    reads the last value, and the results stay right, but the URL grows without
+    bound. Parse the query, replace ``token``, and re-encode.
+    """
+    parts = urlsplit(href)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key != "token"
+    ]
+    query.append(("token", str(token)))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _pagination_hrefs(
+    href: str, *, offset: int, limit: int, has_next: bool
+) -> tuple[str | None, str | None]:
+    """``(prev, next)`` page links for this offset, each with one ``token``."""
+    prev_href = _href_with_token(href, max(0, offset - limit)) if offset > 0 else None
+    next_href = _href_with_token(href, offset + limit) if has_next else None
+    return prev_href, next_href
+
+
+def _body_with_token(body: Mapping[str, Any], token: int) -> dict[str, Any]:
+    """Copy ``body`` with ``token`` set once.
+
+    A POST page link's body is the original search body (STAC API Item Search).
+    Any ``token`` already on that body is dropped before the new one is set, so
+    the cursor is replaced rather than left in place beside a second one.
+    """
+    page = {key: value for key, value in body.items() if key != "token"}
+    page["token"] = token
+    return page
+
+
+def _result_link(rel: str, href: str, body: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A ``next`` or ``prev`` link. A body makes it POST; otherwise it is a GET."""
+    if body is None:
+        return _link(rel, href, type="application/geo+json", method="GET")
+    return _link(
+        rel,
+        href,
+        type="application/geo+json",
+        method="POST",
+        body=dict(body),
+    )
+
+
 def search_result(
     items: list[UmbraItem],
     base_url: str,
     *,
     returned: int | None = None,
     next_href: str | None = None,
+    prev_href: str | None = None,
+    next_body: Mapping[str, Any] | None = None,
+    prev_body: Mapping[str, Any] | None = None,
     self_href: str | None = None,
 ) -> dict[str, Any]:
     """Wrap items in a STAC ``FeatureCollection`` (the ``/search`` response).
 
-    Adds the STAC ``context`` block (returned/limit counts) and a ``next`` link
-    when the query paginated past this page.
+    Adds the STAC ``context`` block (returned/limit counts), a ``next`` link
+    when the query paginated past this page, and a ``prev`` link when this
+    page is not the first. A body on either link makes that link ``POST``
+    (the STAC shape for paging a POST ``/search``); without one the link is
+    a ``GET`` of ``href``.
     """
     base = base_url.rstrip("/")
     features = [item_to_stac(it, base_url) for it in items]
     links = [_link("root", f"{base}/")]
     if self_href:
         links.append(_link("self", self_href, type="application/geo+json"))
+    if prev_href:
+        links.append(_result_link("prev", prev_href, prev_body))
     if next_href:
-        links.append(_link("next", next_href, type="application/geo+json", method="GET"))
+        links.append(_result_link("next", next_href, next_body))
     return {
         "type": "FeatureCollection",
         "stac_version": STAC_VERSION,
@@ -984,8 +1046,10 @@ def run_search(
     ``max_resolution`` are the SAR acquisition-property filters -- all pushed
     down to the backend's ``search`` (both :class:`CatalogIndex` and the live
     :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
-    deterministic offset paging over the source's stable ordering: we request
-    one extra item to decide whether a ``next`` link is warranted.
+    deterministic offset paging. The index orders by task, acquisition date,
+    datetime, then id (href last), so two passes that share a timestamp cannot
+    swap at a page boundary. One extra item is requested to decide whether a
+    ``next`` link is warranted.
     """
     limit = _clamp_limit(limit)
     offset = max(0, int(offset))
@@ -2810,14 +2874,38 @@ def build_app(
         if callable(close):
             close()
 
+    # The collection extent only changes when the index file is replaced.
+    # Keyed by path, mtime and size so a refreshed snapshot is picked up
+    # without scanning thumbnail blobs on every ``GET /collections``.
+    _extent_cache: dict[tuple[str, int, int], tuple[str | None, str | None]] = {}
+
     def _temporal() -> tuple[str | None, str | None]:
         source = _open()
         try:
-            stats = getattr(source, "stats", None)
-            if stats is None:
-                return (None, None)
-            s = stats()
-            return (s.get("start"), s.get("end"))
+            path = getattr(source, "path", None)
+            key: tuple[str, int, int] | None = None
+            if path is not None:
+                try:
+                    st = Path(path).stat()
+                except OSError:
+                    st = None
+                if st is not None:
+                    key = (str(path), st.st_mtime_ns, st.st_size)
+                    cached = _extent_cache.get(key)
+                    if cached is not None:
+                        return cached
+            extent_of = getattr(source, "temporal_extent", None)
+            if callable(extent_of):
+                extent = extent_of()
+            else:
+                stats = getattr(source, "stats", None)
+                if stats is None:
+                    return (None, None)
+                summary = stats()
+                extent = (summary.get("start"), summary.get("end"))
+            if key is not None:
+                _extent_cache[key] = extent
+            return extent
         finally:
             _close(source)
 
@@ -2969,15 +3057,15 @@ def build_app(
             )
         finally:
             _close(source)
-        next_href = None
-        if has_next:
-            sep = "&" if "?" in self_href else "?"
-            next_href = f"{self_href}{sep}token={offset + limit}"
+        prev_href, next_href = _pagination_hrefs(
+            self_href, offset=offset, limit=limit, has_next=has_next
+        )
         result = search_result(
             page,
             str(request.base_url),
             returned=len(page),
             next_href=next_href,
+            prev_href=prev_href,
             self_href=self_href,
         )
         return JSONResponse(content=result, media_type=geojson)
@@ -3169,13 +3257,22 @@ def build_app(
             )
         finally:
             _close(source)
-        next_href = f"{base}/search?token={offset + limit}" if has_next else None
+        # STAC API Item Search: a POST page link is POST /search again, and its
+        # body is this request's body with ``token`` replaced. A GET of
+        # ``/search?token=N`` would drop limit, collections, and every other
+        # filter that lived only in the JSON.
+        search_href = f"{base}/search"
+        prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
+        next_body = _body_with_token(body, offset + limit) if has_next else None
         result = search_result(
             page,
             str(request.base_url),
             returned=len(page),
-            next_href=next_href,
-            self_href=f"{base}/search",
+            next_href=search_href if next_body is not None else None,
+            prev_href=search_href if prev_body is not None else None,
+            next_body=next_body,
+            prev_body=prev_body,
+            self_href=search_href,
         )
         return JSONResponse(content=result, media_type=geojson)
 

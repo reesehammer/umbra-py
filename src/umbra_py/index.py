@@ -24,6 +24,7 @@ an idempotent upsert and an index can be grown incrementally.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import os
@@ -36,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
@@ -299,23 +300,39 @@ def fetch_prebuilt_thumbnails(
 ) -> Path:
     """Download the published baked-thumbnail sidecar.
 
-    The weekly index workflow bakes a quicklook per acquisition and ships it as
-    ``catalog.thumbs.db`` on the rolling ``catalog-index`` release beside
-    ``catalog.db`` / ``catalog.pmtiles``, so a fresh install gets scene previews
-    without streaming a cloud-optimized GeoTIFF overview per acquisition -- the
+    The weekly index workflow bakes a quicklook per acquisition and publishes it
+    on the rolling ``catalog-index`` release beside ``catalog.db`` /
+    ``catalog.pmtiles``, so a fresh install gets scene previews without
+    streaming a cloud-optimized GeoTIFF overview per acquisition -- the
     thumbnail sibling of :meth:`CatalogIndex.from_release` and
-    :func:`umbra_py.pmtiles.fetch_prebuilt_pmtiles`. This fetches the sidecar to
-    ``dest`` (default: :func:`default_thumbs_path`) and returns its path;
+    :func:`umbra_py.pmtiles.fetch_prebuilt_pmtiles`. A current release ships
+    ``catalog.thumbs.manifest.json`` plus hash-named parts (GitHub rejects one
+    asset of 2 GiB or more); those parts are concatenated back to
+    ``catalog.thumbs.db``. A release with no manifest is the legacy single
+    ``catalog.thumbs.db`` asset. This fetches the sidecar to ``dest`` (default:
+    :func:`default_thumbs_path`) and returns its path;
     :meth:`CatalogIndex.import_thumbnails` merges it into a local index. Re-run
     any time to refresh; the download is resume-safe and always overwrites the
-    existing file. ``url`` overrides the release asset location (e.g. a fork).
+    existing file. ``url`` overrides the release asset location (a sidecar, or
+    a ``catalog.thumbs.manifest.json``).
     """
-    from .constants import CATALOG_INDEX_THUMBS_URL  # noqa: PLC0415
-    from .download import download_url  # local dependency; keep the import cheap  # noqa: PLC0415
-
+    sess = default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    download_url(url or CATALOG_INDEX_THUMBS_URL, target, overwrite=True, progress=progress)
+    located = _locate_published_thumbnails(sess, url)
+    staging = target.with_name(target.name + ".next")
+    try:
+        _write_published_thumbnails(sess, located, staging, progress)
+        _remove_sqlite_sidecars(staging)
+        os.replace(staging, target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        chunk = staging.with_name(staging.name + ".chunk")
+        chunk.unlink(missing_ok=True)
+        part = chunk.with_suffix(chunk.suffix + ".part")
+        part.unlink(missing_ok=True)
+        part.with_suffix(part.suffix + ".etag").unlink(missing_ok=True)
+        raise
     return target
 
 
@@ -536,7 +553,14 @@ def _leftover_paths(path: Path) -> list[Path]:
     belong to whoever has the live database open.
     """
     name = path.name
-    names = [f"{name}.next.part", f"{name}.next.part.etag", f"{name}.source.json.tmp"]
+    names = [
+        f"{name}.next.part",
+        f"{name}.next.part.etag",
+        f"{name}.next.chunk",
+        f"{name}.next.chunk.part",
+        f"{name}.next.chunk.part.etag",
+        f"{name}.source.json.tmp",
+    ]
     for staged in (f"{name}.next", f"{name}.merge"):
         names += [staged, f"{staged}-wal", f"{staged}-shm", f"{staged}-journal"]
     return [path.with_name(name) for name in names]
@@ -707,6 +731,167 @@ def _validate_thumbs_sidecar(path: Path) -> int:
     return rows
 
 
+@dataclass(frozen=True)
+class _ThumbsLocated:
+    """A published thumbnail sidecar, either one file or a manifest plus parts."""
+
+    url: str
+    etag: str | None
+    last_modified: str | None
+    nbytes: int | None
+    manifest: dict[str, Any] | None
+    #: Extra bytes beside the reassembled file (the part being downloaded).
+    extra: int
+    #: True when ``url`` is the manifest. The body is fetched by
+    #: :func:`_materialize_thumbnails`, not by the HEAD that finds the ETag,
+    #: so an unchanged sidecar costs one request.
+    chunked: bool = False
+
+
+def _error_status(exc: BaseException) -> int | None:
+    """HTTP status of ``exc``'s cause, when it is a response error."""
+    response = getattr(exc.__cause__, "response", None)
+    code = getattr(response, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _locate_published_thumbnails(sess: Any, url: str | None) -> _ThumbsLocated:
+    """Find the thumbnail release ``url`` points at.
+
+    ``url is None`` (what ``umbra index fetch-thumbnails`` and the container
+    entrypoint do) reads :data:`umbra_py.constants.CATALOG_INDEX_THUMBS_MANIFEST_URL`
+    and, only on HTTP 404, the legacy single
+    :data:`umbra_py.constants.CATALOG_INDEX_THUMBS_URL`. An explicit manifest
+    URL does not fall back. Any other explicit URL is one sidecar file, which
+    is how ``--url`` behaved before parts existed.
+    """
+    from .constants import (  # noqa: PLC0415
+        CATALOG_INDEX_THUMBS_MANIFEST_URL,
+        CATALOG_INDEX_THUMBS_URL,
+        CATALOG_THUMBS_MANIFEST_ASSET,
+    )
+
+    def located_file(src: str) -> _ThumbsLocated:
+        etag, last_modified, length = _head_snapshot(sess, src)
+        return _ThumbsLocated(src, etag, last_modified, length, None, 0)
+
+    if url is not None and not url.endswith("/" + CATALOG_THUMBS_MANIFEST_ASSET):
+        return located_file(url)
+    manifest_url = url or CATALOG_INDEX_THUMBS_MANIFEST_URL
+    try:
+        etag, last_modified, _manifest_length = _head_snapshot(sess, manifest_url)
+    except IndexRefreshError as exc:
+        if url is not None or _error_status(exc) != 404:
+            raise
+        return located_file(CATALOG_INDEX_THUMBS_URL)
+    return _ThumbsLocated(manifest_url, etag, last_modified, None, None, 0, chunked=True)
+
+
+def _materialize_thumbnails(sess: Any, located: _ThumbsLocated) -> _ThumbsLocated:
+    """Fill in a chunked release's manifest, sidecar size, and largest part.
+
+    A no-op when ``located`` is a single file or the manifest was already read.
+    """
+    if not located.chunked or located.manifest is not None:
+        return located
+    manifest = _read_thumbs_manifest(sess, located.url)
+    largest = max(int(part["size"]) for part in manifest["parts"])
+    return _ThumbsLocated(
+        located.url,
+        located.etag,
+        located.last_modified,
+        int(manifest["size"]),
+        manifest,
+        largest,
+        True,
+    )
+
+
+def _read_thumbs_manifest(sess: Any, url: str) -> dict[str, Any]:
+    from .thumbs_release import parse_thumbs_manifest  # noqa: PLC0415
+
+    try:
+        resp = sess.get(url, timeout=60)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise IndexRefreshError(
+            f"Could not download the thumbnail manifest {url!r}: {exc}"
+        ) from exc
+    try:
+        return parse_thumbs_manifest(resp.json())
+    except Exception as exc:
+        raise IndexRefreshError(f"Thumbnail manifest {url!r} is not usable: {exc}") from exc
+
+
+def published_thumbs_snapshot(session: Any = None) -> str:
+    """ETag of the thumbnail release a default fetch will refresh, or ``""``.
+
+    The manifest's ETag when ``catalog.thumbs.manifest.json`` is published,
+    else the legacy ``catalog.thumbs.db`` ETag. Empty when neither asset is
+    on the release (HTTP 404). Other failures raise :class:`IndexRefreshError`.
+    """
+    sess = session or default_session()
+    try:
+        located = _locate_published_thumbnails(sess, None)
+    except IndexRefreshError as exc:
+        if _error_status(exc) == 404:
+            return ""
+        raise
+    return located.etag or ""
+
+
+def _progress_from(
+    progress: Callable[[int, int | None], None] | None, done_base: int, total: int | None
+) -> Callable[[int, int | None], None] | None:
+    if progress is None:
+        return None
+
+    def inner(done: int, _total: int | None) -> None:
+        progress(done_base + done, total)
+
+    return inner
+
+
+def _write_published_thumbnails(
+    sess: Any,
+    located: _ThumbsLocated,
+    staging: Path,
+    progress: Callable[[int, int | None], None] | None,
+) -> None:
+    """Write the sidecar described by ``located`` to ``staging``."""
+    from .download import download_url  # noqa: PLC0415
+
+    located = _materialize_thumbnails(sess, located)
+    if located.manifest is None:
+        download_url(located.url, staging, overwrite=True, session=sess, progress=progress)
+        return
+    from .thumbs_release import append_verified_part  # noqa: PLC0415
+
+    total = hashlib.sha256()
+    written = 0
+    chunk = staging.with_name(staging.name + ".chunk")
+    try:
+        with staging.open("wb") as out:
+            for part in located.manifest["parts"]:
+                part_url = located.url.rsplit("/", 1)[0] + "/" + quote(part["name"])
+                download_url(
+                    part_url,
+                    chunk,
+                    overwrite=True,
+                    session=sess,
+                    progress=_progress_from(progress, written, located.manifest["size"]),
+                )
+                append_verified_part(chunk, out, part, total)
+                written += part["size"]
+                chunk.unlink(missing_ok=True)
+        if written != located.manifest["size"] or total.hexdigest() != located.manifest["sha256"]:
+            raise IndexRefreshError(
+                f"Reassembled thumbnail sidecar from {located.url!r} does not match the manifest."
+            )
+    finally:
+        chunk.unlink(missing_ok=True)
+
+
 def refresh_thumbnails_from_release(
     dest: str | os.PathLike | None = None,
     *,
@@ -717,58 +902,81 @@ def refresh_thumbnails_from_release(
 ) -> RefreshResult:
     """Replace the thumbnail sidecar with the published one only when it changed.
 
-    The ``catalog.thumbs.db`` counterpart of :func:`refresh_from_release`: one
-    ``HEAD`` compares the release asset's ``ETag`` / ``Last-Modified`` with the
-    state recorded beside the sidecar (``catalog.thumbs.db.source.json``), and
-    only a changed (or missing, or ``force``) sidecar is downloaded to
-    ``<name>.next``, checked to be a readable non-empty sidecar, and swapped in
-    atomically. ``dest`` defaults to :func:`default_thumbs_path`. ``items`` in
-    the result is the sidecar's thumbnail count. Raises
-    :class:`IndexRefreshError` (existing sidecar untouched) when the asset is
-    unreachable or the download fails validation, and
-    :class:`InsufficientSpaceError` when the directory cannot hold the new
-    sidecar's ``Content-Length`` beside the current one (the old file stays
-    until the new one is proven, so both coexist for a moment). Stale scratch
-    files of earlier refreshes are removed first, as in
-    :func:`refresh_from_release`. This only refreshes the file;
+    The ``catalog.thumbs.db`` counterpart of :func:`refresh_from_release`. The
+    default (``url is None``, which is what the container entrypoint runs)
+    ``HEAD``s ``catalog.thumbs.manifest.json`` and downloads the parts it names
+    when that manifest's ``ETag`` / ``Last-Modified`` differs from the state
+    recorded beside the sidecar (``catalog.thumbs.db.source.json``). A 404 on
+    the manifest falls back to the legacy single ``catalog.thumbs.db`` asset.
+    An explicit ``url`` that is not the manifest is that one file.
+
+    The download lands in ``<name>.next``, is checked to be a readable
+    non-empty sidecar, and is swapped in atomically. ``dest`` defaults to
+    :func:`default_thumbs_path`. ``items`` in the result is the sidecar's
+    thumbnail count. Raises :class:`IndexRefreshError` (existing sidecar
+    untouched) when the asset is unreachable or the download fails validation,
+    and :class:`InsufficientSpaceError` when the directory cannot hold the new
+    sidecar beside the current one (the old file stays until the new one is
+    proven). A chunked sidecar also needs room for one part beside the
+    reassembled file. Stale scratch files of earlier refreshes are removed
+    first, as in :func:`refresh_from_release`. This only refreshes the file;
     :func:`merge_thumbnails_atomically` merges it into an index.
     """
-    from .constants import CATALOG_INDEX_THUMBS_URL  # noqa: PLC0415
-    from .download import download_url  # noqa: PLC0415
-
     sess = session or default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    src = url or CATALOG_INDEX_THUMBS_URL
     with _refresh_lock(target):
         cleaned = _clean_leftovers(target)
-        etag, last_modified, length = _head_snapshot(sess, src)
+        located = _locate_published_thumbnails(sess, url)
         state = read_snapshot_state(target)
-        if target.exists() and _same_snapshot(state, src, etag, last_modified) and not force:
+        if (
+            target.exists()
+            and _same_snapshot(state, located.url, located.etag, located.last_modified)
+            and not force
+        ):
             return RefreshResult(
-                target, False, etag, last_modified, None, None, "unchanged", cleaned
+                target,
+                False,
+                located.etag,
+                located.last_modified,
+                None,
+                None,
+                "unchanged",
+                cleaned,
             )
 
-        _require_free_space(target.parent, length or 0, f"download {src.rsplit('/', 1)[-1]}")
+        located = _materialize_thumbnails(sess, located)
+        label = located.url.rsplit("/", 1)[-1]
+        _require_free_space(
+            target.parent, (located.nbytes or 0) + located.extra, f"download {label}"
+        )
         staging = target.with_name(target.name + ".next")
         try:
-            download_url(src, staging, overwrite=True, session=sess, progress=progress)
+            _write_published_thumbnails(sess, located, staging, progress)
             rows = _validate_thumbs_sidecar(staging)
         except BaseException as exc:
             _clean_leftovers(target)
             if isinstance(exc, IndexRefreshError) or not isinstance(exc, Exception):
                 raise
             raise IndexRefreshError(
-                f"Could not download the thumbnail sidecar {src!r}: {exc}"
+                f"Could not download the thumbnail sidecar {located.url!r}: {exc}"
             ) from exc
         _remove_sqlite_sidecars(staging)
         _remove_sqlite_sidecars(target)
         os.replace(staging, target)
         _write_snapshot_state(
-            target, {"url": src, "etag": etag, "last_modified": last_modified, "items": rows}
+            target,
+            {
+                "url": located.url,
+                "etag": located.etag,
+                "last_modified": located.last_modified,
+                "items": rows,
+            },
         )
     reason = "fetched" if state is None else "changed"
-    return RefreshResult(target, True, etag, last_modified, rows, None, reason, cleaned)
+    return RefreshResult(
+        target, True, located.etag, located.last_modified, rows, None, reason, cleaned
+    )
 
 
 def _apply_thumbnails(conn: sqlite3.Connection, source: Path, *, overwrite: bool) -> int:
@@ -980,6 +1188,27 @@ def _index_acq_date(item: UmbraItem) -> date | None:
             return d
     dt = item.datetime
     return dt.date() if dt else None
+
+
+def _search_sort_key(item: UmbraItem) -> tuple[object, ...]:
+    """Order key :meth:`CatalogIndex.search_live` merges on.
+
+    For a row that has a task this is the same order as :meth:`CatalogIndex.search`:
+    acquisition date, full timestamp, id, then href. ``id`` is the tiebreaker
+    when two passes share a timestamp, so an offset page cannot swap them.
+    Null tasks sort first here; the SQL ``ORDER BY task IS NULL`` sorts them
+    last.
+    """
+    acq = _index_acq_date(item)
+    when = item.datetime
+    return (
+        0 if item.task is None else 1,
+        item.task or "",
+        acq.isoformat() if acq else "",
+        when.isoformat() if when else "",
+        item.id or "",
+        item.href or "",
+    )
 
 
 def _escape_like(value: str) -> str:
@@ -1927,9 +2156,12 @@ class CatalogIndex:
             params += wanted
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        # Total order. ``id`` breaks a timestamp tie so offset pages cannot
+        # repeat or skip a pass that shares a task and a datetime with its
+        # neighbor. ``href`` is last so a duplicated id still sorts in one way.
         sql = (
             "SELECT href, doc, place, datetime_suspect, created, published FROM items"
-            f"{where} ORDER BY task IS NULL, task, acq_date, href"
+            f"{where} ORDER BY task IS NULL, task, acq_date, datetime, id, href"
         )
 
         count = 0
@@ -1986,7 +2218,7 @@ class CatalogIndex:
         horizon -- its maximum indexed ``acq_date`` minus ``overlap_days`` -- so
         the walk fetches sidecars only for recent passes rather than the whole
         catalog (the same pruning :meth:`update` relies on). The two streams are
-        merged in the usual ``(task, acq_date)`` order and de-duplicated by
+        merged in ``(task, acq_date, datetime, id, href)`` order and de-duplicated by
         sidecar href, so an acquisition the index already knows is never yielded
         twice; the result is what a single fresh search would return, without
         paying for a full crawl.
@@ -2045,18 +2277,16 @@ class CatalogIndex:
         }
         index_stream = self.search(start=start_d, **filters)  # type: ignore[arg-type]
         catalog = catalog or UmbraCatalog()
-        live_stream = catalog.search(start=delta_start, **filters)  # type: ignore[arg-type]
+        # The live walk is acquisition-prefix order, not (datetime, id). Sort
+        # this bounded delta so the merge sees the same total order as search().
+        live_stream = sorted(
+            catalog.search(start=delta_start, **filters),  # type: ignore[arg-type]
+            key=_search_sort_key,
+        )
 
-        def keyed(items: Iterator[UmbraItem], origin: str):
+        def keyed(items: Iterable[UmbraItem], origin: str):
             for it in items:
-                acq = _index_acq_date(it)
-                key = (
-                    0 if it.task is None else 1,
-                    it.task or "",
-                    acq.isoformat() if acq else "",
-                    it.href or "",
-                )
-                yield key, origin, it
+                yield _search_sort_key(it), origin, it
 
         merged = heapq.merge(
             keyed(index_stream, "index"),
@@ -2680,3 +2910,16 @@ class CatalogIndex:
             "datetime_suspect_count": int(suspects or 0),
             "quarantined_future_count": quarantined_future_count(stored_validation(self)),
         }
+
+    def temporal_extent(self) -> tuple[str | None, str | None]:
+        """Acquisition-date span ``(start, end)``, the same dates as :meth:`stats`.
+
+        ``end`` excludes ``datetime_suspect`` rows. :meth:`stats` counts the
+        thumbnail blob column, and SQLite then reads every merged preview off
+        disk (tens of seconds on a cold volume). This aggregate does not name
+        that column, so those overflow pages stay unread.
+        """
+        start, end = self._conn.execute(
+            "SELECT MIN(acq_date), MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END) FROM items"
+        ).fetchone()
+        return (start, end)
