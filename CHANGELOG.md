@@ -10,6 +10,14 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Index validation on `umbra index build`.** The weekly snapshot drops
+  duplicate ids (latest `updated`, otherwise datetime, then the most assets)
+  and quarantines items dated before 2018-01-01 or more than a day ahead,
+  items with a missing or invalid footprint, and items with no public HTTPS
+  asset href or any `prod-prod-processed` href. Those rows are listed in the
+  coverage report and in `index-validation.json` on the `catalog-index`
+  release. `umbra index validate` re-checks the index and parquet and exits
+  non-zero if a violation remains.
 - **One JSON log line per STAC `/search`.** `umbra serve` (plain, `--mcp`,
   and `--public`) logs each `GET` or `POST /search` to stdout: client IP,
   User-Agent, HTTP method, path, status, duration, and the `bbox`,

@@ -44,6 +44,16 @@ class CatalogError(UmbraError):
     """Raised when the STAC catalog cannot be read or parsed."""
 
 
+class IndexValidationError(UmbraError):
+    """The catalog index still violates a publish rule after quarantine.
+
+    :func:`umbra_py.validate.sanitize_index` removes known-bad source rows
+    and duplicate ids. This is raised only when a violation is still present
+    in what would be published — the build exits non-zero rather than
+    uploading that snapshot.
+    """
+
+
 class IndexSchemaError(UmbraError):
     """Raised when a local catalog index has an unsupported schema version.
 

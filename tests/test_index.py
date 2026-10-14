@@ -32,11 +32,23 @@ def _make_item(task, acq, item_id, dt, bbox, products=("GEC",)):
                 "href": f"{base}_{p}.nitf",
                 "type": "application/vnd.nitf",
             }
+    min_lon, min_lat, max_lon, max_lat = bbox
     doc = {
         "id": item_id,
         "properties": {"datetime": dt, "sar:product_type": products[0]},
         "bbox": list(bbox),
-        "geometry": None,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [min_lon, min_lat],
+                    [max_lon, min_lat],
+                    [max_lon, max_lat],
+                    [min_lon, max_lat],
+                    [min_lon, min_lat],
+                ]
+            ],
+        },
         "assets": assets,
     }
     return UmbraItem.from_dict(doc, href=href)

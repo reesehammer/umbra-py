@@ -73,6 +73,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra index fetch-thumbnails` — Download the published SAR thumbnails and merge them into the index.
 - `umbra index info` — Show what a local index holds: item count, date span and task count.
 - `umbra index update` — Cheaply refresh an existing index by re-walking only recent acquisitions.
+- `umbra index validate` — Re-check an index (and optional parquet) against the publish rules.
 - `umbra info` — Show a summary of a STAC item.
 - `umbra llms-txt` — Print the project's llms.txt context bundle to stdout.
 - `umbra load` — Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
