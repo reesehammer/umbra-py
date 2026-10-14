@@ -143,6 +143,13 @@ CATALOG_PMTILES_ASSET = "catalog.pmtiles"
 #: every ``--local`` search fetches stays small, and the pixels are opt-in.
 CATALOG_THUMBS_ASSET = "catalog.thumbs.db"
 
+#: Name of the manifest that lists the thumbnail sidecar's release parts.
+#: GitHub rejects a single asset of 2 GiB or more, so a sidecar past that
+#: limit is published as ``catalog.thumbs.db.partNNN.<sha>`` files named by
+#: this manifest. ``umbra index fetch-thumbnails`` reads it and reassembles
+#: ``catalog.thumbs.db``. See :mod:`umbra_py.thumbs_release`.
+CATALOG_THUMBS_MANIFEST_ASSET = "catalog.thumbs.manifest.json"
+
 #: Name of the prebuilt scene-embedding sidecar asset on the same release (the
 #: per-acquisition quicklook vectors ``umbra embed build`` produces -- published
 #: so a fresh install gets visual similarity search over the archive with no
@@ -170,6 +177,15 @@ CATALOG_INDEX_PMTILES_URL = (
 CATALOG_INDEX_THUMBS_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/"
     f"{CATALOG_INDEX_RELEASE}/{CATALOG_THUMBS_ASSET}"
+)
+
+#: Stable download URL for the thumbnail-release manifest (same rolling-release
+#: redirect as :data:`CATALOG_INDEX_THUMBS_URL`). This is what a current
+#: ``umbra index fetch-thumbnails`` reads; the single-file URL above is the
+#: fallback when the manifest is not on the release.
+CATALOG_INDEX_THUMBS_MANIFEST_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/"
+    f"{CATALOG_INDEX_RELEASE}/{CATALOG_THUMBS_MANIFEST_ASSET}"
 )
 
 #: Stable download URL for the prebuilt scene-embedding sidecar (same

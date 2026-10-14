@@ -20,10 +20,17 @@ name: Publish catalog index
 #                              published catalog.pmtiles by range request
 #   - index-validation.json    items quarantined or dropped as duplicate ids
 #   - index-validation.md      the same record in Markdown
-#   - catalog.thumbs.db        baked SAR quicklook PNGs, one per acquisition
-#                              (`umbra index fetch-thumbnails`): a separate,
-#                              opt-in sidecar so catalog.db stays small, topped
-#                              up incrementally rather than re-baked weekly
+#   - catalog.thumbs.manifest.json
+#     and catalog.thumbs.db.partNNN.<sha>
+#                              baked SAR quicklook PNGs (`umbra index
+#                              fetch-thumbnails`). GitHub rejects one release
+#                              asset of 2 GiB or more, and `gh release upload
+#                              --clobber` deletes the previous asset before the
+#                              new one is accepted, so the sidecar is split into
+#                              hash-named parts under 1.5 GiB. The manifest is
+#                              uploaded last and is what the entrypoint reads.
+#                              A release that still has a single catalog.thumbs.db
+#                              and no manifest is fetched as that file.
 #
 # Weekly is deliberate: frequent enough to pick up new acquisitions, polite
 # to Umbra's open-data bucket.
@@ -198,9 +205,11 @@ jobs:
       #     already pays for.
       #
       # Non-blocking, and split from the upload below so a run that times out
-      # mid-bake still publishes what it (and every earlier run) baked.
-      # 75 minutes: the steps before this take about an hour and the confirm
-      # step polls for up to 30, which keeps the job well inside its 240.
+      # mid-bake still publishes what it (and every earlier run) baked. The
+      # upload itself fails the job: a sidecar that does not land has to be
+      # visible, not a green run with a 404. 75 minutes: the steps before
+      # this take about an hour and the confirm step polls for up to 30,
+      # which keeps the job well inside its 240.
       - name: Bake SAR thumbnails (incremental, non-blocking)
         continue-on-error: true
         timeout-minutes: 75
@@ -210,32 +219,45 @@ jobs:
           umbra index bake-thumbnails --db catalog.db \
             --size 512 --newest-first --limit 1500
 
-      - name: Publish the thumbnail sidecar (non-blocking)
-        if: always()
-        continue-on-error: true
+      - name: Publish the thumbnail sidecar
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           exported="$(umbra index export-thumbnails --db catalog.db \
             --out catalog.thumbs.db | grep -oE '^Exported [0-9]+' | cut -d' ' -f2)"
-          # Never clobber the accumulated published sidecar with an empty one.
+          # Never replace the published sidecar with an empty one. Parts are
+          # hash-named, so a rerun does not delete a live multi-gigabyte asset
+          # before the new bytes are accepted. The manifest goes up last.
           if [ "${exported:-0}" -eq 0 ]; then
             echo "No baked thumbnails to publish; leaving the released sidecar alone."
             exit 0
           fi
-          gh release upload catalog-index catalog.thumbs.db --clobber
+          rm -rf thumbs-release
+          python -c "import umbra_py.thumbs_release as t; t.pack_thumbnail_release('catalog.thumbs.db', 'thumbs-release'); t.publish_thumbnail_release('thumbs-release')"
           echo "Published ${exported} baked thumbnail(s)."
           # The deterministic publish step above rewrites the notes every run,
           # so describe the sidecar once, only when that rewrite dropped it.
           body="$(gh release view catalog-index --json body -q .body)"
           case "$body" in
-            *catalog.thumbs.db*) ;;
+            *catalog.thumbs.manifest.json*) ;;
             *)
               gh release edit catalog-index --notes "$body
 
-          - \`catalog.thumbs.db\` — baked SAR quicklook PNGs (512 px) for \`umbra index fetch-thumbnails\`: merge them into a local \`catalog.db\` and every preview reads local bytes instead of streaming a COG overview per scene. Baked newest-first and topped up weekly, so the most recent passes are covered first."
+          - \`catalog.thumbs.manifest.json\` — baked SAR quicklook PNGs (512 px) for \`umbra index fetch-thumbnails\`. The sqlite sidecar is \`catalog.thumbs.db.partNNN.<sha>\` assets under GitHub's 2 GiB limit; the manifest names them and the client reassembles \`catalog.thumbs.db\`. Baked newest-first and topped up weekly."
               ;;
           esac
+
+      # Distinct from the upload so a green publish step is not the only
+      # evidence the assets exist. Downloads the manifest back and checks
+      # every part's name and size. Fails the job; it does not continue.
+      - name: Verify the thumbnail release assets
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -c "import umbra_py.thumbs_release as t; t.assert_remote_thumbnail_release()"
 
       # The hosted API keeps catalog.db and catalog.thumbs.db on a persistent
       # volume and refreshes both on boot (deploy/docker-entrypoint.sh), so a
@@ -304,7 +326,11 @@ jobs:
             exit 1
           fi
           want_ids="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
-          want_thumbs="$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_THUMBS_URL)[0] or '')" || true)"
+          want_thumbs="$(python -c "import umbra_py.index as i; print(i.published_thumbs_snapshot())")"
+          if [ -z "$want_thumbs" ]; then
+            echo "::error title=Thumbnail release missing::catalog-index has neither catalog.thumbs.manifest.json nor catalog.thumbs.db."
+            exit 1
+          fi
           for _ in $(seq 1 60); do
             healthz="$(curl -fsS --max-time 20 https://api.umbra-py.space/healthz | python -c "import json, sys; from umbra_py.index import _normalize_etag; d = json.load(sys.stdin); t = d.get('thumbnails') or {}; print(_normalize_etag(d.get('snapshot')) or '-', d.get('ids', '-'), t.get('snapshot') or '-', t.get('count', '-'), str(d.get('degraded', '-')).lower())" || true)"
             # shellcheck disable=SC2086
