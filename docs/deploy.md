@@ -414,7 +414,7 @@ Everything the boot refresh writes lives in one directory on the volume
 | File                     | Size                     | Notes                                                       |
 | ------------------------ | ------------------------ | ----------------------------------------------------------- |
 | `catalog.db` (published) | ~126 MB (17,960 items)   | What `umbra index fetch` downloads.                         |
-| `catalog.thumbs.db`      | ~1.2 GB (4,050 previews) | About 300 KB per 512 px preview. Grows with each weekly bake, by at most ~450 MB per week. |
+| `catalog.thumbs.db`      | ~1.2 GB at 4,050 previews; past 2 GiB by 5,550 | Reassembled locally. The release stores it as parts under 1.5 GiB (GitHub rejects an asset of 2 GiB or more). About 300 KB per 512 px preview. |
 | `catalog.db` (merged)    | ~1.33 GB                 | The published index plus the sidecar's PNGs.                |
 
 With `I` the published index and `S` the sidecar, the refresh needs at its peak:
@@ -458,15 +458,19 @@ the only consistent copy.
 
 ### Weekly snapshot redeploy (`RAILWAY_TOKEN`)
 
-The weekly `publish-index.yml` workflow redeploys the hosted service once
-`catalog.db` and `catalog.thumbs.db` are on the `catalog-index` release, so
-the entrypoint's `--if-changed` refresh swaps both in. It redeploys whenever
-`catalog.db` was published, even if the thumbnail bake or upload failed. It
-then polls `https://api.umbra-py.space/healthz` for up to 30 minutes, until
-`snapshot` equals the ETag of the released `catalog.db`. The job fails if the
-redeploy fails or that snapshot never shows up. It warns ("Hosted API
-thumbnails not merged") when the API is `degraded`, or when the sidecar it
-merged is not the released `catalog.thumbs.db`.
+The weekly `publish-index.yml` workflow publishes `catalog.db`, then the
+thumbnail sidecar. A sidecar of 2 GiB or more cannot be one GitHub release
+asset, so the workflow uploads `catalog.thumbs.manifest.json` and
+`catalog.thumbs.db.partNNN.<sha>` parts and fails the job if any of those
+assets is missing afterwards. The entrypoint's `umbra index fetch-thumbnails
+--if-changed` reads that manifest and writes `catalog.thumbs.db`. It
+redeploys whenever `catalog.db` was published, even if the thumbnail bake or
+upload failed. It then polls `https://api.umbra-py.space/healthz` for up to
+30 minutes, until `snapshot` equals the ETag of the released `catalog.db`.
+The job fails if the redeploy fails, that snapshot never shows up, or the
+thumbnail release has no ETag. It warns ("Hosted API thumbnails not merged")
+when the API is `degraded`, or when the sidecar it merged is not the one
+just published.
 
 The redeploy is `npx @railway/cli redeploy --service umbra-py --yes`, run with
 the repository secret **`RAILWAY_TOKEN`**:

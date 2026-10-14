@@ -11,6 +11,7 @@ import json
 import shutil
 import sqlite3
 from collections import namedtuple
+from pathlib import Path
 
 import pytest
 import responses
@@ -281,6 +282,120 @@ def test_stale_volume_thumbs_sidecar_is_replaced_when_the_etag_changes(tmp_path)
     result = refresh_thumbnails_from_release(dest, url=THUMBS_URL)
     assert result.changed and result.reason == "changed" and result.items == 3
     assert read_snapshot_state(dest)["etag"] == "t2"
+
+
+MANIFEST_URL = "https://example.test/releases/download/catalog-index/catalog.thumbs.manifest.json"
+
+
+def _point_thumbs_at_example(monkeypatch) -> None:
+    monkeypatch.setattr("umbra_py.constants.CATALOG_INDEX_THUMBS_MANIFEST_URL", MANIFEST_URL)
+    monkeypatch.setattr("umbra_py.constants.CATALOG_INDEX_THUMBS_URL", THUMBS_URL)
+
+
+def _serve_packed(release: Path, manifest: dict, etag: str = '"tm"') -> None:
+    from umbra_py.constants import CATALOG_THUMBS_MANIFEST_ASSET
+
+    body = (release / CATALOG_THUMBS_MANIFEST_ASSET).read_bytes()
+    headers = {
+        "ETag": etag,
+        "Last-Modified": "Mon, 05 Oct 2026 16:00:00 GMT",
+        "Content-Length": str(len(body)),
+    }
+    responses.add(responses.HEAD, MANIFEST_URL, status=200, headers=headers)
+    responses.add(responses.GET, MANIFEST_URL, body=body, status=200, headers=headers)
+    prefix = MANIFEST_URL.rsplit("/", 1)[0]
+    for part in manifest["parts"]:
+        data = (release / part["name"]).read_bytes()
+        url = f"{prefix}/{part['name']}"
+        responses.add(
+            responses.GET,
+            url,
+            body=data,
+            status=200,
+            headers={"Content-Length": str(len(data)), "ETag": '"part"'},
+        )
+
+
+@responses.activate
+def test_default_refresh_reassembles_manifest_parts(tmp_path, monkeypatch):
+    """The entrypoint calls fetch-thumbnails with no --url, so the default URL
+    is the manifest. Parts concatenate back to a readable sidecar."""
+    from umbra_py.thumbs_release import pack_thumbnail_release
+
+    _point_thumbs_at_example(monkeypatch)
+    body = _thumbs_bytes(tmp_path, "v1", b"one", n=2)
+    src = tmp_path / "packed.thumbs.db"
+    src.write_bytes(body)
+    release = tmp_path / "release"
+    manifest = pack_thumbnail_release(src, release, part_bytes=800)
+    assert len(manifest["parts"]) > 1
+    _serve_packed(release, manifest)
+    # A second HEAD is the unchanged check; responses matches each add once.
+    responses.add(
+        responses.HEAD,
+        MANIFEST_URL,
+        status=200,
+        headers={"ETag": '"tm"', "Last-Modified": "Mon, 05 Oct 2026 16:00:00 GMT"},
+    )
+
+    dest = tmp_path / "catalog.thumbs.db"
+    result = refresh_thumbnails_from_release(dest)
+    assert result.changed and result.reason == "fetched" and result.items == 2
+    assert dest.read_bytes() == body
+    assert read_snapshot_state(dest)["url"] == MANIFEST_URL
+    assert read_snapshot_state(dest)["etag"] == "tm"
+
+    gets = _gets(MANIFEST_URL)
+    again = refresh_thumbnails_from_release(dest)
+    assert not again.changed and again.reason == "unchanged"
+    assert _gets(MANIFEST_URL) == gets
+
+
+@responses.activate
+def test_default_refresh_falls_back_to_the_single_asset_when_the_manifest_404s(
+    tmp_path, monkeypatch
+):
+    _point_thumbs_at_example(monkeypatch)
+    responses.add(responses.HEAD, MANIFEST_URL, status=404)
+    body = _thumbs_bytes(tmp_path, "v1", b"one")
+    _serve_thumbs(body, '"t1"')
+    dest = tmp_path / "catalog.thumbs.db"
+    result = refresh_thumbnails_from_release(dest)
+    assert result.reason == "fetched" and result.items == 2
+    assert read_snapshot_state(dest)["url"] == THUMBS_URL
+    assert _gets(MANIFEST_URL) == 0
+
+
+@responses.activate
+def test_a_bad_part_keeps_the_sidecar_already_on_disk(tmp_path, monkeypatch):
+    from umbra_py.thumbs_release import pack_thumbnail_release
+
+    _point_thumbs_at_example(monkeypatch)
+    body = _thumbs_bytes(tmp_path, "v1", b"one", n=2)
+    src = tmp_path / "packed.thumbs.db"
+    src.write_bytes(body)
+    release = tmp_path / "release"
+    manifest = pack_thumbnail_release(src, release, part_bytes=800)
+    part_path = release / manifest["parts"][0]["name"]
+    part_path.write_bytes(b"\x00" * part_path.stat().st_size)
+    _serve_packed(release, manifest)
+    dest = tmp_path / "catalog.thumbs.db"
+    old = _thumbs_bytes(tmp_path, "old", b"old")
+    dest.write_bytes(old)
+    with pytest.raises(IndexRefreshError, match="sha256"):
+        refresh_thumbnails_from_release(dest)
+    assert dest.read_bytes() == old
+    assert not (tmp_path / "catalog.thumbs.db.next").exists()
+
+
+@responses.activate
+def test_published_thumbs_snapshot_is_empty_when_neither_asset_exists(tmp_path, monkeypatch):
+    from umbra_py.index import published_thumbs_snapshot
+
+    _point_thumbs_at_example(monkeypatch)
+    responses.add(responses.HEAD, MANIFEST_URL, status=404)
+    responses.add(responses.HEAD, THUMBS_URL, status=404)
+    assert published_thumbs_snapshot() == ""
 
 
 @responses.activate

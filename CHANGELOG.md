@@ -171,6 +171,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **Published thumbnails fit GitHub's 2 GiB release-asset limit.** The weekly
+  sidecar passed that limit and `gh release upload --clobber` deleted the
+  previous `catalog.thumbs.db` before GitHub rejected the replacement
+  (`size must be less than 2147483648`), so the asset 404'd. The workflow now
+  uploads `catalog.thumbs.manifest.json` and `catalog.thumbs.db.partNNN.<sha>`
+  parts under 1.5 GiB, checks that each asset is on the release, and fails
+  the job if it is not. `umbra index fetch-thumbnails` (and the container
+  entrypoint) reads the manifest and reassembles `catalog.thumbs.db`. A
+  release that still has only the single file keeps working.
 - **`POST /search` page links keep the request.** `next` and `prev` are
   `POST /search` with the original JSON body and `token` set once (replaced,
   not added again). The previous links were `GET /search?token=N` with no
