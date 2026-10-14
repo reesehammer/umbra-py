@@ -12,7 +12,7 @@ still open.
 
 ## MCP live fetch of a legacy `_METADATA.json` URL
 
-- **Surfaced in:** the `umbra download <_METADATA.json>` fix.
+- **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/277
 - **Code:** `src/umbra_py/mcp_server.py` (`_fetch_item`).
 
 The CLI resolves a legacy sidecar through `UmbraCatalog._item_from_sidecar_url`.
