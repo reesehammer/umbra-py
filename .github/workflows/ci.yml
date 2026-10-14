@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +51,7 @@ jobs:
   # umbra-py's own types are checked. This is the surface a bare `pip install
   # umbra-py` gets; the all-extras surface is checked by the job below.
   type-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -79,7 +79,7 @@ jobs:
   # This job installs all extras and runs the same mypy, so that surface is
   # checked on every PR -- the type-check mirror of `test-all-extras`.
   type-check-all-extras:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -113,7 +113,7 @@ jobs:
   # extra (viz / load / convert / export) importorskips there — silently.
   # This job installs everything so those tests actually run on every PR.
   test-all-extras:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -137,7 +137,7 @@ jobs:
       # fluctuation across Python patch releases doesn't turn CI red. The XML
       # report feeds the Codecov badge in the README.
       #
-      # ubuntu-latest public runners have 4 vCPUs. `-n auto` spends them;
+      # ubuntu-24.04 public runners have 4 vCPUs. `-n auto` spends them;
       # `--dist loadfile` keeps each test module on one worker so GDAL /
       # matplotlib / TestClient fixtures stay process-local. `MPLBACKEND=Agg`
       # stops matplotlib probing for a display. `--durations=20` names

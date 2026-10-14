@@ -1,0 +1,6 @@
+{
+  "previews": 4050,
+  "source": "https://api.umbra-py.space/healthz",
+  "noted": "2026-10-14",
+  "note": "Last known baked-preview count on the public API (thumbnails.count). The weekly thumbnail publish will not upload a sidecar with fewer previews than this, the live /healthz count, or the released manifest. Raise this when a larger count is known and /healthz may be unreachable."
+}

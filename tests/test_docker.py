@@ -206,3 +206,5 @@ def test_entrypoint_thumbnail_fetch_uses_the_manifest_asset_name():
     assert CATALOG_THUMBS_MANIFEST_ASSET in text
     fetch_line = next(line for line in text.splitlines() if "fetch-thumbnails" in line)
     assert "--url" not in fetch_line
+    assert "--force" not in fetch_line
+    assert "fewer previews" in text

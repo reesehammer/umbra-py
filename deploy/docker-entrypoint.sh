@@ -122,9 +122,11 @@ fi
 # still serves a single catalog.thumbs.db. Refreshed like the index:
 # `--if-changed` downloads only when that manifest (or the legacy asset)
 # changed, and re-merges whenever the sidecar changed or the index above
-# was swapped (the published catalog.db carries no thumbnails). A failed
-# check keeps and merges the existing sidecar; no sidecar at all never
-# blocks startup.
+# was swapped (the published catalog.db carries no thumbnails). A published
+# sidecar with fewer previews than the local file is refused: the download
+# is discarded and the local catalog.thumbs.db stays (no --force on this
+# command). A failed check keeps and merges the existing sidecar; no sidecar
+# at all never blocks startup.
 # Both refreshes are disk-safe: each first deletes the scratch files an
 # interrupted boot left (`.next`, `.next.part`, `.merge`, ...), checks free
 # space before downloading, and the merge writes a copy of catalog.db that is

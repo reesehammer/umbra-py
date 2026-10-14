@@ -451,6 +451,10 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> Non
     Bootstrap the index first with 'umbra index fetch' or 'umbra index build'.
     Acquisitions the sidecar doesn't cover are left alone, so re-run after an
     'umbra index update' to pick up newly published previews.
+
+    ``--if-changed`` will not replace a local sidecar that already has more
+    previews than the published one. The local file stays, and it is what gets
+    merged.
     """
     path = _shared._index_path(db_path)
     if not path.exists():
