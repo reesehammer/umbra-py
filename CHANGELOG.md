@@ -62,6 +62,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   adds a MatX `sarbp`-shaped recipe: `--product CPHD` by place/bbox,
   HEAD the size (often 10–30+ GiB), download, stop. umbra-py does not
   form the image. Limitations and the CPHD product blurb say so.
+- **CPHD + SICD pair for image formers.**
+  [`docs/guides/complex-downstream.md`](docs/guides/complex-downstream.md)
+  shows a place or bbox search, a size check, and
+  `umbra download <item> --asset CPHD --asset SICD` from one collect,
+  then handing both files to a former such as FastSAR
+  `read_cphd(..., sicd=)`. umbra-py finds and downloads the pair.
 - **Complex SICD/CPHD handoff guide.** New
   [`docs/guides/complex-downstream.md`](docs/guides/complex-downstream.md)
   for phase-preserving downstream processors: open Umbra SICD is
