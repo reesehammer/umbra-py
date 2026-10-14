@@ -403,6 +403,7 @@ def test_build_flags_datetime_after_created_and_reports_quarantined_future(tmp_p
     with CatalogIndex(tmp_path / "catalog.db") as idx:
         idx.build(FakeCatalog())
         stats = idx.stats()
+        extent = idx.temporal_extent()
         ids = {item.id for item in idx.search()}
         flagged = {item.id: item.datetime_suspect for item in idx.search()}
         kept = idx.get("after-created")
@@ -412,6 +413,7 @@ def test_build_flags_datetime_after_created_and_reports_quarantined_future(tmp_p
     assert stats["quarantined_future_count"] == 1
     assert stats["end"] == "2026-09-13"
     assert stats["start"] == "2024-01-15"
+    assert extent == (stats["start"], stats["end"])
     assert stats["datetime_suspect_count"] == 2
     assert flagged["after-created"] is True
     assert flagged["missing-created"] is True
