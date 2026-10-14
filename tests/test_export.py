@@ -123,6 +123,41 @@ def test_export_keeps_existing_self_link(tmp_path):
     assert item.raw["links"] == [existing]
 
 
+def test_export_doc_injects_published_and_keeps_created():
+    """published is an index column; created is already in the STAC document."""
+    from datetime import datetime, timezone
+
+    item = _make_item("a", (0, 0, 1, 1))
+    item.properties["created"] = "2024-01-20T08:00:00.483435Z"
+    item.published = datetime(2024, 1, 21, 21, 55, tzinfo=timezone.utc)
+    doc = _export_doc(item)
+    assert doc["properties"]["created"] == "2024-01-20T08:00:00.483435Z"
+    assert doc["properties"]["umbra-py:published"] == "2024-01-21T21:55:00Z"
+    # Injection copies properties; the source document stays free of the column.
+    assert "umbra-py:published" not in item.raw["properties"]
+
+
+def test_export_round_trip_carries_created_and_published(tmp_path):
+    pytest.importorskip("stac_geoparquet")
+    from datetime import datetime, timezone
+
+    from umbra_py.models import _parse_datetime
+
+    item = _make_item("a", (0, 0, 1, 1))
+    item.properties["created"] = "2024-01-20T08:00:00Z"
+    item.published = datetime(2024, 1, 21, 21, 55, tzinfo=timezone.utc)
+    out = tmp_path / "catalog.parquet"
+    assert export_geoparquet([item], out) == 1
+    [back] = _read_back(out)
+    # stac-geoparquet rewrites timestamps with an explicit fractional second;
+    # the instant is what has to survive.
+    props = back["properties"]
+    assert _parse_datetime(props["created"]) == datetime(2024, 1, 20, 8, tzinfo=timezone.utc)
+    assert _parse_datetime(props["umbra-py:published"]) == datetime(
+        2024, 1, 21, 21, 55, tzinfo=timezone.utc
+    )
+
+
 def test_export_doc_injects_baked_place():
     """A baked `.place` (from `umbra index bake`) is carried into the exported
     STAC properties as `umbra:place`, without mutating the item's raw doc — so

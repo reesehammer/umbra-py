@@ -77,6 +77,23 @@ def _index(tmp_path, *items: UmbraItem) -> CatalogIndex:
     return idx
 
 
+def test_sanitize_keeps_timestamp_columns_on_a_valid_row(tmp_path):
+    """Quarantine still drops a bad sibling and leaves created/published put."""
+    kept = _item("kept")
+    kept.properties["created"] = "2024-06-03T00:00:00Z"
+    kept.published = datetime(2024, 6, 4, tzinfo=timezone.utc)
+    future = _item("future", dt="2036-04-01T00:00:00Z")
+    with _index(tmp_path, kept, future) as idx:
+        report = sanitize_index(idx, now=NOW)
+        assert report["kept"] == 1
+        assert report["quarantined_count"] == 1
+        got = idx.get("kept")
+        assert got is not None
+        assert got.properties["created"] == "2024-06-03T00:00:00Z"
+        assert got.published == datetime(2024, 6, 4, tzinfo=timezone.utc)
+        assert idx.get("future") is None
+
+
 def test_datetime_before_2018_is_quarantined():
     early = _item(dt="2017-12-31T23:59:59Z")
     on_epoch = _item(dt="2018-01-01T00:00:00Z")

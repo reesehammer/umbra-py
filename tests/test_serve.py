@@ -104,6 +104,40 @@ def test_item_to_stac_stamps_collection_and_rewrites_links(sample_item_dict):
     assert {link["rel"] for link in feature["links"]} == {"self", "root", "parent", "collection"}
 
 
+def test_item_to_stac_passes_created_and_published(sample_item_dict):
+    """created stays the STAC property; published is umbra-py:published."""
+    from datetime import datetime, timezone
+
+    item = UmbraItem.from_dict(sample_item_dict, href=_href(0))
+    feature = serve.item_to_stac(item, "http://x")
+    assert feature["properties"]["created"] == sample_item_dict["properties"]["created"]
+    assert "umbra-py:published" not in feature["properties"]
+    item.published = datetime(2024, 1, 8, 21, 55, tzinfo=timezone.utc)
+    feature = serve.item_to_stac(item, "http://x")
+    assert feature["properties"]["umbra-py:published"] == "2024-01-08T21:55:00Z"
+    assert feature["properties"]["created"] == sample_item_dict["properties"]["created"]
+
+
+def test_search_and_item_pass_created_and_published(tmp_path, sample_item_dict):
+    """/search and the item route both expose the two timestamps."""
+    from datetime import datetime, timezone
+
+    doc = copy.deepcopy(sample_item_dict)
+    doc["id"] = "item-ts"
+    item = UmbraItem.from_dict(doc, href=_href(0))
+    item.published = datetime(2024, 1, 8, 21, 55, tzinfo=timezone.utc)
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path) as idx:
+        idx.add(item)
+    client = TestClient(serve.build_app(path))
+    searched = client.get("/search?limit=1").json()["features"][0]
+    fetched = client.get(f"/collections/{COLLECTION}/items/item-ts").json()
+    created = sample_item_dict["properties"]["created"]
+    for feature in (searched, fetched):
+        assert feature["properties"]["created"] == created
+        assert feature["properties"]["umbra-py:published"] == "2024-01-08T21:55:00Z"
+
+
 def test_item_to_stac_surfaces_baked_place(sample_item_dict):
     """A baked `.place` (from `umbra index bake`) is surfaced as the namespaced
     `umbra:place` property, so a STAC client shows a real place name."""

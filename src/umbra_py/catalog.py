@@ -47,7 +47,7 @@ from .constants import CANOPY_ARCHIVE_URL, S3_BUCKET, S3_REGION
 from .dates import parse_date_bound
 from .exceptions import CatalogError
 from .fuzzy import task_matches
-from .models import BBox, UmbraItem
+from .models import BBox, UmbraItem, _parse_datetime
 
 DateLike = str | date | datetime | None
 
@@ -363,6 +363,10 @@ class UmbraCatalog:
         self.archive_url = archive_url
         #: Optional STAC collection ids to scope a Canopy ``/search`` to.
         self.collections = collections
+        #: Sidecar key → S3 ``LastModified`` text from the listing currently
+        #: being streamed. ``_stream_keys`` fills it; ``_walk_task`` reads it
+        #: once that prefix's keys are consumed. Replaced on the next stream.
+        self._sidecar_last_modified: dict[str, str] = {}
 
     # -- HTTP helpers ----------------------------------------------------------
 
@@ -439,7 +443,14 @@ class UmbraCatalog:
         than one S3 LIST per acquisition directory -- the latter is
         prohibitively slow against the real bucket (~1000s of round
         trips for an unconstrained search).
+
+        Each sidecar object's ``LastModified`` is kept on
+        :attr:`_sidecar_last_modified` for the walk that is consuming this
+        stream. That timestamp is already in the ``ListObjectsV2`` page, so
+        recording when the object appeared in the bucket costs no extra
+        request.
         """
+        self._sidecar_last_modified = {}
         token: str | None = None
         while True:
             # ``list-type=2`` selects ListObjectsV2 so ``continuation-token``
@@ -457,6 +468,10 @@ class UmbraCatalog:
             for c in root.findall(f"{_S3_NS}Contents"):
                 k = c.findtext(f"{_S3_NS}Key")
                 if k:
+                    if k.endswith(_V2_SIDECAR_SUFFIX) or k.endswith(_LEGACY_SIDECAR_SUFFIX):
+                        modified = c.findtext(f"{_S3_NS}LastModified")
+                        if modified:
+                            self._sidecar_last_modified[k] = modified
                     yield k
             if root.findtext(f"{_S3_NS}IsTruncated") != "true":
                 break
@@ -800,22 +815,27 @@ class UmbraCatalog:
         # acquisitions first). Each still needs one sidecar GET -- the N+1
         # round trips in an otherwise single-LIST walk -- which
         # _items_from_sidecars resolves concurrently while preserving order.
-        pending: list[tuple[str, list[str], str]] = []
+        pending: list[tuple[str, list[str], str, datetime | None]] = []
         for acq_prefix in sorted(by_acq):
             keys = by_acq[acq_prefix]
             sidecar = _pick_sidecar(keys)
             if sidecar is None:
                 continue
-            pending.append((acq_prefix, keys, self._url_for(sidecar)))
+            # Read before the next task's stream replaces the map. The value
+            # is the sidecar's own LastModified from the listing just consumed.
+            published = _parse_datetime(self._sidecar_last_modified.get(sidecar))
+            pending.append((acq_prefix, keys, self._url_for(sidecar), published))
         yield from self._items_from_sidecars(pending)
 
     def _items_from_sidecars(
-        self, pending: list[tuple[str, list[str], str]]
+        self, pending: list[tuple[str, list[str], str, datetime | None]]
     ) -> Iterator[UmbraItem]:
         """Fetch each acquisition's sidecar and build its item, order-preserving.
 
-        ``pending`` is ``(acq_prefix, keys, sidecar_url)`` tuples already in the
-        date order the walk yields. The sidecar GET is the one per-acquisition
+        ``pending`` is ``(acq_prefix, keys, sidecar_url, published)`` tuples
+        already in the date order the walk yields. ``published`` is the
+        sidecar's S3 ``LastModified`` (or ``None`` when the listing had none).
+        The sidecar GET is the one per-acquisition
         round trip in an otherwise single-LIST task walk, so we resolve the
         fetches through a small thread pool (:data:`_SIDECAR_WORKERS`) rather than
         one at a time -- but yield strictly in the input order, so ``search``
@@ -828,15 +848,17 @@ class UmbraCatalog:
         if not pending:
             return
         if len(pending) == 1:
-            acq_prefix, keys, sidecar_url = pending[0]
-            item = self._item_from_sidecar(self._get(sidecar_url), acq_prefix, keys, sidecar_url)
+            acq_prefix, keys, sidecar_url, published = pending[0]
+            item = self._item_from_sidecar(
+                self._get(sidecar_url), acq_prefix, keys, sidecar_url, published
+            )
             if item is not None:
                 yield item
             return
 
         from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
-        def fetch(entry: tuple[str, list[str], str]) -> dict:
+        def fetch(entry: tuple[str, list[str], str, datetime | None]) -> dict:
             return self._get(entry[2])
 
         workers = min(_SIDECAR_WORKERS, len(pending))
@@ -844,8 +866,8 @@ class UmbraCatalog:
             for base in range(0, len(pending), workers):
                 window = pending[base : base + workers]
                 for entry, doc in zip(window, pool.map(fetch, window), strict=True):
-                    acq_prefix, keys, sidecar_url = entry
-                    item = self._item_from_sidecar(doc, acq_prefix, keys, sidecar_url)
+                    acq_prefix, keys, sidecar_url, published = entry
+                    item = self._item_from_sidecar(doc, acq_prefix, keys, sidecar_url, published)
                     if item is not None:
                         yield item
 
@@ -890,6 +912,7 @@ class UmbraCatalog:
         acq_prefix: str,
         files: list[str],
         sidecar_url: str,
+        published: datetime | None = None,
     ) -> UmbraItem | None:
         """Build an :class:`UmbraItem` from a v2 sidecar.
 
@@ -897,7 +920,9 @@ class UmbraCatalog:
         bucket. The actual downloadable products sit next to the sidecar
         in the public bucket, so we discard the sidecar's asset hrefs and
         rebuild them from the keys we just listed -- the returned hrefs
-        always resolve.
+        always resolve. ``published`` is the sidecar's S3 ``LastModified``
+        from that same listing (``None`` when the page did not carry one);
+        it is not read from the JSON.
         """
         legacy = sidecar_url.endswith(_LEGACY_SIDECAR_SUFFIX)
         if legacy:
@@ -917,6 +942,7 @@ class UmbraCatalog:
         if not assets:
             return None
         item = UmbraItem.from_dict({**doc, "assets": assets}, href=sidecar_url)
+        item.published = published
         # Record what the collect actually ships, so a caller (and the parquet)
         # can find a matched CPHD + SICD pair from one collect without
         # re-classifying asset keys. Namespaced to umbra-py: not Umbra's field.

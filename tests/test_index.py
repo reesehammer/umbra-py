@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from umbra_py.index import BakedPreview, CatalogIndex, default_index_path
@@ -1569,6 +1570,194 @@ def test_thumbnail_provenance_migration_from_v3(tmp_path):
 
     version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
     assert version == _SCHEMA_VERSION
+
+
+def test_timestamp_columns_migration_from_v4(tmp_path):
+    """A version-4 index gains the suspect flag and the timestamp columns.
+
+    Rows, baked pixels, and the place label survive. ``datetime_suspect``
+    defaults to not-suspect. ``created`` and ``published`` stay NULL until a
+    crawl fills them: this migration does not invent timestamps.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    v4_schema = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL, place TEXT, thumbnail BLOB,
+        thumbnail_asset TEXT, thumbnail_size INTEGER
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v4_schema)
+    conn.execute(
+        "INSERT INTO items (href, id, doc, place, thumbnail) VALUES (?, ?, ?, ?, ?)",
+        ("h", "old", '{"id": "old", "properties": {}, "assets": {}}', "Baked", b"png"),
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
+        assert {"created", "published", "datetime_suspect"} <= cols
+        created, published, place, suspect = idx._conn.execute(
+            "SELECT created, published, place, datetime_suspect FROM items WHERE id = 'old'"
+        ).fetchone()
+        assert created is None and published is None and place == "Baked"
+        assert suspect == 0
+        assert idx.get_thumbnail("old") == b"png"
+        [old] = list(idx.search())
+        assert old.published is None
+        assert old.place == "Baked"
+        assert old.datetime_suspect is False
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def test_v5_index_gains_timestamps_and_keeps_datetime_suspect(tmp_path):
+    """A version-5 index gains created/published without clearing the flag.
+
+    Version 5 is the ``datetime_suspect`` layout. Opening it adds the two
+    timestamp columns as NULL and leaves an existing suspect stamp in place,
+    including on the item ``get`` rebuilds.
+    """
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    v5_schema = """
+    CREATE TABLE items (
+        href TEXT PRIMARY KEY, id TEXT NOT NULL, task TEXT, datetime TEXT,
+        acq_date TEXT, min_lon REAL, min_lat REAL, max_lon REAL, max_lat REAL,
+        doc TEXT NOT NULL, place TEXT, thumbnail BLOB,
+        thumbnail_asset TEXT, thumbnail_size INTEGER,
+        datetime_suspect INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE item_assets (href TEXT NOT NULL, asset TEXT NOT NULL,
+        PRIMARY KEY (href, asset));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    """
+    path = tmp_path / "v5.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(v5_schema)
+    conn.execute(
+        "INSERT INTO items (href, id, doc, place, datetime_suspect) VALUES (?, ?, ?, ?, ?)",
+        ("h", "flagged", '{"id": "flagged", "properties": {}, "assets": {}}', "Baked", 1),
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    with CatalogIndex(path) as idx:
+        cols = {r[1] for r in idx._conn.execute("PRAGMA table_info(items)")}
+        assert {"created", "published", "datetime_suspect"} <= cols
+        created, published, suspect, place = idx._conn.execute(
+            "SELECT created, published, datetime_suspect, place FROM items WHERE id = 'flagged'"
+        ).fetchone()
+        assert created is None and published is None and place == "Baked"
+        assert suspect == 1
+        item = idx.get("flagged")
+        assert item is not None
+        assert item.datetime_suspect is True
+        assert item.published is None
+        assert item.created is None
+        assert item.place == "Baked"
+        assert idx.stats()["datetime_suspect_count"] == 1
+
+    version = sqlite3.connect(str(path)).execute("PRAGMA user_version").fetchone()[0]
+    assert version == _SCHEMA_VERSION
+
+
+def _with_timestamps(item: UmbraItem, created: str | None, published: datetime | None) -> UmbraItem:
+    """Return ``item`` with a STAC ``created`` and a bucket ``published`` set.
+
+    ``properties`` and ``raw`` share one dict after ``from_dict``, so writing
+    ``created`` onto properties is enough for the stored document.
+    """
+    if created is None:
+        item.properties.pop("created", None)
+    else:
+        item.properties["created"] = created
+    item.published = published
+    return item
+
+
+def test_add_stores_created_and_published(tmp_path):
+    """created comes from STAC properties; published from the item field."""
+    item = _with_timestamps(
+        _make_item(
+            "SiteA", "2024-01-15-10-00-00_UMBRA-04", "a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)
+        ),
+        "2024-01-20T08:00:00Z",
+        datetime(2024, 1, 21, 21, 55, tzinfo=timezone.utc),
+    )
+    bare = _make_item(
+        "SiteB", "2024-02-10-12-00-00_UMBRA-09", "b", "2024-02-10T12:00:00Z", (2, 2, 3, 3)
+    )
+    with _index(tmp_path, items=(item, bare)) as idx:
+        got = {i.id: i for i in idx.search()}
+        assert got["a"].properties["created"] == "2024-01-20T08:00:00Z"
+        assert got["a"].published == datetime(2024, 1, 21, 21, 55, tzinfo=timezone.utc)
+        assert got["a"].created == datetime(2024, 1, 20, 8, 0, tzinfo=timezone.utc)
+        # Legacy-shaped rows (no properties.created, no listing time) stay NULL.
+        assert got["b"].properties.get("created") is None
+        assert got["b"].published is None
+        assert idx._conn.execute(
+            "SELECT created, published FROM items WHERE id = 'b'"
+        ).fetchone() == (None, None)
+        by_id = idx.get("a")
+        by_href = idx.get_by_href(item.href or "")
+        assert by_id is not None and by_href is not None
+        assert by_id.published == by_href.published == got["a"].published
+
+
+def test_reindex_refreshes_timestamps_and_keeps_place(tmp_path):
+    """A later crawl replaces created/published and leaves the baked label."""
+    item = _with_timestamps(
+        _make_item(
+            "SiteA", "2024-01-15-10-00-00_UMBRA-04", "a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)
+        ),
+        "2024-01-20T00:00:00Z",
+        datetime(2024, 1, 21, tzinfo=timezone.utc),
+    )
+    with _index(tmp_path, items=(item,)) as idx:
+        idx.bake_places(geocoder=lambda lat, lon: "Baked City")
+        refreshed = _with_timestamps(
+            _make_item(
+                "SiteA", "2024-01-15-10-00-00_UMBRA-04", "a", "2024-01-15T10:00:00Z", (0, 0, 1, 1)
+            ),
+            "2024-02-01T00:00:00Z",
+            datetime(2024, 2, 2, tzinfo=timezone.utc),
+        )
+        idx.add(refreshed)
+        idx.commit()
+        [got] = list(idx.search())
+    assert got.place == "Baked City"
+    assert got.properties["created"] == "2024-02-01T00:00:00Z"
+    assert got.published == datetime(2024, 2, 2, tzinfo=timezone.utc)
+
+
+def test_search_backfills_created_when_only_the_column_has_it(tmp_path):
+    """A column filled without the property still reaches properties.created."""
+    with _index(tmp_path, items=(_A,)) as idx:
+        idx._conn.execute(
+            "UPDATE items SET created = ?, published = ? WHERE id = 'a'",
+            ("2024-01-20T00:00:00Z", "2024-01-21T00:00:00Z"),
+        )
+        idx.commit()
+        [got] = list(idx.search())
+    assert got.properties["created"] == "2024-01-20T00:00:00Z"
+    assert got.published == datetime(2024, 1, 21, tzinfo=timezone.utc)
+    assert "created" not in _A.properties
 
 
 def test_bake_thumbnails_newest_first_spends_a_capped_run_on_fresh_scenes(tmp_path):

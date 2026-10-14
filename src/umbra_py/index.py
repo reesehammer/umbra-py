@@ -44,7 +44,7 @@ from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
 from .exceptions import CatalogError, IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
-from .models import BBox, UmbraItem, _parse_datetime
+from .models import BBox, UmbraItem, _iso_utc, _parse_datetime
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .coverage import SiteCoverage
@@ -65,10 +65,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: picture of, which the index used to leave to be assumed. Version 5 added
 #: ``items.datetime_suspect``: the acquisition time is after ``properties.created``
 #: (or after ``built_at`` when created is missing). The row stays; latest-date
-#: and recency paths skip it. All are purely additive, so a lower-version (or
-#: legacy version-0) database is migrated in place by adding the missing columns
-#: -- exercising the migration path versioning was landed to enable.
-_SCHEMA_VERSION = 5
+#: and recency paths skip it. Version 6 added nullable ``items.created`` (STAC
+#: ``properties.created``, absent on legacy ``_METADATA.json`` collects) and
+#: ``items.published`` (the sidecar's S3 ``LastModified`` from the crawl's
+#: existing listing). All are purely additive, so a lower-version (or legacy
+#: version-0) database is migrated in place by adding the missing columns --
+#: exercising the migration path versioning was landed to enable.
+_SCHEMA_VERSION = 6
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
 #: default for :meth:`CatalogIndex.bake_thumbnails`. 512 px is large enough
@@ -92,7 +95,7 @@ _BUSY_TIMEOUT_MS = 5000
 #: place. Every step so far is additive (a new column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4})
+_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4, 5})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -110,7 +113,9 @@ CREATE TABLE IF NOT EXISTS items (
     thumbnail       BLOB,
     thumbnail_asset TEXT,
     thumbnail_size  INTEGER,
-    datetime_suspect INTEGER NOT NULL DEFAULT 0
+    datetime_suspect INTEGER NOT NULL DEFAULT 0,
+    created         TEXT,
+    published       TEXT
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -1230,6 +1235,9 @@ class CatalogIndex:
             self._conn.execute(
                 "ALTER TABLE items ADD COLUMN datetime_suspect INTEGER NOT NULL DEFAULT 0"
             )
+        if "created" not in columns:  # v5 -> v6: STAC created + bucket LastModified
+            self._conn.execute("ALTER TABLE items ADD COLUMN created TEXT")
+            self._conn.execute("ALTER TABLE items ADD COLUMN published TEXT")
 
     @classmethod
     def from_release(
@@ -1311,11 +1319,31 @@ class CatalogIndex:
         return flagged
 
     def _item_from_row(
-        self, href: str, doc: str, place: str | None, suspect: int | None = 0
+        self,
+        href: str,
+        doc: str,
+        place: str | None,
+        suspect: int | None = 0,
+        created: str | None = None,
+        published: str | None = None,
     ) -> UmbraItem:
+        """Rebuild an item from an index row, restoring columns the STAC doc omits.
+
+        ``place`` and ``published`` are not Umbra STAC fields, so they live only
+        in their columns. ``created`` is a STAC property and is already in
+        ``doc`` when the sidecar had one; the column is copied back only when
+        the document lacks it. ``datetime_suspect`` is the build's flag that
+        the acquisition time is after ``created`` (or after ``built_at``).
+        """
         item = UmbraItem.from_dict(json.loads(doc), href=href)
         item.place = place
         item.datetime_suspect = bool(suspect)
+        item.published = _parse_datetime(published)
+        if created and not item.properties.get("created"):
+            props = dict(item.properties)
+            props["created"] = created
+            item.properties = props
+            item.raw = {**item.raw, "properties": props}
         return item
 
     # -- writing ---------------------------------------------------------------
@@ -1333,7 +1361,9 @@ class CatalogIndex:
         baked ``place`` label is deliberately left untouched -- it is a derived
         denormalization keyed on the footprint, not on the STAC document, so an
         ``umbra index update`` that re-reads the sidecar must not clear a label an
-        ``umbra index bake`` already computed.
+        ``umbra index bake`` already computed. ``created`` and ``published`` are
+        refreshed with the other STAC-derived columns: they come from the crawl,
+        not from a bake.
         """
         href = item.href
         if not href:
@@ -1344,12 +1374,14 @@ class CatalogIndex:
         acq = _index_acq_date(item)
         self._conn.execute(
             "INSERT INTO items "
-            "(href, id, task, datetime, acq_date, min_lon, min_lat, max_lon, max_lat, doc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "(href, id, task, datetime, acq_date, min_lon, min_lat, max_lon, max_lat, doc, "
+            "created, published) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(href) DO UPDATE SET "
             "id=excluded.id, task=excluded.task, datetime=excluded.datetime, "
             "acq_date=excluded.acq_date, min_lon=excluded.min_lon, min_lat=excluded.min_lat, "
-            "max_lon=excluded.max_lon, max_lat=excluded.max_lat, doc=excluded.doc",
+            "max_lon=excluded.max_lon, max_lat=excluded.max_lat, doc=excluded.doc, "
+            "created=excluded.created, published=excluded.published",
             (
                 href,
                 item.id,
@@ -1361,6 +1393,8 @@ class CatalogIndex:
                 max_lon,
                 max_lat,
                 json.dumps(item.raw),
+                _iso_utc(item.created),
+                _iso_utc(item.published),
             ),
         )
         self._conn.execute("DELETE FROM item_assets WHERE href = ?", (href,))
@@ -1648,7 +1682,7 @@ class CatalogIndex:
             "datetime_suspect, acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
         )
         rows = self._conn.execute(
-            "SELECT href, doc, place FROM items "
+            "SELECT href, doc, place, datetime_suspect, created, published FROM items "
             "WHERE href IN (SELECT href FROM item_assets WHERE asset = ?) "
             "AND (thumbnail IS NULL OR "
             "(thumbnail_asset = ? AND thumbnail_size IS NOT NULL "
@@ -1660,9 +1694,8 @@ class CatalogIndex:
             rows = rows[:limit]
 
         baked = 0
-        for processed, (href, doc, place) in enumerate(rows, 1):
-            item = UmbraItem.from_dict(json.loads(doc), href=href)
-            item.place = place
+        for processed, (href, doc, place, suspect, created, published) in enumerate(rows, 1):
+            item = self._item_from_row(href, doc, place, suspect, created, published)
             png = renderer(item)
             if png:
                 self._conn.execute(
@@ -1895,14 +1928,14 @@ class CatalogIndex:
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = (
-            "SELECT href, doc, place, datetime_suspect FROM items"
+            "SELECT href, doc, place, datetime_suspect, created, published FROM items"
             f"{where} ORDER BY task IS NULL, task, acq_date, href"
         )
 
         count = 0
         per_task: dict[str | None, int] = {}
-        for href, doc, place, suspect in self._conn.execute(sql, params):
-            item = self._item_from_row(href, doc, place, suspect)
+        for row in self._conn.execute(sql, params):
+            item = self._item_from_row(*row)
             if intersects is not None and not item.intersects_polygon(intersects):
                 continue
             if not item.matches_filters(
@@ -2451,12 +2484,12 @@ class CatalogIndex:
         recency_last: dict[str, date | None] = {}
         for (task,) in candidates:
             passes = []
-            for href, doc, place, suspect in self._conn.execute(
-                "SELECT href, doc, place, datetime_suspect FROM items"
+            for row in self._conn.execute(
+                "SELECT href, doc, place, datetime_suspect, created, published FROM items"
                 f"{where} AND task = ? ORDER BY datetime, href",
                 [*params, task],
             ):
-                passes.append(self._item_from_row(href, doc, place, suspect))
+                passes.append(self._item_from_row(*row))
             recency_last[task] = _plausible_last(passes)
             # Cadence filter (worst-case revisit gap), applied on the same items the
             # summary reads and with the same ``_passes_cadence`` the pool path uses,
@@ -2546,7 +2579,7 @@ class CatalogIndex:
         share an id, the first by ``href`` order is returned deterministically.
         """
         row = self._conn.execute(
-            "SELECT href, doc, place, datetime_suspect FROM items "
+            "SELECT href, doc, place, datetime_suspect, created, published FROM items "
             "WHERE id = ? ORDER BY href LIMIT 1",
             (item_id,),
         ).fetchone()
@@ -2564,7 +2597,8 @@ class CatalogIndex:
         already answered from.
         """
         row = self._conn.execute(
-            "SELECT href, doc, place, datetime_suspect FROM items WHERE href = ? LIMIT 1",
+            "SELECT href, doc, place, datetime_suspect, created, published FROM items "
+            "WHERE href = ? LIMIT 1",
             (href,),
         ).fetchone()
         if row is None:
@@ -2593,14 +2627,14 @@ class CatalogIndex:
         needle = filename or stem
         like = f"%{_escape_like(needle)}%"
         rows = self._conn.execute(
-            "SELECT href, doc, place, datetime_suspect FROM items "
+            "SELECT href, doc, place, datetime_suspect, created, published FROM items "
             "WHERE doc LIKE ? ESCAPE '\\' OR href LIKE ? ESCAPE '\\' "
             "ORDER BY href",
             (like, like),
         ).fetchall()
         found: list[UmbraItem] = []
-        for href, doc, place, suspect in rows:
-            item = self._item_from_row(href, doc, place, suspect)
+        for row in rows:
+            item = self._item_from_row(*row)
             strings = _asset_name_strings(item)
             if any(_name_hits(value, stem=stem, filename=filename) for value in strings):
                 found.append(item)

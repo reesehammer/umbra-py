@@ -218,6 +218,13 @@ def test_walker_indexes_every_legacy_layout(legacy_bucket):
     assert bingham.available_assets == ["GEC"]
 
 
+def test_legacy_metadata_has_no_created_property():
+    """Legacy ``_METADATA.json`` collects do not carry STAC ``created``."""
+    stac = stac_from_legacy_metadata(_legacy_doc())
+    assert stac is not None
+    assert "created" not in stac["properties"]
+
+
 def test_legacy_items_respect_date_pruning(legacy_bucket):
     tasks = {i.task for i in legacy_bucket.search(start="2024-01-01")}
     assert tasks == {"Bingham Copper Mine"}

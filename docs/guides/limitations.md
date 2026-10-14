@@ -70,6 +70,24 @@ A datetime that is after the item's own `properties.created`, or after
 flagged `datetime_suspect`, and left out of `end`, `rank_by=recency`, and
 other latest-pass selections. The datetime is not rewritten.
 
+## Open-data timestamps are not delivery latency
+
+The catalog index (schema version 6) stores two times beside `datetime`,
+the acquisition time:
+
+- `created` is STAC `properties.created` when the sidecar has it. Legacy
+  `_METADATA.json` collects do not. `created` minus `datetime` is the lag
+  until Umbra generated the STAC record, not tasking delivery latency.
+- `published` is the S3 `LastModified` of the sidecar object. The crawl
+  already sees it in `ListObjectsV2`, so filling it costs no extra request.
+  It is when that object appeared in the public bucket.
+
+Open data is a curated, batch-published subset. A task's collects can land
+in the bucket together, weeks after they were acquired. Neither field is a
+commercial delivery-latency measurement. `umbra serve` passes `created`
+through as `properties.created` and `published` as
+`properties["umbra-py:published"]`.
+
 ## Canopy is the same interface, not a live-verified client
 
 `UmbraCatalog(token=...)` / `umbra search --token` posts to Canopy's STAC
