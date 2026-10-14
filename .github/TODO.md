@@ -10,6 +10,20 @@ still open.
 
 ---
 
+## `search_live` null-task order disagrees with `search`
+
+- **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/285
+  (follow-up to https://github.com/reesehammer/umbra-py/pull/282)
+- **Code:** `src/umbra_py/index.py` (`_search_sort_key`,
+  `CatalogIndex.search`'s `ORDER BY`).
+
+`search` sorts null tasks last (`ORDER BY task IS NULL`). `search_live`'s
+merge key still sorts them first (`0 if task is None else 1`), which is the
+merge's previous convention. A mix of named tasks and rows with no task can
+hand `heapq.merge` an index stream that is not sorted by the key it yields.
+Smallest change: one key for the SQL `ORDER BY` and the merge, including the
+null-task bit.
+
 ## MCP live fetch of a legacy `_METADATA.json` URL
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/277

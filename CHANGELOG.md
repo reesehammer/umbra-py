@@ -171,11 +171,19 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
-- **STAC search page links keep one `token`.** `next` and `prev` on `GET` and
-  `POST /search` (and `GET /collections/{collection}/items`) replace any
-  `token` already in the query instead of appending another, so following
-  pages does not grow the URL. A `prev` link is included when the page is
-  not the first.
+- **`POST /search` page links keep the request.** `next` and `prev` are
+  `POST /search` with the original JSON body and `token` set once (replaced,
+  not added again). The previous links were `GET /search?token=N` with no
+  body, so the next page dropped `limit`, `collections`, and the other
+  filters and used the default limit of 10. Search order is task, acquisition
+  date, datetime, then id, so two passes that share a timestamp do not swap
+  at a page boundary.
+- **GET search page links keep one `token` and the rest of the query.**
+  `next` and `prev` on `GET /search` and `GET /collections/{collection}/items`
+  replace any `token` already in the query instead of appending another, and
+  keep `bbox`, `datetime`, `collections`, `limit`, `ids`, `intersects`, and
+  the other parameters. A `prev` link is included when the page is not the
+  first.
 - **`GET /collections` no longer scans baked thumbnails for its time span.**
   The extent comes from `CatalogIndex.temporal_extent()`, the same start and
   end as `stats()` without reading thumbnail blobs, and is reused until the
