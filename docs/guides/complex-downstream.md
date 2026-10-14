@@ -173,6 +173,47 @@ python cphd_to_sarbp_input.py ./cphd/*.cphd --image-size 8192 --aperture-angle 1
 ./examples/sarbp input_8k.sarbp -o output_image.raw
 ```
 
+## CPHD + SICD pair for image formers (e.g. FastSAR)
+
+Some formers need both files from **one** collect: the CPHD phase history
+and the vendor SICD grid.
+[FastSAR](https://github.com/saulpingerman/FastSAR) reads that pair with
+`fastsar.io.read_cphd(..., sicd=)`. umbra-py searches the catalog and
+downloads the two assets. FastSAR forms the image.
+
+Search by place or by bbox, then check sizes. Open CPHD is large (often
+multi-GiB, sometimes tens of GiB), and the SICD next to it is large too.
+`--place` is a Nominatim rectangle and cannot be combined with `--bbox`.
+`--product CPHD` keeps collects that expose phase history; the `assets`
+line on a hit should also list `SICD` before you download the pair.
+`--product` is "any of these", so repeating it does not require both.
+
+```bash
+umbra index fetch
+
+# --place is a Nominatim rectangle. --bbox is min_lon,min_lat,max_lon,max_lat.
+umbra search --local --product CPHD --place "Panama Canal" --limit 5
+# umbra search --local --product CPHD --bbox -79.61,8.95,-79.55,9.00 --limit 5
+
+# No `umbra head` verb. `umbra info <url> --json` lists each product `url`;
+# HEAD those (Content-Length) before fetching.
+
+# One item, both products. <item-url> is the `url` line from search:
+# a *.stac.v2.json sidecar or a legacy *_METADATA.json.
+# --asset is repeatable; name both so the default does not pull every product.
+umbra download <item-url> --asset CPHD --asset SICD --dest ./pair
+```
+
+```python
+import fastsar
+
+col = fastsar.io.read_cphd("pair/..._CPHD.cphd", sicd="pair/..._SICD.nitf")
+# FastSAR forms the image from col. umbra-py finished at the download.
+```
+
+The library call for the same pair is
+`download_item(item, dest_dir="./pair", assets=["CPHD", "SICD"])`.
+
 ## After download
 
 - **[sarpy](https://github.com/ngageoint/sarpy)** — reference SICD / CPHD
@@ -182,6 +223,10 @@ python cphd_to_sarbp_input.py ./cphd/*.cphd --image-size 8192 --aperture-angle 1
   forms an image from CPHD on the GPU after a sarpy-based
   `cphd_to_sarbp_input.py` conversion. umbra-py only gets the `.cphd` onto
   disk.
+- **CPHD + SICD pair (not in umbra-py).**
+  [FastSAR](https://github.com/saulpingerman/FastSAR)
+  `read_cphd(..., sicd=)` reads both files from one collect. umbra-py
+  downloads that pair; FastSAR forms the image.
 - **PFA → range-Doppler (not in umbra-py).** Piyush S. Agram, [*Modifying
   Range-Doppler geometry frameworks to process Spotlight SAR imagery in
   Polar Format*](https://arxiv.org/abs/2503.07889) (2025), with public
