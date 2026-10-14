@@ -856,7 +856,11 @@ def index_stats() -> dict[str, Any]:
     """Report on the local catalog index, if one has been built or fetched.
 
     Lets a long-running agent decide whether searches will be instant (index
-    present) or pay a live S3 walk, and how stale the snapshot is.
+    present) or pay a live S3 walk, and how stale the snapshot is. ``end`` is
+    the newest acquisition that is not ``datetime_suspect``.
+    ``datetime_suspect_count`` is how many kept rows carry that flag.
+    ``quarantined_future_count`` is how many source rows the last build
+    dropped for a datetime more than a day ahead (they are not in the index).
     """
     path = default_index_path()
     if not path.exists():
@@ -2001,7 +2005,9 @@ def build_server() -> MCPServer:
             f"{f', start={start!r}' if start else ''}"
             f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
             "2. Pick the two or three most recent passes of the same "
-            "polarization (see each card's polarization_caveat).\n"
+            "polarization (see each card's polarization_caveat). Skip a pass "
+            "whose datetime_suspect is true; that datetime is not a latest "
+            "acquisition.\n"
             "3. change_composite(urls=[...]) on their stac_href URLs.\n"
             "4. Describe what the green/magenta regions imply about activity, "
             "citing the acquisition dates and keeping the attribution line."
@@ -2117,7 +2123,9 @@ def build_server() -> MCPServer:
             f"{f', start={start!r}' if start else ''}"
             f"{f', end={end!r}' if end else ''}) to list the site's passes.\n"
             "2. Pick the two or three most recent passes of the same polarization "
-            "(see each card's polarization_caveat).\n"
+            "(see each card's polarization_caveat). Skip a pass whose "
+            "datetime_suspect is true; that datetime is not a latest "
+            "acquisition.\n"
             "3. On a local server, change_composite(urls=[...]) on their stac_href "
             "URLs so you can see the green (appeared) / magenta (vanished) change, "
             "then narrate_change(urls=[...]) — with no server vision key that "

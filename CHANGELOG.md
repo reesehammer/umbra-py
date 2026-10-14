@@ -10,6 +10,14 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **`datetime_suspect` on index build.** A kept acquisition whose datetime is
+  after `properties.created` (or after `built_at` when `created` is missing)
+  is flagged and left out of `umbra index info`'s `end`, `rank_by=recency`,
+  and other latest-pass selections. The datetime is not rewritten. `end` stays
+  the newest plausible acquisition. `datetime_suspect_count` is how many rows
+  are flagged, and `quarantined_future_count` is how many source rows the build
+  removed for a datetime more than a day ahead (the upstream 2035–2036 items),
+  so those drops stay visible.
 - **Index validation on `umbra index build`.** The weekly snapshot drops
   duplicate ids (latest `updated`, otherwise datetime, then the most assets)
   and quarantines items dated before 2018-01-01 or more than a day ahead,

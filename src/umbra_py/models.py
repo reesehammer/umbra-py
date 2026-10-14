@@ -211,6 +211,12 @@ class UmbraItem:
     #: read live or from an index with no baked label. Distinct from
     #: :attr:`task`, which is the Umbra campaign codename, not a geographic name.
     place: str | None = None
+    #: Set by :class:`~umbra_py.CatalogIndex` when the acquisition time is after
+    #: ``properties.created`` (or after the index ``built_at`` when created is
+    #: missing). The row is kept and the datetime is not rewritten; latest-date
+    #: and recency paths skip it. ``False`` for an item that did not come from
+    #: an index build that flagged it.
+    datetime_suspect: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], href: str | None = None) -> UmbraItem:
@@ -539,6 +545,7 @@ class UmbraItem:
         return {
             "id": self.id,
             "datetime": self.datetime.isoformat() if self.datetime else None,
+            "datetime_suspect": self.datetime_suspect,
             # Prefer the baked reverse-geocoded label (e.g. "Reykjavík,
             # Iceland") a `CatalogIndex` search yields on `.place`; fall back to
             # the task codename so an item from a live walk still carries a name.

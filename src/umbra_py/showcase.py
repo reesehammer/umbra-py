@@ -470,6 +470,7 @@ def select_featured_sites(
         _passes_max_span,
         _passes_median_revisit,
         _passes_span,
+        _plausible_last,
         _rank_sort_key,
         _temporal_rank_figures,
     )
@@ -502,10 +503,15 @@ def select_featured_sites(
         # whose latest is after the upper cutoff (so the two together keep sites
         # whose latest pass falls within the window). The ``or datetime.min`` keeps
         # the read typed, exactly as the sort key does.
-        newest = (ordered[-1].datetime or datetime.min).date()
-        if since is not None and newest < since:
+        # A datetime_suspect pass is kept in the series but is not a latest
+        # acquisition, so it does not satisfy (or extend) the newest-pass gate.
+        # ``None`` — every dated pass is suspect — drops the site when a gate
+        # is set, matching the index ``MAX(CASE WHEN datetime_suspect = 0 ...)``
+        # (NULL compared with a bound is never true).
+        newest = _plausible_last(ordered)
+        if since is not None and (newest is None or newest < since):
             continue
-        if before is not None and newest > before:
+        if before is not None and (newest is None or newest > before):
             continue
         # Onset gate: select a site by its *earliest* dated pass -- the ``first`` a
         # summary reports. ``ordered`` is oldest-first and every member is dated
@@ -576,6 +582,11 @@ def select_featured_sites(
     def _sort_key(pair: tuple[FeaturedSite, int]) -> tuple[object, ...]:
         site, comparable = pair
         last, span_days, median_revisit_days = _temporal_rank_figures(site.items)
+        if rank_by == "recency":
+            # Same exclusion as CatalogIndex.rank_sites: the reported ``last``
+            # still names the newest stamp, including a suspect one, but the
+            # recency order does not treat that stamp as current.
+            last = _plausible_last(site.items)
         return _rank_sort_key(
             comparable_passes=comparable,
             passes=len(site.items),

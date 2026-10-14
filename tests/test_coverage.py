@@ -485,6 +485,24 @@ def _temporal_pool():
     ]
 
 
+def test_rank_by_recency_ignores_a_datetime_suspect_pass():
+    """A pass flagged datetime_suspect does not win the recency order.
+
+    The reported ``last`` still names that stamp. Span ranking, which is not
+    a latest-pass order, still sees it.
+    """
+    recent = _pass("Recent", 21)
+    suspect_site_old = _pass("Suspect", 10)
+    suspect_site_new = _pass("Suspect", 28)
+    suspect_site_new.datetime_suspect = True
+    pool = [recent, _pass("Recent", 20), suspect_site_old, suspect_site_new]
+    ranked = rank_site_coverage(pool, rank_by="recency")
+    assert [s.task for s in ranked] == ["Recent", "Suspect"]
+    suspect = next(s for s in ranked if s.task == "Suspect")
+    assert suspect.last == "2024-01-28"
+    assert rank_site_coverage(pool, rank_by="span")[0].task == "Suspect"
+
+
 def test_rank_by_recency_orders_by_newest_pass():
     ranked = rank_site_coverage(_temporal_pool(), rank_by="recency")
     # Newest dated pass first (Wide day 28, Recent day 21, Deep day 5) -- the depth

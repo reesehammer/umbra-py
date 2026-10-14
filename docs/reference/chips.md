@@ -5,6 +5,10 @@ Cut scenes into fixed-size, georeferenced training tiles with per-chip metadata
 stac-geoparquet manifest. Chipping needs the `[load]` extra; the GeoParquet
 manifest and catalog export need `[export]`.
 
+Open GEC is 8-bit display-scaled data with nodata 0 and a floor at DN 1.
+Mask nodata 0 before a threshold or a statistic, and use SICD or CSI when
+dynamic range matters.
+
 The complex products are chippable too: `asset="SICD"` geocodes each acquisition
 through the [conversion pipeline](convert.md) — optionally terrain-orthorectified,
 terrain-flattened and radiometrically calibrated (see `SicdConversion`) — and cuts

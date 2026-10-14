@@ -790,8 +790,9 @@ def index_info(db_path, as_json) -> None:
 
     ``--json`` emits the stats as a machine-readable object
     (``docs/schemas/index-info.schema.json``): ``path``, ``size_bytes``,
-    ``items``, ``start``, ``end``, ``tasks``, ``labeled``, ``thumbnailed`` and
-    ``built_at``.
+    ``items``, ``start``, ``end``, ``tasks``, ``labeled``, ``thumbnailed``,
+    ``built_at``, ``datetime_suspect_count`` and ``quarantined_future_count``.
+    ``end`` omits acquisitions flagged ``datetime_suspect``.
     """
     path = _shared._index_path(db_path)
     if not path.exists():
@@ -806,6 +807,14 @@ def index_info(db_path, as_json) -> None:
     click.echo(f"Index: {path}")
     click.echo(f"  items : {s['items']}")
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
+    click.echo(
+        f"  suspect: {s['datetime_suspect_count']} "
+        "(datetime after created; excluded from the latest date)"
+    )
+    click.echo(
+        f"  future : {s['quarantined_future_count']} "
+        "quarantined at build (dated more than a day ahead)"
+    )
     click.echo(f"  tasks : {s['tasks']}")
     click.echo(f"  places: {s['labeled']} of {s['items']} labelled")
     click.echo(f"  thumbs: {s['thumbnailed']} of {s['items']} baked")

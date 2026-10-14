@@ -21,6 +21,8 @@ API (`umbra serve`) and MCP server sit on the same host.
     (`umbra serve`, hosted at [https://api.umbra-py.space/](https://api.umbra-py.space/)),
     and an MCP server all ship.
     This is not an InSAR toolbox — see [limitations](guides/limitations.md).
+    The weekly index reflects what Umbra has published: as of 2026-10-14,
+    `built_at` 2026-10-08, newest plausible acquisition 2026-09-13.
     Not affiliated with Umbra Lab, Inc.
 
 ## What it gives you

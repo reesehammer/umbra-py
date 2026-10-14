@@ -7,6 +7,7 @@
   "required": [
     "id",
     "datetime",
+    "datetime_suspect",
     "place",
     "bbox",
     "platform",
@@ -32,6 +33,10 @@
       "type": ["string", "null"],
       "description": "Acquisition time, ISO 8601 with an offset. Null when the source item stated none.",
       "examples": ["2024-01-01T02:10:12+00:00"]
+    },
+    "datetime_suspect": {
+      "type": "boolean",
+      "description": "True when a catalog index flagged this acquisition time as after properties.created (or after the index built_at when created is missing). The datetime is the one Umbra published; latest-pass selection should skip it. False for an item that did not come from an index build that flagged it."
     },
     "place": {
       "type": ["string", "null"],

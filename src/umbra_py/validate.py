@@ -488,6 +488,22 @@ def _violation_message(violations: list[dict]) -> str:
     )
 
 
+def quarantined_future_count(report: dict[str, Any] | None) -> int:
+    """How many quarantined rows were dropped for a datetime after the build.
+
+    ``None`` (an index that has never been sanitized) counts as zero. A row
+    dropped for some other reason is not included, even when it also carries
+    a bad date — only the ``datetime in the future`` reason, which is what
+    removes the upstream 2035–2036 items.
+    """
+    if not report:
+        return 0
+    rows = report.get("quarantined") or []
+    return sum(
+        1 for row in rows if isinstance(row, dict) and _REASON_FUTURE in (row.get("reasons") or [])
+    )
+
+
 def stored_validation(index: Any) -> dict[str, Any] | None:
     """The report :func:`sanitize_index` stored, or ``None`` if this index has none."""
     raw = index.get_meta(VALIDATION_META_KEY)
