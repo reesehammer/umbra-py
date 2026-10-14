@@ -81,6 +81,12 @@ umbra search --place "Port of Rotterdam" --limit 5
 umbra info https://example.com/item.stac.v2.json
 umbra download https://example.com/item.stac.v2.json --asset GEC --dest ./downloads
 umbra quicklook https://example.com/item.stac.v2.json --out scene.png --db
+
+# After `umbra index fetch`, info and download also take a GEC/SICD filename
+# or the acquisition stem. The index resolves it across sar-data/tasks/,
+# sar-data/task-data/, and open-data/.
+umbra info 2025-05-17-17-43-46_UMBRA-08_GEC.tif
+umbra download 2025-05-17-17-43-46_UMBRA-08 --asset GEC --dest ./downloads
 ```
 
 See the [CLI reference](cli.md) for every command and flag, the

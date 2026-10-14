@@ -135,7 +135,7 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
 
 
 @cli.command()
-@click.argument("item_url")
+@click.argument("item_url", metavar="ITEM")
 @click.option(
     "--asset",
     "assets",
@@ -154,16 +154,22 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
     "human progress lines. Progress stays on stderr.",
 )
 def download(item_url, assets, dest, overwrite, as_json) -> None:
-    """Download asset(s) of an item given its sidecar URL.
+    """Download asset(s) given a sidecar URL, a GEC/SICD filename, or an acquisition stem.
 
-    Accepts a ``*.stac.v2.json`` URL or a legacy ``*_METADATA.json`` URL
-    (2023 to 2024 collects that have no STAC sidecar).
+    ITEM is a ``*.stac.v2.json`` URL or a legacy ``*_METADATA.json`` URL (2023
+    to 2024 collects that have no STAC sidecar). It may also be a product
+    filename or acquisition stem (``YYYY-MM-DD-HH-MM-SS_UMBRA-NN``, optionally
+    ``_GEC.tif`` / ``_SICD.nitf``) resolved through the local catalog index.
+    The name does not encode the bucket layout, so the lookup matches the stem
+    against asset hrefs under ``sar-data/tasks/``, ``sar-data/task-data/``, and
+    ``open-data/``. Zero matches is an error; more than one lists the candidate
+    STAC URLs. A filename needs a local index (``umbra index fetch``).
 
     ``--json`` emits a machine-readable ``[{asset, path, bytes, sha256}, ...]``
     array (``docs/schemas/download.schema.json``) so an agent can verify each
     file it just fetched without re-hashing it.
     """
-    item = _shared._item_from_url(item_url)
+    item = _shared._resolve_item_arg(item_url)
     names = list(assets) or item.available_assets
     if not names:
         raise click.ClickException("No downloadable assets found on this item.")

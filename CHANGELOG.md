@@ -10,6 +10,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Look up an acquisition by filename or stem.** `umbra info`, `umbra download`,
+  and the MCP `get_item` tool accept a GEC/SICD filename
+  (`2025-05-17-17-43-46_UMBRA-08_GEC.tif`) or an acquisition stem
+  (`2025-05-17-17-43-46_UMBRA-08`) in addition to a STAC JSON URL. The name is
+  resolved through the local catalog index, matching the stem against asset
+  hrefs under `sar-data/tasks/`, `sar-data/task-data/`, and `open-data/`. An
+  unknown name is an error; more than one match lists the candidate STAC URLs.
 - **`datetime_suspect` on index build.** A kept acquisition whose datetime is
   after `properties.created` (or after `built_at` when `created` is missing)
   is flagged and left out of `umbra index info`'s `end`, `rank_by=recency`,

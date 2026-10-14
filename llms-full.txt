@@ -54,7 +54,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra convert` — Convert a downloaded SICD (complex) product to a map-ready GeoTIFF.
 - `umbra demo` — Build a self-serve interactive catalog explorer as one HTML page.
 - `umbra describe` — Describe a SAR scene in plain language with a vision model.
-- `umbra download` — Download asset(s) of an item given its sidecar URL.
+- `umbra download` — Download asset(s) given a sidecar URL, a GEC/SICD filename, or an acquisition stem.
 - `umbra embed` — Visual similarity search over the archive (embedding-based, C5).
 - `umbra embed build` — Render and embed acquisition quicklooks into a scene-similarity index.
 - `umbra embed fetch` — Download the published scene-embedding index for instant similarity search.
@@ -74,7 +74,7 @@ The CLI subcommands map 1:1 to library functions. Run any command with `--help` 
 - `umbra index info` — Show what a local index holds: item count, date span and task count.
 - `umbra index update` — Cheaply refresh an existing index by re-walking only recent acquisitions.
 - `umbra index validate` — Re-check an index (and optional parquet) against the publish rules.
-- `umbra info` — Show a summary of a STAC item.
+- `umbra info` — Show a summary of a STAC item, a GEC/SICD filename, or an acquisition stem.
 - `umbra llms-txt` — Print the project's llms.txt context bundle to stdout.
 - `umbra load` — Load a clipped/decimated SAR scene from a STAC item URL to a GeoTIFF.
 - `umbra map` — Render search results as an interactive map or GeoJSON file.

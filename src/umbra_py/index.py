@@ -27,6 +27,7 @@ from __future__ import annotations
 import heapq
 import json
 import os
+import re
 import shutil
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
@@ -35,12 +36,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
-from .exceptions import IndexRefreshError, IndexSchemaError, InsufficientSpaceError
+from .exceptions import CatalogError, IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem, _parse_datetime
 
@@ -983,6 +985,134 @@ def _escape_like(value: str) -> str:
     looser than the live walk's plain ``in`` substring test.
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# Acquisition stem, optionally followed by a product filename suffix
+# (``_GEC.tif``, ``_SICD.nitf``, ``_CPHD.cphd``, …). The stem is the
+# acquisition-directory name; it is not a bucket prefix, so the same string
+# occurs under ``sar-data/tasks/``, ``sar-data/task-data/``, and ``open-data/``.
+_ASSET_NAME_RE = re.compile(
+    r"^(?P<stem>\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_UMBRA-\d+)"
+    r"(?:_[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9]+)?$"
+)
+
+
+def _asset_basename(value: str) -> str:
+    """Final path segment of a filename, stem, or URL, percent-decoded."""
+    text = unquote(value.strip().split("?", 1)[0].replace("\\", "/"))
+    return text.rstrip("/").rsplit("/", 1)[-1]
+
+
+def is_asset_name(value: str) -> bool:
+    """Whether ``value`` is a product filename or an acquisition stem.
+
+    A string containing ``://`` is a URL, even when its last segment looks
+    like ``<stem>_GEC.tif``. A directory prefix is ignored, so
+    ``downloads/2025-05-17-17-43-46_UMBRA-08_GEC.tif`` is a filename.
+    """
+    if "://" in value:
+        return False
+    return _ASSET_NAME_RE.fullmatch(_asset_basename(value)) is not None
+
+
+def _parsed_asset_name(value: str) -> tuple[str, str | None] | None:
+    """Return ``(stem, filename)`` for a product filename or bare stem.
+
+    ``filename`` is ``None`` when ``value`` is the stem alone. Returns
+    ``None`` when ``value`` is not an asset name (a URL, a STAC id, …).
+    """
+    if "://" in value:
+        return None
+    name = _asset_basename(value)
+    match = _ASSET_NAME_RE.fullmatch(name)
+    if match is None:
+        return None
+    stem = match.group("stem")
+    return stem, name if name != stem else None
+
+
+def _name_hits(value: str, *, stem: str, filename: str | None) -> bool:
+    """Whether one href or asset key is the requested file or acquisition."""
+    if not value:
+        return False
+    if filename is not None:
+        return _asset_basename(value) == filename
+    path = unquote(value.split("?", 1)[0].replace("\\", "/"))
+    parts = [part for part in path.split("/") if part]
+    if stem in parts:
+        return True
+    base = parts[-1] if parts else ""
+    return base == stem or base.startswith(stem + "_")
+
+
+def _asset_name_strings(item: UmbraItem) -> list[str]:
+    """Sidecar href, asset keys, and asset hrefs — where a stem can appear."""
+    found: list[str] = []
+    if item.href:
+        found.append(item.href)
+    for key, asset in item.assets.items():
+        if key:
+            found.append(str(key))
+        if isinstance(asset, dict):
+            href = asset.get("href") or ""
+            if href:
+                found.append(str(href))
+    return found
+
+
+def resolve_asset_name(name: str, *, path: str | os.PathLike | None = None) -> UmbraItem:
+    """Resolve one product filename or acquisition stem via the local index.
+
+    ``name`` is a GEC/SICD (or other product) filename such as
+    ``2025-05-17-17-43-46_UMBRA-08_GEC.tif``, or the bare stem
+    ``2025-05-17-17-43-46_UMBRA-08``. The stem is matched against asset hrefs.
+    It does not encode which open-bucket layout the collect uses, so the
+    lookup covers ``sar-data/tasks/``, ``sar-data/task-data/``, and
+    ``open-data/`` by searching the index rather than guessing a URL.
+
+    Raises :class:`~umbra_py.exceptions.CatalogError` when no index file
+    exists, nothing matches, or more than one acquisition matches. The
+    ambiguous error lists each candidate's STAC sidecar URL. Does not create
+    an index file when one is missing.
+    """
+    parsed = _parsed_asset_name(name)
+    if parsed is None:
+        raise CatalogError(
+            f"{name!r} is not a product filename or an acquisition stem.",
+            hint="Pass a name like 2025-05-17-17-43-46_UMBRA-08_GEC.tif, or a STAC JSON URL.",
+        )
+    db = Path(path) if path is not None else default_index_path()
+    if not db.is_file():
+        raise CatalogError(
+            f"No local catalog index at {db}.",
+            hint="Fetch the weekly snapshot with 'umbra index fetch', then retry.",
+        )
+    with CatalogIndex(db) as index:
+        matches = index.find_by_asset_name(name)
+    if not matches:
+        raise CatalogError(
+            f"No acquisition in the local index matches {name!r}.",
+            hint="Pass the STAC JSON URL, or refresh the snapshot with 'umbra index fetch'.",
+        )
+    if len(matches) > 1:
+        listed = "\n".join(f"  {item.href}" for item in matches)
+        raise CatalogError(
+            f"{len(matches)} acquisitions match {name!r}:\n{listed}",
+            hint="Pass one of these STAC JSON URLs.",
+        )
+    return matches[0]
+
+
+def asset_name_error_text(exc: CatalogError) -> str:
+    """Prose form of an asset-name :class:`CatalogError`, hint included.
+
+    ``umbra``'s entry point prints ``message`` and ``hint`` itself when it
+    unwraps the cause. Click's runner and MCP ``ValueError`` see only
+    ``str(exc)``, so callers that re-raise as those types use this.
+    """
+    if exc.hint:
+        return f"{exc}\n{exc.hint}"
+    return str(exc)
 
 
 class CatalogIndex:
@@ -2440,6 +2570,41 @@ class CatalogIndex:
         if row is None:
             return None
         return self._item_from_row(*row)
+
+    def find_by_asset_name(self, name: str) -> list[UmbraItem]:
+        """Return items whose asset hrefs contain this filename or stem.
+
+        ``name`` is a product filename (``<stem>_GEC.tif``, ``<stem>_SICD.nitf``)
+        or the bare acquisition stem ``YYYY-MM-DD-HH-MM-SS_UMBRA-NN``. A
+        filename matches an asset href or key with that basename. A stem
+        matches when it is a path segment of an asset href (or of the sidecar
+        href) or the start of a product filename. Ordered by sidecar href.
+        An unrecognised name returns an empty list.
+
+        The published index stores the public href, and that href is the only
+        place the layout (``sar-data/tasks/``, ``sar-data/task-data/``, or
+        ``open-data/``) is recorded — the filename does not carry it. ``_`` in
+        the stem is escaped so it is not a LIKE wildcard.
+        """
+        parsed = _parsed_asset_name(name)
+        if parsed is None:
+            return []
+        stem, filename = parsed
+        needle = filename or stem
+        like = f"%{_escape_like(needle)}%"
+        rows = self._conn.execute(
+            "SELECT href, doc, place, datetime_suspect FROM items "
+            "WHERE doc LIKE ? ESCAPE '\\' OR href LIKE ? ESCAPE '\\' "
+            "ORDER BY href",
+            (like, like),
+        ).fetchall()
+        found: list[UmbraItem] = []
+        for href, doc, place, suspect in rows:
+            item = self._item_from_row(href, doc, place, suspect)
+            strings = _asset_name_strings(item)
+            if any(_name_hits(value, stem=stem, filename=filename) for value in strings):
+                found.append(item)
+        return found
 
     def distinct_ids(self) -> int:
         """Number of distinct STAC item ids (rows can repeat an id when one
