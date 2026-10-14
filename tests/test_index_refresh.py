@@ -284,6 +284,49 @@ def test_stale_volume_thumbs_sidecar_is_replaced_when_the_etag_changes(tmp_path)
     assert read_snapshot_state(dest)["etag"] == "t2"
 
 
+@responses.activate
+def test_smaller_published_sidecar_does_not_replace_the_local_file(tmp_path):
+    """The entrypoint must not swap a good local sidecar for a smaller release."""
+    dest = tmp_path / "catalog.thumbs.db"
+    old = _thumbs_bytes(tmp_path, "old", b"old", n=3)
+    dest.write_bytes(old)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"new", n=1), '"t-small"')
+    with pytest.raises(IndexRefreshError, match="fewer"):
+        refresh_thumbnails_from_release(dest, url=THUMBS_URL)
+    assert dest.read_bytes() == old
+    assert not (tmp_path / "catalog.thumbs.db.next").exists()
+    assert read_snapshot_state(dest) is None
+
+
+@responses.activate
+def test_force_accepts_a_smaller_thumbnail_sidecar(tmp_path):
+    dest = tmp_path / "catalog.thumbs.db"
+    dest.write_bytes(_thumbs_bytes(tmp_path, "old", b"old", n=3))
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"new", n=1), '"t-small"')
+    result = refresh_thumbnails_from_release(dest, url=THUMBS_URL, force=True)
+    assert result.changed and result.items == 1
+
+
+@responses.activate
+def test_same_preview_count_still_replaces_the_sidecar(tmp_path):
+    dest = tmp_path / "catalog.thumbs.db"
+    old = _thumbs_bytes(tmp_path, "old", b"old", n=2)
+    dest.write_bytes(old)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"new", n=2), '"t-same"')
+    result = refresh_thumbnails_from_release(dest, url=THUMBS_URL)
+    assert result.changed and result.items == 2
+    assert dest.read_bytes() != old
+
+
+@responses.activate
+def test_unreadable_local_sidecar_can_be_replaced(tmp_path):
+    dest = tmp_path / "catalog.thumbs.db"
+    dest.write_bytes(b"not a database" * 20)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"new", n=1), '"t1"')
+    result = refresh_thumbnails_from_release(dest, url=THUMBS_URL)
+    assert result.changed and result.items == 1
+
+
 MANIFEST_URL = "https://example.test/releases/download/catalog-index/catalog.thumbs.manifest.json"
 
 
@@ -444,6 +487,22 @@ def test_cli_if_changed_merges_new_sidecar_and_skips_when_nothing_moved(tmp_path
     assert second.exit_code == 0, second.output
     assert "Thumbnails are current (snapshot t1)" in second.output
     assert _gets(THUMBS_URL) == 1
+
+
+@responses.activate
+def test_cli_if_changed_keeps_a_larger_local_sidecar_and_merges_it(tmp_path):
+    """What the container entrypoint runs: a smaller release must not win."""
+    db = tmp_path / "catalog.db"
+    _index(db, n=3)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    old = _thumbs_bytes(tmp_path, "old", b"local", n=3)
+    sidecar.write_bytes(old)
+    _serve_thumbs(_thumbs_bytes(tmp_path, "v1", b"remote", n=1), '"t-small"')
+    result = _fetch_thumbs(db)
+    assert result.exit_code == 0, result.output
+    assert "fewer" in result.output
+    assert sidecar.read_bytes() == old
+    assert _thumb(db) == b"local"
 
 
 @responses.activate

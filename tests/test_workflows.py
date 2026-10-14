@@ -173,7 +173,12 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     """
     document = yaml.safe_load((WORKFLOW_DIR / "publish-index.yml").read_text())
     steps = document["jobs"]["publish"]["steps"]
-    position = {step.get("id") or step.get("name"): i for i, step in enumerate(steps)}
+    position = {}
+    for i, step in enumerate(steps):
+        if step.get("id"):
+            position[step["id"]] = i
+        if step.get("name"):
+            position[step["name"]] = i
     redeploy, confirm = steps[position["redeploy"]], steps[position[CONFIRM_STEP]]
 
     order = [
@@ -191,17 +196,39 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     assert "continue-on-error" not in thumbs
     assert "continue-on-error" not in verify
     assert "!cancelled()" in thumbs["if"] and "!cancelled()" in verify["if"]
+    assert "steps.thumbs.outputs.publish == 'yes'" in verify["if"]
     assert "pack_thumbnail_release" in thumbs["run"]
     assert "publish_thumbnail_release" in thumbs["run"]
+    assert "thumbnail_publish_line" in thumbs["run"]
     assert "--clobber" not in thumbs["run"]
     assert "assert_remote_thumbnail_release" in verify["run"]
+    bake = steps[position[BAKE_STEP]]
+    assert "fetch-thumbnails" in bake["run"]
+    assert "|| true" not in bake["run"]
+    assert "::warning" in bake["run"]
     workflow = (WORKFLOW_DIR / "publish-index.yml").read_text(encoding="utf-8")
     assert "catalog.thumbs.db --clobber" not in workflow
+    assert "runs-on: ubuntu-24.04" in workflow
 
 
 THUMBS_STEP = "Publish the thumbnail sidecar"
+BAKE_STEP = "Bake SAR thumbnails (incremental, non-blocking)"
 VERIFY_STEP = "Verify the thumbnail release assets"
 CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
+
+
+def test_workflows_pin_ubuntu_24_04():
+    """GitHub starts moving ubuntu-latest to Ubuntu 26 on 2026-10-19.
+
+    Every workflow job names ubuntu-24.04 so that migration does not change
+    the runner under a weekly publish or a pull-request build.
+    """
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        assert "ubuntu-latest" not in text, path.name
+        document = yaml.safe_load(text)
+        for job_name, job in (document.get("jobs") or {}).items():
+            assert job.get("runs-on") == "ubuntu-24.04", f"{path.name}:{job_name}"
 
 
 def test_the_drift_that_broke_the_publish_would_be_caught():

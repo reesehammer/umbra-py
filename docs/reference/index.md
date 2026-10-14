@@ -10,7 +10,8 @@ sidecar (`umbra index fetch-thumbnails`), so the metadata download stays small.
 The weekly release stores that file as `catalog.thumbs.manifest.json` and
 hash-named parts under GitHub's 2 GiB asset limit; fetch reassembles them.
 A release that still has a single `catalog.thumbs.db` and no manifest is
-downloaded as that file.
+downloaded as that file. `umbra index fetch-thumbnails --if-changed` will
+not replace a local sidecar that already has more previews.
 
 `umbra index build` quarantines source items that cannot be published: a
 datetime before 2018-01-01 or more than a day ahead of the build, a missing

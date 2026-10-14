@@ -10,22 +10,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+import responses
 
 from umbra_py.constants import CATALOG_THUMBS_ASSET, CATALOG_THUMBS_MANIFEST_ASSET
 from umbra_py.exceptions import UmbraError
 from umbra_py.thumbs_release import (
     GITHUB_RELEASE_ASSET_MAX_BYTES,
     THUMBS_PART_BYTES,
+    ThumbnailFloors,
     assemble_thumbnail_sidecar,
     assert_remote_thumbnail_release,
+    decide_thumbnail_publish,
     pack_thumbnail_release,
     parse_thumbs_manifest,
+    preview_count_from_health,
     publish_thumbnail_release,
+    remembered_preview_count,
     remote_thumbnail_problems,
+    sqlite_preview_count,
     stale_thumbs_asset_names,
+    thumbnail_publish_line,
 )
 
 
@@ -201,3 +209,150 @@ def test_remote_check_accepts_a_legacy_asset_and_rejects_a_hole(tmp_path):
         assets + [{"name": CATALOG_THUMBS_ASSET, "size": 3}, {"name": "catalog.db", "size": 4}],
     )
     assert stale == [CATALOG_THUMBS_ASSET]
+
+
+def _sidecar(path: Path, n: int, png: bytes = b"png") -> None:
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE thumbnails (href TEXT PRIMARY KEY, png BLOB)")
+    conn.executemany(
+        "INSERT INTO thumbnails (href, png) VALUES (?, ?)",
+        [(f"h{i}", png) for i in range(n)],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_pack_records_the_sidecar_preview_count(tmp_path):
+    src = tmp_path / "catalog.thumbs.db"
+    _sidecar(src, 2)
+    manifest = pack_thumbnail_release(src, tmp_path / "out", part_bytes=1000)
+    assert manifest["previews"] == 2
+    assert sqlite_preview_count(src) == 2
+
+
+def test_manifest_rejects_a_non_integer_preview_count(tmp_path):
+    src = tmp_path / "catalog.thumbs.db"
+    src.write_bytes(b"x" * 10)
+    manifest = pack_thumbnail_release(src, tmp_path / "out", part_bytes=100)
+    assert "previews" not in manifest
+    manifest["previews"] = "2"
+    with pytest.raises(UmbraError, match="previews"):
+        parse_thumbs_manifest(manifest)
+
+
+def test_decide_thumbnail_publish_skips_a_count_below_the_floor():
+    floors = ThumbnailFloors(manifest=100, legacy=None, healthz=4050, remembered=4050)
+    decision = decide_thumbnail_publish(1500, floors)
+    assert decision.publish is False
+    assert decision.reason == "regression"
+    assert decision.floor == 4050
+    action, floor, reason = decision.line().split("\t", 2)
+    assert action == "skip" and floor == "4050" and "Refusing to publish 1500" in reason
+
+    same = decide_thumbnail_publish(4050, floors)
+    assert same.publish is True and same.reason == "ok"
+    assert same.line().split("\t", 2) == ["publish", "4050", "ok"]
+
+    grown = decide_thumbnail_publish(4051, ThumbnailFloors(healthz=4050))
+    assert grown.publish is True and grown.floor == 4050
+
+
+def test_decide_thumbnail_publish_skips_empty_and_warns_when_no_floor_is_known():
+    empty = decide_thumbnail_publish(0, ThumbnailFloors(healthz=4050))
+    assert empty.publish is False and empty.reason == "empty"
+    assert empty.line().startswith("skip\t4050\t")
+
+    unknown = decide_thumbnail_publish(12, ThumbnailFloors())
+    assert unknown.publish is True and unknown.reason == "no-floor"
+    action, floor, reason = unknown.line().split("\t", 2)
+    assert action == "publish" and floor == "" and "No previous" in reason
+
+    with pytest.raises(UmbraError, match="new_count"):
+        decide_thumbnail_publish(True, ThumbnailFloors())  # type: ignore[arg-type]
+
+
+def test_healthz_preview_count_ignores_a_missing_or_boolean_count():
+    assert preview_count_from_health({"thumbnails": {"count": 4050}}) == 4050
+    assert preview_count_from_health({"thumbnails": {"count": 0}}) == 0
+    assert preview_count_from_health({"thumbnails": {"count": True}}) is None
+    assert preview_count_from_health({"status": "ok"}) is None
+    assert preview_count_from_health([]) is None
+
+
+def test_remembered_floor_file_holds_the_live_preview_count():
+    path = Path(__file__).resolve().parents[1] / ".github" / "thumbnail-preview-floor.json"
+    count, note = remembered_preview_count(path)
+    assert note is None
+    assert count is not None and count >= 4050
+
+
+_MANIFEST = "https://example.test/thumbs/catalog.thumbs.manifest.json"
+_LEGACY = "https://example.test/thumbs/catalog.thumbs.db"
+_HEALTH = "https://example.test/healthz"
+
+
+def _line(sidecar: Path, floor: Path) -> str:
+    return thumbnail_publish_line(
+        sidecar, floor, manifest_url=_MANIFEST, legacy_url=_LEGACY, healthz_url=_HEALTH
+    )
+
+
+@responses.activate
+def test_publish_line_uses_healthz_and_the_repo_floor_when_the_release_is_empty(tmp_path):
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar(sidecar, 2)
+    floor = tmp_path / "floor.json"
+    floor.write_text(json.dumps({"previews": 4050}), encoding="utf-8")
+    responses.add(responses.GET, _MANIFEST, status=404)
+    responses.add(responses.HEAD, _LEGACY, status=404)
+    responses.add(responses.GET, _HEALTH, json={"thumbnails": {"count": 4050}}, status=200)
+    action, got, reason = _line(sidecar, floor).split("\t", 2)
+    assert action == "skip" and got == "4050"
+    assert "healthz=4050" in reason and "remembered=4050" in reason
+    assert not any(
+        call.request.url == _LEGACY and call.request.method == "GET" for call in responses.calls
+    )
+
+
+@responses.activate
+def test_publish_line_counts_a_legacy_sidecar_when_the_manifest_is_absent(tmp_path):
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar(sidecar, 2)
+    previous = tmp_path / "previous.db"
+    _sidecar(previous, 4, png=b"old")
+    body = previous.read_bytes()
+    headers = {"Content-Length": str(len(body))}
+    responses.add(responses.GET, _MANIFEST, status=404)
+    responses.add(responses.HEAD, _LEGACY, status=200, headers=headers)
+    responses.add(responses.GET, _LEGACY, body=body, status=200, headers=headers)
+    responses.add(responses.GET, _HEALTH, status=503)
+    floor = tmp_path / "floor.json"
+    floor.write_text(json.dumps({"previews": 1}), encoding="utf-8")
+    action, got, reason = _line(sidecar, floor).split("\t", 2)
+    assert action == "skip" and got == "4"
+    assert "legacy=4" in reason
+
+
+@responses.activate
+def test_publish_line_reads_previews_from_the_manifest_without_fetching_parts(tmp_path):
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar(sidecar, 9)
+    responses.add(responses.GET, _MANIFEST, json={"version": 1, "previews": 9}, status=200)
+    responses.add(responses.GET, _HEALTH, json={"thumbnails": {"count": 1}}, status=200)
+    floor = tmp_path / "floor.json"
+    floor.write_text(json.dumps({"previews": 1}), encoding="utf-8")
+    action, got, reason = _line(sidecar, floor).split("\t", 2)
+    assert (action, got, reason) == ("publish", "9", "ok")
+    assert not any(call.request.url == _LEGACY for call in responses.calls)
+
+
+@responses.activate
+def test_publish_line_warns_and_allows_a_first_publish_when_every_floor_is_unknown(tmp_path):
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar(sidecar, 3)
+    responses.add(responses.GET, _MANIFEST, status=404)
+    responses.add(responses.HEAD, _LEGACY, status=404)
+    responses.add(responses.GET, _HEALTH, status=503)
+    action, got, reason = _line(sidecar, tmp_path / "missing-floor.json").split("\t", 2)
+    assert action == "publish" and got == ""
+    assert "No previous" in reason and "unreadable" in reason

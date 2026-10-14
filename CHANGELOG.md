@@ -177,9 +177,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   (`size must be less than 2147483648`), so the asset 404'd. The workflow now
   uploads `catalog.thumbs.manifest.json` and `catalog.thumbs.db.partNNN.<sha>`
   parts under 1.5 GiB, checks that each asset is on the release, and fails
-  the job if it is not. `umbra index fetch-thumbnails` (and the container
-  entrypoint) reads the manifest and reassembles `catalog.thumbs.db`. A
-  release that still has only the single file keeps working.
+  the job if that upload's assets are missing. `umbra index fetch-thumbnails`
+  (and the container entrypoint) reads the manifest and reassembles
+  `catalog.thumbs.db`. A release that still has only the single file keeps
+  working.
+- **A smaller thumbnail sidecar is not published.** The weekly bake warns
+  when the `catalog-index` release has no sidecar to re-import, and the upload
+  compares the new preview count with the manifest's `previews` field (or the
+  legacy asset), the live `/healthz` `thumbnails.count`, and
+  `.github/thumbnail-preview-floor.json`. A lower count skips the thumbnail
+  upload and leaves the previous assets in place while the catalog index still
+  publishes. `umbra index fetch-thumbnails --if-changed` refuses to replace a
+  local `catalog.thumbs.db` with one that has fewer previews.
 - **`POST /search` page links keep the request.** `next` and `prev` are
   `POST /search` with the original JSON body and `token` set once (replaced,
   not added again). The previous links were `GET /search?token=N` with no

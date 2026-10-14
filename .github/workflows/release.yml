@@ -16,7 +16,7 @@ permissions:
 jobs:
   build:
     name: Build distributions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -59,7 +59,7 @@ jobs:
     # Only publish on a real published release, never on a manual dry run.
     if: github.event_name == 'release'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/project/umbra-py/
@@ -90,7 +90,7 @@ jobs:
     name: Publish to the MCP registry
     if: github.event_name == 'release'
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       # Required for the registry's GitHub OIDC login, which is what grants
       # this repository the `io.github.reesehammer/*` namespace. No token is

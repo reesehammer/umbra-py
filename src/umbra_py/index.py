@@ -911,16 +911,21 @@ def refresh_thumbnails_from_release(
     An explicit ``url`` that is not the manifest is that one file.
 
     The download lands in ``<name>.next``, is checked to be a readable
-    non-empty sidecar, and is swapped in atomically. ``dest`` defaults to
+    non-empty sidecar, and is swapped in atomically. A sidecar with fewer
+    previews than the file already on disk is refused (the download is
+    deleted and the local file stays) unless ``force`` is true. The container
+    entrypoint does not pass ``force``. An unreadable local file has no count
+    to defend, so a valid download may replace it. ``dest`` defaults to
     :func:`default_thumbs_path`. ``items`` in the result is the sidecar's
     thumbnail count. Raises :class:`IndexRefreshError` (existing sidecar
-    untouched) when the asset is unreachable or the download fails validation,
-    and :class:`InsufficientSpaceError` when the directory cannot hold the new
-    sidecar beside the current one (the old file stays until the new one is
-    proven). A chunked sidecar also needs room for one part beside the
-    reassembled file. Stale scratch files of earlier refreshes are removed
-    first, as in :func:`refresh_from_release`. This only refreshes the file;
-    :func:`merge_thumbnails_atomically` merges it into an index.
+    untouched) when the asset is unreachable, the download fails validation,
+    or it would shrink the preview count, and :class:`InsufficientSpaceError`
+    when the directory cannot hold the new sidecar beside the current one
+    (the old file stays until the new one is proven). A chunked sidecar also
+    needs room for one part beside the reassembled file. Stale scratch files
+    of earlier refreshes are removed first, as in :func:`refresh_from_release`.
+    This only refreshes the file; :func:`merge_thumbnails_atomically` merges
+    it into an index.
     """
     sess = session or default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
@@ -954,6 +959,14 @@ def refresh_thumbnails_from_release(
         try:
             _write_published_thumbnails(sess, located, staging, progress)
             rows = _validate_thumbs_sidecar(staging)
+            from .thumbs_release import sqlite_preview_count  # noqa: PLC0415
+
+            current = sqlite_preview_count(target) if target.exists() else None
+            if current is not None and not force and rows < current:
+                raise IndexRefreshError(
+                    f"Published thumbnail sidecar has {rows} previews, fewer than the "
+                    f"{current} already in {target.name}; keeping the current sidecar."
+                )
         except BaseException as exc:
             _clean_leftovers(target)
             if isinstance(exc, IndexRefreshError) or not isinstance(exc, Exception):

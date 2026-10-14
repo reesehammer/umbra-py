@@ -17,7 +17,7 @@ jobs:
   # mode (no index, no S3 walk until an actual /search), so `/` and `/healthz`
   # answer without any external network.
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 

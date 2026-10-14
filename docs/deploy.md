@@ -461,16 +461,23 @@ the only consistent copy.
 The weekly `publish-index.yml` workflow publishes `catalog.db`, then the
 thumbnail sidecar. A sidecar of 2 GiB or more cannot be one GitHub release
 asset, so the workflow uploads `catalog.thumbs.manifest.json` and
-`catalog.thumbs.db.partNNN.<sha>` parts and fails the job if any of those
+`catalog.thumbs.db.partNNN.<sha>` parts. Before that upload it compares the
+new preview count with the previous manifest (its `previews` field) or the
+legacy asset, the live `/healthz` `thumbnails.count`, and
+`.github/thumbnail-preview-floor.json`. A lower count skips the thumbnail
+upload, leaves the previous assets in place, and warns; the catalog index
+is still published. When an upload does run, the job fails if any of those
 assets is missing afterwards. The entrypoint's `umbra index fetch-thumbnails
---if-changed` reads that manifest and writes `catalog.thumbs.db`. It
-redeploys whenever `catalog.db` was published, even if the thumbnail bake or
-upload failed. It then polls `https://api.umbra-py.space/healthz` for up to
+--if-changed` reads that manifest, writes `catalog.thumbs.db`, and will not
+replace a local sidecar that has more previews. It redeploys whenever
+`catalog.db` was published, even if the thumbnail bake or upload was skipped
+or failed. It then polls `https://api.umbra-py.space/healthz` for up to
 30 minutes, until `snapshot` equals the ETag of the released `catalog.db`.
-The job fails if the redeploy fails, that snapshot never shows up, or the
-thumbnail release has no ETag. It warns ("Hosted API thumbnails not merged")
-when the API is `degraded`, or when the sidecar it merged is not the one
-just published.
+The job fails if the redeploy fails or that snapshot never shows up. A
+missing thumbnail ETag fails the job only when this run tried to publish
+thumbnails; a skipped thumbnail publish warns instead. It warns ("Hosted
+API thumbnails not merged") when the API is `degraded`, or when the sidecar
+it merged is not the one just published.
 
 The redeploy is `npx @railway/cli redeploy --service umbra-py --yes`, run with
 the repository secret **`RAILWAY_TOKEN`**:
