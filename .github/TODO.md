@@ -10,6 +10,17 @@ still open.
 
 ---
 
+## MCP live fetch of a legacy `_METADATA.json` URL
+
+- **Surfaced in:** the `umbra download <_METADATA.json>` fix.
+- **Code:** `src/umbra_py/mcp_server.py` (`_fetch_item`).
+
+The CLI resolves a legacy sidecar through `UmbraCatalog._item_from_sidecar_url`.
+MCP's `_fetch_item` still does `UmbraItem.from_dict(get_json(url))` when the
+href is not already in the local index, so a metadata URL with no index row
+hits the same empty-item failure. Smallest change: on a `_METADATA.json`
+miss, call `_item_from_sidecar_url` instead of `from_dict`.
+
 ## Preflight `Grid/Type` and `ImageFormAlgo` (complex-downstream R2)
 
 - **Surfaced in:** the complex SICD/CPHD handoff docs.

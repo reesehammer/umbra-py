@@ -22,7 +22,7 @@ import click
 
 from .._http import get_json
 from .._spinner import OrbitSpinner
-from ..catalog import UmbraCatalog
+from ..catalog import _LEGACY_SIDECAR_SUFFIX, UmbraCatalog
 from ..constants import CANOPY_TOKEN_ENV
 from ..exceptions import GeocodeError
 from ..geocode import geocode_place
@@ -273,13 +273,21 @@ def _gather_items(
 
 
 def _item_from_url(url: str) -> UmbraItem:
-    """Fetch one acquisition by its STAC item href.
+    """Fetch one acquisition by its sidecar URL.
 
     The explicit-URL half of how a command obtains its items; :func:`_gather_items`
     is the search half. Both live here so a command module reaches its items
     through one module — which is also the single place a test patches to keep
     the CLI offline.
+
+    A ``*.stac.v2.json`` URL is a STAC item. A legacy ``*_METADATA.json`` URL
+    (2023 to 2024 collects with no STAC sidecar) is not: it is synthesized by
+    :meth:`UmbraCatalog._item_from_sidecar_url`, the same mapping the index
+    walk uses, so the sibling CPHD / SICD / GEC objects are assets.
     """
+    bare = url.split("#", 1)[0].split("?", 1)[0]
+    if bare.endswith(_LEGACY_SIDECAR_SUFFIX):
+        return UmbraCatalog()._item_from_sidecar_url(url)
     return UmbraItem.from_dict(get_json(url), href=url)
 
 
