@@ -31,6 +31,17 @@ rows are flagged. `quarantined_future_count` is how many source rows the
 build removed for a datetime more than a day ahead (the upstream 2035–2036
 items); those are not in the index, and the count is what keeps them visible.
 
+`created` and `published` are nullable columns (schema version 6; version 5
+is `datetime_suspect`). Opening a version-5 index adds the two columns and
+keeps an existing flag. `created` is STAC `properties.created` when the sidecar
+has one; legacy
+`_METADATA.json` collects leave it empty. `published` is the sidecar's S3
+`LastModified`, read from the `ListObjectsV2` page the crawl already
+fetches. `created` minus `datetime` is the lag until Umbra's STAC
+generation, not delivery latency, and `published` is when the object
+appeared in the public bucket. Open data is a curated batch-published
+subset — see [Limitations](../guides/limitations.md#open-data-timestamps-are-not-delivery-latency).
+
 ::: umbra_py.CatalogIndex
 
 ::: umbra_py.UpdateResult

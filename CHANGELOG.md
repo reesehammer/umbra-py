@@ -25,6 +25,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   are flagged, and `quarantined_future_count` is how many source rows the build
   removed for a datetime more than a day ahead (the upstream 2035–2036 items),
   so those drops stay visible.
+- **Index `created` and `published` times.** Catalog index schema version 6
+  adds nullable `items.created` (STAC `properties.created` when the sidecar
+  has it; legacy `_METADATA.json` collects leave it empty) and
+  `items.published` (the sidecar's S3 `LastModified`, taken from the
+  `ListObjectsV2` page the crawl already fetches). `umbra serve` `/search`
+  and item responses pass `created` through as `properties.created` and
+  `published` as `properties["umbra-py:published"]`. The geoparquet export
+  carries the same fields. `created` minus `datetime` is the lag until
+  Umbra generated the STAC record, not delivery latency; `published` is when
+  the object appeared in the public bucket. Open data is a curated,
+  batch-published subset.
 - **Index validation on `umbra index build`.** The weekly snapshot drops
   duplicate ids (latest `updated`, otherwise datetime, then the most assets)
   and quarantines items dated before 2018-01-01 or more than a day ahead,

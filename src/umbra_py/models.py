@@ -71,6 +71,19 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return dt
 
 
+def _iso_utc(value: datetime | None) -> str | None:
+    """UTC RFC 3339 form of ``value`` (``Z`` suffix), or ``None``.
+
+    Naive values are read as UTC. Microseconds are kept when the instant has
+    them, so a STAC ``created`` of ``...28.483435Z`` round-trips unchanged.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _bbox_from_geometry(geometry: dict | None) -> BBox | None:
     if not geometry:
         return None
@@ -217,6 +230,14 @@ class UmbraItem:
     #: and recency paths skip it. ``False`` for an item that did not come from
     #: an index build that flagged it.
     datetime_suspect: bool = False
+    #: When the sidecar object was last written in the public bucket (its S3
+    #: ``LastModified``), taken from the ``ListObjectsV2`` page the crawl
+    #: already fetches. Not a STAC field: the open-bucket walk sets it, and
+    #: :class:`~umbra_py.CatalogIndex` restores it from the ``published``
+    #: column. ``None`` for a Canopy item, a hand-built item, or a row indexed
+    #: before that column existed. This is when the object appeared in the
+    #: public bucket, not when the collect was tasked.
+    published: datetime | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], href: str | None = None) -> UmbraItem:
@@ -251,6 +272,19 @@ class UmbraItem:
         )
 
     # -- convenience accessors -------------------------------------------------
+
+    # Declared before ``datetime``: that property's name shadows the class
+    # for every later annotation in this body.
+    @property
+    def created(self) -> datetime | None:
+        """When Umbra generated this STAC item (``properties.created``).
+
+        That is the sidecar's generation time, not tasking delivery and not
+        when the object appeared in the public bucket (:attr:`published`).
+        Legacy ``_METADATA.json`` collects do not carry ``created``.
+        """
+        value = self.properties.get("created")
+        return _parse_datetime(value if isinstance(value, str) else None)
 
     @property
     def datetime(self) -> datetime | None:

@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -427,13 +427,20 @@ _S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
 _NEXT_TOKEN = "PAGE2TOKEN"
 
 
-def _list_result(*, contents=(), common_prefixes=(), next_token=None):
-    """Build a minimal ListObjectsV2 XML response body."""
+def _list_result(*, contents=(), common_prefixes=(), next_token=None, last_modified=None):
+    """Build a minimal ListObjectsV2 XML response body.
+
+    ``last_modified`` maps an object key to the S3 ``LastModified`` text to
+    emit beside it. Keys absent from the map get no ``LastModified`` element.
+    """
+    modified = last_modified or {}
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', f'<ListBucketResult xmlns="{_S3_NS}">']
     for p in common_prefixes:
         parts.append(f"<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>")
     for k in contents:
-        parts.append(f"<Contents><Key>{k}</Key></Contents>")
+        lm = modified.get(k)
+        lm_xml = f"<LastModified>{lm}</LastModified>" if lm else ""
+        parts.append(f"<Contents><Key>{k}</Key>{lm_xml}</Contents>")
     if next_token is not None:
         parts.append("<IsTruncated>true</IsTruncated>")
         parts.append(f"<NextContinuationToken>{next_token}</NextContinuationToken>")
@@ -553,6 +560,52 @@ def test_parse_listing_rejects_malformed_xml():
     """Truncated / non-XML bodies fail loudly as a CatalogError, not a raw traceback."""
     with pytest.raises(CatalogError):
         UmbraCatalog._parse_listing(b"<ListBucketResult><Contents>")
+
+
+@responses.activate
+def test_search_records_sidecar_last_modified_without_extra_requests(monkeypatch):
+    """``published`` is the sidecar LastModified already in ListObjectsV2.
+
+    The walk lists the task and GETs the sidecar. It does not HEAD or GET the
+    object a second time to learn when it appeared in the bucket. ``created``
+    comes from the STAC document, not from S3.
+    """
+    cat = UmbraCatalog()
+    task = "sar-data/tasks/Site/"
+    stem = "2024-05-06-19-00-00_UMBRA-05"
+    acq = f"{task}{stem}/"
+    sidecar_key = f"{acq}{stem}.stac.v2.json"
+    gec_key = f"{acq}{stem}_GEC.tif"
+    published = "2026-05-06T21:55:00.000Z"
+    created = "2026-05-06T19:59:00Z"
+    monkeypatch.setattr(UmbraCatalog, "_list_prefix", _list_roots(task))
+    responses.add(
+        responses.GET,
+        f"{cat._list_base}/",
+        body=_list_result(
+            contents=[sidecar_key, gec_key],
+            last_modified={sidecar_key: published, gec_key: "2026-05-06T21:56:00.000Z"},
+        ),
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        cat._url_for(sidecar_key),
+        json=_sidecar("acq", "2024-05-06T19:00:00Z", (0, 0, 1, 1))
+        | {"properties": {"datetime": "2024-05-06T19:00:00Z", "created": created}},
+        status=200,
+    )
+
+    [item] = list(cat.search())
+
+    assert item.published == datetime(2026, 5, 6, 21, 55, tzinfo=timezone.utc)
+    assert item.properties["created"] == created
+    assert item.created == datetime(2026, 5, 6, 19, 59, tzinfo=timezone.utc)
+    # Task discovery is mocked. The live calls are one listing and one sidecar GET.
+    assert len(responses.calls) == 2
+    assert [call.request.method for call in responses.calls] == ["GET", "GET"]
+    assert "list-type=2" in responses.calls[0].request.url
+    assert responses.calls[1].request.url == cat._url_for(sidecar_key)
 
 
 def test_parse_listing_accepts_well_formed_listing():

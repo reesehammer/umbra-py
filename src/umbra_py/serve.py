@@ -195,7 +195,7 @@ from .index import (
     snapshot_id,
 )
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
-from .models import BBox, UmbraItem
+from .models import BBox, UmbraItem, _iso_utc
 from .schemas import load_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -896,6 +896,12 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     # didn't already carry it.
     if item.place and "umbra:place" not in feature["properties"]:
         feature["properties"]["umbra:place"] = item.place
+    # ``created`` is already ``properties.created`` when the sidecar had it
+    # (legacy metadata does not). ``published`` is the bucket LastModified,
+    # which is not a STAC field, so it is added under the umbra-py namespace.
+    published = _iso_utc(item.published)
+    if published and "umbra-py:published" not in feature["properties"]:
+        feature["properties"]["umbra-py:published"] = published
     feature.setdefault("assets", dict(item.assets))
 
     item_path = f"{base}/collections/{COLLECTION_ID}/items/{item.id}"

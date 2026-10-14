@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .exceptions import MissingDependencyError, UmbraError
-from .models import UmbraItem
+from .models import UmbraItem, _iso_utc
 
 
 def _require(module: str):
@@ -47,14 +47,20 @@ def _export_doc(item: UmbraItem) -> dict[str, Any]:
     if item.href and not any(link.get("rel") == "self" for link in links):
         links.append({"rel": "self", "href": item.href, "type": "application/json"})
     doc["links"] = links
-    # Carry the baked reverse-geocoded label (from `umbra index bake`) into the
-    # published snapshot as a namespaced property, so a parquet consumer gets a
-    # real place name without re-geocoding every row. Only when the index
-    # resolved one and the raw item didn't already carry it.
-    if item.place:
-        props = dict(doc.get("properties") or {})
-        props.setdefault("umbra:place", item.place)
-        doc["properties"] = props
+    # ``created`` is already in the STAC properties when the sidecar had it.
+    # The baked place label and ``published`` (bucket LastModified) are index
+    # columns, injected so a parquet consumer sees them without re-reading
+    # SQLite. Rebind properties to a fresh dict so ``item.raw`` is not mutated.
+    # An existing ``umbra:place`` / ``umbra-py:published`` on the source wins.
+    extra: dict[str, Any] = {}
+    props = doc.get("properties") or {}
+    if item.place and "umbra:place" not in props:
+        extra["umbra:place"] = item.place
+    published = _iso_utc(item.published)
+    if published and "umbra-py:published" not in props:
+        extra["umbra-py:published"] = published
+    if extra:
+        doc["properties"] = {**props, **extra}
     return doc
 
 
