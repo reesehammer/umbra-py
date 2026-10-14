@@ -59,9 +59,16 @@ from .constants import (
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import MissingDependencyError, UmbraError
+from .exceptions import CatalogError, MissingDependencyError, UmbraError
 from .geocode import geocode_place as _geocode_place
-from .index import BakedPreview, CatalogIndex, default_index_path
+from .index import (
+    BakedPreview,
+    CatalogIndex,
+    asset_name_error_text,
+    default_index_path,
+    is_asset_name,
+    resolve_asset_name,
+)
 from .models import UmbraItem
 from .watch import MetaWatchStore, SearchSource, watch, watch_key
 
@@ -816,22 +823,37 @@ def find_repeat_sites(
 def get_item(url: str) -> dict[str, Any]:
     """Return the full context card for one item.
 
-    Without a Canopy token configured, ``url`` is the JSON URL of an open-data
-    STAC sidecar. When a local catalog index contains that href, the indexed
-    snapshot is returned — the same document ``search_catalog`` already
-    answered from — rather than a live re-fetch that can disagree on asset
-    filenames or product types. When the server is configured with a token
-    (``$UMBRA_CANOPY_TOKEN``) and ``url`` is a bare acquisition id (no ``://``),
+    ``url`` is the JSON URL of an open-data STAC sidecar, a GEC/SICD (or other
+    product) filename such as ``2025-05-17-17-43-46_UMBRA-08_GEC.tif``, or the
+    acquisition stem ``2025-05-17-17-43-46_UMBRA-08``. A filename or stem is
+    resolved through the local catalog index: the stem is matched against
+    asset hrefs, which is what distinguishes ``sar-data/tasks/``,
+    ``sar-data/task-data/``, and ``open-data/`` — the name itself does not.
+    Zero matches is an error. More than one match lists the candidate STAC
+    URLs; pass one of those. A filename needs a local index
+    (``umbra index fetch``).
+
+    When the index contains a STAC URL, the indexed snapshot is returned —
+    the same document ``search_catalog`` already answered from — rather than
+    a live re-fetch that can disagree on asset filenames or product types.
+    When the server is configured with a token (``$UMBRA_CANOPY_TOKEN``) and
+    ``url`` is a bare acquisition id (no ``://``, and not a filename or stem),
     it is instead looked up in Umbra's authenticated commercial archive by a
-    keyed STAC search — the retrieval complement to ``search_catalog`` over the
-    paid catalog, since archive cards carry an ``id`` (not a fetchable sidecar
-    URL) as their hand-off pointer.
+    keyed STAC search — the retrieval complement to ``search_catalog`` over
+    the paid catalog, since archive cards carry an ``id`` (not a fetchable
+    sidecar URL) as their hand-off pointer. A filename or stem still resolves
+    from the local open-data index when a token is set.
 
     The card (:meth:`UmbraItem.to_llm_context`) carries the id, ISO datetime,
     place, bbox, resolution, polarization *with the change-detection caveat*,
     the per-product-type explanations and asset URLs, and the mandatory
     attribution line — everything a model needs to reason about the scene.
     """
+    if is_asset_name(url):
+        try:
+            return resolve_asset_name(url).to_llm_context()
+        except CatalogError as exc:
+            raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
     if token and "://" not in url:
         item = UmbraCatalog(token=token).get_item(url)
@@ -1896,7 +1918,9 @@ def build_server() -> MCPServer:
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
         "get_item query Umbra's authenticated COMMERCIAL archive (source: "
-        "'canopy-archive'); get_item takes an acquisition id, not a URL."
+        "'canopy-archive'); get_item takes an acquisition id, a STAC JSON URL, "
+        "or a GEC/SICD filename / acquisition stem (the filename is resolved "
+        "from the local open-data index)."
         if _canopy_token()
         else ""
     )

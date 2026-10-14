@@ -23,6 +23,7 @@ from ..coverage import SITE_RANKINGS
 from ..exceptions import UmbraError
 from ..index import (
     CatalogIndex,
+    is_asset_name,
 )
 from . import _shared
 from ._root import cli
@@ -888,25 +889,34 @@ def watch_cmd(
     f"as an open-data sidecar URL. Falls back to ${CANOPY_TOKEN_ENV}.",
 )
 def info(item, as_json, token) -> None:
-    """Show a summary of a STAC item.
+    """Show a summary of a STAC item, a GEC/SICD filename, or an acquisition stem.
 
-    Without ``--token`` (the default), ITEM is the JSON URL of an open-data
-    sidecar, read directly. With ``--token`` (or ``$UMBRA_CANOPY_TOKEN``), ITEM
-    is instead an acquisition id, looked up in Umbra's Canopy commercial archive
-    by a keyed STAC search — the retrieval complement to ``umbra search
-    --token``, over the paid catalog.
+    Without ``--token`` (the default), ITEM is a sidecar URL — ``*.stac.v2.json``,
+    or a legacy ``*_METADATA.json`` for 2023 to 2024 collects — or a product
+    filename / acquisition stem (``YYYY-MM-DD-HH-MM-SS_UMBRA-NN``, optionally
+    ``_GEC.tif`` / ``_SICD.nitf``) resolved through the local catalog index.
+    The name does not encode the
+    bucket layout, so the lookup matches the stem against asset hrefs under
+    ``sar-data/tasks/``, ``sar-data/task-data/``, and ``open-data/``. Zero
+    matches is an error; more than one lists the candidate STAC URLs. A
+    filename needs a local index (``umbra index fetch``).
+
+    With ``--token`` (or ``$UMBRA_CANOPY_TOKEN``), ITEM is an acquisition id
+    looked up in Umbra's Canopy commercial archive by a keyed STAC search —
+    the retrieval complement to ``umbra search --token``. A product filename
+    or acquisition stem is still resolved from the local open-data index.
 
     ``--json`` emits the explanation-rich context card
     (:meth:`umbra_py.UmbraItem.to_llm_context`) — a compact object an agent
     can consume directly, with per-product explanations and the license line.
     """
-    if token:
+    if token and not is_asset_name(item):
         found = UmbraCatalog(token=token).get_item(item)
         if found is None:
             raise click.ClickException(f"No item {item!r} in the Canopy commercial archive.")
         item_obj = found
     else:
-        item_obj = _shared._item_from_url(item)
+        item_obj = _shared._resolve_item_arg(item)
     if as_json:
         click.echo(json.dumps(item_obj.to_llm_context(), indent=2))
         return

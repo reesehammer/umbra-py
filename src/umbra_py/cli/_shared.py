@@ -24,12 +24,15 @@ from .._http import get_json
 from .._spinner import OrbitSpinner
 from ..catalog import _LEGACY_SIDECAR_SUFFIX, UmbraCatalog
 from ..constants import CANOPY_TOKEN_ENV
-from ..exceptions import GeocodeError
+from ..exceptions import CatalogError, GeocodeError
 from ..geocode import geocode_place
 from ..index import (
     BakedPreview,
     CatalogIndex,
+    asset_name_error_text,
     default_index_path,
+    is_asset_name,
+    resolve_asset_name,
 )
 from ..models import UmbraItem
 
@@ -289,6 +292,25 @@ def _item_from_url(url: str) -> UmbraItem:
     if bare.endswith(_LEGACY_SIDECAR_SUFFIX):
         return UmbraCatalog()._item_from_sidecar_url(url)
     return UmbraItem.from_dict(get_json(url), href=url)
+
+
+def _resolve_item_arg(ref: str) -> UmbraItem:
+    """Resolve one ``info`` / ``download`` argument to an item.
+
+    A GEC/SICD filename or acquisition stem is looked up in the local catalog
+    index (:func:`umbra_py.index.resolve_asset_name`). Anything else is a
+    sidecar URL and goes through :func:`_item_from_url`: a ``*.stac.v2.json``
+    item, or a legacy ``*_METADATA.json`` collect. A filename is not that
+    legacy URL — ``2024-01-01-00-00-00_UMBRA-04_METADATA.json`` with no scheme
+    is an index lookup; the same name with ``https://`` is synthesized from
+    its siblings.
+    """
+    if is_asset_name(ref):
+        try:
+            return resolve_asset_name(ref)
+        except CatalogError as exc:
+            raise click.ClickException(asset_name_error_text(exc)) from exc
+    return _item_from_url(ref)
 
 
 def _gather_featured_sites(
