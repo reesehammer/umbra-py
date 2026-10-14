@@ -2680,3 +2680,16 @@ class CatalogIndex:
             "datetime_suspect_count": int(suspects or 0),
             "quarantined_future_count": quarantined_future_count(stored_validation(self)),
         }
+
+    def temporal_extent(self) -> tuple[str | None, str | None]:
+        """Acquisition-date span ``(start, end)``, the same dates as :meth:`stats`.
+
+        ``end`` excludes ``datetime_suspect`` rows. :meth:`stats` counts the
+        thumbnail blob column, and SQLite then reads every merged preview off
+        disk (tens of seconds on a cold volume). This aggregate does not name
+        that column, so those overflow pages stay unread.
+        """
+        start, end = self._conn.execute(
+            "SELECT MIN(acq_date), MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END) FROM items"
+        ).fetchone()
+        return (start, end)

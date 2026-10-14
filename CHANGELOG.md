@@ -171,6 +171,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **STAC search page links keep one `token`.** `next` and `prev` on `GET` and
+  `POST /search` (and `GET /collections/{collection}/items`) replace any
+  `token` already in the query instead of appending another, so following
+  pages does not grow the URL. A `prev` link is included when the page is
+  not the first.
+- **`GET /collections` no longer scans baked thumbnails for its time span.**
+  The extent comes from `CatalogIndex.temporal_extent()`, the same start and
+  end as `stats()` without reading thumbnail blobs, and is reused until the
+  index file changes.
 - **`umbra download` accepts a legacy `_METADATA.json` URL.** Commands that
   take a sidecar URL (`download`, `info`, `quicklook`, and the rest) used to
   parse a 2023 to 2024 `<stem>_METADATA.json` as STAC and fail with `Item ''

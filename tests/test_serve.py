@@ -14,7 +14,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -490,6 +492,134 @@ def test_search_paginates_with_next_link(client):
     page2 = client.get(href).json()
     assert len(page2["features"]) == 1
     assert not [link for link in page2["links"] if link["rel"] == "next"]
+
+
+def _token_values(href: str) -> list[str]:
+    return parse_qs(urlparse(href).query).get("token", [])
+
+
+def test_href_with_token_replaces_every_existing_token():
+    # Page 40 of the old builder carried token=1&token=2&...&token=39.
+    href = "https://api.example/search?limit=10&" + "&".join(f"token={i}" for i in range(1, 40))
+    out = serve._href_with_token(href, 40)
+    query = parse_qs(urlparse(out).query)
+    assert query["token"] == ["40"]
+    assert query["limit"] == ["10"]
+    assert out.count("token=") == 1
+
+
+def test_search_pagination_replaces_token_across_pages(client):
+    """Following next several times keeps exactly one token and the right page.
+
+    The request already has two ``token`` parameters. The server reads the
+    last one (offset 0). Each next link must replace them, not append a third,
+    and still walk the three items in order. ``prev`` does the same on the
+    way back.
+    """
+    href = "/search?limit=1&bbox=-69,10,-67,11&token=5&token=0"
+    ids: list[str] = []
+    next_seen = 0
+    body: dict | None = None
+    for _ in range(6):
+        body = client.get(href).json()
+        assert len(body["features"]) == 1
+        ids.append(body["features"][0]["id"])
+        prevs = [link for link in body["links"] if link["rel"] == "prev"]
+        if len(ids) == 1:
+            assert prevs == []
+        else:
+            assert len(prevs) == 1
+            prev_query = parse_qs(urlparse(prevs[0]["href"]).query)
+            assert prev_query["token"] == [str(len(ids) - 2)]
+            assert prev_query["bbox"] == ["-69,10,-67,11"]
+            assert prev_query["limit"] == ["1"]
+        nxt = [link for link in body["links"] if link["rel"] == "next"]
+        if not nxt:
+            break
+        next_seen += 1
+        raw = nxt[0]["href"]
+        query = parse_qs(urlparse(raw).query)
+        assert query["token"] == [str(len(ids))]
+        assert query["bbox"] == ["-69,10,-67,11"]
+        assert query["limit"] == ["1"]
+        assert raw.count("token=") == 1
+        href = raw.replace("http://testserver", "")
+    assert ids == ["item-0", "item-1", "item-2"]
+    assert next_seen == 2
+    assert body is not None
+    # Walk prev from the last page back to the first; still one token each.
+    back = [body["features"][0]["id"]]
+    for _ in range(4):
+        prevs = [link for link in body["links"] if link["rel"] == "prev"]
+        if not prevs:
+            break
+        raw = prevs[0]["href"]
+        assert _token_values(raw) == [str(len(ids) - len(back) - 1)]
+        assert raw.count("token=") == 1
+        body = client.get(raw.replace("http://testserver", "")).json()
+        back.append(body["features"][0]["id"])
+    assert back == ["item-2", "item-1", "item-0"]
+
+
+def test_post_search_pagination_replaces_token(client):
+    """POST page links are GETs of the request query with ``token`` replaced."""
+    resp = client.post(
+        "/search?limit=1&bbox=-69,10,-67,11&token=4&token=0",
+        json={"limit": 1, "token": 0, "bbox": [-69, 10, -67, 11]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [f["id"] for f in body["features"]] == ["item-0"]
+    assert [link for link in body["links"] if link["rel"] == "prev"] == []
+    nxt = next(link for link in body["links"] if link["rel"] == "next")
+    query = parse_qs(urlparse(nxt["href"]).query)
+    assert query["token"] == ["1"]
+    assert query["limit"] == ["1"]
+    assert query["bbox"] == ["-69,10,-67,11"]
+    assert nxt["href"].count("token=") == 1
+
+    ids = ["item-0"]
+    href = nxt["href"].replace("http://testserver", "")
+    for _ in range(5):
+        page = client.get(href).json()
+        ids.append(page["features"][0]["id"])
+        links = [link for link in page["links"] if link["rel"] == "next"]
+        if not links:
+            break
+        raw = links[0]["href"]
+        assert _token_values(raw) == [str(len(ids))]
+        assert raw.count("token=") == 1
+        href = raw.replace("http://testserver", "")
+    assert ids == ["item-0", "item-1", "item-2"]
+
+    # A later page's prev link also carries a single replaced token.
+    mid = client.post("/search?limit=1&token=9", json={"limit": 1, "token": 1}).json()
+    assert mid["features"][0]["id"] == "item-1"
+    prev = next(link for link in mid["links"] if link["rel"] == "prev")
+    nxt = next(link for link in mid["links"] if link["rel"] == "next")
+    assert _token_values(prev["href"]) == ["0"]
+    assert _token_values(nxt["href"]) == ["2"]
+    assert prev["href"].count("token=") == 1
+    assert nxt["href"].count("token=") == 1
+
+
+def test_collections_reuses_temporal_extent(client, index_path, monkeypatch):
+    calls = {"n": 0}
+    real = CatalogIndex.temporal_extent
+
+    def wrapped(self):
+        calls["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(CatalogIndex, "temporal_extent", wrapped)
+    first = client.get("/collections").json()["collections"][0]["extent"]["temporal"]
+    second = client.get(f"/collections/{COLLECTION}").json()["extent"]["temporal"]
+    assert first == second
+    assert calls["n"] == 1
+    st = index_path.stat()
+    os.utime(index_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    client.get("/collections")
+    assert calls["n"] == 2
 
 
 def test_post_search_matches_get_search(client):
