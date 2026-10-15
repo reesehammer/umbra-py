@@ -19,9 +19,19 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .constants import ASSET_SCHEMA_FIELD, ASSET_SCHEMA_VERSION
+from .constants import (
+    ASSET_SCHEMA_FIELD,
+    ASSET_SCHEMA_VERSION,
+    STAC_BUILT_AT_FIELD,
+    STAC_SNAPSHOT_FIELD,
+)
 from .exceptions import MissingDependencyError, UmbraError
 from .models import UmbraItem, _iso_utc, _normalize_assets
+
+#: The collection id stamped into geoparquet file metadata. Same value as
+#: ``umbra_py.serve.COLLECTION_ID``; kept here so export does not import the
+#: server. A test asserts the two stay equal.
+PARQUET_COLLECTION_ID = "umbra-open-data"
 
 
 def _require(module: str):
@@ -101,7 +111,71 @@ def _normalize_mixed_property_types(docs: list[dict[str, Any]]) -> None:
         doc["properties"] = normalized
 
 
-def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> int:
+def _parquet_collection(built_at: str | None, snapshot: str | None) -> dict[str, Any]:
+    """Collection document stored in the parquet file metadata.
+
+    File-level only: it is not a column, and it does not touch ``assets``.
+    ``updated`` is the same midnight-UTC rendering as the STAC collection.
+    """
+    from .serve import _collection_updated  # noqa: PLC0415
+
+    doc: dict[str, Any] = {
+        "type": "Collection",
+        "stac_version": "1.0.0",
+        "id": PARQUET_COLLECTION_ID,
+        # Same stamp as the served collection and each exported item.
+        ASSET_SCHEMA_FIELD: ASSET_SCHEMA_VERSION,
+    }
+    if built_at:
+        doc[STAC_BUILT_AT_FIELD] = built_at
+        doc["updated"] = _collection_updated(built_at)
+    if snapshot:
+        doc[STAC_SNAPSHOT_FIELD] = snapshot
+    return doc
+
+
+def _write_geoparquet(
+    reader: Any,
+    path: Path,
+    *,
+    built_at: str | None,
+    snapshot: str | None,
+) -> None:
+    """Write ``reader`` and stamp build provenance into the file metadata.
+
+    Uses stac-geoparquet's metadata builder so the ``geo`` and
+    ``stac-geoparquet`` keys stay intact, then adds ``umbra-py:built_at`` and
+    ``umbra-py:snapshot`` as sibling key/value entries. Row groups, including
+    the ``assets`` column, are whatever ``parse_stac_items_to_arrow`` produced.
+    """
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.parquet as pq  # noqa: PLC0415
+    import stac_geoparquet.arrow as sga  # noqa: PLC0415
+    from stac_geoparquet.arrow._to_parquet import create_parquet_metadata  # noqa: PLC0415
+
+    stream = pa.RecordBatchReader.from_stream(reader)
+    meta = create_parquet_metadata(
+        stream.schema,
+        schema_version=sga.DEFAULT_PARQUET_SCHEMA_VERSION,
+        collections={PARQUET_COLLECTION_ID: _parquet_collection(built_at, snapshot)},
+    )
+    if built_at:
+        meta[STAC_BUILT_AT_FIELD.encode("utf-8")] = built_at.encode("utf-8")
+    if snapshot:
+        meta[STAC_SNAPSHOT_FIELD.encode("utf-8")] = snapshot.encode("utf-8")
+    schema = stream.schema.with_metadata(meta)
+    with pq.ParquetWriter(str(path), schema) as writer:
+        for batch in stream:
+            writer.write_batch(batch)
+
+
+def export_geoparquet(
+    items: Iterable[UmbraItem],
+    path: str | os.PathLike,
+    *,
+    built_at: str | None = None,
+    snapshot: str | None = None,
+) -> int:
     """Write items to a stac-geoparquet file; return how many were written.
 
     Items without a footprint geometry are skipped — the geometry column is
@@ -109,6 +183,11 @@ def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> in
     value can be less than the number of items passed in. Raises
     :class:`~umbra_py.UmbraError` when nothing is exportable, rather than
     writing an empty (and schema-less) file.
+
+    ``built_at`` and ``snapshot`` are written as file-level key/value metadata
+    (and inside the ``stac-geoparquet`` collection document, next to
+    ``umbra-py:asset_schema``). They are not columns. Omit both and the
+    collection metadata still records the asset schema.
     """
     _require("stac_geoparquet")
     import stac_geoparquet.arrow  # noqa: PLC0415
@@ -122,17 +201,14 @@ def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> in
     path.parent.mkdir(parents=True, exist_ok=True)
     reader = stac_geoparquet.arrow.parse_stac_items_to_arrow(docs)
     # File metadata, next to the per-item property. The collection id matches
-    # the one ``umbra serve`` publishes.
-    stac_geoparquet.arrow.to_parquet(
-        reader,
-        path,
-        collections={
-            "umbra-open-data": {
-                "type": "Collection",
-                "stac_version": "1.0.0",
-                "id": "umbra-open-data",
-                ASSET_SCHEMA_FIELD: ASSET_SCHEMA_VERSION,
-            }
-        },
-    )
+    # the one ``umbra serve`` publishes. Asset schema is always recorded;
+    # build date and snapshot are added when this export has them.
+    if built_at or snapshot:
+        _write_geoparquet(reader, path, built_at=built_at, snapshot=snapshot)
+    else:
+        stac_geoparquet.arrow.to_parquet(
+            reader,
+            path,
+            collections={PARQUET_COLLECTION_ID: _parquet_collection(None, None)},
+        )
     return len(docs)

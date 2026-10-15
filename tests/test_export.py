@@ -265,6 +265,71 @@ def test_cli_index_export(tmp_path):
     assert out.exists()
 
 
+def test_export_provenance_is_file_metadata_not_an_assets_column(tmp_path):
+    pytest.importorskip("stac_geoparquet")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from umbra_py.constants import (
+        ASSET_SCHEMA_FIELD,
+        ASSET_SCHEMA_VERSION,
+        STAC_BUILT_AT_FIELD,
+        STAC_SNAPSHOT_FIELD,
+    )
+    from umbra_py.export import PARQUET_COLLECTION_ID
+    from umbra_py.serve import COLLECTION_ID
+
+    assert PARQUET_COLLECTION_ID == COLLECTION_ID
+    item = _make_item("a", (0, 0, 1, 1))
+    plain = tmp_path / "plain.parquet"
+    stamped = tmp_path / "stamped.parquet"
+    export_geoparquet([item], plain)
+    export_geoparquet([item], stamped, built_at="2026-10-08", snapshot="rel-1")
+
+    plain_schema = pq.read_schema(plain)
+    stamped_schema = pq.read_schema(stamped)
+    assert plain_schema.names == stamped_schema.names
+    assert "assets" in stamped_schema.names
+    assert STAC_BUILT_AT_FIELD.encode() not in (plain_schema.metadata or {})
+    plain_collection = json.loads(plain_schema.metadata[b"stac-geoparquet"])["collections"][
+        PARQUET_COLLECTION_ID
+    ]
+    assert plain_collection[ASSET_SCHEMA_FIELD] == ASSET_SCHEMA_VERSION
+    assert STAC_BUILT_AT_FIELD not in plain_collection
+    meta = stamped_schema.metadata
+    assert meta[STAC_BUILT_AT_FIELD.encode()] == b"2026-10-08"
+    assert meta[STAC_SNAPSHOT_FIELD.encode()] == b"rel-1"
+    assert b"geo" in meta
+    collection = json.loads(meta[b"stac-geoparquet"])["collections"][PARQUET_COLLECTION_ID]
+    assert collection[ASSET_SCHEMA_FIELD] == ASSET_SCHEMA_VERSION
+    assert collection[STAC_BUILT_AT_FIELD] == "2026-10-08"
+    assert collection[STAC_SNAPSHOT_FIELD] == "rel-1"
+    assert collection["updated"] == "2026-10-08T00:00:00Z"
+    assert _read_back(plain)[0]["assets"] == _read_back(stamped)[0]["assets"]
+
+
+def test_cli_export_stamps_index_provenance(tmp_path):
+    pytest.importorskip("stac_geoparquet")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from click.testing import CliRunner
+
+    from umbra_py import cli as cli_mod
+    from umbra_py.constants import STAC_BUILT_AT_FIELD, STAC_SNAPSHOT_FIELD
+    from umbra_py.index import CatalogIndex, snapshot_state_path
+
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as idx:
+        idx.add(_make_item("a", (0, 0, 1, 1)))
+        idx.set_meta("built_at", "2026-10-08")
+    snapshot_state_path(db).write_text(json.dumps({"etag": '"rel-1"'}), encoding="utf-8")
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(
+        cli_mod.cli, ["index", "export", "--db", str(db), "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    meta = pq.read_schema(out).metadata
+    assert meta[STAC_BUILT_AT_FIELD.encode()] == b"2026-10-08"
+    assert meta[STAC_SNAPSHOT_FIELD.encode()] == b"rel-1"
+
+
 def test_cli_index_export_missing_index_errors(tmp_path):
     from click.testing import CliRunner
 

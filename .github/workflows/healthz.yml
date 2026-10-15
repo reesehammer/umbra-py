@@ -1,0 +1,48 @@
+name: Hosted API health
+
+# External probe of https://api.umbra-py.space/healthz. The process's own
+# health check cannot see a dead proxy or a missed Monday publish, so this
+# runs from GitHub Actions on the free schedule. Each result is appended to
+# healthz.jsonl on the `monitoring` branch and nowhere else — main is not
+# checked out for the commit and is not pushed.
+#
+# A single bad probe fails this run. An issue is opened or updated only after
+# three consecutive failures (about 45 minutes), and again at most every 12
+# hours while it lasts. `built_at` older than 9 days fails the run too and
+# uses a separate issue. `ok` in the history file is the uptime bit; staleness
+# is not downtime. The uptime percentage stays unpublished until that file
+# covers 7 days.
+#
+# GitHub may start the cron late. The history records when the probe ran.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: hosted-api-health
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    # Forks have no business pushing a monitoring branch or opening issues.
+    if: github.repository == 'reesehammer/umbra-py'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Probe /healthz, record history, alert
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Stdlib only. Do not `pip install`: a PyPI outage must not look like
+        # an API outage, and the script does not import the package.
+        run: python3 src/umbra_py/health_monitor.py

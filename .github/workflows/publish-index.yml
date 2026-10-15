@@ -477,7 +477,7 @@ jobs:
       # stays in the denominator, so a real gap still fails this step.
       - name: Coverage gate (99% of acquisitions with a sidecar)
         run: |
-          python -c "import json, sys; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= 99 else 1)"
+          python -c "import json, sys; from umbra_py.parity import COVERAGE_GATE_PCT; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= COVERAGE_GATE_PCT else 1)"
 
       # After the thumbnail publish step has copied a non-shrinking export
       # onto catalog.thumbs.seed.db. Runs when that upload was skipped and

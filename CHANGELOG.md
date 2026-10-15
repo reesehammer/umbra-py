@@ -10,6 +10,24 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Hosted API limits and an external uptime probe.** [Hosted API limits](docs/hosted-limits.md)
+  states the best-effort 99% monthly uptime (no SLA), the 120 requests per
+  60-second sliding window, the 10,000 `limit` ceiling, the CORS policy, and
+  the `catalog-index` release as the bulk or outage fallback. A GitHub Actions
+  workflow probes `https://api.umbra-py.space/healthz` every 15 minutes (HTTP
+  200, `degraded: false`, and latency) and appends each result to
+  `healthz.jsonl` on the `monitoring` branch. Three consecutive failures open
+  or update an issue. An uptime percentage is withheld until that file covers
+  7 days.
+- **Stale index alert.** `/healthz` sets `stale: true` when `built_at` is
+  missing or more than 9 days old. The same probe opens or updates an issue.
+  The STAC collection and the geoparquet file metadata carry
+  `umbra-py:built_at` and `umbra-py:snapshot` next to `umbra-py:asset_schema`.
+  The collection `updated` field is that build date at midnight UTC.
+- **Coverage report states the 99% bar.** `coverage.json` / `coverage.md`
+  already break indexed vs bucket acquisitions down by prefix and product, and
+  list quarantined rows with reasons plus the duplicate count. The report now
+  also records whether `pct_indexable` meets the 99% publication bar.
 - **Look up an acquisition by filename or stem.** `umbra info`, `umbra download`,
   and the MCP `get_item` tool accept a GEC/SICD filename
   (`2025-05-17-17-43-46_UMBRA-08_GEC.tif`) or an acquisition stem

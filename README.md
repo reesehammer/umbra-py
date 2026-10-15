@@ -25,6 +25,10 @@ nothing installed.
 > **not** an InSAR toolbox (phase is not preserved through convert). Not
 > affiliated with Umbra Lab, Inc.
 
+Hosted API ([api.umbra-py.space](https://api.umbra-py.space/)): best-effort
+99% monthly uptime, no SLA, 120 requests/minute, page size 10,000.
+[Limits, CORS, and the parquet fallback](https://umbra-py.space/hosted-limits/).
+
 ## Install
 
 ```bash

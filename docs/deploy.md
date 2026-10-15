@@ -54,6 +54,8 @@ product. Search is served from the weekly catalog snapshot. Asset `href`s
 point at Umbra's public S3 bucket — the API does not proxy rasters (that is
 the COG-streaming guardrail). Attribute [CC BY 4.0](https://umbra.space/open-data/).
 A per-client rate limit (120 requests/minute) returns `429` with `Retry-After`.
+The operational contract (uptime, the 10,000 page size, CORS, and the release
+fallback) is [Hosted API limits](hosted-limits.md).
 Do not set `UMBRA_CANOPY_TOKEN` or model API keys on this instance.
 
 ## Self-host (one command)
@@ -120,7 +122,9 @@ needs no build-arg for it.
   flight). Its `thumbnails` object (`count`, the merged `snapshot`, the
   on-disk `sidecar_snapshot`, `merged`) and top-level `degraded` flag say
   whether the boot's thumbnail merge landed. A skipped or failed merge is
-  still `200` with `degraded: true`. Only an index that exists but cannot be
+  still `200` with `degraded: true`. `built_at`, `snapshot`, and `stale`
+  (`true` when the build date is more than 9 days old) say which snapshot is
+  loaded. Only an index that exists but cannot be
   opened is a `503` (`status: "error"`, with the SQLite `error`). It is wired
   to a Docker `HEALTHCHECK` and is exactly what a Kubernetes liveness/readiness
   probe wants.

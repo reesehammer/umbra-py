@@ -93,6 +93,25 @@ def test_collection_carries_license_and_temporal_extent():
     assert coll["license"] == "CC-BY-4.0"
     assert coll["extent"]["temporal"]["interval"] == [["2023-01-01", "2024-06-01"]]
     assert coll["extent"]["spatial"]["bbox"] == [[-180.0, -90.0, 180.0, 90.0]]
+    # No build stamp on a caller that does not have one. Asset schema is
+    # independent of that stamp.
+    assert coll["umbra-py:asset_schema"] == 2
+    assert "umbra-py:built_at" not in coll
+    assert "umbra-py:snapshot" not in coll
+    assert "updated" not in coll
+
+
+def test_collection_stamps_built_at_and_snapshot():
+    coll = serve.collection(
+        "http://localhost:8000",
+        built_at="2026-10-08",
+        snapshot="0xabc",
+    )
+    assert coll["umbra-py:asset_schema"] == 2
+    assert coll["umbra-py:built_at"] == "2026-10-08"
+    assert coll["umbra-py:snapshot"] == "0xabc"
+    assert coll["updated"] == "2026-10-08T00:00:00Z"
+    assert serve._collection_updated("2026-10-08T06:17:00Z") == "2026-10-08T06:17:00Z"
 
 
 def test_item_to_stac_stamps_collection_and_rewrites_links(sample_item_dict):
@@ -276,20 +295,37 @@ def test_healthz_reports_ready_index_with_item_count(client):
     assert body["items"] == 3
 
 
-def test_healthz_reports_freshness_fields(index_path):
+def test_healthz_reports_freshness_fields(index_path, monkeypatch):
     # PRD P1-1/P1-4: distinct ids, build date and the snapshot identity let an
-    # outside monitor tell a stale hosted index from a current one.
+    # outside monitor tell a stale hosted index from a current one. `stale` is
+    # the same comparison the probe makes, against a fixed UTC day so the
+    # assertion does not move with the calendar.
     import json as _json
+    from datetime import date
 
+    from umbra_py import health_monitor
     from umbra_py.index import CatalogIndex, snapshot_state_path
 
+    monkeypatch.setattr(health_monitor, "utc_today", lambda: date(2026, 10, 15))
     with CatalogIndex(index_path) as idx:
-        idx.set_meta("built_at", "2026-10-05")
+        idx.set_meta("built_at", "2026-10-06")  # exactly 9 days: still fresh
     snapshot_state_path(index_path).write_text(_json.dumps({"etag": '"v1"'}))
     body = TestClient(serve.build_app(index_path)).get("/healthz").json()
     assert body["ids"] == 3
-    assert body["built_at"] == "2026-10-05"
+    assert body["built_at"] == "2026-10-06"
     assert body["snapshot"] == "v1"
+    assert body["stale"] is False
+
+    with CatalogIndex(index_path) as idx:
+        idx.set_meta("built_at", "2026-10-05")  # 10 days
+    body = TestClient(serve.build_app(index_path)).get("/healthz").json()
+    assert body["built_at"] == "2026-10-05"
+    assert body["stale"] is True
+    coll = TestClient(serve.build_app(index_path)).get(f"/collections/{COLLECTION}").json()
+    assert coll["umbra-py:asset_schema"] == 2
+    assert coll["umbra-py:built_at"] == "2026-10-05"
+    assert coll["umbra-py:snapshot"] == "v1"
+    assert coll["updated"] == "2026-10-05T00:00:00Z"
 
 
 @pytest.mark.parametrize("stored", ['"0x8DE1"', 'W/"0x8DE1"', "0x8DE1"])
@@ -312,6 +348,23 @@ def _sidecar_state(index_path, etag: str) -> None:
     sidecar = default_thumbs_path(index_path)
     sidecar.write_bytes(b"")
     snapshot_state_path(sidecar).write_text(_json.dumps({"etag": etag}))
+
+
+def test_healthz_without_a_build_date_is_stale(client):
+    body = client.get("/healthz").json()
+    assert body["ready"] is True
+    assert "built_at" not in body
+    assert body["stale"] is True
+
+
+def test_cors_middleware_uses_the_published_policy(index_path):
+    app = serve.build_app(index_path)
+    cors = [layer for layer in app.user_middleware if layer.cls.__name__ == "CORSMiddleware"]
+    assert len(cors) == 1
+    assert cors[0].kwargs["allow_origins"] == list(serve.CORS_ALLOW_ORIGINS)
+    assert cors[0].kwargs["allow_methods"] == list(serve.CORS_ALLOW_METHODS)
+    assert cors[0].kwargs["allow_headers"] == list(serve.CORS_ALLOW_HEADERS)
+    assert cors[0].kwargs["expose_headers"] == list(serve.CORS_EXPOSE_HEADERS)
 
 
 def test_healthz_reports_no_thumbnails_without_a_sidecar(client):

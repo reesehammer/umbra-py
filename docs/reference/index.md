@@ -25,7 +25,16 @@ the latest `updated` (or datetime), then the record with the most assets.
 The dropped rows are listed in `umbra index coverage` and in
 `index-validation.json`. They are omitted from the coverage percentage and
 from the missing list; a sidecar that was never indexed still counts as
-missing. `--validation` points the report at a saved `index-validation.json`. `umbra index validate` re-checks the index and,
+missing. `--validation` points the report at a saved `index-validation.json`. The weekly
+[`coverage.md`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.md)
+and
+[`coverage.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.json)
+on the `catalog-index` release are that report: indexed vs bucket acquisitions
+by prefix (`sar-data/tasks/`, `sar-data/task-data/`, `open-data/`) and by
+product, whether `pct_indexable` meets the 99% publication bar, each
+quarantined row with its reason, and the duplicate count.
+[`index-validation.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/index-validation.json)
+is the same list from the build. `umbra index validate` re-checks the index and,
 with `--parquet`, the geoparquet export, and exits non-zero if any violation
 remains. Duplicate ids are counted in SQL and from the parquet `id` column;
 rows are checked a batch at a time. A snapshot exported before asset schema
