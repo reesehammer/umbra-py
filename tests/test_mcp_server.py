@@ -24,7 +24,7 @@ pytest.importorskip("mcp")
 from mcp.server.mcpserver import Image  # noqa: E402
 
 from umbra_py import mcp_server as ms  # noqa: E402
-from umbra_py.exceptions import MissingDependencyError  # noqa: E402
+from umbra_py.exceptions import AssetNotFoundError, MissingDependencyError  # noqa: E402
 from umbra_py.models import UmbraItem  # noqa: E402
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -1317,6 +1317,42 @@ def test_download_asset_empty_id_reaches_the_client():
     server = ms.build_server()
     with pytest.raises(ToolError, match="item id is required"):
         asyncio.run(server.call_tool("download_asset", {"url": "", "asset": "SICD"}))
+
+
+def test_download_asset_tool_describes_v2_keys_and_filename_urls():
+    server = ms.build_server()
+    tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    desc = tools["download_asset"].description
+    assert "gec_2" in desc
+    assert "csi_sidd" in desc
+    assert "file_tif" in desc
+    assert "umbra-py:filename" in desc
+    assert "acquisition stem" in desc
+
+
+@responses.activate
+def test_download_asset_accepts_a_v2_key_on_an_uppercase_item(sample_item_dict):
+    """The stored sidecar keys the file ``GEC``. The API's ``gec`` still selects it."""
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
+    out = ms.download_asset(ITEM_URL, "gec", confirm=False)
+    assert out["confirm_required"] is True
+    assert out["asset"] == "gec"
+    assert out["url"] == href
+
+
+@responses.activate
+def test_download_asset_missing_key_lists_v2_keys(sample_item_dict):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    with pytest.raises(AssetNotFoundError, match=r"Available: gec, sidd, sicd, cphd, metadata\."):
+        ms.download_asset(ITEM_URL, "gec_2")
+
+    server = ms.build_server()
+    with pytest.raises(ToolError, match=r"Available: gec, sidd, sicd, cphd, metadata"):
+        asyncio.run(server.call_tool("download_asset", {"url": ITEM_URL, "asset": "nope"}))
 
 
 # --------------------------------------------------------------------------

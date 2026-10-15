@@ -584,7 +584,15 @@ class UmbraItem:
         return [name for name in PRODUCT_ASSETS if name in present]
 
     def asset_href(self, name: str) -> str:
-        """Return the download URL for a product type (``"GEC"``) or asset key.
+        """Return the download URL for one asset.
+
+        ``name`` is a product type in any case (``"GEC"``), a schema v2 key
+        (``"gec"``, ``"gec_2"``, ``"csi_sidd"``, ``"file_tif"``), or the
+        original filename (``umbra-py:filename``). ``"GEC"`` and ``"gec"``
+        are the primary file; ``"gec_2"`` is the next file of that product.
+        A name that is not on the item raises :class:`AssetNotFoundError`
+        listing the v2 keys. Stored keys may still be a filename or
+        ``"GEC"``; selection uses the same v2 key space the API serves.
 
         Umbra's published ``*.stac.v2.json`` sidecars reference assets either
         with ``href=""`` or with an ``s3://`` URL into a *private* processing
@@ -600,17 +608,17 @@ class UmbraItem:
         href = asset.get("href") or ""
         if href.startswith(("http://", "https://")):
             return href
-        public = self._public_asset_url(key)
+        public = self._public_asset_url(key, asset)
         if public is not None:
             return public
         task_id = self.properties.get("umbra:task_id")
         if task_id:
-            derived = _derive_data_url(key, task_id)
+            derived = _derive_data_url(_asset_filename(key, asset), task_id)
             if derived is not None:
                 return derived
         return href
 
-    def _public_asset_url(self, key: str) -> str | None:
+    def _public_asset_url(self, key: str, asset: dict[str, Any] | None = None) -> str | None:
         """Resolve an asset's public URL as a sibling of the item's sidecar.
 
         The downloadable products live next to the ``*.stac.v2.json`` sidecar
@@ -628,7 +636,10 @@ class UmbraItem:
             return None
         # Schema v2 keys are ``gec`` / ``cphd``; the on-disk suffix still comes
         # from the filename (v1 ``*_MM.cphd`` or already-public ``*_CPHD.cphd``).
-        filename = _asset_filename(key, self.assets.get(key) or {})
+        # ``asset`` is the resolved body: the stored key may still be a filename
+        # while ``key`` is already the v2 name.
+        body = asset if asset is not None else (self.assets.get(key) or {})
+        filename = _asset_filename(key, body)
         suffix = _disk_suffix(filename)
         if suffix is None:
             return None
@@ -642,31 +653,51 @@ class UmbraItem:
         return f"{base_dir}/{basename}"
 
     def _resolve_asset(self, name: str) -> tuple[str, dict[str, Any]]:
-        """The ``(key, asset)`` for a product type, stable key, or filename.
+        """The ``(v2 key, asset)`` for a product type, stable key, or filename.
 
-        ``"GEC"`` uses :attr:`asset_map`. ``"gec"`` and ``"gec_2"`` match the
-        key directly. A product filename matches ``umbra-py:filename`` (schema
-        v2) or a v1 key that still is the filename.
+        Selection uses the schema v2 key space, including when this item still
+        stores a filename or an uppercase ``"GEC"`` key. ``"GEC"`` / ``"gec"``
+        / ``"Gec"`` select the unsuffixed ``gec`` asset. ``"gec_2"`` selects
+        that collision suffix. A product type that is not itself a key
+        (``"SIDD"`` when the only file is ``csi_sidd``) uses :attr:`asset_map`.
+        A product filename matches ``umbra-py:filename``. A miss lists the v2
+        keys, not the uppercase product types.
         """
-        key = self.asset_map.get(name, name)
-        asset = self.assets.get(key)
-        if asset is None and name.lower() in self.assets:
-            key = name.lower()
-            asset = self.assets[key]
-        if asset is None:
-            want = unquote(name.replace("\\", "/").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1])
-            for candidate, body in self.assets.items():
-                if not isinstance(body, dict):
-                    continue
-                if candidate == want or _asset_filename(candidate, body) == want:
-                    key, asset = candidate, body
-                    break
-        if asset is None:
-            available = ", ".join(self.available_assets) or "none"
-            raise AssetNotFoundError(
-                f"Item {self.id!r} has no asset {name!r}. Available: {available}."
-            )
-        return key, asset
+        normalized = _normalize_assets(self.assets)
+        text = name.strip()
+        folded = {key.lower(): key for key in normalized}
+        key = folded.get(text.lower())
+        if key is not None:
+            return key, normalized[key]
+        if text.upper() in PRODUCT_ASSETS:
+            picked = self._normalized_for_storage_key(normalized, self.asset_map.get(text.upper()))
+            if picked is not None:
+                return picked
+        want = unquote(text.replace("\\", "/").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1])
+        if want:
+            for candidate, body in normalized.items():
+                filename = body.get(ASSET_FILENAME_FIELD)
+                if candidate == want or filename == want:
+                    return candidate, body
+        available = ", ".join(normalized) or "none"
+        raise AssetNotFoundError(f"Item {self.id!r} has no asset {name!r}. Available: {available}.")
+
+    def _normalized_for_storage_key(
+        self,
+        normalized: dict[str, dict[str, Any]],
+        storage_key: str | None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """The v2 entry for a key that still lives in :attr:`assets`."""
+        if storage_key is None:
+            return None
+        body = self.assets.get(storage_key)
+        if not isinstance(body, dict):
+            return None
+        filename = _asset_filename(storage_key, body)
+        for candidate, asset in normalized.items():
+            if asset.get(ASSET_FILENAME_FIELD) == filename:
+                return candidate, asset
+        return None
 
     def has_asset(self, name: str) -> bool:
         try:

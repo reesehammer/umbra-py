@@ -173,7 +173,7 @@ def test_asset_href_accepts_product_stable_key_and_filename():
     assert item.has_asset("CPHD")
     assert item.has_asset(v1_name)
     assert not item.has_asset("GEC")
-    with pytest.raises(AssetNotFoundError):
+    with pytest.raises(AssetNotFoundError, match=r"Available: cphd\."):
         item.asset_href("GEC")
 
 
@@ -419,3 +419,99 @@ def test_parquet_schema_uses_the_fixed_asset_keys(tmp_path):
     meta = json.loads(schema.metadata[b"stac-geoparquet"])
     recorded = meta["collections"]["umbra-open-data"][ASSET_SCHEMA_FIELD]
     assert recorded == ASSET_SCHEMA_VERSION
+
+
+def test_v2_key_resolves_when_the_stored_key_is_still_the_filename():
+    """Index rows keep filename keys until the next crawl.
+
+    The API rewrites them on the way out, so a client that copied ``cphd``
+    from a search response must still resolve against the stored item.
+    """
+    sidecar = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/"
+        "2026-02-20-03-03-38_UMBRA-07/2026-02-20-03-03-38_UMBRA-07.stac.v2.json"
+    )
+    v1_name = "2026-02-20-03-03-29_UMBRA-07_MM.cphd"
+    item = UmbraItem.from_dict(
+        {
+            "id": "x",
+            "properties": {},
+            "assets": {
+                v1_name: {
+                    "href": f"s3://prod-prod-processed-sar-data/2026-02-20/abc/{v1_name}",
+                    "type": "application/octet-stream",
+                }
+            },
+        },
+        href=sidecar,
+    )
+    expect = (
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/"
+        "sar-data/task-data/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/"
+        "2026-02-20-03-03-38_UMBRA-07/2026-02-20-03-03-38_UMBRA-07_CPHD.cphd"
+    )
+    assert "cphd" not in item.assets
+    assert item.asset_href("cphd") == expect
+    assert item.asset_href("CPHD") == expect
+    assert item.asset_href(v1_name) == expect
+    assert item.assets == {
+        v1_name: {
+            "href": f"s3://prod-prod-processed-sar-data/2026-02-20/abc/{v1_name}",
+            "type": "application/octet-stream",
+        }
+    }
+
+
+def test_selection_accepts_v2_keys_suffixes_and_filenames_on_stored_keys():
+    """Filename keys, not a pre-normalized document, still select by v2 name."""
+    stem = _STEM
+    canonical = f"{stem}_GEC.tif"
+    bare = f"{stem}.tif"
+    csi_sidd = f"{stem}_CSI-SIDD.nitf"
+    sicd = f"{stem}_SICD.nitf"
+    metadata = f"{stem}_METADATA.json"
+    stac_metadata = f"{stem}_STAC-METADATA.json"
+    gif = f"{stem}_DI-GIF.gif"
+    notes = "notes.xml"
+    stored = {
+        canonical: {"href": "https://example.com/gec.tif", "type": "image/tiff"},
+        bare: {"href": "https://example.com/bare.tif", "type": "image/tiff"},
+        csi_sidd: {"href": "https://example.com/csi-sidd.nitf"},
+        sicd: {"href": "https://example.com/sicd.nitf"},
+        metadata: {"href": "https://example.com/metadata.json"},
+        stac_metadata: {"href": "https://example.com/stac.json"},
+        gif: {"href": "https://example.com/di.gif"},
+        notes: {"href": "https://example.com/notes.xml"},
+    }
+    item = UmbraItem.from_dict({"id": "stored", "assets": stored}, href=_HREF)
+    assert "gec" not in item.assets
+
+    assert item.asset_href("gec") == "https://example.com/gec.tif"
+    assert item.asset_href("GEC") == "https://example.com/gec.tif"
+    assert item.asset_href("Gec") == "https://example.com/gec.tif"
+    assert item.asset_href(canonical) == "https://example.com/gec.tif"
+    assert item.asset_href("gec_2") == "https://example.com/bare.tif"
+    assert item.asset_href("GEC_2") == "https://example.com/bare.tif"
+    assert item.asset_href(bare) == "https://example.com/bare.tif"
+    assert item.asset_href("csi_sidd") == "https://example.com/csi-sidd.nitf"
+    assert item.asset_href("sidd") == "https://example.com/csi-sidd.nitf"
+    assert item.asset_href("SIDD") == "https://example.com/csi-sidd.nitf"
+    assert item.asset_href("sicd") == "https://example.com/sicd.nitf"
+    assert item.asset_href("metadata") == "https://example.com/metadata.json"
+    assert item.asset_href("stac_metadata") == "https://example.com/stac.json"
+    assert item.asset_href("di_gif") == "https://example.com/di.gif"
+    assert item.asset_href("file_xml") == "https://example.com/notes.xml"
+    assert item.asset_href("FILE_XML") == "https://example.com/notes.xml"
+    assert item.asset_href(notes) == "https://example.com/notes.xml"
+    assert item.has_asset("gec_2")
+    assert not item.has_asset("cphd")
+    # Selection must not rewrite the stored document.
+    assert item.assets == stored
+
+    with pytest.raises(AssetNotFoundError) as exc:
+        item.asset_href("nope")
+    assert str(exc.value) == (
+        "Item 'stored' has no asset 'nope'. Available: "
+        "gec, gec_2, csi_sidd, sicd, metadata, stac_metadata, di_gif, file_xml."
+    )

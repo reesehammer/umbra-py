@@ -1360,6 +1360,24 @@ def download_asset(
     downloading, then again with ``confirm=True`` to actually fetch. Returns
     ``{asset, path, bytes}`` on download, or a size-and-hint object when
     confirmation is still required.
+
+    ``url`` is a STAC JSON URL, or a product filename
+    (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
+    (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
+    the local catalog index the same way as ``get_item``. A filename needs a
+    local index (``umbra index fetch``).
+
+    ``asset`` selects the file. All of these work:
+
+    - a product type, any case: ``GEC``, ``gec``, ``SICD``
+    - a schema v2 key, including a collision suffix: ``gec``, ``gec_2``,
+      ``csi``, ``sidd``, ``csi_sidd``, ``sicd``, ``cphd``, ``metadata``,
+      ``stac_metadata``, ``di_gif``, ``file``, ``file_tif``
+    - the original filename (the asset's ``umbra-py:filename``)
+
+    ``GEC`` and ``gec`` are the primary file. ``gec_2`` is the second GEC,
+    not the primary. A name that matches nothing raises with the item's v2
+    keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
     from .download import download_asset as _download_asset
@@ -1369,7 +1387,13 @@ def download_asset(
             "An item id is required (an item id or url from search_catalog); "
             "call search_catalog first."
         )
-    item = _fetch_item(url)
+    if is_asset_name(url):
+        try:
+            item = resolve_asset_name(url)
+        except CatalogError as exc:
+            raise ValueError(asset_name_error_text(exc)) from exc
+    else:
+        item = _fetch_item(url)
     href = item.asset_href(asset)
 
     if not confirm:

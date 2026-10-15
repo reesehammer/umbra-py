@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 from urllib.parse import quote
 
+import click
 import pytest
+import responses
 from click.testing import CliRunner
 
 from umbra_py.cli import cli
@@ -22,7 +24,7 @@ from umbra_py.index import (
     is_asset_name,
     resolve_asset_name,
 )
-from umbra_py.mcp_server import get_item
+from umbra_py.mcp_server import download_asset, get_item
 from umbra_py.models import UmbraItem
 
 _BUCKET = "https://umbra-open-data-catalog.s3.amazonaws.com"
@@ -310,6 +312,75 @@ def test_cli_reports_missing_unknown_and_ambiguous_names(tmp_path, monkeypatch):
     assert "sar-data/tasks/" in ambiguous.output
     assert "sar-data/task-data/" in ambiguous.output
     assert "Pass one of these STAC JSON URLs." in ambiguous.output
+
+
+def test_download_flag_passes_v2_keys_and_filenames(tmp_path, monkeypatch):
+    """``--asset`` is not a product-type Choice: ``gec`` stays ``gec``, and ``gec_2`` is legal."""
+    from umbra_py.cli.scenes import download as download_cmd
+
+    param = next(p for p in download_cmd.params if p.name == "assets")
+    assert not isinstance(param.type, click.Choice)
+    assert param.multiple is True
+
+    db = tmp_path / "catalog.db"
+    with _index(tmp_path):
+        pass
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(db))
+    seen: list[str] = []
+
+    def fake_download(item, dest, assets, overwrite, progress):
+        seen.extend(assets)
+        path = tmp_path / "out.tif"
+        path.write_bytes(b"x")
+        return [path]
+
+    monkeypatch.setattr("umbra_py.cli.scenes.download_item", fake_download)
+    filename = f"{_KHAVDA}_GEC.tif"
+    result = _runner().invoke(
+        cli,
+        [
+            "download",
+            _KHAVDA,
+            "--asset",
+            "gec",
+            "--asset",
+            "gec_2",
+            "--asset",
+            filename,
+            "--dest",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == ["gec", "gec_2", filename]
+    help_text = _runner().invoke(cli, ["download", "--help"])
+    assert help_text.exit_code == 0, help_text.output
+    assert "gec_2" in help_text.output
+    assert "file_tif" in help_text.output
+
+
+@responses.activate
+def test_download_asset_url_accepts_a_stem(tmp_path, monkeypatch):
+    """A bare stem must resolve like get_item, not fail with 'No scheme supplied'."""
+    db = tmp_path / "catalog.db"
+    with _index(tmp_path):
+        pass
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(db))
+
+    def boom(url, *args, **kwargs):
+        raise AssertionError(f"No scheme supplied: fetched {url}")
+
+    monkeypatch.setattr("umbra_py._http.get_json", boom)
+    href = resolve_asset_name(_OPEN_DATA, path=db).asset_href("gec")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "8"}, status=200)
+    out = download_asset(_OPEN_DATA, "gec", confirm=False)
+    assert out["confirm_required"] is True
+    assert out["asset"] == "gec"
+    assert out["url"] == href
+
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(tmp_path / "missing.db"))
+    with pytest.raises(ValueError, match="No local catalog index"):
+        download_asset(_KHAVDA, "GEC")
 
 
 def test_get_item_resolves_filename_stem_and_errors(tmp_path, monkeypatch):

@@ -35,6 +35,18 @@ For a site name you roughly know (`beet piler`), use `search_catalog(area=…,
 fuzzy=True)` or `find_repeat_sites` — not `semantic=True` (that needs an
 embedding key this host does not hold).
 
+## download_asset
+
+`asset` is a schema v2 key (`gec`, `gec_2`, `csi`, `sidd`, `csi_sidd`,
+`sicd`, `cphd`, `metadata`, `stac_metadata`, `di_gif`, `file`, `file_tif`),
+a product type in any case (`GEC`), or the original filename
+(`umbra-py:filename`). `gec` is the primary GEC; `gec_2` is the next file
+of that product, not an alias. A name that is not on the item lists those
+v2 keys.
+
+`url` is a STAC JSON URL, or a product filename or acquisition stem resolved
+like `get_item`. A filename or stem needs a local index (`umbra index fetch`).
+
 ## Claude Code (recommended: one command)
 
 Remote Streamable HTTP. Claude Code calls this transport `http`:

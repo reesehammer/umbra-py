@@ -65,8 +65,15 @@ both carry `umbra-py:asset_schema: 2`, and so does each item.
 
 `di_gif` is the only thumbnail-like product file in the open archive. It is
 not the baked quicklook PNG (`catalog.thumbs.db`). A file that matches none
-of these is `file` or `file_<ext>`. `asset_href("GEC")`, `asset_href("gec")`,
-and `asset_href` of the filename all resolve the same primary asset.
+of these is `file` or `file_<ext>`.
+
+`asset_href`, `download_asset`, and `umbra download --asset` accept a product
+type in any case (`GEC`), a v2 key including a suffix (`gec`, `gec_2`,
+`csi_sidd`, `file_tif`), or the original filename (`umbra-py:filename`).
+`gec` is the primary file; `gec_2` is the next file of that product. A miss
+lists the v2 keys on the item. That lookup works on an index row that still
+stores filename or uppercase keys; the API rewrites keys on the way out, and
+selection uses the same key space.
 
 The snapshot is what Umbra has published, rebuilt weekly. `umbra index info`
 reports `built_at` and `end` (the newest plausible acquisition). As of

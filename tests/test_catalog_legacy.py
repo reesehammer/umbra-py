@@ -308,7 +308,8 @@ def test_download_resolves_melbourne_legacy_metadata_url(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert [assets for _, assets in seen] == [["CPHD"], ["SICD"]]
+    # ``--asset`` keeps the v2 key the caller typed; it is not rewritten to CPHD.
+    assert [assets for _, assets in seen] == [["cphd"], ["sicd"]]
     item = seen[0][0]
     assert item.id == MELBOURNE_ID
     assert item.properties["umbra-py:layout"] == "legacy"
@@ -322,10 +323,12 @@ def test_download_resolves_melbourne_legacy_metadata_url(tmp_path, monkeypatch):
     cphd = sicd.replace("_SICD.nitf", "_CPHD.cphd")
     gec = sicd.replace("_SICD.nitf", "_GEC.tif")
     assert item.asset_href("SICD") == sicd
+    assert item.asset_href("sicd") == sicd
     assert item.asset_href("CPHD") == cphd
+    assert item.asset_href("cphd") == cphd
     assert item.asset_href("GEC") == gec
-    assert f"Downloading CPHD of {MELBOURNE_ID}" in result.output
-    assert f"Downloading SICD of {MELBOURNE_ID}" in result.output
+    assert f"Downloading cphd of {MELBOURNE_ID}" in result.output
+    assert f"Downloading sicd of {MELBOURNE_ID}" in result.output
 
 
 def test_legacy_metadata_url_without_a_collect_raises(monkeypatch):
