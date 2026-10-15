@@ -42,14 +42,13 @@ VALIDATION_META_KEY = "validation"
 
 #: Rows decoded from a geoparquet at a time.
 #:
-#: The weekly export stores ``assets`` as one struct field per asset key —
-#: about 80,000 fields on the published snapshot, because Umbra's keys are
-#: filenames, not a handful of product names. ``pq.read_table`` plus
-#: ``stac_table_to_items`` on that file materialises every null field and
-#: exhausted the 16 GB publish runner (the step was killed with no traceback).
-#: A batch of 1024 stayed near 3 GB; a batch of the whole file was OOM-killed
-#: on a 16 GB machine. Smaller batches spend their time slicing the wide
-#: struct, so 1024 is the measured compromise.
+#: The weekly export used to store ``assets`` as one struct field per asset
+#: key — about 80,000 fields, because the keys were filenames. Asset schema
+#: v2 collapses that to a fixed set of product keys; a v1 file is still wide,
+#: and ``pq.read_table`` plus ``stac_table_to_items`` on it materialises every
+#: null field (the step was killed on a 16 GB runner with no traceback). A
+#: batch of 1024 stayed near 3 GB. Smaller batches spend their time slicing
+#: the wide struct, so 1024 stays the measured compromise for a v1 file.
 _PARQUET_BATCH_SIZE = 1024
 
 #: STAC item keys that stay at the top level of a geoparquet row. Everything

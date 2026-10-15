@@ -119,6 +119,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   tool name and argument key names (never values) on `tools/call`.
 
 ### Changed
+- **Breaking: STAC asset schema v2.** `umbra serve` (`/search`,
+  `/collections/{id}/items`) and `umbra index export` key assets as `gec`,
+  `csi`, `sidd`, `csi_sidd`, `sicd`, `cphd`, `metadata`, `stac_metadata`, and
+  `di_gif` instead of the product filename. A second file of the same product
+  is `gec_2`, `gec_3`, … (filename order; the canonical `*_GEC.tif` /
+  `*_CPHD.cphd` name keeps the bare key). The filename is `title` when the
+  asset had none, and always `umbra-py:filename`. `umbra-py:products` stays
+  the uppercase list (`GEC`, …) lined up with those keys. The collection and
+  the parquet metadata record `umbra-py:asset_schema: 2`. Migrate by reading
+  the stable key, or pass `GEC` / `gec` / the filename to `asset_href`; v1
+  filename keys are not served alongside v2.
 - **Container builds pull official Python from ECR Public.** `deploy/Dockerfile`
   and `deploy/Dockerfile.mcp` default to
   `public.ecr.aws/docker/library/python:3.12-slim` (the same official

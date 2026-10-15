@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .constants import (
+    ASSET_FILENAME_FIELD,
     ATTRIBUTION,
     DATA_LICENSE,
     METADATA_ASSET,
@@ -32,10 +33,12 @@ BBox = tuple[float, float, float, float]
 def _classify_asset(key: str, asset: dict[str, Any]) -> str | None:
     """Map a STAC asset to a canonical Umbra product type (or ``None``).
 
-    Handles both the old explicit keys (``"GEC"``, ``"SICD"``, ...) and the
-    newer filename-style keys (``..._SICD_MM.nitf``, ``..._MM.tif``).
+    Handles explicit keys (``"GEC"``, ``"gec"``), filename-style keys
+    (``..._SICD_MM.nitf``, ``..._MM.tif``), and asset schema v2 keys whose
+    filename lives on :data:`~umbra_py.constants.ASSET_FILENAME_FIELD`.
     """
-    name = f"{key} {asset.get('href', '')}".upper()
+    filename = asset.get(ASSET_FILENAME_FIELD) or ""
+    name = f"{key} {filename} {asset.get('href', '')}".upper()
     media = (asset.get("type") or "").lower()
     # ``name`` is upper-cased, so the substring must be too: a lowercase "tif"
     # can never match and would leave the branch dead, dropping a GeoTIFF whose
@@ -55,6 +58,187 @@ def _classify_asset(key: str, asset: dict[str, Any]) -> str | None:
     if is_geotiff:  # remaining geocoded GeoTIFF is the GEC product
         return "GEC"
     return None
+
+
+#: Stable asset keys emitted by :func:`_normalize_assets`, in dict order.
+#:
+#: Drawn from the filenames on the published ``umbra-open-data.parquet``
+#: (catalog-index snapshot, 2026-10): every one of ~79k asset fields was one
+#: of these filename shapes.
+#:
+#: - ``gec`` — ``*_GEC.tif``, and legacy bare ``<stem>.tif``
+#: - ``csi`` — ``*_CSI.tif`` (color sub-aperture GeoTIFF)
+#: - ``sidd`` — ``*_SIDD.nitf``
+#: - ``csi_sidd`` — ``*_CSI-SIDD.nitf`` (color sub-aperture SIDD; its own key
+#:   so it does not collide with ``sidd``)
+#: - ``sicd`` — ``*_SICD.nitf``
+#: - ``cphd`` — ``*_CPHD.cphd``, and legacy bare ``<stem>.cphd``
+#: - ``metadata`` — ``*_METADATA.json`` (Umbra extended metadata)
+#: - ``stac_metadata`` — ``*_STAC-METADATA.json``
+#: - ``di_gif`` — ``*_DI-GIF.gif``, the detected-image GIF preview (the only
+#:   thumbnail-like product file in the open archive)
+#:
+#: A file that matches none of these collapses to ``file`` or ``file_<ext>``
+#: so a new suffix cannot reopen one struct field per filename. A second file
+#: of the same key is ``<key>_2``, ``<key>_3``, … (see :func:`_normalize_assets`).
+ASSET_KEYS: tuple[str, ...] = (
+    "gec",
+    "csi",
+    "sidd",
+    "csi_sidd",
+    "sicd",
+    "cphd",
+    "metadata",
+    "stac_metadata",
+    "di_gif",
+)
+
+# Filename token that marks the primary file for a key. Checked on the
+# upper-cased filename. ``_METADATA.`` does not match ``_STAC-METADATA.json``
+# (the character before METADATA there is ``-``).
+_PRIMARY_MARK: dict[str, str] = {
+    "gec": "_GEC.",
+    "csi": "_CSI.",
+    "sidd": "_SIDD.",
+    "csi_sidd": "CSI-SIDD",
+    "sicd": "_SICD.",
+    "cphd": "_CPHD.",
+    "metadata": "_METADATA.",
+    "stac_metadata": "STAC-METADATA",
+    "di_gif": "DI-GIF",
+}
+
+_COLLISION_KEY_RE = re.compile(r"^(?P<base>.+)_(?P<n>[0-9]+)$")
+
+
+def _looks_like_filename(value: str) -> bool:
+    """A single path segment with an extension, not a URL."""
+    if not value or "://" in value or "/" in value or "\\" in value:
+        return False
+    return "." in value
+
+
+def _asset_filename(key: str, asset: dict[str, Any]) -> str:
+    """On-disk filename for an asset, wherever schema v1 or v2 stored it.
+
+    Prefers ``umbra-py:filename``, then a filename-shaped key, then the href
+    basename, then a filename-shaped title. A stable key such as ``gec`` with
+    none of those falls back to the key itself.
+    """
+    named = asset.get(ASSET_FILENAME_FIELD)
+    if isinstance(named, str) and named.strip():
+        return named.strip()
+    if _looks_like_filename(key):
+        return key
+    href = asset.get("href") or ""
+    if isinstance(href, str) and href:
+        base = unquote(href.rsplit("/", 1)[-1].split("?", 1)[0])
+        if _looks_like_filename(base):
+            return base
+    title = asset.get("title")
+    if isinstance(title, str) and _looks_like_filename(title):
+        return title
+    return key
+
+
+def _known_base_key(name: str) -> bool:
+    """Whether ``name`` is a stable key or the ``file`` / ``file_<ext>`` fallback."""
+    if name in ASSET_KEYS or name == "file":
+        return True
+    return name.startswith("file_") and name.removeprefix("file_").isalnum()
+
+
+def _asset_base_key(filename: str, asset: dict[str, Any]) -> str:
+    """Stable product key for one file, before collision suffixes."""
+    name = filename.upper()
+    media = (asset.get("type") or "").lower()
+    is_geotiff = "TIF" in name or "geotiff" in media
+    if "CSI-SIDD" in name or "CSI_SIDD" in name:
+        return "csi_sidd"
+    if "STAC-METADATA" in name or "STAC_METADATA" in name:
+        return "stac_metadata"
+    if "DI-GIF" in name or "DI_GIF" in name or name.endswith(".GIF"):
+        return "di_gif"
+    if "CPHD" in name or name.endswith(".CPHD"):
+        return "cphd"
+    if "SICD" in name:
+        return "sicd"
+    if "SIDD" in name:
+        return "sidd"
+    if "CSI" in name and is_geotiff:
+        return "csi"
+    if "METADATA" in name:
+        return "metadata"
+    if is_geotiff or name.endswith(".TIFF"):
+        return "gec"
+    # Idempotent: a key that is already ``gec`` or ``gec_2`` with no filename.
+    lowered = filename.lower()
+    match = _COLLISION_KEY_RE.fullmatch(lowered)
+    base = match.group("base") if match else lowered
+    if _known_base_key(base):
+        return base
+    if "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if ext.isalnum():
+            return f"file_{ext}"
+    return "file"
+
+
+def _asset_key_rank(key: str) -> int:
+    """Sort rank of a normalized key. The unsuffixed key ranks first (1)."""
+    match = _COLLISION_KEY_RE.fullmatch(key)
+    if match and _known_base_key(match.group("base")):
+        return int(match.group("n"))
+    return 1
+
+
+def _normalize_assets(assets: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Rewrite asset keys to asset schema v2.
+
+    Each file keeps its bytes-address (``href``) and gains
+    ``umbra-py:filename`` plus, when it had no title, a ``title`` of that
+    filename. An existing title that is not the old key is left alone.
+
+    Two files of the same product become ``gec`` and ``gec_2`` (then
+    ``gec_3``, …). Order is deterministic: a filename carrying the canonical
+    token (``_GEC.tif``, ``_CPHD.cphd``, …) takes the unsuffixed key; the
+    rest follow in filename order. Re-applying this to its own output is a
+    no-op.
+    """
+    if not assets:
+        return {}
+    grouped: dict[str, list[tuple]] = {}
+    for index, (key, asset) in enumerate(assets.items()):
+        if not isinstance(asset, dict):
+            continue
+        text_key = str(key)
+        filename = _asset_filename(text_key, asset)
+        base = _asset_base_key(filename, asset)
+        upper = filename.upper()
+        mark = _PRIMARY_MARK.get(base)
+        preferred = 0 if mark and mark in upper else 1
+        grouped.setdefault(base, []).append(
+            ((preferred, filename, index), filename, text_key, asset)
+        )
+    order = [name for name in ASSET_KEYS if name in grouped]
+    order.extend(sorted(name for name in grouped if name not in ASSET_KEYS))
+    out: dict[str, dict[str, Any]] = {}
+    for base in order:
+        rows = sorted(grouped[base], key=lambda row: row[0])
+        for nth, (_, filename, old_key, asset) in enumerate(rows, start=1):
+            new_key = base if nth == 1 else f"{base}_{nth}"
+            stamped = dict(asset)
+            stamped[ASSET_FILENAME_FIELD] = filename
+            title = stamped.get("title")
+            # Fill a missing title. A v1 key that *is* the filename and was
+            # copied into ``title`` is rewritten to that same filename; a
+            # human title such as ``"GEC"`` is left alone.
+            title_missing = not isinstance(title, str) or not title.strip()
+            title_is_old_filename = title == old_key and _looks_like_filename(old_key)
+            if title_missing or title_is_old_filename:
+                stamped["title"] = filename
+            out[new_key] = stamped
+    return out
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -370,8 +554,10 @@ class UmbraItem:
     def asset_map(self) -> dict[str, str]:
         """Map canonical product type -> actual STAC asset key.
 
-        When several assets share a product type (e.g. a primary SIDD and a
-        Color Sub-aperture SIDD), the non-CSI "primary" asset is preferred.
+        When several assets share a product type (a primary SIDD and a
+        ``csi_sidd``, or ``gec`` and ``gec_2``), the unsuffixed non-CSI asset
+        is preferred. CSI is read from the key and the filename, so a
+        normalized ``csi_sidd`` key still loses to ``sidd``.
         """
         result: dict[str, str] = {}
         for key, asset in self.assets.items():
@@ -380,10 +566,14 @@ class UmbraItem:
                 continue
             existing = result.get(canon)
             if existing is not None:
-                new_is_csi = "CSI" in key.upper()
-                old_is_csi = "CSI" in existing.upper()
-                if new_is_csi and not old_is_csi:
-                    continue  # keep the primary (non-CSI) asset
+                if _asset_key_rank(key) > _asset_key_rank(existing):
+                    continue
+                if _asset_key_rank(key) == _asset_key_rank(existing):
+                    new_is_csi = "CSI" in f"{key} {_asset_filename(key, asset)}".upper()
+                    old_asset = self.assets[existing]
+                    old_name = f"{existing} {_asset_filename(existing, old_asset)}"
+                    if new_is_csi and "CSI" not in old_name.upper():
+                        continue  # keep the primary (non-CSI) asset
             result[canon] = key
         return result
 
@@ -406,14 +596,7 @@ class UmbraItem:
         ``umbra:task_id``. Hrefs already pointing at ``http(s)`` are returned
         unchanged.
         """
-        key = self.asset_map.get(name, name)
-        try:
-            asset = self.assets[key]
-        except KeyError as exc:
-            available = ", ".join(self.available_assets) or "none"
-            raise AssetNotFoundError(
-                f"Item {self.id!r} has no asset {name!r}. Available: {available}."
-            ) from exc
+        key, asset = self._resolve_asset(name)
         href = asset.get("href") or ""
         if href.startswith(("http://", "https://")):
             return href
@@ -434,28 +617,63 @@ class UmbraItem:
         in the public bucket and share that sidecar's acquisition stem
         (``<stem>_CPHD.cphd`` next to ``<stem>.stac.v2.json``). STAC asset
         keys sometimes carry a *processing* timestamp that is not the
-        on-disk name, so we take the suffix from the key (v1 or already-
-        public) and the stem from the sidecar. That also handles named-task
+        on-disk name, so we take the suffix from the filename (the v1 key,
+        ``umbra-py:filename``, or an already-public name) and the stem from
+        the sidecar. That also handles named-task
         and ``task-data/`` layouts that a ``umbra:task_id``-only
         reconstruction can't. Returns ``None`` when there's no usable sidecar
         href or the key isn't recognised.
         """
         if not self.href or not self.href.startswith(("http://", "https://")):
             return None
-        suffix = _disk_suffix(key)
+        # Schema v2 keys are ``gec`` / ``cphd``; the on-disk suffix still comes
+        # from the filename (v1 ``*_MM.cphd`` or already-public ``*_CPHD.cphd``).
+        filename = _asset_filename(key, self.assets.get(key) or {})
+        suffix = _disk_suffix(filename)
         if suffix is None:
             return None
         base_dir = self.href.rsplit("/", 1)[0]
         stem = _sidecar_acquisition_stem(self.href)
         if stem is not None:
             return f"{base_dir}/{stem}{suffix}"
-        basename = _public_basename(key)
+        basename = _public_basename(filename)
         if basename is None:
             return None
         return f"{base_dir}/{basename}"
 
+    def _resolve_asset(self, name: str) -> tuple[str, dict[str, Any]]:
+        """The ``(key, asset)`` for a product type, stable key, or filename.
+
+        ``"GEC"`` uses :attr:`asset_map`. ``"gec"`` and ``"gec_2"`` match the
+        key directly. A product filename matches ``umbra-py:filename`` (schema
+        v2) or a v1 key that still is the filename.
+        """
+        key = self.asset_map.get(name, name)
+        asset = self.assets.get(key)
+        if asset is None and name.lower() in self.assets:
+            key = name.lower()
+            asset = self.assets[key]
+        if asset is None:
+            want = unquote(name.replace("\\", "/").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1])
+            for candidate, body in self.assets.items():
+                if not isinstance(body, dict):
+                    continue
+                if candidate == want or _asset_filename(candidate, body) == want:
+                    key, asset = candidate, body
+                    break
+        if asset is None:
+            available = ", ".join(self.available_assets) or "none"
+            raise AssetNotFoundError(
+                f"Item {self.id!r} has no asset {name!r}. Available: {available}."
+            )
+        return key, asset
+
     def has_asset(self, name: str) -> bool:
-        return name in self.asset_map or name in self.assets
+        try:
+            self._resolve_asset(name)
+        except AssetNotFoundError:
+            return False
+        return True
 
     def intersects_bbox(self, bbox: BBox) -> bool:
         """Whether this item's footprint overlaps the given bounding box."""
