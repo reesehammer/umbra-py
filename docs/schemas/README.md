@@ -10,7 +10,7 @@ with a `CHANGELOG.md` entry.
 | --- | --- | --- |
 | [`error.schema.json`](error.schema.json) | The JSON error object printed to stderr on failure. | `umbra_py.UmbraError.to_dict()`; the `cli.main` error path when `--json` / `UMBRA_JSON` is active. |
 | [`download.schema.json`](download.schema.json) | The `[{asset, path, bytes, sha256}, …]` array printed to stdout on success. | `umbra download --json`. |
-| [`index-info.schema.json`](index-info.schema.json) | The index-stats object (path, size, item/task counts, date span, build date, suspect and quarantined-future counts) printed to stdout. | `umbra index info --json`. |
+| [`index-info.schema.json`](index-info.schema.json) | The index-stats object (path, size, item/task counts, unique captures, date span, build date, suspect and quarantined-future counts) printed to stdout. | `umbra index info --json`. |
 | [`render-manifest.schema.json`](render-manifest.schema.json) | The `{output, items_used, parameters}` manifest printed to stdout on success. | `umbra change` / `timescan` / `swipe` / `gallery` / `map` / `stack`, each with `--json`. |
 | [`render-job.schema.json`](render-job.schema.json) | One asynchronous artifact render on an `umbra serve` instance: how far it has got and where the result will be. | Any `POST /artifacts/…` with `"async": true`; `GET /jobs/{id}` (`umbra_py.serve.job_to_dict`). |
 | [`stack-stats.schema.json`](stack-stats.schema.json) | The datacube measurement: per-pass distribution, pass-to-pass and net change, the optional spatial breakdown. | `umbra_py.stack_stats`; `umbra stack --stats --json` (as the manifest's `stats`); `POST /artifacts/stats`; the `stack_stats` agent tool. |

@@ -10,6 +10,14 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Republished captures stay in the index and are linked.** The same collect
+  under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
+  when the datetimes are within 60 seconds. Every item gains
+  `umbra-py:canonical`; grouped items also gain `umbra-py:canonical_id`,
+  `umbra-py:duplicate_ids`, `umbra-py:duplicate_confidence`, and
+  `rel: canonical` / `rel: related` links. `GET`/`POST /search` and
+  `search_catalog(canonical=True)` can keep the canonical copy. Item counts
+  are unchanged; `unique_captures` counts canonical rows.
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
   GitHub release. The README and [Citing](docs/citing.md) give a BibTeX
   entry and a DOI badge using the placeholder `10.5281/zenodo.TBD` until

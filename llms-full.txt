@@ -36,6 +36,7 @@ Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogInde
 - **min_incidence** — Lower bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
 - **max_incidence** — Upper bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
 - **max_resolution** — Keep only items at least this fine: both range and azimuth resolution must be <= this many metres. An item missing a resolution is excluded. A set acquisition-property filter excludes items lacking that property (the STAC Query-extension convention).
+- **canonical** — When true, keep the canonical copy of a republished collect (the same umbra:task_id and umbra:collect_id, with datetimes within 60 seconds) and omit the other copies. When false, keep only those other copies. Omit it to return every item. An item that is not in a duplicate group counts as canonical.
 - **limit** — Maximum number of items to return.
 - **max_per_task** — Cap items per task. Use 1 for a 'one pin per site' world view; omit for the full time series of each site.
 

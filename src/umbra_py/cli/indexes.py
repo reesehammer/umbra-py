@@ -130,6 +130,13 @@ def index_build(db_path, bbox, place, intersects, start, end, area, fuzzy, limit
         f"Quarantined {report.get('quarantined_count', 0)} item(s); "
         f"dropped {report.get('duplicates_dropped', 0)} duplicate id(s)."
     )
+    republished = report.get("republished_captures")
+    if isinstance(republished, dict):
+        click.echo(
+            f"Linked {republished.get('groups', 0)} republished group(s); "
+            f"{republished.get('unique_captures', total)} unique capture(s), "
+            f"{republished.get('low_confidence_groups', 0)} low-confidence."
+        )
 
 
 @index.command("update")
@@ -758,6 +765,12 @@ def index_validate(db_path, parquet_path, json_path, md_path) -> None:
         f"{len(recheck['index_violations'])} index violation(s) remain."
         f"{parquet_note}"
     )
+    republished = report.get("republished_captures")
+    if isinstance(republished, dict):
+        click.echo(
+            f"Linked {republished.get('groups', 0)} republished group(s); "
+            f"{republished.get('unique_captures', 0)} unique capture(s)."
+        )
     try:
         assert_recheck_clean(report)
     except IndexValidationError as exc:
@@ -828,8 +841,9 @@ def index_info(db_path, as_json) -> None:
     ``--json`` emits the stats as a machine-readable object
     (``docs/schemas/index-info.schema.json``): ``path``, ``size_bytes``,
     ``items``, ``start``, ``end``, ``tasks``, ``labeled``, ``thumbnailed``,
-    ``built_at``, ``datetime_suspect_count`` and ``quarantined_future_count``.
-    ``end`` omits acquisitions flagged ``datetime_suspect``.
+    ``built_at``, ``datetime_suspect_count``, ``quarantined_future_count`` and
+    ``unique_captures`` (canonical rows; equals ``items`` until republished
+    copies are linked). ``end`` omits acquisitions flagged ``datetime_suspect``.
     """
     path = _shared._index_path(db_path)
     if not path.exists():
@@ -843,6 +857,7 @@ def index_info(db_path, as_json) -> None:
     size_mb = size_bytes / 1e6
     click.echo(f"Index: {path}")
     click.echo(f"  items : {s['items']}")
+    click.echo(f"  captures: {s['unique_captures']} unique")
     click.echo(f"  dates : {s['start'] or '?'} -> {s['end'] or '?'}")
     click.echo(
         f"  suspect: {s['datetime_suspect_count']} "

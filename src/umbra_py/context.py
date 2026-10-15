@@ -97,6 +97,13 @@ _SEARCH_PARAMETERS: dict[str, str] = {
         "A set acquisition-property filter excludes items lacking that property "
         "(the STAC Query-extension convention)."
     ),
+    "canonical": (
+        "When true, keep the canonical copy of a republished collect (the same "
+        "umbra:task_id and umbra:collect_id, with datetimes within 60 seconds) "
+        "and omit the other copies. When false, keep only those other copies. "
+        "Omit it to return every item. An item that is not in a duplicate group "
+        "counts as canonical."
+    ),
     "limit": "Maximum number of items to return.",
     "max_per_task": (
         "Cap items per task. Use 1 for a 'one pin per site' world view; omit "

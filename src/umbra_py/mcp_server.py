@@ -372,6 +372,7 @@ def search_catalog(
     min_incidence: float | None = None,
     max_incidence: float | None = None,
     max_resolution: float | None = None,
+    canonical: bool | None = None,
     limit: int = 20,
     max_per_task: int | None = None,
     local: bool | None = None,
@@ -410,7 +411,10 @@ def search_catalog(
     filter that keeps a change comparison like-with-like), ``min_incidence`` /
     ``max_incidence`` (view incidence-angle bounds in degrees) and
     ``max_resolution`` (keep items at least this fine, in metres) -- each a hard
-    predicate that excludes items missing that metadata; ``limit`` to cap
+    predicate that excludes items missing that metadata; ``canonical`` to keep
+    the preferred copy of a collect Umbra republished under another prefix
+    (``True``), only the other copies (``False``), or every item when omitted;
+    ``limit`` to cap
     results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
     overview).
 
@@ -493,6 +497,7 @@ def search_catalog(
             min_incidence=min_incidence,
             max_incidence=max_incidence,
             max_resolution=max_resolution,
+            canonical=canonical,
             limit=limit,
             max_per_task=max_per_task,
         )
@@ -883,6 +888,8 @@ def index_stats() -> dict[str, Any]:
     ``datetime_suspect_count`` is how many kept rows carry that flag.
     ``quarantined_future_count`` is how many source rows the last build
     dropped for a datetime more than a day ahead (they are not in the index).
+    ``unique_captures`` is how many rows are the canonical copy of their
+    collect; it equals ``items`` until republished copies have been linked.
     """
     path = default_index_path()
     if not path.exists():
@@ -1953,7 +1960,8 @@ def build_server() -> MCPServer:
         instructions=(
             "Search and visualize Umbra's open SAR archive. Start by reading "
             "the 'umbra://context' resource for product-type and search "
-            "semantics. Use search_catalog to find acquisitions (compact cards), "
+            "semantics. Use search_catalog to find acquisitions (compact cards; "
+            "canonical=True keeps one copy of a republished collect), "
             "find_repeat_sites to rank the most repeat-imaged sites when you do "
             "not yet know which site to analyse (it returns each site's passes "
             "oldest-first, ready for pick_change_interval), "
