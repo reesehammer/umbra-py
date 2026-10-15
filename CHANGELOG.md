@@ -15,7 +15,8 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   when the datetimes are within 60 seconds. Every item gains
   `umbra-py:canonical`; grouped items also gain `umbra-py:canonical_id`,
   `umbra-py:duplicate_ids`, `umbra-py:duplicate_confidence`, and
-  `rel: canonical` / `rel: related` links. `GET`/`POST /search` and
+  `rel: canonical` / `rel: related` links (sidecar URLs in the index and
+  parquet; the API rewrites them to its item route). `GET`/`POST /search` and
   `search_catalog(canonical=True)` can keep the canonical copy. Item counts
   are unchanged; `unique_captures` counts canonical rows.
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a

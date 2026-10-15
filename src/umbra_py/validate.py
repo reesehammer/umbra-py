@@ -504,7 +504,12 @@ def sanitize_index(index: Any, *, now: datetime | None = None) -> dict[str, Any]
     _delete_hrefs(index, [href for href in drop_hrefs if isinstance(href, str)])
 
     violations = collect_violations(iter_index_items(index), now=now)
-    # Link only a clean index. A violation must fail the build before every
+    input_rows = len(items)
+    kept = input_rows - len(quarantined) - len(duplicates)
+    # The link pass reads the table again. Drop the copies this function is
+    # still holding so a full-catalog build does not keep two item lists.
+    del items, survivors, by_id
+    # Link only a clean index. A violation must fail the build before any
     # row is rewritten with canonical fields.
     republished = apply_duplicate_links(index) if not violations else None
     report: dict[str, Any] = {
@@ -512,8 +517,8 @@ def sanitize_index(index: Any, *, now: datetime | None = None) -> dict[str, Any]
         "checked_at": now.isoformat(),
         "earliest": EARLIEST.isoformat(),
         "future_after": (now + FUTURE_SLACK).isoformat(),
-        "input_rows": len(items),
-        "kept": len(items) - len(quarantined) - len(duplicates),
+        "input_rows": input_rows,
+        "kept": kept,
         "quarantined_count": len(quarantined),
         "quarantined": quarantined,
         "duplicates_dropped": len(duplicates),
@@ -565,24 +570,42 @@ def quarantined_future_count(report: dict[str, Any] | None) -> int:
 
 
 def apply_duplicate_links(index: Any) -> dict[str, int]:
-    """Stamp republished-copy links onto every row. Does not commit.
+    """Stamp republished-copy links onto rows that changed. Does not commit.
 
     Reads each stored document (and the ``created`` column, when the document
     itself has no ``created``) and writes ``umbra-py:canonical`` plus, for a
     real duplicate group, the sibling fields and STAC links. The ``canonical``
     column is updated with the document so a search filter does not have to
-    parse JSON. Returns the summary stored as ``republished_captures``.
+    parse JSON. A row whose document and flag already match is left alone, so
+    a later ``umbra index update`` does not rewrite its thumbnail blob.
+    Returns the summary stored as ``republished_captures``.
     """
     from .duplicates import annotate_republished, canonical_flag  # noqa: PLC0415
 
     rows = index._conn.execute(
-        "SELECT href, doc, place, datetime_suspect, created, published FROM items ORDER BY href"
+        "SELECT href, doc, place, datetime_suspect, created, published, canonical "
+        "FROM items ORDER BY href"
     )
-    items = [index._item_from_row(*row) for row in rows]
+    items: list[UmbraItem] = []
+    stored: list[tuple[str, int]] = []
+    for href, doc, place, suspect, created, published, flag in rows:
+        items.append(index._item_from_row(href, doc, place, suspect, created, published))
+        stored.append((doc, int(flag)))
     summary = annotate_republished(items)
+
+    def changed():
+        for item, (doc, flag) in zip(items, stored, strict=True):
+            if not item.href:
+                continue
+            new_doc = json.dumps(item.raw)
+            new_flag = canonical_flag(item)
+            if new_doc == doc and new_flag == flag:
+                continue
+            yield new_doc, new_flag, item.href
+
     index._conn.executemany(
         "UPDATE items SET doc = ?, canonical = ? WHERE href = ?",
-        [(json.dumps(item.raw), canonical_flag(item), item.href) for item in items if item.href],
+        changed(),
     )
     return summary
 

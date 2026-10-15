@@ -190,12 +190,8 @@ def choose_canonical(items: Sequence[UmbraItem]) -> UmbraItem:
 def duplicate_confidence(items: Sequence[UmbraItem]) -> str:
     """``high`` for one task-data copy and one tasks/campaign copy; else ``low``."""
     kinds = [prefix_kind(item.href) for item in items]
-    if (
-        len(items) == 2
-        and kinds.count("task-data") == 1
-        and kinds.count("tasks") == 1
-        and all(item.datetime is not None for item in items)
-    ):
+    # Undated items never reach a group, so a pair here already has datetimes.
+    if len(items) == 2 and kinds.count("task-data") == 1 and kinds.count("tasks") == 1:
         return "high"
     return "low"
 

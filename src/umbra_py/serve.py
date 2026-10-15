@@ -993,8 +993,9 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     then normalises it for the API: stamps the collection, and rewrites the
     ``links`` to point at this server (self / root / parent / collection) rather
     than the static-catalog relative paths the bucket ships. ``canonical`` and
-    ``related`` links from the duplicate pass are kept; their href is the
-    sibling sidecar.
+    ``related`` links from the duplicate pass are kept, and their href is
+    rewritten to this server's item route so a client stays on the API. The
+    index and the parquet export keep the sidecar URL.
     """
     base = base_url.rstrip("/")
     feature = dict(item.raw) if item.raw else {}
@@ -1025,11 +1026,22 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     feature["assets"] = _normalize_assets(feature.get("assets") or item.assets)
 
     item_path = f"{base}/collections/{COLLECTION_ID}/items/{item.id}"
-    preserved = [
-        dict(link)
-        for link in (feature.get("links") or [])
-        if isinstance(link, dict) and link.get("rel") in PRESERVED_LINK_RELS
-    ]
+    props = feature["properties"]
+    preserved = []
+    for link in feature.get("links") or []:
+        if not isinstance(link, dict) or link.get("rel") not in PRESERVED_LINK_RELS:
+            continue
+        copied = dict(link)
+        sibling = copied.get("title")
+        if not isinstance(sibling, str) or not sibling:
+            if copied.get("rel") == "canonical":
+                sibling = props.get("umbra-py:canonical_id")
+            else:
+                dup_ids = props.get("umbra-py:duplicate_ids")
+                sibling = dup_ids[0] if isinstance(dup_ids, list) and len(dup_ids) == 1 else None
+        if isinstance(sibling, str) and sibling:
+            copied["href"] = f"{base}/collections/{COLLECTION_ID}/items/{sibling}"
+        preserved.append(copied)
     feature["links"] = [
         _link("self", item_path, type="application/geo+json"),
         _link("root", f"{base}/"),

@@ -22,7 +22,7 @@ Polarization caveat: Polarizations are not interchangeable: an HH scene and a VV
 
 ## Search parameters
 
-Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogIndex.search`. Build a valid query in one shot:
+Filters on `UmbraCatalog.search` and `CatalogIndex.search`. Most are also `umbra search` options; `canonical` is API, MCP, and Python only. Build a valid query in one shot:
 
 - **bbox** — Footprint filter as (min_lon, min_lat, max_lon, max_lat) in WGS84 degrees. Items whose footprint overlaps the box are returned.
 - **intersects** — GeoJSON polygon filter (Polygon / MultiPolygon, or a Feature / FeatureCollection wrapping one). Items whose footprint overlaps the polygon are returned -- a tighter spatial filter than the rectangular bbox, and the one to use for an area of interest that isn't a rectangle (a coastline, a border, a catchment). Mutually exclusive with bbox/place.
@@ -36,7 +36,7 @@ Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and `CatalogInde
 - **min_incidence** — Lower bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
 - **max_incidence** — Upper bound (inclusive, degrees) on the view incidence angle. An item with no incidence metadata is excluded when this is set.
 - **max_resolution** — Keep only items at least this fine: both range and azimuth resolution must be <= this many metres. An item missing a resolution is excluded. A set acquisition-property filter excludes items lacking that property (the STAC Query-extension convention).
-- **canonical** — When true, keep the canonical copy of a republished collect (the same umbra:task_id and umbra:collect_id, with datetimes within 60 seconds) and omit the other copies. When false, keep only those other copies. Omit it to return every item. An item that is not in a duplicate group counts as canonical.
+- **canonical** — When true, keep the canonical copy of a republished collect (the same umbra:task_id and umbra:collect_id, with datetimes within 60 seconds) and omit the other copies. When false, keep only those other copies. Omit it to return every item. An item that is not in a duplicate group counts as canonical. This filter is on the STAC API, MCP search_catalog, and the Python search methods. There is no `umbra search` flag.
 - **limit** — Maximum number of items to return.
 - **max_per_task** — Cap items per task. Use 1 for a 'one pin per site' world view; omit for the full time series of each site.
 

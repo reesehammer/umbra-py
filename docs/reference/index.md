@@ -131,7 +131,9 @@ including items that are not in a group). A grouped item also gets
 `umbra-py:canonical_id`, `umbra-py:duplicate_ids`, and
 `umbra-py:duplicate_confidence`. A non-canonical item has a STAC link
 `rel: canonical` to the preferred sidecar. Every member links to each
-sibling with `rel: related`. IANA `duplicate` means a byte-for-byte copy;
+sibling with `rel: related`. The index and the parquet file keep those
+sidecar URLs. API responses rewrite both rels to
+`/collections/umbra-open-data/items/{id}`. IANA `duplicate` means a byte-for-byte copy;
 these items differ in id, processor version, and often in which products
 they carry, so `related` is the relation that does not claim the bytes are
 interchangeable.

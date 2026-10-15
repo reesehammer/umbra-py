@@ -18,7 +18,7 @@ from umbra_py.duplicates import (
 from umbra_py.index import CatalogIndex
 from umbra_py.models import UmbraItem
 from umbra_py.serve import build_app, item_to_stac, parse_query
-from umbra_py.validate import sanitize_index
+from umbra_py.validate import apply_duplicate_links, sanitize_index
 
 NOW = datetime(2026, 10, 15, tzinfo=timezone.utc)
 SQUARE = {
@@ -320,6 +320,8 @@ def test_search_api_and_counts(tmp_path):
     assert feature["properties"]["umbra-py:canonical"] is False
     rels = {link["rel"] for link in feature["links"]}
     assert {"self", "root", "parent", "collection", "canonical", "related"} <= rels
+    canon_link = next(link for link in feature["links"] if link["rel"] == "canonical")
+    assert canon_link["href"].endswith("/collections/umbra-open-data/items/canon")
 
 
 def test_item_to_stac_keeps_duplicate_links_only():
@@ -332,6 +334,12 @@ def test_item_to_stac_keeps_duplicate_links_only():
     assert rels[:4] == ["self", "root", "parent", "collection"]
     assert "canonical" in rels and "related" in rels
     assert feature["links"][0]["href"].endswith("/items/copy")
+    item_href = "http://localhost:8000/collections/umbra-open-data/items/canon"
+    for rel in ("canonical", "related"):
+        link = next(entry for entry in feature["links"] if entry["rel"] == rel)
+        assert link["href"] == item_href
+    stored = next(entry for entry in item.raw["links"] if entry["rel"] == "canonical")
+    assert stored["href"] == winner.href
 
 
 def test_parse_query_reads_canonical_eq():
@@ -358,6 +366,22 @@ def test_mcp_search_catalog_canonical_filter(tmp_path, monkeypatch):
     only = mcp.search_catalog(local=True, limit=10, canonical=True)
     assert [card["id"] for card in only["items"]] == ["canon"]
     assert "canonical=True" in mcp.build_server().instructions
+
+
+def test_relink_skips_rows_whose_document_is_unchanged(tmp_path):
+    idx = _index(
+        tmp_path,
+        _copy("keep-me", kind="tasks", created="2026-02-01T00:00:00Z"),
+        _copy("also-keep", kind="task-data", created="2026-01-01T00:00:00Z"),
+    )
+    sanitize_index(idx, now=NOW)
+    idx._conn.execute("UPDATE items SET thumbnail = ? WHERE id = ?", (b"png-bytes", "keep-me"))
+    before = idx._conn.total_changes
+    apply_duplicate_links(idx)
+    assert idx._conn.total_changes == before
+    blob = idx._conn.execute("SELECT thumbnail FROM items WHERE id = ?", ("keep-me",)).fetchone()[0]
+    assert blob == b"png-bytes"
+    idx.close()
 
 
 def test_v6_index_gains_canonical_defaulting_true(tmp_path):
