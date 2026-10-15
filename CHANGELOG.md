@@ -10,6 +10,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Replace your crawler.** [docs/replace-crawler.md](docs/replace-crawler.md)
+  is three short programs — plain `GET /search`, `pystac-client`, and DuckDB
+  over the weekly `umbra-open-data.parquet` — that list GEC hrefs for a bbox.
+  A daily Replace-crawler canary runs those same files against
+  https://api.umbra-py.space. The API already serves asset schema v2
+  (`gec`, `sicd`, …, filename on `umbra-py:filename`). The DuckDB check waits
+  until the published parquet carries that schema.
 - **Hosted API limits and an external uptime probe.** [Hosted API limits](docs/hosted-limits.md)
   states the best-effort 99% monthly uptime (no SLA), the 120 requests per
   60-second sliding window, the 10,000 `limit` ceiling, the CORS policy, and

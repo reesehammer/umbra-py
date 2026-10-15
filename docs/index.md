@@ -50,6 +50,7 @@ API (`umbra serve`) and MCP server sit on the same host.
 
 - [Install](install.md) the right extras for what you need.
 - Work through the [Quickstart](quickstart.md).
+- Listing the open-data bucket yourself? [Replace your crawler](replace-crawler.md).
 - Explore the [example notebooks](guides/notebooks.md).
 - Need phase? [Complex products (SICD/CPHD)](guides/complex-downstream.md)
   — download and stop; convert discards phase.

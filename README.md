@@ -18,6 +18,8 @@ nothing installed.
 📖 **Docs:** [umbra-py.space](https://umbra-py.space/)
 · **Showcase:** [browse the archive in the browser](https://umbra-py.space/showcase/)
 (no install)
+· **Already listing the bucket?** [Replace your crawler](https://umbra-py.space/replace-crawler/)
+(HTTP, `pystac-client`, or DuckDB over the weekly Parquet)
 
 > **Status:** v0.1.2. Discovery, download, xarray loading,
 > SICD → geocoded COG, change/timescan composites, chips, a STAC API
