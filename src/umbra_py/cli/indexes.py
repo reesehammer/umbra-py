@@ -637,20 +637,33 @@ def index_fetch(db_path, url, if_changed, force) -> None:
 @click.option("--json", "json_path", default=None, help="Write the full report as JSON here.")
 @click.option("--markdown", "md_path", default=None, help="Write a Markdown summary here.")
 @click.option(
+    "--validation",
+    "validation_path",
+    default=None,
+    type=click.Path(dir_okay=False, exists=True),
+    help="Read deduped and quarantined hrefs from this index-validation.json "
+    "instead of the record stored on the index. Those acquisitions are omitted "
+    "from missing coverage.",
+)
+@click.option(
     "--min-pct",
     type=float,
     default=None,
-    help="Exit non-zero when overall coverage of acquisitions with a sidecar is below "
-    "this percentage (e.g. 99).",
+    help="Exit non-zero when coverage of acquisitions we expect to index is below "
+    "this percentage (e.g. 99). Deduped duplicates and quarantined rows are not "
+    "missing; a sidecar the index never saw still counts.",
 )
-def index_coverage(db_path, keys_path, save_keys, json_path, md_path, min_pct) -> None:
+def index_coverage(
+    db_path, keys_path, save_keys, json_path, md_path, validation_path, min_pct
+) -> None:
     """Measure what share of the open-data bucket an index covers.
 
     Lists every object under sar-data/ and open-data/ (about 100 requests),
     groups the keys into acquisitions exactly as the crawler does, and compares
     them with the index by prefix (tasks/, task-data/, open-data/), sidecar
     layout (v2, legacy _METADATA.json, none) and product. Acquisitions with no sidecar are
-    reported as unindexable rather than missing.
+    reported as unindexable rather than missing. Acquisitions the build dropped
+    as duplicate ids or quarantined are accounted, not missing.
     """
     from .. import parity  # noqa: PLC0415
 
@@ -668,20 +681,29 @@ def index_coverage(db_path, keys_path, save_keys, json_path, md_path, min_pct) -
                 raise click.ClickException(str(exc)) from exc
         if save_keys:
             Path(save_keys).write_text("\n".join(keys) + "\n", encoding="utf-8")
+    validation = None
+    if validation_path:
+        try:
+            validation = json.loads(Path(validation_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Could not read {validation_path}: {exc}") from exc
+        if not isinstance(validation, dict):
+            raise click.ClickException(f"{validation_path} is not a JSON object.")
     with CatalogIndex(path) as idx:
-        report = parity.coverage_report(idx, keys)
+        report = parity.coverage_report(idx, keys, validation=validation)
     parity.write_report(report, json_path, md_path)
     t = report["totals"]
     click.echo(
         f"Coverage: {t['indexed']}/{t['bucket']} acquisitions ({t['pct']}%), "
-        f"{t['pct_indexable']}% of the {t['indexable']} with a sidecar."
+        f"{parity._indexable_phrase(t)}."
     )
     for name, row in report["by_prefix"].items():
         click.echo(f"  {name:<22} {row['indexed']:>6}/{row['bucket']:<6} {row['pct']}%")
     if min_pct is not None and t["pct_indexable"] < min_pct:
         raise click.ClickException(
             f"Coverage {t['pct_indexable']}% is below the required {min_pct}% "
-            f"({report['missing_count']} acquisition(s) missing)."
+            f"({report['missing_count']} acquisition(s) missing, "
+            f"{t['accounted']} omitted by dedupe or quarantine)."
         )
 
 

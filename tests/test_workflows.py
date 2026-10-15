@@ -204,11 +204,20 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     assert "assert_remote_thumbnail_release" in verify["run"]
     bake = steps[position[BAKE_STEP]]
     assert "fetch-thumbnails" in bake["run"]
+    assert "--from catalog.thumbs.seed.db" in bake["run"]
+    assert "catalog.thumbs.seed.merged" in bake["run"]
+    assert "--limit 2400" in bake["run"]
     assert "|| true" not in bake["run"]
     assert "::warning" in bake["run"]
     workflow = (WORKFLOW_DIR / "publish-index.yml").read_text(encoding="utf-8")
     assert "catalog.thumbs.db --clobber" not in workflow
     assert "runs-on: ubuntu-24.04" in workflow
+    assert "actions/cache/restore@v4" in workflow
+    assert "actions/cache/save@v4" in workflow
+    assert "--validation index-validation.json" in workflow
+    assert "indexed_preview_count" in workflow
+    assert document["permissions"]["actions"] == "write"
+    assert document["permissions"]["contents"] == "write"
 
 
 THUMBS_STEP = "Publish the thumbnail sidecar"

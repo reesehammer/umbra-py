@@ -42,6 +42,9 @@ on:
 
 permissions:
   contents: write
+  # actions/cache save and restore for the thumbnail seed. A workflow that
+  # sets permissions drops every scope it does not name.
+  actions: write
 
 jobs:
   publish:
@@ -170,7 +173,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          umbra index coverage --db catalog.db --json coverage.json --markdown coverage.md
+          umbra index coverage --db catalog.db \
+            --validation index-validation.json \
+            --json coverage.json --markdown coverage.md
           gh release upload catalog-index coverage.json coverage.md --clobber
 
       # Tile the whole catalog into a single-file vector basemap from the index
@@ -200,22 +205,32 @@ jobs:
       # affordable to publish weekly:
       #
       #   - It is *incremental*. The crawl above rebuilds catalog.db from
-      #     scratch, so every thumbnail column starts NULL; re-importing last
-      #     week's published sidecar first means this run streams only the
-      #     acquisitions added since, not the whole archive every Monday. A
-      #     missing seed is a warning, not a swallowed success: the live API
-      #     has no bulk sidecar (only per-item thumbnail URLs, rate-limited),
-      #     so this step cannot rebuild the server's previews from there. The
-      #     publish step below then refuses a sidecar with fewer previews
-      #     than the release, /healthz, or the repo floor.
+      #     scratch, so every thumbnail column starts NULL. This run merges
+      #     two seeds before it bakes: the actions cache from the previous
+      #     run (catalog.thumbs.seed.db), then the catalog-index release when
+      #     that release has a sidecar. Each bake adds to those bytes instead
+      #     of starting from zero. A missing release sidecar is a warning, not
+      #     a swallowed success: the live API has no bulk sidecar (only
+      #     per-item thumbnail URLs, rate-limited), so this step cannot
+      #     rebuild the server's previews from there. The publish step below
+      #     refuses a sidecar with fewer matching previews than the release,
+      #     /healthz, or the repo floor, unless the release has no sidecar at
+      #     all — then a growing seed may be published. The server still will
+      #     not replace its own larger local file.
       #   - It is *bounded*. --limit caps the scenes streamed per run and
       #     --newest-first spends that budget on the freshest passes, which are
       #     what a demo or a monitoring view opens on; the rest are picked up
-      #     over subsequent runs. --size 512 is large enough to read a scene in
-      #     an MCP client; a full-res render still wants a local COG stream.
-      #     bake_thumbnails upgrades a smaller recorded bake, so the weekly
-      #     bump from 128 px actually replaces the old sidecar instead of
-      #     leaving it in place. The sidecar is a separate, opt-in asset
+      #     over subsequent runs. 2400 is about 47 minutes at the rate the
+      #     2026-10-14 run measured (1500 previews in 29.5 minutes, ~1.2 s
+      #     each), which leaves about 28 minutes inside this step's 75. A cap
+      #     near 3600 would clear the 3355 merged-preview floor in one run and
+      #     would also sit on the timeout; a timed-out bake keeps the previews
+      #     it committed, but the slack is what makes the second run's
+      #     download-plus-bake fit too. --size 512 is large enough to read a
+      #     scene in an MCP client; a full-res render still wants a local COG
+      #     stream. bake_thumbnails upgrades a smaller recorded bake, so the
+      #     weekly bump from 128 px actually replaces the old sidecar instead
+      #     of leaving it in place. The sidecar is a separate, opt-in asset
       #     because pixels dwarf the metadata every `umbra index fetch`
       #     already pays for.
       #
@@ -226,21 +241,55 @@ jobs:
       # run and does not land fails the job. 75 minutes: the steps before
       # this take about an hour and the confirm step polls for up to 30,
       # which keeps the job well inside its 240.
+      - name: Restore the thumbnail seed
+        id: thumbs-seed
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: catalog.thumbs.seed.db
+          # A new key every run; restore-keys picks up the previous run's seed.
+          # The cache is scoped to this branch, and the weekly schedule runs on
+          # the default branch, so Monday restores Monday.
+          key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            thumbs-seed-
+
       - name: Bake SAR thumbnails (incremental, non-blocking)
         continue-on-error: true
         timeout-minutes: 75
         run: |
           set -euo pipefail
           pip install -e ".[viz]"
-          # The release is the seed. Swallowing a fetch failure used to hide a
-          # 404 and let an empty bake publish over a larger sidecar. A miss is
-          # a warning; the bake still runs, and the guard below will not
-          # upload a regression.
+          # The cache is the seed that survives a week when the release has
+          # nothing to fetch. Merge it before the release so a release that
+          # is behind the cache cannot wipe previews the cache already holds
+          # (import keeps a local bake unless the incoming one is a larger
+          # preview of the same product).
+          if [ -f catalog.thumbs.seed.db ]; then
+            if umbra index fetch-thumbnails --db catalog.db --from catalog.thumbs.seed.db; then
+              # The publish step will not replace the cached seed unless this
+              # merge landed. A failed merge must not let a smaller export
+              # overwrite the only copy of last week's previews.
+              touch catalog.thumbs.seed.merged
+            else
+              echo "::warning title=Thumbnail cache seed unreadable::catalog.thumbs.seed.db was restored but could not be merged. The bake continues from the release sidecar, if there is one, and the cached seed is left in place."
+            fi
+          else
+            touch catalog.thumbs.seed.merged
+          fi
+          # The release is the other seed. Swallowing a fetch failure used to
+          # hide a 404 and let an empty bake publish over a larger sidecar. A
+          # miss is a warning; the bake still runs, and the guard below will
+          # not upload a regression of a sidecar the release already has.
           if ! umbra index fetch-thumbnails --db catalog.db; then
-            echo "::warning title=Thumbnail seed missing::The catalog-index release has no thumbnail sidecar to re-import (catalog.thumbs.manifest.json and catalog.thumbs.db are both absent). The live API does not publish that file, only per-item /artifacts/thumbnail URLs behind a rate limit, so this bake starts from an empty thumbnail column. The publish step will not replace a larger known preview count."
+            if [ -f catalog.thumbs.seed.db ]; then
+              echo "::warning title=Thumbnail release has no sidecar::The catalog-index release has no thumbnail sidecar to re-import. This bake continues from the cached seed. The live API does not publish that file, only per-item /artifacts/thumbnail URLs behind a rate limit, and it will not replace its own larger local sidecar."
+            else
+              echo "::warning title=Thumbnail seed missing::The catalog-index release has no thumbnail sidecar to re-import (catalog.thumbs.manifest.json and catalog.thumbs.db are both absent) and this run has no cached seed. The live API does not publish that file, only per-item /artifacts/thumbnail URLs behind a rate limit, so this bake starts from an empty thumbnail column. The publish step may upload this run as a seed; it will not replace a larger sidecar the release already has, and the server will not replace its own larger local file."
+            fi
           fi
           umbra index bake-thumbnails --db catalog.db \
-            --size 512 --newest-first --limit 1500
+            --size 512 --newest-first --limit 2400
 
       - name: Publish the thumbnail sidecar
         id: thumbs
@@ -251,19 +300,34 @@ jobs:
           set -euo pipefail
           exported="$(umbra index export-thumbnails --db catalog.db \
             --out catalog.thumbs.db | grep -oE '^Exported [0-9]+' | cut -d' ' -f2)"
+          # Keep the cache at least as large as what this index actually holds.
+          # Export writes only current rows, so a seed that still has previews
+          # for dropped ids is replaced once the indexed count has not shrunk.
+          seed_n=0
+          if [ -f catalog.thumbs.seed.db ]; then
+            seed_n="$(python -c 'import umbra_py.thumbs_release as t; n = t.indexed_preview_count("catalog.thumbs.seed.db", "catalog.db"); print(0 if n is None else n)')"
+          fi
+          if [ "${exported:-0}" -gt 0 ] && [ -f catalog.thumbs.seed.merged ] && [ "${exported:-0}" -ge "${seed_n:-0}" ]; then
+            cp -f catalog.thumbs.db catalog.thumbs.seed.db
+          elif [ -f catalog.thumbs.seed.db ]; then
+            echo "::warning title=Thumbnail seed kept::Export has ${exported:-0} previews; the cached seed matches ${seed_n} rows in this index. The cached seed was left in place."
+          fi
           # Never replace the published sidecar with an empty one, or with one
           # that has fewer previews than the release, the live /healthz count,
-          # or .github/thumbnail-preview-floor.json. A skip leaves the previous
-          # thumbnail assets in place and does not fail the job: catalog.db
-          # was already published. Parts are hash-named, so a rerun that does
-          # publish does not delete a live multi-gigabyte asset before the new
-          # bytes are accepted. The manifest goes up last and records previews.
+          # or .github/thumbnail-preview-floor.json. The comparison counts
+          # previews whose id or href is in catalog.db. A release with no
+          # sidecar may still receive this run as a seed. A skip leaves the
+          # previous thumbnail assets in place and does not fail the job:
+          # catalog.db was already published. Parts are hash-named, so a rerun
+          # that does publish does not delete a live multi-gigabyte asset
+          # before the new bytes are accepted. The manifest goes up last and
+          # records previews.
           if [ "${exported:-0}" -eq 0 ]; then
             echo "::warning title=No thumbnails to publish::No baked thumbnails to publish; leaving the released sidecar alone."
             echo "publish=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          line="$(python -c 'import umbra_py.thumbs_release as t; print(t.thumbnail_publish_line("catalog.thumbs.db", ".github/thumbnail-preview-floor.json"))')"
+          line="$(python -c 'import umbra_py.thumbs_release as t; print(t.thumbnail_publish_line("catalog.thumbs.db", ".github/thumbnail-preview-floor.json", index="catalog.db"))')"
           IFS=$'\t' read -r action floor reason <<<"$line"
           # Anything other than an explicit publish is a skip: a regression,
           # an empty sidecar, or a guard line the shell could not read. The
@@ -274,7 +338,7 @@ jobs:
             exit 0
           fi
           if [ "$reason" != "ok" ]; then
-            echo "::warning title=Thumbnail floor unknown::${reason}"
+            echo "::warning title=Thumbnail publish note::${reason}"
           fi
           echo "New sidecar has ${exported} previews; floor is ${floor:-unknown}."
           rm -rf thumbs-release
@@ -407,6 +471,21 @@ jobs:
           echo "::error title=Hosted API stale::https://api.umbra-py.space/healthz did not report snapshot ${want} within 30 minutes."
           exit 1
 
+      # pct_indexable is indexed / expected. expected is acquisitions with a
+      # sidecar minus the deduped duplicates and quarantined rows named in
+      # index-validation.json. A sidecar the validation report does not name
+      # stays in the denominator, so a real gap still fails this step.
       - name: Coverage gate (99% of acquisitions with a sidecar)
         run: |
           python -c "import json, sys; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= 99 else 1)"
+
+      # After the thumbnail publish step has copied a non-shrinking export
+      # onto catalog.thumbs.seed.db. Runs when that upload was skipped and
+      # when this gate fails, so a red coverage check does not throw away the
+      # previews this run baked.
+      - name: Save the thumbnail seed
+        if: ${{ !cancelled() && hashFiles('catalog.thumbs.seed.db') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: catalog.thumbs.seed.db
+          key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}

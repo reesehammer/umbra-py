@@ -11,7 +11,10 @@ STAC, legacy ``_METADATA.json``, none) and by product (GEC, CSI, SIDD, SICD,
 CPHD), and lists what is missing so a gap is actionable rather than a number.
 
 An acquisition with no sidecar of either kind has no footprint or time to index
-and is reported as ``unindexable`` rather than missing.
+and is reported as ``unindexable`` rather than missing. An acquisition the
+index build dropped on purpose — a duplicate id, or a quarantined row — is
+``accounted`` rather than missing, so the coverage gate does not fail on a
+gap the validation report already accepted.
 """
 
 from __future__ import annotations
@@ -142,21 +145,57 @@ def _pct(num: int, den: int) -> float:
     return round(100.0 * num / den, 2) if den else 100.0
 
 
+def accounted_group_ids(validation: dict[str, Any] | None) -> set[str]:
+    """Bucket groups the index dropped on purpose, from a validation report.
+
+    ``validation`` is the object ``umbra index validate`` writes
+    (``index-validation.json``) or the same lists stored on the index:
+    ``quarantined`` and ``duplicates`` rows, each with the dropped ``href``.
+    A href that is not an open-data acquisition does not account for anything.
+    Counts alone are not subtracted — a missing sidecar the report does not
+    name stays missing.
+    """
+    if not isinstance(validation, dict):
+        return set()
+    groups: set[str] = set()
+    for key in ("quarantined", "duplicates"):
+        rows = validation.get(key) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            href = row.get("href")
+            if not isinstance(href, str):
+                continue
+            bucket_key = _href_to_key(href)
+            gid = group_key(bucket_key) if bucket_key else None
+            if gid:
+                groups.add(gid)
+    return groups
+
+
 def coverage_report(
     index: Any,
     keys: Iterable[str],
     *,
     missing_limit: int = MISSING_LIST_LIMIT,
+    validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compare a built index against a bucket listing.
 
     ``index`` is an open :class:`~umbra_py.CatalogIndex`; ``keys`` is every
     object key under the data roots (see :func:`list_bucket_keys`). Coverage is
     counted in acquisitions. ``pct`` is indexed over every acquisition in the
-    bucket; ``pct_indexable`` excludes acquisitions with no sidecar at all.
+    bucket. ``pct_indexable`` is indexed over acquisitions that have a sidecar
+    and were not dropped on purpose (a deduped duplicate or a quarantined row
+    in ``validation``, or in the record stored on the index when ``validation``
+    is omitted). Those drops are ``accounted``, not missing.
     """
     acqs = bucket_acquisitions(keys)
     indexed = indexed_groups(index)
+    record = validation if isinstance(validation, dict) else stored_validation(index)
+    omitted = accounted_group_ids(record)
     rows, distinct = index._conn.execute(
         "SELECT COUNT(*), COUNT(DISTINCT id) FROM items"
     ).fetchone()
@@ -166,6 +205,7 @@ def coverage_report(
     by_product: dict[str, dict[str, dict[str, int]]] = {}
     missing: list[dict[str, Any]] = []
     unindexable: list[str] = []
+    accounted: list[str] = []
     for gid in sorted(acqs):
         acq = acqs[gid]
         hit = gid in indexed
@@ -181,6 +221,8 @@ def coverage_report(
         if not hit:
             if acq.layout == "none":
                 unindexable.append(gid)
+            elif gid in omitted:
+                accounted.append(gid)
             else:
                 missing.append(
                     {"group": gid, "layout": acq.layout, "products": sorted(acq.products)}
@@ -192,6 +234,9 @@ def coverage_report(
     total = len(acqs)
     hit_total = sum(1 for gid in acqs if gid in indexed)
     indexable = total - len(unindexable)
+    # Intentional drops are not a hole in the snapshot. The gate reads
+    # ``pct_indexable``, so a real missing sidecar is what still lowers it.
+    expected = indexable - len(accounted)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "index": {
@@ -204,8 +249,10 @@ def coverage_report(
             "bucket": total,
             "indexable": indexable,
             "indexed": hit_total,
+            "accounted": len(accounted),
+            "expected": expected,
             "pct": _pct(hit_total, total),
-            "pct_indexable": _pct(hit_total, indexable),
+            "pct_indexable": _pct(hit_total, expected),
         },
         "by_prefix": {k: finish(v) for k, v in sorted(by_prefix.items())},
         "by_layout": {k: finish(v) for k, v in sorted(by_layout.items())},
@@ -215,10 +262,12 @@ def coverage_report(
         },
         "missing_count": len(missing),
         "missing": missing[:missing_limit],
+        "accounted": accounted,
         "unindexable": unindexable,
-        # Quarantine / dedupe from the build that wrote this index (PRD P1-2).
-        # ``None`` on an index that predates that pass.
-        "validation": stored_validation(index),
+        # Quarantine / dedupe from the build that wrote this index (PRD P1-2),
+        # or the validation document the caller passed. ``None`` on an index
+        # that predates that pass and was given no document.
+        "validation": record,
     }
 
 
@@ -233,7 +282,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"({idx['rows']} rows, {idx['distinct_ids']} distinct ids).",
         "",
         f"**Overall: {t['indexed']} of {t['bucket']} bucket acquisitions indexed "
-        f"({t['pct']}%; {t['pct_indexable']}% of the {t['indexable']} with a sidecar).**",
+        f"({t['pct']}%; {_indexable_phrase(t)}).**",
         "",
         "| Prefix | Bucket | Indexed | % |",
         "| --- | ---: | ---: | ---: |",
@@ -255,8 +304,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
     lines += [
         "",
-        f"Missing: {report['missing_count']}. Unindexable (no sidecar): "
-        f"{len(report['unindexable'])}.",
+        f"Missing: {report['missing_count']}. "
+        f"Accounted (deduped or quarantined): {t['accounted']}. "
+        f"Unindexable (no sidecar): {len(report['unindexable'])}.",
         "",
         "## Validation",
         "",
@@ -268,6 +318,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("No quarantine record on this index.")
     lines += ["", "Contains Umbra open data, licensed under CC BY 4.0.", ""]
     return "\n".join(lines)
+
+
+def _indexable_phrase(totals: dict[str, Any]) -> str:
+    """The sidecar half of the headline. Intentional drops get their own clause."""
+    if totals.get("accounted"):
+        return (
+            f"{totals['pct_indexable']}% of the {totals['expected']} expected "
+            f"({totals['indexable']} with a sidecar, {totals['accounted']} omitted "
+            f"by dedupe or quarantine)"
+        )
+    return f"{totals['pct_indexable']}% of the {totals['indexable']} with a sidecar"
 
 
 def write_report(report: dict[str, Any], json_path: str | None, md_path: str | None) -> None:
