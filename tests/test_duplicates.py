@@ -278,6 +278,7 @@ def test_sanitize_links_without_dropping_rows(tmp_path):
 
 
 def test_search_api_and_counts(tmp_path):
+    pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     pair = [
@@ -340,6 +341,7 @@ def test_parse_query_reads_canonical_eq():
 
 
 def test_mcp_search_catalog_canonical_filter(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
     mcp = pytest.importorskip("umbra_py.mcp_server")
     pair = [
         _copy("canon", kind="tasks", created="2026-02-01T00:00:00Z"),
