@@ -162,6 +162,11 @@ artifacts = ["src/umbra_py/py.typed"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# The Python fences in this page are pymdownx snippet directives
+# (`--8<-- "docs/examples/replace_crawler/….py"`), which the formatter
+# rewrites. The included programs are formatted as their own files, and
+# tests/test_replace_crawler_canary.py checks the page still includes them.
+extend-exclude = ["docs/replace-crawler.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]

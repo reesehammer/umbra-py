@@ -1,0 +1,62 @@
+name: Replace-crawler canary
+
+# The docs page docs/replace-crawler.md includes the three programs in
+# docs/examples/replace_crawler/. This runs those files against production:
+# GET /search and pystac-client on https://api.umbra-py.space, and DuckDB
+# over the catalog-index parquet. The API already rewrites asset keys to
+# schema v2. The published parquet keeps filename keys until the next
+# publish-index rebuild, so the DuckDB program is skipped while
+# umbra-py:asset_schema is not 2 and the assets struct has no gec field
+# (scripts/replace_crawler_canary.py). A failed HTTP or pystac program, a
+# v2 parquet that fails the DuckDB program, or a missing parquet URL fails
+# the run and opens or updates a tracking issue.
+
+on:
+  schedule:
+    - cron: "17 11 * * *" # daily 11:17 UTC, after Monday's index publish window
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-24.04
+    # Don't hit the public API from forks; schedules there stay off anyway.
+    if: github.repository == 'reesehammer/umbra-py'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install snippet dependencies
+        run: pip install duckdb pystac-client
+
+      - name: Run the replace-crawler snippets
+        run: python scripts/replace_crawler_canary.py
+
+      - name: Open or update a tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body="The scheduled replace-crawler canary failed on $(date -u +%Y-%m-%d).
+          The programs in \`docs/examples/replace_crawler/\` (the same files
+          \`docs/replace-crawler.md\` includes) did not return schema-v2 GEC
+          hrefs from https://api.umbra-py.space, or the published
+          \`umbra-open-data.parquet\` failed its v2 check. See the
+          [failed run]($run_url)."
+          existing=$(gh issue list --state open \
+            --search 'Replace-crawler canary failed in:title' \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Replace-crawler canary failed" --body "$body"
+          fi

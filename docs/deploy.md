@@ -31,6 +31,9 @@ for item in api.search(collections=["umbra-open-data"], max_items=3).items():
     print(item.id, item.datetime)
 ```
 
+The same API, with a bbox and GEC hrefs, in HTTP, `pystac-client`, and
+DuckDB: [Replace your crawler](replace-crawler.md).
+
 **MCP** is a different path on the same host. Copy-paste for Claude Desktop
 and Claude Code: [Connect Claude (MCP)](mcp.md).
 
