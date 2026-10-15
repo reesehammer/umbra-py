@@ -140,8 +140,11 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
     "--asset",
     "assets",
     multiple=True,
-    type=click.Choice(PRODUCT_ASSETS, case_sensitive=False),
-    help="Asset(s) to download (repeatable). Defaults to all present.",
+    help=(
+        "Asset to download (repeatable). A product type in any case (GEC), "
+        "a schema v2 key (gec, gec_2, csi_sidd, metadata, di_gif, file_tif), "
+        "or the original filename. Defaults to every product type present."
+    ),
 )
 @click.option("--dest", default=".", show_default=True, help="Output directory.")
 @click.option("--overwrite", is_flag=True, help="Re-download if the file exists.")
@@ -164,6 +167,12 @@ def download(item_url, assets, dest, overwrite, as_json) -> None:
     against asset hrefs under ``sar-data/tasks/``, ``sar-data/task-data/``, and
     ``open-data/``. Zero matches is an error; more than one lists the candidate
     STAC URLs. A filename needs a local index (``umbra index fetch``).
+
+    ``--asset`` accepts a product type in any case (``GEC``), a schema v2 key
+    (``gec``, ``gec_2``, ``csi_sidd``, ``file_tif``), or the original filename.
+    ``gec`` is the primary file; ``gec_2`` is the next file of that product.
+    Omit ``--asset`` to download every product type present. A missing name
+    lists the v2 keys on the item.
 
     ``--json`` emits a machine-readable ``[{asset, path, bytes, sha256}, ...]``
     array (``docs/schemas/download.schema.json``) so an agent can verify each

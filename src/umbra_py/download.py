@@ -184,7 +184,12 @@ def download_asset(
     dest_dir: str | os.PathLike = ".",
     **kwargs,
 ) -> Path:
-    """Download a single named asset (e.g. ``"GEC"``) of an item."""
+    """Download one asset of an item.
+
+    ``asset`` is a product type in any case (``"GEC"``), a schema v2 key
+    (``"gec"``, ``"gec_2"``, ``"csi_sidd"``, ``"file_tif"``), or the original
+    filename (``umbra-py:filename``).
+    """
     url = item.asset_href(asset)
     return download_url(url, Path(dest_dir), **kwargs)
 
@@ -197,7 +202,10 @@ def download_item(
 ) -> list[Path]:
     """Download several assets of an item.
 
-    Defaults to every product asset present on the item.
+    Each name is resolved like :meth:`UmbraItem.asset_href`: a product type
+    in any case, a schema v2 key (``gec``, ``gec_2``, ``file_tif``), or the
+    original filename. Defaults to every product type present (one primary
+    file each).
     """
     names = list(assets) if assets is not None else item.available_assets
     return [download_asset(item, name, dest_dir, **kwargs) for name in names]

@@ -200,6 +200,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **Download selection accepts schema v2 keys.** `asset_href`,
+  `download_asset` / `download_item`, `umbra download --asset`, and the MCP
+  `download_asset` tool accept a v2 key (`gec`, `gec_2`, `csi_sidd`,
+  `file_tif`), a product type in any case, or the original filename,
+  including when the stored item still has filename or uppercase keys. A
+  missing name lists those v2 keys. The MCP tool's `url` also accepts a
+  filename or acquisition stem, resolved like `get_item`.
 - **Coverage no longer counts intentional drops as gaps.** `umbra index coverage` and the weekly 99% gate omit acquisitions named as deduped duplicates or quarantined rows in `index-validation.json` (or the validation record stored on the index). `totals.pct_indexable` is indexed acquisitions over that expected set. A sidecar the report does not name still fails the gate.
 - **Weekly thumbnail bakes accumulate, and the preview floor is the merged count.** The publish workflow restores a cached thumbnail seed, bakes up to 2400 new previews, and saves the seed for the next run. The guard compares previews whose id or href is in the current index with `.github/thumbnail-preview-floor.json` (3355), `/healthz`, and any published sidecar, and may publish a seed when the release has no sidecar. The server still will not replace a larger local `catalog.thumbs.db`.
 - **`umbra index validate` no longer loads the whole catalog into memory.**

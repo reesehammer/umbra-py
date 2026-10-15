@@ -23,8 +23,12 @@ def test_available_assets_order(sample_item_dict):
 def test_asset_href_and_missing(sample_item_dict):
     item = UmbraItem.from_dict(sample_item_dict)
     assert item.asset_href("GEC").endswith("_GEC.tif")
-    with pytest.raises(AssetNotFoundError):
-        item.asset_href("NOPE")
+    # Umbra sidecars and older index rows key the file ``GEC``, not ``gec``.
+    assert "GEC" in item.assets
+    assert item.asset_href("gec") == item.asset_href("GEC")
+    assert item.asset_href("Gec") == item.asset_href("GEC")
+    with pytest.raises(AssetNotFoundError, match=r"Available: gec, sidd, sicd, cphd, metadata\."):
+        item.asset_href("gec_2")
 
 
 def test_bbox_from_3d_geometry():
@@ -153,9 +157,11 @@ def test_asset_href_resolves_empty_href_via_task_id():
     assert gec.startswith("https://s3.")
     assert "/sar-data/tasks/task-abc/" in gec
     assert gec.endswith("/2025-06-22-23-57-52_UMBRA-10/2025-06-22-23-57-52_UMBRA-10_GEC.tif")
+    assert item.asset_href("gec") == gec
 
     sicd = item.asset_href("SICD")
     assert sicd.endswith("/2025-06-22-23-57-52_UMBRA-10_SICD.nitf")
+    assert item.asset_href("sicd") == sicd
 
 
 def test_asset_href_rewrites_private_s3_href_to_public_sidecar_sibling():
