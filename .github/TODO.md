@@ -10,6 +10,18 @@ still open.
 
 ---
 
+## Site ranking counts both republished copies
+
+- **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294
+- **Code:** `src/umbra_py/index.py` (`rank_sites`), `find_repeat_sites`, and
+  `GET /sites` in `src/umbra_py/serve.py`.
+
+Search keeps every republished copy unless the caller sets `canonical=true`.
+Site pass counts still add both the `task-data` row and the campaign row, so
+a site that was imaged once and published twice looks like two passes.
+Smallest change: count `canonical = 1` when ranking sites. Leave the default
+search as every item.
+
 ## `search_live` null-task order disagrees with `search`
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/285
