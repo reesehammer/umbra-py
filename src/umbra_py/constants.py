@@ -210,6 +210,13 @@ DATA_LICENSE = "CC-BY-4.0"
 #: Suggested attribution string for derived products.
 ATTRIBUTION = "Contains Umbra open data, licensed under CC BY 4.0."
 
+#: STAC extension fields for the weekly catalog snapshot. ``built_at`` is the
+#: index build date (``YYYY-MM-DD``). ``snapshot`` is the published
+#: ``catalog.db`` ETag. Both ride on the collection document and on the
+#: geoparquet file metadata; neither is an item property or an assets column.
+STAC_BUILT_AT_FIELD = "umbra-py:built_at"
+STAC_SNAPSHOT_FIELD = "umbra-py:snapshot"
+
 #: Provenance note that must travel with any model-generated interpretation of
 #: the data (a scene description, a change narration). It marks the text as an
 #: AI reading of the imagery -- not a measurement -- so a downstream reader never

@@ -99,7 +99,16 @@ def test_coverage_report_counts_by_prefix_layout_and_product(tmp_path):
     assert [m["group"] for m in report["missing"]] == [f"sar-data/tasks/ad hoc/Aswan/{S3}"]
     assert report["unindexable"] == [f"sar-data/tasks/ship/u/{S4}/"]
     assert report["index"]["distinct_ids"] == 2
-    assert "Overall: 2 of 4" in parity.render_markdown(report)
+    assert report["gate"] == {
+        "min_pct_indexable": 99.0,
+        "pct_indexable": 66.67,
+        "meets": False,
+    }
+    rendered = parity.render_markdown(report)
+    assert "Overall: 2 of 4" in rendered
+    assert ">= 99%" in rendered
+    assert "is below the bar" in rendered
+    assert "No quarantine record" in rendered
 
 
 def test_cli_coverage_gate(tmp_path):
@@ -218,7 +227,12 @@ def test_deduped_and_quarantined_acquisitions_are_not_missing(tmp_path):
     assert covered["totals"]["pct_indexable"] == 50.0
     assert covered["missing_count"] == 1
     assert miss_prefix.rsplit("/", 1)[0] + "/" in covered["missing"][0]["group"]
-    assert "omitted by dedupe or quarantine" in parity.render_markdown(covered)
+    rendered = parity.render_markdown(covered)
+    assert "omitted by dedupe or quarantine" in rendered
+    assert "datetime in the future" in rendered
+    assert "Duplicates dropped: 1" in rendered
+    assert "Quarantined: 1" in rendered
+    assert covered["gate"]["meets"] is False
 
     keys_without_hole = keys[:6]
     with CatalogIndex(tmp_path / "catalog.db") as idx:
@@ -226,6 +240,8 @@ def test_deduped_and_quarantined_acquisitions_are_not_missing(tmp_path):
     assert closed["missing_count"] == 0
     assert closed["totals"]["pct_indexable"] == 100.0
     assert closed["totals"]["accounted"] == 2
+    assert closed["gate"]["meets"] is True
+    assert "meets the bar" in parity.render_markdown(closed)
 
 
 def test_validation_counts_without_hrefs_do_not_hide_a_real_gap(tmp_path):

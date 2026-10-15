@@ -88,6 +88,7 @@ nav:
   - Complex products (SICD/CPHD): guides/complex-downstream.md
   - Example notebooks: guides/notebooks.md
   - Used in research: guides/research.md
+  - Hosted API limits: hosted-limits.md
   - Deploy / self-host: deploy.md
   - Connect Claude (MCP): mcp.md
   - CLI reference: cli.md

@@ -43,6 +43,12 @@ DATA_ROOTS = ("sar-data/", "open-data/")
 #: How many missing acquisitions the report lists by name (the counts are exact).
 MISSING_LIST_LIMIT = 500
 
+#: Publication bar for the weekly snapshot. ``pct_indexable`` is indexed
+#: acquisitions over the ones we expect (a sidecar, and not a deduped or
+#: quarantined row). The publish workflow imports this rather than hard-coding
+#: the number a second time.
+COVERAGE_GATE_PCT = 99.0
+
 
 @dataclass
 class Acquisition:
@@ -237,6 +243,7 @@ def coverage_report(
     # Intentional drops are not a hole in the snapshot. The gate reads
     # ``pct_indexable``, so a real missing sidecar is what still lowers it.
     expected = indexable - len(accounted)
+    pct_indexable = _pct(hit_total, expected)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "index": {
@@ -252,7 +259,12 @@ def coverage_report(
             "accounted": len(accounted),
             "expected": expected,
             "pct": _pct(hit_total, total),
-            "pct_indexable": _pct(hit_total, expected),
+            "pct_indexable": pct_indexable,
+        },
+        "gate": {
+            "min_pct_indexable": COVERAGE_GATE_PCT,
+            "pct_indexable": pct_indexable,
+            "meets": pct_indexable >= COVERAGE_GATE_PCT,
         },
         "by_prefix": {k: finish(v) for k, v in sorted(by_prefix.items())},
         "by_layout": {k: finish(v) for k, v in sorted(by_layout.items())},
@@ -284,6 +296,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"**Overall: {t['indexed']} of {t['bucket']} bucket acquisitions indexed "
         f"({t['pct']}%; {_indexable_phrase(t)}).**",
         "",
+        _gate_line(report["gate"]),
+        "",
         "| Prefix | Bucket | Indexed | % |",
         "| --- | ---: | ---: | ---: |",
     ]
@@ -308,6 +322,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Accounted (deduped or quarantined): {t['accounted']}. "
         f"Unindexable (no sidecar): {len(report['unindexable'])}.",
         "",
+    ]
+    counts = _validation_counts(report.get("validation"))
+    if counts:
+        lines.append(counts)
+        lines.append("")
+    lines += [
         "## Validation",
         "",
     ]
@@ -318,6 +338,27 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("No quarantine record on this index.")
     lines += ["", "Contains Umbra open data, licensed under CC BY 4.0.", ""]
     return "\n".join(lines)
+
+
+def _gate_line(gate: dict[str, Any]) -> str:
+    """One sentence so the published markdown shows the 99% bar itself."""
+    verdict = "meets" if gate["meets"] else "is below"
+    return (
+        f"Publication bar: pct_indexable >= {gate['min_pct_indexable']:g}% "
+        f"of expected acquisitions. This report {verdict} the bar "
+        f"({gate['pct_indexable']}%)."
+    )
+
+
+def _validation_counts(validation: Any) -> str | None:
+    """Quarantine and duplicate counts, or ``None`` when the index has no record."""
+    if not isinstance(validation, dict):
+        return None
+    return (
+        f"Quarantined: {validation.get('quarantined_count', 0)} "
+        f"(each reason is in the table below). "
+        f"Duplicates dropped: {validation.get('duplicates_dropped', 0)}."
+    )
 
 
 def _indexable_phrase(totals: dict[str, Any]) -> str:

@@ -185,10 +185,13 @@ from .constants import (
     DATA_LICENSE,
     PRODUCT_ASSETS,
     PRODUCT_TYPE_EXPLANATIONS,
+    STAC_BUILT_AT_FIELD,
+    STAC_SNAPSHOT_FIELD,
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
 from .exceptions import MissingDependencyError, UmbraError
+from .health_monitor import index_is_stale
 from .index import (
     THUMBS_SNAPSHOT_META_KEY,
     CatalogIndex,
@@ -196,6 +199,7 @@ from .index import (
     default_thumbs_path,
     read_snapshot_state,
     snapshot_id,
+    snapshot_state_path,
 )
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem, _iso_utc, _normalize_assets
@@ -248,6 +252,21 @@ PUBLIC_RATE_WINDOW_S = 60.0
 #: Paths a probe or a human hits before any query; never count them against
 #: the cap (a health check that 429s is worse than a scraper).
 RATE_LIMIT_EXEMPT_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
+
+#: CORS for the read-only server. Star origins cannot be credentialed, so
+#: ``allow_credentials`` stays off. Browser clients (stac-browser, the static
+#: demo) need GET and POST; OPTIONS is the preflight.
+CORS_ALLOW_ORIGINS = ("*",)
+CORS_ALLOW_METHODS = ("GET", "POST", "OPTIONS")
+CORS_ALLOW_HEADERS = ("*",)
+CORS_EXPOSE_HEADERS = (
+    "Link",
+    "Retry-After",
+    "X-RateLimit-Limit",
+    "X-RateLimit-Remaining",
+    "X-Umbra-Attribution",
+    "X-Umbra-License",
+)
 
 #: Env vars a public instance must not hold. Canopy is the commercial archive
 #: (don't position against it); model keys would turn MCP's
@@ -761,6 +780,7 @@ def health_document(
     built_at: str | None = None,
     snapshot: str | None = None,
     thumbnails: dict[str, Any] | None = None,
+    stale: bool | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``/healthz`` liveness/readiness document.
@@ -787,6 +807,12 @@ def health_document(
 
     ``error`` marks an index that exists but cannot be opened or read; the
     route sends that document with a ``503``, the only non-2xx it returns.
+
+    ``stale`` is true when ``built_at`` is missing or more than
+    :data:`~umbra_py.health_monitor.INDEX_STALE_AFTER_DAYS` days before today
+    (UTC). It is omitted when this process has no index build date to judge
+    (live mode, still starting, or the 503). A stale index still returns 200:
+    freshness is not an outage. ``degraded`` remains the thumbnail-merge bit.
     """
     if error is not None:
         status = "error"
@@ -808,6 +834,8 @@ def health_document(
         doc["built_at"] = built_at
     if snapshot is not None:
         doc["snapshot"] = snapshot
+    if stale is not None:
+        doc["stale"] = stale
     if thumbnails is not None:
         doc["thumbnails"] = thumbnails
         doc["degraded"] = thumbnails.get("sidecar_snapshot") is not None and not thumbnails.get(
@@ -821,17 +849,40 @@ def _temporal_interval(temporal: tuple[str | None, str | None] | None) -> list[l
     return [[start, end]]
 
 
+def _collection_updated(built_at: str) -> str:
+    """STAC ``updated`` for an index build date.
+
+    ``built_at`` is a UTC calendar date (``YYYY-MM-DD``) with no clock time.
+    STAC wants a datetime, so a bare date becomes midnight UTC. That midnight
+    is the date, not the hour the Monday workflow ran.
+    """
+    if len(built_at) == 10:
+        try:
+            date.fromisoformat(built_at)
+        except ValueError:
+            return built_at
+        return f"{built_at}T00:00:00Z"
+    return built_at
+
+
 def collection(
-    base_url: str, *, temporal: tuple[str | None, str | None] | None = None
+    base_url: str,
+    *,
+    temporal: tuple[str | None, str | None] | None = None,
+    built_at: str | None = None,
+    snapshot: str | None = None,
 ) -> dict[str, Any]:
     """The single ``umbra-open-data`` STAC Collection.
 
     ``temporal`` is the ``(start, end)`` ISO date span (typically from
-    :meth:`CatalogIndex.stats`); a global spatial extent is used because the
-    archive spans the whole Earth.
+    :meth:`CatalogIndex.temporal_extent`); a global spatial extent is used
+    because the archive spans the whole Earth. ``built_at`` and ``snapshot``
+    are the index build date and the published ``catalog.db`` ETag. They are
+    omitted when this process does not have them (live mode, or an index that
+    was never stamped).
     """
     base = base_url.rstrip("/")
-    return {
+    doc = {
         "type": "Collection",
         "stac_version": STAC_VERSION,
         "id": COLLECTION_ID,
@@ -876,6 +927,12 @@ def collection(
             ),
         ],
     }
+    if built_at:
+        doc[STAC_BUILT_AT_FIELD] = built_at
+        doc["updated"] = _collection_updated(built_at)
+    if snapshot:
+        doc[STAC_SNAPSHOT_FIELD] = snapshot
+    return doc
 
 
 def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
@@ -2804,17 +2861,10 @@ def build_app(
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=[
-            "Link",
-            "Retry-After",
-            "X-RateLimit-Limit",
-            "X-RateLimit-Remaining",
-            "X-Umbra-Attribution",
-            "X-Umbra-License",
-        ],
+        allow_origins=list(CORS_ALLOW_ORIGINS),
+        allow_methods=list(CORS_ALLOW_METHODS),
+        allow_headers=list(CORS_ALLOW_HEADERS),
+        expose_headers=list(CORS_EXPOSE_HEADERS),
     )
 
     limiter = RateLimiter(rate_limit) if rate_limit else None
@@ -2883,38 +2933,58 @@ def build_app(
         if callable(close):
             close()
 
-    # The collection extent only changes when the index file is replaced.
-    # Keyed by path, mtime and size so a refreshed snapshot is picked up
-    # without scanning thumbnail blobs on every ``GET /collections``.
-    _extent_cache: dict[tuple[str, int, int], tuple[str | None, str | None]] = {}
+    # The collection extent and the build stamp only change when the index
+    # file (or the snapshot sidecar beside it) is replaced. Keyed by path,
+    # mtime and size so a refreshed snapshot is picked up without scanning
+    # thumbnail blobs on every ``GET /collections``.
+    _FactKey = tuple[str, int, int, int, int]
+    _Facts = tuple[tuple[str | None, str | None], str | None, str | None]
+    _facts_cache: dict[_FactKey, _Facts] = {}
 
-    def _temporal() -> tuple[str | None, str | None]:
+    def _provenance(source: Any) -> tuple[str | None, str | None]:
+        built_at: str | None = None
+        get_meta = getattr(source, "get_meta", None)
+        if callable(get_meta):
+            value = get_meta("built_at")
+            built_at = value if isinstance(value, str) and value else None
+        src_path = getattr(source, "path", None)
+        snapshot = snapshot_id(read_snapshot_state(src_path)) if src_path is not None else None
+        return built_at, snapshot
+
+    def _facts() -> _Facts:
         source = _open()
         try:
             path = getattr(source, "path", None)
-            key: tuple[str, int, int] | None = None
+            key: _FactKey | None = None
             if path is not None:
                 try:
                     st = Path(path).stat()
                 except OSError:
                     st = None
                 if st is not None:
-                    key = (str(path), st.st_mtime_ns, st.st_size)
-                    cached = _extent_cache.get(key)
+                    try:
+                        snap = snapshot_state_path(path).stat()
+                        snap_ns, snap_size = snap.st_mtime_ns, snap.st_size
+                    except OSError:
+                        snap_ns, snap_size = 0, 0
+                    key = (str(path), st.st_mtime_ns, st.st_size, snap_ns, snap_size)
+                    cached = _facts_cache.get(key)
                     if cached is not None:
                         return cached
+            built_at, snapshot = _provenance(source)
             extent_of = getattr(source, "temporal_extent", None)
             if callable(extent_of):
                 extent = extent_of()
             else:
                 stats = getattr(source, "stats", None)
                 if stats is None:
-                    return (None, None)
+                    return ((None, None), built_at, snapshot)
                 summary = stats()
                 extent = (summary.get("start"), summary.get("end"))
+            facts: _Facts = (extent, built_at, snapshot)
             if key is not None:
-                _extent_cache[key] = extent
-            return extent
+                _facts_cache[key] = facts
+            return facts
         finally:
             _close(source)
 
@@ -2999,6 +3069,7 @@ def build_app(
                 built_at=built_at,
                 snapshot=snapshot,
                 thumbnails=thumbnails,
+                stale=index_is_stale(built_at),
             )
         except sqlite3.DatabaseError as exc:
             return _unhealthy(exc)
@@ -3012,8 +3083,11 @@ def build_app(
     @app.get("/collections", tags=["STAC"])
     def get_collections(request: Request) -> dict[str, Any]:
         base = str(request.base_url).rstrip("/")
+        temporal, built_at, snapshot = _facts()
         return {
-            "collections": [collection(base, temporal=_temporal())],
+            "collections": [
+                collection(base, temporal=temporal, built_at=built_at, snapshot=snapshot)
+            ],
             "links": [
                 _link("self", f"{base}/collections"),
                 _link("root", f"{base}/"),
@@ -3024,7 +3098,10 @@ def build_app(
     def get_collection(collection_id: str, request: Request) -> dict[str, Any]:
         if collection_id != COLLECTION_ID:
             raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
-        return collection(str(request.base_url), temporal=_temporal())
+        temporal, built_at, snapshot = _facts()
+        return collection(
+            str(request.base_url), temporal=temporal, built_at=built_at, snapshot=snapshot
+        )
 
     def _do_search(
         request: Request,

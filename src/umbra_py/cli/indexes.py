@@ -784,6 +784,8 @@ def index_export(db_path, out_path) -> None:
     the whole catalog searchable in seconds with DuckDB, geopandas or pyarrow,
     no server and no crawl. Each row carries the full STAC item plus a 'self'
     link back to its sidecar JSON, so results lead straight to the data files.
+    The index ``built_at`` and snapshot ETag are file-level metadata
+    (``umbra-py:built_at``, ``umbra-py:snapshot``), not columns.
     Build the index first with 'umbra index build'. Requires the export extra
     (``pip install "umbra-py[export]"``).
     """
@@ -792,8 +794,15 @@ def index_export(db_path, out_path) -> None:
         raise click.ClickException(f"No index at {path}. Build one with 'umbra index build'.")
     with CatalogIndex(path) as idx:
         total = len(idx)
+        built_at = idx.get_meta("built_at")
+        snapshot = snapshot_id(read_snapshot_state(path))
         with OrbitSpinner(f"Exporting {total} item(s) to geoparquet"):
-            written = export_geoparquet(idx.search(), out_path)
+            written = export_geoparquet(
+                idx.search(),
+                out_path,
+                built_at=built_at if isinstance(built_at, str) else None,
+                snapshot=snapshot,
+            )
     skipped = total - written
     note = f" ({skipped} without a footprint skipped)" if skipped else ""
     click.echo(f"Exported {written} of {total} item(s) to {out_path}{note}.")
