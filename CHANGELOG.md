@@ -10,6 +10,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
+  GitHub release. The README and [Citing](docs/citing.md) give a BibTeX
+  entry and a DOI badge using the placeholder `10.5281/zenodo.TBD` until
+  that release mints a concept DOI, and they quote Umbra's required
+  notice: `SAR-derived data © [YEAR] Umbra Lab, Inc.`
 - **Replace your crawler.** [docs/replace-crawler.md](docs/replace-crawler.md)
   is three short programs — plain `GET /search`, `pystac-client`, and DuckDB
   over the weekly `umbra-open-data.parquet` — that list GEC hrefs for a bbox.

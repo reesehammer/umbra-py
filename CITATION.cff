@@ -1,19 +1,28 @@
-# This file lets GitHub render a "Cite this repository" button and lets Zenodo,
-# citation managers, and academic tooling read machine-readable citation
-# metadata. Format: Citation File Format 1.2.0 (https://citation-file-format.github.io/).
+# This file lets GitHub render a "Cite this repository" button and lets
+# citation managers and academic tooling read machine-readable citation
+# metadata. Format: Citation File Format 1.2.0
+# (https://citation-file-format.github.io/).
+#
+# Zenodo's GitHub integration prefers `.zenodo.json` when both files exist
+# and ignores this one for the archive record. Keep it anyway: GitHub's
+# cite button reads it.
 #
 # Keep `version` in sync with `umbra_py.__version__` (enforced by
-# tests/test_citation.py). When a release is cut, add a matching
-# `date-released:` and (once minted) a `doi:` for the Zenodo archive.
+# tests/test_citation.py). When a release is cut, bump `date-released:`.
+# `doi` is a placeholder. Replace it with the Zenodo concept DOI (the
+# "Cite all versions" DOI) after the first Zenodo-archived release.
 cff-version: 1.2.0
 message: "If you use umbra-py in your research, please cite it as below."
 title: umbra-py
 abstract: "Search, preview, load, and convert Umbra open SAR. Umbra ships no search API; umbra-py is that layer, plus a community STAC API and MCP server."
 type: software
 authors:
-  - name: "umbra-py contributors"
+  - given-names: Reese
+    family-names: Hammerstrom
 version: 0.1.2
 date-released: "2026-09-02"
+# Placeholder. Replace with the concept DOI after the first Zenodo-archived release.
+doi: "10.5281/zenodo.TBD"
 license: Apache-2.0
 repository-code: "https://github.com/reesehammer/umbra-py"
 url: "https://umbra-py.space/"
@@ -26,3 +35,11 @@ keywords:
   - stac
   - geospatial
   - gis
+references:
+  - type: data
+    title: Umbra Open Data
+    authors:
+      - name: "Umbra Lab, Inc."
+    license: CC-BY-4.0
+    url: "https://umbra.space/open-data/"
+    notes: "Umbra Space open SAR data, licensed CC BY 4.0."

@@ -169,7 +169,9 @@ compute coherence. For a processor that needs the complex pixels, see
 ## Data license & attribution
 
 Umbra's imagery is **CC BY 4.0**. If you use or redistribute the data or
-derived products you must attribute Umbra, e.g.:
+derived products you must attribute Umbra. The copyright notice Umbra's
+terms require is quoted under [Citing umbra-py](#citing-umbra-py).
+`umbra-py` also stamps this shorter line on its own outputs:
 
 > Contains Umbra open data, licensed under CC BY 4.0.
 
@@ -178,9 +180,37 @@ are independent and compatible.
 
 ## Citing umbra-py
 
-Machine-readable metadata lives in [CITATION.cff](CITATION.cff). GitHub
-renders it as a **"Cite this repository"** button. Please also honor the
-CC BY 4.0 line above for any Umbra data you use.
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.TBD.svg)](https://doi.org/10.5281/zenodo.TBD)
+
+`10.5281/zenodo.TBD` is a placeholder. After the first Zenodo-archived
+release, replace it with the concept DOI (Zenodo's **Cite all versions?**
+value). Machine-readable metadata lives in [CITATION.cff](CITATION.cff)
+(GitHub's **Cite this repository** button) and
+[.zenodo.json](.zenodo.json) (what Zenodo archives).
+
+```bibtex
+@software{hammerstrom2026umbrapy,
+  author  = {Hammerstrom, Reese},
+  title   = {umbra-py},
+  year    = {2026},
+  version = {0.1.2},
+  doi     = {10.5281/zenodo.TBD},
+  url     = {https://github.com/reesehammer/umbra-py},
+  license = {Apache-2.0}
+}
+```
+
+Imagery is © Umbra Space, licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Umbra's
+[terms](https://umbra.space/umbra-satellite-tasking-services-terms-and-conditions/)
+require this copyright notice on or adjacent to adapted materials, with
+`[YEAR]` the year the image was first created:
+
+> SAR-derived data © [YEAR] Umbra Lab, Inc.
+
+Also credit Umbra, link the license, and say if you changed the data. The
+open-data program is [umbra.space/open-data](https://umbra.space/open-data/).
 
 ## Repo layout
 

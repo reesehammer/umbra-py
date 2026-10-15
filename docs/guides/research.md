@@ -44,6 +44,8 @@ open Umbra SICD is RGAZIM/PFA), see
 
 ## License & affiliation
 
-Umbra open imagery is **CC BY 4.0** — attribute *"Contains Umbra open data,
-licensed under CC BY 4.0."* when you publish derived products. This is an
-independent, unofficial toolkit and is **not affiliated with Umbra Lab, Inc.**
+Umbra open imagery is **CC BY 4.0**. The copyright notice Umbra requires on
+adapted materials is on [Citing](../citing.md). umbra-py also stamps
+*"Contains Umbra open data, licensed under CC BY 4.0."* on its outputs.
+This is an independent, unofficial toolkit and is **not affiliated with
+Umbra Lab, Inc.**
