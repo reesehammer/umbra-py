@@ -72,7 +72,10 @@ mismatch, then publishes to PyPI (Trusted Publisher) and submits
 2. Move `CHANGELOG.md`'s `[Unreleased]` notes under `## [X.Y.Z] — YYYY-MM-DD`
    with a short first-screen summary above the bullets. Leave Unreleased
    empty. Do not expand the bullets into a development diary.
-3. Set `date-released:` in `CITATION.cff` (and `doi:` after Zenodo mints one).
+3. In `CITATION.cff`, set `date-released:` to the release date and replace
+   the `doi:` placeholder (`10.5281/zenodo.TBD`) with the Zenodo concept DOI
+   once the first archived release mints one. Put that same DOI in the README
+   and `docs/citing.md` badge and BibTeX.
 4. `ruff check . && ruff format --check . && pytest -q` is green.
 5. Create a GitHub Release on tag `vX.Y.Z`. The Release body is the short
    CHANGELOG narrative, not the full file.

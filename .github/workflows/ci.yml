@@ -163,3 +163,25 @@ jobs:
           # integration) fail the build — the gate above is the real check.
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Zenodo's GitHub docs recommend `cffconvert --validate` for CITATION.cff.
+  # cffconvert 2.0.0 requires jsonschema<4, and the schema tests need
+  # jsonschema>=4.18, so this check gets its own venv instead of the [dev] extra.
+  citation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Validate CITATION.cff
+        run: |
+          uv venv /tmp/cff
+          uv pip install --python /tmp/cff/bin/python 'cffconvert>=2.0'
+          /tmp/cff/bin/cffconvert --validate -i CITATION.cff

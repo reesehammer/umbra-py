@@ -55,6 +55,7 @@ API (`umbra serve`) and MCP server sit on the same host.
 - Need phase? [Complex products (SICD/CPHD)](guides/complex-downstream.md)
   — download and stop; convert discards phase.
 - See how open Umbra data shows up in [research](guides/research.md) (ProSR-inspired ISR cookbook).
+- Cite the software and attribute the imagery: [Citing](citing.md).
 - Connect [Claude Desktop or Claude Code](mcp.md) to the hosted MCP.
 - Read the [hosted API limits](hosted-limits.md): best-effort uptime, the
   rate limit, page size, CORS, and the release fallback.
@@ -62,7 +63,7 @@ API (`umbra serve`) and MCP server sit on the same host.
 
 ## License & attribution
 
-`umbra-py` is Apache-2.0. Umbra's open imagery is licensed **CC BY 4.0** —
-attribute *"Umbra Lab, Inc."* when you publish derived products. This is an
-independent, unofficial toolkit and is not affiliated with or endorsed by
-Umbra Lab, Inc.
+`umbra-py` is Apache-2.0. Umbra's open imagery is licensed **CC BY 4.0**.
+The copyright notice Umbra requires, and a BibTeX entry for the software,
+are on [Citing](citing.md). This is an independent, unofficial toolkit and
+is not affiliated with or endorsed by Umbra Lab, Inc.

@@ -1,0 +1,26 @@
+{
+  "title": "umbra-py",
+  "description": "Search, preview, load, and convert Umbra open SAR. Umbra ships no search API; umbra-py is that layer, plus a community STAC API and MCP server. The data this software searches is Umbra Space open data under CC BY 4.0. umbra-py is not affiliated with Umbra Lab, Inc.",
+  "upload_type": "software",
+  "license": "apache-2.0",
+  "creators": [
+    {
+      "name": "Hammerstrom, Reese"
+    }
+  ],
+  "keywords": ["SAR", "Umbra", "STAC", "remote sensing"],
+  "related_identifiers": [
+    {
+      "identifier": "https://umbra-py.space",
+      "relation": "isDocumentedBy",
+      "scheme": "url",
+      "resource_type": "other"
+    },
+    {
+      "identifier": "https://umbra.space/open-data/",
+      "relation": "references",
+      "scheme": "url",
+      "resource_type": "dataset"
+    }
+  ]
+}
