@@ -19,8 +19,8 @@ type: software
 authors:
   - given-names: Reese
     family-names: Hammerstrom
-version: 0.1.2
-date-released: "2026-09-02"
+version: 0.1.3
+date-released: "2026-10-15"
 # Placeholder. Replace with the concept DOI after the first Zenodo-archived release.
 doi: "10.5281/zenodo.TBD"
 license: Apache-2.0

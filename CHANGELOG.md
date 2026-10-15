@@ -9,6 +9,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-10-15
+
+The catalog index covers the open bucket (named tasks, UUID `task-data/`,
+legacy collects, and `open-data/`) and the weekly snapshot validates what it
+keeps. STAC search and the geoparquet export use asset schema v2. The public
+host states its limits, probes `/healthz`, and serves baked previews. This is
+the first release Zenodo's GitHub integration archives; the concept DOI is
+still `10.5281/zenodo.TBD`.
+
 ### Added
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
   GitHub release. The README and [Citing](docs/citing.md) give a BibTeX
@@ -422,7 +431,8 @@ live-verified Canopy client; a MultiRTC replacement. See
 
 This tag is the first public cut. Pre-release commits are in git.
 
-[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.3
 [0.1.2]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.2
 [0.1.1]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.1
 [0.1.0]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.0
