@@ -99,6 +99,17 @@ jobs:
       # be uploaded; any remaining violation fails the job before the release
       # is touched. The report is uploaded with the snapshot below, and the
       # coverage report later repeats the same quarantine list.
+      #
+      # Runs 38581733265 and 38652794747 were killed here ("The runner has
+      # received a shutdown signal" / "The operation was canceled", no Python
+      # traceback) after the validate command loaded the whole catalog. This
+      # step finishes first, so a later kill still has the memory and disk
+      # numbers.
+      - name: Report free memory and disk
+        run: |
+          free -m
+          df -h
+
       - name: Validate the index and parquet
         run: |
           umbra index validate --db catalog.db \

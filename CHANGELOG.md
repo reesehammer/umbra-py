@@ -171,6 +171,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **`umbra index validate` no longer loads the whole catalog into memory.**
+  The weekly publish was killed a couple of minutes into that step (runner
+  shutdown, "The operation was canceled") because the check held every index
+  row and the entire geoparquet table. Duplicate ids are counted with SQL
+  and an `id`-only parquet read, and rows are checked a batch at a time.
+  Quarantine rules and the `index-validation.json` / `.md` reports are unchanged.
 - **Published thumbnails fit GitHub's 2 GiB release-asset limit.** The weekly
   sidecar passed that limit and `gh release upload --clobber` deleted the
   previous `catalog.thumbs.db` before GitHub rejected the replacement

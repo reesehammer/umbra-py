@@ -400,6 +400,136 @@ def test_parquet_is_held_to_the_same_rules(tmp_path):
     assert parquet_violations(clean, now=NOW) == []
 
 
+def test_recheck_reports_duplicate_ids_without_holding_rows(tmp_path):
+    """Duplicate ids are a SQL aggregate; every copy is still a violation."""
+    first = _item("same", href="https://example.com/a.json")
+    second = _item("same", href="https://example.com/b.json")
+    other = _item("other", href="https://example.com/c.json")
+    with _index(tmp_path, second, other, first) as idx:
+        report = recheck_report(idx, now=NOW)
+    violations = report["recheck"]["index_violations"]
+    assert [row["href"] for row in violations] == [
+        "https://example.com/a.json",
+        "https://example.com/b.json",
+    ]
+    assert all(row["reasons"] == ["duplicate id"] for row in violations)
+
+
+def test_recheck_streams_a_large_index(tmp_path):
+    """A few hundred fat documents must not all be resident during the recheck.
+
+    The published catalog is ~1.7 GB of STAC JSON. Holding every parsed row
+    is what the weekly validate step did. This corpus is large enough that
+    materialising it exceeds the peak traced below, and small enough to run
+    in the offline suite.
+    """
+    import tracemalloc
+
+    payload = "x" * 32_000
+    items = []
+    for i in range(250):
+        item = _item(f"id-{i:04d}", href=f"https://example.com/{i:04d}.json")
+        item.properties["umbra:note"] = payload
+        items.append(item)
+    items.append(_item("future", dt="2035-04-01T00:00:00Z", href="https://example.com/zz.json"))
+    dup_a = _item("dup", href="https://example.com/dup-a.json")
+    dup_b = _item("dup", href="https://example.com/dup-b.json")
+    with _index(tmp_path, *items, dup_a, dup_b) as idx:
+        tracemalloc.start()
+        report = recheck_report(idx, now=NOW)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    counts: dict[str, int] = {}
+    reasons: dict[str, list] = {}
+    for row in report["recheck"]["index_violations"]:
+        counts[row["id"]] = counts.get(row["id"], 0) + 1
+        reasons[row["id"]] = row["reasons"]
+    assert counts == {"future": 1, "dup": 2}
+    assert reasons["future"] == ["datetime in the future"]
+    assert reasons["dup"] == ["duplicate id"]
+    # 250 documents × 32 KB is 8 MB of JSON before Python object overhead.
+    # One row in flight stays well under that; the list-everything path cannot.
+    assert peak < 6 * 1024 * 1024, peak
+
+
+def test_parquet_rules_match_a_full_table_read(tmp_path):
+    """Batched decoding agrees with stac_table_to_items, including duplicates."""
+    pytest.importorskip("stac_geoparquet")
+    import pyarrow.parquet as pq
+    import stac_geoparquet.arrow as arrow
+
+    from umbra_py.export import export_geoparquet
+    from umbra_py.validate import parquet_violations
+
+    bowtie = {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [3, 1], [0, 1], [1, 0], [0, 0]]],
+    }
+    items = []
+    for i in range(12):
+        key = f"2024-06-01-00-00-{i:02d}_UMBRA-05_GEC.tif"
+        items.append(
+            _item(
+                f"id-{i:02d}",
+                href=f"https://example.com/{i:02d}.json",
+                assets={key: {"href": f"https://example.com/{key}", "type": "image/tiff"}},
+            )
+        )
+    items.append(_item("same", href="https://example.com/dup-a.json"))
+    items.append(_item("same", href="https://example.com/dup-b.json"))
+    items.append(_item("future", dt="2036-01-01T00:00:00Z"))
+    items.append(_item("bowtie", geometry=bowtie))
+    items.append(
+        _item(
+            "private",
+            assets={"GEC": {"href": "s3://prod-prod-processed-sar-data/2024/a.tif"}},
+        )
+    )
+    out = tmp_path / "wide.parquet"
+    export_geoparquet(items, out)
+
+    oracle_items = [
+        UmbraItem.from_dict(doc) for doc in arrow.stac_table_to_items(pq.read_table(out))
+    ]
+    oracle = collect_violations(oracle_items, now=NOW)
+    got = parquet_violations(out, now=NOW)
+    assert [(row["id"], row["reasons"]) for row in got] == [
+        (row["id"], row["reasons"]) for row in oracle
+    ]
+    assert {row["id"] for row in got} >= {"same", "future", "bowtie", "private"}
+
+
+def test_parquet_validation_reads_ids_and_batches(tmp_path, monkeypatch):
+    """The whole table is not read. Only the id column, then fixed-size batches."""
+    pytest.importorskip("stac_geoparquet")
+    import pyarrow.parquet as pq
+
+    from umbra_py.export import export_geoparquet
+    from umbra_py.validate import _PARQUET_BATCH_SIZE, parquet_violations
+
+    out = tmp_path / "catalog.parquet"
+    export_geoparquet([_item("good"), _item("also")], out)
+    reads: list = []
+    batches: list = []
+    real_read = pq.read_table
+    real_iter = pq.ParquetFile.iter_batches
+
+    def spy_read(source, **kwargs):
+        reads.append(kwargs.get("columns"))
+        return real_read(source, **kwargs)
+
+    def spy_iter(self, *args, **kwargs):
+        batches.append(kwargs)
+        return real_iter(self, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "read_table", spy_read)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", spy_iter)
+    assert parquet_violations(out, now=NOW) == []
+    assert reads == [["id"]]
+    assert batches and all(call.get("batch_size") == _PARQUET_BATCH_SIZE for call in batches)
+    assert all(call.get("columns") is None for call in batches)
+
+
 def test_cli_validate_parquet_fails_loudly(tmp_path):
     pytest.importorskip("stac_geoparquet")
     from umbra_py.export import export_geoparquet

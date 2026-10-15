@@ -21,7 +21,9 @@ the latest `updated` (or datetime), then the record with the most assets.
 The dropped rows are listed in `umbra index coverage` and in
 `index-validation.json`. `umbra index validate` re-checks the index and,
 with `--parquet`, the geoparquet export, and exits non-zero if any violation
-remains.
+remains. Duplicate ids are counted in SQL and from the parquet `id` column;
+rows are checked a batch at a time, so the weekly file's wide `assets`
+struct (one field per asset filename) is not loaded all at once.
 
 The snapshot is what Umbra has published, rebuilt weekly. `umbra index info`
 reports `built_at` and `end` (the newest plausible acquisition). As of

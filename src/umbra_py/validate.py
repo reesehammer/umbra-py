@@ -40,6 +40,38 @@ PRIVATE_BUCKET = "prod-prod-processed"
 #: ``meta`` key holding the last :func:`sanitize_index` report (JSON).
 VALIDATION_META_KEY = "validation"
 
+#: Rows decoded from a geoparquet at a time.
+#:
+#: The weekly export stores ``assets`` as one struct field per asset key —
+#: about 80,000 fields on the published snapshot, because Umbra's keys are
+#: filenames, not a handful of product names. ``pq.read_table`` plus
+#: ``stac_table_to_items`` on that file materialises every null field and
+#: exhausted the 16 GB publish runner (the step was killed with no traceback).
+#: A batch of 1024 stayed near 3 GB; a batch of the whole file was OOM-killed
+#: on a 16 GB machine. Smaller batches spend their time slicing the wide
+#: struct, so 1024 is the measured compromise.
+_PARQUET_BATCH_SIZE = 1024
+
+#: STAC item keys that stay at the top level of a geoparquet row. Everything
+#: else is a property (see stac-geoparquet's ``lower_properties_from_top_level``).
+_STAC_TOP_LEVEL = frozenset(
+    {
+        "stac_version",
+        "stac_extensions",
+        "type",
+        "id",
+        "bbox",
+        "geometry",
+        "collection",
+        "links",
+        "assets",
+    }
+)
+
+#: Structs wider than this are read field-by-field, skipping all-null fields.
+#: Asset keys are the case that matters; a 4-field bbox is cheaper as a list.
+_WIDE_STRUCT_FIELDS = 32
+
 _REASON_BEFORE = "datetime before 2018-01-01"
 _REASON_FUTURE = "datetime in the future"
 _REASON_MISSING_GEOM = "missing geometry"
@@ -379,21 +411,40 @@ def iter_index_items(index: Any) -> Iterator[UmbraItem]:
         yield item
 
 
-def collect_violations(items: Iterable[UmbraItem], *, now: datetime | None = None) -> list[dict]:
-    """Violations still present. Duplicate ids are a violation on every copy."""
+def collect_violations(
+    items: Iterable[UmbraItem],
+    *,
+    now: datetime | None = None,
+    duplicate_ids: set[str] | None = None,
+) -> list[dict]:
+    """Violations still present. Duplicate ids are a violation on every copy.
+
+    Pass ``duplicate_ids`` (an empty set when every id is unique) to walk
+    ``items`` once and drop each row after it is checked. Omit it and the
+    ids are counted here, which stores every item first.
+    """
     now = _now(now)
-    materialized = list(items)
-    counts: dict[str, int] = {}
-    for item in materialized:
-        counts[item.id] = counts.get(item.id, 0) + 1
+    if duplicate_ids is None:
+        materialized = list(items)
+        counts: dict[str, int] = {}
+        for item in materialized:
+            counts[item.id] = counts.get(item.id, 0) + 1
+        duplicate_ids = {item_id for item_id, count in counts.items() if count > 1}
+        items = materialized
     violations: list[dict] = []
-    for item in materialized:
+    for item in items:
         reasons = item_reasons(item, now=now)
-        if counts[item.id] > 1:
+        if item.id in duplicate_ids:
             reasons.append(_REASON_DUPLICATE)
         if reasons:
             violations.append(_row(item, reasons=reasons))
     return violations
+
+
+def _index_duplicate_ids(index: Any) -> set[str]:
+    """Ids that occur more than once. Does not read the STAC document column."""
+    rows = index._conn.execute("SELECT id FROM items GROUP BY id HAVING COUNT(*) > 1")
+    return {row[0] for row in rows}
 
 
 def _delete_hrefs(index: Any, hrefs: list[str]) -> None:
@@ -518,24 +569,160 @@ def stored_validation(index: Any) -> dict[str, Any] | None:
     return parsed
 
 
-def parquet_violations(path: str, *, now: datetime | None = None) -> list[dict]:
-    """The same rules, read back from a stac-geoparquet export.
-
-    Requires the ``export`` extra. Items the writer skipped never appear;
-    every row that did is held to the publish rules.
-    """
+def _require_parquet():
+    """Import the export extra, or raise the same error the old reader did."""
     try:
-        import pyarrow.parquet as pq
-        import stac_geoparquet.arrow as arrow
+        import pyarrow
+        import pyarrow.compute
+        import pyarrow.parquet
+        import shapely
+        import stac_geoparquet.arrow
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise MissingDependencyError(
             "stac-geoparquet is required to validate a parquet export. "
             'Install the extra with: pip install "umbra-py[export]"',
             hint='pip install "umbra-py[export]"',
         ) from exc
-    docs = list(arrow.stac_table_to_items(pq.read_table(path)))
-    items = [UmbraItem.from_dict(doc) for doc in docs]
-    return collect_violations(items, now=_now(now))
+    return pyarrow, pyarrow.compute, pyarrow.parquet, shapely, stac_geoparquet.arrow
+
+
+def _coordinates_as_lists(value: Any) -> Any:
+    """Shapely's ``__geo_interface__`` uses tuples; the geometry rules walk lists."""
+    if isinstance(value, tuple):
+        return [_coordinates_as_lists(part) for part in value]
+    return value
+
+
+def _geometry_dicts(wkb_column: Any) -> list[dict | None]:
+    import shapely
+
+    geoms = shapely.from_wkb(wkb_column)
+    decoded: list[dict | None] = []
+    for geom in geoms:
+        if geom is None or geom.is_empty:
+            decoded.append(None)
+            continue
+        geojson = dict(geom.__geo_interface__)
+        geojson["coordinates"] = _coordinates_as_lists(geojson["coordinates"])
+        decoded.append(geojson)
+    return decoded
+
+
+def _sparse_struct_dicts(column: Any) -> list[dict]:
+    """One dict per row, omitting fields that are null in every row of ``column``.
+
+    ``stac_table_to_items`` builds each dict by walking every struct field,
+    including the tens of thousands of asset keys that are null on a given
+    row. That is what made one row take the better part of a minute and a
+    whole-file conversion run out of memory. A field that is null for the
+    whole batch cannot change any row, so it is skipped.
+    """
+    n = len(column)
+    rows: list[dict] = [{} for _ in range(n)]
+    struct_type = column.type
+    for field_index in range(struct_type.num_fields):
+        child = column.field(field_index)
+        if child.null_count == n:
+            continue
+        name = struct_type.field(field_index).name
+        for row_index, value in enumerate(child.to_pylist()):
+            if value is not None:
+                rows[row_index][name] = value
+    return rows
+
+
+def _column_python_values(column: Any) -> list:
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_struct(column.type) and column.type.num_fields > _WIDE_STRUCT_FIELDS:
+        return _sparse_struct_dicts(column)
+    if pa.types.is_timestamp(column.type):
+        # Same UTC rendering stac-geoparquet uses when it lowers a column
+        # back into a STAC property string.
+        return pc.strftime(column, format="%Y-%m-%dT%H:%M:%SZ").to_pylist()
+    return column.to_pylist()
+
+
+def _docs_from_batch(batch: Any) -> Iterator[dict]:
+    """STAC dicts for one record batch, without a full-table ``as_py``."""
+    n = len(batch)
+    names = batch.schema.names
+    present = set(names)
+
+    def _values(name: str) -> list:
+        if name not in present:
+            return [None] * n
+        return _column_python_values(batch.column(name))
+
+    ids = _values("id")
+    types = _values("type")
+    versions = _values("stac_version")
+    extensions = _values("stac_extensions")
+    collections = _values("collection")
+    links = _values("links")
+    geometries = _geometry_dicts(batch.column("geometry")) if "geometry" in present else [None] * n
+    assets = (
+        _sparse_struct_dicts(batch.column("assets"))
+        if "assets" in present
+        else [{} for _ in range(n)]
+    )
+    property_names = [name for name in names if name not in _STAC_TOP_LEVEL]
+    property_values = {name: _column_python_values(batch.column(name)) for name in property_names}
+    for index in range(n):
+        properties = {
+            name: values[index]
+            for name, values in property_values.items()
+            if values[index] is not None
+        }
+        doc: dict[str, Any] = {
+            "type": types[index] or "Feature",
+            "id": ids[index] if ids[index] is not None else "",
+            "properties": properties,
+            "geometry": geometries[index],
+            "assets": assets[index],
+            "links": links[index] or [],
+        }
+        if versions[index] is not None:
+            doc["stac_version"] = versions[index]
+        if extensions[index] is not None:
+            doc["stac_extensions"] = extensions[index]
+        if collections[index] is not None:
+            doc["collection"] = collections[index]
+        yield doc
+
+
+def _iter_parquet_items(path: str) -> Iterator[UmbraItem]:
+    import pyarrow.parquet as pq
+
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(batch_size=_PARQUET_BATCH_SIZE, use_threads=False):
+        for doc in _docs_from_batch(batch):
+            yield UmbraItem.from_dict(doc)
+
+
+def _parquet_duplicate_ids(path: str) -> set[str]:
+    """Ids that occur more than once, from the ``id`` column alone."""
+    import pyarrow.parquet as pq
+
+    values = pq.read_table(path, columns=["id"], use_threads=False).column("id").to_pylist()
+    counts: dict[str, int] = {}
+    for item_id in values:
+        counts[item_id] = counts.get(item_id, 0) + 1
+    return {item_id for item_id, count in counts.items() if count > 1}
+
+
+def parquet_violations(path: str, *, now: datetime | None = None) -> list[dict]:
+    """The same rules, read back from a stac-geoparquet export.
+
+    Requires the ``export`` extra. Items the writer skipped never appear;
+    every row that did is held to the publish rules. Rows are decoded a
+    batch at a time (:data:`_PARQUET_BATCH_SIZE`); duplicate ids are counted
+    from the ``id`` column, not by holding the table.
+    """
+    _require_parquet()
+    duplicate_ids = _parquet_duplicate_ids(path)
+    return collect_violations(_iter_parquet_items(path), now=_now(now), duplicate_ids=duplicate_ids)
 
 
 def assert_recheck_clean(report: dict[str, Any]) -> None:
@@ -576,7 +763,11 @@ def recheck_report(
     }
     recheck: dict[str, Any] = {
         "checked_at": now.isoformat(),
-        "index_violations": collect_violations(iter_index_items(index), now=now),
+        "index_violations": collect_violations(
+            iter_index_items(index),
+            now=now,
+            duplicate_ids=_index_duplicate_ids(index),
+        ),
     }
     if parquet is not None:
         recheck["parquet_violations"] = parquet_violations(parquet, now=now)
