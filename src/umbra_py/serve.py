@@ -178,6 +178,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from ._geometry import Geometry, parse_geometry
 from .catalog import DateLike, _coerce_date
 from .constants import (
+    ASSET_SCHEMA_FIELD,
+    ASSET_SCHEMA_VERSION,
     ATTRIBUTION,
     CANOPY_TOKEN_ENV,
     DATA_LICENSE,
@@ -196,7 +198,7 @@ from .index import (
     snapshot_id,
 )
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
-from .models import BBox, UmbraItem, _iso_utc
+from .models import BBox, UmbraItem, _iso_utc, _normalize_assets
 from .schemas import load_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -840,6 +842,9 @@ def collection(
             "CSI, SIDD, SICD and CPHD products. " + ATTRIBUTION
         ),
         "license": DATA_LICENSE,
+        # Asset keys are stable product names (``gec``, ``sicd``, …), not
+        # filenames. See :func:`umbra_py.models._normalize_assets`.
+        ASSET_SCHEMA_FIELD: ASSET_SCHEMA_VERSION,
         "keywords": ["sar", "umbra", "x-band", "open-data", "radar"],
         "providers": [
             {
@@ -890,7 +895,8 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     feature.setdefault("geometry", item.geometry)
     if item.bbox is not None:
         feature["bbox"] = list(item.bbox)
-    feature.setdefault("properties", dict(item.properties))
+    # Copy so stamping the asset schema does not write back into ``item.raw``.
+    feature["properties"] = dict(feature.get("properties") or item.properties or {})
     # Surface the baked reverse-geocoded label (from `umbra index bake`) as a
     # namespaced property so a STAC client shows a real place name, not just
     # the task codename. Only when the index resolved one and the raw item
@@ -903,7 +909,10 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     published = _iso_utc(item.published)
     if published and "umbra-py:published" not in feature["properties"]:
         feature["properties"]["umbra-py:published"] = published
-    feature.setdefault("assets", dict(item.assets))
+    feature["properties"][ASSET_SCHEMA_FIELD] = ASSET_SCHEMA_VERSION
+    # Old index rows still store filename keys. Rewrite on the way out so
+    # /search and /items are schema v2 before the next catalog rebuild.
+    feature["assets"] = _normalize_assets(feature.get("assets") or item.assets)
 
     item_path = f"{base}/collections/{COLLECTION_ID}/items/{item.id}"
     feature["links"] = [

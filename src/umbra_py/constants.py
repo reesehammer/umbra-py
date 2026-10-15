@@ -118,6 +118,15 @@ POLARIZATION_CAVEAT = (
 METADATA_ASSET = "metadata"
 ALL_ASSETS = (*PRODUCT_ASSETS, METADATA_ASSET)
 
+#: Asset schema v2. Items this library builds, serves, and exports key
+#: ``assets`` by a stable product name (``gec``, ``sicd``, …) rather than by
+#: the product filename. Recorded on the STAC collection, on each served or
+#: exported item, and in the stac-geoparquet file metadata.
+ASSET_SCHEMA_VERSION = 2
+ASSET_SCHEMA_FIELD = "umbra-py:asset_schema"
+#: Original on-disk filename, kept on each asset after the key is normalized.
+ASSET_FILENAME_FIELD = "umbra-py:filename"
+
 #: GitHub repository that hosts this project and its rolling catalog snapshot.
 GITHUB_REPO = "reesehammer/umbra-py"
 

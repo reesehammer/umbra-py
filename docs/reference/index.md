@@ -28,8 +28,36 @@ from the missing list; a sidecar that was never indexed still counts as
 missing. `--validation` points the report at a saved `index-validation.json`. `umbra index validate` re-checks the index and,
 with `--parquet`, the geoparquet export, and exits non-zero if any violation
 remains. Duplicate ids are counted in SQL and from the parquet `id` column;
-rows are checked a batch at a time, so the weekly file's wide `assets`
-struct (one field per asset filename) is not loaded all at once.
+rows are checked a batch at a time. A snapshot exported before asset schema
+v2 has one `assets` field per filename (tens of thousands); v2 uses a fixed
+set of product keys, and validation still batches so a v1 file is not loaded
+all at once.
+
+Asset schema v2 keys each product by a stable name instead of its filename.
+The filename is `title` (when the asset had none) and `umbra-py:filename`.
+A second file of the same product is `gec_2`, `gec_3`, … in filename order;
+the canonical `*_GEC.tif` / `*_CPHD.cphd` / … name keeps the unsuffixed key.
+`umbra-py:products` stays the uppercase type list (`GEC`, `SICD`, …), one
+entry per type, lined up with those keys. The collection document and the
+parquet file metadata (`stac-geoparquet` → `collections` → `umbra-open-data`)
+both carry `umbra-py:asset_schema: 2`, and so does each item.
+
+| Key | File |
+| --- | --- |
+| `gec` | `*_GEC.tif`, or a legacy bare `<stem>.tif` |
+| `csi` | `*_CSI.tif` (color sub-aperture GeoTIFF) |
+| `sidd` | `*_SIDD.nitf` |
+| `csi_sidd` | `*_CSI-SIDD.nitf` (color sub-aperture SIDD) |
+| `sicd` | `*_SICD.nitf` |
+| `cphd` | `*_CPHD.cphd`, or a legacy bare `<stem>.cphd` |
+| `metadata` | `*_METADATA.json` |
+| `stac_metadata` | `*_STAC-METADATA.json` |
+| `di_gif` | `*_DI-GIF.gif` detected-image preview |
+
+`di_gif` is the only thumbnail-like product file in the open archive. It is
+not the baked quicklook PNG (`catalog.thumbs.db`). A file that matches none
+of these is `file` or `file_<ext>`. `asset_href("GEC")`, `asset_href("gec")`,
+and `asset_href` of the filename all resolve the same primary asset.
 
 The snapshot is what Umbra has published, rebuilt weekly. `umbra index info`
 reports `built_at` and `end` (the newest plausible acquisition). As of

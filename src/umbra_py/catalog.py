@@ -43,11 +43,17 @@ from defusedxml.common import DefusedXmlException
 from ._geometry import Geometry
 from ._geometry import to_geojson as _geometry_to_geojson
 from ._http import default_session, get_json
-from .constants import CANOPY_ARCHIVE_URL, S3_BUCKET, S3_REGION
+from .constants import (
+    ASSET_SCHEMA_FIELD,
+    ASSET_SCHEMA_VERSION,
+    CANOPY_ARCHIVE_URL,
+    S3_BUCKET,
+    S3_REGION,
+)
 from .dates import parse_date_bound
 from .exceptions import CatalogError
 from .fuzzy import task_matches
-from .models import BBox, UmbraItem, _parse_datetime
+from .models import BBox, UmbraItem, _normalize_assets, _parse_datetime
 
 DateLike = str | date | datetime | None
 
@@ -941,17 +947,22 @@ class UmbraCatalog:
             }
         if not assets:
             return None
-        item = UmbraItem.from_dict({**doc, "assets": assets}, href=sidecar_url)
+        # Asset schema v2: stable product keys, filename on the asset. Products
+        # are read back from those keys so the list cannot drift from them.
+        item = UmbraItem.from_dict({**doc, "assets": _normalize_assets(assets)}, href=sidecar_url)
         item.published = published
         # Record what the collect actually ships, so a caller (and the parquet)
         # can find a matched CPHD + SICD pair from one collect without
         # re-classifying asset keys. Namespaced to umbra-py: not Umbra's field.
+        # Uppercase canonical types (``GEC``), one per type; the asset key is
+        # the lowercase form (``gec``), with ``gec_2`` when a type repeats.
         products = item.available_assets
         item.properties = {
             **item.properties,
             "umbra-py:products": products,
             "umbra-py:cphd_sicd_pair": "CPHD" in products and "SICD" in products,
             "umbra-py:layout": "legacy" if legacy else "v2",
+            ASSET_SCHEMA_FIELD: ASSET_SCHEMA_VERSION,
         }
         item.raw = {**item.raw, "properties": item.properties}
         return item

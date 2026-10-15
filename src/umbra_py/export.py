@@ -19,8 +19,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from .constants import ASSET_SCHEMA_FIELD, ASSET_SCHEMA_VERSION
 from .exceptions import MissingDependencyError, UmbraError
-from .models import UmbraItem, _iso_utc
+from .models import UmbraItem, _iso_utc, _normalize_assets
 
 
 def _require(module: str):
@@ -52,15 +53,16 @@ def _export_doc(item: UmbraItem) -> dict[str, Any]:
     # columns, injected so a parquet consumer sees them without re-reading
     # SQLite. Rebind properties to a fresh dict so ``item.raw`` is not mutated.
     # An existing ``umbra:place`` / ``umbra-py:published`` on the source wins.
-    extra: dict[str, Any] = {}
-    props = doc.get("properties") or {}
+    # Asset keys are schema v2 even when ``item.raw`` still has filenames.
+    props = dict(doc.get("properties") or {})
     if item.place and "umbra:place" not in props:
-        extra["umbra:place"] = item.place
+        props["umbra:place"] = item.place
     published = _iso_utc(item.published)
     if published and "umbra-py:published" not in props:
-        extra["umbra-py:published"] = published
-    if extra:
-        doc["properties"] = {**props, **extra}
+        props["umbra-py:published"] = published
+    props[ASSET_SCHEMA_FIELD] = ASSET_SCHEMA_VERSION
+    doc["properties"] = props
+    doc["assets"] = _normalize_assets(doc.get("assets") or item.assets)
     return doc
 
 
@@ -119,5 +121,18 @@ def export_geoparquet(items: Iterable[UmbraItem], path: str | os.PathLike) -> in
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     reader = stac_geoparquet.arrow.parse_stac_items_to_arrow(docs)
-    stac_geoparquet.arrow.to_parquet(reader, path)
+    # File metadata, next to the per-item property. The collection id matches
+    # the one ``umbra serve`` publishes.
+    stac_geoparquet.arrow.to_parquet(
+        reader,
+        path,
+        collections={
+            "umbra-open-data": {
+                "type": "Collection",
+                "stac_version": "1.0.0",
+                "id": "umbra-open-data",
+                ASSET_SCHEMA_FIELD: ASSET_SCHEMA_VERSION,
+            }
+        },
+    )
     return len(docs)

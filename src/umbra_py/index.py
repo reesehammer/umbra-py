@@ -1304,6 +1304,14 @@ def _asset_name_strings(item: UmbraItem) -> list[str]:
             href = asset.get("href") or ""
             if href:
                 found.append(str(href))
+            # Schema v2 keeps the filename off the key. The href usually still
+            # carries it; this covers a row whose href does not.
+            filename = asset.get("umbra-py:filename")
+            if filename:
+                found.append(str(filename))
+            title = asset.get("title")
+            if title:
+                found.append(str(title))
     return found
 
 
