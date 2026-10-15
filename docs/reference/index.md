@@ -11,7 +11,11 @@ The weekly release stores that file as `catalog.thumbs.manifest.json` and
 hash-named parts under GitHub's 2 GiB asset limit; fetch reassembles them.
 A release that still has a single `catalog.thumbs.db` and no manifest is
 downloaded as that file. `umbra index fetch-thumbnails --if-changed` will
-not replace a local sidecar that already has more previews.
+not replace a local sidecar that already has more previews. The weekly job
+caches its bake between runs and will not publish fewer matching previews
+than the released sidecar, `/healthz`, or
+`.github/thumbnail-preview-floor.json`, except to seed a release that has
+no sidecar yet.
 
 `umbra index build` quarantines source items that cannot be published: a
 datetime before 2018-01-01 or more than a day ahead of the build, a missing
@@ -19,7 +23,9 @@ or invalid footprint, no public HTTPS asset href, or any href into the
 private `prod-prod-processed` bucket. Duplicate ids are collapsed, keeping
 the latest `updated` (or datetime), then the record with the most assets.
 The dropped rows are listed in `umbra index coverage` and in
-`index-validation.json`. `umbra index validate` re-checks the index and,
+`index-validation.json`. They are omitted from the coverage percentage and
+from the missing list; a sidecar that was never indexed still counts as
+missing. `--validation` points the report at a saved `index-validation.json`. `umbra index validate` re-checks the index and,
 with `--parquet`, the geoparquet export, and exits non-zero if any violation
 remains. Duplicate ids are counted in SQL and from the parquet `id` column;
 rows are checked a batch at a time, so the weekly file's wide `assets`

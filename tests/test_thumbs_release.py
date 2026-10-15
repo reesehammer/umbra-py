@@ -25,6 +25,7 @@ from umbra_py.thumbs_release import (
     assemble_thumbnail_sidecar,
     assert_remote_thumbnail_release,
     decide_thumbnail_publish,
+    indexed_preview_count,
     pack_thumbnail_release,
     parse_thumbs_manifest,
     preview_count_from_health,
@@ -257,6 +258,32 @@ def test_decide_thumbnail_publish_skips_a_count_below_the_floor():
     assert grown.publish is True and grown.floor == 4050
 
 
+def test_decide_thumbnail_publish_seeds_when_the_release_has_no_sidecar():
+    """A growing bake may publish when nothing is on the release yet.
+
+    The floor is still reported. A manifest, even a small one, keeps the
+    shrink protection, and an empty bake is never a seed.
+    """
+    floors = ThumbnailFloors(healthz=3355, remembered=3355, release_absent=True)
+    decision = decide_thumbnail_publish(1500, floors)
+    assert decision.publish is True and decision.reason == "seed" and decision.floor == 3355
+    action, floor, reason = decision.line().split("\t", 2)
+    assert action == "publish" and floor == "3355"
+    assert "seed" in reason and "will not replace" in reason
+
+    caught_up = decide_thumbnail_publish(3355, floors)
+    assert caught_up.publish is True and caught_up.reason == "ok"
+
+    blocked = decide_thumbnail_publish(
+        1500,
+        ThumbnailFloors(manifest=100, healthz=3355, remembered=3355, release_absent=True),
+    )
+    assert blocked.publish is False and blocked.reason == "regression"
+
+    empty = decide_thumbnail_publish(0, floors)
+    assert empty.publish is False and empty.reason == "empty"
+
+
 def test_decide_thumbnail_publish_skips_empty_and_warns_when_no_floor_is_known():
     empty = decide_thumbnail_publish(0, ThumbnailFloors(healthz=4050))
     assert empty.publish is False and empty.reason == "empty"
@@ -283,7 +310,7 @@ def test_remembered_floor_file_holds_the_live_preview_count():
     path = Path(__file__).resolve().parents[1] / ".github" / "thumbnail-preview-floor.json"
     count, note = remembered_preview_count(path)
     assert note is None
-    assert count is not None and count >= 4050
+    assert count == 3355
 
 
 _MANIFEST = "https://example.test/thumbs/catalog.thumbs.manifest.json"
@@ -298,7 +325,8 @@ def _line(sidecar: Path, floor: Path) -> str:
 
 
 @responses.activate
-def test_publish_line_uses_healthz_and_the_repo_floor_when_the_release_is_empty(tmp_path):
+def test_publish_line_seeds_when_the_release_is_confirmed_empty(tmp_path):
+    """404 on both release assets may publish below /healthz. A 503 may not."""
     sidecar = tmp_path / "catalog.thumbs.db"
     _sidecar(sidecar, 2)
     floor = tmp_path / "floor.json"
@@ -307,11 +335,19 @@ def test_publish_line_uses_healthz_and_the_repo_floor_when_the_release_is_empty(
     responses.add(responses.HEAD, _LEGACY, status=404)
     responses.add(responses.GET, _HEALTH, json={"thumbnails": {"count": 4050}}, status=200)
     action, got, reason = _line(sidecar, floor).split("\t", 2)
-    assert action == "skip" and got == "4050"
-    assert "healthz=4050" in reason and "remembered=4050" in reason
+    assert action == "publish" and got == "4050"
+    assert "seed" in reason and "healthz=4050" in reason and "remembered=4050" in reason
     assert not any(
         call.request.url == _LEGACY and call.request.method == "GET" for call in responses.calls
     )
+
+    responses.reset()
+    responses.add(responses.GET, _MANIFEST, status=503)
+    responses.add(responses.HEAD, _LEGACY, status=503)
+    responses.add(responses.GET, _HEALTH, json={"thumbnails": {"count": 4050}}, status=200)
+    action, got, reason = _line(sidecar, floor).split("\t", 2)
+    assert action == "skip" and got == "4050"
+    assert "Refusing" in reason
 
 
 @responses.activate
@@ -356,3 +392,92 @@ def test_publish_line_warns_and_allows_a_first_publish_when_every_floor_is_unkno
     action, got, reason = _line(sidecar, tmp_path / "missing-floor.json").split("\t", 2)
     assert action == "publish" and got == ""
     assert "No previous" in reason and "unreadable" in reason
+
+
+def _index_with_id(path, item_id: str, href: str) -> None:
+    from umbra_py.index import CatalogIndex
+    from umbra_py.models import UmbraItem
+
+    with CatalogIndex(path) as idx:
+        idx.add(
+            UmbraItem.from_dict(
+                {
+                    "id": item_id,
+                    "bbox": [0, 0, 1, 1],
+                    "properties": {"datetime": "2024-01-15T10:00:00Z"},
+                    "assets": {},
+                },
+                href=href,
+            )
+        )
+        idx.commit()
+
+
+def _sidecar_rows(path: Path, rows: list[tuple[str, str]]) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE thumbnails (href TEXT PRIMARY KEY, id TEXT NOT NULL, png BLOB NOT NULL)"
+    )
+    conn.executemany(
+        "INSERT INTO thumbnails (href, id, png) VALUES (?, ?, ?)",
+        [(href, item_id, b"png") for href, item_id in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_indexed_preview_count_drops_ids_the_index_no_longer_has(tmp_path):
+    index = tmp_path / "catalog.db"
+    href = "https://example.test/keep.json"
+    _index_with_id(index, "keep", href)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar_rows(sidecar, [(href, "keep"), ("https://example.test/drop.json", "drop")])
+    assert sqlite_preview_count(sidecar) == 2
+    assert indexed_preview_count(sidecar, index) == 1
+    assert indexed_preview_count(tmp_path / "missing.db", index) is None
+
+
+@responses.activate
+def test_publish_line_counts_only_previews_that_match_the_index(tmp_path):
+    """A legacy sidecar's stale rows do not raise the floor above the index."""
+    href = "https://example.test/keep.json"
+    index = tmp_path / "catalog.db"
+    _index_with_id(index, "keep", href)
+    sidecar = tmp_path / "catalog.thumbs.db"
+    _sidecar_rows(sidecar, [(href, "keep")])
+    previous = tmp_path / "previous.db"
+    _sidecar_rows(
+        previous,
+        [(href, "keep"), ("https://example.test/drop.json", "drop")],
+    )
+    body = previous.read_bytes()
+    headers = {"Content-Length": str(len(body))}
+    responses.add(responses.GET, _MANIFEST, status=404)
+    responses.add(responses.HEAD, _LEGACY, status=200, headers=headers)
+    responses.add(responses.GET, _LEGACY, body=body, status=200, headers=headers)
+    responses.add(responses.GET, _HEALTH, status=503)
+    floor = tmp_path / "floor.json"
+    floor.write_text(json.dumps({"previews": 1}), encoding="utf-8")
+
+    def line(index_path):
+        return thumbnail_publish_line(
+            sidecar,
+            floor,
+            index=index_path,
+            manifest_url=_MANIFEST,
+            legacy_url=_LEGACY,
+            healthz_url=_HEALTH,
+        )
+
+    action, got, reason = line(index).split("\t", 2)
+    assert (action, got) == ("publish", "1")
+    assert reason == "ok"
+
+    responses.reset()
+    responses.add(responses.GET, _MANIFEST, status=404)
+    responses.add(responses.HEAD, _LEGACY, status=200, headers=headers)
+    responses.add(responses.GET, _LEGACY, body=body, status=200, headers=headers)
+    responses.add(responses.GET, _HEALTH, status=503)
+    action, got, reason = line(None).split("\t", 2)
+    assert action == "skip" and got == "2"
+    assert "legacy=2" in reason

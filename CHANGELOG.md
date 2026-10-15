@@ -171,6 +171,8 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   in git. New entries are 1–3 sentences naming the public surface.
 
 ### Fixed
+- **Coverage no longer counts intentional drops as gaps.** `umbra index coverage` and the weekly 99% gate omit acquisitions named as deduped duplicates or quarantined rows in `index-validation.json` (or the validation record stored on the index). `totals.pct_indexable` is indexed acquisitions over that expected set. A sidecar the report does not name still fails the gate.
+- **Weekly thumbnail bakes accumulate, and the preview floor is the merged count.** The publish workflow restores a cached thumbnail seed, bakes up to 2400 new previews, and saves the seed for the next run. The guard compares previews whose id or href is in the current index with `.github/thumbnail-preview-floor.json` (3355), `/healthz`, and any published sidecar, and may publish a seed when the release has no sidecar. The server still will not replace a larger local `catalog.thumbs.db`.
 - **`umbra index validate` no longer loads the whole catalog into memory.**
   The weekly publish was killed a couple of minutes into that step (runner
   shutdown, "The operation was canceled") because the check held every index

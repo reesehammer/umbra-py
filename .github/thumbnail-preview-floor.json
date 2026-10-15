@@ -1,6 +1,6 @@
 {
-  "previews": 4050,
+  "previews": 3355,
   "source": "https://api.umbra-py.space/healthz",
-  "noted": "2026-10-14",
-  "note": "Last known baked-preview count on the public API (thumbnails.count). The weekly thumbnail publish will not upload a sidecar with fewer previews than this, the live /healthz count, or the released manifest. Raise this when a larger count is known and /healthz may be unreachable."
+  "noted": "2026-10-15",
+  "note": "Merged preview count (thumbnails.count) after the index dropped duplicate ids and future-dated rows. The previous floor of 4050 included about 695 previews whose ids are no longer in the index. The weekly publish will not upload a sidecar with fewer matching previews than this, the live /healthz count, or a published sidecar. When the release has no thumbnail sidecar, a smaller seed may be published; the server will not replace its own larger local file."
 }

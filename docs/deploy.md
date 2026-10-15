@@ -461,13 +461,18 @@ the only consistent copy.
 The weekly `publish-index.yml` workflow publishes `catalog.db`, then the
 thumbnail sidecar. A sidecar of 2 GiB or more cannot be one GitHub release
 asset, so the workflow uploads `catalog.thumbs.manifest.json` and
-`catalog.thumbs.db.partNNN.<sha>` parts. Before that upload it compares the
-new preview count with the previous manifest (its `previews` field) or the
-legacy asset, the live `/healthz` `thumbnails.count`, and
-`.github/thumbnail-preview-floor.json`. A lower count skips the thumbnail
-upload, leaves the previous assets in place, and warns; the catalog index
-is still published. When an upload does run, the job fails if any of those
-assets is missing afterwards. The entrypoint's `umbra index fetch-thumbnails
+`catalog.thumbs.db.partNNN.<sha>` parts. Before that upload it compares the new preview count — rows whose id or href
+is in the index just built — with the previous manifest (its `previews`
+field) or the legacy asset, the live `/healthz` `thumbnails.count`, and
+`.github/thumbnail-preview-floor.json` (3355, the merged count after
+duplicate and future-dated rows left the index). A lower count skips the
+thumbnail upload, leaves the previous assets in place, and warns; the catalog
+index is still published. Each run restores the previous bake from the
+Actions cache, merges it, and saves the result, so a week that does not
+publish still keeps its previews. When the release has no thumbnail sidecar
+at all, a smaller bake may still be published so the next run can continue
+from it. When an upload does run, the job fails if any of those assets is
+missing afterwards. The entrypoint's `umbra index fetch-thumbnails
 --if-changed` reads that manifest, writes `catalog.thumbs.db`, and will not
 replace a local sidecar that has more previews. It redeploys whenever
 `catalog.db` was published, even if the thumbnail bake or upload was skipped

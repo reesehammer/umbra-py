@@ -479,6 +479,48 @@ def sqlite_preview_count(path: str | os.PathLike) -> int | None:
     return _nonneg_int(row[0])
 
 
+def indexed_preview_count(sidecar: str | os.PathLike, index_path: str | os.PathLike) -> int | None:
+    """How many sidecar previews belong to an item still in ``index_path``.
+
+    A row counts when its ``id`` is in the index or its ``href`` is. Quarantined
+    items and duplicate hrefs whose id was dropped are not in the index, so
+    they do not count. ``None`` means ``sidecar`` is not a thumbnail database
+    or ``index_path`` could not be read — not zero previews. Zero means none of
+    the rows match.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{sidecar}?mode=ro", uri=True)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(thumbnails)")}
+            clauses: list[str] = []
+            if "id" in columns:
+                clauses.append("t.id IN (SELECT id FROM idx.items)")
+            if "href" in columns:
+                clauses.append("t.href IN (SELECT href FROM idx.items)")
+            if not clauses:
+                return None
+            conn.execute("ATTACH DATABASE ? AS idx", (f"file:{index_path}?mode=ro",))
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM thumbnails AS t WHERE {' OR '.join(clauses)}"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return None
+    if row is None:
+        return None
+    return _nonneg_int(row[0])
+
+
+def _count_previews(path: str | os.PathLike, index: str | os.PathLike | None) -> int | None:
+    """Indexed overlap when ``index`` is set and readable, else the raw row count."""
+    if index is not None:
+        counted = indexed_preview_count(path, index)
+        if counted is not None:
+            return counted
+    return sqlite_preview_count(path)
+
+
 @dataclass(frozen=True)
 class ThumbnailFloors:
     """Preview counts the publish guard was able to read.
@@ -487,6 +529,10 @@ class ThumbnailFloors:
     carrying no count). A present zero is a real count and participates in
     the floor. ``notes`` are the failures a warning should mention; a 404
     on an asset that is simply not published is not a note.
+
+    ``release_absent`` is true only when the manifest and the legacy sidecar
+    are both confirmed missing (HTTP 404). A network error is not absence:
+    the guard must not treat an unread release as an empty one.
     """
 
     manifest: int | None = None
@@ -494,6 +540,7 @@ class ThumbnailFloors:
     healthz: int | None = None
     remembered: int | None = None
     notes: tuple[str, ...] = ()
+    release_absent: bool = False
 
     def floor(self) -> int | None:
         known = [
@@ -509,9 +556,11 @@ class ThumbnailPublishDecision:
     """Whether a freshly baked sidecar may replace the published thumbnail assets.
 
     ``publish`` is false for an empty sidecar and for one with fewer previews
-    than :meth:`ThumbnailFloors.floor`. The catalog index is a separate upload;
-    a false decision leaves the previous thumbnail assets where they are.
-    ``reason`` is ``empty``, ``regression``, ``no-floor``, or ``ok``.
+    than :meth:`ThumbnailFloors.floor`, except when the release has no sidecar
+    at all: a positive count may be published as a seed (``reason`` ``seed``).
+    The catalog index is a separate upload; a false decision leaves the
+    previous thumbnail assets where they are. ``reason`` is ``empty``,
+    ``regression``, ``no-floor``, ``seed``, or ``ok``.
     """
 
     publish: bool
@@ -529,6 +578,16 @@ class ThumbnailPublishDecision:
             return (
                 f"No previous thumbnail preview count ({detail}). "
                 f"Publishing {self.new_count} previews."
+            )
+        if self.reason == "seed":
+            known = ", ".join(
+                f"{name}={count}" for name, count in self.sources.items() if count is not None
+            )
+            extra = f" Notes: {'; '.join(self.notes)}." if self.notes else ""
+            return (
+                f"Publishing {self.new_count} previews as a thumbnail seed; the release "
+                f"has no sidecar (floor {self.floor}, {known}). The server will not "
+                f"replace a larger local sidecar.{extra}"
             )
         if self.reason == "regression":
             known = ", ".join(
@@ -554,14 +613,27 @@ class ThumbnailPublishDecision:
         return f"{action}\t{floor}\t{text}"
 
 
+def _seeding(floors: ThumbnailFloors) -> bool:
+    """True when a positive bake may be published because the release has no sidecar.
+
+    The server-side refresh still refuses to replace a larger local file, so
+    this seed cannot shrink the copy ``/healthz`` is counting.
+    """
+    return floors.release_absent and floors.manifest is None and floors.legacy is None
+
+
 def decide_thumbnail_publish(new_count: int, floors: ThumbnailFloors) -> ThumbnailPublishDecision:
     """Decide whether ``new_count`` previews may replace the published sidecar.
 
     The floor is the greatest count among the manifest, the legacy asset, the
     live ``/healthz`` ``thumbnails.count``, and the repo-stored last-known
-    count. A new sidecar below that floor is not published. When every source
-    is unknown the sidecar may be published, and ``reason`` is ``no-floor`` so
-    the caller can warn. ``new_count`` of zero is never published.
+    count. Those counts are previews that match the current index when the
+    caller could read the rows. A new sidecar below that floor is not
+    published, unless the release has no sidecar at all: then a positive
+    count is a seed (``reason`` ``seed``) and the known floor is only reported.
+    When every source is unknown the sidecar may be published, and ``reason``
+    is ``no-floor`` so the caller can warn. ``new_count`` of zero is never
+    published.
     """
     if _nonneg_int(new_count) is None:
         raise UmbraError(f"new_count {new_count!r} is not a non-negative integer.")
@@ -577,6 +649,9 @@ def decide_thumbnail_publish(new_count: int, floors: ThumbnailFloors) -> Thumbna
         publish = False
     elif floor is None:
         reason = "no-floor"
+        publish = True
+    elif new_count < floor and _seeding(floors):
+        reason = "seed"
         publish = True
     elif new_count < floor:
         reason = "regression"
@@ -621,6 +696,7 @@ def collect_thumbnail_floors(
     *,
     session: Any = None,
     floor_path: str | os.PathLike | None = None,
+    index: str | os.PathLike | None = None,
     healthz_url: str = PUBLIC_HEALTHZ_URL,
     manifest_url: str = CATALOG_INDEX_THUMBS_MANIFEST_URL,
     legacy_url: str = CATALOG_INDEX_THUMBS_URL,
@@ -630,13 +706,18 @@ def collect_thumbnail_floors(
     A manifest with a ``previews`` field is that count; the parts are not
     downloaded. With no manifest, a legacy ``catalog.thumbs.db`` is downloaded
     and counted. ``/healthz`` contributes ``thumbnails.count`` when the live
-    API answers. ``floor_path`` is the repo-stored last-known count. Failures
-    are notes, not exceptions: the index publish must not depend on a floor
-    that happens to be down.
+    API answers. ``floor_path`` is the repo-stored last-known count. When
+    ``index`` is set, a downloaded legacy sidecar counts only rows whose id or
+    href is in that index. The manifest's ``previews`` field is a number, not
+    a row list, so it cannot be filtered the same way. Failures are notes, not
+    exceptions: the index publish must not depend on a floor that happens to
+    be down.
     """
     sess = session if session is not None else _session()
     notes: list[str] = []
-    manifest_count, legacy_count, release_notes = _release_counts(sess, manifest_url, legacy_url)
+    manifest_count, legacy_count, release_notes, release_absent = _release_counts(
+        sess, manifest_url, legacy_url, index=index
+    )
     notes.extend(release_notes)
     healthz_count, healthz_note = _healthz_count(sess, healthz_url)
     if healthz_note:
@@ -646,13 +727,21 @@ def collect_thumbnail_floors(
         remembered, remembered_note = remembered_preview_count(floor_path)
         if remembered_note:
             notes.append(remembered_note)
-    return ThumbnailFloors(manifest_count, legacy_count, healthz_count, remembered, tuple(notes))
+    return ThumbnailFloors(
+        manifest_count,
+        legacy_count,
+        healthz_count,
+        remembered,
+        tuple(notes),
+        release_absent,
+    )
 
 
 def thumbnail_publish_line(
     sidecar: str | os.PathLike,
     floor_path: str | os.PathLike,
     *,
+    index: str | os.PathLike | None = None,
     session: Any = None,
     healthz_url: str = PUBLIC_HEALTHZ_URL,
     manifest_url: str = CATALOG_INDEX_THUMBS_MANIFEST_URL,
@@ -661,12 +750,15 @@ def thumbnail_publish_line(
     """One line the weekly workflow reads before uploading thumbnail assets.
 
     Counts ``sidecar`` and compares it with :func:`collect_thumbnail_floors`.
-    A file that is not a thumbnail database counts as zero and is not published.
+    When ``index`` is set, the new sidecar counts only previews whose id or
+    href is in that index. A file that is not a thumbnail database counts as
+    zero and is not published.
     """
-    counted = sqlite_preview_count(sidecar)
+    counted = _count_previews(sidecar, index)
     floors = collect_thumbnail_floors(
         session=session,
         floor_path=floor_path,
+        index=index,
         healthz_url=healthz_url,
         manifest_url=manifest_url,
         legacy_url=legacy_url,
@@ -701,8 +793,17 @@ def _optional_get_json(session: Any, url: str) -> tuple[Any, int | None, str | N
 
 
 def _release_counts(
-    session: Any, manifest_url: str, legacy_url: str
-) -> tuple[int | None, int | None, list[str]]:
+    session: Any,
+    manifest_url: str,
+    legacy_url: str,
+    *,
+    index: str | os.PathLike | None = None,
+) -> tuple[int | None, int | None, list[str], bool]:
+    """``(manifest, legacy, notes, release_absent)``.
+
+    ``release_absent`` is true only when both the manifest and the legacy
+    asset answer 404. Any other miss leaves it false.
+    """
     notes: list[str] = []
     body, status, note = _optional_get_json(session, manifest_url)
     if note:
@@ -710,24 +811,29 @@ def _release_counts(
     if status == 200:
         if not isinstance(body, dict):
             notes.append("thumbnail manifest is not a JSON object")
-            return None, None, notes
+            return None, None, notes, False
         if "previews" not in body:
             notes.append("thumbnail manifest has no previews count")
-            return None, None, notes
+            return None, None, notes, False
         count = _nonneg_int(body.get("previews"))
         if count is None:
             notes.append(
                 f"thumbnail manifest previews {body.get('previews')!r} is not a "
                 "non-negative integer"
             )
-        return count, None, notes
-    legacy_count, legacy_note = _legacy_count(session, legacy_url)
+        return count, None, notes, False
+    legacy_count, legacy_note = _legacy_count(session, legacy_url, index=index)
     if legacy_note:
         notes.append(legacy_note)
-    return None, legacy_count, notes
+    # A confirmed 404 on the manifest and a confirmed 404 on the legacy asset
+    # (no note, no count). An error reading either one is not absence.
+    release_absent = status == 404 and legacy_count is None and legacy_note is None
+    return None, legacy_count, notes, release_absent
 
 
-def _legacy_count(session: Any, url: str) -> tuple[int | None, str | None]:
+def _legacy_count(
+    session: Any, url: str, *, index: str | os.PathLike | None = None
+) -> tuple[int | None, str | None]:
     try:
         head = session.head(url, allow_redirects=True, timeout=60)
     except Exception as exc:
@@ -742,7 +848,7 @@ def _legacy_count(session: Any, url: str) -> tuple[int | None, str | None]:
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / CATALOG_THUMBS_ASSET
             download_url(url, dest, overwrite=True, session=session)
-            count = sqlite_preview_count(dest)
+            count = _count_previews(dest, index)
     except Exception as exc:
         return None, f"legacy sidecar could not be counted: {exc}"
     if count is None:
