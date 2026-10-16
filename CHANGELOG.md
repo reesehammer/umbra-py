@@ -10,6 +10,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **The MCP registry lists the hosted server.** `server.json` keeps the stdio
+  PyPI package and adds a `streamable-http` remote at
+  `https://api.umbra-py.space/mcp`. The host needs no auth, so the remote
+  has no headers. Registry clients that only keep remotes can discover it.
 - **Republished captures stay in the index and are linked.** The same collect
   under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
   when the datetimes are within 60 seconds. Every item gains
