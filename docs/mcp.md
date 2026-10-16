@@ -114,6 +114,10 @@ the server never connects
 claude mcp add-json umbra '{"type":"http","url":"https://api.umbra-py.space/mcp"}' --scope user
 ```
 
+An optional plugin packages this same host, limited to the core tools, with
+a short skill: `integrations/agent-plugin/umbra-sar/`. In Claude Code,
+`/plugin marketplace add reesehammer/umbra-py`.
+
 ## Claude Desktop
 
 **Settings → Connectors** (or **Developer**), then add a custom connector

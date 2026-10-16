@@ -29,6 +29,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   parquet; the API rewrites them to its item route). `GET`/`POST /search` and
   `search_catalog(canonical=True)` can keep the canonical copy. Item counts
   are unchanged; `unique_captures` counts canonical rows.
+- **Optional agent plugin for the hosted umbra MCP.**
+  `integrations/agent-plugin/umbra-sar/` is a portable plugin (MCP config plus
+  a short skill) that searches, previews, and opens Umbra open SAR (CC BY 4.0)
+  through `https://api.umbra-py.space/mcp`, limited to the core tools. Claude
+  Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 
 ### Fixed
 - **`download_asset(confirm=true)` is refused on the public host.** When COG
