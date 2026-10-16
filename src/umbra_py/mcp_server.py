@@ -189,6 +189,34 @@ def _require_cog_streaming(tool: str) -> None:
     raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
+def _refuse_public_asset_download(href: str) -> None:
+    """Refuse ``download_asset(confirm=True)`` when this host must not store Umbra files.
+
+    Same gate as :func:`_require_cog_streaming`: ``cog_streaming`` off
+    (``umbra serve --public`` / ``UMBRA_MCP_COG_STREAMING=0``). The error names
+    the asset href and its size in bytes so the client can fetch the file
+    itself. A local or stdio server returns immediately, with no extra request.
+    """
+    if _cog_streaming_allowed():
+        return
+    from ._http import DEFAULT_TIMEOUT, default_session
+
+    head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+    head.raise_for_status()
+    length = head.headers.get("Content-Length")
+    size = int(length) if length is not None else None
+    if size is None:
+        sized = f"{href} (size unknown)"
+    else:
+        sized = f"{href} ({size} bytes)"
+    raise ValueError(
+        "download_asset would write this file on the public community host. "
+        "The public community instance does not proxy the archive — download "
+        f"{sized} locally with your own downloader, or run a local "
+        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server for download_asset."
+    )
+
+
 def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a tool so anticipated failures reach the MCP client.
 
@@ -1368,6 +1396,12 @@ def download_asset(
     ``{asset, path, bytes}`` on download, or a size-and-hint object when
     confirmation is still required.
 
+    On a public host (``umbra serve --public``, COG streaming off),
+    ``confirm=True`` is refused. The error includes the asset href and its
+    size in bytes and tells you to download the file locally (or run a local
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
+    ``confirm=False`` still returns the size.
+
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
@@ -1420,6 +1454,7 @@ def download_asset(
             + "Call again with confirm=true to download it.",
         }
 
+    _refuse_public_asset_download(href)
     path = _download_asset(item, asset, dest_dir)
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
