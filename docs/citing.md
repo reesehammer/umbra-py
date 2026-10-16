@@ -19,7 +19,7 @@ Space open data under CC BY 4.0.
   author  = {Hammerstrom, Reese},
   title   = {umbra-py},
   year    = {2026},
-  version = {0.1.2},
+  version = {0.1.3},
   doi     = {10.5281/zenodo.TBD},
   url     = {https://github.com/reesehammer/umbra-py},
   license = {Apache-2.0}
