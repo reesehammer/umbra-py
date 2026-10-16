@@ -423,6 +423,7 @@ jobs:
       # the boot skipped or failed (healthz `degraded`, or a merged sidecar that
       # is not the published one) is a warning: the index serves, previews lag.
       - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)
+        id: confirm
         if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' }}
         env:
           REDEPLOY_OUTCOME: ${{ steps.redeploy.outcome }}
@@ -471,6 +472,15 @@ jobs:
           done
           echo "::error title=Hosted API stale::https://api.umbra-py.space/healthz did not report snapshot ${want} within 30 minutes."
           exit 1
+
+      # Same redeploy the snapshot check just waited out. tools/list is the
+      # canary a desktop client runs: the six stable names are present.
+      # Retries live in umbra_py.mcp_smoke (30s per attempt) so a container
+      # whose /healthz is up but whose first MCP request is still cold
+      # (~25s) does not fail the publish.
+      - name: Confirm the hosted MCP lists the stable tools
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' && steps.confirm.outcome == 'success' }}
+        run: python -c "import umbra_py.mcp_smoke as s; s.assert_hosted_core_tools()"
 
       # pct_indexable is indexed / expected. expected is acquisitions with a
       # sidecar minus the deduped duplicates and quarantined rows named in
