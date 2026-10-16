@@ -21,8 +21,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Container driver, so --cache-to type=gha works. The BuildKit image
+      # comes from the GCR mirror: this repo already left anonymous Docker Hub.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      # buildx's gha cache reads ACTIONS_RUNTIME_TOKEN, which `run:` steps do
+      # not see. No repo secret: this republishes the runner's own cache token.
+      - name: Export Actions cache credentials
+        uses: ./.github/actions/export-actions-env
+
+      # Retries public.ecr.aws, then mirror.gcr.io. Dockerfile default is unchanged.
       - name: Build image (serve extra)
-        run: docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve -t umbra-py:ci .
+        run: bash .github/scripts/docker-build-ci.sh
 
       - name: CLI passthrough works
         run: docker run --rm umbra-py:ci --version
