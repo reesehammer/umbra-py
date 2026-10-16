@@ -65,7 +65,11 @@ Good entry points today:
 Version is single-sourced from `umbra_py.__version__`. The tag must be
 `vX.Y.Z` matching that value — `.github/workflows/release.yml` refuses a
 mismatch, then publishes to PyPI (Trusted Publisher) and submits
-`server.json` to the MCP registry.
+`server.json` to the MCP registry. The agent plugin manifests
+(`integrations/agent-plugin/umbra-sar/plugin.json` and
+`integrations/agent-plugin/umbra-sar/.claude-plugin/plugin.json`) must use
+that same version; `tests/test_agent_plugin.py` fails the release if they
+drift.
 
 1. Register the PyPI Trusted Publisher *before* the first tag (GitHub repo
    `reesehammer/umbra-py`, workflow `release.yml`, environment `pypi`).

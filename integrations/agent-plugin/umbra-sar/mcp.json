@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "umbra": {
+      "type": "http",
+      "url": "https://api.umbra-py.space/mcp",
+      "enabled_tools": [
+        "search_catalog",
+        "get_item",
+        "quicklook",
+        "download_asset",
+        "geocode_place",
+        "index_stats"
+      ]
+    }
+  }
+}

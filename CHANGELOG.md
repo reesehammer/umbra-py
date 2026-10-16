@@ -10,6 +10,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Optional agent plugin for the hosted umbra MCP.**
+  `integrations/agent-plugin/umbra-sar/` is a portable plugin (MCP config plus
+  a short skill) that searches, previews, and opens Umbra open SAR (CC BY 4.0)
+  through `https://api.umbra-py.space/mcp`, limited to the core tools. Claude
+  Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 - **Republished captures stay in the index and are linked.** The same collect
   under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
   when the datetimes are within 60 seconds. Every item gains

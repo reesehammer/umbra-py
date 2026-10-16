@@ -1,0 +1,15 @@
+{
+  "name": "umbra-py",
+  "description": "Optional plugins for the community umbra MCP host.",
+  "owner": {
+    "name": "umbra-py contributors",
+    "url": "https://github.com/reesehammer/umbra-py"
+  },
+  "plugins": [
+    {
+      "name": "umbra-sar",
+      "source": "./integrations/agent-plugin/umbra-sar",
+      "description": "Search, preview and open Umbra open SAR (CC BY 4.0) via the community umbra MCP host."
+    }
+  ]
+}
