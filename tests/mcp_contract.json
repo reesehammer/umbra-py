@@ -1,0 +1,68 @@
+{
+  "search_catalog": {
+    "required": [],
+    "args": {
+      "bbox": "array[number]|null",
+      "intersects": "null|object",
+      "place": "null|string",
+      "area": "null|string",
+      "fuzzy": "boolean",
+      "semantic": "boolean",
+      "min_score": "number",
+      "start": "null|string",
+      "end": "null|string",
+      "products": "array[string]|null",
+      "polarizations": "array[string]|null",
+      "min_incidence": "null|number",
+      "max_incidence": "null|number",
+      "max_resolution": "null|number",
+      "canonical": "boolean|null",
+      "limit": "integer",
+      "max_per_task": "integer|null",
+      "local": "boolean|null"
+    }
+  },
+  "get_item": {
+    "required": [
+      "url"
+    ],
+    "args": {
+      "url": "string"
+    }
+  },
+  "quicklook": {
+    "required": [
+      "url"
+    ],
+    "args": {
+      "url": "string",
+      "asset": "string",
+      "db": "boolean",
+      "max_size": "integer",
+      "preview": "string"
+    }
+  },
+  "download_asset": {
+    "required": [
+      "url"
+    ],
+    "args": {
+      "url": "string",
+      "asset": "string",
+      "dest_dir": "string",
+      "confirm": "boolean"
+    }
+  },
+  "geocode_place": {
+    "required": [
+      "query"
+    ],
+    "args": {
+      "query": "string"
+    }
+  },
+  "index_stats": {
+    "required": [],
+    "args": {}
+  }
+}

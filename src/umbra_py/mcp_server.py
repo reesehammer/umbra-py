@@ -835,8 +835,9 @@ def get_item(url: str) -> dict[str, Any]:
     asset hrefs, which is what distinguishes ``sar-data/tasks/``,
     ``sar-data/task-data/``, and ``open-data/`` — the name itself does not.
     Zero matches is an error. More than one match lists the candidate STAC
-    URLs; pass one of those. A filename needs a local index
-    (``umbra index fetch``).
+    URLs; pass one of those. The hosted server resolves a filename or stem
+    with the catalog index it already loaded. A local server does the same
+    after ``umbra index fetch``.
 
     When the index contains a STAC URL, the indexed snapshot is returned —
     the same document ``search_catalog`` already answered from — rather than
@@ -1371,8 +1372,8 @@ def download_asset(
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
-    the local catalog index the same way as ``get_item``. A filename needs a
-    local index (``umbra index fetch``).
+    the catalog index the same way as ``get_item``. The hosted server already
+    has that index. A local server needs ``umbra index fetch``.
 
     ``asset`` selects the file. All of these work:
 
@@ -1937,6 +1938,32 @@ def main() -> None:
     run()
 
 
+#: Tools that only read. Clients use ``readOnlyHint`` to skip an approval
+#: prompt. ``download_asset`` writes a file when ``confirm`` is true.
+#: ``watch_site`` persists a baseline in the catalog index meta table.
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "search_catalog",
+        "find_repeat_sites",
+        "get_item",
+        "geocode_place",
+        "index_stats",
+        "quicklook",
+        "change_composite",
+        "timescan",
+        "stack_stats",
+        "stack_provenance",
+        "pick_change_interval",
+        "find_similar",
+        "find_similar_text",
+        "describe_scene",
+        "narrate_change",
+        "stamp_description",
+        "stamp_narration",
+    }
+)
+
+
 def build_server() -> MCPServer:
     """Construct and return the configured ``MCPServer``.
 
@@ -1945,6 +1972,11 @@ def build_server() -> MCPServer:
     lazy — importing this module does not require the extra until you build.
     """
     MCPServer, _Image = _require_mcp()
+    from mcp_types import ToolAnnotations
+
+    from umbra_py import __version__
+
+    read_only = ToolAnnotations(read_only_hint=True)
 
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
@@ -1957,6 +1989,7 @@ def build_server() -> MCPServer:
     )
     server = MCPServer(
         "umbra",
+        version=__version__,
         instructions=(
             "Search and visualize Umbra's open SAR archive. Start by reading "
             "the 'umbra://context' resource for product-type and search "
@@ -2029,7 +2062,11 @@ def build_server() -> MCPServer:
         # is what lets the radar scene reach the client at all; the JSON tools
         # keep structured output, which is worth having for them.
         image_tool = fn in _IMAGE_TOOLS or fn in (describe_scene, narrate_change)
-        server.add_tool(_as_mcp_tool(fn), structured_output=False if image_tool else None)
+        server.add_tool(
+            _as_mcp_tool(fn),
+            structured_output=False if image_tool else None,
+            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else None,
+        )
 
     @server.resource(
         "umbra://context",
