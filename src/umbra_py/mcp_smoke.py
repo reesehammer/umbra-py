@@ -134,3 +134,25 @@ def assert_hosted_core_tools(
     raise RuntimeError(
         f"hosted MCP at {url} did not list the stable tools after {attempts} attempts: {last_error}"
     )
+
+
+def main() -> int:
+    """Probe the hosted core and return 1 when a name is missing.
+
+    Prints a GitHub Actions ``::error`` on failure, the same way the hosted
+    health probe reports a bad ``/healthz``. Retries stay inside
+    :func:`assert_hosted_core_tools` (30s each) so a cold listener does not
+    fail a single attempt.
+    """
+    try:
+        names = assert_hosted_core_tools()
+    except RuntimeError as exc:
+        print(f"::error title=Hosted MCP tools::{exc}", flush=True)
+        return 1
+    present = [name for name in names if name in STABLE_CORE]
+    print("hosted MCP lists " + ", ".join(present), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

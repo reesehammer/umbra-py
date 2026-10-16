@@ -43,9 +43,8 @@ Six tools are the stable core through every 0.x minor: `search_catalog`,
 stays optional when it is optional today. A new argument is optional, and
 its default preserves the behavior of a call that omits it. A name or
 argument that is retired stays registered as an alias for at least one
-minor release and two hosted-index weeks. The old tool's description starts
-with `DEPRECATED: use X`, the change is in `CHANGELOG.md`, and this page
-notes it. The hosted host keeps that alias until the next minor.
+minor release. The old tool's description starts with `DEPRECATED: use X`,
+the change is in `CHANGELOG.md`, and this page notes it.
 
 Result cards follow the published JSON schemas: stable within a minor
 version, and changed only with a changelog entry. A new field may appear.
@@ -149,8 +148,8 @@ and no session id.
 
 A usual flow is `search_catalog`, then the `bbox` on each card as a
 footprint, then `quicklook`, then `get_item`, then the GEC product `url`.
-Umbra's bucket sends `Access-Control-Allow-Origin: *` and allows `Range`,
-so a browser or a desktop map can stream that COG itself. Download a large
+Umbra's bucket allows a cross-origin GET with Range requests. Whether a
+given browser COG reader works is not verified. Otherwise download the
 file with your own downloader. On this host `download_asset` is the size
 check (`confirm=false`).
 

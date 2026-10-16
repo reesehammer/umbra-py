@@ -473,22 +473,25 @@ jobs:
           echo "::error title=Hosted API stale::https://api.umbra-py.space/healthz did not report snapshot ${want} within 30 minutes."
           exit 1
 
-      # Same redeploy the snapshot check just waited out. tools/list is the
-      # canary a desktop client runs: the six stable names are present.
-      # Retries live in umbra_py.mcp_smoke (30s per attempt) so a container
-      # whose /healthz is up but whose first MCP request is still cold
-      # (~25s) does not fail the publish.
-      - name: Confirm the hosted MCP lists the stable tools
-        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' && steps.confirm.outcome == 'success' }}
-        run: python -c "import umbra_py.mcp_smoke as s; s.assert_hosted_core_tools()"
-
       # pct_indexable is indexed / expected. expected is acquisitions with a
       # sidecar minus the deduped duplicates and quarantined rows named in
       # index-validation.json. A sidecar the validation report does not name
       # stays in the denominator, so a real gap still fails this step.
+      # This step stays ahead of the MCP probe: a failed tools/list must not
+      # skip the gate.
       - name: Coverage gate (99% of acquisitions with a sidecar)
         run: |
           python -c "import json, sys; from umbra_py.parity import COVERAGE_GATE_PCT; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= COVERAGE_GATE_PCT else 1)"
+
+      # Same redeploy the snapshot check just waited out. tools/list is the
+      # canary a desktop client runs: the six stable names are present.
+      # Retries live in umbra_py.mcp_smoke (30s per attempt) so a container
+      # whose /healthz is up but whose first MCP request is still cold
+      # (~25s) does not fail the publish. It runs after the coverage gate
+      # so a red probe cannot skip that gate.
+      - name: Confirm the hosted MCP lists the stable tools
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' && steps.confirm.outcome == 'success' }}
+        run: python -c "import umbra_py.mcp_smoke as s; s.assert_hosted_core_tools()"
 
       # After the thumbnail publish step has copied a non-shrinking export
       # onto catalog.thumbs.seed.db. Runs when that upload was skipped and

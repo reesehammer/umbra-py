@@ -113,4 +113,4 @@ Data on that release is Umbra open data, CC BY 4.0. This host is not an Umbra
 product.
 
 If an application probes `/mcp` as a canary, the core tool names stay stable
-within a minor release. See [Stable tools](mcp.md#stable-tools).
+through every 0.x minor. See [Stable tools](mcp.md#stable-tools).

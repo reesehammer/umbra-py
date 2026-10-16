@@ -36,19 +36,10 @@ pytest.importorskip("mcp")
 
 from umbra_py import __version__  # noqa: E402
 from umbra_py import mcp_server as ms  # noqa: E402
+from umbra_py.mcp_smoke import STABLE_CORE  # noqa: E402
 from umbra_py.models import UmbraItem  # noqa: E402
 
 CONTRACT_PATH = Path(__file__).parent / "mcp_contract.json"
-
-#: Names promised stable through 0.x. Order is the snapshot's order.
-STABLE_CORE = (
-    "search_catalog",
-    "get_item",
-    "quicklook",
-    "download_asset",
-    "geocode_place",
-    "index_stats",
-)
 
 
 def _json_type(schema: dict[str, Any]) -> str:
@@ -56,15 +47,12 @@ def _json_type(schema: dict[str, Any]) -> str:
 
     Optional arguments arrive as ``anyOf`` (the type, plus ``null``). Array
     arguments keep their item type, so ``list[str]`` and ``list[float]`` do
-    not compare equal. Union member order is not part of the type.
+    not compare equal. Union member order is not part of the type. A shape
+    this does not spell becomes ``unknown``, and the snapshot diff fails.
     """
     if "anyOf" in schema:
         return "|".join(sorted(_json_type(part) for part in schema["anyOf"]))
-    if "oneOf" in schema:
-        return "|".join(sorted(_json_type(part) for part in schema["oneOf"]))
     type_name = schema.get("type")
-    if isinstance(type_name, list):
-        return "|".join(sorted(str(part) for part in type_name))
     if type_name == "array":
         items = schema.get("items")
         if isinstance(items, dict) and items:
@@ -122,6 +110,7 @@ def _contract_errors(live: dict[str, Any], snapshot: dict[str, Any]) -> list[str
 
 
 def test_snapshot_names_the_stable_core():
+    """The snapshot keys are ``umbra_py.mcp_smoke.STABLE_CORE``, in that order."""
     assert tuple(_snapshot()) == STABLE_CORE
 
 

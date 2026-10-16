@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from umbra_py.mcp_smoke import (
     STABLE_CORE,
     assert_hosted_core_tools,
     decode_rpc,
+    main,
     tool_names_from_rpc,
 )
 
@@ -121,6 +123,31 @@ def test_assert_retries_a_cold_start_then_accepts_the_core():
     )
     assert set(STABLE_CORE) <= set(names)
     assert slept == [5, 5]
+
+
+def test_stable_core_is_the_contract_snapshot_keys():
+    """One list: ``umbra_py.mcp_smoke.STABLE_CORE`` and the snapshot keys."""
+    snapshot = json.loads((Path(__file__).parent / "mcp_contract.json").read_text(encoding="utf-8"))
+    assert tuple(snapshot) == STABLE_CORE
+
+
+def test_main_reports_a_missing_core_name(monkeypatch, capsys):
+    def boom(**kwargs: object) -> list[str]:
+        raise RuntimeError("missing quicklook")
+
+    monkeypatch.setattr("umbra_py.mcp_smoke.assert_hosted_core_tools", boom)
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert "::error title=Hosted MCP tools::missing quicklook" in captured.out
+
+
+def test_main_prints_the_core_when_the_probe_succeeds(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "umbra_py.mcp_smoke.assert_hosted_core_tools",
+        lambda **kwargs: list(STABLE_CORE),
+    )
+    assert main() == 0
+    assert "search_catalog" in capsys.readouterr().out
 
 
 def test_assert_fails_when_a_stable_name_never_appears():

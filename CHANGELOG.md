@@ -14,8 +14,8 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `download_asset`, `geocode_place`, and `index_stats` keep their names and
   existing arguments through 0.x ([Stable tools](docs/mcp.md#stable-tools)).
   The server reports its package version, and read-only tools set
-  `readOnlyHint`. After each hosted redeploy, `tools/list` is checked for
-  those six names.
+  `readOnlyHint`. `tools/list` is checked for those six names after the
+  weekly index redeploy and on the 15-minute hosted health probe.
 - **Republished captures stay in the index and are linked.** The same collect
   under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
   when the datetimes are within 60 seconds. Every item gains
