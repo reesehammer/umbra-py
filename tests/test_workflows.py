@@ -182,7 +182,16 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     redeploy, confirm = steps[position["redeploy"]], steps[position[CONFIRM_STEP]]
 
     order = [
-        position[key] for key in ("publish", THUMBS_STEP, VERIFY_STEP, "redeploy", CONFIRM_STEP)
+        position[key]
+        for key in (
+            "publish",
+            THUMBS_STEP,
+            VERIFY_STEP,
+            "redeploy",
+            CONFIRM_STEP,
+            COVERAGE_STEP,
+            MCP_SMOKE_STEP,
+        )
     ]
     assert order == sorted(order), order
     assert "steps.publish.outcome == 'success'" in redeploy["if"]
@@ -191,6 +200,15 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     assert "steps.publish.outputs.etag" in confirm["env"]["WANT_SNAPSHOT"]
     assert "'snapshot'" in confirm["run"]
     assert "published_thumbs_snapshot" in confirm["run"]
+    assert confirm.get("id") == "confirm"
+    smoke = steps[position[MCP_SMOKE_STEP]]
+    assert "steps.confirm.outcome == 'success'" in smoke["if"]
+    assert "steps.publish.outcome == 'success'" in smoke["if"]
+    assert "RAILWAY_TOKEN" in smoke["if"]
+    assert "assert_hosted_core_tools" in smoke["run"]
+    gate = steps[position[COVERAGE_STEP]]
+    assert "if" not in gate
+    assert "mcp_smoke" not in gate["run"]
 
     thumbs, verify = steps[position[THUMBS_STEP]], steps[position[VERIFY_STEP]]
     assert "continue-on-error" not in thumbs
@@ -224,6 +242,8 @@ THUMBS_STEP = "Publish the thumbnail sidecar"
 BAKE_STEP = "Bake SAR thumbnails (incremental, non-blocking)"
 VERIFY_STEP = "Verify the thumbnail release assets"
 CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
+COVERAGE_STEP = "Coverage gate (99% of acquisitions with a sidecar)"
+MCP_SMOKE_STEP = "Confirm the hosted MCP lists the stable tools"
 
 
 def test_workflows_pin_ubuntu_24_04():

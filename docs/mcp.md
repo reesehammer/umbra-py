@@ -35,6 +35,25 @@ For a site name you roughly know (`beet piler`), use `search_catalog(area=…,
 fuzzy=True)` or `find_repeat_sites` — not `semantic=True` (that needs an
 embedding key this host does not hold).
 
+### Stable tools
+
+Six tools are the stable core through every 0.x minor: `search_catalog`,
+`get_item`, `quicklook`, `download_asset`, `geocode_place`, and
+`index_stats`. Their names stay. An existing argument keeps its name, and
+stays optional when it is optional today. A new argument is optional, and
+its default preserves the behavior of a call that omits it. A name or
+argument that is retired stays registered as an alias for at least one
+minor release. The old tool's description starts with `DEPRECATED: use X`,
+the change is in `CHANGELOG.md`, and this page notes it.
+
+Result cards follow the published JSON schemas: stable within a minor
+version, and changed only with a changelog entry. A new field may appear.
+Removing or retyping a field is a deprecation, on the same alias rule.
+
+A refusal on this host (a tool that would stream an Umbra GeoTIFF, and
+`download_asset` with `confirm=true`) is behavior. The tool stays listed.
+The call returns a tool error that names the next step.
+
 ## download_asset
 
 `asset` is a schema v2 key (`gec`, `gec_2`, `csi`, `sidd`, `csi_sidd`,
@@ -45,7 +64,13 @@ of that product, not an alias. A name that is not on the item lists those
 v2 keys.
 
 `url` is a STAC JSON URL, or a product filename or acquisition stem resolved
-like `get_item`. A filename or stem needs a local index (`umbra index fetch`).
+like `get_item`. On this host the catalog index resolves a filename or
+stem. A local server resolves one the same way after `umbra index fetch`.
+
+`confirm=false` (the default) returns the byte size and the asset href
+without downloading. On this host `confirm=true` is refused: the tool
+error includes that href and the size, and you download the file with
+your own client. A local server still downloads when `confirm=true`.
 
 On the hosted server, `confirm=true` is refused.
 
@@ -117,6 +142,21 @@ Already configured Desktop? Claude Code can import it:
 ```bash
 claude mcp add-from-claude-desktop
 ```
+
+## Other MCP clients (desktop GIS agents)
+
+Any Streamable HTTP client uses `https://api.umbra-py.space/mcp`. No auth
+and no session id.
+
+A usual flow is `search_catalog`, then the `bbox` on each card as a
+footprint, then `quicklook`, then `get_item`, then the GEC product `url`.
+Umbra's bucket allows a cross-origin GET with Range requests. Whether a
+given browser COG reader works is not verified. Otherwise download the
+file with your own downloader. On this host `download_asset` is the size
+check (`confirm=false`).
+
+A client that can limit which tools it loads can keep the
+[stable core](#stable-tools).
 
 ## Local stdio (no public host)
 
