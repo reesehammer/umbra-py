@@ -13,6 +13,12 @@ name: Hosted API health
 # is not downtime. The uptime percentage stays unpublished until that file
 # covers 7 days.
 #
+# The same run also POSTs tools/list and fails if a stable core name is
+# missing. Railway deploys on every merge to main, not only on the weekly
+# index redeploy, so this is the check that sees those deploys. Retries live
+# in umbra_py.mcp_smoke (30s per attempt) for a cold listener. It does not
+# change the healthz uptime bit.
+#
 # GitHub may start the cron late. The history records when the probe ran.
 
 on:
@@ -46,3 +52,13 @@ jobs:
         # Stdlib only. Do not `pip install`: a PyPI outage must not look like
         # an API outage, and the script does not import the package.
         run: python3 src/umbra_py/health_monitor.py
+
+      # tools/list for the stable core. The module file is stdlib-only, so
+      # this runs it directly and does not import the umbra_py package.
+      # `!cancelled()` keeps the probe running when /healthz itself failed
+      # (a stale index still has a process that can list tools). A missing
+      # name prints `::error` and fails this run, same as a bad health probe.
+      # Retries inside the module cover a ~25s cold start.
+      - name: Probe MCP stable tool names
+        if: ${{ !cancelled() }}
+        run: python3 src/umbra_py/mcp_smoke.py

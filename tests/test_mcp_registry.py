@@ -45,6 +45,10 @@ README = REPO_ROOT / "README.md"
 #: segment must match the repository that publishes it.
 SERVER_NAME = "io.github.reesehammer/umbra-mcp"
 
+#: The public host. Streamable HTTP, no credentials. Registry clients that
+#: keep only ``remotes`` (and drop stdio packages) discover the server here.
+HOSTED_MCP_URL = "https://api.umbra-py.space/mcp"
+
 #: Files that state the invocation to a human or to a model. Every ``uvx``
 #: mention in one of them is checked.
 DOCUMENTED_IN = (
@@ -131,6 +135,20 @@ def test_the_published_package_is_this_distribution():
     assert package["registryBaseUrl"] == "https://pypi.org"
     assert package["transport"] == {"type": "stdio"}
     assert package["runtimeHint"] == "uvx"
+
+
+def test_server_json_lists_the_hosted_streamable_http_remote():
+    """A remote is how a registry client that never runs a package finds the host.
+
+    ``StreamableHttpTransport`` requires ``type`` and ``url``. ``headers`` is
+    optional and is omitted: the public host needs no auth. The stdio PyPI
+    package stays beside this remote.
+    """
+    server = _server()
+    remotes = [remote for remote in server["remotes"] if remote.get("type") == "streamable-http"]
+    assert remotes == [{"type": "streamable-http", "url": HOSTED_MCP_URL}]
+    assert "headers" not in remotes[0]
+    assert _pypi_package(server)["transport"] == {"type": "stdio"}
 
 
 def test_server_json_runtime_arguments_spell_the_real_command():

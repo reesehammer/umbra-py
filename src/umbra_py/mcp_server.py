@@ -189,6 +189,43 @@ def _require_cog_streaming(tool: str) -> None:
     raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
+def _refuse_public_asset_download(href: str) -> None:
+    """Refuse ``download_asset(confirm=True)`` when this host must not store Umbra files.
+
+    Same gate as :func:`_require_cog_streaming`: ``cog_streaming`` off
+    (``umbra serve --public`` / ``UMBRA_MCP_COG_STREAMING=0``). The error names
+    the asset href and its size in bytes so the client can fetch the file
+    itself. A HEAD that fails (network error, timeout, or a non-2xx status)
+    still refuses; the message then says the size is unknown. A local or
+    stdio server returns immediately, with no extra request.
+    """
+    if _cog_streaming_allowed():
+        return
+    import requests
+
+    from ._http import DEFAULT_TIMEOUT, default_session
+
+    size: int | None = None
+    try:
+        head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+        head.raise_for_status()
+        length = head.headers.get("Content-Length")
+        if length is not None:
+            size = int(length)
+    except requests.RequestException:
+        size = None
+    if size is None:
+        sized = f"{href} (size unknown)"
+    else:
+        sized = f"{href} ({size} bytes)"
+    raise ValueError(
+        "download_asset would write this file on the public community host. "
+        "The public community instance does not proxy the archive — download "
+        f"{sized} locally with your own downloader, or run a local "
+        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server for download_asset."
+    )
+
+
 def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a tool so anticipated failures reach the MCP client.
 
@@ -835,8 +872,9 @@ def get_item(url: str) -> dict[str, Any]:
     asset hrefs, which is what distinguishes ``sar-data/tasks/``,
     ``sar-data/task-data/``, and ``open-data/`` — the name itself does not.
     Zero matches is an error. More than one match lists the candidate STAC
-    URLs; pass one of those. A filename needs a local index
-    (``umbra index fetch``).
+    URLs; pass one of those. The hosted server resolves a filename or stem
+    with the catalog index it already loaded. A local server does the same
+    after ``umbra index fetch``.
 
     When the index contains a STAC URL, the indexed snapshot is returned —
     the same document ``search_catalog`` already answered from — rather than
@@ -1368,11 +1406,17 @@ def download_asset(
     ``{asset, path, bytes}`` on download, or a size-and-hint object when
     confirmation is still required.
 
+    On a public host (``umbra serve --public``, COG streaming off),
+    ``confirm=True`` is refused. The error includes the asset href and its
+    size in bytes and tells you to download the file locally (or run a local
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
+    ``confirm=False`` still returns the size.
+
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
-    the local catalog index the same way as ``get_item``. A filename needs a
-    local index (``umbra index fetch``).
+    the catalog index the same way as ``get_item``. The hosted server already
+    has that index. A local server needs ``umbra index fetch``.
 
     ``asset`` selects the file. All of these work:
 
@@ -1420,6 +1464,7 @@ def download_asset(
             + "Call again with confirm=true to download it.",
         }
 
+    _refuse_public_asset_download(href)
     path = _download_asset(item, asset, dest_dir)
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
@@ -1937,6 +1982,32 @@ def main() -> None:
     run()
 
 
+#: Tools that only read. Clients use ``readOnlyHint`` to skip an approval
+#: prompt. ``download_asset`` writes a file when ``confirm`` is true.
+#: ``watch_site`` persists a baseline in the catalog index meta table.
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "search_catalog",
+        "find_repeat_sites",
+        "get_item",
+        "geocode_place",
+        "index_stats",
+        "quicklook",
+        "change_composite",
+        "timescan",
+        "stack_stats",
+        "stack_provenance",
+        "pick_change_interval",
+        "find_similar",
+        "find_similar_text",
+        "describe_scene",
+        "narrate_change",
+        "stamp_description",
+        "stamp_narration",
+    }
+)
+
+
 def build_server() -> MCPServer:
     """Construct and return the configured ``MCPServer``.
 
@@ -1945,6 +2016,11 @@ def build_server() -> MCPServer:
     lazy — importing this module does not require the extra until you build.
     """
     MCPServer, _Image = _require_mcp()
+    from mcp_types import ToolAnnotations
+
+    from umbra_py import __version__
+
+    read_only = ToolAnnotations(read_only_hint=True)
 
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
@@ -1957,6 +2033,7 @@ def build_server() -> MCPServer:
     )
     server = MCPServer(
         "umbra",
+        version=__version__,
         instructions=(
             "Search and visualize Umbra's open SAR archive. Start by reading "
             "the 'umbra://context' resource for product-type and search "
@@ -2029,7 +2106,11 @@ def build_server() -> MCPServer:
         # is what lets the radar scene reach the client at all; the JSON tools
         # keep structured output, which is worth having for them.
         image_tool = fn in _IMAGE_TOOLS or fn in (describe_scene, narrate_change)
-        server.add_tool(_as_mcp_tool(fn), structured_output=False if image_tool else None)
+        server.add_tool(
+            _as_mcp_tool(fn),
+            structured_output=False if image_tool else None,
+            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else None,
+        )
 
     @server.resource(
         "umbra://context",

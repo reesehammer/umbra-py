@@ -392,6 +392,12 @@ def test_healthz_workflow_stays_off_main_and_pins_the_runner():
     assert document["permissions"]["issues"] == "write"
     script = "\n".join(step.get("run") or "" for step in job["steps"])
     assert "src/umbra_py/health_monitor.py" in script
+    assert "src/umbra_py/mcp_smoke.py" in script
+    assert "pip install" not in script
+    mcp_step = next(
+        step for step in job["steps"] if step.get("name") == "Probe MCP stable tool names"
+    )
+    assert mcp_step["if"] == "${{ !cancelled() }}"
     assert "ubuntu-latest" not in text
     source = (REPO / "src" / "umbra_py" / "health_monitor.py").read_text(encoding="utf-8")
     assert "import umbra_py" not in source
