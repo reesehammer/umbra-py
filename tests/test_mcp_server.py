@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 import responses
 
 pytest.importorskip("mcp")
@@ -1351,6 +1352,51 @@ def test_public_host_refuses_download_asset_confirm(sample_item_dict, tmp_path, 
     assert "your own downloader" in message
     assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        pytest.param({"status": 403}, id="403"),
+        pytest.param({"body": requests.ConnectionError("unreachable")}, id="connection-error"),
+    ],
+)
+@responses.activate
+def test_public_host_refusal_survives_a_failed_head(sample_item_dict, tmp_path, monkeypatch, head):
+    """A failed size check must not replace the public-host refusal.
+
+    403 (``raise_for_status``) and a connection error both still produce a
+    ToolError naming the href and ``size unknown``, and nothing is downloaded.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, **head)
+
+    def boom(*_a, **_k):
+        raise AssertionError("public host wrote an asset to disk")
+
+    monkeypatch.setattr("umbra_py.download.download_asset", boom)
+    ms.configure(cog_streaming=False)
+
+    server = ms.build_server()
+    with pytest.raises(ToolError, match="size unknown") as excinfo:
+        asyncio.run(
+            server.call_tool(
+                "download_asset",
+                {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
+            )
+        )
+    message = str(excinfo.value)
+    assert href in message
+    assert "(size unknown)" in message
+    assert "your own downloader" in message
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    assert not any(tmp_path.iterdir())
+    assert not any(
+        call.request.method == "GET" and call.request.url == href for call in responses.calls
+    )
 
 
 @responses.activate

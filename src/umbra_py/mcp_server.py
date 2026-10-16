@@ -195,16 +195,25 @@ def _refuse_public_asset_download(href: str) -> None:
     Same gate as :func:`_require_cog_streaming`: ``cog_streaming`` off
     (``umbra serve --public`` / ``UMBRA_MCP_COG_STREAMING=0``). The error names
     the asset href and its size in bytes so the client can fetch the file
-    itself. A local or stdio server returns immediately, with no extra request.
+    itself. A HEAD that fails (network error, timeout, or a non-2xx status)
+    still refuses; the message then says the size is unknown. A local or
+    stdio server returns immediately, with no extra request.
     """
     if _cog_streaming_allowed():
         return
+    import requests
+
     from ._http import DEFAULT_TIMEOUT, default_session
 
-    head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
-    head.raise_for_status()
-    length = head.headers.get("Content-Length")
-    size = int(length) if length is not None else None
+    size: int | None = None
+    try:
+        head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+        head.raise_for_status()
+        length = head.headers.get("Content-Length")
+        if length is not None:
+            size = int(length)
+    except requests.RequestException:
+        size = None
     if size is None:
         sized = f"{href} (size unknown)"
     else:
