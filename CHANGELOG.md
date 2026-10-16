@@ -26,6 +26,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `search_catalog(canonical=True)` can keep the canonical copy. Item counts
   are unchanged; `unique_captures` counts canonical rows.
 
+### Fixed
+- **`download_asset(confirm=true)` is refused on the public host.** When COG
+  streaming is off (`umbra serve --public`), confirming a download no longer
+  writes the file onto the server. The tool error includes the asset URL, its
+  size in bytes, and tells you to download it locally or run
+  `uvx --from 'umbra-py[mcp]' umbra-mcp` and call `download_asset` there.
+  If that size cannot be read, the same refusal says the size is unknown.
+  `confirm=false` still returns the size.
+
 ## [0.1.3] — 2026-10-15
 
 The catalog index covers the open bucket (named tasks, UUID `task-data/`,

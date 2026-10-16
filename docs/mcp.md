@@ -72,6 +72,8 @@ without downloading. On this host `confirm=true` is refused: the tool
 error includes that href and the size, and you download the file with
 your own client. A local server still downloads when `confirm=true`.
 
+On the hosted server, `confirm=true` is refused.
+
 ## Claude Code (recommended: one command)
 
 Remote Streamable HTTP. Claude Code calls this transport `http`:

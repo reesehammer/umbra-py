@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 import responses
 
 pytest.importorskip("mcp")
@@ -1302,6 +1303,141 @@ def test_download_asset_confirm_gate(sample_item_dict):
     assert out["confirm_required"] is True
     assert out["bytes"] == 2500000
     assert "confirm=true" in out["hint"]
+
+
+@responses.activate
+def test_public_host_refuses_download_asset_confirm(sample_item_dict, tmp_path, monkeypatch):
+    """``confirm=true`` on a public host must not write the asset to server disk.
+
+    The client gets a ToolError naming the href, the size in bytes, and how to
+    fetch the file itself. The direct callable still raises ValueError, the
+    same way the other COG-streaming refusals do.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
+
+    def boom(*_a, **_k):
+        raise AssertionError("public host wrote an asset to disk")
+
+    monkeypatch.setattr("umbra_py.download.download_asset", boom)
+    ms.configure(cog_streaming=False)
+
+    with pytest.raises(ValueError, match="does not proxy") as direct:
+        ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path), confirm=True)
+    text = str(direct.value)
+    assert href in text
+    assert "2500000 bytes" in text
+    assert "your own downloader" in text
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in text
+    assert "download_asset" in text
+    assert not any(tmp_path.iterdir())
+    assert not any(
+        call.request.method == "GET" and call.request.url == href for call in responses.calls
+    )
+
+    server = ms.build_server()
+    with pytest.raises(ToolError, match="does not proxy") as excinfo:
+        asyncio.run(
+            server.call_tool(
+                "download_asset",
+                {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
+            )
+        )
+    message = str(excinfo.value)
+    assert href in message
+    assert "2500000 bytes" in message
+    assert "your own downloader" in message
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        pytest.param({"status": 403}, id="403"),
+        pytest.param({"body": requests.ConnectionError("unreachable")}, id="connection-error"),
+    ],
+)
+@responses.activate
+def test_public_host_refusal_survives_a_failed_head(sample_item_dict, tmp_path, monkeypatch, head):
+    """A failed size check must not replace the public-host refusal.
+
+    403 (``raise_for_status``) and a connection error both still produce a
+    ToolError naming the href and ``size unknown``, and nothing is downloaded.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, **head)
+
+    def boom(*_a, **_k):
+        raise AssertionError("public host wrote an asset to disk")
+
+    monkeypatch.setattr("umbra_py.download.download_asset", boom)
+    ms.configure(cog_streaming=False)
+
+    server = ms.build_server()
+    with pytest.raises(ToolError, match="size unknown") as excinfo:
+        asyncio.run(
+            server.call_tool(
+                "download_asset",
+                {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
+            )
+        )
+    message = str(excinfo.value)
+    assert href in message
+    assert "(size unknown)" in message
+    assert "your own downloader" in message
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    assert not any(tmp_path.iterdir())
+    assert not any(
+        call.request.method == "GET" and call.request.url == href for call in responses.calls
+    )
+
+
+@responses.activate
+def test_public_host_download_asset_size_check_still_works(sample_item_dict):
+    """``confirm=false`` on the public host still returns the size and the href."""
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=False)
+    assert out == {
+        "confirm_required": True,
+        "asset": "GEC",
+        "url": href,
+        "bytes": 2500000,
+        "hint": "This asset is 2.5 MB. Call again with confirm=true to download it.",
+    }
+
+
+@responses.activate
+def test_download_asset_confirm_still_downloads_off_the_public_host(
+    sample_item_dict, tmp_path, monkeypatch
+):
+    """A local or stdio server (COG streaming allowed) still downloads on confirm."""
+    monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
+    ms.configure(cog_streaming=None)
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    body = b"gec-bytes"
+    responses.add(
+        responses.GET,
+        href,
+        body=body,
+        status=200,
+        headers={"Content-Length": str(len(body))},
+    )
+    out = ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path), confirm=True)
+    assert out["asset"] == "GEC"
+    assert out["bytes"] == len(body)
+    assert Path(out["path"]).read_bytes() == body
+    assert Path(out["path"]).parent == tmp_path
 
 
 @pytest.mark.parametrize("url", ["", "   ", None])
