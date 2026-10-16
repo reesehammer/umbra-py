@@ -4,7 +4,8 @@ Machine-readable contracts for umbra-py's structured output, so an agent (or a
 script) can depend on the shapes the CLI and library emit. These schemas are
 **public API**: they follow the same backwards-compatibility rules as
 everything in `umbra_py.__all__` — stable within a minor version, changed only
-with a `CHANGELOG.md` entry.
+with a `CHANGELOG.md` entry. The stable MCP tool names and their required
+arguments are a separate promise: [Stable tools](../mcp.md#stable-tools).
 
 | Schema | Describes | Produced by |
 | --- | --- | --- |

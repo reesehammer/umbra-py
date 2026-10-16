@@ -14,6 +14,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   PyPI package and adds a `streamable-http` remote at
   `https://api.umbra-py.space/mcp`. The host needs no auth, so the remote
   has no headers. Registry clients that only keep remotes can discover it.
+- **MCP stable core.** `search_catalog`, `get_item`, `quicklook`,
+  `download_asset`, `geocode_place`, and `index_stats` keep their names and
+  existing arguments through 0.x ([Stable tools](docs/mcp.md#stable-tools)).
+  The server reports its package version, and read-only tools set
+  `readOnlyHint`. `tools/list` is checked for those six names after the
+  weekly index redeploy and on the 15-minute hosted health probe.
 - **Republished captures stay in the index and are linked.** The same collect
   under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
   when the datetimes are within 60 seconds. Every item gains
@@ -23,6 +29,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   parquet; the API rewrites them to its item route). `GET`/`POST /search` and
   `search_catalog(canonical=True)` can keep the canonical copy. Item counts
   are unchanged; `unique_captures` counts canonical rows.
+
+### Fixed
+- **`download_asset(confirm=true)` is refused on the public host.** When COG
+  streaming is off (`umbra serve --public`), confirming a download no longer
+  writes the file onto the server. The tool error includes the asset URL, its
+  size in bytes, and tells you to download it locally or run
+  `uvx --from 'umbra-py[mcp]' umbra-mcp` and call `download_asset` there.
+  If that size cannot be read, the same refusal says the size is unknown.
+  `confirm=false` still returns the size.
 
 ## [0.1.3] — 2026-10-15
 
