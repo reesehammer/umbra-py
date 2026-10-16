@@ -190,6 +190,7 @@ from .constants import (
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
+from .duplicates import PRESERVED_LINK_RELS
 from .exceptions import MissingDependencyError, UmbraError
 from .health_monitor import index_is_stale
 from .index import (
@@ -435,6 +436,30 @@ def parse_polarizations(value: str | list[str] | None) -> list[str] | None:
     return wanted or None
 
 
+def _as_bool(prop: str, value: Any) -> bool:
+    """Coerce a query value to a bool, or raise a 400-worthy ``ValueError``."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ValueError(f"query.{prop} must be true or false, got {value!r}")
+
+
+def parse_optional_bool(value: Any, field: str) -> bool | None:
+    """Parse an optional true/false flag. ``None`` and ``""`` stay unset."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"true", "1", "yes"}:
+            return True
+        if token in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"{field} must be true or false, got {value!r}")
+
+
 def _as_float(prop: str, value: Any) -> float:
     """Coerce a query value to a float, or raise a 400-worthy ``ValueError``."""
     try:
@@ -484,6 +509,7 @@ class QueryFilters(NamedTuple):
     min_incidence: float | None = None
     max_incidence: float | None = None
     max_resolution: float | None = None
+    canonical: bool | None = None
 
 
 def parse_query(query: Any) -> QueryFilters:
@@ -502,6 +528,9 @@ def parse_query(query: Any) -> QueryFilters:
       on the view incidence angle (either or both operators).
     - ``{"sar:resolution": {"lte": 0.5}}`` (or a bare number) -- keep items
       whose range *and* azimuth resolution are both at most this fine (metres).
+    - ``{"umbra-py:canonical": {"eq": true}}`` -- keep the canonical copy of
+      a republished collect (``false`` keeps only the other copies). Omit the
+      field to return every item.
 
     Any other property, or an unsupported operator, is a :class:`ValueError` so
     a client's filter is never silently dropped (which would return items the
@@ -519,6 +548,7 @@ def parse_query(query: Any) -> QueryFilters:
         "sar:polarizations",
         "view:incidence_angle",
         "sar:resolution",
+        "umbra-py:canonical",
     }
     unknown = sorted(set(query) - supported)
     if unknown:
@@ -575,6 +605,11 @@ def parse_query(query: Any) -> QueryFilters:
         spec = _scalar("sar:resolution", query["sar:resolution"], ("lte",))
         max_resolution = _as_float("sar:resolution", spec)
 
+    canonical = None
+    if "umbra-py:canonical" in query:
+        spec = _scalar("umbra-py:canonical", query["umbra-py:canonical"], ("eq",))
+        canonical = _as_bool("umbra-py:canonical", spec)
+
     return QueryFilters(
         product_types=product_types,
         area=area,
@@ -582,6 +617,7 @@ def parse_query(query: Any) -> QueryFilters:
         min_incidence=min_incidence,
         max_incidence=max_incidence,
         max_resolution=max_resolution,
+        canonical=canonical,
     )
 
 
@@ -781,6 +817,7 @@ def health_document(
     snapshot: str | None = None,
     thumbnails: dict[str, Any] | None = None,
     stale: bool | None = None,
+    unique_captures: int | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``/healthz`` liveness/readiness document.
@@ -813,6 +850,10 @@ def health_document(
     (UTC). It is omitted when this process has no index build date to judge
     (live mode, still starting, or the 503). A stale index still returns 200:
     freshness is not an outage. ``degraded`` remains the thumbnail-merge bit.
+
+    ``unique_captures`` is how many rows are the canonical copy of their
+    collect (see :mod:`umbra_py.duplicates`). It is omitted when unknown.
+    ``items`` stays the row count, including republished copies.
     """
     if error is not None:
         status = "error"
@@ -828,6 +869,8 @@ def health_document(
         doc["error"] = error
     if items is not None:
         doc["items"] = items
+    if unique_captures is not None:
+        doc["unique_captures"] = unique_captures
     if ids is not None:
         doc["ids"] = ids
     if built_at is not None:
@@ -871,6 +914,8 @@ def collection(
     temporal: tuple[str | None, str | None] | None = None,
     built_at: str | None = None,
     snapshot: str | None = None,
+    items: int | None = None,
+    unique_captures: int | None = None,
 ) -> dict[str, Any]:
     """The single ``umbra-open-data`` STAC Collection.
 
@@ -879,7 +924,9 @@ def collection(
     because the archive spans the whole Earth. ``built_at`` and ``snapshot``
     are the index build date and the published ``catalog.db`` ETag. They are
     omitted when this process does not have them (live mode, or an index that
-    was never stamped).
+    was never stamped). ``umbra-py:items`` is the row count and
+    ``umbra-py:unique_captures`` counts one row per collect; both are omitted
+    when this process does not know them.
     """
     base = base_url.rstrip("/")
     doc = {
@@ -932,6 +979,10 @@ def collection(
         doc["updated"] = _collection_updated(built_at)
     if snapshot:
         doc[STAC_SNAPSHOT_FIELD] = snapshot
+    if items is not None:
+        doc["umbra-py:items"] = items
+    if unique_captures is not None:
+        doc["umbra-py:unique_captures"] = unique_captures
     return doc
 
 
@@ -941,7 +992,10 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     Starts from the item's original STAC JSON (``item.raw``) so nothing is lost,
     then normalises it for the API: stamps the collection, and rewrites the
     ``links`` to point at this server (self / root / parent / collection) rather
-    than the static-catalog relative paths the bucket ships.
+    than the static-catalog relative paths the bucket ships. ``canonical`` and
+    ``related`` links from the duplicate pass are kept, and their href is
+    rewritten to this server's item route so a client stays on the API. The
+    index and the parquet export keep the sidecar URL.
     """
     base = base_url.rstrip("/")
     feature = dict(item.raw) if item.raw else {}
@@ -972,11 +1026,28 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     feature["assets"] = _normalize_assets(feature.get("assets") or item.assets)
 
     item_path = f"{base}/collections/{COLLECTION_ID}/items/{item.id}"
+    props = feature["properties"]
+    preserved = []
+    for link in feature.get("links") or []:
+        if not isinstance(link, dict) or link.get("rel") not in PRESERVED_LINK_RELS:
+            continue
+        copied = dict(link)
+        sibling = copied.get("title")
+        if not isinstance(sibling, str) or not sibling:
+            if copied.get("rel") == "canonical":
+                sibling = props.get("umbra-py:canonical_id")
+            else:
+                dup_ids = props.get("umbra-py:duplicate_ids")
+                sibling = dup_ids[0] if isinstance(dup_ids, list) and len(dup_ids) == 1 else None
+        if isinstance(sibling, str) and sibling:
+            copied["href"] = f"{base}/collections/{COLLECTION_ID}/items/{sibling}"
+        preserved.append(copied)
     feature["links"] = [
         _link("self", item_path, type="application/geo+json"),
         _link("root", f"{base}/"),
         _link("parent", f"{base}/collections/{COLLECTION_ID}"),
         _link("collection", f"{base}/collections/{COLLECTION_ID}"),
+        *preserved,
     ]
     return feature
 
@@ -1100,6 +1171,7 @@ def run_search(
     min_incidence: float | None = None,
     max_incidence: float | None = None,
     max_resolution: float | None = None,
+    canonical: bool | None = None,
     limit: int = DEFAULT_LIMIT,
     offset: int = 0,
 ) -> tuple[list[UmbraItem], bool]:
@@ -1111,7 +1183,9 @@ def run_search(
     and ``polarizations`` / ``min_incidence`` / ``max_incidence`` /
     ``max_resolution`` are the SAR acquisition-property filters -- all pushed
     down to the backend's ``search`` (both :class:`CatalogIndex` and the live
-    :class:`~umbra_py.catalog.UmbraCatalog` accept them). Paging is
+    :class:`~umbra_py.catalog.UmbraCatalog` accept them). ``canonical`` keeps
+    the preferred copy of a republished collect (``True``), the other copies
+    (``False``), or every item (``None``). Paging is
     deterministic offset paging. The index orders by task, acquisition date,
     datetime, then id (href last), so two passes that share a timestamp cannot
     swap at a page boundary. One extra item is requested to decide whether a
@@ -1134,6 +1208,7 @@ def run_search(
         min_incidence=min_incidence,
         max_incidence=max_incidence,
         max_resolution=max_resolution,
+        canonical=canonical,
         limit=cap,
     )
     if ids:
@@ -2938,8 +3013,24 @@ def build_app(
     # mtime and size so a refreshed snapshot is picked up without scanning
     # thumbnail blobs on every ``GET /collections``.
     _FactKey = tuple[str, int, int, int, int]
-    _Facts = tuple[tuple[str | None, str | None], str | None, str | None]
+    _Facts = tuple[tuple[str | None, str | None], str | None, str | None, int | None, int | None]
     _facts_cache: dict[_FactKey, _Facts] = {}
+
+    def _counts(source: Any) -> tuple[int | None, int | None]:
+        """Row count and canonical-copy count, without reading thumbnail blobs."""
+        n_items: int | None
+        try:
+            n_items = len(source)
+        except TypeError:
+            n_items = None
+        captures = getattr(source, "unique_captures", None)
+        n_captures: int | None = None
+        if callable(captures):
+            try:
+                n_captures = int(captures())
+            except (TypeError, ValueError):
+                n_captures = None
+        return n_items, n_captures
 
     def _provenance(source: Any) -> tuple[str | None, str | None]:
         built_at: str | None = None
@@ -2978,10 +3069,12 @@ def build_app(
             else:
                 stats = getattr(source, "stats", None)
                 if stats is None:
-                    return ((None, None), built_at, snapshot)
+                    n_items, n_captures = _counts(source)
+                    return ((None, None), built_at, snapshot, n_items, n_captures)
                 summary = stats()
                 extent = (summary.get("start"), summary.get("end"))
-            facts: _Facts = (extent, built_at, snapshot)
+            n_items, n_captures = _counts(source)
+            facts: _Facts = (extent, built_at, snapshot, n_items, n_captures)
             if key is not None:
                 _facts_cache[key] = facts
             return facts
@@ -3032,6 +3125,7 @@ def build_app(
             ids: int | None = None
             built_at: str | None = None
             thumbnailed: int | None = None
+            unique_captures: int | None = None
             stats = getattr(source, "stats", None)
             if stats is not None:
                 try:
@@ -3039,6 +3133,8 @@ def build_app(
                     items = int(s["items"])
                     built_at = s.get("built_at")
                     thumbnailed = int(s["thumbnailed"])
+                    if s.get("unique_captures") is not None:
+                        unique_captures = int(s["unique_captures"])
                 except (KeyError, TypeError, ValueError):
                     pass
             distinct = getattr(source, "distinct_ids", None)
@@ -3070,6 +3166,7 @@ def build_app(
                 snapshot=snapshot,
                 thumbnails=thumbnails,
                 stale=index_is_stale(built_at),
+                unique_captures=unique_captures,
             )
         except sqlite3.DatabaseError as exc:
             return _unhealthy(exc)
@@ -3083,10 +3180,17 @@ def build_app(
     @app.get("/collections", tags=["STAC"])
     def get_collections(request: Request) -> dict[str, Any]:
         base = str(request.base_url).rstrip("/")
-        temporal, built_at, snapshot = _facts()
+        temporal, built_at, snapshot, n_items, n_captures = _facts()
         return {
             "collections": [
-                collection(base, temporal=temporal, built_at=built_at, snapshot=snapshot)
+                collection(
+                    base,
+                    temporal=temporal,
+                    built_at=built_at,
+                    snapshot=snapshot,
+                    items=n_items,
+                    unique_captures=n_captures,
+                )
             ],
             "links": [
                 _link("self", f"{base}/collections"),
@@ -3098,9 +3202,14 @@ def build_app(
     def get_collection(collection_id: str, request: Request) -> dict[str, Any]:
         if collection_id != COLLECTION_ID:
             raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
-        temporal, built_at, snapshot = _facts()
+        temporal, built_at, snapshot, n_items, n_captures = _facts()
         return collection(
-            str(request.base_url), temporal=temporal, built_at=built_at, snapshot=snapshot
+            str(request.base_url),
+            temporal=temporal,
+            built_at=built_at,
+            snapshot=snapshot,
+            items=n_items,
+            unique_captures=n_captures,
         )
 
     def _do_search(
@@ -3118,6 +3227,7 @@ def build_app(
         min_incidence: float | None = None,
         max_incidence: float | None = None,
         max_resolution: float | None = None,
+        canonical: bool | None = None,
         limit: int,
         offset: int,
         self_href: str,
@@ -3138,6 +3248,7 @@ def build_app(
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
                 max_resolution=max_resolution,
+                canonical=canonical,
                 limit=limit,
                 offset=offset,
             )
@@ -3249,6 +3360,13 @@ def build_app(
         max_resolution: float | None = Query(
             default=None, description="Coarsest range/azimuth resolution to keep (metres)"
         ),
+        canonical: str | None = Query(
+            default=None,
+            description=(
+                "true keeps the canonical copy of a republished collect; "
+                "false keeps the other copies; omit to return every item"
+            ),
+        ),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
@@ -3263,6 +3381,7 @@ def build_app(
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
             wanted_pols = parse_polarizations(polarizations)
+            wanted_canonical = parse_optional_bool(canonical, "canonical")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         id_list = [i for i in ids.split(",") if i] if ids else None
@@ -3280,6 +3399,7 @@ def build_app(
             min_incidence=min_incidence,
             max_incidence=max_incidence,
             max_resolution=max_resolution,
+            canonical=wanted_canonical,
             limit=limit,
             offset=token,
             self_href=str(request.url),
@@ -3315,6 +3435,10 @@ def build_app(
             max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
             if max_resolution is None:
                 max_resolution = q.max_resolution
+            if "canonical" in body:
+                canonical = parse_optional_bool(body.get("canonical"), "canonical")
+            else:
+                canonical = q.canonical
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ids = body.get("ids")
@@ -3338,6 +3462,7 @@ def build_app(
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
                 max_resolution=max_resolution,
+                canonical=canonical,
                 limit=limit,
                 offset=offset,
             )

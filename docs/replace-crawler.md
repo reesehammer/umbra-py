@@ -158,5 +158,36 @@ absent and this query errors. The daily canary reads the file metadata
 first and skips this program until `umbra-py:asset_schema` is 2, or a field
 named `gec` exists. The HTTP and `pystac-client` programs run either way.
 
+## One copy of a republished collect
+
+The same collect is often published twice: once under `sar-data/task-data/`
+and once under `sar-data/tasks/<campaign>/`. Those are different STAC ids.
+The index keeps both. After the next rebuild, each item has
+`umbra-py:canonical`. `true` is the copy to keep (newest `created`, then
+processor version, datetime, product count, a `task-data` href, then the
+lowest id — see [Local index](reference/index.md#republished-captures)).
+Items that are not a republished pair are canonical too, so the filter is
+one boolean.
+
+These three programs are the same Nepal search limited to that copy. They
+are not the daily canary: the canary hits the API and parquet that are
+already published, and this filter is on the snapshot this change builds.
+`GET /search?canonical=true` is the HTTP form. `pystac-client` sends it as
+a query-extension predicate. DuckDB quotes `"umbra-py:canonical"` because
+the column name contains a colon. The column is absent until the weekly
+parquet is rebuilt from an index that has been linked.
+
+```python
+--8<-- "docs/examples/replace_crawler/canonical_get.py"
+```
+
+```python
+--8<-- "docs/examples/replace_crawler/canonical_pystac.py"
+```
+
+```python
+--8<-- "docs/examples/replace_crawler/canonical_duckdb.py"
+```
+
 Imagery `href`s point at Umbra's public bucket. Attribute Umbra under
 CC BY 4.0. The API rate limit is 120 requests per minute per client.

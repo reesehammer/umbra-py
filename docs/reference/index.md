@@ -90,7 +90,10 @@ items); those are not in the index, and the count is what keeps them visible.
 
 `created` and `published` are nullable columns (schema version 6; version 5
 is `datetime_suspect`). Opening a version-5 index adds the two columns and
-keeps an existing flag. `created` is STAC `properties.created` when the sidecar
+keeps an existing flag. Schema version 7 adds `items.canonical` (1 for the
+copy to keep). Opening a version-6 index adds that column with default 1,
+so every existing row stays canonical until the next build links copies.
+`created` is STAC `properties.created` when the sidecar
 has one; legacy
 `_METADATA.json` collects leave it empty. `published` is the sidecar's S3
 `LastModified`, read from the `ListObjectsV2` page the crawl already
@@ -98,6 +101,57 @@ fetches. `created` minus `datetime` is the lag until Umbra's STAC
 generation, not delivery latency, and `published` is when the object
 appeared in the public bucket. Open data is a curated batch-published
 subset — see [Limitations](../guides/limitations.md#open-data-timestamps-are-not-delivery-latency).
+
+## Republished captures
+
+Umbra publishes the same collect under more than one prefix, usually
+`sar-data/task-data/<task_id>/...` and
+`sar-data/tasks/<campaign>/<task_id>/...`. Those sidecars are different
+STAC items (different ids) that share `umbra:task_id` and
+`umbra:collect_id`. The index keeps every copy. `umbra index build` groups
+the ones whose `datetime` values fall within 60 seconds of the earliest in
+the cluster and marks one canonical. A wider gap is a different imaging
+window and is split. Items with no `datetime` are not grouped.
+
+The canonical copy is the first of these that differs:
+
+1. Newest `properties.created`. A missing `created` loses to any present one.
+2. Higher `processing:version` (dotted integers, so `5.2.10` beats `5.2.8`),
+   or the version inside `processing:software` when the field is absent.
+3. Newest acquisition `datetime`.
+4. Most product assets present (`GEC`, `CSI`, `SIDD`, `SICD`, `CPHD`).
+5. An href under `sar-data/task-data/`.
+6. Lowest STAC id.
+
+`duplicate_confidence` is `high` only for a pair that is one `task-data`
+href and one `tasks/<campaign>` href. Every other linked group is `low`.
+
+Every item gets `umbra-py:canonical` (`true` when it is the copy to keep,
+including items that are not in a group). A grouped item also gets
+`umbra-py:canonical_id`, `umbra-py:duplicate_ids`, and
+`umbra-py:duplicate_confidence`. A non-canonical item has a STAC link
+`rel: canonical` to the preferred sidecar. Every member links to each
+sibling with `rel: related`. The index and the parquet file keep those
+sidecar URLs. API responses rewrite both rels to
+`/collections/umbra-open-data/items/{id}`. IANA `duplicate` means a byte-for-byte copy;
+these items differ in id, processor version, and often in which products
+they carry, so `related` is the relation that does not claim the bytes are
+interchangeable.
+
+`items` on `/healthz`, `umbra index info`, and the coverage report stays
+the row count. `unique_captures` is how many of those rows are canonical.
+`index-validation.json` records `republished_captures`
+(`groups`, `extra_items`, `unique_captures`, `low_confidence_groups`).
+The coverage gate still counts rows, so linking copies does not change it.
+
+Filter to the canonical copy once this build is what the API and the
+parquet file are serving. `GET /search?canonical=true` and `POST /search`
+with `{"umbra-py:canonical": {"eq": true}}` (or a top-level
+`"canonical": true`, which wins over the query object) are the same filter.
+`search_catalog(canonical=True)` is the MCP form. Omitting the flag returns
+every item. In DuckDB the column name contains a colon, so it is quoted as
+`"umbra-py:canonical"`. HTTP, pystac-client, and DuckDB programs are in
+[Replace your crawler](../replace-crawler.md#one-copy-of-a-republished-collect).
 
 ::: umbra_py.CatalogIndex
 

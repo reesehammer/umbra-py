@@ -4,7 +4,7 @@
   "title": "umbra-py index-info object",
   "description": "The JSON object umbra-py prints to stdout when 'umbra index info --json' succeeds: a machine-readable summary of a local catalog index. Produced from CatalogIndex.stats() plus the database's path and size. Stable within a minor version.",
   "type": "object",
-  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at", "datetime_suspect_count", "quarantined_future_count"],
+  "required": ["path", "size_bytes", "items", "start", "end", "tasks", "labeled", "thumbnailed", "built_at", "datetime_suspect_count", "quarantined_future_count", "unique_captures"],
   "additionalProperties": false,
   "examples": [
     {
@@ -18,7 +18,8 @@
       "thumbnailed": 1500,
       "built_at": "2026-01-13",
       "datetime_suspect_count": 0,
-      "quarantined_future_count": 0
+      "quarantined_future_count": 0,
+      "unique_captures": 11000
     }
   ],
   "properties": {
@@ -72,6 +73,11 @@
       "type": "integer",
       "minimum": 0,
       "description": "Source rows the last index build removed because a datetime was more than a day ahead of the build (the upstream 2035-2036 items). They are not in items. Zero when this index has no stored validation report."
+    },
+    "unique_captures": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rows whose canonical flag is true: one per imaging window, counting items that are not part of a republished group. Equals items until the link pass has run. items itself is unchanged."
     }
   }
 }

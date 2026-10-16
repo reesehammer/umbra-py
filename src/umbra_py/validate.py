@@ -466,6 +466,12 @@ def sanitize_index(index: Any, *, now: datetime | None = None) -> dict[str, Any]
     ``properties.updated`` (falling back to ``datetime``, then the
     acquisition-directory date), then the record with the most assets, then
     the lowest href.
+
+    Republished copies (same ``umbra:task_id`` and ``umbra:collect_id``,
+    different STAC ids) are not dropped. After the re-check passes they are
+    linked in place; see :mod:`umbra_py.duplicates`. The summary is
+    ``republished_captures`` on this report. A violation still aborts before
+    that link pass.
     """
     now = _now(now)
     items = list(iter_index_items(index))
@@ -498,18 +504,27 @@ def sanitize_index(index: Any, *, now: datetime | None = None) -> dict[str, Any]
     _delete_hrefs(index, [href for href in drop_hrefs if isinstance(href, str)])
 
     violations = collect_violations(iter_index_items(index), now=now)
+    input_rows = len(items)
+    kept = input_rows - len(quarantined) - len(duplicates)
+    # The link pass reads the table again. Drop the copies this function is
+    # still holding so a full-catalog build does not keep two item lists.
+    del items, survivors, by_id
+    # Link only a clean index. A violation must fail the build before any
+    # row is rewritten with canonical fields.
+    republished = apply_duplicate_links(index) if not violations else None
     report: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "checked_at": now.isoformat(),
         "earliest": EARLIEST.isoformat(),
         "future_after": (now + FUTURE_SLACK).isoformat(),
-        "input_rows": len(items),
-        "kept": len(items) - len(quarantined) - len(duplicates),
+        "input_rows": input_rows,
+        "kept": kept,
         "quarantined_count": len(quarantined),
         "quarantined": quarantined,
         "duplicates_dropped": len(duplicates),
         "duplicates": duplicates,
         "violations": violations,
+        "republished_captures": republished,
     }
     index.set_meta(VALIDATION_META_KEY, json.dumps(report))
     index._conn.commit()
@@ -552,6 +567,62 @@ def quarantined_future_count(report: dict[str, Any] | None) -> int:
     return sum(
         1 for row in rows if isinstance(row, dict) and _REASON_FUTURE in (row.get("reasons") or [])
     )
+
+
+def apply_duplicate_links(index: Any) -> dict[str, int]:
+    """Stamp republished-copy links onto rows that changed. Does not commit.
+
+    Reads each stored document (and the ``created`` column, when the document
+    itself has no ``created``) and writes ``umbra-py:canonical`` plus, for a
+    real duplicate group, the sibling fields and STAC links. The ``canonical``
+    column is updated with the document so a search filter does not have to
+    parse JSON. A row whose document and flag already match is left alone, so
+    a later ``umbra index update`` does not rewrite its thumbnail blob.
+    Returns the summary stored as ``republished_captures``.
+    """
+    from .duplicates import annotate_republished, canonical_flag  # noqa: PLC0415
+
+    rows = index._conn.execute(
+        "SELECT href, doc, place, datetime_suspect, created, published, canonical "
+        "FROM items ORDER BY href"
+    )
+    items: list[UmbraItem] = []
+    stored: list[tuple[str, int]] = []
+    for href, doc, place, suspect, created, published, flag in rows:
+        items.append(index._item_from_row(href, doc, place, suspect, created, published))
+        stored.append((doc, int(flag)))
+    summary = annotate_republished(items)
+
+    def changed():
+        for item, (doc, flag) in zip(items, stored, strict=True):
+            if not item.href:
+                continue
+            new_doc = json.dumps(item.raw)
+            new_flag = canonical_flag(item)
+            if new_doc == doc and new_flag == flag:
+                continue
+            yield new_doc, new_flag, item.href
+
+    index._conn.executemany(
+        "UPDATE items SET doc = ?, canonical = ? WHERE href = ?",
+        changed(),
+    )
+    return summary
+
+
+def record_republished_summary(index: Any, summary: dict[str, int]) -> None:
+    """Fold ``summary`` into the stored validation report, when one exists.
+
+    An incremental ``update`` relinks without re-running quarantine. The
+    coverage report reads this object, so the counts move with the links.
+    No report yet (a hand-built index) leaves ``meta`` alone; the
+    ``canonical`` column is still the filter.
+    """
+    stored = stored_validation(index)
+    if not isinstance(stored, dict):
+        return
+    stored["republished_captures"] = summary
+    index.set_meta(VALIDATION_META_KEY, json.dumps(stored))
 
 
 def stored_validation(index: Any) -> dict[str, Any] | None:
@@ -759,6 +830,7 @@ def recheck_report(
         "duplicates_dropped": 0,
         "duplicates": [],
         "violations": [],
+        "republished_captures": None,
     }
     recheck: dict[str, Any] = {
         "checked_at": now.isoformat(),
@@ -788,6 +860,15 @@ def render_validation_section(report: dict[str, Any]) -> str:
         for row in quarantined:
             reasons = ", ".join(row.get("reasons") or [])
             lines.append(f"| {row.get('id', '')} | {row.get('href', '')} | {reasons} |")
+        lines.append("")
+    republished = report.get("republished_captures")
+    if isinstance(republished, dict):
+        lines.append(
+            f"Republished captures: {republished.get('groups', 0)} group(s), "
+            f"{republished.get('extra_items', 0)} extra item(s), "
+            f"{republished.get('unique_captures', 0)} unique capture(s), "
+            f"{republished.get('low_confidence_groups', 0)} low-confidence group(s)."
+        )
         lines.append("")
     duplicates = report.get("duplicates") or []
     if duplicates:

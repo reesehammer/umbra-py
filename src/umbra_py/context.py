@@ -27,9 +27,10 @@ from .constants import (
     PRODUCT_TYPE_EXPLANATIONS,
 )
 
-#: Semantics of the search filters, mirroring the ``umbra search`` CLI options
-#: and :meth:`umbra_py.UmbraCatalog.search` / :meth:`umbra_py.CatalogIndex.search`
-#: keyword arguments. An agent reads this to build a valid query in one shot.
+#: Semantics of the search filters. Most mirror the ``umbra search`` CLI
+#: options and :meth:`umbra_py.UmbraCatalog.search` / :meth:`umbra_py.CatalogIndex.search`.
+#: ``canonical`` is the exception: the API, MCP, and those Python methods, not
+#: the CLI. An agent reads this to build a valid query in one shot.
 _SEARCH_PARAMETERS: dict[str, str] = {
     "bbox": (
         "Footprint filter as (min_lon, min_lat, max_lon, max_lat) in WGS84 "
@@ -96,6 +97,15 @@ _SEARCH_PARAMETERS: dict[str, str] = {
         "must be <= this many metres. An item missing a resolution is excluded. "
         "A set acquisition-property filter excludes items lacking that property "
         "(the STAC Query-extension convention)."
+    ),
+    "canonical": (
+        "When true, keep the canonical copy of a republished collect (the same "
+        "umbra:task_id and umbra:collect_id, with datetimes within 60 seconds) "
+        "and omit the other copies. When false, keep only those other copies. "
+        "Omit it to return every item. An item that is not in a duplicate group "
+        "counts as canonical. This filter is on the STAC API, MCP "
+        "search_catalog, and the Python search methods. There is no "
+        "`umbra search` flag."
     ),
     "limit": "Maximum number of items to return.",
     "max_per_task": (

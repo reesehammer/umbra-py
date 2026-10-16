@@ -18,7 +18,8 @@ name: Publish catalog index
 #                              MapLibre page — a whole-archive map, no crawl
 #   - catalog.html             a ready-to-open MapLibre GL viewer that reads the
 #                              published catalog.pmtiles by range request
-#   - index-validation.json    items quarantined or dropped as duplicate ids
+#   - index-validation.json    items quarantined, dropped as duplicate ids,
+#                              or linked as republished captures
 #   - index-validation.md      the same record in Markdown
 #   - catalog.thumbs.manifest.json
 #     and catalog.thumbs.db.partNNN.<sha>

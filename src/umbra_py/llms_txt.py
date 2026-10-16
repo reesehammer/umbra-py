@@ -306,8 +306,9 @@ def llms_full_txt() -> str:
     lines.append("## Search parameters")
     lines.append("")
     lines.append(
-        "Filters shared by the `umbra search` CLI, `UmbraCatalog.search` and "
-        "`CatalogIndex.search`. Build a valid query in one shot:"
+        "Filters on `UmbraCatalog.search` and `CatalogIndex.search`. Most are "
+        "also `umbra search` options; `canonical` is API, MCP, and Python only. "
+        "Build a valid query in one shot:"
     )
     lines.append("")
     for param, description in ctx["search_parameters"].items():

@@ -9,6 +9,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Added
+- **Republished captures stay in the index and are linked.** The same collect
+  under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
+  when the datetimes are within 60 seconds. Every item gains
+  `umbra-py:canonical`; grouped items also gain `umbra-py:canonical_id`,
+  `umbra-py:duplicate_ids`, `umbra-py:duplicate_confidence`, and
+  `rel: canonical` / `rel: related` links (sidecar URLs in the index and
+  parquet; the API rewrites them to its item route). `GET`/`POST /search` and
+  `search_catalog(canonical=True)` can keep the canonical copy. Item counts
+  are unchanged; `unique_captures` counts canonical rows.
+
 ## [0.1.3] — 2026-10-15
 
 The catalog index covers the open bucket (named tasks, UUID `task-data/`,

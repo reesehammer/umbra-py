@@ -69,10 +69,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: and recency paths skip it. Version 6 added nullable ``items.created`` (STAC
 #: ``properties.created``, absent on legacy ``_METADATA.json`` collects) and
 #: ``items.published`` (the sidecar's S3 ``LastModified`` from the crawl's
-#: existing listing). All are purely additive, so a lower-version (or legacy
-#: version-0) database is migrated in place by adding the missing columns --
-#: exercising the migration path versioning was landed to enable.
-_SCHEMA_VERSION = 6
+#: existing listing). Version 7 added ``items.canonical`` (1 when the row is
+#: the copy to keep for a republished collect; see :mod:`umbra_py.duplicates`).
+#: All are purely additive, so a lower-version (or legacy version-0) database
+#: is migrated in place by adding the missing columns -- exercising the
+#: migration path versioning was landed to enable.
+_SCHEMA_VERSION = 7
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
 #: default for :meth:`CatalogIndex.bake_thumbnails`. 512 px is large enough
@@ -96,7 +98,7 @@ _BUSY_TIMEOUT_MS = 5000
 #: place. Every step so far is additive (a new column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4, 5})
+_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4, 5, 6})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -116,7 +118,8 @@ CREATE TABLE IF NOT EXISTS items (
     thumbnail_size  INTEGER,
     datetime_suspect INTEGER NOT NULL DEFAULT 0,
     created         TEXT,
-    published       TEXT
+    published       TEXT,
+    canonical       INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS item_assets (
     href  TEXT NOT NULL,
@@ -1488,6 +1491,8 @@ class CatalogIndex:
         if "created" not in columns:  # v5 -> v6: STAC created + bucket LastModified
             self._conn.execute("ALTER TABLE items ADD COLUMN created TEXT")
             self._conn.execute("ALTER TABLE items ADD COLUMN published TEXT")
+        if "canonical" not in columns:  # v6 -> v7: republished-copy flag
+            self._conn.execute("ALTER TABLE items ADD COLUMN canonical INTEGER NOT NULL DEFAULT 1")
 
     @classmethod
     def from_release(
@@ -1533,6 +1538,17 @@ class CatalogIndex:
 
     def __len__(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+
+    def unique_captures(self) -> int:
+        """How many rows are the canonical copy of their capture.
+
+        A republished collect counts once. Items not in a duplicate group are
+        canonical, and so is every row of an index that has not been linked
+        yet (the column defaults to 1), so this equals :meth:`__len__` until
+        :func:`umbra_py.validate.apply_duplicate_links` runs.
+        """
+        row = self._conn.execute("SELECT COALESCE(SUM(canonical = 1), 0) FROM items").fetchone()
+        return int(row[0] or 0)
 
     # -- metadata --------------------------------------------------------------
 
@@ -1622,16 +1638,19 @@ class CatalogIndex:
         min_lon, min_lat, max_lon, max_lat = bbox if bbox else (None, None, None, None)
         dt = item.datetime
         acq = _index_acq_date(item)
+        from .duplicates import canonical_flag  # noqa: PLC0415
+
         self._conn.execute(
             "INSERT INTO items "
             "(href, id, task, datetime, acq_date, min_lon, min_lat, max_lon, max_lat, doc, "
-            "created, published) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "created, published, canonical) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(href) DO UPDATE SET "
             "id=excluded.id, task=excluded.task, datetime=excluded.datetime, "
             "acq_date=excluded.acq_date, min_lon=excluded.min_lon, min_lat=excluded.min_lat, "
             "max_lon=excluded.max_lon, max_lat=excluded.max_lat, doc=excluded.doc, "
-            "created=excluded.created, published=excluded.published",
+            "created=excluded.created, published=excluded.published, "
+            "canonical=excluded.canonical",
             (
                 href,
                 item.id,
@@ -1645,6 +1664,7 @@ class CatalogIndex:
                 json.dumps(item.raw),
                 _iso_utc(item.created),
                 _iso_utc(item.published),
+                canonical_flag(item),
             ),
         )
         self._conn.execute("DELETE FROM item_assets WHERE href = ?", (href,))
@@ -1772,6 +1792,14 @@ class CatalogIndex:
                     self._conn.commit()
             if progress is not None:
                 progress(scanned)
+        # Relink the whole index, not only the rows this walk refreshed.
+        # ``add`` replaces the stored document with the sidecar, which has
+        # no canonical fields, and a new copy has to be grouped with the
+        # rows already here.
+        from .validate import apply_duplicate_links, record_republished_summary  # noqa: PLC0415
+
+        summary = apply_duplicate_links(self)
+        record_republished_summary(self, summary)
         self.set_meta("built_at", date.today().isoformat())
         self._conn.commit()
         self._flag_datetime_suspects()
@@ -2101,6 +2129,7 @@ class CatalogIndex:
         min_incidence: float | None = None,
         max_incidence: float | None = None,
         max_resolution: float | None = None,
+        canonical: bool | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -2125,6 +2154,12 @@ class CatalogIndex:
         document (already reconstructed here) and applied in Python via
         :meth:`UmbraItem.matches_filters`, the same way the polygon test runs, so
         both backends agree without a schema change.
+
+        ``canonical`` keeps the preferred copy of a republished collect
+        (``True``) or only the other copies (``False``). ``None``, the
+        default, returns every row. The flag is the ``canonical`` column
+        written when the index is linked; an unlinked row defaults to
+        canonical. See :mod:`umbra_py.duplicates`.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -2175,6 +2210,10 @@ class CatalogIndex:
                 f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
             )
             params += wanted
+        if canonical is True:
+            conditions.append("canonical = 1")
+        elif canonical is False:
+            conditions.append("canonical = 0")
 
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         # Total order. ``id`` breaks a timestamp tie so offset pages cannot
@@ -2225,6 +2264,7 @@ class CatalogIndex:
         min_incidence: float | None = None,
         max_incidence: float | None = None,
         max_resolution: float | None = None,
+        canonical: bool | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -2295,6 +2335,7 @@ class CatalogIndex:
             "min_incidence": min_incidence,
             "max_incidence": max_incidence,
             "max_resolution": max_resolution,
+            "canonical": canonical,
         }
         index_stream = self.search(start=start_d, **filters)  # type: ignore[arg-type]
         catalog = catalog or UmbraCatalog()
@@ -2344,6 +2385,20 @@ class CatalogIndex:
                     return
         finally:
             if added_any:
+                # A new href can be the other publication of a collect already
+                # in the index. Relink before the commit so the next search
+                # sees both copies. Read-only warming already stopped in the
+                # loop; a failure here leaves the yielded page as it was.
+                try:
+                    from .validate import (  # noqa: PLC0415
+                        apply_duplicate_links,
+                        record_republished_summary,
+                    )
+
+                    summary = apply_duplicate_links(self)
+                    record_republished_summary(self, summary)
+                except sqlite3.OperationalError:
+                    pass
                 self.set_meta("built_at", date.today().isoformat())
                 self._flag_datetime_suspects()
 
@@ -2912,11 +2967,11 @@ class CatalogIndex:
         dropped for a datetime more than a day ahead (see
         :func:`umbra_py.validate.sanitize_index`); they are not in the index.
         """
-        items, start, end, tasks, labeled, thumbnailed, suspects = self._conn.execute(
+        items, start, end, tasks, labeled, thumbnailed, suspects, captures = self._conn.execute(
             "SELECT COUNT(*), MIN(acq_date), "
             "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END), "
             "COUNT(DISTINCT task), COUNT(place), COUNT(thumbnail), "
-            "SUM(datetime_suspect) FROM items"
+            "SUM(datetime_suspect), COALESCE(SUM(canonical = 1), 0) FROM items"
         ).fetchone()
         from .validate import quarantined_future_count, stored_validation  # noqa: PLC0415
 
@@ -2930,6 +2985,7 @@ class CatalogIndex:
             "built_at": self.get_meta("built_at"),
             "datetime_suspect_count": int(suspects or 0),
             "quarantined_future_count": quarantined_future_count(stored_validation(self)),
+            "unique_captures": int(captures or 0),
         }
 
     def temporal_extent(self) -> tuple[str | None, str | None]:

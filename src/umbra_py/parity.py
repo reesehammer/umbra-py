@@ -202,8 +202,8 @@ def coverage_report(
     indexed = indexed_groups(index)
     record = validation if isinstance(validation, dict) else stored_validation(index)
     omitted = accounted_group_ids(record)
-    rows, distinct = index._conn.execute(
-        "SELECT COUNT(*), COUNT(DISTINCT id) FROM items"
+    rows, distinct, captures = index._conn.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT id), COALESCE(SUM(canonical = 1), 0) FROM items"
     ).fetchone()
 
     by_prefix: dict[str, dict[str, int]] = {}
@@ -251,6 +251,7 @@ def coverage_report(
             "built_at": index.get_meta("built_at"),
             "rows": rows,
             "distinct_ids": distinct,
+            "unique_captures": int(captures or 0),
         },
         "totals": {
             "bucket": total,
@@ -291,7 +292,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "# umbra-py index coverage",
         "",
         f"Generated {report['generated_at']} against index built {idx['built_at']} "
-        f"({idx['rows']} rows, {idx['distinct_ids']} distinct ids).",
+        f"({idx['rows']} rows, {idx['distinct_ids']} distinct ids, "
+        f"{idx.get('unique_captures', idx['rows'])} unique captures).",
         "",
         f"**Overall: {t['indexed']} of {t['bucket']} bucket acquisitions indexed "
         f"({t['pct']}%; {_indexable_phrase(t)}).**",

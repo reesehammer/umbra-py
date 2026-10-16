@@ -51,6 +51,7 @@ from .constants import (
     S3_REGION,
 )
 from .dates import parse_date_bound
+from .duplicates import passes_canonical_filter
 from .exceptions import CatalogError
 from .fuzzy import task_matches
 from .models import BBox, UmbraItem, _normalize_assets, _parse_datetime
@@ -501,6 +502,7 @@ class UmbraCatalog:
         min_incidence: float | None = None,
         max_incidence: float | None = None,
         max_resolution: float | None = None,
+        canonical: bool | None = None,
         limit: int | None = None,
         max_per_task: int | None = None,
     ) -> Iterator[UmbraItem]:
@@ -561,6 +563,12 @@ class UmbraCatalog:
             resolution value is excluded. See :meth:`UmbraItem.matches_filters`
             for the exact acquisition-property semantics (a set filter excludes
             items lacking that property, matching the STAC Query extension).
+        canonical:
+            ``True`` keeps items that are the canonical copy of a republished
+            collect; ``False`` keeps only the other copies. ``None`` (the
+            default) keeps every item. A live sidecar has not been linked, so
+            it counts as canonical until an index build stamps the field.
+            See :mod:`umbra_py.duplicates`.
         limit:
             Stop after yielding this many items.
         max_per_task:
@@ -600,6 +608,7 @@ class UmbraCatalog:
                 area=area,
                 fuzzy=fuzzy,
                 acq_filters=acq_filters,
+                canonical=canonical,
                 limit=limit,
                 max_per_task=max_per_task,
             )
@@ -626,6 +635,8 @@ class UmbraCatalog:
                     continue
                 if not item.matches_filters(**acq_filters):
                     continue
+                if not passes_canonical_filter(item, canonical):
+                    continue
                 yield item
                 count += 1
                 per_task += 1
@@ -647,6 +658,7 @@ class UmbraCatalog:
         area: str | None,
         fuzzy: bool,
         acq_filters: dict[str, Any],
+        canonical: bool | None,
         limit: int | None,
         max_per_task: int | None,
     ) -> Iterator[UmbraItem]:
@@ -696,6 +708,8 @@ class UmbraCatalog:
                 if area and not task_matches(area, item.task or "", fuzzy=fuzzy):
                     continue
                 if not item.matches_filters(**acq_filters):
+                    continue
+                if not passes_canonical_filter(item, canonical):
                     continue
                 if max_per_task is not None:
                     seen = per_task.get(item.task, 0)
