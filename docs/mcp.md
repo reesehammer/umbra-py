@@ -47,6 +47,8 @@ v2 keys.
 `url` is a STAC JSON URL, or a product filename or acquisition stem resolved
 like `get_item`. A filename or stem needs a local index (`umbra index fetch`).
 
+On the hosted server, `confirm=true` is refused.
+
 ## Claude Code (recommended: one command)
 
 Remote Streamable HTTP. Claude Code calls this transport `http`:
