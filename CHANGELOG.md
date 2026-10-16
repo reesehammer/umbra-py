@@ -9,15 +9,6 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
-## [0.1.3] — 2026-10-15
-
-The catalog index covers the open bucket (named tasks, UUID `task-data/`,
-legacy collects, and `open-data/`) and the weekly snapshot validates what it
-keeps. STAC search and the geoparquet export use asset schema v2. The public
-host states its limits, probes `/healthz`, and serves baked previews. This is
-the first release Zenodo's GitHub integration archives; the concept DOI is
-still `10.5281/zenodo.TBD`.
-
 ### Added
 - **Republished captures stay in the index and are linked.** The same collect
   under `sar-data/task-data/` and `sar-data/tasks/<campaign>/` is one group
@@ -28,6 +19,17 @@ still `10.5281/zenodo.TBD`.
   parquet; the API rewrites them to its item route). `GET`/`POST /search` and
   `search_catalog(canonical=True)` can keep the canonical copy. Item counts
   are unchanged; `unique_captures` counts canonical rows.
+
+## [0.1.3] — 2026-10-15
+
+The catalog index covers the open bucket (named tasks, UUID `task-data/`,
+legacy collects, and `open-data/`) and the weekly snapshot validates what it
+keeps. STAC search and the geoparquet export use asset schema v2. The public
+host states its limits, probes `/healthz`, and serves baked previews. This is
+the first release Zenodo's GitHub integration archives; the concept DOI is
+still `10.5281/zenodo.TBD`.
+
+### Added
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
   GitHub release. The README and [Citing](docs/citing.md) give a BibTeX
   entry and a DOI badge using the placeholder `10.5281/zenodo.TBD` until
