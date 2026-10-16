@@ -60,6 +60,12 @@
       ]
     }
   ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.umbra-py.space/mcp"
+    }
+  ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "command": "uvx --from 'umbra-py[mcp]' umbra-mcp",
