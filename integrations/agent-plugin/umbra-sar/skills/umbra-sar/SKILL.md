@@ -14,9 +14,9 @@ should not depend on daylight or clear skies.
 
 Call `search_catalog` with a place or a bbox, optional `start` and `end`,
 `limit` of 20 or less, and `canonical` true. Report how many cards came back
-and the newest `datetime` on them. The open archive's newest collect is
-mid-September 2026 (an Umbra-side publishing gap). Do not say "latest" unless
-that sentence also gives the date.
+and the newest `datetime` on them. The open archive can lag weeks behind
+Umbra's newest collects, so always state the newest date you found and never
+say "latest" without it.
 
 ## Map
 
@@ -33,9 +33,10 @@ Call `quicklook` with `url` set to the card's `stac_href`. The picture is a
 ## Open pixels
 
 Call `get_item` on the chosen `stac_href`, then take the `GEC` product `url`.
-That file is a cloud-optimized GeoTIFF on Umbra's public bucket, so a map can
-stream it directly. If COG rendering fails, fall back to the quicklook plus a
-local download.
+That file is a cloud-optimized GeoTIFF on Umbra's public bucket. The bucket
+allows cross-origin GET with Range requests, so a map's COG layer may be able
+to stream it directly. This is not verified for every reader, and if it fails,
+fall back to the quicklook plus a local download.
 
 For a copy on disk, use the client's own downloader. On the hosted server,
 `download_asset` is a size check only: pass `confirm` false and read `bytes`.
