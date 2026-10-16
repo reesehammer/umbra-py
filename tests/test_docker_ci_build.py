@@ -1,12 +1,9 @@
-"""The Docker workflow must outlive an anonymous ECR Public 429.
+"""The Docker workflow retries an ECR Public 429, and only that failure.
 
-The failure mode is BuildKit's ``load metadata`` for
-``public.ecr.aws/docker/library/python:3.12-slim`` returning
-``429 Too Many Requests - toomanyrequests: Data limit exceeded``. A later
-empty commit used to clear it by landing on another runner. The workflow
-retries that build and, only after the retries are spent, passes
-``PYTHON_IMAGE=mirror.gcr.io/library/python:3.12-slim``. Railway builds the
-Dockerfile itself and does not pass that arg, so the default stays ECR Public.
+A step timestamp such as ``#11 3.429 Downloading fastapi`` is not a rate
+limit. After the ECR attempts are spent, the job passes
+``PYTHON_IMAGE=mirror.gcr.io/library/python:3.12-slim``. Dockerfiles are
+unchanged; Railway builds ``deploy/Dockerfile.mcp``.
 """
 
 from __future__ import annotations
@@ -23,10 +20,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "docker-build-ci.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker.yml"
-EXPORTER = REPO_ROOT / ".github" / "actions" / "export-actions-env" / "index.js"
-ECR_PYTHON = "public.ecr.aws/docker/library/python:3.12-slim"
 MIRROR_PYTHON = "mirror.gcr.io/library/python:3.12-slim"
-BUILDKIT_MIRROR = "mirror.gcr.io/moby/buildkit:buildx-stable-1"
+RATE_LIMIT = "429 Too Many Requests - toomanyrequests: Data limit exceeded"
 
 FAKE_DOCKER = """\
 #!/usr/bin/env python3
@@ -44,28 +39,21 @@ if n >= len(lines):
     print(f"unexpected extra docker invocation: {sys.argv[1:]}", file=sys.stderr)
     sys.exit(99)
 state.write_text(str(n + 1), encoding="utf-8")
-spec = lines[n]
-code, _, msg = spec.partition(":")
+code, _, msg = lines[n].partition(":")
 if msg:
     print(msg, file=sys.stderr)
 sys.exit(int(code))
 """
 
 
-def _install_fake(tmp_path: Path) -> Path:
+def _run(tmp_path: Path, plan: str) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
     docker.write_text(FAKE_DOCKER, encoding="utf-8")
     docker.chmod(docker.stat().st_mode | stat.S_IEXEC)
-    (tmp_path / "docker.log").write_text("", encoding="utf-8")
-    (tmp_path / "docker.state").write_text("0", encoding="utf-8")
-    return bin_dir
-
-
-def _run(tmp_path: Path, plan: str) -> subprocess.CompletedProcess[str]:
-    bin_dir = _install_fake(tmp_path)
     (tmp_path / "docker.plan").write_text(textwrap.dedent(plan).strip() + "\n", encoding="utf-8")
+    (tmp_path / "docker.state").write_text("0", encoding="utf-8")
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["DOCKER_LOG"] = str(tmp_path / "docker.log")
@@ -82,145 +70,78 @@ def _run(tmp_path: Path, plan: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _invocations(tmp_path: Path) -> list[list[str]]:
-    lines = (tmp_path / "docker.log").read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines if line]
+def _calls(tmp_path: Path) -> list[list[str]]:
+    text = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines() if line]
 
 
-def _rate_limit(count: int) -> str:
-    return "\n".join(["10:429 Too Many Requests - toomanyrequests: Data limit exceeded"] * count)
-
-
-def test_first_build_uses_gha_cache_and_the_dockerfile_default(tmp_path: Path):
-    result = _run(tmp_path, "0\n")
-    assert result.returncode == 0, result.stderr
-    calls = _invocations(tmp_path)
-    assert len(calls) == 1
-    argv = calls[0]
-    assert argv[:2] == ["buildx", "build"]
-    assert "--cache-from" in argv and "type=gha" in argv
-    assert "--cache-to" in argv and "type=gha,mode=max,ignore-error=true" in argv
-    assert "--build-arg" in argv and "UMBRA_EXTRAS=serve" in argv
-    assert "--load" in argv
-    assert "PYTHON_IMAGE" not in " ".join(argv)
-    assert ECR_PYTHON not in " ".join(argv)
-    assert MIRROR_PYTHON not in " ".join(argv)
+def _limited(count: int) -> str:
+    return "\n".join(f"1:{RATE_LIMIT}" for _ in range(count))
 
 
 def test_rate_limit_retries_then_succeeds_without_the_mirror(tmp_path: Path):
-    result = _run(tmp_path, _rate_limit(2) + "\n0\n")
+    result = _run(tmp_path, _limited(2) + "\n0\n")
     assert result.returncode == 0, result.stderr
-    calls = _invocations(tmp_path)
+    calls = _calls(tmp_path)
     assert len(calls) == 3
+    assert all(argv[:2] == ["build", "-f"] for argv in calls)
     assert all("PYTHON_IMAGE" not in " ".join(argv) for argv in calls)
     assert "attempt 1/5" in result.stderr
     assert "attempt 2/5" in result.stderr
+    assert RATE_LIMIT in result.stdout
 
 
-def test_non_rate_limit_failure_is_not_retried_or_mirrored(tmp_path: Path):
-    result = _run(tmp_path, "2:pip install failed\n")
+def test_timestamp_and_digest_are_not_a_rate_limit(tmp_path: Path):
+    """`#11 3.429` and a sha256 that contains 429 must not be retried."""
+    message = (
+        "#11 3.429 Downloading fastapi-0.143.3-py3-none-any.whl"
+        " sha256:a6e3429c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
+    )
+    result = _run(tmp_path, f"2:{message}\n")
     assert result.returncode == 2
-    assert len(_invocations(tmp_path)) == 1
+    assert len(_calls(tmp_path)) == 1
+    assert "3.429 Downloading fastapi" in result.stdout
     assert MIRROR_PYTHON not in result.stderr
+    assert "rate-limited" not in result.stderr
 
 
-def test_exhausted_ecr_retries_fall_back_to_the_gcr_mirror(tmp_path: Path):
-    result = _run(tmp_path, _rate_limit(5) + "\n0\n")
+def test_exhausted_ecr_retries_fall_back_to_the_mirror(tmp_path: Path):
+    result = _run(tmp_path, _limited(5) + "\n0\n")
     assert result.returncode == 0, result.stderr
-    calls = _invocations(tmp_path)
+    calls = _calls(tmp_path)
     assert len(calls) == 6
-    ecr_calls, mirror_calls = calls[:5], calls[5:]
-    assert all("PYTHON_IMAGE" not in " ".join(argv) for argv in ecr_calls)
-    mirror = " ".join(mirror_calls[0])
-    assert f"PYTHON_IMAGE={MIRROR_PYTHON}" in mirror
-    assert "--cache-from" in mirror_calls[0]
-    assert f"building from {MIRROR_PYTHON}" in result.stderr.lower()
+    assert all("PYTHON_IMAGE" not in " ".join(argv) for argv in calls[:5])
+    assert f"PYTHON_IMAGE={MIRROR_PYTHON}" in " ".join(calls[5])
+    assert f"building from {MIRROR_PYTHON}" in result.stderr
 
 
-def test_mirror_rate_limit_retries_then_a_real_mirror_error_stops(tmp_path: Path):
-    plan = _rate_limit(5) + "\n" + _rate_limit(1) + "\n3:manifest unknown\n"
-    result = _run(tmp_path, plan)
+def test_mirror_error_keeps_its_exit_code(tmp_path: Path):
+    result = _run(tmp_path, _limited(5) + "\n3:manifest unknown\n")
     assert result.returncode == 3
-    calls = _invocations(tmp_path)
-    assert len(calls) == 7
-    assert sum(f"PYTHON_IMAGE={MIRROR_PYTHON}" in " ".join(argv) for argv in calls) == 2
+    assert len(_calls(tmp_path)) == 6
 
 
-def test_both_registries_rate_limited_fails(tmp_path: Path):
-    result = _run(tmp_path, _rate_limit(5) + "\n" + _rate_limit(3) + "\n")
+def test_both_registries_rate_limited_exits_1(tmp_path: Path):
+    result = _run(tmp_path, _limited(8) + "\n")
     assert result.returncode == 1
-    assert len(_invocations(tmp_path)) == 8
+    assert len(_calls(tmp_path)) == 8
     assert "Both public.ecr.aws and mirror.gcr.io rate-limited" in result.stderr
 
 
-def test_script_defaults_and_workflow_wiring():
-    script = SCRIPT.read_text(encoding="utf-8")
-    assert "public.ecr.aws/docker/library/python:3.12-slim" in script
-    assert "mirror.gcr.io/library/python:3.12-slim" in script
-    assert "UMBRA_ECR_ATTEMPTS:-5" in script
-    assert "UMBRA_MIRROR_ATTEMPTS:-3" in script
-
-    document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps = document["jobs"]["build"]["steps"]
-    uses = [step.get("uses", "") for step in steps]
-    assert "docker/setup-buildx-action@v4" in uses
-    assert "./.github/actions/export-actions-env" in uses
-    setup = next(step for step in steps if step.get("uses") == "docker/setup-buildx-action@v4")
-    assert setup["with"]["driver-opts"] == f"image={BUILDKIT_MIRROR}"
-    build = next(step for step in steps if step.get("name") == "Build image (serve extra)")
-    assert build["run"] == "bash .github/scripts/docker-build-ci.sh"
+def test_workflow_is_plain_docker_build_with_no_cache():
     raw = WORKFLOW.read_text(encoding="utf-8")
-    assert "docker build -f" not in raw
-    assert "docker.io" not in raw
-    assert "PYTHON_IMAGE" not in raw
-
-
-def test_export_action_writes_cache_env_without_printing_the_token(tmp_path: Path):
-    dest = tmp_path / "github.env"
-    dest.write_text("", encoding="utf-8")
-    token = "runtime-token-do-not-print"
-    env = os.environ.copy()
-    env.update(
-        {
-            "GITHUB_ENV": str(dest),
-            "GITHUB_ACTIONS": "true",
-            "ACTIONS_RUNTIME_TOKEN": token,
-            "ACTIONS_RESULTS_URL": "https://results.example/cache",
-            "ACTIONS_CACHE_SERVICE_V2": "true",
-        }
+    document = yaml.safe_load(raw)
+    build = next(
+        step
+        for step in document["jobs"]["build"]["steps"]
+        if step.get("name") == "Build image (serve extra)"
     )
-    result = subprocess.run(
-        ["node", str(EXPORTER)],
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert token not in result.stdout
-    assert token not in result.stderr
-    assert "ACTIONS_RUNTIME_TOKEN" in result.stdout
-    written = dest.read_text(encoding="utf-8")
-    assert f"ACTIONS_RUNTIME_TOKEN<<EOF_ACTIONS_RUNTIME_TOKEN\n{token}\n" in written
-    assert (
-        "ACTIONS_RESULTS_URL<<EOF_ACTIONS_RESULTS_URL\nhttps://results.example/cache\n" in written
-    )
-    assert "ACTIONS_CACHE_SERVICE_V2<<EOF_ACTIONS_CACHE_SERVICE_V2\ntrue\n" in written
-
-
-def test_export_action_fails_in_gha_when_the_cache_token_is_missing(tmp_path: Path):
-    dest = tmp_path / "github.env"
-    dest.write_text("", encoding="utf-8")
-    env = os.environ.copy()
-    env["GITHUB_ENV"] = str(dest)
-    env["GITHUB_ACTIONS"] = "true"
-    env.pop("ACTIONS_RUNTIME_TOKEN", None)
-    result = subprocess.run(
-        ["node", str(EXPORTER)],
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert "ACTIONS_RUNTIME_TOKEN" in result.stderr
+    assert build["run"] == "bash .github/scripts/docker-build-ci.sh"
+    assert "setup-buildx" not in raw
+    assert "cache-from" not in raw
+    assert "export-actions-env" not in raw
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "docker build -f deploy/Dockerfile" in script
+    assert "cache-from" not in script
+    assert "toomanyrequests|429 Too Many Requests" in script
+    assert "Dockerfiles unchanged; Railway builds deploy/Dockerfile.mcp" in script

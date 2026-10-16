@@ -1,7 +1,0 @@
-name: Export Actions cache env
-description: >-
-  Copy Actions cache credentials into the job environment for a later
-  `docker buildx` step. Values are not printed.
-runs:
-  using: node24
-  main: index.js
