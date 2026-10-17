@@ -36,6 +36,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 
 ### Fixed
+- **CI image builds survive ECR Public pull limits.** The Docker workflow
+  retries `public.ecr.aws/docker/library/python:3.12-slim` when the registry
+  returns 429 `Data limit exceeded`. If those retries still fail, that job
+  builds from `mirror.gcr.io/library/python:3.12-slim`. Dockerfiles unchanged;
+  Railway builds `deploy/Dockerfile.mcp`, so production is unaffected.
 - **`download_asset(confirm=true)` is refused on the public host.** When COG
   streaming is off (`umbra serve --public`), confirming a download no longer
   writes the file onto the server. The tool error includes the asset URL, its

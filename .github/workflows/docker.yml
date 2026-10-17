@@ -21,8 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Retries public.ecr.aws 429s, then mirror.gcr.io. Dockerfiles unchanged.
       - name: Build image (serve extra)
-        run: docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve -t umbra-py:ci .
+        run: bash .github/scripts/docker-build-ci.sh
 
       - name: CLI passthrough works
         run: docker run --rm umbra-py:ci --version
