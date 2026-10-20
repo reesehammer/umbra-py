@@ -36,6 +36,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 
 ### Fixed
+- **A catalog-read deadline is a 503 on Python 3.10.** `asyncio.wait_for`
+  raises `asyncio.TimeoutError` there, a different class from the builtin
+  `TimeoutError`. `/healthz` and search now answer 503 when that deadline
+  fires, instead of a 500.
+- **Stateless MCP no longer logs `Terminating session: None` on every
+  request.** The line comes from the `mcp` Streamable HTTP transport, which
+  tears down a session-less transport after each call. The line is kept only
+  when that logger is at DEBUG; otherwise it is dropped, including when the
+  handler level is NOTSET. A real session id, and errors on that logger, keep
+  their level.
+- **`/healthz` keeps a single cached readiness document.** A new snapshot or
+  UTC day replaces the previous entry.
 - **Hosted `/healthz` and `/search` no longer read every preview image.**
   Baked quicklooks now live in `item_thumbnails`, not in the `items` row ahead
   of `datetime_suspect`, `created`, `published`, and `canonical`. Opening an

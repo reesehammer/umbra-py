@@ -1968,6 +1968,11 @@ def run(
     if not http:
         server.run()
         return
+    from ._mcp_log import quiet_stateless_session_teardown
+
+    # Same stateless transport as ``umbra serve --public``. The library logs
+    # "Terminating session: None" after every request; that is DEBUG.
+    quiet_stateless_session_teardown()
     server.run(
         transport="streamable-http",
         host=host,

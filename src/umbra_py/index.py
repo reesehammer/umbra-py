@@ -1749,10 +1749,14 @@ class CatalogIndex:
             )
             self._conn.commit()
             try:
+                # A reader holding the WAL does not raise. The pragma returns
+                # a row whose first column is 1 (busy), and this batch's frames
+                # stay in the ``-wal``. The rows are already committed; a later
+                # batch runs the pragma again. Freed overflow is reused once a
+                # checkpoint finishes. ``OperationalError`` means the pragma
+                # could not start at all.
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except sqlite3.OperationalError:
-                # Readers can hold the checkpoint. The next batch retries; the
-                # pages still get reused once the checkpoint lands.
                 pass
             moved += len(rows)
         self.set_meta(_THUMBS_OFF_ROW, "1")
