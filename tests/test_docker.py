@@ -58,7 +58,7 @@ def _instruction_body(path: Path) -> list[str]:
 def test_railway_points_at_the_mcp_dockerfile():
     text = RAILWAY.read_text(encoding="utf-8")
     assert _toml_string(text, "dockerfilePath") == "deploy/Dockerfile.mcp"
-    assert _toml_string(text, "healthcheckPath") == "/healthz"
+    assert _toml_string(text, "healthcheckPath") == "/livez"
 
 
 def test_railway_lives_at_repo_root_not_under_deploy():

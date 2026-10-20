@@ -119,18 +119,20 @@ needs no build-arg for it.
   render-artifact cache all live under `/data` (the image sets
   `XDG_CACHE_HOME=/data`), so restarts are instant and the archive is never
   re-crawled.
-- **Exposes a health probe.** `GET /healthz` returns `200` once the HTTP server
-  is up (liveness); its body's `ready` flag reports whether the search backend
-  can answer queries yet (readiness — the first-boot fetch may still be in
-  flight). Its `thumbnails` object (`count`, the merged `snapshot`, the
-  on-disk `sidecar_snapshot`, `merged`) and top-level `degraded` flag say
-  whether the boot's thumbnail merge landed. A skipped or failed merge is
-  still `200` with `degraded: true`. `built_at`, `snapshot`, and `stale`
-  (`true` when the build date is more than 9 days old) say which snapshot is
-  loaded. Only an index that exists but cannot be
-  opened is a `503` (`status: "error"`, with the SQLite `error`). It is wired
-  to a Docker `HEALTHCHECK` and is exactly what a Kubernetes liveness/readiness
-  probe wants.
+- **Exposes liveness and readiness.** `GET /livez` (also `/healthz/live`)
+  returns `200` and `{"status":"ok"}` with no catalog read. The image
+  `HEALTHCHECK` and Railway's deploy check use it. `GET /healthz` (also
+  `/readyz` and `/healthz/ready`) is readiness: the body's `ready` flag
+  reports whether the search backend can answer queries yet. Its `thumbnails`
+  object (`count`, the merged `snapshot`, the on-disk `sidecar_snapshot`,
+  `merged`) and top-level `degraded` flag say whether the boot's thumbnail
+  merge landed. A skipped or failed merge is still `200` with
+  `degraded: true`. `built_at`, `snapshot`, and `stale` (`true` when the build
+  date is more than 9 days old) say which snapshot is loaded. The document is
+  cached until the index file or its snapshot sidecar changes. A catalog read
+  that exceeds `UMBRA_REQUEST_TIMEOUT_S` (default 15s), or that cannot be
+  started because too many reads are already running, is a `503`. Only an
+  index that exists but cannot be opened is a `503` with `status: "error"`.
 - **Runs unprivileged.** The entrypoint starts as root only long enough to
   `chown` a mounted `/data` (Railway Volumes are root-owned and hide the
   image's `chown`), then drops to uid 10001 (`umbra`) before any `umbra`
@@ -152,6 +154,11 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_INDEX_URL`   | unset     | Override the published-index asset URL (e.g. a fork or mirror).        |
 | `UMBRA_INDEX_DB`    | `/data/umbra-py/catalog.db` | Explicit index path.                                   |
 | `UMBRA_SERVE_ARGS`  | unset     | Extra flags forwarded to `umbra serve` (e.g. `--no-artifacts`).        |
+| `UMBRA_REQUEST_TIMEOUT_S` | `15` | Catalog-read deadline. Past it, `/healthz` and `/search` return 503. |
+| `UMBRA_DB_CONCURRENCY` | `4` | Catalog reads in flight. Further DB requests get 503 immediately. |
+| `UMBRA_WATCHDOG` | `1` | `0` disables the event-loop stall exit. |
+| `UMBRA_WATCHDOG_STALL_S` | `90` | Loop silence before the process exits. |
+| `UMBRA_WATCHDOG_GRACE_S` | `120` | Startup window during which silence is ignored. |
 
 If the first-boot fetch fails (e.g. no outbound network), the entrypoint falls
 back to a live S3 walk so the server still answers.

@@ -47,8 +47,14 @@ HISTORY_MIN_DAYS = 7
 HISTORY_BRANCH = "monitoring"
 HISTORY_FILE = "healthz.jsonl"
 
-#: Matches the publish workflow's health check (``curl --max-time 20``).
-PROBE_TIMEOUT_S = 20.0
+#: A cold ``/healthz`` on the hosted volume has taken about 25s, and a 20s
+#: client timeout reported that as "no status" (an outage) for a request that
+#: was still reading. 60s lets a slow-but-alive read finish. The server's own
+#: catalog deadline is shorter, so a stuck read is a 503 inside this budget.
+PROBE_TIMEOUT_S = 60.0
+
+#: GitHub login assigned to, and mentioned on, a hosted-API failure issue.
+HEALTH_ISSUE_ASSIGNEE = "reesehammer"
 
 HEALTH_ISSUE_TITLE = "Hosted API healthz failing"
 STALE_ISSUE_TITLE = "Hosted catalog index is stale"
@@ -475,7 +481,19 @@ def apply_issue(
     number, _updated = _open_issue(title, run)
     if action == "open":
         if number is None:
-            run(["gh", "issue", "create", "--title", title, "--body", body])
+            run(
+                [
+                    "gh",
+                    "issue",
+                    "create",
+                    "--title",
+                    title,
+                    "--body",
+                    body,
+                    "--assignee",
+                    HEALTH_ISSUE_ASSIGNEE,
+                ]
+            )
         else:
             run(["gh", "issue", "comment", str(number), "--body", body])
         return
@@ -507,6 +525,14 @@ def _run_url(env: Mapping[str, str]) -> str | None:
     return f"{server}/{repository}/actions/runs/{run_id}"
 
 
+def _probe_timed_out(record: Mapping[str, Any]) -> bool:
+    """True when the probe got no HTTP status because the client gave up."""
+    if record.get("status_code") is not None:
+        return False
+    text = f"{record.get('error') or ''} {record.get('reason') or ''}".lower()
+    return "timeout" in text or "timed out" in text
+
+
 def failure_body(
     record: Mapping[str, Any], records: Sequence[Mapping[str, Any]], env: Mapping[str, str]
 ) -> str:
@@ -516,8 +542,17 @@ def failure_body(
             streak += 1
         else:
             break
+    url = record.get("url", HEALTHZ_URL)
+    if _probe_timed_out(record):
+        lead = (
+            f"@{HEALTH_ISSUE_ASSIGNEE} The external probe of {url} timed out "
+            f"after {record.get('latency_ms')} ms and got no HTTP status. "
+            "This is a timeout, not an HTTP error from the API."
+        )
+    else:
+        lead = f"@{HEALTH_ISSUE_ASSIGNEE} The external probe of {url} failed."
     lines = [
-        f"The external probe of {record.get('url', HEALTHZ_URL)} failed.",
+        lead,
         "",
         f"- probed_at: {record.get('probed_at')}",
         f"- status: {record.get('status_code')}",

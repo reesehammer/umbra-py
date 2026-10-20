@@ -6,8 +6,13 @@ name: Hosted API health
 # healthz.jsonl on the `monitoring` branch and nowhere else — main is not
 # checked out for the commit and is not pushed.
 #
+# GitHub delays a `*/15` cron; on the free plan the run often starts hours
+# later, not every 15 minutes. The history line is when the probe actually
+# ran. The client timeout is 60s (health_monitor.PROBE_TIMEOUT_S): a cold
+# read has taken ~25s, and a 20s cutoff recorded that as "no status".
+#
 # A single bad probe fails this run. An issue is opened or updated only after
-# three consecutive failures (about 45 minutes), and again at most every 12
+# three consecutive failures, and again at most every 12
 # hours while it lasts. `built_at` older than 9 days fails the run too and
 # uses a separate issue. `ok` in the history file is the uptime bit; staleness
 # is not downtime. The uptime percentage stays unpublished until that file
