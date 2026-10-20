@@ -675,3 +675,41 @@ def test_stateless_session_teardown_is_logged_at_debug(caplog):
     assert len(debug_lines) == 1
     assert debug_lines[0].levelno == logging.DEBUG
     assert debug_lines[0].getMessage() == "Terminating session: None"
+
+
+def test_stateless_teardown_is_not_emitted_by_a_notset_handler():
+    """A handler at NOTSET emits any record that reaches it.
+
+    The logger is at INFO, so the original ERROR line passes
+    ``isEnabledFor``. The filter must refuse it anyway. The same handler
+    still receives a real session id and a real error.
+    """
+    quiet_stateless_session_teardown()
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    emitted: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record.getMessage())
+
+    handler = _Capture(level=logging.NOTSET)
+    previous_level = target.level
+    previous_propagate = target.propagate
+    target.addHandler(handler)
+    target.setLevel(logging.INFO)
+    target.propagate = False
+    try:
+        target.error("Terminating session: None")
+        target.error("Terminating session: abc123")
+        target.error("Error handling POST request")
+        assert emitted == [
+            "Terminating session: abc123",
+            "Error handling POST request",
+        ]
+        target.setLevel(logging.DEBUG)
+        target.error("Terminating session: None")
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+        target.propagate = previous_propagate
+    assert emitted[-1] == "Terminating session: None"

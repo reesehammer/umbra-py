@@ -67,13 +67,19 @@ _STREAMABLE_HTTP_LOGGER = "mcp.server.streamable_http"
 
 
 class _StatelessSessionFilter(logging.Filter):
-    """Lower the stateless ``Terminating session: None`` line to DEBUG."""
+    """Drop ``Terminating session: None`` unless this logger is at DEBUG.
+
+    Relabelling the record is not enough. ``Logger.isEnabledFor`` already
+    accepted the original INFO/ERROR line, and a handler left at NOTSET (the
+    default, including uvicorn's) emits whatever reaches it.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.getMessage() == _STATELESS_SESSION_TEARDOWN:
-            record.levelno = logging.DEBUG
-            record.levelname = logging.getLevelName(logging.DEBUG)
-        return True
+        if record.getMessage() != _STATELESS_SESSION_TEARDOWN:
+            return True
+        record.levelno = logging.DEBUG
+        record.levelname = logging.getLevelName(logging.DEBUG)
+        return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
 
 
 def quiet_stateless_session_teardown() -> None:

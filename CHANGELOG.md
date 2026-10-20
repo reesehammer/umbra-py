@@ -42,8 +42,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   fires, instead of a 500.
 - **Stateless MCP no longer logs `Terminating session: None` on every
   request.** The line comes from the `mcp` Streamable HTTP transport, which
-  tears down a session-less transport after each call. It is logged at DEBUG.
-  A real session id, and errors on that logger, keep their level.
+  tears down a session-less transport after each call. The line is kept only
+  when that logger is at DEBUG; otherwise it is dropped, including when the
+  handler level is NOTSET. A real session id, and errors on that logger, keep
+  their level.
 - **`/healthz` keeps a single cached readiness document.** A new snapshot or
   UTC day replaces the previous entry.
 - **Hosted `/healthz` and `/search` no longer read every preview image.**
