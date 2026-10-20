@@ -36,6 +36,20 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 
 ### Fixed
+- **Hosted `/healthz` and `/search` no longer read every preview image.**
+  Baked quicklooks now live in `item_thumbnails`, not in the `items` row ahead
+  of `datetime_suspect`, `created`, `published`, and `canonical`. Opening an
+  existing index moves them in place (no catalog rebuild). `/search` stops
+  after `LIMIT` rows using an index on that sort, and `/healthz` reuses one
+  result per snapshot instead of calling `COUNT(thumbnail)` on every probe.
+  A catalog read that overruns its deadline, or that cannot start because
+  other reads are still running, returns 503. `GET /livez` does no catalog
+  I/O; Railway's deploy check uses it. If the event loop stays silent past
+  a grace period, the process exits so the platform can restart it.
+- **The external health probe waits 60s and names a timeout.** The GitHub
+  Actions check of `https://api.umbra-py.space/healthz` no longer treats a
+  ~25s cold read as "no status". A failure issue is assigned to and mentions
+  @reesehammer, and a client timeout says it is a timeout.
 - **CI image builds survive ECR Public pull limits.** The Docker workflow
   retries `public.ecr.aws/docker/library/python:3.12-slim` when the registry
   returns 429 `Data limit exceeded`. If those retries still fail, that job

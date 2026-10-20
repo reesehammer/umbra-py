@@ -553,9 +553,19 @@ def _free_space(monkeypatch, free: int) -> None:
 
 
 def _thumbs_count(db) -> int:
+    """Previews in ``item_thumbnails`` plus any legacy blob still inline."""
     conn = sqlite3.connect(db)
     try:
-        return conn.execute("SELECT COUNT(thumbnail) FROM items").fetchone()[0]
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        separate = 0
+        if "item_thumbnails" in tables:
+            separate = conn.execute(
+                "SELECT COUNT(*) FROM item_thumbnails WHERE length(thumbnail) IS NOT NULL"
+            ).fetchone()[0]
+        inline = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE length(thumbnail) IS NOT NULL"
+        ).fetchone()[0]
+        return int(separate) + int(inline)
     finally:
         conn.close()
 

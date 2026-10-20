@@ -227,7 +227,11 @@ def test_alert_opens_on_sustained_failure_and_closes_on_recovery():
     history = [_record(ok=False), _record(ok=False), _record(ok=False, reason="status 503")]
     hm.alert_from_history(history, history[-1], env={}, run=gh, now=now)
     assert hm.HEALTH_ISSUE_TITLE in gh.issues
-    assert "status 503" in gh.issues[hm.HEALTH_ISSUE_TITLE]["body"]
+    body = gh.issues[hm.HEALTH_ISSUE_TITLE]["body"]
+    assert "status 503" in body
+    assert "@reesehammer" in body
+    created = next(call for call in gh.calls if len(call) > 2 and call[2] == "create")
+    assert created[created.index("--assignee") + 1] == "reesehammer"
 
     # Still failing, but the issue was just updated: no second comment.
     before = len(gh.calls)
@@ -252,6 +256,27 @@ def test_stale_issue_is_separate_from_uptime():
     fresh = _record(ok=True, stale=False, built_at="2026-10-14")
     hm.alert_from_history([stale, fresh], fresh, env={}, run=gh, now=now)
     assert gh.issues[hm.STALE_ISSUE_TITLE]["closed"] is True
+
+
+def test_timeout_issue_says_timeout():
+    record = _record(
+        ok=False,
+        status_code=None,
+        status=None,
+        ready=None,
+        degraded=None,
+        built_at=None,
+        snapshot=None,
+        stale=None,
+        error="TimeoutError: timed out",
+        reason="status None; degraded is not false",
+        latency_ms=20081,
+    )
+    body = hm.failure_body(record, [record, record, record], {})
+    assert "timed out" in body
+    assert "not an HTTP error" in body
+    assert "@reesehammer" in body
+    assert hm.PROBE_TIMEOUT_S >= 60
 
 
 def test_main_exit_code_follows_ok_and_stale_without_publishing_a_ratio(capsys):

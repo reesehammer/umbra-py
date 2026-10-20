@@ -14,14 +14,19 @@ below is best effort.
 Target: **99% monthly uptime**, best effort.
 
 Uptime is measured by an external probe, not by the process's own view of
-itself. GitHub Actions requests `GET /healthz` every 15 minutes (GitHub may
-start the cron late; the history records when the probe actually ran). A probe
-counts as up when the response is HTTP 200 and `degraded` is false. Latency
-is stored with each result. The server has no latency cap, so a slow 200 is
-still up; a timeout (20 seconds, the same budget the publish workflow uses)
-is a failed probe.
+itself. GitHub Actions requests `GET /healthz` on a `*/15` cron. GitHub often
+starts that cron hours late; the history records when the probe actually ran.
+A probe counts as up when the response is HTTP 200 and `degraded` is false.
+Latency is stored with each result. The client waits 60 seconds. A timeout is
+a failed probe and the opened issue says so. A catalog read that misses the
+server's own deadline is HTTP 503, which is also a failed probe.
 
-`/healthz` does not count against the rate limit.
+`/healthz` is readiness: the same JSON document as before, including
+`ready`, `degraded`, and `stale`. `/livez` (and `/healthz/live`) is liveness:
+`{"status":"ok"}`, no catalog read. Railway's deploy check uses `/livez`.
+`/readyz` and `/healthz/ready` are the same document as `/healthz`.
+
+`/healthz`, `/livez`, and `/readyz` do not count against the rate limit.
 
 Results are appended to `healthz.jsonl` on the
 [`monitoring`](https://github.com/reesehammer/umbra-py/tree/monitoring) branch.
@@ -69,7 +74,8 @@ keeps a hash, not the token), otherwise the client IP. `--public` trusts
 `X-Forwarded-For` from the proxy, which is what makes the cap per visitor
 rather than one bucket for all of Railway.
 
-These paths do not count: `/healthz`, `/docs`, `/openapi.json`, `/redoc`.
+These paths do not count: `/healthz`, `/healthz/live`, `/healthz/ready`,
+`/livez`, `/readyz`, `/docs`, `/openapi.json`, `/redoc`.
 
 Over the cap the response is HTTP 429, body `RateLimited`, with `Retry-After`
 (seconds), `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
