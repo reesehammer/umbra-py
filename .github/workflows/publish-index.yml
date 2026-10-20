@@ -245,7 +245,7 @@ jobs:
       - name: Restore the thumbnail seed
         id: thumbs-seed
         continue-on-error: true
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: catalog.thumbs.seed.db
           # A new key every run; restore-keys picks up the previous run's seed.
@@ -499,7 +499,7 @@ jobs:
       # previews this run baked.
       - name: Save the thumbnail seed
         if: ${{ !cancelled() && hashFiles('catalog.thumbs.seed.db') != '' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: catalog.thumbs.seed.db
           key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}
