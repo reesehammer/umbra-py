@@ -132,3 +132,47 @@ def test_a_saturated_catalog_returns_503_without_waiting(index_path, monkeypatch
     assert busy.status_code == 503
     assert "busy" in busy.json()["detail"].lower()
     assert held.status_code == 200
+
+
+def test_health_cache_drops_stale_snapshots():
+    cache: dict[tuple[object, ...], dict] = {}
+    serve._cache_health_document(cache, ("/idx", 1), {"ready": True, "items": 1})
+    serve._cache_health_document(cache, ("/idx", 2), {"ready": True, "items": 2})
+    assert list(cache) == [("/idx", 2)]
+    assert cache[("/idx", 2)]["items"] == 2
+
+
+def test_asyncio_timeout_error_is_a_503(index_path, monkeypatch):
+    """Python 3.10 raises asyncio.TimeoutError, which is not builtin TimeoutError.
+
+    On 3.11+ the two names are one class, so the test installs a distinct
+    exception under ``asyncio.TimeoutError`` and makes ``wait_for`` raise it.
+    ``except TimeoutError`` alone would turn this into a 500 on every version.
+    """
+
+    class DistinctTimeout(Exception):
+        pass
+
+    class _Asyncio:
+        TimeoutError = DistinctTimeout
+
+        def __getattr__(self, name: str):
+            return getattr(asyncio, name)
+
+        @staticmethod
+        async def wait_for(awaitable, _timeout):
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise DistinctTimeout()
+
+    monkeypatch.setattr(serve, "asyncio", _Asyncio())
+    with TestClient(serve.build_app(index_path), raise_server_exceptions=False) as client:
+        health = client.get("/healthz")
+        search = client.get("/search", params={"limit": 1})
+    assert health.status_code == 503
+    assert health.json()["ready"] is False
+    assert "Timeout" in health.json()["error"]
+    assert search.status_code == 503
+    assert search.json()["error"] == "Timeout"
+    assert "deadline" in search.json()["message"]

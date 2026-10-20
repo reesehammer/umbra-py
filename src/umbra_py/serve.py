@@ -936,6 +936,21 @@ def health_document(
     return doc
 
 
+def _cache_health_document(
+    cache: dict[tuple[object, ...], dict[str, Any]],
+    key: tuple[object, ...],
+    doc: dict[str, Any],
+) -> None:
+    """Remember one readiness document and drop every other snapshot.
+
+    The key includes the index path, file sizes, mtimes and the UTC day, so a
+    refreshed snapshot or a new day is a different entry. Keeping each of
+    those would retain a document per deploy for the life of the process.
+    """
+    cache.clear()
+    cache[key] = doc
+
+
 def _temporal_interval(temporal: tuple[str | None, str | None] | None) -> list[list[str | None]]:
     start, end = temporal or (None, None)
     return [[start, end]]
@@ -2947,6 +2962,11 @@ def build_app(
                 enable_dns_rebinding_protection=False,
             )
         mcp_asgi = _build_mcp_server().streamable_http_app(**mcp_kw)
+        from ._mcp_log import quiet_stateless_session_teardown
+
+        # Stateless HTTP has no session id. The transport still logs
+        # "Terminating session: None" once per request; keep that at DEBUG.
+        quiet_stateless_session_teardown()
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -3099,7 +3119,7 @@ def build_app(
         """
         try:
             return await asyncio.wait_for(asyncio.to_thread(fn), _request_timeout_s())
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             return JSONResponse(
                 status_code=503,
                 content={
@@ -3217,8 +3237,9 @@ def build_app(
         # ``ready`` flag reports whether the search backend can answer yet; a
         # skipped thumbnail merge is ``degraded``, still 200. Only an index
         # that exists but cannot be opened or read is a 503. The read is cached
-        # for the life of this snapshot (path, size, mtime) so a probe does not
-        # recompute it, and it gives up at ``_request_timeout_s``.
+        # for this snapshot (path, size, mtime, UTC day) so a probe does not
+        # recompute it. A newer key replaces that document. The read gives up
+        # at ``_request_timeout_s``.
         if live:
             return health_document(backend="live", ready=True)
         if not _slots.acquire(blocking=False):
@@ -3258,7 +3279,7 @@ def build_app(
             return cached
         doc = _health_read()
         if isinstance(doc, dict):
-            _health_cache[key] = doc
+            _cache_health_document(_health_cache, key, doc)
         return doc
 
     def _health_read() -> Any:
@@ -3337,7 +3358,7 @@ def build_app(
     async def get_health() -> Any:
         try:
             return await asyncio.wait_for(asyncio.to_thread(_health_sync), _request_timeout_s())
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             return _health_deadline()
 
     def _unhealthy(exc: Exception) -> Any:

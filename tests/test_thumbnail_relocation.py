@@ -144,14 +144,21 @@ def test_search_limit_and_stats_do_not_read_the_thumbnail_column(tmp_path):
         return sqlite3.SQLITE_OK
 
     with CatalogIndex(path) as idx:
+        moved = idx._conn.execute(
+            "SELECT id, thumbnail FROM item_thumbnails ORDER BY id"
+        ).fetchall()
+        assert [(row[0], bytes(row[1])) for row in moved] == [
+            ("scene-a", b"png-a"),
+            ("scene-b", b"png-b"),
+        ]
         idx._conn.set_authorizer(auth)
         traced: list[str] = []
         idx._conn.set_trace_callback(traced.append)
         page = list(idx.search(limit=1))
         idx.stats()
         idx.temporal_extent()
-        assert [item.id for item in page] == ["scene-a"] or page[0].id in {"scene-a", "scene-b"}
         assert len(page) == 1
+        assert page[0].id in {"scene-a", "scene-b"}
         selects = [sql for sql in traced if "LIMIT" in sql.upper() and "FROM items" in sql]
         assert selects, traced
         assert read == []
