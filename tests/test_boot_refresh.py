@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -21,11 +22,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from umbra_py.exceptions import IndexRefreshError  # noqa: E402
 from umbra_py.index import (  # noqa: E402
+    _SCHEMA_VERSION,
     CatalogIndex,
     IndexLease,
     RefreshResult,
     attach_index_lease,
     detach_index_lease,
+    index_is_usable,
     publish_sqlite,
     refresh_serving_catalog,
 )
@@ -136,6 +139,67 @@ def test_refresh_swaps_a_validated_snapshot_in_one_rename(tmp_path, monkeypatch)
     assert outcome.startswith("swapped")
     assert _ids(live) == ["new-id"]
     assert not (tmp_path / "catalog.db.next").exists()
+
+
+def _is_live(target: object, live: Path) -> bool:
+    text = str(target)
+    if text.startswith("file:"):
+        text = text[5:].split("?", 1)[0]
+    try:
+        return Path(text).resolve() == live
+    except OSError:
+        return False
+
+
+def test_warm_boot_does_not_quick_check_the_live_catalog(tmp_path, monkeypatch):
+    """The pre-listen open must not integrity-scan the catalog being served.
+
+    ``PRAGMA quick_check`` on the live file is what made a warm boot wait.
+    It stays on the staged snapshot (``catalog.db.next``), which this test
+    never builds: the refresh is held back and does not touch SQLite.
+    """
+    path = _catalog(tmp_path / "catalog.db", "old-id")
+    live = path.resolve()
+    scanned: list[str] = []
+    real_connect = sqlite3.connect
+
+    def _connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        target = args[0] if args else kwargs.get("database", "")
+
+        def _trace(sql: str) -> None:
+            if "quick_check" in sql.lower() and _is_live(target, live):
+                scanned.append(sql)
+
+        conn.set_trace_callback(_trace)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+    monkeypatch.setattr("umbra_py.index.refresh_serving_catalog", lambda *_a, **_k: "unchanged")
+    app = build_app(path, refresh=True)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/healthz").status_code == 200
+            assert client.get("/livez").status_code == 200
+    finally:
+        detach_index_lease(path)
+    assert scanned == []
+
+
+def test_index_is_usable_is_a_cheap_open(tmp_path):
+    path = _catalog(tmp_path / "catalog.db", "old-id")
+    assert index_is_usable(path) is True
+    empty = tmp_path / "empty.db"
+    with CatalogIndex(empty):
+        pass
+    assert index_is_usable(empty) is False
+    future = _catalog(tmp_path / "future.db", "old-id")
+    conn = sqlite3.connect(future)
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    assert index_is_usable(future) is False
+    assert index_is_usable(tmp_path / "missing.db") is False
 
 
 def test_warm_server_answers_before_the_refresh_finishes(tmp_path, monkeypatch):

@@ -164,13 +164,14 @@ def test_deploy_docs_do_not_advertise_bare_mcp_start_command():
 
 
 def test_entrypoint_refreshes_the_index_on_every_boot():
-    """A usable catalog is served immediately. The server refreshes it after
-    listen. A cold volume still fetches before the process listens, and a
-    failed refresh of an index that is already there keeps serving it."""
+    """A catalog file is served immediately. The shell does not open it.
+    A cold volume still fetches before the process listens, and a failed
+    refresh of an index that is already there keeps serving it."""
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "umbra index fetch --if-changed" in text
     assert "--refresh-index" in text
-    assert "catalog_usable" in text
+    assert "index_is_usable" not in text
+    assert "catalog_usable" not in text
     assert '[ ! -f "$INDEX_DB" ]; then\n    echo "No catalog index' not in text
     assert "serving the existing index" in text
     assert text.index("--refresh-index") < text.rindex("exec umbra serve")

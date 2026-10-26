@@ -804,20 +804,32 @@ def _lease_for(path: Path) -> IndexLease | None:
 
 
 def index_is_usable(path: str | os.PathLike) -> bool:
-    """Whether ``path`` is a catalog this build can serve.
+    """Whether ``path`` can be served without scanning the live catalog.
 
-    Missing, empty, unreadable, or a newer schema than this process understands
-    is not usable. A cold volume fails this; a catalog left by the last deploy
-    passes it, which is what lets the server listen before the refresh runs.
+    The file exists, SQLite can open it, ``PRAGMA user_version`` is at most
+    :data:`_SCHEMA_VERSION`, and ``items`` has a row. That is the check before
+    a warm process listens. It does not run ``PRAGMA quick_check`` or count
+    every row: both walk a catalog of about a gigabyte, and doing so before
+    the socket is open is the outage this boot path exists to avoid.
+    :func:`_validate_snapshot` still ``quick_check``s a staged download
+    (``catalog.db.next``) before that file replaces the one being served.
+    Missing, empty, unreadable, or a newer schema is not usable.
     """
     candidate = Path(path)
     if not candidate.is_file():
         return False
     try:
-        rows, _built_at = _validate_snapshot(candidate)
-    except (IndexRefreshError, OSError):
+        conn = sqlite3.connect(str(candidate))
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > _SCHEMA_VERSION:
+                return False
+            row = conn.execute("SELECT 1 FROM items LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.DatabaseError, OSError):
         return False
-    return rows > 0
+    return row is not None
 
 
 def publish_sqlite(staging: Path, dest: Path) -> None:

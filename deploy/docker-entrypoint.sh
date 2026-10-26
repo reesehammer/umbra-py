@@ -75,14 +75,18 @@ fi
 
 # A persistent volume keeps catalog.db across deploys, so "fetch only when
 # missing" pinned the hosted API to its first snapshot. The serve path hands
-# that refresh to `umbra serve --refresh-index`: a usable catalog is served
-# immediately and the snapshot, thumbnail sidecar, and preview merge run after
-# the socket is open, swapping in under the server's lease. Railway volumes
-# cannot overlap two deployments, so blocking on that work before listen is
-# the whole outage. A cold volume (nothing usable on disk) still fetches the
-# index here, before the process listens, and a total failure still falls
-# back to a live S3 walk. `mcp` mode has no readiness gate of its own and
-# keeps the blocking refresh.
+# that refresh to `umbra serve --refresh-index`: a catalog file already on
+# disk is served immediately and the snapshot, thumbnail sidecar, and preview
+# merge run after the socket is open, swapping in under the server's lease.
+# The shell only checks that the file exists. Opening it here as well as in
+# the server was two integrity scans of the live catalog before listen.
+# The server does one cheap open (schema version, and that items has a row)
+# and leaves /healthz failing until that passes. `PRAGMA quick_check` stays
+# on the staged download. Railway volumes cannot overlap two deployments, so
+# blocking on that work before listen is the whole outage. A cold volume (no
+# catalog file) still fetches the index here, before the process listens, and
+# a total failure still falls back to a live S3 walk. `mcp` mode has no
+# readiness gate of its own and keeps the blocking refresh.
 INDEX_DB="${UMBRA_INDEX_DB:-${XDG_CACHE_HOME:-$HOME/.cache}/umbra-py/catalog.db}"
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -d "$(dirname "$INDEX_DB")" ]; then
     # What the refreshes below have to work with, so a full volume is
@@ -91,11 +95,6 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -d "$(dirname "$INDEX_DB")" ]; then
     df -Ph "$data_root" | awk 'NR == 2 {print "Volume " $6 ": " $4 " free of " $2 "; largest entries:"}'
     du -xah -d 2 "$data_root" 2>/dev/null | sort -rh | head -n 10 || true
 fi
-catalog_usable() {
-    python -c 'import sys
-from umbra_py.index import index_is_usable
-sys.exit(0 if index_is_usable(sys.argv[1]) else 1)' "$1"
-}
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ "$MODE" = "mcp" ]; then
     if [ -f "$INDEX_DB" ]; then
         echo "Checking for a newer published snapshot than $INDEX_DB..."
@@ -115,20 +114,19 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ "$MODE" = "mcp" ]; then
         exec umbra mcp --http --host "$HOST" --port "$PORT"
     fi
 elif [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
-    if catalog_usable "$INDEX_DB"; then
-        echo "Catalog at $INDEX_DB is usable; the server will refresh it after it is listening."
-    elif [ -f "$INDEX_DB" ]; then
-        # Present but not readable. Listen anyway: /healthz stays 503 and
-        # --refresh-index replaces the file once a good snapshot is in hand.
-        echo "Catalog at $INDEX_DB is not usable; serving stays unready until refresh replaces it." >&2
+    if [ -f "$INDEX_DB" ]; then
+        # Present, readable or not. The server opens it once and keeps
+        # /healthz failing until that open passes. Do not integrity-scan it
+        # here: that scan is the warm-boot delay.
+        echo "Catalog at $INDEX_DB is present; the server will refresh it after it is listening."
     else
-        echo "No usable catalog at $INDEX_DB; fetching the published snapshot before listening..."
+        echo "No catalog at $INDEX_DB; fetching the published snapshot before listening..."
         if [ -n "${UMBRA_INDEX_URL:-}" ]; then
             umbra index fetch --if-changed --url "$UMBRA_INDEX_URL" || FETCH_FAILED=1
         else
             umbra index fetch --if-changed || FETCH_FAILED=1
         fi
-        if [ "${FETCH_FAILED:-0}" = "1" ] && { catalog_usable "$INDEX_DB" || [ -f "$INDEX_DB" ]; }; then
+        if [ "${FETCH_FAILED:-0}" = "1" ] && [ -f "$INDEX_DB" ]; then
             echo "Snapshot refresh failed; serving the existing index at $INDEX_DB." >&2
         elif [ "${FETCH_FAILED:-0}" = "1" ]; then
             echo "Index fetch failed; falling back to a live S3 walk (slow)." >&2

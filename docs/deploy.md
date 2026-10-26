@@ -95,14 +95,17 @@ needs no build-arg for it.
 ## What the image does
 
 - **Serves a catalog that is already on disk, then refreshes it.** When
-  `/data` already holds a usable `catalog.db`, `umbra serve --refresh-index`
+  `/data` already holds a `catalog.db`, `umbra serve --refresh-index`
   listens immediately and refreshes the published snapshot, the thumbnail
-  sidecar, and the preview merge in the background. One `HEAD` decides
-  whether the weekly snapshot changed. The new file is renamed into place
-  only after `PRAGMA quick_check`, and only once no request still has the old
-  file open. A failed refresh keeps the catalog that is already being served.
+  sidecar, and the preview merge in the background. The entrypoint only
+  checks that the file is present. The server opens it once (schema version,
+  and that `items` has a row) and does not integrity-scan the live catalog
+  before the socket is open. One `HEAD` decides whether the weekly snapshot
+  changed. The staged file is renamed into place only after `PRAGMA
+  quick_check`, and only once no request still has the old file open. A
+  failed refresh keeps the catalog that is already being served.
   A published sidecar with fewer previews than the local file is refused.
-  A cold volume (nothing usable) still runs
+  A cold volume (no catalog file) still runs
   [`umbra index fetch --if-changed`](cli.md) before the process listens;
   thumbnail fetch does not block that.
   [`umbra index fetch-thumbnails --if-changed`](cli.md) runs in the background

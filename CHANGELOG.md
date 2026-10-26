@@ -47,8 +47,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   before it answers.** When `catalog.db` on the volume is already usable,
   `umbra serve --refresh-index` (what the image runs) listens immediately and
   refreshes the published snapshot, thumbnail sidecar, and preview merge in
-  the background. The new file replaces the one being served only after
-  `quick_check`, once open requests have closed. A failed refresh keeps
+  the background. Before it listens it only checks that the catalog file
+  opens, that its schema version is one this build supports, and that
+  `items` has a row. `PRAGMA quick_check` runs on the staged snapshot, not
+  on the live catalog. The new file replaces the one being served only after
+  that check, once open requests have closed. A failed refresh keeps
   serving the current catalog. A cold volume still downloads the index before
   `/healthz` is 200.
 - **A catalog-read deadline is a 503 on Python 3.10.** `asyncio.wait_for`
