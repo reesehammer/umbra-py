@@ -9,6 +9,30 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-10-26
+
+Hosted MCP is in the registry, and the six core tools keep their names
+through 0.x. Republished collects stay indexed and can collapse to one
+canonical copy. Baked previews move to `item_thumbnails` (index schema v8).
+
+### Upgrading
+
+The published `catalog.db` snapshot is index schema v8. v7 added
+`items.canonical`. v8 moved baked previews into the `item_thumbnails`
+table. umbra-py 0.1.3 reads only up to schema v6, so `umbra index fetch`
+on 0.1.3 fails against current snapshots. Upgrade to 0.1.4.
+
+0.1.4 migrates a local index from schema v0 through v7 to v8 in place.
+The migration is one-way: it stamps schema v8, and 0.1.3 cannot read the
+file afterward.
+
+Relocating baked thumbnails in a large self-built index (more than 64 MiB
+of inline previews) does not run during open. `umbra serve` finishes that
+move on a background thread after it is listening. The copy commits eight
+rows at a time and checkpoints the write-ahead log so freed pages are
+reused. It still needs temporary extra disk for about one batch, not a
+second copy of the whole preview payload.
+
 ### Added
 - **The MCP registry lists the hosted server.** `server.json` keeps the stdio
   PyPI package and adds a `streamable-http` remote at
@@ -80,9 +104,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 The catalog index covers the open bucket (named tasks, UUID `task-data/`,
 legacy collects, and `open-data/`) and the weekly snapshot validates what it
 keeps. STAC search and the geoparquet export use asset schema v2. The public
-host states its limits, probes `/healthz`, and serves baked previews. This is
-the first release Zenodo's GitHub integration archives; the concept DOI is
-still `10.5281/zenodo.TBD`.
+host states its limits, probes `/healthz`, and serves baked previews. This
+release was not archived. Zenodo's GitHub integration is enabled for 0.1.4,
+which will be the first archived release; the concept DOI is still
+`10.5281/zenodo.TBD`.
 
 ### Added
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
@@ -497,7 +522,8 @@ live-verified Canopy client; a MultiRTC replacement. See
 
 This tag is the first public cut. Pre-release commits are in git.
 
-[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/reesehammer/umbra-py/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.4
 [0.1.3]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.3
 [0.1.2]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.2
 [0.1.1]: https://github.com/reesehammer/umbra-py/releases/tag/v0.1.1

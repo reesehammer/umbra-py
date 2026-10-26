@@ -14,7 +14,7 @@ Treat **this** file as the source of truth.
 
 - **What it is:** `umbra-py` — a Python toolkit for discovering, downloading
   and working with [Umbra](https://umbra.space/open-data/) open SAR data.
-- **Status:** v0.1.3. Discovery, download, load,
+- **Status:** v0.1.4. Discovery, download, load,
   convert, viz, chips, serve, and the agent front doors all ship. Not an
   InSAR toolbox; see `docs/guides/limitations.md`.
 - **Language / Python:** Python 3.10+ (also tested on 3.11, 3.12).
