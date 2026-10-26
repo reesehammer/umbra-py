@@ -63,10 +63,11 @@ RUN useradd --create-home --uid 10001 umbra \
 
 EXPOSE 8000
 
-# Liveness/readiness for orchestrators. `/healthz` returns 200 once the HTTP
-# server is up; the entrypoint fetches the index before starting uvicorn, so a
-# healthy container is a ready one.
+# Liveness only. `/livez` does no catalog read, so a cold fetch or a slow
+# `/healthz` does not restart the container. Readiness is `/healthz` (503
+# until a usable catalog is being served). Railway's deploy check is that
+# path, from railway.toml, not this instruction.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('UMBRA_PORT','8000'), timeout=4).status==200 else 1)"]
+    CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/livez' % os.environ.get('UMBRA_PORT','8000'), timeout=4).status==200 else 1)"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]

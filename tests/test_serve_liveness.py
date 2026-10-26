@@ -131,7 +131,10 @@ def test_a_saturated_catalog_returns_503_without_waiting(index_path, monkeypatch
     held, busy = asyncio.run(_run())
     assert busy.status_code == 503
     assert "busy" in busy.json()["detail"].lower()
-    assert held.status_code == 200
+    # The held read then finds no index. That is not ready, so it is 503
+    # rather than a 200 a deploy probe would treat as healthy.
+    assert held.status_code == 503
+    assert held.json()["ready"] is False
 
 
 def test_health_cache_drops_stale_snapshots():

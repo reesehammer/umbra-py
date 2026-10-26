@@ -415,7 +415,7 @@ def test_healthz_is_degraded_but_200_when_the_sidecar_was_not_merged(index_path)
     assert body["thumbnails"]["sidecar_snapshot"] == "t2"
 
 
-def test_healthz_is_503_only_when_the_index_cannot_be_opened(tmp_path):
+def test_healthz_is_503_when_the_index_cannot_be_opened(tmp_path):
     path = tmp_path / "catalog.db"
     path.write_bytes(b"\0" * 8192)  # what a volume that filled mid-write can leave
     client = TestClient(serve.build_app(path), raise_server_exceptions=False)
@@ -427,12 +427,13 @@ def test_healthz_is_503_only_when_the_index_cannot_be_opened(tmp_path):
 
 
 def test_healthz_is_alive_but_not_ready_without_an_index(tmp_path):
-    # First-boot / missing-index: the server is up (200) but reports not-ready,
-    # so a readiness probe holds traffic until the index fetch lands.
+    # First-boot / missing-index: the process is up (/livez 200) but readiness
+    # is 503, so a probe that treats any 2xx as healthy holds traffic.
     app = serve.build_app(tmp_path / "absent.db")
     client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/livez").status_code == 200
     resp = client.get("/healthz")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "starting"
     assert body["ready"] is False

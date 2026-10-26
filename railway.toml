@@ -28,10 +28,15 @@ dockerfilePath = "deploy/Dockerfile.mcp"
 
 [deploy]
 startCommand = "/bin/sh -c 'exec /usr/local/bin/docker-entrypoint.sh serve --public'"
-# Liveness only. `/healthz` reads the catalog (readiness) and must not gate
-# the deploy: the entrypoint fetches the index before the socket listens, and
-# a cold catalog read is not "the process is dead". 300s still covers that
-# fetch; shortening it fails deploys that have not opened the port yet.
-healthcheckPath = "/livez"
-healthcheckTimeout = 300
+# Readiness, not liveness. Railway marks a deploy active on any 2xx from this
+# path and, with no path set, as soon as the container process is running.
+# `/livez` is 200 once the socket is open, including while a cold volume is
+# still downloading. `/healthz` is 503 until a usable catalog is being served
+# and 200 as soon as one is (a warm volume, immediately; the refresh runs
+# after that). 900s covers a cold index download before the process listens.
+# Thumbnail fetch does not block it. A volume cannot mount on two deployments
+# at once, so this probe does not keep the old container up — it only stops
+# the new one being marked active before it answers.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 900
 restartPolicyType = "ON_FAILURE"

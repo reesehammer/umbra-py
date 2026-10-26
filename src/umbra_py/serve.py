@@ -874,10 +874,11 @@ def health_document(
     ``backend`` is ``"index"`` or ``"live"``; ``ready`` reports whether the
     search backend can currently answer queries (a local index is present, or
     live mode is configured); ``items`` is the indexed acquisition count when
-    known. The document is deliberately tiny so a container ``HEALTHCHECK`` or a
-    Kubernetes probe can poll it cheaply -- the endpoint itself always returns
-    ``200`` once the HTTP server is up (liveness), and ``ready`` distinguishes a
-    server that is still waiting on its first-boot index fetch (readiness).
+    known. The document is deliberately tiny so a probe can poll it cheaply. ``ready``
+    false (no usable catalog yet) is served as HTTP 503: Railway treats any
+    2xx as a successful deploy check, so a 200 with ``"ready": false`` would
+    mark a cold volume healthy. ``/livez`` is the cheap liveness document and
+    stays 200 with no catalog read. A degraded thumbnail merge is still 200.
 
     ``ids`` (distinct item ids), ``built_at`` (the index build date) and
     ``snapshot`` (the published release asset's ETag the index was fetched
@@ -892,7 +893,7 @@ def health_document(
     index still serves, previews fall back to streaming or are missing.
 
     ``error`` marks an index that exists but cannot be opened or read; the
-    route sends that document with a ``503``, the only non-2xx it returns.
+    route sends that document with a 503, as it does for ``ready`` false.
 
     ``stale`` is true when ``built_at`` is missing or more than
     :data:`~umbra_py.health_monitor.INDEX_STALE_AFTER_DAYS` days before today
@@ -2848,6 +2849,8 @@ def build_app(
     mcp: bool = False,
     public: bool = False,
     rate_limit: int | None = None,
+    refresh: bool = False,
+    index_url: str | None = None,
 ) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
@@ -2912,6 +2915,32 @@ def build_app(
     # ``serve`` extra), so publish them into the module namespace for that
     # resolution to succeed.
     globals().update(Request=Request, JSONResponse=JSONResponse, Response=Response)
+
+    catalog_path = Path(index_path) if index_path is not None else default_index_path()
+    # Set once a usable catalog is what requests will open. Unset on a cold
+    # volume until the background fetch publishes one, which keeps /healthz
+    # at 503 so a deploy probe waits. None when this process is not refreshing.
+    _refresh_ready: threading.Event | None = None
+    _refresh_lease: Any | None = None
+    if refresh and not live:
+        from .index import IndexLease, attach_index_lease, index_is_usable
+
+        _refresh_lease = IndexLease()
+        attach_index_lease(catalog_path, _refresh_lease)
+        _refresh_ready = threading.Event()
+        if index_is_usable(catalog_path):
+            _refresh_ready.set()
+            print(
+                f"Catalog at {catalog_path} is usable; serving it and refreshing "
+                "in the background.",
+                flush=True,
+            )
+        else:
+            print(
+                f"No usable catalog at {catalog_path}; /healthz stays failing "
+                "until the published snapshot is fetched.",
+                flush=True,
+            )
 
     if renderers is None:
         renderers = default_renderers(stack_execution, narrator=narrator)
@@ -2981,6 +3010,28 @@ def build_app(
             else nullcontext()
         )
         beat = asyncio.create_task(heartbeat_forever())
+
+        def _refresh_catalog() -> None:
+            from .index import index_is_usable, refresh_serving_catalog
+
+            try:
+                outcome = refresh_serving_catalog(
+                    catalog_path, index_url=index_url, lease=_refresh_lease
+                )
+                print(f"Catalog refresh {outcome}. ({catalog_path})", flush=True)
+            except Exception as exc:
+                print(
+                    f"Catalog refresh failed; serving the catalog already open. ({exc})",
+                    flush=True,
+                )
+            finally:
+                if _refresh_ready is not None and index_is_usable(catalog_path):
+                    _refresh_ready.set()
+
+        if _refresh_ready is not None:
+            threading.Thread(
+                target=_refresh_catalog, name="umbra-catalog-refresh", daemon=True
+            ).start()
         # Preview bytes merged into ``items.thumbnail`` make every later-column
         # read walk overflow pages. A large file is moved after the socket is
         # up so the deploy health check (liveness) is not waiting on that copy.
@@ -3226,22 +3277,24 @@ def build_app(
     @app.get("/livez", tags=["Ops"])
     @app.get("/healthz/live", tags=["Ops"])
     async def get_live() -> dict[str, str]:
-        # No index, no lock, no thread-pool hop. Railway's deploy health check
-        # hits this. A stuck catalog read must not fail liveness.
+        # No index, no lock, no thread-pool hop. A stuck catalog read must not
+        # fail liveness. Railway's deploy check is /healthz (readiness), not
+        # this: a 200 here only means the process is listening.
         return {"status": "ok"}
 
     _health_cache: dict[tuple[object, ...], dict[str, Any]] = {}
 
     def _health_sync() -> Any:
-        # Readiness. Same document ``/healthz`` has always returned. The body's
-        # ``ready`` flag reports whether the search backend can answer yet; a
-        # skipped thumbnail merge is ``degraded``, still 200. Only an index
-        # that exists but cannot be opened or read is a 503. The read is cached
-        # for this snapshot (path, size, mtime, UTC day) so a probe does not
-        # recompute it. A newer key replaces that document. The read gives up
-        # at ``_request_timeout_s``.
+        # Readiness. Same document ``/healthz`` has always returned. ``ready``
+        # false is HTTP 503 (a cold volume, or an index that will not open) so
+        # a deploy probe waits. A skipped thumbnail merge is ``degraded``,
+        # still 200. The read is cached for this snapshot (path, size, mtime,
+        # UTC day) so a probe does not recompute it. A newer key replaces that
+        # document. The read gives up at ``_request_timeout_s``.
         if live:
             return health_document(backend="live", ready=True)
+        if _refresh_ready is not None and not _refresh_ready.is_set():
+            return health_document(backend="index", ready=False)
         if not _slots.acquire(blocking=False):
             raise HTTPException(
                 status_code=503,
@@ -3357,9 +3410,14 @@ def build_app(
     @app.get("/healthz/ready", tags=["Ops"])
     async def get_health() -> Any:
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_health_sync), _request_timeout_s())
+            result = await asyncio.wait_for(asyncio.to_thread(_health_sync), _request_timeout_s())
         except (TimeoutError, asyncio.TimeoutError):
             return _health_deadline()
+        # Railway (and any probe that treats any 2xx as healthy) must not see
+        # a cold or unreadable catalog as ready. ``degraded`` stays 200.
+        if isinstance(result, dict) and not result.get("ready", False):
+            return JSONResponse(status_code=503, content=result)
+        return result
 
     def _unhealthy(exc: Exception) -> Any:
         doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
@@ -4763,6 +4821,8 @@ def serve(
     public: bool = False,
     rate_limit: int | None = None,
     proxy_headers: bool = False,
+    refresh: bool = False,
+    index_url: str | None = None,
 ) -> None:
     """Build the app and run it with uvicorn (blocking). Requires ``serve``."""
     _require_serve()
@@ -4799,6 +4859,8 @@ def serve(
         mcp=mcp,
         public=public,
         rate_limit=rate_limit,
+        refresh=refresh,
+        index_url=index_url,
     )
     from .watchdog import start_watchdog
 
@@ -4837,4 +4899,8 @@ def serve(
         # always behind a proxy.
         run_kw["proxy_headers"] = True
         run_kw["forwarded_allow_ips"] = "*"
+    # Finish the request in flight when the platform sends SIGTERM. Railway's
+    # default drain is 0 seconds (SIGKILL immediately) and a volume cannot be
+    # mounted by two deployments, so this only helps when a drain is configured.
+    run_kw["timeout_graceful_shutdown"] = 10
     uvicorn.run(app, **run_kw)

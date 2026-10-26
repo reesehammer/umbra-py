@@ -418,8 +418,9 @@ jobs:
       # Compares /healthz `snapshot` (the ETag of the catalog.db the API swapped
       # in) with the asset this run published; the acquisition count alone can't
       # tell a stale API from a fresh one when a week adds nothing. Polls for up
-      # to 30 minutes: a boot downloads and merges the ~1.2 GB thumbnail sidecar
-      # before the server listens. Once the snapshot matches, a thumbnail merge
+      # to 30 minutes. The server answers on the catalog already on the volume,
+      # then swaps this snapshot in after the download and thumbnail merge.
+      # Once the snapshot matches, a thumbnail merge
       # the boot skipped or failed (healthz `degraded`, or a merged sidecar that
       # is not the published one) is a warning: the index serves, previews lag.
       - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)

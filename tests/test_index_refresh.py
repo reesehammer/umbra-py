@@ -71,6 +71,22 @@ def _count(path) -> int:
 
 
 @responses.activate
+def test_publish_false_leaves_the_serving_index_in_place(tmp_path):
+    """The background refresh must not rename over a catalog requests have open."""
+    dest = tmp_path / "catalog.db"
+    _serve(_db_bytes(tmp_path, "v1.db", 2), '"v1"')
+    refresh_from_release(dest, url=URL)
+    _serve(_db_bytes(tmp_path, "v2.db", 4), '"v2"')
+    result = refresh_from_release(dest, url=URL, publish=False)
+    assert result.changed and result.path.name == "catalog.db.next"
+    assert _count(dest) == 2
+    assert _count(result.path) == 4
+    assert read_snapshot_state(dest)["etag"] == "v1"
+    assert read_snapshot_state(result.path)["etag"] == "v2"
+    assert not (dest.parent / "catalog.db-wal").exists() or _count(dest) == 2
+
+
+@responses.activate
 def test_first_fetch_records_the_snapshot(tmp_path):
     dest = tmp_path / "data" / "catalog.db"
     _serve(_db_bytes(tmp_path, "v1.db", 3), '"v1"')

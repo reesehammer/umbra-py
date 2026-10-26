@@ -94,17 +94,21 @@ needs no build-arg for it.
 
 ## What the image does
 
-- **Fetches the published index on first boot.** The entrypoint runs
-  [`umbra index fetch`](cli.md) into the `/data` volume before starting the
-  server, so a fresh container is queryable in seconds rather than after a full
-  bucket walk. Every later start runs `umbra index fetch --if-changed`: one
-  `HEAD` request decides whether the weekly snapshot changed, and only then is
-  it downloaded, validated and swapped in. If that check fails, the existing
-  index keeps serving. It then runs
-  [`umbra index fetch-thumbnails --if-changed`](cli.md) the same way for the
-  baked-preview sidecar, re-merging it whenever the sidecar or the index
-  changed, so MCP `quicklook` / `describe_scene` can return baked previews
-  without proxying Umbra COGs. A failed check keeps the existing sidecar.
+- **Serves a catalog that is already on disk, then refreshes it.** When
+  `/data` already holds a usable `catalog.db`, `umbra serve --refresh-index`
+  listens immediately and refreshes the published snapshot, the thumbnail
+  sidecar, and the preview merge in the background. One `HEAD` decides
+  whether the weekly snapshot changed. The new file is renamed into place
+  only after `PRAGMA quick_check`, and only once no request still has the old
+  file open. A failed refresh keeps the catalog that is already being served.
+  A published sidecar with fewer previews than the local file is refused.
+  A cold volume (nothing usable) still runs
+  [`umbra index fetch --if-changed`](cli.md) before the process listens;
+  thumbnail fetch does not block that.
+  [`umbra index fetch-thumbnails --if-changed`](cli.md) runs in the background
+  so MCP `quicklook` / `describe_scene` can return baked previews without
+  proxying Umbra COGs. The `mcp` command (no STAC server) still refreshes
+  before it listens.
 - **Refreshes without filling the disk.** The boot first logs the volume's
   free space and its largest entries. Each refresh then deletes the scratch
   files an interrupted boot left behind (`*.next`, `*.next.part`,
@@ -121,18 +125,19 @@ needs no build-arg for it.
   re-crawled.
 - **Exposes liveness and readiness.** `GET /livez` (also `/healthz/live`)
   returns `200` and `{"status":"ok"}` with no catalog read. The image
-  `HEALTHCHECK` and Railway's deploy check use it. `GET /healthz` (also
-  `/readyz` and `/healthz/ready`) is readiness: the body's `ready` flag
-  reports whether the search backend can answer queries yet. Its `thumbnails`
-  object (`count`, the merged `snapshot`, the on-disk `sidecar_snapshot`,
-  `merged`) and top-level `degraded` flag say whether the boot's thumbnail
-  merge landed. A skipped or failed merge is still `200` with
-  `degraded: true`. `built_at`, `snapshot`, and `stale` (`true` when the build
-  date is more than 9 days old) say which snapshot is loaded. The document is
-  cached until the index file or its snapshot sidecar changes. A catalog read
-  that exceeds `UMBRA_REQUEST_TIMEOUT_S` (default 15s), or that cannot be
-  started because too many reads are already running, is a `503`. Only an
-  index that exists but cannot be opened is a `503` with `status: "error"`.
+  `HEALTHCHECK` uses it, so a cold fetch does not restart the container.
+  Railway's deploy check is `GET /healthz` (also `/readyz` and
+  `/healthz/ready`): `200` when the catalog can answer, `503` when it cannot
+  (no usable index yet, or the file will not open). A `200` with
+  `"ready": false` would count as healthy. Its `thumbnails` object (`count`,
+  the merged `snapshot`, the on-disk `sidecar_snapshot`, `merged`) and
+  top-level `degraded` flag say whether the thumbnail merge landed. A skipped
+  or failed merge is still `200` with `degraded: true`. `built_at`,
+  `snapshot`, and `stale` (`true` when the build date is more than 9 days
+  old) say which snapshot is loaded. The document is cached until the index
+  file or its snapshot sidecar changes. A catalog read that exceeds
+  `UMBRA_REQUEST_TIMEOUT_S` (default 15s), or that cannot be started because
+  too many reads are already running, is a `503`.
 - **Runs unprivileged.** The entrypoint starts as root only long enough to
   `chown` a mounted `/data` (Railway Volumes are root-owned and hide the
   image's `chown`), then drops to uid 10001 (`umbra`) before any `umbra`
@@ -149,7 +154,7 @@ All behaviour is driven by environment variables (set them in the compose file's
 | ------------------- | --------- | ---------------------------------------------------------------------- |
 | `UMBRA_HOST`        | `0.0.0.0` | Interface the server binds to inside the container.                    |
 | `UMBRA_PORT`        | `8000`    | Port the server listens on.                                            |
-| `UMBRA_FETCH_INDEX` | `1`       | Fetch the published index on boot, refreshing it when the snapshot changed; `0` skips. |
+| `UMBRA_FETCH_INDEX` | `1`       | On `serve`, pass `--refresh-index` (listen first when a catalog is already usable; block on the index download only when it is not). `0` skips. `mcp` still refreshes before listening. |
 | `UMBRA_SERVE_LIVE`  | unset     | `1` serves from a live S3 walk per request — no index (correct, slow). |
 | `UMBRA_INDEX_URL`   | unset     | Override the published-index asset URL (e.g. a fork or mirror).        |
 | `UMBRA_INDEX_DB`    | `/data/umbra-py/catalog.db` | Explicit index path.                                   |
@@ -160,8 +165,10 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_WATCHDOG_STALL_S` | `90` | Loop silence before the process exits. |
 | `UMBRA_WATCHDOG_GRACE_S` | `120` | Startup window during which silence is ignored. |
 
-If the first-boot fetch fails (e.g. no outbound network), the entrypoint falls
-back to a live S3 walk so the server still answers.
+If that download fails and there is no catalog file on disk (for example, no
+outbound network), the entrypoint falls back to a live S3 walk so the server
+still answers. A failed refresh of a catalog that is already there keeps
+serving that file.
 
 ## Render endpoints
 

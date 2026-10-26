@@ -58,7 +58,8 @@ def _instruction_body(path: Path) -> list[str]:
 def test_railway_points_at_the_mcp_dockerfile():
     text = RAILWAY.read_text(encoding="utf-8")
     assert _toml_string(text, "dockerfilePath") == "deploy/Dockerfile.mcp"
-    assert _toml_string(text, "healthcheckPath") == "/livez"
+    assert _toml_string(text, "healthcheckPath") == "/healthz"
+    assert re.search(r"^healthcheckTimeout\s*=\s*900\s*$", text, re.MULTILINE)
 
 
 def test_railway_lives_at_repo_root_not_under_deploy():
@@ -163,14 +164,16 @@ def test_deploy_docs_do_not_advertise_bare_mcp_start_command():
 
 
 def test_entrypoint_refreshes_the_index_on_every_boot():
-    """PRD P1-1: a persistent volume kept catalog.db across deploys and the
-    entrypoint only fetched when the file was missing, so the hosted API stayed
-    on its first snapshot. Every boot must now run the change-aware refresh,
-    and a failed refresh with an index present must keep serving it."""
+    """A usable catalog is served immediately. The server refreshes it after
+    listen. A cold volume still fetches before the process listens, and a
+    failed refresh of an index that is already there keeps serving it."""
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "umbra index fetch --if-changed" in text
+    assert "--refresh-index" in text
+    assert "catalog_usable" in text
     assert '[ ! -f "$INDEX_DB" ]; then\n    echo "No catalog index' not in text
     assert "serving the existing index" in text
+    assert text.index("--refresh-index") < text.rindex("exec umbra serve")
 
 
 def test_entrypoint_logs_free_space_before_refreshing():
@@ -182,15 +185,15 @@ def test_entrypoint_logs_free_space_before_refreshing():
 
 
 def test_entrypoint_refreshes_the_thumbnail_sidecar_on_every_boot():
-    """Same volume, same bug: the sidecar was fetched only when missing, so a
-    stale catalog.thumbs.db was never replaced (or re-merged into a refreshed
-    index). A failed fetch must not stop the server from starting."""
+    """The sidecar refresh must not block `umbra serve`. mcp mode still runs
+    it before listening, and a failed fetch must not stop that server."""
     text = ENTRYPOINT.read_text(encoding="utf-8")
     assert "umbra index fetch-thumbnails --if-changed ||" in text
     assert '[ ! -f "$THUMBS_DB" ]' not in text
-    assert text.index("umbra index fetch --if-changed") < text.index(
-        "umbra index fetch-thumbnails --if-changed"
-    )
+    assert 'if [ "$MODE" = "mcp" ]' in text
+    thumbs = text.index("umbra index fetch-thumbnails --if-changed")
+    assert text.index("umbra index fetch --if-changed") < thumbs
+    assert text.rindex('MODE" = "mcp"') < thumbs or text.index('"$MODE" = "mcp"') < thumbs
 
 
 def test_entrypoint_thumbnail_fetch_uses_the_manifest_asset_name():

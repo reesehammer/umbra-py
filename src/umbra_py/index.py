@@ -45,7 +45,13 @@ from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
 from .constants import CATALOG_INDEX_DB_URL
-from .exceptions import CatalogError, IndexRefreshError, IndexSchemaError, InsufficientSpaceError
+from .exceptions import (
+    CatalogError,
+    IndexRefreshError,
+    IndexSchemaError,
+    InsufficientSpaceError,
+    UmbraError,
+)
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem, _iso_utc, _parse_datetime
 
@@ -674,6 +680,8 @@ def _leftover_paths(path: Path) -> list[Path]:
         f"{name}.next.chunk",
         f"{name}.next.chunk.part",
         f"{name}.next.chunk.part.etag",
+        f"{name}.next.source.json",
+        f"{name}.next.source.json.tmp",
         f"{name}.source.json.tmp",
     ]
     for staged in (f"{name}.next", f"{name}.merge"):
@@ -718,6 +726,116 @@ def _clean_leftovers(path: Path) -> dict[str, int]:
     return removed
 
 
+class IndexLease:
+    """Shared/exclusive lease for one catalog file the server has open.
+
+    Each request holds a :class:`CatalogIndex` for the length of that request.
+    Publishing a replacement has to wait until those connections close: the
+    swap deletes the live ``-wal`` / ``-shm``, and on Linux an open connection
+    keeps the old inode only while that wal file is still the one it opened.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._readers = 0
+        self._writing = False
+        # Set as soon as a publish wants the file, so new requests wait out
+        # the ones already open instead of keeping the reader count above zero.
+        self._writer_waiting = False
+
+    def acquire_read(self) -> None:
+        with self._cv:
+            while self._writing or self._writer_waiting:
+                self._cv.wait()
+            self._readers += 1
+
+    def release_read(self) -> None:
+        with self._cv:
+            self._readers -= 1
+            if self._readers == 0:
+                self._cv.notify_all()
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        self.acquire_read()
+        try:
+            yield
+        finally:
+            self.release_read()
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        with self._cv:
+            self._writer_waiting = True
+            while self._readers:
+                self._cv.wait()
+            self._writing = True
+            self._writer_waiting = False
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._writing = False
+                self._cv.notify_all()
+
+
+_index_leases: dict[str, IndexLease] = {}
+_index_leases_guard = threading.Lock()
+
+
+def _lease_key(path: Path) -> str:
+    return str(path.resolve())
+
+
+def attach_index_lease(path: str | os.PathLike, lease: IndexLease) -> None:
+    """Requests that open ``path`` take ``lease`` until they close."""
+    with _index_leases_guard:
+        _index_leases[_lease_key(Path(path))] = lease
+
+
+def detach_index_lease(path: str | os.PathLike) -> None:
+    with _index_leases_guard:
+        _index_leases.pop(_lease_key(Path(path)), None)
+
+
+def _lease_for(path: Path) -> IndexLease | None:
+    with _index_leases_guard:
+        return _index_leases.get(_lease_key(path))
+
+
+def index_is_usable(path: str | os.PathLike) -> bool:
+    """Whether ``path`` is a catalog this build can serve.
+
+    Missing, empty, unreadable, or a newer schema than this process understands
+    is not usable. A cold volume fails this; a catalog left by the last deploy
+    passes it, which is what lets the server listen before the refresh runs.
+    """
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    try:
+        rows, _built_at = _validate_snapshot(candidate)
+    except (IndexRefreshError, OSError):
+        return False
+    return rows > 0
+
+
+def publish_sqlite(staging: Path, dest: Path) -> None:
+    """Replace ``dest`` with a finished ``staging`` database.
+
+    The caller must already hold the exclusive side of any :class:`IndexLease`
+    on ``dest``. This deletes ``dest``'s ``-wal`` / ``-shm`` (they belong to
+    the file being replaced) and renames ``staging`` over it. A snapshot state
+    file written beside ``staging`` moves with the database.
+    """
+    _remove_sqlite_sidecars(staging)
+    _remove_sqlite_sidecars(dest)
+    os.replace(staging, dest)
+    staged_state = snapshot_state_path(staging)
+    if staged_state.exists():
+        os.replace(staged_state, snapshot_state_path(dest))
+
+
 def _index_rows(path: Path) -> int | None:
     """``COUNT(*)`` of an index's items, or ``None`` when it cannot be read at all."""
     try:
@@ -738,6 +856,7 @@ def refresh_from_release(
     min_ratio: float = 0.5,
     session: Any = None,
     progress: Callable[[int, int | None], None] | None = None,
+    publish: bool = True,
 ) -> RefreshResult:
     """Replace the index with the published snapshot only when it changed.
 
@@ -761,10 +880,12 @@ def refresh_from_release(
     itself is a same-directory rename and needs no further space.
 
     The swap removes the old file's ``-wal`` / ``-shm`` so the new database is
-    never paired with a stale write-ahead log. That makes it safe only while no
-    process holds the index open, which is why the container entrypoint runs it
-    *before* starting the server. Raises :class:`IndexRefreshError` (old index
-    untouched) when the download fails validation.
+    never paired with a stale write-ahead log. With ``publish=True`` (the CLI)
+    that is safe only while nothing holds the index open. ``publish=False``
+    leaves the validated file at ``<name>.next`` and does not touch the live
+    database; :func:`refresh_serving_catalog` renames it into place once the
+    server's open requests have closed. Raises :class:`IndexRefreshError` (old
+    index untouched) when the download fails validation.
     """
     from .download import download_url  # noqa: PLC0415
 
@@ -798,11 +919,8 @@ def refresh_from_release(
         except BaseException:
             _clean_leftovers(dest)
             raise
-        _remove_sqlite_sidecars(staging)
-        _remove_sqlite_sidecars(dest)
-        os.replace(staging, dest)
         _write_snapshot_state(
-            dest,
+            staging,
             {
                 "url": src,
                 "etag": etag,
@@ -811,13 +929,18 @@ def refresh_from_release(
                 "built_at": built_at,
             },
         )
+        if publish:
+            publish_sqlite(staging, dest)
+            published = dest
+        else:
+            published = staging
     if state is None:
         reason = "fetched"
     elif existed and current is None:
         reason = "unreadable"
     else:
         reason = "changed"
-    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason, cleaned)
+    return RefreshResult(published, True, etag, last_modified, rows, built_at, reason, cleaned)
 
 
 #: Index ``meta`` key naming the sidecar snapshot last merged into it, so
@@ -1232,6 +1355,7 @@ def merge_thumbnails_atomically(
     *,
     overwrite: bool = False,
     snapshot: str | None = None,
+    publish: bool = True,
 ) -> int:
     """Merge a thumbnail sidecar into an index so a failure leaves it as it was.
 
@@ -1262,8 +1386,11 @@ def merge_thumbnails_atomically(
     Any failure -- ``database or disk is full`` included -- deletes the copy and
     raises :class:`IndexRefreshError`, leaving the index byte-for-byte as it
     was. Like :func:`refresh_from_release`, the swap drops the old file's
-    ``-wal`` / ``-shm``, so run it only while no server holds the index open
-    (the container entrypoint does). Returns the number of thumbnails applied.
+    ``-wal`` / ``-shm``. ``publish=True`` (the CLI) does that immediately, so
+    nothing else may have the index open. ``publish=False`` leaves the checked
+    copy at ``<name>.merge`` for :func:`refresh_serving_catalog` to rename in
+    once the server's requests have closed. Returns the number of thumbnails
+    applied.
     """
     dest = Path(index_path)
     source = Path(sidecar)
@@ -1320,9 +1447,103 @@ def merge_thumbnails_atomically(
             raise IndexRefreshError(
                 f"Merging {source.name} into {dest.name} failed ({exc}); {dest} was left as it was."
             ) from exc
-        _remove_sqlite_sidecars(dest)
-        os.replace(staging, dest)
+        if publish:
+            _remove_sqlite_sidecars(dest)
+            os.replace(staging, dest)
     return applied
+
+
+def _sidecar_needs_merge(index_path: Path, sidecar: Path) -> bool:
+    """Whether ``sidecar`` is not yet the snapshot recorded in ``index_path``.
+
+    Same skip as ``umbra index fetch-thumbnails``: a recorded marker that
+    already matches is a no-op. No marker, or a different one, merges.
+    """
+    if not sidecar.is_file() or not index_path.is_file():
+        return False
+    marker = snapshot_id(read_snapshot_state(sidecar))
+    try:
+        with CatalogIndex(index_path) as idx:
+            merged = idx.get_meta(THUMBS_SNAPSHOT_META_KEY)
+    except (sqlite3.DatabaseError, OSError, IndexSchemaError):
+        return False
+    if marker and merged == marker:
+        return False
+    return True
+
+
+def refresh_serving_catalog(
+    path: str | os.PathLike,
+    *,
+    index_url: str | None = None,
+    lease: IndexLease | None = None,
+) -> str:
+    """Refresh a catalog the server is reading, and swap the file once.
+
+    The published index is downloaded only when its snapshot changed, and the
+    thumbnail sidecar only when its manifest changed. A newer index is merged
+    with the sidecar *before* it replaces the file requests have open, so a
+    request never observes a partly written database. The rename waits on
+    ``lease`` when the server has attached one, until those requests close.
+
+    Download and merge failures are reported in the return value and leave the
+    current catalog serving. ``"unchanged"`` means the files already matched.
+    ``"swapped"`` means the live catalog was replaced. A new index whose
+    preview merge failed is still swapped in (the weekly snapshot), and
+    ``/healthz`` reports that as degraded.
+    """
+    dest = Path(path)
+    notes: list[str] = []
+    staged: Path | None = None
+    try:
+        fetched = refresh_from_release(dest, url=index_url, publish=False)
+    except UmbraError as exc:
+        notes.append(f"index: {exc}")
+    else:
+        if fetched.changed and fetched.path.exists() and fetched.path != dest:
+            staged = fetched.path
+
+    sidecar = default_thumbs_path(dest)
+    try:
+        refresh_thumbnails_from_release(sidecar)
+    except UmbraError as exc:
+        notes.append(f"thumbnails: {exc}")
+
+    try:
+        if sidecar.is_file():
+            target = staged if staged is not None else dest
+            if target.is_file() and _sidecar_needs_merge(target, sidecar):
+                marker = snapshot_id(read_snapshot_state(sidecar))
+                if target == dest:
+                    merge_thumbnails_atomically(dest, sidecar, snapshot=marker, publish=False)
+                    merged = dest.with_name(dest.name + ".merge")
+                    if merged.exists():
+                        staged = merged
+                else:
+                    merge_thumbnails_atomically(target, sidecar, snapshot=marker, publish=True)
+                    staged = target
+    except UmbraError as exc:
+        notes.append(f"merge: {exc}")
+        if staged is not None and staged.name.endswith(".merge"):
+            staged.unlink(missing_ok=True)
+            staged = None
+
+    if staged is not None and staged.exists() and staged.resolve() != dest.resolve():
+        incoming = staged
+
+        def _publish() -> None:
+            publish_sqlite(incoming, dest)
+
+        if lease is not None:
+            with lease.writing():
+                _publish()
+        else:
+            _publish()
+        detail = f" ({'; '.join(notes)})" if notes else ""
+        return f"swapped{detail}"
+    if notes:
+        return "kept: " + "; ".join(notes)
+    return "unchanged"
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -1554,13 +1775,24 @@ class CatalogIndex:
     def __init__(self, path: str | os.PathLike | None = None) -> None:
         self.path = Path(path) if path is not None else default_index_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
-        self._configure_connection()
-        self._init_schema()
-        # Small indexes move previews before the caller runs a query. A hosted
-        # catalog.db (gigabytes of inline PNGs) only records that the move is
-        # still owed, so this open does not read the blobs.
-        self._relocate_inline()
+        self._lease = _lease_for(self.path)
+        self._holding_lease = False
+        if self._lease is not None:
+            # Held until close, so a publish waits out this request before it
+            # deletes the wal the connection is reading.
+            self._lease.acquire_read()
+            self._holding_lease = True
+        try:
+            self._conn = sqlite3.connect(str(self.path))
+            self._configure_connection()
+            self._init_schema()
+            # Small indexes move previews before the caller runs a query. A hosted
+            # catalog.db (gigabytes of inline PNGs) only records that the move is
+            # still owed, so this open does not read the blobs.
+            self._relocate_inline()
+        except BaseException:
+            self._drop_lease()
+            raise
 
     def _configure_connection(self) -> None:
         """Tune the connection for concurrent, multi-process access.
@@ -1820,8 +2052,16 @@ class CatalogIndex:
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.commit()
-        self._conn.close()
+        try:
+            self._conn.commit()
+            self._conn.close()
+        finally:
+            self._drop_lease()
+
+    def _drop_lease(self) -> None:
+        if self._holding_lease and self._lease is not None:
+            self._holding_lease = False
+            self._lease.release_read()
 
     def __enter__(self) -> CatalogIndex:
         return self

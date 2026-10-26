@@ -22,9 +22,12 @@ a failed probe and the opened issue says so. A catalog read that misses the
 server's own deadline is HTTP 503, which is also a failed probe.
 
 `/healthz` is readiness: the same JSON document as before, including
-`ready`, `degraded`, and `stale`. `/livez` (and `/healthz/live`) is liveness:
-`{"status":"ok"}`, no catalog read. Railway's deploy check uses `/livez`.
-`/readyz` and `/healthz/ready` are the same document as `/healthz`.
+`ready`, `degraded`, and `stale`. It is HTTP 503 when `ready` is false (no
+usable catalog yet, or the file will not open) and 200 when the catalog can
+answer, including `degraded: true`. `/livez` (and `/healthz/live`) is
+liveness: `{"status":"ok"}`, no catalog read. Railway's deploy check uses
+`/healthz`. `/readyz` and `/healthz/ready` are the same document as
+`/healthz`.
 
 `/healthz`, `/livez`, and `/readyz` do not count against the rate limit.
 

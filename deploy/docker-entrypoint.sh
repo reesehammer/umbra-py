@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # Entrypoint for the umbra-py image.
 #
-# Default behaviour: make sure the catalog index on the /data volume is the
-# latest published snapshot (download it on first boot; on later boots one HEAD
-# request decides whether the weekly rebuild changed it, and only then is the new
-# file downloaded, validated and swapped in), then run the read-only STAC API.
+# Default behaviour: serve the read-only STAC API. When the volume already
+# holds a usable catalog, the server listens immediately and refreshes the
+# published snapshot in the background. A cold volume fetches the index
+# before listening. `mcp` still refreshes before it listens.
 # Pass `serve --public` for the hosted community instance (STAC + MCP on one
 # process). Pass `mcp` as the first argument to serve
 # Streamable HTTP MCP alone (`umbra mcp --http`).
@@ -73,14 +73,16 @@ if [ "${UMBRA_SERVE_LIVE:-0}" = "1" ]; then
     exec umbra serve --host "$HOST" --port "$PORT" --live "$@"
 fi
 
-# Fetch the published snapshot on first boot, and on every later boot refresh it
-# when the weekly rebuild changed it. A persistent volume keeps catalog.db across
-# deploys, so "fetch only when missing" pinned the hosted API to its first
-# snapshot forever; `--if-changed` compares the release asset's ETag with the one
-# recorded beside the index and downloads, validates and atomically swaps only
-# on a change. It runs here, before the server starts, because the swap is only
-# safe while nothing holds the index open.
-# This leaves the serve/mcp args in "$@" untouched for the final exec below.
+# A persistent volume keeps catalog.db across deploys, so "fetch only when
+# missing" pinned the hosted API to its first snapshot. The serve path hands
+# that refresh to `umbra serve --refresh-index`: a usable catalog is served
+# immediately and the snapshot, thumbnail sidecar, and preview merge run after
+# the socket is open, swapping in under the server's lease. Railway volumes
+# cannot overlap two deployments, so blocking on that work before listen is
+# the whole outage. A cold volume (nothing usable on disk) still fetches the
+# index here, before the process listens, and a total failure still falls
+# back to a live S3 walk. `mcp` mode has no readiness gate of its own and
+# keeps the blocking refresh.
 INDEX_DB="${UMBRA_INDEX_DB:-${XDG_CACHE_HOME:-$HOME/.cache}/umbra-py/catalog.db}"
 if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -d "$(dirname "$INDEX_DB")" ]; then
     # What the refreshes below have to work with, so a full volume is
@@ -89,7 +91,12 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -d "$(dirname "$INDEX_DB")" ]; then
     df -Ph "$data_root" | awk 'NR == 2 {print "Volume " $6 ": " $4 " free of " $2 "; largest entries:"}'
     du -xah -d 2 "$data_root" 2>/dev/null | sort -rh | head -n 10 || true
 fi
-if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
+catalog_usable() {
+    python -c 'import sys
+from umbra_py.index import index_is_usable
+sys.exit(0 if index_is_usable(sys.argv[1]) else 1)' "$1"
+}
+if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ "$MODE" = "mcp" ]; then
     if [ -f "$INDEX_DB" ]; then
         echo "Checking for a newer published snapshot than $INDEX_DB..."
     else
@@ -105,11 +112,31 @@ if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
         echo "Snapshot refresh failed; serving the existing index at $INDEX_DB." >&2
     elif [ "${FETCH_FAILED:-0}" = "1" ]; then
         echo "Index fetch failed; falling back to a live S3 walk (slow)." >&2
-        if [ "$MODE" = "mcp" ]; then
-            exec umbra mcp --http --host "$HOST" --port "$PORT"
-        fi
-        exec umbra serve --host "$HOST" --port "$PORT" --live
+        exec umbra mcp --http --host "$HOST" --port "$PORT"
     fi
+elif [ "${UMBRA_FETCH_INDEX:-1}" != "0" ]; then
+    if catalog_usable "$INDEX_DB"; then
+        echo "Catalog at $INDEX_DB is usable; the server will refresh it after it is listening."
+    elif [ -f "$INDEX_DB" ]; then
+        # Present but not readable. Listen anyway: /healthz stays 503 and
+        # --refresh-index replaces the file once a good snapshot is in hand.
+        echo "Catalog at $INDEX_DB is not usable; serving stays unready until refresh replaces it." >&2
+    else
+        echo "No usable catalog at $INDEX_DB; fetching the published snapshot before listening..."
+        if [ -n "${UMBRA_INDEX_URL:-}" ]; then
+            umbra index fetch --if-changed --url "$UMBRA_INDEX_URL" || FETCH_FAILED=1
+        else
+            umbra index fetch --if-changed || FETCH_FAILED=1
+        fi
+        if [ "${FETCH_FAILED:-0}" = "1" ] && { catalog_usable "$INDEX_DB" || [ -f "$INDEX_DB" ]; }; then
+            echo "Snapshot refresh failed; serving the existing index at $INDEX_DB." >&2
+        elif [ "${FETCH_FAILED:-0}" = "1" ]; then
+            echo "Index fetch failed; falling back to a live S3 walk (slow)." >&2
+            # Drop --public: it refuses --live. Same fallback the mcp branch uses.
+            exec umbra serve --host "$HOST" --port "$PORT" --live
+        fi
+    fi
+    set -- --refresh-index "$@"
 fi
 
 # Baked SAR previews so MCP quicklook / describe_scene work without proxying
@@ -132,8 +159,10 @@ fi
 # space before downloading, and the merge writes a copy of catalog.db that is
 # swapped in only after it passes quick_check. A full volume skips the step
 # with a log line and keeps the current files; /healthz reports `degraded`.
+# `serve` does this inside --refresh-index, after the socket is open. Blocking
+# here is what made a volume redeploy 502 until the merge finished.
 THUMBS_DB="${INDEX_DB%.db}.thumbs.db"
-if [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ]; then
+if [ "$MODE" = "mcp" ] && [ "${UMBRA_FETCH_INDEX:-1}" != "0" ] && [ -f "$INDEX_DB" ]; then
     if [ -f "$THUMBS_DB" ]; then
         echo "Checking for newer published baked previews than $THUMBS_DB..."
     else

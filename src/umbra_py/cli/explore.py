@@ -191,6 +191,17 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     default=None,
     help="Directory for cached render artifacts (default: alongside the index).",
 )
+@click.option(
+    "--refresh-index",
+    "refresh",
+    is_flag=True,
+    help="Refresh the published catalog in the background. A usable index is "
+    "served immediately (/healthz 200); the snapshot, thumbnail sidecar, and "
+    "preview merge swap in together when the new file is ready. With no usable "
+    "index, /healthz stays 503 until that fetch finishes. UMBRA_INDEX_URL "
+    "overrides the index asset. The container entrypoint sets this when "
+    "UMBRA_FETCH_INDEX is not 0.",
+)
 def serve(
     host,
     port,
@@ -210,6 +221,7 @@ def serve(
     narrate_client_limit,
     narrate_allow_bbox,
     cache_dir,
+    refresh,
 ) -> None:
     """Run a read-only STAC API over the catalog index (HTTP server).
 
@@ -287,6 +299,12 @@ def serve(
             )
     elif artifacts is None:
         artifacts = True
+    if refresh and live:
+        raise click.UsageError(
+            "--refresh-index cannot be combined with --live: a live S3 walk "
+            "has no catalog file to refresh."
+        )
+    index_url = os.environ.get("UMBRA_INDEX_URL") or None
 
     try:
         execution = StackExecution(
@@ -364,6 +382,8 @@ def serve(
             public=public,
             rate_limit=rate_limit,
             proxy_headers=proxy_headers,
+            refresh=refresh,
+            index_url=index_url,
         )
     except (MissingDependencyError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

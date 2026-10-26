@@ -35,7 +35,22 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   through `https://api.umbra-py.space/mcp`, limited to the core tools. Claude
   Code installs it with `/plugin marketplace add reesehammer/umbra-py`.
 
+### Changed
+- **`/healthz` is 503 when the catalog is not ready.** A missing or unusable
+  index used to return 200 with `"ready": false`. Railway treats any 2xx as
+  a healthy deploy, so the deploy check is now `/healthz` (`railway.toml`,
+  timeout 900s) and that response stays non-2xx until the catalog can answer.
+  `/livez` is unchanged.
+
 ### Fixed
+- **A redeploy of the hosted API no longer waits out the catalog refresh
+  before it answers.** When `catalog.db` on the volume is already usable,
+  `umbra serve --refresh-index` (what the image runs) listens immediately and
+  refreshes the published snapshot, thumbnail sidecar, and preview merge in
+  the background. The new file replaces the one being served only after
+  `quick_check`, once open requests have closed. A failed refresh keeps
+  serving the current catalog. A cold volume still downloads the index before
+  `/healthz` is 200.
 - **A catalog-read deadline is a 503 on Python 3.10.** `asyncio.wait_for`
   raises `asyncio.TimeoutError` there, a different class from the builtin
   `TimeoutError`. `/healthz` and search now answer 503 when that deadline
@@ -56,7 +71,7 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   result per snapshot instead of calling `COUNT(thumbnail)` on every probe.
   A catalog read that overruns its deadline, or that cannot start because
   other reads are still running, returns 503. `GET /livez` does no catalog
-  I/O; Railway's deploy check uses it. If the event loop stays silent past
+  I/O. If the event loop stays silent past
   a grace period, the process exits so the platform can restart it.
 - **The external health probe waits 60s and names a timeout.** The GitHub
   Actions check of `https://api.umbra-py.space/healthz` no longer treats a
