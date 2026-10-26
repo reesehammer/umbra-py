@@ -57,6 +57,42 @@ _SEARCH_QUERY_PARAMS = ("bbox", "datetime", "limit", "collections", "sortby")
 
 logger = logging.getLogger(MCP_REQUEST_LOGGER)
 
+#: ``mcp.server.streamable_http.StreamableHTTPServerTransport.terminate``.
+#: Stateless mode builds a transport with ``mcp_session_id=None`` and terminates
+#: it after every request, so this line is the normal teardown, not a failure.
+#: The library logs it at INFO (Railway often surfaces that stderr line as an
+#: error). A real session id keeps its level, as do exceptions on the same logger.
+_STATELESS_SESSION_TEARDOWN = "Terminating session: None"
+_STREAMABLE_HTTP_LOGGER = "mcp.server.streamable_http"
+
+
+class _StatelessSessionFilter(logging.Filter):
+    """Drop ``Terminating session: None`` unless this logger is at DEBUG.
+
+    Relabelling the record is not enough. ``Logger.isEnabledFor`` already
+    accepted the original INFO/ERROR line, and a handler left at NOTSET (the
+    default, including uvicorn's) emits whatever reaches it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() != _STATELESS_SESSION_TEARDOWN:
+            return True
+        record.levelno = logging.DEBUG
+        record.levelname = logging.getLevelName(logging.DEBUG)
+        return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+
+
+def quiet_stateless_session_teardown() -> None:
+    """Keep a normal stateless MCP teardown off INFO and ERROR handlers.
+
+    Idempotent. Installed for ``umbra serve --mcp`` / ``--public`` and for
+    ``umbra mcp --http``, both of which run Streamable HTTP without sessions.
+    """
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    if any(isinstance(existing, _StatelessSessionFilter) for existing in target.filters):
+        return
+    target.addFilter(_StatelessSessionFilter())
+
 
 def _clip(value: Any) -> str | None:
     if value is None:

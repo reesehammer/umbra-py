@@ -27,10 +27,12 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import logging
 import os
 import re
 import shutil
 import sqlite3
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -71,10 +73,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: ``items.published`` (the sidecar's S3 ``LastModified`` from the crawl's
 #: existing listing). Version 7 added ``items.canonical`` (1 when the row is
 #: the copy to keep for a republished collect; see :mod:`umbra_py.duplicates`).
-#: All are purely additive, so a lower-version (or legacy version-0) database
-#: is migrated in place by adding the missing columns -- exercising the
-#: migration path versioning was landed to enable.
-_SCHEMA_VERSION = 7
+#: Version 8 moves baked previews into ``item_thumbnails``. The blob used to
+#: sit in ``items`` before ``datetime_suspect``, ``created``, ``published`` and
+#: ``canonical``, so a read of any later column walked every preview's overflow
+#: pages. The bytes move in place; the catalog is not rebuilt. Older databases
+#: are migrated in place by :meth:`CatalogIndex._migrate`.
+_SCHEMA_VERSION = 8
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
 #: default for :meth:`CatalogIndex.bake_thumbnails`. 512 px is large enough
@@ -98,7 +102,32 @@ _BUSY_TIMEOUT_MS = 5000
 #: place. Every step so far is additive (a new column), handled
 #: idempotently by :meth:`CatalogIndex._migrate`; a version not listed here is
 #: an older schema with no migration path and is rejected on open.
-_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4, 5, 6})
+_MIGRATABLE_FROM = frozenset({0, 1, 2, 3, 4, 5, 6, 7})
+
+#: ``meta`` key set once inline preview blobs have been copied to
+#: ``item_thumbnails`` and nulled on ``items``. Hot aggregates may then read
+#: columns that used to sit after the blob.
+_THUMBS_OFF_ROW = "thumbs_off_row"
+#: ``meta`` key set when the inline payload is too large to move inside
+#: :meth:`CatalogIndex.__init__` (the container entrypoint opens the index
+#: before the socket listens). A background thread finishes the move.
+_THUMBS_RELOCATE_DEFERRED = "thumbs_relocate_deferred"
+#: Header-only count of inline blobs, recorded when relocation is deferred so
+#: ``/healthz`` can report ``thumbnails.count`` without naming the blob column.
+_INLINE_THUMB_COUNT = "inline_thumbnail_count"
+#: Move inline previews during ``__init__`` only up to this many bytes. Above
+#: it, opening the index stays a metadata operation and
+#: :meth:`CatalogIndex.relocate_thumbnails` runs off the request path. Tests
+#: and any index whose previews fit stay synchronous so a reopened database
+#: is already on the new layout.
+_INLINE_RELOCATE_MAX_BYTES = 64 * 1024 * 1024
+#: Rows per commit. Each batch's nulled overflow returns to the freelist
+#: before the next batch allocates, so the file does not grow by the preview
+#: payload. ``wal_checkpoint(TRUNCATE)`` keeps the ``-wal`` from holding a
+#: second copy.
+_RELOCATE_BATCH = 8
+_RELOCATE_LOCK = threading.Lock()
+_log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -134,6 +163,23 @@ CREATE INDEX IF NOT EXISTS idx_items_acq_date ON items(acq_date);
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
 CREATE INDEX IF NOT EXISTS idx_items_id ON items(id);
 CREATE INDEX IF NOT EXISTS idx_item_assets_asset ON item_assets(asset);
+-- Previews live here, not in ``items``, so a search or a count never walks
+-- PNG overflow to reach a column stored after the blob. ``id`` is denormalized
+-- so ``get_thumbnail`` is one point lookup.
+CREATE TABLE IF NOT EXISTS item_thumbnails (
+    href            TEXT PRIMARY KEY,
+    id              TEXT NOT NULL,
+    thumbnail       BLOB,
+    thumbnail_asset TEXT,
+    thumbnail_size  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_item_thumbnails_id ON item_thumbnails(id);
+-- Matches ``CatalogIndex.search``'s ORDER BY. Every indexed column is stored
+-- before ``thumbnail``, so building this index does not read preview overflow.
+-- ``LIMIT`` can then stop after the first matching leaf instead of sorting
+-- every row in a temp b-tree (which used to read those overflow pages).
+CREATE INDEX IF NOT EXISTS idx_items_search
+    ON items ((task IS NULL), task, acq_date, datetime, id, href);
 """
 
 
@@ -173,6 +219,72 @@ _THUMBS_PROVENANCE_COLUMNS = {"asset": "TEXT", "size": "INTEGER"}
 #: ``NULL``, so it does not replace anything -- while ``IS`` compares the assets
 #: without tripping over the same ``NULL``.
 _KEEP_UNLESS_LARGER = " AND (thumbnail IS NULL OR (? > thumbnail_size AND thumbnail_asset IS ?))"
+
+
+def _preview_replaces(
+    existing: tuple[object, object] | None,
+    size: object,
+    asset: object,
+    *,
+    overwrite: bool,
+) -> bool:
+    """Whether an incoming preview should replace ``existing`` ``(size, asset)``.
+
+    Same rule as :data:`_KEEP_UNLESS_LARGER`: fill a gap, and otherwise keep
+    the local bake unless the incoming one is a bigger preview of the same
+    product. ``IS``-style asset equality treats two missing assets as the
+    same product; a missing size never wins the comparison.
+    """
+    if overwrite or existing is None:
+        return True
+    old_size, old_asset = existing
+    if not isinstance(old_size, int) or not isinstance(size, int):
+        return False
+    return size > old_size and old_asset == asset
+
+
+def thumbs_pending(path: str | os.PathLike) -> bool:
+    """Whether ``path`` still has preview blobs inline in ``items``.
+
+    A read-only open: it does not migrate. ``length(thumbnail)`` stops at the
+    first header, so this does not read PNG overflow. False when the file is
+    missing, already relocated, or has no inline blobs.
+    """
+    db = Path(path)
+    if not db.exists():
+        return False
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (_THUMBS_OFF_ROW,)
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        if row is not None and row[0] == "1":
+            return False
+        try:
+            hit = conn.execute(
+                "SELECT 1 FROM items WHERE length(thumbnail) IS NOT NULL LIMIT 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        return hit is not None
+    finally:
+        conn.close()
+
+
+def relocate_index_thumbnails(path: str | os.PathLike) -> int:
+    """Open ``path`` and move any inline preview blobs off the item row.
+
+    Safe to call from a background thread after the server is listening. A
+    database that already finished the move returns ``0``.
+    """
+    with CatalogIndex(path) as index:
+        moved = index.relocate_thumbnails()
+    if moved:
+        _log.warning("Moved %s inline previews into item_thumbnails (%s)", moved, path)
+    return moved
 
 
 def _widen_thumbs_sidecar(conn: sqlite3.Connection) -> None:
@@ -1014,15 +1126,42 @@ def _apply_thumbnails(conn: sqlite3.Connection, source: Path, *, overwrite: bool
             ) from exc
         applied = 0
         for href, png, asset, size in rows:
-            params: tuple[object, ...] = (sqlite3.Binary(png), asset, size, href)
-            if not overwrite:
-                params += (size, asset)
+            # Previews live in ``item_thumbnails``. A row still holding the
+            # legacy ``items.thumbnail`` blob counts as the current preview
+            # until relocation nulls it, so a merge does not clobber a larger
+            # bake that has not moved yet.
+            existing = conn.execute(
+                "SELECT thumbnail_size, thumbnail_asset FROM item_thumbnails WHERE href = ?",
+                (href,),
+            ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    "SELECT thumbnail_size, thumbnail_asset FROM items "
+                    "WHERE href = ? AND length(thumbnail) IS NOT NULL",
+                    (href,),
+                ).fetchone()
+            if not _preview_replaces(existing, size, asset, overwrite=overwrite):
+                continue
             cur = conn.execute(
-                "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, thumbnail_size = ? "
-                f"WHERE href = ?{'' if overwrite else _KEEP_UNLESS_LARGER}",
-                params,
+                "INSERT INTO item_thumbnails "
+                "(href, id, thumbnail, thumbnail_asset, thumbnail_size) "
+                "SELECT ?, id, ?, ?, ? FROM items WHERE href = ? "
+                "ON CONFLICT(href) DO UPDATE SET "
+                "id = excluded.id, thumbnail = excluded.thumbnail, "
+                "thumbnail_asset = excluded.thumbnail_asset, "
+                "thumbnail_size = excluded.thumbnail_size",
+                (href, sqlite3.Binary(png), asset, size, href),
             )
-            applied += cur.rowcount
+            if cur.rowcount == 0:
+                continue
+            # Drop the inline copy of this one row so the next reader of
+            # columns stored after the blob does not walk the old overflow.
+            conn.execute(
+                "UPDATE items SET thumbnail = NULL, thumbnail_asset = NULL, "
+                "thumbnail_size = NULL WHERE href = ? AND length(thumbnail) IS NOT NULL",
+                (href,),
+            )
+            applied += 1
     finally:
         side.close()
     return applied
@@ -1044,15 +1183,41 @@ def _merge_growth(dest: Path, source: Path, *, overwrite: bool) -> tuple[int | N
             columns = {row[1] for row in conn.execute("PRAGMA side.table_info(thumbnails)")}
             size = "s.size" if "size" in columns else "NULL"
             asset = "s.asset" if "asset" in columns else "NULL"
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            # ``length(thumbnail)`` reads the record header, not the PNG.
+            # ``item_thumbnails`` is absent on a schema-7 file that has not
+            # been opened by this umbra-py yet.
+            if "item_thumbnails" in tables:
+                current_size = (
+                    "COALESCE(t.thumbnail_size, "
+                    "CASE WHEN length(i.thumbnail) IS NULL THEN NULL ELSE i.thumbnail_size END)"
+                )
+                current_asset = (
+                    "COALESCE(t.thumbnail_asset, "
+                    "CASE WHEN length(i.thumbnail) IS NULL THEN NULL ELSE i.thumbnail_asset END)"
+                )
+                missing = "(t.href IS NULL AND length(i.thumbnail) IS NULL)"
+                join = "LEFT JOIN item_thumbnails t ON t.href = i.href"
+            else:
+                current_size = (
+                    "CASE WHEN length(i.thumbnail) IS NULL THEN NULL ELSE i.thumbnail_size END"
+                )
+                current_asset = (
+                    "CASE WHEN length(i.thumbnail) IS NULL THEN NULL ELSE i.thumbnail_asset END"
+                )
+                missing = "length(i.thumbnail) IS NULL"
+                join = ""
             rule = (
                 "1"
                 if overwrite
-                else f"(i.thumbnail IS NULL OR ({size} > i.thumbnail_size "
-                f"AND i.thumbnail_asset IS {asset}))"
+                else f"({missing} OR ({size} > {current_size} AND {current_asset} IS {asset}))"
             )
             rows, size_bytes = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(length(s.png)), 0) FROM side.thumbnails s "
-                f"JOIN items i ON i.href = s.href WHERE {rule}"
+                f"JOIN items i ON i.href = s.href {join} WHERE {rule}"
             ).fetchone()
             return rows, size_bytes
         finally:
@@ -1392,6 +1557,10 @@ class CatalogIndex:
         self._conn = sqlite3.connect(str(self.path))
         self._configure_connection()
         self._init_schema()
+        # Small indexes move previews before the caller runs a query. A hosted
+        # catalog.db (gigabytes of inline PNGs) only records that the move is
+        # still owed, so this open does not read the blobs.
+        self._relocate_inline()
 
     def _configure_connection(self) -> None:
         """Tune the connection for concurrent, multi-process access.
@@ -1439,8 +1608,13 @@ class CatalogIndex:
         """
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version == _SCHEMA_VERSION:
-            # Same layout; make sure any additive `CREATE ... IF NOT EXISTS`
-            # objects are present, then leave the stamp untouched.
+            # Same layout. ``executescript`` commits, and a commit on every
+            # open bumps the file mtime so a per-snapshot health cache would
+            # never hit. Skip the write when the objects this version added
+            # are already present.
+            names = {row[0] for row in self._conn.execute("SELECT name FROM sqlite_master")}
+            if "item_thumbnails" in names and "idx_items_search" in names:
+                return
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
             return
@@ -1494,6 +1668,125 @@ class CatalogIndex:
         if "canonical" not in columns:  # v6 -> v7: republished-copy flag
             self._conn.execute("ALTER TABLE items ADD COLUMN canonical INTEGER NOT NULL DEFAULT 1")
 
+    def _relocate_inline(self) -> None:
+        """Move a small inline preview payload now; defer a large one.
+
+        ``length(thumbnail)`` reads the record header, not the PNG, so the
+        decision itself does not walk overflow pages. The actual copy of a
+        hosted catalog is :meth:`relocate_thumbnails`, started after the
+        server is listening.
+        """
+        if self.get_meta(_THUMBS_OFF_ROW) == "1":
+            return
+        if self.get_meta(_THUMBS_RELOCATE_DEFERRED) == "1":
+            return
+        with _RELOCATE_LOCK:
+            if self.get_meta(_THUMBS_OFF_ROW) == "1":
+                return
+            if self.get_meta(_THUMBS_RELOCATE_DEFERRED) == "1":
+                return
+            nbytes, count = self._conn.execute(
+                "SELECT COALESCE(SUM(length(thumbnail)), 0), "
+                "COALESCE(SUM(length(thumbnail) IS NOT NULL), 0) FROM items"
+            ).fetchone()
+            if int(nbytes or 0) == 0:
+                self.set_meta(_THUMBS_OFF_ROW, "1")
+                self._conn.commit()
+                return
+            if int(nbytes) <= _INLINE_RELOCATE_MAX_BYTES:
+                self._move_thumbnail_batches()
+                return
+            self.set_meta(_INLINE_THUMB_COUNT, str(int(count)))
+            self.set_meta(_THUMBS_RELOCATE_DEFERRED, "1")
+            self._conn.commit()
+            _log.warning(
+                "Deferring relocation of %s inline preview bytes in %s",
+                int(nbytes),
+                self.path,
+            )
+
+    def relocate_thumbnails(self) -> int:
+        """Copy inline ``items.thumbnail`` blobs into ``item_thumbnails``.
+
+        Idempotent and safe to run on a schema-7 database that was not rebuilt:
+        each batch commits and checkpoints so the freed overflow pages are
+        reused instead of growing the file by the preview payload. Returns how
+        many rows moved. A no-op when the move has already finished.
+        """
+        with _RELOCATE_LOCK:
+            if self.get_meta(_THUMBS_OFF_ROW) == "1":
+                return 0
+            return self._move_thumbnail_batches()
+
+    def _move_thumbnail_batches(self) -> int:
+        """Caller holds :data:`_RELOCATE_LOCK`."""
+        moved = 0
+        while True:
+            rows = self._conn.execute(
+                "SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size "
+                "FROM items WHERE length(thumbnail) IS NOT NULL LIMIT ?",
+                (_RELOCATE_BATCH,),
+            ).fetchall()
+            if not rows:
+                break
+            self._conn.executemany(
+                "INSERT INTO item_thumbnails "
+                "(href, id, thumbnail, thumbnail_asset, thumbnail_size) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(href) DO UPDATE SET "
+                "id = excluded.id, thumbnail = excluded.thumbnail, "
+                "thumbnail_asset = excluded.thumbnail_asset, "
+                "thumbnail_size = excluded.thumbnail_size",
+                [
+                    (href, item_id, sqlite3.Binary(png) if png is not None else None, asset, size)
+                    for href, item_id, png, asset, size in rows
+                ],
+            )
+            self._conn.executemany(
+                "UPDATE items SET thumbnail = NULL, thumbnail_asset = NULL, "
+                "thumbnail_size = NULL WHERE href = ?",
+                [(href,) for href, *_rest in rows],
+            )
+            self._conn.commit()
+            try:
+                # A reader holding the WAL does not raise. The pragma returns
+                # a row whose first column is 1 (busy), and this batch's frames
+                # stay in the ``-wal``. The rows are already committed; a later
+                # batch runs the pragma again. Freed overflow is reused once a
+                # checkpoint finishes. ``OperationalError`` means the pragma
+                # could not start at all.
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError:
+                pass
+            moved += len(rows)
+        self.set_meta(_THUMBS_OFF_ROW, "1")
+        self.set_meta(_THUMBS_RELOCATE_DEFERRED, "0")
+        self._conn.commit()
+        return moved
+
+    def _post_blob_reads_ok(self) -> bool:
+        """Whether columns stored after ``items.thumbnail`` are cheap to read.
+
+        False while preview bytes still sit in the row: SQLite walks those
+        overflow pages to reach ``datetime_suspect`` and everything after it.
+        """
+        return self.get_meta(_THUMBS_OFF_ROW) == "1"
+
+    def _thumbnailed_count(self) -> int:
+        """Baked-preview count that does not name ``items.thumbnail``."""
+        separate = int(self._conn.execute("SELECT COUNT(*) FROM item_thumbnails").fetchone()[0])
+        if self._post_blob_reads_ok():
+            return separate
+        raw = self.get_meta(_INLINE_THUMB_COUNT)
+        try:
+            inline = int(raw) if raw else 0
+        except ValueError:
+            inline = 0
+        # While a deferred move is in progress, ``separate`` grows toward
+        # ``inline``. A merge that landed new previews only in the side table
+        # can also make ``separate`` the larger of the two.
+        return max(inline, separate)
+
     @classmethod
     def from_release(
         cls,
@@ -1546,7 +1839,12 @@ class CatalogIndex:
         canonical, and so is every row of an index that has not been linked
         yet (the column defaults to 1), so this equals :meth:`__len__` until
         :func:`umbra_py.validate.apply_duplicate_links` runs.
+
+        While preview blobs are still inline, ``canonical`` sits after the
+        blob and this returns the row count instead of scanning overflow.
         """
+        if not self._post_blob_reads_ok():
+            return int(self._conn.execute("SELECT COUNT(*) FROM items").fetchone()[0])
         row = self._conn.execute("SELECT COALESCE(SUM(canonical = 1), 0) FROM items").fetchone()
         return int(row[0] or 0)
 
@@ -1957,14 +2255,29 @@ class CatalogIndex:
         # A suspect datetime is not a latest acquisition, so it does not jump
         # a capped newest-first bake ahead of a plausible recent scene.
         order = (
-            "datetime_suspect, acq_date IS NULL, acq_date DESC, href" if newest_first else "href"
+            "i.datetime_suspect, i.acq_date IS NULL, i.acq_date DESC, i.href"
+            if newest_first
+            else "i.href"
         )
+        # The effective preview is ``item_thumbnails`` when present, else the
+        # legacy inline blob. ``length()`` is the header, so a relocated index
+        # (every inline blob NULL) does not read PNG overflow to find gaps.
         rows = self._conn.execute(
-            "SELECT href, doc, place, datetime_suspect, created, published FROM items "
-            "WHERE href IN (SELECT href FROM item_assets WHERE asset = ?) "
-            "AND (thumbnail IS NULL OR "
-            "(thumbnail_asset = ? AND thumbnail_size IS NOT NULL "
-            "AND thumbnail_size < ?)) "
+            "SELECT i.href, i.id, i.doc, i.place, i.datetime_suspect, i.created, i.published "
+            "FROM items i LEFT JOIN item_thumbnails t ON t.href = i.href "
+            "WHERE i.href IN (SELECT href FROM item_assets WHERE asset = ?) "
+            "AND ("
+            "  COALESCE(t.thumbnail_size, CASE WHEN length(i.thumbnail) IS NULL "
+            "    THEN NULL ELSE i.thumbnail_size END) IS NULL "
+            "  OR ("
+            "    COALESCE(t.thumbnail_asset, CASE WHEN length(i.thumbnail) IS NULL "
+            "      THEN NULL ELSE i.thumbnail_asset END) = ? "
+            "    AND COALESCE(t.thumbnail_size, CASE WHEN length(i.thumbnail) IS NULL "
+            "      THEN NULL ELSE i.thumbnail_size END) IS NOT NULL "
+            "    AND COALESCE(t.thumbnail_size, CASE WHEN length(i.thumbnail) IS NULL "
+            "      THEN NULL ELSE i.thumbnail_size END) < ?"
+            "  )"
+            ") "
             f"ORDER BY {order}",
             (asset.upper(), asset.upper(), max_size),
         ).fetchall()
@@ -1972,14 +2285,26 @@ class CatalogIndex:
             rows = rows[:limit]
 
         baked = 0
-        for processed, (href, doc, place, suspect, created, published) in enumerate(rows, 1):
+        for processed, (href, item_id, doc, place, suspect, created, published) in enumerate(
+            rows, 1
+        ):
             item = self._item_from_row(href, doc, place, suspect, created, published)
             png = renderer(item)
             if png:
                 self._conn.execute(
-                    "UPDATE items SET thumbnail = ?, thumbnail_asset = ?, "
-                    "thumbnail_size = ? WHERE href = ?",
-                    (sqlite3.Binary(png), asset.upper(), max_size, href),
+                    "INSERT INTO item_thumbnails "
+                    "(href, id, thumbnail, thumbnail_asset, thumbnail_size) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(href) DO UPDATE SET "
+                    "id = excluded.id, thumbnail = excluded.thumbnail, "
+                    "thumbnail_asset = excluded.thumbnail_asset, "
+                    "thumbnail_size = excluded.thumbnail_size",
+                    (href, item_id, sqlite3.Binary(png), asset.upper(), max_size),
+                )
+                self._conn.execute(
+                    "UPDATE items SET thumbnail = NULL, thumbnail_asset = NULL, "
+                    "thumbnail_size = NULL WHERE href = ? AND length(thumbnail) IS NOT NULL",
+                    (href,),
                 )
                 baked += 1
                 if baked % 25 == 0:
@@ -1988,6 +2313,21 @@ class CatalogIndex:
                 progress(processed)
         self._conn.commit()
         return baked
+
+    def _thumbnail_row(self, item_id: str) -> tuple[Any, ...] | None:
+        """Preview bytes for ``item_id``, side table first, then a legacy inline blob."""
+        row = self._conn.execute(
+            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM item_thumbnails "
+            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if row is not None:
+            return row
+        return self._conn.execute(
+            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
+            "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
+            (item_id,),
+        ).fetchone()
 
     def get_thumbnail(self, item_id: str) -> bytes | None:
         """Return the baked quicklook PNG for this STAC id, or ``None``.
@@ -2000,11 +2340,7 @@ class CatalogIndex:
         instead". If two sidecars share an id, the first by ``href`` order wins,
         as in :meth:`get`.
         """
-        row = self._conn.execute(
-            "SELECT thumbnail FROM items WHERE id = ? AND thumbnail IS NOT NULL "
-            "ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
+        row = self._thumbnail_row(item_id)
         if row is None or row[0] is None:
             return None
         return bytes(row[0])
@@ -2020,11 +2356,7 @@ class CatalogIndex:
         a preview baked before the index recorded it reports ``None`` for both
         fields (see :class:`BakedPreview`) rather than claiming the default.
         """
-        row = self._conn.execute(
-            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
-            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
+        row = self._thumbnail_row(item_id)
         if row is None or row[0] is None:
             return None
         return BakedPreview(png=bytes(row[0]), asset=row[1], max_size=row[2])
@@ -2058,8 +2390,14 @@ class CatalogIndex:
             out.executescript(_THUMBS_SCHEMA)
             _widen_thumbs_sidecar(out)
             rows = self._conn.execute(
-                "SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size FROM items "
-                "WHERE thumbnail IS NOT NULL ORDER BY href"
+                "SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size FROM ("
+                "  SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size "
+                "  FROM item_thumbnails WHERE thumbnail IS NOT NULL "
+                "  UNION ALL "
+                "  SELECT href, id, thumbnail, thumbnail_asset, thumbnail_size FROM items "
+                "  WHERE length(thumbnail) IS NOT NULL "
+                "    AND href NOT IN (SELECT href FROM item_thumbnails)"
+                ") ORDER BY href"
             )
             written = 0
             for href, item_id, png, asset, size in rows:
@@ -2219,10 +2557,26 @@ class CatalogIndex:
         # Total order. ``id`` breaks a timestamp tie so offset pages cannot
         # repeat or skip a pass that shares a task and a datetime with its
         # neighbor. ``href`` is last so a duplicated id still sorts in one way.
+        # The parenthesized ``task IS NULL`` matches ``idx_items_search``, so
+        # SQLite walks that index instead of sorting every row (the sort read
+        # columns stored after the preview blob). ``LIMIT`` is pushed only when
+        # nothing is filtered in Python afterwards: a polygon or polarization
+        # test can reject a row, and a SQL limit would then return a short page.
+        post_filter = (
+            intersects is not None
+            or polarizations
+            or min_incidence is not None
+            or max_incidence is not None
+            or max_resolution is not None
+            or max_per_task is not None
+        )
         sql = (
             "SELECT href, doc, place, datetime_suspect, created, published FROM items"
-            f"{where} ORDER BY task IS NULL, task, acq_date, datetime, id, href"
+            f"{where} ORDER BY (task IS NULL), task, acq_date, datetime, id, href"
         )
+        if limit is not None and not post_filter:
+            sql += " LIMIT ?"
+            params.append(int(limit))
 
         count = 0
         per_task: dict[str | None, int] = {}
@@ -2967,12 +3321,27 @@ class CatalogIndex:
         dropped for a datetime more than a day ahead (see
         :func:`umbra_py.validate.sanitize_index`); they are not in the index.
         """
-        items, start, end, tasks, labeled, thumbnailed, suspects, captures = self._conn.execute(
-            "SELECT COUNT(*), MIN(acq_date), "
-            "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END), "
-            "COUNT(DISTINCT task), COUNT(place), COUNT(thumbnail), "
-            "SUM(datetime_suspect), COALESCE(SUM(canonical = 1), 0) FROM items"
-        ).fetchone()
+        # ``COUNT(thumbnail)`` and the sums of columns stored after the blob
+        # read every preview's overflow pages. After relocation those columns
+        # are ordinary header fields. Until then, skip them: ``/healthz`` used
+        # to call this on every probe.
+        if self._post_blob_reads_ok():
+            items, start, end, tasks, labeled, suspects, captures = self._conn.execute(
+                "SELECT COUNT(*), MIN(acq_date), "
+                "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END), "
+                "COUNT(DISTINCT task), COUNT(place), "
+                "SUM(datetime_suspect), COALESCE(SUM(canonical = 1), 0) FROM items"
+            ).fetchone()
+            suspect_count = int(suspects or 0)
+            unique = int(captures or 0)
+        else:
+            items, start, end, tasks, labeled = self._conn.execute(
+                "SELECT COUNT(*), MIN(acq_date), MAX(acq_date), "
+                "COUNT(DISTINCT task), COUNT(place) FROM items"
+            ).fetchone()
+            suspect_count = 0
+            unique = int(items or 0)
+        thumbnailed = self._thumbnailed_count()
         from .validate import quarantined_future_count, stored_validation  # noqa: PLC0415
 
         return {
@@ -2983,20 +3352,24 @@ class CatalogIndex:
             "labeled": labeled,
             "thumbnailed": thumbnailed,
             "built_at": self.get_meta("built_at"),
-            "datetime_suspect_count": int(suspects or 0),
+            "datetime_suspect_count": suspect_count,
             "quarantined_future_count": quarantined_future_count(stored_validation(self)),
-            "unique_captures": int(captures or 0),
+            "unique_captures": unique,
         }
 
     def temporal_extent(self) -> tuple[str | None, str | None]:
         """Acquisition-date span ``(start, end)``, the same dates as :meth:`stats`.
 
-        ``end`` excludes ``datetime_suspect`` rows. :meth:`stats` counts the
-        thumbnail blob column, and SQLite then reads every merged preview off
-        disk (tens of seconds on a cold volume). This aggregate does not name
-        that column, so those overflow pages stay unread.
+        ``end`` excludes ``datetime_suspect`` rows once preview blobs have left
+        the row. While they are still inline, ``datetime_suspect`` sits after
+        the blob, so this uses ``MAX(acq_date)`` and does not walk overflow.
         """
-        start, end = self._conn.execute(
-            "SELECT MIN(acq_date), MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END) FROM items"
-        ).fetchone()
+        if self._post_blob_reads_ok():
+            sql = (
+                "SELECT MIN(acq_date), "
+                "MAX(CASE WHEN datetime_suspect = 0 THEN acq_date END) FROM items"
+            )
+        else:
+            sql = "SELECT MIN(acq_date), MAX(acq_date) FROM items"
+        start, end = self._conn.execute(sql).fetchone()
         return (start, end)

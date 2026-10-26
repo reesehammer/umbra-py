@@ -157,10 +157,12 @@ keys and of a live S3 walk. Railway's start command is that flag.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import itertools
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -199,8 +201,10 @@ from .index import (
     default_index_path,
     default_thumbs_path,
     read_snapshot_state,
+    relocate_index_thumbnails,
     snapshot_id,
     snapshot_state_path,
+    thumbs_pending,
 )
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem, _iso_utc, _normalize_assets
@@ -252,7 +256,52 @@ PUBLIC_RATE_WINDOW_S = 60.0
 
 #: Paths a probe or a human hits before any query; never count them against
 #: the cap (a health check that 429s is worse than a scraper).
-RATE_LIMIT_EXEMPT_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
+RATE_LIMIT_EXEMPT_PATHS = frozenset(
+    {
+        "/healthz",
+        "/healthz/live",
+        "/healthz/ready",
+        "/livez",
+        "/readyz",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    }
+)
+
+
+def _request_timeout_s() -> float:
+    """Deadline for a catalog read on the request path.
+
+    The external probe waits longer than this (see
+    :data:`umbra_py.health_monitor.PROBE_TIMEOUT_S`) so a stuck read becomes a
+    ``503`` the probe can record, not a client-side timeout with no status.
+    ``UMBRA_REQUEST_TIMEOUT_S`` overrides the default of 15 seconds.
+    """
+    raw = os.environ.get("UMBRA_REQUEST_TIMEOUT_S", "15")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 15.0
+    return value if value > 0 else 15.0
+
+
+def _db_concurrency() -> int:
+    """How many catalog reads may run at once (``UMBRA_DB_CONCURRENCY``).
+
+    A client that gives up does not cancel the thread already inside SQLite.
+    Capping the reads keeps an abandoned probe from filling the ASGI thread
+    pool; the next request gets ``503`` instead of queueing behind the scan.
+    """
+    raw = os.environ.get("UMBRA_DB_CONCURRENCY", "4")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 4
+    return value if value > 0 else 4
+
+
+_log = logging.getLogger(__name__)
 
 #: CORS for the read-only server. Star origins cannot be credentialed, so
 #: ``allow_credentials`` stays off. Browser clients (stac-browser, the static
@@ -885,6 +934,21 @@ def health_document(
             "merged"
         )
     return doc
+
+
+def _cache_health_document(
+    cache: dict[tuple[object, ...], dict[str, Any]],
+    key: tuple[object, ...],
+    doc: dict[str, Any],
+) -> None:
+    """Remember one readiness document and drop every other snapshot.
+
+    The key includes the index path, file sizes, mtimes and the UTC day, so a
+    refreshed snapshot or a new day is a different entry. Keeping each of
+    those would retain a document per deploy for the life of the process.
+    """
+    cache.clear()
+    cache[key] = doc
 
 
 def _temporal_interval(temporal: tuple[str | None, str | None] | None) -> list[list[str | None]]:
@@ -2898,21 +2962,42 @@ def build_app(
                 enable_dns_rebinding_protection=False,
             )
         mcp_asgi = _build_mcp_server().streamable_http_app(**mcp_kw)
+        from ._mcp_log import quiet_stateless_session_teardown
+
+        # Stateless HTTP has no session id. The transport still logs
+        # "Terminating session: None" once per request; keep that at DEBUG.
+        quiet_stateless_session_teardown()
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         # MCP's session manager (even in stateless HTTP) starts in its lifespan;
         # run it around the STAC app so ``POST /mcp`` is live for the same
         # process that answers ``/search``.
+        from .watchdog import heartbeat_forever
+
         mcp_life = (
             mcp_asgi.router.lifespan_context(mcp_asgi)
             if mcp_asgi is not None and mcp_asgi.router.lifespan_context is not None
             else nullcontext()
         )
+        beat = asyncio.create_task(heartbeat_forever())
+        # Preview bytes merged into ``items.thumbnail`` make every later-column
+        # read walk overflow pages. A large file is moved after the socket is
+        # up so the deploy health check (liveness) is not waiting on that copy.
+        if not live:
+            src = Path(index_path) if index_path is not None else default_index_path()
+            if thumbs_pending(src):
+                threading.Thread(
+                    target=relocate_index_thumbnails,
+                    args=(src,),
+                    name="umbra-thumb-relocate",
+                    daemon=True,
+                ).start()
         async with mcp_life:
             try:
                 yield
             finally:
+                beat.cancel()
                 # Drain the background render pool on shutdown so a stopping
                 # server does not hang on (or leak) in-flight renders.
                 if job_executor is not None:
@@ -2997,16 +3082,51 @@ def build_app(
 
     app.add_middleware(StacSearchLog)
 
+    # One abandoned probe used to leave its scan running, and the next probe
+    # started another. A handful of slots keeps that from filling the thread
+    # pool; past the cap the request is a fast 503.
+    _slots = threading.BoundedSemaphore(_db_concurrency())
+
     def _open():
+        if not _slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="Catalog index is busy; retry shortly.",
+            )
         try:
-            return open_source(index_path, live=live)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            try:
+                return open_source(index_path, live=live)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BaseException:
+            _slots.release()
+            raise
 
     def _close(source: Any) -> None:
-        close = getattr(source, "close", None)
-        if callable(close):
-            close()
+        try:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+        finally:
+            _slots.release()
+
+    async def _bounded(fn: Callable[[], Any]) -> Any:
+        """Run ``fn`` off the loop and turn a deadline miss into a 503.
+
+        The worker is not cancelled: SQLite cannot be interrupted from here.
+        It still holds its slot until it returns, which is what stops the
+        next caller from starting another scan.
+        """
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn), _request_timeout_s())
+        except (TimeoutError, asyncio.TimeoutError):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "Timeout",
+                    "message": "Catalog index read exceeded the request deadline.",
+                },
+            )
 
     # The collection extent and the build stamp only change when the index
     # file (or the snapshot sidecar beside it) is replaced. Keyed by path,
@@ -3103,17 +3223,66 @@ def build_app(
     def get_conformance() -> dict[str, Any]:
         return conformance()
 
-    @app.get("/healthz", tags=["Ops"])
-    def get_health() -> Any:
-        # Liveness + readiness for container orchestration (a Docker
-        # HEALTHCHECK, a Kubernetes probe). Returns 200 whenever the server can
-        # serve; the body's `ready` reports whether the search backend can
-        # answer queries yet -- on first boot the published-index fetch may
-        # still be in flight, so a server can be alive but not yet ready. A
-        # skipped or failed thumbnail merge is `degraded`, still 200. Only an
-        # index that exists but cannot be opened or read is a 503.
+    @app.get("/livez", tags=["Ops"])
+    @app.get("/healthz/live", tags=["Ops"])
+    async def get_live() -> dict[str, str]:
+        # No index, no lock, no thread-pool hop. Railway's deploy health check
+        # hits this. A stuck catalog read must not fail liveness.
+        return {"status": "ok"}
+
+    _health_cache: dict[tuple[object, ...], dict[str, Any]] = {}
+
+    def _health_sync() -> Any:
+        # Readiness. Same document ``/healthz`` has always returned. The body's
+        # ``ready`` flag reports whether the search backend can answer yet; a
+        # skipped thumbnail merge is ``degraded``, still 200. Only an index
+        # that exists but cannot be opened or read is a 503. The read is cached
+        # for this snapshot (path, size, mtime, UTC day) so a probe does not
+        # recompute it. A newer key replaces that document. The read gives up
+        # at ``_request_timeout_s``.
         if live:
             return health_document(backend="live", ready=True)
+        if not _slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="Catalog index is busy; retry shortly.",
+            )
+        try:
+            return _health_cached()
+        finally:
+            _slots.release()
+
+    def _health_cached() -> Any:
+        from .health_monitor import utc_today
+
+        path = Path(index_path) if index_path is not None else default_index_path()
+        if not path.exists():
+            return health_document(backend="index", ready=False)
+
+        def _ns(candidate: Path) -> tuple[int, int]:
+            try:
+                st = candidate.stat()
+            except OSError:
+                return 0, 0
+            return st.st_mtime_ns, st.st_size
+
+        key = (
+            str(path),
+            *_ns(path),
+            *_ns(Path(str(path) + "-wal")),
+            *_ns(snapshot_state_path(path)),
+            *_ns(snapshot_state_path(default_thumbs_path(path))),
+            utc_today().isoformat(),
+        )
+        cached = _health_cache.get(key)
+        if cached is not None:
+            return cached
+        doc = _health_read()
+        if isinstance(doc, dict):
+            _cache_health_document(_health_cache, key, doc)
+        return doc
+
+    def _health_read() -> Any:
         try:
             source = open_source(index_path, live=False)
         except FileNotFoundError:
@@ -3171,14 +3340,39 @@ def build_app(
         except sqlite3.DatabaseError as exc:
             return _unhealthy(exc)
         finally:
-            _close(source)
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+
+    def _health_deadline() -> Any:
+        doc = health_document(
+            backend="index",
+            ready=False,
+            error="Timeout: catalog read exceeded the deadline",
+        )
+        return JSONResponse(status_code=503, content=doc)
+
+    @app.get("/healthz", tags=["Ops"])
+    @app.get("/readyz", tags=["Ops"])
+    @app.get("/healthz/ready", tags=["Ops"])
+    async def get_health() -> Any:
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_health_sync), _request_timeout_s())
+        except (TimeoutError, asyncio.TimeoutError):
+            return _health_deadline()
 
     def _unhealthy(exc: Exception) -> Any:
         doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
         return JSONResponse(status_code=503, content=doc)
 
     @app.get("/collections", tags=["STAC"])
-    def get_collections(request: Request) -> dict[str, Any]:
+    async def get_collections(request: Request) -> Any:
+        def _run() -> dict[str, Any]:
+            return _collections_body(request)
+
+        return await _bounded(_run)
+
+    def _collections_body(request: Request) -> dict[str, Any]:
         base = str(request.base_url).rstrip("/")
         temporal, built_at, snapshot, n_items, n_captures = _facts()
         return {
@@ -3334,7 +3528,7 @@ def build_app(
         return JSONResponse(content=item_to_stac(item, str(request.base_url)), media_type=geojson)
 
     @app.get("/search", tags=["STAC"])
-    def get_search(
+    async def get_search(
         request: Request,
         bbox: str | None = Query(default=None),
         intersects: str | None = Query(
@@ -3369,7 +3563,7 @@ def build_app(
         ),
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
-    ) -> JSONResponse:
+    ) -> Any:
         _check_collections(collections.split(",") if collections else None)
         if intersects and bbox:
             raise HTTPException(
@@ -3385,28 +3579,30 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         id_list = [i for i in ids.split(",") if i] if ids else None
-        return _do_search(
-            request,
-            bbox=parsed_bbox,
-            intersects=parsed_geometry,
-            start=start,
-            end=end,
-            ids=id_list,
-            product_types=wanted_products,
-            area=area,
-            fuzzy=fuzzy,
-            polarizations=wanted_pols,
-            min_incidence=min_incidence,
-            max_incidence=max_incidence,
-            max_resolution=max_resolution,
-            canonical=wanted_canonical,
-            limit=limit,
-            offset=token,
-            self_href=str(request.url),
+        return await _bounded(
+            lambda: _do_search(
+                request,
+                bbox=parsed_bbox,
+                intersects=parsed_geometry,
+                start=start,
+                end=end,
+                ids=id_list,
+                product_types=wanted_products,
+                area=area,
+                fuzzy=fuzzy,
+                polarizations=wanted_pols,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                canonical=wanted_canonical,
+                limit=limit,
+                offset=token,
+                self_href=str(request.url),
+            )
         )
 
     @app.post("/search", tags=["STAC"])
-    def post_search(request: Request, body: dict[str, Any] = Body(default={})) -> JSONResponse:
+    async def post_search(request: Request, body: dict[str, Any] = Body(default={})) -> Any:
         _check_collections(body.get("collections"))
         if body.get("intersects") is not None and body.get("bbox") is not None:
             raise HTTPException(
@@ -3446,46 +3642,50 @@ def build_app(
         limit = _clamp_limit(body.get("limit"))
         offset = int(body.get("token") or 0)
         base = str(request.base_url).rstrip("/")
-        source = _open()
-        try:
-            page, has_next = run_search(
-                source,
-                bbox=parsed_bbox,
-                intersects=parsed_geometry,
-                start=start,
-                end=end,
-                ids=list(ids) if ids else None,
-                product_types=wanted_products,
-                area=area,
-                fuzzy=fuzzy,
-                polarizations=polarizations,
-                min_incidence=min_incidence,
-                max_incidence=max_incidence,
-                max_resolution=max_resolution,
-                canonical=canonical,
-                limit=limit,
-                offset=offset,
+
+        def _run() -> JSONResponse:
+            source = _open()
+            try:
+                page, has_next = run_search(
+                    source,
+                    bbox=parsed_bbox,
+                    intersects=parsed_geometry,
+                    start=start,
+                    end=end,
+                    ids=list(ids) if ids else None,
+                    product_types=wanted_products,
+                    area=area,
+                    fuzzy=fuzzy,
+                    polarizations=polarizations,
+                    min_incidence=min_incidence,
+                    max_incidence=max_incidence,
+                    max_resolution=max_resolution,
+                    canonical=canonical,
+                    limit=limit,
+                    offset=offset,
+                )
+            finally:
+                _close(source)
+            # STAC API Item Search: a POST page link is POST /search again, and its
+            # body is this request's body with ``token`` replaced. A GET of
+            # ``/search?token=N`` would drop limit, collections, and every other
+            # filter that lived only in the JSON.
+            search_href = f"{base}/search"
+            prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
+            next_body = _body_with_token(body, offset + limit) if has_next else None
+            result = search_result(
+                page,
+                str(request.base_url),
+                returned=len(page),
+                next_href=search_href if next_body is not None else None,
+                prev_href=search_href if prev_body is not None else None,
+                next_body=next_body,
+                prev_body=prev_body,
+                self_href=search_href,
             )
-        finally:
-            _close(source)
-        # STAC API Item Search: a POST page link is POST /search again, and its
-        # body is this request's body with ``token`` replaced. A GET of
-        # ``/search?token=N`` would drop limit, collections, and every other
-        # filter that lived only in the JSON.
-        search_href = f"{base}/search"
-        prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
-        next_body = _body_with_token(body, offset + limit) if has_next else None
-        result = search_result(
-            page,
-            str(request.base_url),
-            returned=len(page),
-            next_href=search_href if next_body is not None else None,
-            prev_href=search_href if prev_body is not None else None,
-            next_body=next_body,
-            prev_body=prev_body,
-            self_href=search_href,
-        )
-        return JSONResponse(content=result, media_type=geojson)
+            return JSONResponse(content=result, media_type=geojson)
+
+        return await _bounded(_run)
 
     @app.get(
         "/sites",
@@ -4600,6 +4800,11 @@ def serve(
         public=public,
         rate_limit=rate_limit,
     )
+    from .watchdog import start_watchdog
+
+    # Armed after the grace period, and only once the lifespan has published a
+    # heartbeat. A catalog read in the thread pool does not trip it.
+    start_watchdog()
     run_kw: dict[str, Any] = {"host": host, "port": port, "log_level": log_level}
     import copy
 

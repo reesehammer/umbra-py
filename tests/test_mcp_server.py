@@ -118,6 +118,10 @@ def test_run_stdio_is_the_default(monkeypatch):
 
 
 def test_run_http_uses_streamable_http(monkeypatch):
+    import logging
+
+    from umbra_py._mcp_log import _STREAMABLE_HTTP_LOGGER, _StatelessSessionFilter
+
     seen: dict = {}
 
     class _Stub:
@@ -132,6 +136,8 @@ def test_run_http_uses_streamable_http(monkeypatch):
     assert seen["port"] == 9999
     assert seen["streamable_http_path"] == "/mcp"
     assert seen["stateless_http"] is True
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    assert any(isinstance(item, _StatelessSessionFilter) for item in target.filters)
 
 
 def test_cli_mcp_http_flag_forwards_bind(monkeypatch):

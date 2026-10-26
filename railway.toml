@@ -28,6 +28,10 @@ dockerfilePath = "deploy/Dockerfile.mcp"
 
 [deploy]
 startCommand = "/bin/sh -c 'exec /usr/local/bin/docker-entrypoint.sh serve --public'"
-healthcheckPath = "/healthz"
+# Liveness only. `/healthz` reads the catalog (readiness) and must not gate
+# the deploy: the entrypoint fetches the index before the socket listens, and
+# a cold catalog read is not "the process is dead". 300s still covers that
+# fetch; shortening it fails deploys that have not opened the port yet.
+healthcheckPath = "/livez"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

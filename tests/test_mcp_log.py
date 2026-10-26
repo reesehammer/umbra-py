@@ -14,10 +14,13 @@ import logging
 import pytest
 
 from umbra_py._mcp_log import (
+    _STREAMABLE_HTTP_LOGGER,
     MCP_LOG_BODY_LIMIT,
     MCP_REQUEST_LOGGER,
     McpRequestLog,
     StacSearchLog,
+    _StatelessSessionFilter,
+    quiet_stateless_session_teardown,
 )
 
 
@@ -646,3 +649,67 @@ def test_public_app_installs_search_logging_too(tmp_path):
 
     app = serve.build_app(tmp_path / "catalog.db", public=True)
     assert app.user_middleware[0].cls is StacSearchLog
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    assert any(isinstance(item, _StatelessSessionFilter) for item in target.filters)
+
+
+def test_stateless_session_teardown_is_logged_at_debug(caplog):
+    quiet_stateless_session_teardown()
+    quiet_stateless_session_teardown()
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    assert sum(isinstance(item, _StatelessSessionFilter) for item in target.filters) == 1
+
+    with caplog.at_level(logging.INFO, logger=_STREAMABLE_HTTP_LOGGER):
+        target.error("Terminating session: None")
+        target.error("Terminating session: abc123")
+        target.error("Error handling POST request")
+    info_or_above = [record.getMessage() for record in caplog.records]
+    assert "Terminating session: None" not in info_or_above
+    assert "Terminating session: abc123" in info_or_above
+    assert "Error handling POST request" in info_or_above
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=_STREAMABLE_HTTP_LOGGER):
+        target.error("Terminating session: None")
+    debug_lines = [record for record in caplog.records if record.name == _STREAMABLE_HTTP_LOGGER]
+    assert len(debug_lines) == 1
+    assert debug_lines[0].levelno == logging.DEBUG
+    assert debug_lines[0].getMessage() == "Terminating session: None"
+
+
+def test_stateless_teardown_is_not_emitted_by_a_notset_handler():
+    """A handler at NOTSET emits any record that reaches it.
+
+    The logger is at INFO, so the original ERROR line passes
+    ``isEnabledFor``. The filter must refuse it anyway. The same handler
+    still receives a real session id and a real error.
+    """
+    quiet_stateless_session_teardown()
+    target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
+    emitted: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record.getMessage())
+
+    handler = _Capture(level=logging.NOTSET)
+    previous_level = target.level
+    previous_propagate = target.propagate
+    target.addHandler(handler)
+    target.setLevel(logging.INFO)
+    target.propagate = False
+    try:
+        target.error("Terminating session: None")
+        target.error("Terminating session: abc123")
+        target.error("Error handling POST request")
+        assert emitted == [
+            "Terminating session: abc123",
+            "Error handling POST request",
+        ]
+        target.setLevel(logging.DEBUG)
+        target.error("Terminating session: None")
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+        target.propagate = previous_propagate
+    assert emitted[-1] == "Terminating session: None"
