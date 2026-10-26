@@ -230,8 +230,8 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     workflow = (WORKFLOW_DIR / "publish-index.yml").read_text(encoding="utf-8")
     assert "catalog.thumbs.db --clobber" not in workflow
     assert "runs-on: ubuntu-24.04" in workflow
-    assert "actions/cache/restore@v4" in workflow
-    assert "actions/cache/save@v4" in workflow
+    assert "actions/cache/restore@v6" in workflow
+    assert "actions/cache/save@v6" in workflow
     assert "--validation index-validation.json" in workflow
     assert "indexed_preview_count" in workflow
     assert document["permissions"]["actions"] == "write"
