@@ -4,8 +4,8 @@ CITATION.cff is machine-readable citation metadata (Citation File Format 1.2.0)
 that GitHub renders as a "Cite this repository" button. ``.zenodo.json`` is
 what Zenodo actually copies onto an archived release when both files exist.
 The version must track ``umbra_py.__version__`` so a citation names the release
-it describes, and the DOI placeholder must stay in lockstep across the CFF
-file, the README, and the docs page until a concept DOI replaces it.
+it describes. The default citation is the Zenodo concept DOI (Cite all
+versions). A version DOI names one archived release.
 
 Schema validation (``cffconvert --validate``) lives in the ``citation`` CI job,
 not here: cffconvert 2.0.0 requires ``jsonschema<4``, and the schema tests in
@@ -15,6 +15,7 @@ this suite need ``jsonschema>=4.18``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from umbra_py import __version__
@@ -25,9 +26,29 @@ ZENODO = REPO_ROOT / ".zenodo.json"
 README = REPO_ROOT / "README.md"
 CITING = REPO_ROOT / "docs" / "citing.md"
 
-DOI_PLACEHOLDER = "10.5281/zenodo.TBD"
+# Concept DOI ("Cite all versions"). It resolves to the latest archived release.
+CONCEPT_DOI = "10.5281/zenodo.23676715"
+# Zenodo software DOIs are 10.5281/zenodo.<numeric recid>.
+_ZENODO_DOI = re.compile(r"^10\.5281/zenodo\.\d+$")
+# Assembled so this source does not contain the retired placeholder token.
+_PLACEHOLDER = "10.5281/" + "zenodo." + "TBD"
 # The copyright notice Umbra's terms require on adapted materials.
 UMBRA_NOTICE = "SAR-derived data © [YEAR] Umbra Lab, Inc."
+
+_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "dist",
+    "build",
+    "htmlcov",
+    "site",
+}
 
 
 def _field(text: str, key: str) -> str:
@@ -51,7 +72,9 @@ def test_citation_has_the_required_cff_fields():
     assert _field(text, "title") == "umbra-py"
     assert _field(text, "type") == "software"
     assert _field(text, "license") == "Apache-2.0"
-    assert _field(text, "doi") == DOI_PLACEHOLDER
+    doi = _field(text, "doi")
+    assert _ZENODO_DOI.fullmatch(doi), doi
+    assert doi == CONCEPT_DOI
     for key in ("message", "authors", "repository-code", "url", "references"):
         assert f"{key}:" in text, f"CITATION.cff is missing '{key}:'"
     assert "CC-BY-4.0" in text
@@ -82,13 +105,32 @@ def test_zenodo_json_describes_the_software():
     }
 
 
-def test_citing_surfaces_share_the_placeholder_and_notice():
+def test_citing_surfaces_share_the_concept_doi_and_notice():
     readme = README.read_text(encoding="utf-8")
     citing = CITING.read_text(encoding="utf-8")
     nav = (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    badge = f"https://zenodo.org/badge/DOI/{CONCEPT_DOI}.svg"
+    link = f"https://doi.org/{CONCEPT_DOI}"
     assert "Citing: citing.md" in nav
     for text in (readme, citing):
-        assert DOI_PLACEHOLDER in text
+        assert CONCEPT_DOI in text
+        assert badge in text
+        assert link in text
+        assert _PLACEHOLDER not in text
         assert UMBRA_NOTICE in text
         assert f"version = {{{__version__}}}" in text
         assert "© Umbra Space" in text
+
+
+def test_no_zenodo_placeholder_remains():
+    offenders: list[str] = []
+    for path in REPO_ROOT.rglob("*"):
+        if not path.is_file() or any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if _PLACEHOLDER in text:
+            offenders.append(path.relative_to(REPO_ROOT).as_posix())
+    assert offenders == []
