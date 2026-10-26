@@ -16,7 +16,7 @@ API (`umbra serve`) and MCP server sit on the same host.
     required. Build your own with [`umbra showcase`](cli.md).
 
 !!! note "Status"
-    **v0.1.3.** Discovery, download, xarray loading,
+    **v0.1.4.** Discovery, download, xarray loading,
     SICD → geocoded COG, change composites, chips, a STAC API
     (`umbra serve`, hosted at [https://api.umbra-py.space/](https://api.umbra-py.space/)),
     and an MCP server all ship.
