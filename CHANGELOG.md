@@ -9,6 +9,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Changed
+- **Citation metadata uses the Zenodo concept DOI**
+  `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
+  the latest archived release.
+
 ## [0.1.4] — 2026-10-26
 
 Hosted MCP is in the registry, and the six core tools keep their names
@@ -106,13 +111,12 @@ legacy collects, and `open-data/`) and the weekly snapshot validates what it
 keeps. STAC search and the geoparquet export use asset schema v2. The public
 host states its limits, probes `/healthz`, and serves baked previews. This
 release was not archived. Zenodo's GitHub integration is enabled for 0.1.4,
-which will be the first archived release; the concept DOI is still
-`10.5281/zenodo.TBD`.
+which will be the first archived release. No concept DOI had been minted.
 
 ### Added
 - **Cite umbra-py.** `.zenodo.json` is the metadata Zenodo copies from a
   GitHub release. The README and [Citing](docs/citing.md) give a BibTeX
-  entry and a DOI badge using the placeholder `10.5281/zenodo.TBD` until
+  entry and a DOI badge using a placeholder DOI until
   that release mints a concept DOI, and they quote Umbra's required
   notice: `SAR-derived data © [YEAR] Umbra Lab, Inc.`
 - **Replace your crawler.** [docs/replace-crawler.md](docs/replace-crawler.md)

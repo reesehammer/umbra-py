@@ -4,15 +4,15 @@ Cite the software when a paper, report, or dataset depends on it. Attribute
 the imagery separately: the code is Apache-2.0, and the scenes are Umbra
 Space open data under CC BY 4.0.
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.TBD.svg)](https://doi.org/10.5281/zenodo.TBD)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23676715.svg)](https://doi.org/10.5281/zenodo.23676715)
 
-!!! note "DOI placeholder"
-    `10.5281/zenodo.TBD` is not a minted DOI. After the first GitHub release
-    that Zenodo archives, replace it — here, in the README, and in
-    `CITATION.cff` — with the concept DOI. On the Zenodo record that is the
-    value under **Cite all versions?**. It resolves to the latest archived
-    version. The DOI in the record's badge is the version DOI for that
-    release only.
+!!! note "Concept DOI"
+    The default citation is the concept DOI
+    [10.5281/zenodo.23676715](https://doi.org/10.5281/zenodo.23676715)
+    (Zenodo's **Cite all versions?** value). It resolves to the latest
+    archived version. The v0.1.4 version DOI is
+    [10.5281/zenodo.23676716](https://doi.org/10.5281/zenodo.23676716);
+    that DOI names that release only.
 
 ```bibtex
 @software{hammerstrom2026umbrapy,
@@ -20,7 +20,7 @@ Space open data under CC BY 4.0.
   title   = {umbra-py},
   year    = {2026},
   version = {0.1.4},
-  doi     = {10.5281/zenodo.TBD},
+  doi     = {10.5281/zenodo.23676715},
   url     = {https://github.com/reesehammer/umbra-py},
   license = {Apache-2.0}
 }

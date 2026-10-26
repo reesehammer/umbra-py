@@ -180,11 +180,14 @@ are independent and compatible.
 
 ## Citing umbra-py
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.TBD.svg)](https://doi.org/10.5281/zenodo.TBD)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23676715.svg)](https://doi.org/10.5281/zenodo.23676715)
 
-`10.5281/zenodo.TBD` is a placeholder. After the first Zenodo-archived
-release, replace it with the concept DOI (Zenodo's **Cite all versions?**
-value). Machine-readable metadata lives in [CITATION.cff](CITATION.cff)
+Cite all versions with the concept DOI
+[10.5281/zenodo.23676715](https://doi.org/10.5281/zenodo.23676715)
+(Zenodo's **Cite all versions?** value). It resolves to the latest archived
+release. The v0.1.4 version DOI is
+[10.5281/zenodo.23676716](https://doi.org/10.5281/zenodo.23676716).
+Machine-readable metadata lives in [CITATION.cff](CITATION.cff)
 (GitHub's **Cite this repository** button) and
 [.zenodo.json](.zenodo.json) (what Zenodo archives).
 
@@ -194,7 +197,7 @@ value). Machine-readable metadata lives in [CITATION.cff](CITATION.cff)
   title   = {umbra-py},
   year    = {2026},
   version = {0.1.4},
-  doi     = {10.5281/zenodo.TBD},
+  doi     = {10.5281/zenodo.23676715},
   url     = {https://github.com/reesehammer/umbra-py},
   license = {Apache-2.0}
 }

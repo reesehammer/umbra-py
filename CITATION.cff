@@ -9,8 +9,8 @@
 #
 # Keep `version` in sync with `umbra_py.__version__` (enforced by
 # tests/test_citation.py). When a release is cut, bump `date-released:`.
-# `doi` is a placeholder. Replace it with the Zenodo concept DOI (the
-# "Cite all versions" DOI) after the first Zenodo-archived release.
+# `doi` is the Zenodo concept DOI ("Cite all versions"). It resolves to the
+# latest archived release. Keep it across releases; a version DOI names one.
 cff-version: 1.2.0
 message: "If you use umbra-py in your research, please cite it as below."
 title: umbra-py
@@ -21,8 +21,8 @@ authors:
     family-names: Hammerstrom
 version: 0.1.4
 date-released: "2026-10-26"
-# Placeholder. Replace with the concept DOI after the first Zenodo-archived release.
-doi: "10.5281/zenodo.TBD"
+# Concept DOI (Cite all versions). The v0.1.4 version DOI is 10.5281/zenodo.23676716.
+doi: "10.5281/zenodo.23676715"
 license: Apache-2.0
 repository-code: "https://github.com/reesehammer/umbra-py"
 url: "https://umbra-py.space/"
