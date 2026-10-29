@@ -104,8 +104,9 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     "--public",
     is_flag=True,
     help="Hosted community instance: STAC search + MCP on one URL, artifacts "
-    "off, per-client rate limit, CC-BY license headers, proxy headers, and a "
-    "refuse of --live and of Canopy / model API keys. Railway's start command.",
+    "off, per-client rate limit keyed on the edge's client IP, CC-BY license "
+    "headers, and a refuse of --live and of Canopy / model API keys. "
+    "Railway's start command.",
 )
 @click.option(
     "--rate-limit",
@@ -117,8 +118,10 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
 @click.option(
     "--proxy-headers",
     is_flag=True,
-    help="Trust X-Forwarded-For from the reverse proxy so the per-client rate "
-    "limit sees real clients. --public turns this on (Railway is always proxied).",
+    help="Trust X-Forwarded-For from the reverse proxy (uvicorn, leftmost hop). "
+    "--public does not use this: it reads X-Real-IP (UMBRA_CLIENT_IP_HEADER) "
+    "and, if that header is absent, the rightmost UMBRA_TRUSTED_PROXY_HOPS "
+    "of X-Forwarded-For.",
 )
 @click.option(
     "--stack-lazy",
@@ -276,7 +279,7 @@ def serve(
         mcp = True
         if rate_limit is None:
             rate_limit = PUBLIC_RATE_LIMIT
-        proxy_headers = True
+        proxy_headers = False
         secrets = public_secret_names()
         if secrets:
             raise click.ClickException(

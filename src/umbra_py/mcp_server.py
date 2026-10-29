@@ -46,6 +46,9 @@ import io
 import json
 import os
 import shlex
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
@@ -65,7 +68,7 @@ from .constants import (
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_place as _geocode_place
+from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
     CatalogIndex,
@@ -166,6 +169,102 @@ def _cog_streaming_allowed() -> bool:
         return _cog_streaming_override
     raw = os.environ.get(COG_STREAMING_ENV, "1")
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+#: Public ``search_catalog`` page size. The tool's ``limit`` argument and its
+#: default stay 20; a larger request is clamped and the result says so.
+#: Local MCP (COG streaming allowed) keeps the caller's limit.
+PUBLIC_CATALOG_LIMIT = 100
+
+_PUBLIC_LIMIT_NOTE = (
+    "limit clamped to 100; use the next page (narrow bbox, dates, or area; "
+    "the STAC /search next link pages the rest)."
+)
+
+
+def _clamp_public_catalog_limit(limit: int) -> tuple[int, str | None]:
+    """Cap ``search_catalog`` on the public host. Local calls pass through."""
+    if _cog_streaming_allowed():
+        return limit, None
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return limit, None
+    if limit > PUBLIC_CATALOG_LIMIT:
+        return PUBLIC_CATALOG_LIMIT, _PUBLIC_LIMIT_NOTE
+    return limit, None
+
+
+def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any]:
+    if note:
+        payload["note"] = note
+    return payload
+
+
+class PublicGeocodeGate:
+    """LRU cache and a global Nominatim throttle for the public MCP host.
+
+    One shared address is what Nominatim bans. Cache hits do not wait and
+    do not call out. A miss takes the single in-flight slot, waits until a
+    second has passed since the previous call, then resolves. A failure is
+    not cached; it still consumed the slot. Local MCP does not use this.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_size: int = 256,
+        min_interval: float = 1.0,
+        time_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._max_size = max_size
+        self._min_interval = min_interval
+        self._time = time_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._network = threading.Lock()
+        self._cache: OrderedDict[str, tuple[Any, str]] = OrderedDict()
+        self._next_at = 0.0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._next_at = 0.0
+
+    def resolve(self, query: str) -> tuple[Any, str]:
+        key = " ".join(query.split()).casefold()
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)
+                return hit
+        with self._network:
+            with self._lock:
+                hit = self._cache.get(key)
+                if hit is not None:
+                    self._cache.move_to_end(key)
+                    return hit
+                now = self._time()
+                wait = self._next_at - now
+                self._next_at = max(self._next_at, now) + self._min_interval
+            if wait > 0:
+                self._sleep(wait)
+            result = _nominatim_geocode(query)
+            with self._lock:
+                self._cache[key] = result
+                self._cache.move_to_end(key)
+                while len(self._cache) > self._max_size:
+                    self._cache.popitem(last=False)
+            return result
+
+
+_public_geocode = PublicGeocodeGate()
+
+
+def _geocode_place(query: str) -> tuple[Any, str]:
+    """Nominatim, directly locally and through :class:`PublicGeocodeGate` on the public host."""
+    if _cog_streaming_allowed():
+        return _nominatim_geocode(query)
+    return _public_geocode.resolve(query)
 
 
 def _model_key_configured() -> bool:
@@ -655,7 +754,9 @@ def search_catalog(
     the preferred copy of a collect Umbra republished under another prefix
     (``True``), only the other copies (``False``), or every item when omitted;
     ``limit`` to cap
-    results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
+    results (on the public host a value above 100 is clamped to 100 and the
+    result includes ``note``; the argument and its default are unchanged);
+    ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
     overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
@@ -683,6 +784,7 @@ def search_catalog(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
             "site description via embeddings, fuzzy is a deterministic token match"
         )
+    limit, limit_note = _clamp_public_catalog_limit(limit)
 
     resolved_area = None
     semantic_matches = None
@@ -698,16 +800,19 @@ def search_catalog(
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
-            return {
-                "count": 0,
-                "source": "semantic-index",
-                "resolved_place": None,
-                "resolved_bbox": None,
-                "resolved_area": None,
-                "semantic_matches": [],
-                "items": [],
-                "attribution": ATTRIBUTION,
-            }
+            return _with_limit_note(
+                {
+                    "count": 0,
+                    "source": "semantic-index",
+                    "resolved_place": None,
+                    "resolved_bbox": None,
+                    "resolved_area": None,
+                    "semantic_matches": [],
+                    "items": [],
+                    "attribution": ATTRIBUTION,
+                },
+                limit_note,
+            )
         # Search the resolved exact task name literally (it is a real label, so a
         # substring match hits it; no fuzzy widening on an already-resolved name).
         search_area = resolved_area
@@ -746,16 +851,19 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
-        "count": len(cards),
-        "source": label,
-        "resolved_place": resolved_place,
-        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": resolved_area,
-        "semantic_matches": semantic_matches,
-        "items": cards,
-        "attribution": ATTRIBUTION,
-    }
+    return _with_limit_note(
+        {
+            "count": len(cards),
+            "source": label,
+            "resolved_place": resolved_place,
+            "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+            "resolved_area": resolved_area,
+            "semantic_matches": semantic_matches,
+            "items": cards,
+            "attribution": ATTRIBUTION,
+        },
+        limit_note,
+    )
 
 
 def find_repeat_sites(

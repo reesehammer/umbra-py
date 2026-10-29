@@ -57,7 +57,7 @@ product. Search is served from the weekly catalog snapshot. Asset `href`s
 point at Umbra's public S3 bucket — the API does not proxy rasters (that is
 the COG-streaming guardrail). Attribute [CC BY 4.0](https://umbra.space/open-data/).
 A per-client rate limit (120 requests/minute) returns `429` with `Retry-After`.
-The operational contract (uptime, the 10,000 page size, CORS, and the release
+The operational contract (uptime, the 500 page size, CORS, and the release
 fallback) is [Hosted API limits](hosted-limits.md).
 Do not set `UMBRA_CANOPY_TOKEN` or model API keys on this instance.
 
@@ -159,6 +159,10 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_WATCHDOG` | `1` | `0` disables the event-loop stall exit. |
 | `UMBRA_WATCHDOG_STALL_S` | `90` | Loop silence before the process exits. |
 | `UMBRA_WATCHDOG_GRACE_S` | `120` | Startup window during which silence is ignored. |
+| `UMBRA_CLIENT_IP_HEADER` | `x-real-ip` | Header `--public` trusts as the client address. `x-forwarded-for` uses the hop walk only. `none` or `peer` uses the socket peer. |
+| `UMBRA_TRUSTED_PROXY_HOPS` | `1` | How many rightmost `X-Forwarded-For` hops count when that header is the source. Railway does not promise a hop count; leave the default header. |
+| `UMBRA_CLIENT_CONCURRENCY` | `2` | Catalog reads one `--public` client may hold at once (minimum 1). |
+| `UMBRA_PUBLIC_BASE_URL` | unset | Absolute origin for STAC links. On `--public`, unset falls back to `https://$RAILWAY_PUBLIC_DOMAIN`. |
 
 If the first-boot fetch fails (e.g. no outbound network), the entrypoint falls
 back to a live S3 walk so the server still answers.
@@ -416,6 +420,13 @@ image hardcodes `mcp,viz,serve`. An old `mcp,viz` arg drops FastAPI and
 
 Do not set `UMBRA_CANOPY_TOKEN` or model API keys on a public instance —
 `--public` refuses to start if they are set.
+
+Set `UMBRA_PUBLIC_BASE_URL=https://api.umbra-py.space` so STAC links use the
+custom domain. Unset, `--public` uses `https://$RAILWAY_PUBLIC_DOMAIN`, which
+is often `*.up.railway.app`. The rate limit reads `X-Real-IP` (Railway
+overwrites it). `UMBRA_CLIENT_IP_HEADER`, `UMBRA_TRUSTED_PROXY_HOPS`, and
+`UMBRA_CLIENT_CONCURRENCY` can stay at their defaults. See
+[Hosted API limits](hosted-limits.md).
 
 MCP render tools (quicklook / change / timescan) still stream Umbra COGs
 through this host; keep an eye on egress. STAC search does not.

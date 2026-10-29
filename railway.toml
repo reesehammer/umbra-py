@@ -21,6 +21,13 @@
 #
 # `.railway.internal` is private mesh DNS. Generate a public domain
 # (`https://<service>.up.railway.app`).
+#
+# Set UMBRA_PUBLIC_BASE_URL=https://api.umbra-py.space so STAC links use the
+# custom domain. Unset, --public uses https://$RAILWAY_PUBLIC_DOMAIN.
+# The rate limit reads X-Real-IP (UMBRA_CLIENT_IP_HEADER, default x-real-ip).
+# UMBRA_TRUSTED_PROXY_HOPS (default 1) is only the X-Forwarded-For fallback.
+# UMBRA_CLIENT_CONCURRENCY (default 2) is how many catalog reads one client
+# may hold. None of those need to be set for the defaults to be safe.
 
 [build]
 builder = "DOCKERFILE"

@@ -10,6 +10,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Changed
+- **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
+  The limiter ignores `Authorization` and reads `X-Real-IP` (`UMBRA_CLIENT_IP_HEADER`;
+  `UMBRA_TRUSTED_PROXY_HOPS` is the `X-Forwarded-For` fallback); each client may
+  hold two catalog reads, and a timed-out read interrupts SQLite.
+  Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
+  (with a `note` when clamped), bodies over 1 MiB are HTTP 413, a malformed
+  `POST /search` is HTTP 400, STAC links use `UMBRA_PUBLIC_BASE_URL` or
+  `https://$RAILWAY_PUBLIC_DOMAIN`, and public `geocode_place` caches names and
+  calls Nominatim about once a second. Local `umbra serve` and local MCP are unchanged.
 - **Hosted `download_asset` preview (`confirm=false`) only checks size against Umbra's public bucket**
   and never follows redirects. A href outside that bucket is not requested;
   `bytes` is the STAC `file:size` or `size`, or null.

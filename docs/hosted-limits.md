@@ -69,22 +69,67 @@ that is still fetching).
 **120 requests per 60-second sliding window**, per client. That is
 `PUBLIC_RATE_LIMIT` and `PUBLIC_RATE_WINDOW_S` on `umbra serve --public`.
 
-A client is the `Authorization: Bearer` token when one is sent (the server
-keeps a hash, not the token), otherwise the client IP. `--public` trusts
-`X-Forwarded-For` from the proxy, which is what makes the cap per visitor
-rather than one bucket for all of Railway.
+A client is the address Railway's edge accepted. `--public` reads
+`X-Real-IP` (`UMBRA_CLIENT_IP_HEADER`) and ignores `Authorization`. A bearer
+token is not a separate bucket. `X-Forwarded-For` is only the fallback: the
+rightmost `UMBRA_TRUSTED_PROXY_HOPS` entries (default 1), never the leftmost.
+Railway overwrites `X-Real-IP` and does not promise a fixed hop count, so
+leave the header at the default. A loopback peer (a laptop `--public` with
+no proxy) ignores those headers and is keyed on the socket address.
 
 These paths do not count: `/healthz`, `/healthz/live`, `/healthz/ready`,
 `/livez`, `/readyz`, `/docs`, `/openapi.json`, `/redoc`.
 
 Over the cap the response is HTTP 429, body `RateLimited`, with `Retry-After`
-(seconds), `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+(seconds), `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The window is
+per process. A request body over 1 MiB counts as well (HTTP 413, or 429 when
+that hit crosses the cap).
+
+## Concurrent catalog reads
+
+One client may hold **2** catalog reads at once (`UMBRA_CLIENT_CONCURRENCY`,
+minimum 1). A third is HTTP 429 with `Retry-After: 1`, before it takes a
+database slot. The process still allows `UMBRA_DB_CONCURRENCY` reads in
+total (default 4); past that the response is HTTP 503. A read that passes
+`UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 and the SQLite statement
+is interrupted so the slot is released.
 
 ## Page size
 
-`limit` defaults to 10. The most a client can request on `/search` and on
-`/collections/{id}/items` is **10,000** (`MAX_LIMIT`). `GET /sites` ranks
-sites, and its `top` parameter caps at 100, which is a different knob.
+`limit` defaults to 10. On this host, `/search` and
+`/collections/{id}/items` return at most **500** items
+(`PUBLIC_SEARCH_LIMIT`). A larger `limit` is clamped, not rejected, and the
+`next` link advances by that page. A self-hosted server without `--public`
+still accepts up to **10,000** (`MAX_LIMIT`). `GET /sites` ranks sites, and
+its `top` parameter caps at 100. Its `limit` sizes a live-backend pool and
+is ignored on the index, so it is not part of the page cap.
+
+MCP `search_catalog` keeps its argument and its default of 20. On this host
+a `limit` above **100** is clamped to 100 and the result includes `note`
+telling the caller to take the next page. A default call has no `note`.
+
+## Request body
+
+`POST` bodies larger than **1 MiB** (`PUBLIC_MAX_BODY_BYTES`) are HTTP 413
+and are not parsed. A `POST /search` body with the wrong JSON types (a
+string `token`, a non-array `ids`, a scalar where an object is required,
+or nesting the parser cannot walk) is HTTP 400.
+
+## Geocoding
+
+Public `geocode_place`, and a `place` filter on the public MCP tools that
+geocode, share one Nominatim throttle of about **1 request per second** and
+an LRU cache of 256 names. A repeated name does not call out. Local MCP and
+the CLI call Nominatim directly.
+
+## Link origin
+
+STAC `links[].href` uses `UMBRA_PUBLIC_BASE_URL` when that variable is set
+(no trailing slash). On `--public`, an unset value uses
+`https://$RAILWAY_PUBLIC_DOMAIN` when Railway injected it. Otherwise the
+request URL is used, which is the right origin for a laptop. Set
+`UMBRA_PUBLIC_BASE_URL=https://api.umbra-py.space` on the community host so
+links use that name rather than the `*.up.railway.app` domain.
 
 ## CORS
 

@@ -158,17 +158,20 @@ keys and of a live S3 walk. Railway's start command is that flag.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import io
+import ipaddress
 import itertools
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -246,6 +249,52 @@ CONFORMANCE_CLASSES = (
 #: Default page size, and the ceiling a client can request via ``limit``.
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 10_000
+
+#: ``/search`` and ``/collections/{id}/items`` page size on ``--public``.
+#: The local ceiling stays :data:`MAX_LIMIT`. The STAC ``next`` link pages
+#: the rest, so a public client does not need a 10,000-item response.
+PUBLIC_SEARCH_LIMIT = 500
+
+#: How many catalog reads one public client may hold at once. The process-wide
+#: pool stays :func:`_db_concurrency`; this stops one caller from taking all
+#: of those slots. ``UMBRA_CLIENT_CONCURRENCY`` overrides it (minimum 1).
+PUBLIC_CLIENT_CONCURRENCY = 2
+
+#: Request body cap for ``--public``. Larger bodies are HTTP 413 and are not
+#: parsed. About 1 MiB: a STAC search body is a small JSON document.
+PUBLIC_MAX_BODY_BYTES = 1_048_576
+
+#: Largest ``token`` / ``limit`` integer accepted on ``POST /search``. Bigger
+#: than this does not fit a SQLite offset and is a 400, not a 500.
+_MAX_SEARCH_INT = 2**62
+
+#: ``POST /search`` list caps. A few thousand ids is a filter; tens of
+#: thousands is a scan. Product types are a five-value vocabulary.
+_MAX_SEARCH_IDS = 10_000
+_MAX_PRODUCT_TYPE_LIST = 32
+
+#: Public rate-limit identity. Railway's edge sets ``X-Real-IP`` to the
+#: client it accepted and overwrites a caller-supplied value. ``X-Forwarded-For``
+#: has no guaranteed length, so it is only the fallback.
+CLIENT_IP_HEADER_ENV = "UMBRA_CLIENT_IP_HEADER"
+TRUSTED_PROXY_HOPS_ENV = "UMBRA_TRUSTED_PROXY_HOPS"
+DEFAULT_CLIENT_IP_HEADER = "x-real-ip"
+DEFAULT_TRUSTED_PROXY_HOPS = 1
+
+#: STAC link origin. When set, every link is built from this absolute URL
+#: instead of the request's ``Host``. On Railway, an unset value falls back
+#: to ``https://$RAILWAY_PUBLIC_DOMAIN`` in public mode.
+PUBLIC_BASE_URL_ENV = "UMBRA_PUBLIC_BASE_URL"
+CLIENT_CONCURRENCY_ENV = "UMBRA_CLIENT_CONCURRENCY"
+
+#: Set on the worker that is inside a deadline-bounded catalog read, and on
+#: the request task so ``_open`` can count in-flight reads per client.
+_query_cancel: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "umbra_query_cancel", default=None
+)
+_inflight_client: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "umbra_inflight_client", default=None
+)
 
 #: Per-client request cap for ``umbra serve --public``. Search is a local SQL
 #: read; the cap exists so a tiny shared host cannot be scraped into a DoS, and
@@ -389,12 +438,14 @@ def parse_bbox(value: str | list[float] | None) -> BBox | None:
         parts = [float(p) for p in value.split(",")]
     else:
         parts = [float(p) for p in value]
+    if len(parts) not in (4, 6):
+        raise ValueError("bbox must have 4 or 6 comma-separated numbers")
+    if any(not math.isfinite(p) for p in parts):
+        raise ValueError("bbox values must be finite numbers")
     if len(parts) == 4:
         return (parts[0], parts[1], parts[2], parts[3])
-    if len(parts) == 6:
-        # 3D bbox: [minx, miny, minz, maxx, maxy, maxz] -> drop z.
-        return (parts[0], parts[1], parts[3], parts[4])
-    raise ValueError("bbox must have 4 or 6 comma-separated numbers")
+    # 3D bbox: [minx, miny, minz, maxx, maxy, maxz] -> drop z.
+    return (parts[0], parts[1], parts[3], parts[4])
 
 
 def parse_intersects(value: dict | str | None) -> Geometry | None:
@@ -522,9 +573,12 @@ def _opt_float(value: Any, field: str) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field} must be a number, got {value!r}") from exc
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValueError(f"{field} must be a number, got {value!r}")
+    return number
 
 
 def _opt_int(value: Any, field: str) -> int | None:
@@ -1214,10 +1268,208 @@ def search_result(
 # --------------------------------------------------------------------------
 
 
-def _clamp_limit(limit: int | None) -> int:
+def _clamp_limit(limit: int | None, *, cap: int = MAX_LIMIT) -> int:
     if limit is None:
         return DEFAULT_LIMIT
-    return max(1, min(int(limit), MAX_LIMIT))
+    return max(1, min(int(limit), cap))
+
+
+def _search_limit_cap(*, public: bool) -> int:
+    """Page-size ceiling. Public search is :data:`PUBLIC_SEARCH_LIMIT`."""
+    return PUBLIC_SEARCH_LIMIT if public else MAX_LIMIT
+
+
+def _strict_int(value: Any, field: str) -> int | None:
+    """An integer from JSON, or ``None`` when the field was omitted.
+
+    Booleans, floats that are not whole numbers, and strings that are not a
+    plain base-10 integer (``"abc"``, ``"1e400"``) are a :class:`ValueError`.
+    A digit string longer than what :data:`_MAX_SEARCH_INT` needs is rejected
+    before ``int`` builds it.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer.")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"{field} must be an integer.")
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        sign = ""
+        if text.startswith(("+", "-")):
+            sign, text = text[0], text[1:]
+        if not text.isdigit() or len(text) > 19:
+            raise ValueError(f"{field} must be an integer.")
+        number = int(text)
+        return -number if sign == "-" else number
+    raise ValueError(f"{field} must be an integer.")
+
+
+def _bounded_int(value: Any, field: str, *, default: int, minimum: int, maximum: int) -> int:
+    parsed = _strict_int(value, field)
+    if parsed is None:
+        return default
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}.")
+    return parsed
+
+
+def _string_list(value: Any, field: str, *, max_items: int) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array of strings.")
+    if len(value) > max_items:
+        raise ValueError(f"{field} has {len(value)} entries; the maximum is {max_items}.")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field} must be an array of strings.")
+        out.append(item)
+    return out
+
+
+def _optional_str(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string.")
+    return value
+
+
+def _optional_bool(value: Any, field: str, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field} must be true or false.")
+
+
+@dataclass(frozen=True)
+class SearchBody:
+    """A validated ``POST /search`` body.
+
+    ``raw`` is the object the client sent, kept so a page link can echo the
+    filters. ``token`` on that object is replaced when the link is built.
+    """
+
+    bbox: BBox | None
+    intersects: Geometry | None
+    start: date | None
+    end: date | None
+    ids: list[str] | None
+    collections: list[str] | None
+    product_types: list[str] | None
+    area: str | None
+    fuzzy: bool
+    polarizations: list[str] | None
+    min_incidence: float | None
+    max_incidence: float | None
+    max_resolution: float | None
+    canonical: bool | None
+    limit: int
+    offset: int
+    raw: dict[str, Any]
+
+
+def parse_json_object(raw: bytes) -> dict[str, Any]:
+    """Parse a request body as a JSON object.
+
+    An empty body is ``{}``. An array, a scalar, invalid JSON, or nesting
+    deep enough to blow the parser is a :class:`ValueError` (HTTP 400), not
+    an unhandled 500.
+    """
+    if not raw or not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting is too deep.") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("Request body is not valid JSON.") from exc
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise ValueError("Search body must be a JSON object.")
+    return body
+
+
+def parse_search_body(body: Mapping[str, Any]) -> SearchBody:
+    """Validate a STAC Item Search POST body.
+
+    Unknown fields are kept on :attr:`SearchBody.raw` so a client can round
+    them through a page link. Fields this API reads must have the types the
+    STAC body uses; a wrong type is a :class:`ValueError`.
+    """
+    if body.get("intersects") is not None and body.get("bbox") is not None:
+        raise ValueError("bbox and intersects are mutually exclusive")
+    bbox = parse_bbox(body.get("bbox"))
+    intersects = parse_intersects(body.get("intersects"))
+    datetime = _optional_str(body.get("datetime"), "datetime")
+    start, end = parse_datetime(datetime)
+    query = body.get("query")
+    if query is not None and not isinstance(query, dict):
+        raise ValueError("query must be an object")
+    parsed_query = parse_query(query)
+    products_raw = body.get("product_types")
+    if isinstance(products_raw, list) and len(products_raw) > _MAX_PRODUCT_TYPE_LIST:
+        raise ValueError(
+            f"product_types has {len(products_raw)} entries; "
+            f"the maximum is {_MAX_PRODUCT_TYPE_LIST}."
+        )
+    top_products = parse_product_types(products_raw)
+    product_types = top_products if top_products is not None else parsed_query.product_types
+    area_raw = body.get("area")
+    if area_raw in (None, ""):
+        area = parsed_query.area
+    else:
+        area_text = _optional_str(area_raw, "area")
+        area = area_text.strip() if area_text else parsed_query.area
+    top_pols = parse_polarizations(body.get("polarizations"))
+    polarizations = top_pols if top_pols is not None else parsed_query.polarizations
+    min_incidence = _opt_float(body.get("min_incidence"), "min_incidence")
+    if min_incidence is None:
+        min_incidence = parsed_query.min_incidence
+    max_incidence = _opt_float(body.get("max_incidence"), "max_incidence")
+    if max_incidence is None:
+        max_incidence = parsed_query.max_incidence
+    max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
+    if max_resolution is None:
+        max_resolution = parsed_query.max_resolution
+    if "canonical" in body:
+        canonical = parse_optional_bool(body.get("canonical"), "canonical")
+    else:
+        canonical = parsed_query.canonical
+    ids = _string_list(body.get("ids"), "ids", max_items=_MAX_SEARCH_IDS)
+    collections = _string_list(body.get("collections"), "collections", max_items=8)
+    fuzzy = _optional_bool(body.get("fuzzy"), "fuzzy") if "fuzzy" in body else False
+    limit = _bounded_int(
+        body.get("limit"), "limit", default=DEFAULT_LIMIT, minimum=1, maximum=MAX_LIMIT
+    )
+    offset = _bounded_int(body.get("token"), "token", default=0, minimum=0, maximum=_MAX_SEARCH_INT)
+    return SearchBody(
+        bbox=bbox,
+        intersects=intersects,
+        start=start,
+        end=end,
+        ids=ids,
+        collections=collections,
+        product_types=product_types,
+        area=area or None,
+        fuzzy=fuzzy,
+        polarizations=polarizations,
+        min_incidence=min_incidence,
+        max_incidence=max_incidence,
+        max_resolution=max_resolution,
+        canonical=canonical,
+        limit=limit,
+        offset=offset,
+        raw=dict(body),
+    )
 
 
 def run_search(
@@ -2249,7 +2501,9 @@ class RateLimiter:
     is mounted, the render tools that stream Umbra COGs. ``limit`` requests per
     ``window_s`` seconds per :func:`client_identity` is the cheap abuse brake.
     ``max_clients`` bounds the tracking dict so a rotating-identity adversary
-    cannot grow it without bound (evict the least-recently-seen).
+    cannot grow it without bound. Eviction drops the least-recently-seen
+    client in O(1) (an :class:`~collections.OrderedDict`, moved to the end
+    on every call).
     """
 
     def __init__(
@@ -2262,12 +2516,14 @@ class RateLimiter:
     ) -> None:
         if limit < 1:
             raise ValueError("rate limit must be >= 1 (pass None/0 to disable)")
+        if max_clients < 1:
+            raise ValueError("max_clients must be >= 1")
         self.limit = limit
         self.window_s = window_s
         self.max_clients = max_clients
         self._time = time_fn
         self._lock = threading.Lock()
-        self._hits: dict[str, deque[float]] = {}
+        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
 
     def hit(self, client: str) -> tuple[bool, int, int]:
         """Record one request.
@@ -2282,21 +2538,398 @@ class RateLimiter:
             if q is None:
                 q = deque()
                 self._hits[client] = q
+            else:
+                self._hits.move_to_end(client)
             while q and q[0] <= cutoff:
                 q.popleft()
             if len(q) >= self.limit:
+                self._evict()
                 retry = max(1, int(q[0] + self.window_s - now + 0.999))
                 return False, 0, retry
             q.append(now)
-            if len(self._hits) > self.max_clients:
-                oldest = min(
-                    (k for k in self._hits if k != client),
-                    key=lambda k: self._hits[k][-1] if self._hits[k] else 0,
-                    default=None,
-                )
-                if oldest is not None:
-                    del self._hits[oldest]
+            self._evict()
             return True, self.limit - len(q), 0
+
+    def _evict(self) -> None:
+        """Drop the least-recently-seen clients until the dict fits.
+
+        The caller has already moved the current client to the end, so
+        ``popitem(last=False)`` removes someone else.
+        """
+        while len(self._hits) > self.max_clients:
+            self._hits.popitem(last=False)
+
+
+class ClientInFlight:
+    """How many catalog reads each client currently holds.
+
+    ``acquire`` fails when that client is already at ``limit`` so the request
+    can be rejected without waiting. Counts are removed at zero, so the dict
+    stays the size of the in-flight set rather than every client ever seen.
+    """
+
+    def __init__(self, limit: int) -> None:
+        if limit < 1:
+            raise ValueError("in-flight limit must be >= 1")
+        self.limit = limit
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def acquire(self, client: str) -> bool:
+        with self._lock:
+            held = self._counts.get(client, 0)
+            if held >= self.limit:
+                return False
+            self._counts[client] = held + 1
+            return True
+
+    def release(self, client: str) -> None:
+        with self._lock:
+            held = self._counts.get(client, 0) - 1
+            if held <= 0:
+                self._counts.pop(client, None)
+            else:
+                self._counts[client] = held
+
+
+def _client_ip_header() -> str:
+    raw = os.environ.get(CLIENT_IP_HEADER_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_CLIENT_IP_HEADER
+    return raw.strip().lower()
+
+
+def _trusted_proxy_hops() -> int:
+    raw = os.environ.get(TRUSTED_PROXY_HOPS_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_TRUSTED_PROXY_HOPS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TRUSTED_PROXY_HOPS
+    return value if value >= 1 else DEFAULT_TRUSTED_PROXY_HOPS
+
+
+def _client_concurrency() -> int:
+    raw = os.environ.get(CLIENT_CONCURRENCY_ENV)
+    if raw is None or not raw.strip():
+        return PUBLIC_CLIENT_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        return PUBLIC_CLIENT_CONCURRENCY
+    return value if value >= 1 else PUBLIC_CLIENT_CONCURRENCY
+
+
+def _parse_ip_token(value: str) -> str | None:
+    """A single IP literal, or ``None`` when ``value`` is not one.
+
+    Accepts a bare address, ``host:port`` for IPv4, and ``[v6]:port``.
+    The canonical form (from :mod:`ipaddress`) is what the limiter stores,
+    so ``::ffff:192.0.2.1`` and the same address written another way share
+    a bucket.
+    """
+    text = value.strip().strip('"')
+    if not text or any(c.isspace() for c in text):
+        return None
+    host = text
+    if text.startswith("["):
+        end = text.find("]")
+        if end == -1:
+            return None
+        host = text[1:end]
+    elif text.count(":") == 1 and "." in text:
+        host, sep, port = text.partition(":")
+        if sep != ":" or not port.isdigit():
+            return None
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return None
+
+
+def _peer_is_loopback(peer: str | None) -> bool:
+    if not peer:
+        return False
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
+
+
+def _forwarded_client(header: str, hops: int) -> str | None:
+    """The client address ``hops`` from the right of ``X-Forwarded-For``.
+
+    Each appending proxy adds the address it saw at the right. The leftmost
+    entry is the one a client can forge when a proxy appends, so it is never
+    selected. When the header is shorter than ``hops`` (Railway overwrites
+    it with one entry and does not promise a length), the rightmost entry
+    is used — still never the left one when they differ.
+    """
+    parts = [part.strip() for part in header.split(",") if part.strip()]
+    if not parts:
+        return None
+    hops = hops if hops >= 1 else 1
+    index = -hops if len(parts) >= hops else -1
+    return _parse_ip_token(parts[index])
+
+
+def public_client_ip(peer: str | None, headers: Mapping[str, str]) -> str:
+    """Client address for the public rate limiter.
+
+    ``UMBRA_CLIENT_IP_HEADER`` (default ``x-real-ip``) is read first. Railway's
+    edge sets that header to the client it accepted and overwrites a
+    caller-supplied value; it does not promise a fixed ``X-Forwarded-For``
+    hop count, so that header is only the fallback
+    (:func:`_forwarded_client`, ``UMBRA_TRUSTED_PROXY_HOPS``, default 1).
+
+    A loopback socket peer is the client itself (a local ``--public`` with
+    no proxy). Forwarded headers from that peer are ignored, which is what
+    stops a direct caller from picking a fresh bucket per request. The
+    hosted process is not reached on loopback; its peer is the edge.
+    """
+    if _peer_is_loopback(peer):
+        return peer or "unknown"
+    name = _client_ip_header()
+    if name not in {"", "none", "peer"}:
+        if name == "x-forwarded-for":
+            found = _forwarded_client(headers.get("x-forwarded-for", ""), _trusted_proxy_hops())
+        else:
+            found = _parse_ip_token(headers.get(name, ""))
+            if found is None:
+                found = _forwarded_client(headers.get("x-forwarded-for", ""), _trusted_proxy_hops())
+        if found:
+            return found
+    return peer or "unknown"
+
+
+def rate_limit_identity(request: Any, *, public: bool) -> str:
+    """Bucket key for the per-client request cap.
+
+    Public mode ignores ``Authorization``. A bearer token is not
+    authentication on that host, and a new token per request was a new
+    bucket. The address is whatever :func:`public_client_ip` stored on
+    ``request.client``. Other modes keep :func:`client_identity` (bearer,
+    then the socket peer) so a local ``--rate-limit`` still separates tokens.
+    """
+    if public:
+        client = getattr(request, "client", None)
+        host = getattr(client, "host", None) if client is not None else None
+        return f"ip:{host or 'unknown'}"
+    return client_identity(request)
+
+
+def configured_link_base(*, public: bool) -> str | None:
+    """Absolute origin for STAC links, or ``None`` to keep the request URL.
+
+    ``UMBRA_PUBLIC_BASE_URL`` wins in every mode. In public mode, an unset
+    value uses ``https://$RAILWAY_PUBLIC_DOMAIN`` when Railway injected that
+    variable. Otherwise the request URL is used, which is the right origin
+    for a laptop and for tests. Hardcoding the community hostname would
+    point a self-hosted ``--public`` at someone else's API.
+    """
+    raw = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    if raw:
+        return raw.rstrip("/")
+    if not public:
+        return None
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip().strip("/")
+    if not domain or "://" in domain or "/" in domain:
+        return None
+    return f"https://{domain}"
+
+
+def link_base(request: Any, *, public: bool) -> str:
+    """Origin used to build STAC links, without a trailing slash."""
+    configured = configured_link_base(public=public)
+    if configured:
+        return configured
+    return str(request.base_url).rstrip("/")
+
+
+def link_self(request: Any, *, public: bool) -> str:
+    """The request URL, with the origin swapped when one is configured."""
+    configured = configured_link_base(public=public)
+    if configured is None:
+        return str(request.url)
+    path = request.url.path
+    query = request.url.query
+    if query:
+        return f"{configured}{path}?{query}"
+    return f"{configured}{path}"
+
+
+def _scope_headers(scope: Mapping[str, Any]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for key, value in scope.get("headers") or ():
+        found[key.decode("latin1")] = value.decode("latin1")
+    return found
+
+
+class ClientIpMiddleware:
+    """Rewrite ``scope["client"]`` from the trusted edge header.
+
+    Installed only for ``--public``, and outside the rate limiter, so the
+    limiter, the access log, and the in-flight cap all see the same address.
+    uvicorn's ``forwarded_allow_ips="*"`` is not used: that trusts the
+    leftmost ``X-Forwarded-For`` entry and never reads ``X-Real-IP``.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            peer = scope.get("client")
+            peer_host = peer[0] if peer else None
+            ip = public_client_ip(peer_host, _scope_headers(scope))
+            port = peer[1] if peer and len(peer) > 1 else 0
+            scope["client"] = (ip, port)
+        await self.app(scope, receive, send)
+
+
+class InFlightClientMiddleware:
+    """Publish the rewritten client address to the request task.
+
+    Pure ASGI, inside the rate-limit middleware's spawned task, so a catalog
+    read on the thread pool can see who is holding a slot.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        host = client[0] if client else None
+        token = _inflight_client.set(f"ip:{host or 'unknown'}")
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _inflight_client.reset(token)
+
+
+def _too_large_body() -> bytes:
+    message = f"Request body exceeds {PUBLIC_MAX_BODY_BYTES} bytes."
+    payload = {"error": "RequestEntityTooLarge", "message": message}
+    return json.dumps(payload).encode("utf-8")
+
+
+class BodyLimitMiddleware:
+    """Reject a public request body above :data:`PUBLIC_MAX_BODY_BYTES`.
+
+    ``Content-Length`` is checked before the body is read. A chunked body is
+    counted and stopped at the cap, so a client cannot omit the header and
+    stream a larger payload into the parser.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        max_bytes: int = PUBLIC_MAX_BODY_BYTES,
+        limiter: RateLimiter | None = None,
+    ) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+        self.limiter = limiter
+
+    async def _reject_too_large(self, scope: Mapping[str, Any], send: Any) -> None:
+        """413, or 429 when this reject is the request that crosses the cap.
+
+        A body that is never parsed still counts, so a client cannot dodge the
+        limiter by sending only oversized requests. The limiter's normal path
+        does not also count it: this middleware returns before the route.
+        """
+        if self.limiter is not None:
+            client = scope.get("client")
+            host = client[0] if client else None
+            allowed, _remaining, retry_after = self.limiter.hit(f"ip:{host or 'unknown'}")
+            if not allowed:
+                payload = json.dumps(
+                    {
+                        "error": "RateLimited",
+                        "message": (
+                            f"Rate limit exceeded ({self.limiter.limit} requests "
+                            f"per {int(self.limiter.window_s)}s)."
+                        ),
+                        "hint": f"Retry after {retry_after} seconds.",
+                    }
+                ).encode("utf-8")
+                await _send_json(
+                    send,
+                    429,
+                    payload,
+                    extra_headers=[
+                        (b"retry-after", str(retry_after).encode("ascii")),
+                        (b"x-ratelimit-limit", str(self.limiter.limit).encode("ascii")),
+                        (b"x-ratelimit-remaining", b"0"),
+                    ],
+                )
+                return
+        await _send_json(send, 413, _too_large_body())
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+            await self.app(scope, receive, send)
+            return
+        headers = _scope_headers(scope)
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                size = int(declared)
+            except ValueError:
+                size = self.max_bytes + 1
+            if size > self.max_bytes:
+                await self._reject_too_large(scope, send)
+                return
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                return
+            piece = message.get("body", b"") or b""
+            total += len(piece)
+            if total > self.max_bytes:
+                await self._reject_too_large(scope, send)
+                return
+            chunks.append(piece)
+            if not message.get("more_body", False):
+                break
+        payload = b"".join(chunks)
+        sent = False
+
+        async def replay() -> dict[str, Any]:
+            nonlocal sent
+            if sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent = True
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+async def _send_json(
+    send: Any,
+    status: int,
+    body: bytes,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        *list(extra_headers or []),
+    ]
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": headers,
+        }
+    )
+    await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
 @dataclass(frozen=True)
@@ -3019,6 +3652,12 @@ def build_app(
     # call ``/search`` and the ``/artifacts/...`` render endpoints cross-origin.
     from fastapi.middleware.cors import CORSMiddleware
 
+    # Added first so it is the innermost middleware and runs in the same task
+    # as the route (inside the guard's spawned task). That is what copies the
+    # client id onto the catalog-read thread.
+    if public:
+        app.add_middleware(InFlightClientMiddleware)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOW_ORIGINS),
@@ -3040,7 +3679,9 @@ def build_app(
                 and request.method != "OPTIONS"
                 and path not in RATE_LIMIT_EXEMPT_PATHS
             ):
-                allowed, remaining, retry_after = limiter.hit(client_identity(request))
+                allowed, remaining, retry_after = limiter.hit(
+                    rate_limit_identity(request, public=public)
+                )
                 if not allowed:
                     return JSONResponse(
                         {
@@ -3082,51 +3723,143 @@ def build_app(
 
     app.add_middleware(StacSearchLog)
 
+    # Outside the search log so a multi-megabyte body is refused before that
+    # middleware peeks it. Inside the client-IP rewrite (added next, so it
+    # runs first) so the address is already the edge's client. Rejects count
+    # against the same limiter.
+    if public:
+        app.add_middleware(BodyLimitMiddleware, max_bytes=PUBLIC_MAX_BODY_BYTES, limiter=limiter)
+        app.add_middleware(ClientIpMiddleware)
+
     # One abandoned probe used to leave its scan running, and the next probe
     # started another. A handful of slots keeps that from filling the thread
-    # pool; past the cap the request is a fast 503.
+    # pool; past the cap the request is a fast 503. Public mode also caps how
+    # many of those slots one client may hold, and a deadline interrupts the
+    # SQLite statement so the slot is released instead of staying busy until
+    # the scan finishes on its own.
     _slots = threading.BoundedSemaphore(_db_concurrency())
+    client_gate = ClientInFlight(_client_concurrency()) if public else None
+    _holders: dict[int, str] = {}
+    _armed: list[tuple[Any, threading.Event]] = []
+    _armed_lock = threading.Lock()
+
+    def _release_client(source: Any) -> None:
+        if client_gate is None:
+            return
+        client = _holders.pop(id(source), None)
+        if client:
+            client_gate.release(client)
 
     def _open():
+        client = _inflight_client.get() if client_gate is not None else None
+        acquired_client = False
+        if client_gate is not None and client:
+            if not client_gate.acquire(client):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many catalog reads already in flight for this client.",
+                    headers={"Retry-After": "1"},
+                )
+            acquired_client = True
         if not _slots.acquire(blocking=False):
+            if acquired_client and client:
+                client_gate.release(client)
             raise HTTPException(
                 status_code=503,
                 detail="Catalog index is busy; retry shortly.",
             )
         try:
             try:
-                return open_source(index_path, live=live)
+                source = open_source(index_path, live=live)
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
         except BaseException:
             _slots.release()
+            if acquired_client and client:
+                client_gate.release(client)
             raise
+        if acquired_client and client:
+            _holders[id(source)] = client
+        flag = _query_cancel.get()
+        if flag is not None:
+            arm = getattr(source, "arm_query_cancel", None)
+            if callable(arm):
+                arm(flag)
+                with _armed_lock:
+                    _armed.append((source, flag))
+        return source
 
     def _close(source: Any) -> None:
+        with _armed_lock:
+            _armed[:] = [(item, flag) for item, flag in _armed if item is not source]
+        disarm = getattr(source, "disarm_query_cancel", None)
+        if callable(disarm):
+            try:
+                disarm()
+            except sqlite3.Error:
+                pass
         try:
             close = getattr(source, "close", None)
             if callable(close):
                 close()
         finally:
             _slots.release()
+            _release_client(source)
+
+    def _deadline_response() -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Timeout",
+                "message": "Catalog index read exceeded the request deadline.",
+            },
+        )
 
     async def _bounded(fn: Callable[[], Any]) -> Any:
         """Run ``fn`` off the loop and turn a deadline miss into a 503.
 
-        The worker is not cancelled: SQLite cannot be interrupted from here.
-        It still holds its slot until it returns, which is what stops the
-        next caller from starting another scan.
+        On timeout the SQLite statement is interrupted (``interrupt`` plus a
+        progress handler armed in ``_open``), so the worker leaves the query
+        and ``_close`` releases the slot. ``interrupt`` alone is a no-op
+        until a statement is running; the handler covers that gap.
         """
+        cancelled = threading.Event()
+        client = _inflight_client.get()
+
+        def run() -> Any:
+            cancel_token = _query_cancel.set(cancelled)
+            client_token = _inflight_client.set(client)
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if cancelled.is_set() or "interrupt" in str(exc).lower():
+                    return _deadline_response()
+                raise
+            finally:
+                _query_cancel.reset(cancel_token)
+                _inflight_client.reset(client_token)
+
         try:
-            return await asyncio.wait_for(asyncio.to_thread(fn), _request_timeout_s())
+            return await asyncio.wait_for(asyncio.to_thread(run), _request_timeout_s())
         except (TimeoutError, asyncio.TimeoutError):
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "Timeout",
-                    "message": "Catalog index read exceeded the request deadline.",
-                },
-            )
+            cancelled.set()
+            with _armed_lock:
+                armed = [source for source, flag in _armed if flag is cancelled]
+            for source in armed:
+                interrupt = getattr(source, "interrupt_query", None)
+                if not callable(interrupt):
+                    continue
+                try:
+                    interrupt()
+                except sqlite3.Error:
+                    pass
+            return _deadline_response()
+
+    def _base(request: Request) -> str:
+        return link_base(request, public=public)
+
+    def _self_href(request: Request) -> str:
+        return link_self(request, public=public)
 
     # The collection extent and the build stamp only change when the index
     # file (or the snapshot sidecar beside it) is replaced. Keyed by path,
@@ -3210,7 +3943,7 @@ def build_app(
         # describes the *default* renderers, as the policy itself does; injected
         # ones do their own stacking and answer for themselves.
         return landing_page(
-            str(request.base_url),
+            _base(request),
             artifacts=artifacts,
             stack_execution=stack_execution,
             narrate=renderers.narrate is not None,
@@ -3373,7 +4106,7 @@ def build_app(
         return await _bounded(_run)
 
     def _collections_body(request: Request) -> dict[str, Any]:
-        base = str(request.base_url).rstrip("/")
+        base = _base(request)
         temporal, built_at, snapshot, n_items, n_captures = _facts()
         return {
             "collections": [
@@ -3398,7 +4131,7 @@ def build_app(
             raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
         temporal, built_at, snapshot, n_items, n_captures = _facts()
         return collection(
-            str(request.base_url),
+            _base(request),
             temporal=temporal,
             built_at=built_at,
             snapshot=snapshot,
@@ -3426,6 +4159,7 @@ def build_app(
         offset: int,
         self_href: str,
     ) -> JSONResponse:
+        limit = _clamp_limit(limit, cap=_search_limit_cap(public=public))
         source = _open()
         try:
             page, has_next = run_search(
@@ -3453,7 +4187,7 @@ def build_app(
         )
         result = search_result(
             page,
-            str(request.base_url),
+            _base(request),
             returned=len(page),
             next_href=next_href,
             prev_href=prev_href,
@@ -3511,7 +4245,7 @@ def build_app(
             max_resolution=max_resolution,
             limit=limit,
             offset=token,
-            self_href=str(request.url),
+            self_href=_self_href(request),
         )
 
     @app.get("/collections/{collection_id}/items/{item_id}", tags=["STAC"])
@@ -3525,7 +4259,7 @@ def build_app(
             _close(source)
         if item is None:
             raise HTTPException(status_code=404, detail=f"No item {item_id!r}")
-        return JSONResponse(content=item_to_stac(item, str(request.base_url)), media_type=geojson)
+        return JSONResponse(content=item_to_stac(item, _base(request)), media_type=geojson)
 
     @app.get("/search", tags=["STAC"])
     async def get_search(
@@ -3597,70 +4331,40 @@ def build_app(
                 canonical=wanted_canonical,
                 limit=limit,
                 offset=token,
-                self_href=str(request.url),
+                self_href=_self_href(request),
             )
         )
 
     @app.post("/search", tags=["STAC"])
-    async def post_search(request: Request, body: dict[str, Any] = Body(default={})) -> Any:
-        _check_collections(body.get("collections"))
-        if body.get("intersects") is not None and body.get("bbox") is not None:
-            raise HTTPException(
-                status_code=400, detail="bbox and intersects are mutually exclusive"
-            )
+    async def post_search(request: Request) -> Any:
         try:
-            parsed_bbox = parse_bbox(body.get("bbox"))
-            parsed_geometry = parse_intersects(body.get("intersects"))
-            start, end = parse_datetime(body.get("datetime"))
-            # The Query-extension filters can arrive either as a STAC ``query``
-            # object or as plain top-level fields; a top-level field, when given,
-            # overrides the same field inside ``query``.
-            q = parse_query(body.get("query"))
-            top_products = parse_product_types(body.get("product_types"))
-            wanted_products = top_products if top_products is not None else q.product_types
-            top_area = body.get("area")
-            area = str(top_area).strip() if top_area not in (None, "") else q.area
-            top_pols = parse_polarizations(body.get("polarizations"))
-            polarizations = top_pols if top_pols is not None else q.polarizations
-            min_incidence = _opt_float(body.get("min_incidence"), "min_incidence")
-            if min_incidence is None:
-                min_incidence = q.min_incidence
-            max_incidence = _opt_float(body.get("max_incidence"), "max_incidence")
-            if max_incidence is None:
-                max_incidence = q.max_incidence
-            max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
-            if max_resolution is None:
-                max_resolution = q.max_resolution
-            if "canonical" in body:
-                canonical = parse_optional_bool(body.get("canonical"), "canonical")
-            else:
-                canonical = q.canonical
-        except (ValueError, TypeError) as exc:
+            parsed = parse_search_body(parse_json_object(await request.body()))
+        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        ids = body.get("ids")
-        fuzzy = bool(body.get("fuzzy", False))
-        limit = _clamp_limit(body.get("limit"))
-        offset = int(body.get("token") or 0)
-        base = str(request.base_url).rstrip("/")
+        _check_collections(parsed.collections)
+        limit = _clamp_limit(parsed.limit, cap=_search_limit_cap(public=public))
+        offset = parsed.offset
+        base = _base(request)
+        body = parsed.raw
 
         def _run() -> JSONResponse:
             source = _open()
             try:
                 page, has_next = run_search(
                     source,
-                    bbox=parsed_bbox,
-                    intersects=parsed_geometry,
-                    start=start,
-                    end=end,
-                    ids=list(ids) if ids else None,
-                    product_types=wanted_products,
-                    area=area,
-                    fuzzy=fuzzy,
-                    polarizations=polarizations,
-                    min_incidence=min_incidence,
-                    max_incidence=max_incidence,
-                    max_resolution=max_resolution,
-                    canonical=canonical,
+                    bbox=parsed.bbox,
+                    intersects=parsed.intersects,
+                    start=parsed.start,
+                    end=parsed.end,
+                    ids=parsed.ids,
+                    product_types=parsed.product_types,
+                    area=parsed.area,
+                    fuzzy=parsed.fuzzy,
+                    polarizations=parsed.polarizations,
+                    min_incidence=parsed.min_incidence,
+                    max_incidence=parsed.max_incidence,
+                    max_resolution=parsed.max_resolution,
+                    canonical=parsed.canonical,
                     limit=limit,
                     offset=offset,
                 )
@@ -3675,7 +4379,7 @@ def build_app(
             next_body = _body_with_token(body, offset + limit) if has_next else None
             result = search_result(
                 page,
-                str(request.base_url),
+                _base(request),
                 returned=len(page),
                 next_href=search_href if next_body is not None else None,
                 prev_href=search_href if prev_body is not None else None,
@@ -3924,7 +4628,7 @@ def build_app(
             )
         finally:
             _close(source)
-        base = str(request.base_url).rstrip("/")
+        base = _base(request)
         # Echo the ranking-and-selection inputs as the caller expressed them (the
         # raw recency/onset expressions, not the coerced dates), so the answer says
         # how it was ranked and filtered -- single-sourced with the agent tool.
@@ -3943,7 +4647,7 @@ def build_app(
         )
         result = sites_result(
             sites,
-            str(request.base_url),
+            _base(request),
             resolved_bbox=parsed_bbox,
             resolved_area=area,
             query=query,
@@ -4082,7 +4786,7 @@ def build_app(
             )
         finally:
             _close(source)
-        base = str(request.base_url).rstrip("/")
+        base = _base(request)
         # Echo the ranking-and-selection inputs as the body expressed them (the raw
         # recency/onset expressions, not the coerced dates) -- single-sourced with
         # GET /sites and the agent tool.
@@ -4101,7 +4805,7 @@ def build_app(
         )
         result = sites_result(
             sites,
-            str(request.base_url),
+            _base(request),
             resolved_bbox=parsed_bbox,
             resolved_area=area,
             query=query,
@@ -4219,7 +4923,7 @@ def build_app(
         # closure never runs without one.
         assert job_executor is not None
         key = artifact_cache_key(kind, [it.id for it in items], options)
-        base = str(request.base_url).rstrip("/")
+        base = _base(request)
         if _cache_file(key, suffix).exists():
             job = job_store.create(kind, key, media_type, suffix, status=JOB_SUCCEEDED, cached=True)
         else:
@@ -4231,7 +4935,7 @@ def build_app(
         status_code = 200 if job.status == JOB_SUCCEEDED else 202
         return JSONResponse(
             status_code=status_code,
-            content=job_to_dict(job, str(request.base_url)),
+            content=job_to_dict(job, _base(request)),
             headers={"Location": f"{base}/jobs/{job.id}"},
         )
 
@@ -4674,7 +5378,7 @@ def build_app(
             job = job_store.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"No job {job_id!r}")
-            return JSONResponse(content=job_to_dict(job, str(request.base_url)))
+            return JSONResponse(content=job_to_dict(job, _base(request)))
 
         @app.get(
             "/jobs/{job_id}/result",
@@ -4784,7 +5488,11 @@ def serve(
                 + ". Unset them (Canopy is the commercial archive; model keys "
                 "would spend on every describe/narrate tool call)."
             )
-        proxy_headers = True
+        # Do not turn on uvicorn's proxy-header parser. With
+        # forwarded_allow_ips="*" it takes the leftmost X-Forwarded-For
+        # entry and never reads X-Real-IP. Public mode parses the client
+        # address itself (ClientIpMiddleware).
+        proxy_headers = False
 
     app = build_app(
         index_path,
@@ -4830,11 +5538,9 @@ def serve(
     }
     run_kw["log_config"] = log_config
     if proxy_headers:
-        # Railway (and any TLS-terminating proxy) is the socket peer; without
-        # this the per-client rate limit collapses to one bucket. Honouring
-        # forwarded-for from *untrusted* clients would make the cap evadable,
-        # so this is opt-in -- ``--public`` turns it on because that host is
-        # always behind a proxy.
+        # Opt-in for a local reverse proxy. uvicorn trusts the leftmost
+        # X-Forwarded-For hop and never reads X-Real-IP. ``--public`` does
+        # not use this path; ClientIpMiddleware reads the edge's client.
         run_kw["proxy_headers"] = True
         run_kw["forwarded_allow_ips"] = "*"
     uvicorn.run(app, **run_kw)
