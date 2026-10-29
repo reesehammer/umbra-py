@@ -184,22 +184,26 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     The release job holds ``contents: write`` and never sees ``RAILWAY_TOKEN``.
     The deploy job holds the token and ``contents: read``, and it starts only
     after the publish job — including the thumbnail upload — has finished.
+    Scene embeddings are a step in that same publish job. An empty key exits
+    before install; the OpenAI variables exist only on that step.
     """
     document = yaml.safe_load((WORKFLOW_DIR / "publish-index.yml").read_text())
     publish_job = document["jobs"]["publish"]
     deploy_job = document["jobs"]["deploy"]
-    embed_job = document["jobs"]["embed"]
     steps = publish_job["steps"]
     deploy_steps = deploy_job["steps"]
     position = _step_positions(steps)
     deploy_position = _step_positions(deploy_steps)
 
-    release_order = [position[key] for key in ("publish", THUMBS_STEP, VERIFY_STEP, COVERAGE_STEP)]
+    release_order = [
+        position[key] for key in ("publish", THUMBS_STEP, VERIFY_STEP, EMBED_STEP, COVERAGE_STEP)
+    ]
     assert release_order == sorted(release_order), release_order
     deploy_order = [deploy_position[key] for key in ("redeploy", CONFIRM_STEP, MCP_SMOKE_STEP)]
     assert deploy_order == sorted(deploy_order), deploy_order
     assert deploy_job["needs"] == "publish"
-    assert embed_job["needs"] == "publish"
+    assert "embed" not in document["jobs"]
+    assert "embed_index" not in publish_job["outputs"]
 
     redeploy = deploy_steps[deploy_position["redeploy"]]
     confirm = deploy_steps[deploy_position[CONFIRM_STEP]]
@@ -254,33 +258,41 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     assert publish_job["permissions"]["contents"] == "write"
     assert publish_job["permissions"]["actions"] == "write"
     assert deploy_job["permissions"] == {"contents": "read"}
-    # GitHub rejects the secrets context in `if`, so one step records whether
-    # the embedding key is set. That value is not on the crawl or pip steps.
+    # A step `if` cannot read secrets. The embed step exits 0 when the key is
+    # empty, and it is the only publish step that sees the OpenAI variables.
     # The Railway token is absent entirely: this job can edit the release.
     assert "env" not in publish_job
+    embed = steps[position[EMBED_STEP]]
+    assert embed.get("continue-on-error") is True
+    assert "if" not in embed
+    assert embed["env"] == {
+        "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+        "OPENAI_BASE_URL": "${{ secrets.OPENAI_BASE_URL }}",
+        "UMBRA_SCENE_EMBED_MODEL": "${{ secrets.UMBRA_SCENE_EMBED_MODEL }}",
+        "GH_TOKEN": "${{ github.token }}",
+    }
+    assert "OPENAI_API_KEY is not set; skipping scene embeddings." in embed["run"]
+    assert "exit 0" in embed["run"]
+    assert 'pip install -e ".[ai,viz]"' in embed["run"]
+    assert "gh release upload catalog-index catalog.embed.db --clobber" in embed["run"]
     for step in steps:
+        if step.get("name") == EMBED_STEP:
+            continue
         env = step.get("env") or {}
         assert "RAILWAY_TOKEN" not in env
+        assert "OPENAI_API_KEY" not in env
         assert "OPENAI_BASE_URL" not in env
         assert "UMBRA_SCENE_EMBED_MODEL" not in env
-        if step.get("id") != "embed-key":
-            assert "OPENAI_API_KEY" not in env
-    embed_key = steps[position["embed-key"]]
-    assert embed_key["env"]["OPENAI_API_KEY"] == "${{ secrets.OPENAI_API_KEY }}"
-    assert "pip install" not in embed_key["run"]
-    assert "umbra " not in embed_key["run"]
     assert "RAILWAY_TOKEN" not in yaml.dump(publish_job)
-    for step in embed_job["steps"]:
-        assert "RAILWAY_TOKEN" not in (step.get("env") or {})
-    embed_env = yaml.dump(embed_job)
-    assert "OPENAI_API_KEY" in embed_env
-    assert "RAILWAY_TOKEN" not in embed_env
+    assert "catalog-db" not in workflow
+    assert "embed-key" not in workflow
     assert "OPENAI_API_KEY" not in yaml.dump(deploy_job)
 
 
 THUMBS_STEP = "Publish the thumbnail sidecar"
 BAKE_STEP = "Bake SAR thumbnails (incremental, non-blocking)"
 VERIFY_STEP = "Verify the thumbnail release assets"
+EMBED_STEP = "Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)"
 CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
 COVERAGE_STEP = "Coverage gate (99% of acquisitions with a sidecar)"
 MCP_SMOKE_STEP = "Confirm the hosted MCP lists the stable tools"

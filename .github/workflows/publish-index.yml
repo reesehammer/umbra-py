@@ -52,9 +52,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      # actions/cache save and restore for the thumbnail seed, and the
-      # optional catalog.db artifact the embedding job downloads. A job
-      # that sets permissions drops every scope it does not name.
+      # actions/cache save and restore for the thumbnail seed. A job that
+      # sets permissions drops every scope it does not name.
       actions: write
     # Don't crawl Umbra's bucket from forks; schedules there stay off anyway.
     if: github.repository == 'reesehammer/umbra-py'
@@ -66,7 +65,6 @@ jobs:
       ids: ${{ steps.publish.outputs.ids }}
       published: ${{ steps.publish.outcome }}
       thumbs: ${{ steps.thumbs.outputs.publish }}
-      embed_index: ${{ steps.embed-index.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -374,6 +372,37 @@ jobs:
         run: |
           python -c "import umbra_py.thumbs_release as t; t.assert_remote_thumbnail_release()"
 
+      # Scene embeddings are model-derived and model-specific, so — unlike the
+      # deterministic artifacts above — publishing them is opt-in: it needs a
+      # multimodal (CLIP-family) embedding key and streams a quicklook per
+      # acquisition. It runs only when the maintainer has configured
+      # OPENAI_API_KEY as a repo secret, and never blocks the deterministic
+      # publish (continue-on-error), so `umbra embed fetch` can pull a
+      # `catalog.embed.db` beside `catalog.db` once a key is set. See
+      # STRATEGY.md 5.2 ("offer it upstream"); the C5 similarity workstream.
+      # A step `if` cannot read secrets, so an empty key exits before install.
+      # The OpenAI variables exist only on this step.
+      - name: Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY is not set; skipping scene embeddings."
+            exit 0
+          fi
+          pip install -e ".[ai,viz]"
+          umbra embed build --local --index-db catalog.db \
+            --bbox -180,-90,180,90 --limit 100000000 --embed-db catalog.embed.db
+          model="$(umbra embed info --embed-db catalog.embed.db | sed -n 's/^ *model *: //p')"
+          gh release upload catalog-index catalog.embed.db --clobber
+          gh release edit catalog-index --notes "$(gh release view catalog-index --json body -q .body)
+
+          - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."
+
       # pct_indexable is indexed / expected. expected is acquisitions with a
       # sidecar minus the deduped duplicates and quarantined rows named in
       # index-validation.json. A sidecar the validation report does not name
@@ -394,99 +423,6 @@ jobs:
         with:
           path: catalog.thumbs.seed.db
           key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}
-
-      # GitHub does not allow the secrets context in `if`. This step only
-      # records whether a key is set. The crawl, the pip installs, and the
-      # artifact upload do not see the value. The base URL and model stay
-      # on the embedding job's build step.
-      - name: Record whether scene embeddings are configured
-        id: embed-key
-        if: ${{ !cancelled() }}
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          if [ -n "$OPENAI_API_KEY" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Hands catalog.db to the embedding job. Skipped when the key is unset,
-      # and a failed upload does not fail the release (continue-on-error).
-      # `!cancelled()` so a red coverage gate still offers the index.
-      - name: Upload the index for scene embeddings
-        id: embed-index
-        if: ${{ !cancelled() && steps.embed-key.outputs.enabled == 'true' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: catalog-db
-          path: catalog.db
-          retention-days: 1
-          if-no-files-found: error
-
-  # Opt-in, and never a dependency of the release or the redeploy. The OpenAI
-  # variables exist only on the build step, after pip install has finished.
-  # Every step continues on error so a model or upload failure leaves the
-  # catalog release green.
-  embed:
-    name: Publish scene embeddings
-    needs: publish
-    if: >-
-      ${{ !cancelled() && github.repository == 'reesehammer/umbra-py'
-      && needs.publish.outputs.published == 'success'
-      && needs.publish.outputs.embed_index == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        continue-on-error: true
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        continue-on-error: true
-        with:
-          python-version: "3.12"
-
-      - name: Install umbra-py with the ai and viz extras
-        continue-on-error: true
-        run: pip install -e ".[ai,viz]"
-
-      - name: Download the catalog index
-        id: index
-        continue-on-error: true
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: catalog-db
-          path: .
-
-      # Scene embeddings are model-derived and model-specific, so — unlike the
-      # deterministic artifacts above — publishing them is opt-in: it needs a
-      # multimodal (CLIP-family) embedding key and streams a quicklook per
-      # acquisition. The job runs only when OPENAI_API_KEY is configured, and
-      # never blocks the deterministic publish, so `umbra embed fetch` can pull
-      # a `catalog.embed.db` beside `catalog.db` once a key is set. See
-      # STRATEGY.md 5.2 ("offer it upstream"); the C5 similarity workstream.
-      - name: Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)
-        if: steps.index.outcome == 'success'
-        continue-on-error: true
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          umbra embed build --local --index-db catalog.db \
-            --bbox -180,-90,180,90 --limit 100000000 --embed-db catalog.embed.db
-          model="$(umbra embed info --embed-db catalog.embed.db | sed -n 's/^ *model *: //p')"
-          gh release upload catalog-index catalog.embed.db --clobber
-          gh release edit catalog-index --notes "$(gh release view catalog-index --json body -q .body)
-
-          - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."
 
   # contents: read only. This job cannot edit the catalog-index release.
   # RAILWAY_TOKEN is a Railway project token and is present only on the
