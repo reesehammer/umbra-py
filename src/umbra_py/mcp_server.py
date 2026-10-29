@@ -277,14 +277,19 @@ def _public_bucket_https(href: str) -> bool:
     return host == _BUCKET_PATH_HOST and bool(segments) and segments[0] == S3_BUCKET
 
 
-def _head_content_length(href: str) -> int | None:
+def _head_content_length(href: str, *, raise_on_failure: bool = False) -> int | None:
     """``Content-Length`` from HEAD, or None when it is missing or the check fails.
 
     Only an allowlisted https URL is requested, via :func:`requests.head` so
     the shared session does not retry, and redirects are not followed. A 404
-    or 410 raises :class:`requests.HTTPError`, the same way ``confirm=false``
-    does. Any other non-2xx, including a redirect, or a network error, returns
-    None so the caller still emits a link plan.
+    or 410 raises :class:`requests.HTTPError`. Any other non-2xx, including a
+    redirect, or a network error, returns None so ``confirm=true`` still emits
+    a link plan.
+
+    ``raise_on_failure`` is the public ``confirm=false`` preview. A redirect
+    is still not followed and returns None. Any other non-2xx raises
+    :class:`requests.HTTPError`, and a network error propagates — that preview
+    used to ``raise_for_status`` on the response it got back.
     """
     if not _public_bucket_https(href):
         return None
@@ -295,12 +300,29 @@ def _head_content_length(href: str) -> int | None:
     try:
         head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
+        if raise_on_failure:
+            raise
         return None
-    if head.status_code in (404, 410):
-        head.raise_for_status()
-    if head.status_code < 200 or head.status_code >= 300:
+    # A redirect is not a size. Do not read its Content-Length or follow it.
+    if 300 <= head.status_code < 400:
+        return None
+    if not 200 <= head.status_code < 300:
+        if head.status_code in (404, 410) or raise_on_failure:
+            head.raise_for_status()
         return None
     return _header_length(head.headers)
+
+
+def _public_confirm_preview_size(item: UmbraItem, asset: str, href: str) -> int | None:
+    """Byte size for ``confirm=false`` on the public host.
+
+    An allowlisted href is HEADed. Anything else is not requested; the size
+    is the STAC ``file:size`` or ``size``.
+    """
+    if _public_bucket_https(href):
+        return _head_content_length(href, raise_on_failure=True)
+    body = item._resolve_asset(asset)[1]
+    return _stac_asset_size(body)
 
 
 def _plain_basename(name: str) -> str:
@@ -1600,7 +1622,14 @@ def download_asset(
     raises. Any other HEAD failure leaves ``bytes`` null and still returns
     the plan. The hosted server never transfers the file. A local
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
-    disk. ``confirm=False`` is unchanged.
+    disk. ``confirm=False`` on this host returns the same size-and-hint
+    object and does not write a file. It HEADs for ``Content-Length`` only
+    when the href is https on the public open-data bucket, with no retries,
+    and it does not follow redirects. A 404 or 410 raises, and so does any
+    other non-redirect HEAD error. A redirect leaves ``bytes`` null. A href
+    outside the bucket is not requested; ``bytes`` is the STAC ``file:size``
+    or ``size`` when that is a non-negative integer, otherwise null. A local
+    server still HEADs the href and follows redirects.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
@@ -1637,11 +1666,17 @@ def download_asset(
     href = item.asset_href(asset)
 
     if not confirm:
-        session = default_session()
-        head = session.head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
-        head.raise_for_status()
-        length = head.headers.get("Content-Length")
-        size = int(length) if length is not None else None
+        # Local servers still HEAD whatever href the item carries and follow
+        # redirects. The public host must not: a caller-supplied STAC item can
+        # point the preview at loopback or the platform's private network.
+        if _cog_streaming_allowed():
+            session = default_session()
+            head = session.head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+            head.raise_for_status()
+            length = head.headers.get("Content-Length")
+            size = int(length) if length is not None else None
+        else:
+            size = _public_confirm_preview_size(item, asset, href)
         return {
             "confirm_required": True,
             "asset": asset,

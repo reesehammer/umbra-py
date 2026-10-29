@@ -10,6 +10,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Changed
+- **Hosted `download_asset` preview (`confirm=false`) only checks size against Umbra's public bucket**
+  and never follows redirects. A href outside that bucket is not requested;
+  `bytes` is the STAC `file:size` or `size`, or null.
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
