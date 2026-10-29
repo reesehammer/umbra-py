@@ -10,6 +10,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Changed
+- **The public host does not write the catalog or reveal its path.**
+  `watch_site` on `umbra serve --public` reports the current matches as new,
+  stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full
+  count), and caps the watch name at 128 characters. Request paths open the
+  index read-only. `index_stats` and `umbra://index/stats` set `path` to null,
+  and public-host errors omit filesystem paths. A local server still persists
+  watch state and still reports the path.
 - **Hosted `download_asset` preview (`confirm=false`) only checks size against Umbra's public bucket**
   and never follows redirects. A href outside that bucket is not requested;
   `bytes` is the STAC `file:size` or `size`, or null.
