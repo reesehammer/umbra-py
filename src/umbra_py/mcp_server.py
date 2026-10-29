@@ -46,6 +46,9 @@ import io
 import json
 import os
 import shlex
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
@@ -64,8 +67,8 @@ from .constants import (
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_place as _geocode_place
+from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
+from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
     CatalogIndex,
@@ -166,6 +169,161 @@ def _cog_streaming_allowed() -> bool:
         return _cog_streaming_override
     raw = os.environ.get(COG_STREAMING_ENV, "1")
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+#: Public ``search_catalog`` page size. The tool's ``limit`` argument and its
+#: default stay 20; a larger request is clamped and the result says so.
+#: Local MCP (COG streaming allowed) keeps the caller's limit.
+PUBLIC_CATALOG_LIMIT = 100
+
+_PUBLIC_LIMIT_NOTE = (
+    "limit clamped to 100; use the next page (narrow bbox, dates, or area; "
+    "the STAC /search next link pages the rest)."
+)
+
+
+def _clamp_public_catalog_limit(limit: int) -> tuple[int, str | None]:
+    """Cap ``search_catalog`` on the public host. Local calls pass through."""
+    if _cog_streaming_allowed():
+        return limit, None
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return limit, None
+    if limit > PUBLIC_CATALOG_LIMIT:
+        return PUBLIC_CATALOG_LIMIT, _PUBLIC_LIMIT_NOTE
+    return limit, None
+
+
+def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any]:
+    if note:
+        payload["note"] = note
+    return payload
+
+
+#: A miss that would wait longer than this, or join more than this many
+#: callers already waiting on Nominatim, fails immediately.
+_GEOCODE_MAX_WAIT_S = 5.0
+_GEOCODE_MAX_WAITERS = 5
+#: How long a "no such place" answer is remembered. A network failure is not.
+_GEOCODE_NEGATIVE_TTL_S = 600.0
+_GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
+
+
+def _geocode_not_found(exc: GeocodeError) -> bool:
+    text = str(exc)
+    return text.startswith("No place matched") or "no usable bounding box" in text
+
+
+class PublicGeocodeGate:
+    """LRU cache and a global Nominatim throttle for the public MCP host.
+
+    One shared address is what Nominatim bans. Cache hits do not wait and
+    do not call out. A miss waits for the single in-flight call and for the
+    one-second gap, and that whole wait is capped at about five seconds.
+    More than five waiters, or a lock that is not free inside the remaining
+    budget, fails immediately. "No such place" is remembered for about ten
+    minutes. Any other failure is not cached. Local MCP does not use this.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_size: int = 256,
+        min_interval: float = 1.0,
+        time_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._max_size = max_size
+        self._min_interval = min_interval
+        self._time = time_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._network = threading.Lock()
+        self._cache: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
+        self._next_at = 0.0
+        self._waiters = 0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._next_at = 0.0
+            self._waiters = 0
+
+    def resolve(self, query: str) -> tuple[Any, str]:
+        key = " ".join(query.split()).casefold()
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        deadline = self._time() + _GEOCODE_MAX_WAIT_S
+        self._admit()
+        acquired = False
+        try:
+            remaining = deadline - self._time()
+            if remaining <= 0 or not self._network.acquire(timeout=remaining):
+                raise GeocodeError(_GEOCODE_BUSY)
+            acquired = True
+            cached = self._cached(key)
+            if cached is not None:
+                return cached
+            now = self._time()
+            throttle = max(0.0, self._next_at - now)
+            if throttle > deadline - now:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._next_at = now + throttle + self._min_interval
+            if throttle > 0:
+                self._sleep(throttle)
+            try:
+                result = _nominatim_geocode(query)
+            except GeocodeError as exc:
+                if _geocode_not_found(exc):
+                    self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+                raise
+            self._store(key, ("ok", result))
+            return result
+        finally:
+            if acquired:
+                self._network.release()
+            with self._lock:
+                self._waiters -= 1
+
+    def _admit(self) -> None:
+        with self._lock:
+            if self._waiters >= _GEOCODE_MAX_WAITERS:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._waiters += 1
+
+    def _cached(self, key: str) -> tuple[Any, str] | None:
+        with self._lock:
+            return self._cached_locked(key)
+
+    def _cached_locked(self, key: str) -> tuple[Any, str] | None:
+        hit = self._cache.get(key)
+        if hit is None:
+            return None
+        if hit[0] == "neg":
+            if self._time() >= hit[1]:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            raise GeocodeError(hit[2])
+        self._cache.move_to_end(key)
+        return hit[1]
+
+    def _store(self, key: str, entry: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._cache[key] = entry
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+
+
+_public_geocode = PublicGeocodeGate()
+
+
+def _geocode_place(query: str) -> tuple[Any, str]:
+    """Nominatim, directly locally and through :class:`PublicGeocodeGate` on the public host."""
+    if _cog_streaming_allowed():
+        return _nominatim_geocode(query)
+    return _public_geocode.resolve(query)
 
 
 def _model_key_configured() -> bool:
@@ -655,7 +813,9 @@ def search_catalog(
     the preferred copy of a collect Umbra republished under another prefix
     (``True``), only the other copies (``False``), or every item when omitted;
     ``limit`` to cap
-    results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
+    results (on the public host a value above 100 is clamped to 100 and the
+    result includes ``note``; the argument and its default are unchanged);
+    ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
     overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
@@ -683,6 +843,7 @@ def search_catalog(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
             "site description via embeddings, fuzzy is a deterministic token match"
         )
+    limit, limit_note = _clamp_public_catalog_limit(limit)
 
     resolved_area = None
     semantic_matches = None
@@ -698,16 +859,19 @@ def search_catalog(
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
-            return {
-                "count": 0,
-                "source": "semantic-index",
-                "resolved_place": None,
-                "resolved_bbox": None,
-                "resolved_area": None,
-                "semantic_matches": [],
-                "items": [],
-                "attribution": ATTRIBUTION,
-            }
+            return _with_limit_note(
+                {
+                    "count": 0,
+                    "source": "semantic-index",
+                    "resolved_place": None,
+                    "resolved_bbox": None,
+                    "resolved_area": None,
+                    "semantic_matches": [],
+                    "items": [],
+                    "attribution": ATTRIBUTION,
+                },
+                limit_note,
+            )
         # Search the resolved exact task name literally (it is a real label, so a
         # substring match hits it; no fuzzy widening on an already-resolved name).
         search_area = resolved_area
@@ -746,16 +910,19 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
-        "count": len(cards),
-        "source": label,
-        "resolved_place": resolved_place,
-        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": resolved_area,
-        "semantic_matches": semantic_matches,
-        "items": cards,
-        "attribution": ATTRIBUTION,
-    }
+    return _with_limit_note(
+        {
+            "count": len(cards),
+            "source": label,
+            "resolved_place": resolved_place,
+            "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+            "resolved_area": resolved_area,
+            "semantic_matches": semantic_matches,
+            "items": cards,
+            "attribution": ATTRIBUTION,
+        },
+        limit_note,
+    )
 
 
 def find_repeat_sites(

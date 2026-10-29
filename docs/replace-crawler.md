@@ -99,8 +99,9 @@ The parameters are the ones `/search` implements:
 - `product_types` — `GEC` (comma-separated on GET). Case-insensitive. This is
   the product type, uppercase, which is a different string from the asset
   key `gec`.
-- `limit` — page size. Default 10, maximum 10000. The next page is `token`
-  (the offset) on the `next` link.
+- `limit` — page size. Default 10. This host returns at most 500 items per
+  page (`next` still carries `token`, the offset). A self-hosted server
+  without `--public` accepts up to 10000.
 
 The programs are the files the daily canary runs. They live in
 [`docs/examples/replace_crawler/`](https://github.com/reesehammer/umbra-py/tree/main/docs/examples/replace_crawler).

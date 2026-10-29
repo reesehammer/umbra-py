@@ -48,3 +48,16 @@ def _reset_mcp_cog_policy():
     mod = sys.modules.get("umbra_py.mcp_server")
     if mod is not None:
         mod.configure(cog_streaming=None)
+        gate = getattr(mod, "_public_geocode", None)
+        if gate is not None:
+            gate.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_public_host_env(monkeypatch):
+    """Public-host knobs must not leak from the developer environment into tests."""
+    for name in (
+        "UMBRA_PUBLIC_BASE_URL",
+        "UMBRA_TRUSTED_PROXY_HOPS",
+    ):
+        monkeypatch.delenv(name, raising=False)

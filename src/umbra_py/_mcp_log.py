@@ -269,9 +269,10 @@ class McpRequestLog:
 
     ``GET /mcp`` (the server-to-client SSE stream) and every other method go
     straight to ``app`` without being read or logged. The client IP is the
-    ASGI scope's client, which uvicorn already rewrites from ``X-Forwarded-For``
-    when it runs with ``--proxy-headers`` (``umbra serve --public``), so this
-    trusts the same proxy the rate limiter does and no other.
+    ASGI scope's client. ``umbra serve --public`` rewrites that from
+    ``X-Real-IP`` (or the rightmost trusted ``X-Forwarded-For`` hop) before
+    this mount runs. A plain ``umbra serve`` logs the socket peer.
+    ``--proxy-headers`` still lets uvicorn rewrite from the leftmost hop.
     """
 
     def __init__(self, app: ASGIApp, *, body_limit: int = MCP_LOG_BODY_LIMIT) -> None:
@@ -319,10 +320,12 @@ class StacSearchLog:
     the body the same way :class:`McpRequestLog` does and replays it, so the
     search handler still sees every byte.
 
-    The client IP is the ASGI scope's client. uvicorn rewrites that from
-    ``X-Forwarded-For`` when it runs with ``--proxy-headers`` (``umbra serve
-    --public``); a plain ``umbra serve`` has no proxy, and the socket peer is
-    the client. This trusts the same address the rate limiter does and no other.
+    The client IP is the ASGI scope's client. ``umbra serve --public``
+    rewrites that from ``X-Real-IP`` (or the rightmost trusted
+    ``X-Forwarded-For`` hop) in middleware outside this logger. A plain
+    ``umbra serve`` has no proxy, and the socket peer is the client.
+    ``--proxy-headers`` still lets uvicorn rewrite from the leftmost hop.
+    This trusts the same address the rate limiter does and no other.
     """
 
     def __init__(self, app: ASGIApp, *, body_limit: int = MCP_LOG_BODY_LIMIT) -> None:

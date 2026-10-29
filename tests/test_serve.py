@@ -3009,7 +3009,7 @@ def test_serve_cli_public_bundles_the_guardrails(monkeypatch):
     assert seen["mcp"] is True
     assert seen["artifacts"] is False
     assert seen["rate_limit"] == serve.PUBLIC_RATE_LIMIT
-    assert seen["proxy_headers"] is True
+    assert seen["proxy_headers"] is False
     assert "public mode" in result.output
     assert "MCP at /mcp" in result.output
 

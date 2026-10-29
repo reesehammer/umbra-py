@@ -1823,6 +1823,32 @@ class CatalogIndex:
         self._conn.commit()
         self._conn.close()
 
+    def arm_query_cancel(self, cancelled: threading.Event) -> None:
+        """Abort the running statement once ``cancelled`` is set.
+
+        ``interrupt`` is forgotten when no statement is running, so a deadline
+        that fires before the query starts would not stick. The progress
+        handler re-checks the flag. The server arms this on the worker that
+        owns the connection and calls :meth:`interrupt_query` from the event
+        loop when the request deadline passes.
+        """
+        conn = self._conn
+
+        def _progress() -> int:
+            return 1 if cancelled.is_set() else 0
+
+        conn.set_progress_handler(_progress, 1000)
+        if cancelled.is_set():
+            conn.interrupt()
+
+    def disarm_query_cancel(self) -> None:
+        """Remove the progress handler so commit is not aborted with the query."""
+        self._conn.set_progress_handler(None, 0)
+
+    def interrupt_query(self) -> None:
+        """Abort the statement on this connection. Safe to call from another thread."""
+        self._conn.interrupt()
+
     def __enter__(self) -> CatalogIndex:
         return self
 
