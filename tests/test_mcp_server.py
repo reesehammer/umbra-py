@@ -24,6 +24,7 @@ pytest.importorskip("mcp")
 
 from mcp.server.mcpserver import Image  # noqa: E402
 
+from umbra_py import _http  # noqa: E402
 from umbra_py import mcp_server as ms  # noqa: E402
 from umbra_py.exceptions import AssetNotFoundError, MissingDependencyError  # noqa: E402
 from umbra_py.models import UmbraItem  # noqa: E402
@@ -1449,6 +1450,309 @@ def test_public_host_download_asset_size_check_still_works(sample_item_dict):
     }
 
 
+def _assert_confirm_preview(out: dict, *, asset: str, href: str, size: int | None) -> None:
+    if size is None:
+        hint = "Size unknown. Call again with confirm=true to download it."
+    else:
+        hint = f"This asset is {size / 1e6:.1f} MB. Call again with confirm=true to download it."
+    assert out == {
+        "confirm_required": True,
+        "asset": asset,
+        "url": href,
+        "bytes": size,
+        "hint": hint,
+    }
+
+
+def _metadata_item(sample_item_dict: dict, href: str, **fields: object) -> dict:
+    item = copy.deepcopy(sample_item_dict)
+    asset: dict[str, object] = {
+        "href": href,
+        "type": "application/json",
+        "umbra-py:filename": "scene_METADATA.json",
+    }
+    asset.update(fields)
+    item["assets"]["metadata"] = asset
+    return item
+
+
+def _reject_unregistered(method: str, url: str) -> None:
+    def boom(request):
+        raise AssertionError(f"public host fetched {request.method} {request.url}")
+
+    responses.add_callback(method, url, callback=boom)
+
+
+def _forbid_retrying_head(monkeypatch) -> None:
+    """A HEAD through ``default_session`` would retry and follow a caller's redirects."""
+    real_default = _http.default_session
+
+    def guarded():
+        session = real_default()
+        original = session.request
+
+        def request(method, url, *args, **kwargs):
+            if str(method).upper() == "HEAD":
+                raise AssertionError(f"retrying session HEAD {url}")
+            return original(method, url, *args, **kwargs)
+
+        session.request = request
+        return session
+
+    monkeypatch.setattr(_http, "default_session", guarded)
+
+
+def _record_requests_head(monkeypatch) -> list[dict]:
+    seen: list[dict] = []
+    real_head = requests.head
+
+    def head(url, **kwargs):
+        seen.append({"url": url, "kwargs": dict(kwargs)})
+        return real_head(url, **kwargs)
+
+    monkeypatch.setattr(requests, "head", head)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("href", "fields", "size"),
+    [
+        ("http://127.0.0.1/x", {"file:size": 2_500_000}, 2_500_000),
+        ("http://127.0.0.1/x", {}, None),
+        ("https://evil.example/secret.json", {"size": 7}, 7),
+        ("https://evil.example/secret.json", {}, None),
+        (
+            "https://user@umbra-open-data-catalog.s3.amazonaws.com/x.json",
+            {"file:size": 3},
+            3,
+        ),
+        (
+            "https://user:pass@umbra-open-data-catalog.s3.amazonaws.com/x.json",
+            {},
+            None,
+        ),
+        (
+            "http://umbra-open-data-catalog.s3.amazonaws.com/sar-data/x.json",
+            {"file:size": 12},
+            12,
+        ),
+        ("http://127.0.0.1/x", {"file:size": True}, None),
+    ],
+)
+@responses.activate
+def test_public_confirm_false_does_not_request_a_foreign_href(
+    sample_item_dict, monkeypatch, href, fields, size
+):
+    """A non-bucket href is not HEADed. ``bytes`` is the STAC size, or null."""
+    item = _metadata_item(sample_item_dict, href, **fields)
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    _reject_unregistered(responses.HEAD, href)
+    _reject_unregistered(responses.GET, href)
+    _forbid_retrying_head(monkeypatch)
+    heads = _record_requests_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=False)
+    _assert_confirm_preview(out, asset="metadata", href=href, size=size)
+    assert heads == []
+    assert all(call.request.url != href for call in responses.calls)
+
+
+@responses.activate
+def test_public_confirm_false_respects_the_cog_streaming_env(sample_item_dict, monkeypatch):
+    """``UMBRA_MCP_COG_STREAMING=0`` is the same preview gate as configure(False)."""
+    monkeypatch.setenv(ms.COG_STREAMING_ENV, "0")
+    ms.configure(cog_streaming=None)
+    href = "http://127.0.0.1/x"
+    item = _metadata_item(sample_item_dict, href)
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    _reject_unregistered(responses.HEAD, href)
+    _forbid_retrying_head(monkeypatch)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=False)
+    _assert_confirm_preview(out, asset="metadata", href=href, size=None)
+
+
+@responses.activate
+def test_public_confirm_false_heads_a_bucket_href_without_redirects(sample_item_dict, monkeypatch):
+    """An allowlisted href is HEADed once, with no retries and no redirect following.
+
+    A recorded STAC size does not skip the check: ``confirm=false`` reports
+    the HEAD ``Content-Length``.
+    """
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["GEC"]["file:size"] = 1
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
+    _forbid_retrying_head(monkeypatch)
+    heads = _record_requests_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=False)
+    _assert_confirm_preview(out, asset="GEC", href=href, size=2_500_000)
+    assert heads == [
+        {
+            "url": href,
+            "kwargs": {"allow_redirects": False, "timeout": _http.DEFAULT_TIMEOUT},
+        }
+    ]
+    head_urls = [call.request.url for call in responses.calls if call.request.method == "HEAD"]
+    assert head_urls == [href]
+
+
+@responses.activate
+def test_public_confirm_false_null_size_when_content_length_is_unusable(
+    sample_item_dict, monkeypatch
+):
+    """A non-numeric ``Content-Length`` is null. The preview does not raise."""
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "nope"}, status=200)
+    _forbid_retrying_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=False)
+    _assert_confirm_preview(out, asset="GEC", href=href, size=None)
+
+
+@pytest.mark.parametrize("status", [404, 410])
+@responses.activate
+def test_public_confirm_false_missing_object_raises(sample_item_dict, monkeypatch, status):
+    """A 404 or 410 raises ``requests.HTTPError``. A STAC size does not hide it."""
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["GEC"]["file:size"] = 100
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, status=status)
+    _forbid_retrying_head(monkeypatch)
+    _reject_unregistered(responses.GET, href)
+    ms.configure(cog_streaming=False)
+
+    with pytest.raises(requests.HTTPError) as exc_info:
+        ms.download_asset(ITEM_URL, "GEC", confirm=False)
+    assert exc_info.value.response is not None
+    assert exc_info.value.response.status_code == status
+
+
+@pytest.mark.parametrize("status", [403, 500])
+@responses.activate
+def test_public_confirm_false_other_http_errors_still_raise(sample_item_dict, monkeypatch, status):
+    """A non-redirect failure still raises, and a 500 is not retried."""
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, status=status)
+    _forbid_retrying_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    with pytest.raises(requests.HTTPError) as exc_info:
+        ms.download_asset(ITEM_URL, "GEC", confirm=False)
+    assert exc_info.value.response is not None
+    assert exc_info.value.response.status_code == status
+    head_urls = [call.request.url for call in responses.calls if call.request.method == "HEAD"]
+    assert head_urls == [href]
+
+
+@responses.activate
+def test_public_confirm_false_network_error_still_raises(sample_item_dict, monkeypatch):
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, body=requests.ConnectionError("unreachable"))
+    _forbid_retrying_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    with pytest.raises(requests.ConnectionError):
+        ms.download_asset(ITEM_URL, "GEC", confirm=False)
+
+
+@responses.activate
+def test_public_confirm_false_redirect_leaves_size_null(sample_item_dict, monkeypatch):
+    """A 302 is not followed. ``bytes`` is null even when STAC recorded a size."""
+    href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/scene_METADATA.json"
+    target = "http://127.0.0.1/secret.json"
+    item = _metadata_item(sample_item_dict, href, **{"file:size": 999})
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+
+    def redirect(_request):
+        return (302, {"Location": target, "Content-Length": "4"}, b"")
+
+    responses.add_callback(responses.HEAD, href, callback=redirect)
+    _reject_unregistered(responses.HEAD, target)
+    _reject_unregistered(responses.GET, target)
+    _forbid_retrying_head(monkeypatch)
+    heads = _record_requests_head(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=False)
+    _assert_confirm_preview(out, asset="metadata", href=href, size=None)
+    assert heads == [
+        {
+            "url": href,
+            "kwargs": {"allow_redirects": False, "timeout": _http.DEFAULT_TIMEOUT},
+        }
+    ]
+    assert all(target not in call.request.url for call in responses.calls)
+    assert all("127.0.0.1" not in call.request.url for call in responses.calls)
+
+
+@responses.activate
+def test_local_confirm_false_still_follows_redirects(sample_item_dict, monkeypatch):
+    """Off the public host, ``confirm=false`` still HEADs any href and follows redirects."""
+    monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
+    ms.configure(cog_streaming=None)
+    href = "http://127.0.0.1/x"
+    target = "http://127.0.0.1/final"
+    item = _metadata_item(sample_item_dict, href, **{"file:size": 1})
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(responses.HEAD, href, status=302, headers={"Location": target})
+    responses.add(responses.HEAD, target, headers={"Content-Length": "55"}, status=200)
+
+    seen: list[dict] = []
+    real_default = _http.default_session
+
+    def tracking():
+        session = real_default()
+        original = session.head
+
+        def head(url, **kwargs):
+            seen.append({"url": url, "kwargs": dict(kwargs)})
+            return original(url, **kwargs)
+
+        session.head = head
+        return session
+
+    monkeypatch.setattr(_http, "default_session", tracking)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("local confirm=false used requests.head")
+
+    monkeypatch.setattr(requests, "head", boom)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=False)
+    _assert_confirm_preview(out, asset="metadata", href=href, size=55)
+    assert seen == [
+        {
+            "url": href,
+            "kwargs": {"allow_redirects": True, "timeout": _http.DEFAULT_TIMEOUT},
+        }
+    ]
+    head_urls = [call.request.url for call in responses.calls if call.request.method == "HEAD"]
+    assert head_urls == [href, target]
+
+
+@responses.activate
+def test_local_confirm_false_still_raises_on_a_bad_content_length(sample_item_dict, monkeypatch):
+    """The local preview still parses ``Content-Length`` with ``int``."""
+    monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
+    ms.configure(cog_streaming=None)
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "nope"}, status=200)
+
+    with pytest.raises(ValueError):
+        ms.download_asset(ITEM_URL, "GEC", confirm=False)
+
+
 @responses.activate
 def test_download_asset_confirm_still_downloads_off_the_public_host(
     sample_item_dict, tmp_path, monkeypatch
@@ -1820,6 +2124,7 @@ def test_download_asset_tool_describes_v2_keys_and_filename_urls():
     assert "inline" not in desc.lower()
     assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in desc
     assert "confirm=False" in desc or "confirm=false" in desc
+    assert "does not follow redirects" in desc
 
 
 @responses.activate
