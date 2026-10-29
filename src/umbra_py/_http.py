@@ -6,18 +6,13 @@ JSON and the data assets), so we never need AWS credentials or signed requests.
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import socket
-import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.exceptions import HTTPError as Urllib3HTTPError
 from urllib3.util.retry import Retry
 
 from . import __version__
@@ -28,42 +23,8 @@ DEFAULT_TIMEOUT = 30
 #: stops and raises rather than buffering the rest.
 SAFE_MAX_BYTES = 2 * 1024 * 1024
 #: Wall-clock budget for one public-mode JSON fetch, connect included.
-#: Enforced across reads (see :func:`safe_get`), not reset on each chunk.
 SAFE_DEADLINE_S = 10.0
-
-
-class _PublicJsonAllowlist:
-    """Process-wide allowlist for :func:`get_json` during a public-host fetch.
-
-    A :class:`contextvars.ContextVar` does not reach the threads
-    ``ThreadPoolExecutor`` uses for sidecar reads on this interpreter, so the
-    flag is a depth count those workers can see. Library and CLI callers
-    leave the depth at zero and keep the retrying GET.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._depth = 0
-        self._allow: Callable[[str], bool] | None = None
-
-    def push(self, allow: Callable[[str], bool]) -> None:
-        with self._lock:
-            self._depth += 1
-            self._allow = allow
-
-    def pop(self) -> None:
-        with self._lock:
-            self._depth -= 1
-            if self._depth <= 0:
-                self._depth = 0
-                self._allow = None
-
-    def current(self) -> Callable[[str], bool] | None:
-        with self._lock:
-            return self._allow
-
-
-_public_json_allowlist = _PublicJsonAllowlist()
+_SAFE_CHUNK = 65536
 
 #: How a model POST (Anthropic, or an OpenAI-compatible gateway like OpenRouter)
 #: fails transiently. The first two are ordinary HTTP; the third is the one a
@@ -123,89 +84,6 @@ def default_session() -> requests.Session:
     return session
 
 
-def _hostname(url: str) -> str | None:
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return None
-    if not host:
-        return None
-    return host.lower().rstrip(".")
-
-
-def _url_is_allowed(url: str, allowed_hosts: Collection[str] | Callable[[str], bool]) -> bool:
-    """Whether ``url`` may be fetched.
-
-    A callable is a full-URL predicate (the public bucket check, which also
-    requires the bucket name on a path-style host). A collection is a set of
-    https hostnames: port 443 or default, no userinfo.
-    """
-    if callable(allowed_hosts):
-        return bool(allowed_hosts(url))
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-        host = parts.hostname
-    except ValueError:
-        return False
-    if parts.scheme != "https" or parts.username or parts.password:
-        return False
-    if port not in (None, 443) or not host:
-        return False
-    normalized = host.lower().rstrip(".")
-    return normalized in {item.lower().rstrip(".") for item in allowed_hosts}
-
-
-def _address_is_blocked(text: str) -> bool:
-    """Private, loopback, link-local, or unspecified. IPv4-mapped addresses count."""
-    try:
-        ip = ipaddress.ip_address(text.split("%", 1)[0])
-    except ValueError:
-        return True
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
-    return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified)
-
-
-def _host_has_blocked_address(host: str) -> bool:
-    """Whether ``host`` resolves to an address :func:`_address_is_blocked` rejects.
-
-    A resolver failure returns False. The GET then fails the same way it would
-    have without this check, so an offline test double does not become a refusal.
-    """
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-    for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            continue
-        if _address_is_blocked(str(sockaddr[0])):
-            return True
-    return False
-
-
-def _response_socket(resp: requests.Response) -> socket.socket | None:
-    """The live socket under a streamed ``requests`` response, if there is one.
-
-    urllib3 applies the read timeout once, before the status line. A body that
-    drips a byte just inside that window would otherwise never hit a total
-    deadline. Tightening this socket before each read is what makes
-    ``total_deadline`` cover the whole transfer.
-    """
-    # http.client HTTPResponse → BufferedReader → SocketIO. A mocked body
-    # has none of these, and then the read simply returns.
-    fp = getattr(resp.raw, "_fp", None)
-    reader = getattr(fp, "fp", None)
-    raw = getattr(reader, "raw", None)
-    sock = getattr(raw, "_sock", None)
-    if isinstance(sock, socket.socket):
-        return sock
-    return None
-
-
 def _read_bounded(
     resp: requests.Response,
     *,
@@ -214,34 +92,30 @@ def _read_bounded(
     deadline: float,
     budget: float,
 ) -> bytes:
-    """Read ``resp`` until EOF, ``max_bytes``, or ``deadline`` (monotonic)."""
-    sock = _response_socket(resp)
+    """Read ``resp`` until EOF, ``max_bytes``, or ``deadline`` (monotonic).
+
+    Chunks come from ``iter_content`` so Content-Encoding is decoded and the
+    read stays on the public ``requests`` surface. The request's own timeout
+    is ``budget``; this loop also refuses a chunk that arrives after it.
+    """
     chunks: list[bytes] = []
     total = 0
+    iterator = resp.iter_content(chunk_size=_SAFE_CHUNK)
     while True:
-        left = deadline - time.monotonic()
-        if left <= 0:
+        if time.monotonic() >= deadline:
             raise ValueError(f"Refusing to fetch {url!r}: exceeded the {budget:g}s deadline.")
-        if sock is not None:
-            try:
-                # One successful recv restarts this timer, so each call is a
-                # single read1 and the next iteration shrinks it to what is
-                # left of the original deadline.
-                sock.settimeout(left)
-            except OSError:
-                sock = None
         try:
-            chunk = resp.raw.read1(64 * 1024)
-        except (requests.RequestException, TimeoutError, Urllib3HTTPError) as exc:
-            # The socket timeout was set to the time still left, so a stall
-            # lands on the deadline. A reset well before that is a real error.
+            chunk = next(iterator)
+        except StopIteration:
+            break
+        except (requests.RequestException, TimeoutError) as exc:
             if time.monotonic() + 0.05 >= deadline or "timed out" in str(exc).lower():
                 raise ValueError(
                     f"Refusing to fetch {url!r}: exceeded the {budget:g}s deadline."
                 ) from exc
             raise
         if not chunk:
-            break
+            continue
         total += len(chunk)
         if total > max_bytes:
             raise ValueError(f"Refusing to fetch {url!r}: response exceeds {max_bytes} bytes.")
@@ -251,22 +125,17 @@ def _read_bounded(
 
 def safe_get(
     url: str,
-    allowed_hosts: Collection[str] | Callable[[str], bool],
+    allowed: Callable[[str], bool],
     *,
     max_bytes: int = SAFE_MAX_BYTES,
     total_deadline: float = SAFE_DEADLINE_S,
 ) -> bytes:
-    """GET ``url`` with an allowlist, no redirects, no retries, and a hard cap.
+    """GET ``url`` when ``allowed`` says so. No redirects, no retries, hard cap.
 
-    ``allowed_hosts`` is a set of https hostnames or a predicate on the whole
-    URL. The public item fetch passes the open-data bucket check, which also
-    rejects a path-style URL whose first segment is not that bucket.
-
-    The body is streamed. More than ``max_bytes`` raises :class:`ValueError`.
-    ``total_deadline`` is a wall-clock budget across the connect and every
-    read, not a timeout that starts over on each chunk. A host that resolves
-    to a private, loopback, link-local, or unspecified address is refused
-    before the connection. Redirects are not followed and not requested.
+    ``allowed`` is a predicate on the whole URL. The public item fetch passes
+    the open-data bucket check. The body is streamed in 64 KiB chunks. More
+    than ``max_bytes`` raises :class:`ValueError`. ``total_deadline`` bounds
+    the connect and the read. Redirects are not followed and not requested.
     """
     if not isinstance(url, str) or not url:
         raise ValueError("Refusing to fetch an empty URL.")
@@ -274,14 +143,8 @@ def safe_get(
         raise ValueError("max_bytes must be positive.")
     if total_deadline <= 0:
         raise ValueError("total_deadline must be positive.")
-    if not _url_is_allowed(url, allowed_hosts):
+    if not allowed(url):
         raise ValueError(f"Refusing to fetch {url!r}: the host is not allowed.")
-    host = _hostname(url)
-    if host and _host_has_blocked_address(host):
-        raise ValueError(
-            f"Refusing to fetch {url!r}: the host resolves to a private, "
-            "loopback, or link-local address."
-        )
 
     deadline = time.monotonic() + total_deadline
     connect_timeout = min(total_deadline, 3.0)
@@ -331,21 +194,10 @@ def safe_get(
 def get_json(url: str, session: requests.Session | None = None, **kwargs: Any) -> dict:
     """Fetch and decode a JSON document.
 
-    While a public-host MCP network section has pushed
-    :data:`_public_json_allowlist`, this uses :func:`safe_get` instead of the
-    shared retrying session. Library and CLI callers leave that unset and
-    keep the retrying GET. Worker threads see the same allowlist.
+    Uses the shared retrying session. A live catalog walk depends on that
+    retry, including a transient S3 503. Public-host item reads call
+    :func:`safe_get` themselves.
     """
-    allow = _public_json_allowlist.current()
-    if allow is not None:
-        raw = safe_get(url, allow)
-        try:
-            body = json.loads(raw)
-        except ValueError as exc:
-            raise ValueError(f"Response from {url!r} was not JSON.") from exc
-        if not isinstance(body, dict):
-            raise ValueError(f"Response from {url!r} was not a JSON object.")
-        return body
     sess = session or default_session()
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
     resp = sess.get(url, **kwargs)

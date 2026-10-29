@@ -153,45 +153,53 @@ _PUBLIC_ITEM_REFUSAL = (
     "open-data bucket. The public host did not request it."
 )
 
-#: Outbound HTTP in flight on the public host. anyio's worker pool is 40;
-#: this leaves the rest for index-backed tools. One client reading a handful
-#: of uncached bucket URLs still fits. Past the cap the call fails at once.
+
+class PublicHostBusy(ValueError):
+    """The public host refused to start another outbound request."""
+
+
+#: Quick outbound calls: HEAD, geocode, one item GET. anyio's worker pool is
+#: 40; this leaves the rest for index-backed tools. One client reading a
+#: handful of uncached bucket URLs still fits. Past the cap the call fails
+#: at once.
 _PUBLIC_NET_LIMIT = 8
+#: Live catalog walks and semantic or embedding model calls. Separate from
+#: the quick pool so a walk cannot fill every permit a geocode needs.
+_PUBLIC_NET_LONG_LIMIT = 2
 _PUBLIC_NET_BUSY = (
     "The public host is already handling its limit of network requests. Retry in a moment."
 )
 _PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+_PUBLIC_NET_LONG = threading.BoundedSemaphore(_PUBLIC_NET_LONG_LIMIT)
 
 
 def _reset_public_net() -> None:
     """Drop any leaked public-network permits. Tests call this between cases."""
-    global _PUBLIC_NET
+    global _PUBLIC_NET, _PUBLIC_NET_LONG
     _PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+    _PUBLIC_NET_LONG = threading.BoundedSemaphore(_PUBLIC_NET_LONG_LIMIT)
 
 
 @contextmanager
-def _public_net_slot():
-    """One public-host outbound-HTTP permit, or a no-op off the public host.
+def _public_net_slot(*, long: bool = False):
+    """One public-host outbound permit, or a no-op off the public host.
 
-    While the permit is held, :func:`umbra_py._http.get_json` uses
-    :func:`umbra_py._http.safe_get` with the open-data bucket check, including
-    sidecar reads the catalog walk issues on worker threads.
+    ``long=False`` is the quick pool (:data:`_PUBLIC_NET_LIMIT`): HEAD,
+    geocode, and a single item GET. ``long=True`` is the pool for a live
+    catalog walk or a semantic or embedding model call
+    (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
+    :class:`PublicHostBusy` at once when it is full, with the same message.
     """
     if _cog_streaming_allowed():
         yield
         return
-    if not _PUBLIC_NET.acquire(blocking=False):
-        raise ValueError(_PUBLIC_NET_BUSY)
-    from ._http import _public_json_allowlist
-
-    _public_json_allowlist.push(_public_bucket_https)
+    pool = _PUBLIC_NET_LONG if long else _PUBLIC_NET
+    if not pool.acquire(blocking=False):
+        raise PublicHostBusy(_PUBLIC_NET_BUSY)
     try:
         yield
     finally:
-        try:
-            _public_json_allowlist.pop()
-        finally:
-            _PUBLIC_NET.release()
+        pool.release()
 
 
 def _fetch_item_public(url: str) -> UmbraItem:
@@ -514,11 +522,17 @@ def _public_host_confirmed_download(
     item_arg = url
     if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
         item_arg = item.href
+    size: int | None = None
     if _public_bucket_https(href):
         stac_size = _stac_asset_size(body)
-        size = stac_size if stac_size is not None else _head_content_length(href)
-    else:
-        size = None
+        if stac_size is not None:
+            size = stac_size
+        else:
+            try:
+                size = _head_content_length(href)
+            except PublicHostBusy:
+                # The plan is still the answer. The size can be read later.
+                size = None
     return _link_plan(
         asset=asset,
         filename=filename,
@@ -794,7 +808,7 @@ def search_catalog(
                 "semantic=True needs `area` set to the plain-language site "
                 "description to resolve (e.g. 'grain storage north dakota')"
             )
-        with _public_net_slot():
+        with _public_net_slot(long=True):
             resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
@@ -827,7 +841,7 @@ def search_catalog(
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
     try:
-        with _public_net_slot() if not is_index else nullcontext():
+        with _public_net_slot(long=True) if not is_index else nullcontext():
             results = source.search(
                 bbox=resolved_bbox,
                 intersects=geometry,
@@ -1108,7 +1122,7 @@ def find_repeat_sites(
                 max_span_days=max_span_days,
             )
         else:
-            with _public_net_slot():
+            with _public_net_slot(long=True):
                 pool = list(
                     source.search(
                         bbox=resolved_bbox,
@@ -1197,8 +1211,7 @@ def get_item(url: str) -> dict[str, Any]:
 
     On the public host a URL is fetched only when it is https on Umbra's
     public open-data bucket. Any other URL is refused before a request.
-    A bare id that is not in the local index is refused the same way, and
-    the commercial archive is not called.
+    A bare id that is not in the local index is refused the same way.
 
     The card (:meth:`UmbraItem.to_llm_context`) carries the id, ISO datetime,
     place, bbox, resolution, polarization *with the change-detection caveat*,
@@ -1211,9 +1224,7 @@ def get_item(url: str) -> dict[str, Any]:
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
-    # Public mode does not call Canopy. ``umbra serve --public`` already
-    # refuses the token; this keeps a bare id on that host index-only.
-    if token and "://" not in url and _cog_streaming_allowed():
+    if token and "://" not in url:
         item = UmbraCatalog(token=token).get_item(url)
         if item is None:
             raise ValueError(f"No item {url!r} in the Canopy commercial archive.")
@@ -1734,9 +1745,9 @@ def download_asset(
     no retries. A href that is not on that bucket is not requested:
     ``how_to_fetch.curl`` and ``how_to_fetch.umbra`` are null, ``bytes`` is
     null, and ``note`` says the commands were omitted. A 404 or 410 from
-    an allowlisted HEAD raises. Any other HEAD failure leaves ``bytes``
-    null and still returns the plan. The hosted server never transfers the
-    file. A local
+    an allowlisted HEAD raises. Any other HEAD failure, including a full
+    quick-request slot, leaves ``bytes`` null and still returns the plan.
+    The hosted server never transfers the file. A local
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
     disk. ``confirm=False`` on this host returns the same size-and-hint
     object and does not write a file. It HEADs for ``Content-Length`` only
@@ -1880,9 +1891,9 @@ def watch_site(
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
-        # A live walk holds one public-network permit for the whole search.
+        # A live walk holds one long-pool permit for the whole search.
         # An index-backed watch does not: it never leaves the machine.
-        with _public_net_slot() if not is_index else nullcontext():
+        with _public_net_slot(long=True) if not is_index else nullcontext():
             result = watch(
                 cast(SearchSource, source),
                 name=watch_name,
@@ -2003,7 +2014,7 @@ def find_similar_text(
             f"No scene-embedding index at {path}. Build one first with "
             "'umbra embed build' (text-to-scene search needs it)."
         )
-    with _public_net_slot():
+    with _public_net_slot(long=True):
         text_embedder = emb.default_text_embedder(model=model)
         with emb.SceneEmbeddingIndex(path) as index:
             matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)

@@ -29,8 +29,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   product filename, an acquisition stem, or an https URL on the open-data
   bucket. Anything else is refused before a request. Those JSON reads do
   not follow redirects, stop at about 2 MB, and share a 10 second deadline.
-  A busy public host returns an error instead of starting another network
-  read.
+  A busy public host returns an error instead of starting another item read.
+- **A hosted size check that cannot start still returns the download plan.**
+  `download_asset(confirm=true)` sets `bytes` to null when the public host
+  is already at its limit of quick requests. A live catalog walk keeps the
+  retrying HTTP session, so a transient S3 failure is retried, and that
+  walk does not take a permit a geocode or a single item read needs.
 
 ## [0.1.4] — 2026-10-26
 

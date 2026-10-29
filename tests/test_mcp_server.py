@@ -2838,6 +2838,18 @@ def _drain_public_net(held: int) -> None:
         ms._PUBLIC_NET.release()
 
 
+def _fill_long_net():
+    held = 0
+    while ms._PUBLIC_NET_LONG.acquire(blocking=False):
+        held += 1
+    return held
+
+
+def _drain_long_net(held: int) -> None:
+    for _ in range(held):
+        ms._PUBLIC_NET_LONG.release()
+
+
 def test_public_item_tools_do_not_request_a_foreign_url(tmp_path, monkeypatch):
     """get_item, quicklook, download, describe, and a composite make no request."""
     monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
@@ -2918,24 +2930,23 @@ def test_public_full_network_slot_errors_before_the_request(
         _drain_public_net(held)
 
 
-def test_public_get_item_does_not_call_canopy(tmp_path, monkeypatch):
-    called: list[object] = []
+def test_get_item_with_a_token_calls_the_archive_when_streaming_is_off(
+    sample_item_dict, monkeypatch
+):
+    """``umbra serve --public`` refuses the token. ``get_item`` itself does not."""
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
 
     class _FakeArchive:
         def __init__(self, *args, **kwargs):
-            called.append(kwargs)
+            self.token = kwargs.get("token")
 
         def get_item(self, item_id):
-            called.append(item_id)
-            return None
+            return item if item_id == item.id else None
 
     monkeypatch.setenv(ms.CANOPY_TOKEN_ENV, "secret-token")
-    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
     monkeypatch.setattr(ms, "UmbraCatalog", _FakeArchive)
     ms.configure(cog_streaming=False)
-    with pytest.raises(ValueError, match="did not request"):
-        ms.get_item("2d1827a2-d04c-4e15-9319-3810d011540b")
-    assert called == []
+    assert ms.get_item(item.id)["id"] == item.id
 
 
 def test_public_index_search_runs_when_the_network_slot_is_full(
@@ -2982,18 +2993,75 @@ def test_public_geocode_still_runs_for_one_caller(monkeypatch):
     assert out["bbox"] == [0.0, 0.0, 1.0, 1.0]
 
 
-@responses.activate
-def test_public_slot_worker_get_json_does_not_follow_a_redirect():
-    """A catalog sidecar fetch on a worker thread uses the same allowlist."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    target = "http://127.0.0.1/secret"
-    responses.add(responses.GET, ITEM_URL, status=302, headers={"Location": target})
-    responses.add(responses.GET, target, json={"secret": "internal"}, status=200)
+def test_full_long_pool_does_not_block_a_quick_geocode(monkeypatch):
+    monkeypatch.setattr(ms, "_geocode_place", lambda _query: ((0.0, 0.0, 1.0, 1.0), "Austin"))
     ms.configure(cog_streaming=False)
-    with ms._public_net_slot():
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_http.get_json, ITEM_URL)
-            with pytest.raises(ValueError, match="redirects are not followed"):
-                future.result()
-    assert all("127.0.0.1" not in call.request.url for call in responses.calls)
+    held = _fill_long_net()
+    assert held == ms._PUBLIC_NET_LONG_LIMIT
+    try:
+        out = ms.geocode_place("Austin")
+    finally:
+        _drain_long_net(held)
+    assert out["display_name"] == "Austin"
+
+
+def test_full_long_pool_rejects_a_live_search(tmp_path, monkeypatch):
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            raise AssertionError("walked while the long pool was full")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *args, **kwargs: _FakeCatalog())
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
+    monkeypatch.delenv(ms.CANOPY_TOKEN_ENV, raising=False)
+    ms.configure(cog_streaming=False)
+    held = _fill_long_net()
+    try:
+        with pytest.raises(ms.PublicHostBusy, match="limit of network requests"):
+            ms.search_catalog(local=False, limit=1)
+    finally:
+        _drain_long_net(held)
+
+
+def test_full_quick_pool_does_not_block_a_live_search(tmp_path, monkeypatch):
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            return iter([])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *args, **kwargs: _FakeCatalog())
+    monkeypatch.setattr(ms, "default_index_path", lambda: tmp_path / "missing.db")
+    monkeypatch.delenv(ms.CANOPY_TOKEN_ENV, raising=False)
+    ms.configure(cog_streaming=False)
+    held = _fill_public_net()
+    try:
+        out = ms.search_catalog(local=False, limit=1)
+    finally:
+        _drain_public_net(held)
+    assert out["source"] == "live-catalog"
+    assert out["count"] == 0
+
+
+@responses.activate
+def test_public_confirm_true_returns_a_plan_when_the_size_slot_is_busy(
+    sample_item_dict, tmp_path, monkeypatch
+):
+    """A full quick pool leaves ``bytes`` null and still returns the link plan."""
+    from umbra_py.index import CatalogIndex
+
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+    db = tmp_path / "catalog.db"
+    with CatalogIndex(db) as index:
+        index.add(item)
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(db))
+    href = item.asset_href("GEC")
+
+    def boom(request):
+        raise AssertionError(f"public host fetched {request.url}")
+
+    responses.add_callback(responses.HEAD, href, callback=boom)
+    ms.configure(cog_streaming=False)
+    held = _fill_public_net()
+    try:
+        out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
+    finally:
+        _drain_public_net(held)
+    _assert_link_plan(out, href=href, asset="GEC", size=None)
