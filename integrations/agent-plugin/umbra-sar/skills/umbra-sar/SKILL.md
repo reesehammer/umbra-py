@@ -39,9 +39,11 @@ to stream it directly. This is not verified for every reader, and if it fails,
 fall back to the quicklook plus a local download.
 
 Call `download_asset` with `confirm` true. On the hosted server that returns
-a link plan (`mode` `link`, `downloaded` false) with the public `href` and
-a `curl -L -C -` command. It does not transfer the file. For a copy on your
-disk, run a local server and call `download_asset` there:
+a link plan (`mode` `link`, `downloaded` false) with the public `href`. When
+that href is https on Umbra's public bucket, `how_to_fetch` includes a
+`curl -L -C -` command; otherwise those commands are null. It does not
+transfer the file. For a copy on your disk, run a local server and call
+`download_asset` there:
 `uvx --from 'umbra-py[mcp]' umbra-mcp`.
 
 ## Honesty

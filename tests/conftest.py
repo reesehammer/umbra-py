@@ -48,3 +48,4 @@ def _reset_mcp_cog_policy():
     mod = sys.modules.get("umbra_py.mcp_server")
     if mod is not None:
         mod.configure(cog_streaming=None)
+        mod._reset_public_net()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -17,6 +18,13 @@ from urllib3.util.retry import Retry
 from . import __version__
 
 DEFAULT_TIMEOUT = 30
+
+#: Public-mode JSON body cap. A STAC item is much smaller; past this the read
+#: stops and raises rather than buffering the rest.
+SAFE_MAX_BYTES = 2 * 1024 * 1024
+#: Wall-clock budget for one public-mode JSON fetch, connect included.
+SAFE_DEADLINE_S = 10.0
+_SAFE_CHUNK = 65536
 
 #: How a model POST (Anthropic, or an OpenAI-compatible gateway like OpenRouter)
 #: fails transiently. The first two are ordinary HTTP; the third is the one a
@@ -76,8 +84,120 @@ def default_session() -> requests.Session:
     return session
 
 
+def _read_bounded(
+    resp: requests.Response,
+    *,
+    url: str,
+    max_bytes: int,
+    deadline: float,
+    budget: float,
+) -> bytes:
+    """Read ``resp`` until EOF, ``max_bytes``, or ``deadline`` (monotonic).
+
+    Chunks come from ``iter_content`` so Content-Encoding is decoded and the
+    read stays on the public ``requests`` surface. The request's own timeout
+    is ``budget``; this loop also refuses a chunk that arrives after it.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    iterator = resp.iter_content(chunk_size=_SAFE_CHUNK)
+    while True:
+        if time.monotonic() >= deadline:
+            raise ValueError(f"Refusing to fetch {url!r}: exceeded the {budget:g}s deadline.")
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            break
+        except (requests.RequestException, TimeoutError) as exc:
+            if time.monotonic() + 0.05 >= deadline or "timed out" in str(exc).lower():
+                raise ValueError(
+                    f"Refusing to fetch {url!r}: exceeded the {budget:g}s deadline."
+                ) from exc
+            raise
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Refusing to fetch {url!r}: response exceeds {max_bytes} bytes.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def safe_get(
+    url: str,
+    allowed: Callable[[str], bool],
+    *,
+    max_bytes: int = SAFE_MAX_BYTES,
+    total_deadline: float = SAFE_DEADLINE_S,
+) -> bytes:
+    """GET ``url`` when ``allowed`` says so. No redirects, no retries, hard cap.
+
+    ``allowed`` is a predicate on the whole URL. The public item fetch passes
+    the open-data bucket check. The body is streamed in 64 KiB chunks. More
+    than ``max_bytes`` raises :class:`ValueError`. ``total_deadline`` bounds
+    the connect and the read. Redirects are not followed and not requested.
+    """
+    if not isinstance(url, str) or not url:
+        raise ValueError("Refusing to fetch an empty URL.")
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive.")
+    if total_deadline <= 0:
+        raise ValueError("total_deadline must be positive.")
+    if not allowed(url):
+        raise ValueError(f"Refusing to fetch {url!r}: the host is not allowed.")
+
+    deadline = time.monotonic() + total_deadline
+    connect_timeout = min(total_deadline, 3.0)
+    session = requests.Session()
+    try:
+        session.headers.update({"User-Agent": f"umbra-py/{__version__}"})
+        adapter = HTTPAdapter(max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        try:
+            resp = session.get(
+                url,
+                stream=True,
+                allow_redirects=False,
+                timeout=(connect_timeout, total_deadline),
+            )
+        except requests.Timeout as exc:
+            raise ValueError(
+                f"Refusing to fetch {url!r}: exceeded the {total_deadline:g}s deadline."
+            ) from exc
+        try:
+            if 300 <= resp.status_code < 400:
+                raise ValueError(
+                    f"Refusing to fetch {url!r}: the server returned HTTP "
+                    f"{resp.status_code} and redirects are not followed."
+                )
+            resp.raise_for_status()
+            declared = resp.headers.get("Content-Length")
+            if declared is not None:
+                try:
+                    advertised = int(str(declared).strip())
+                except ValueError:
+                    advertised = None
+                if advertised is not None and advertised > max_bytes:
+                    raise ValueError(
+                        f"Refusing to fetch {url!r}: response exceeds {max_bytes} bytes."
+                    )
+            return _read_bounded(
+                resp, url=url, max_bytes=max_bytes, deadline=deadline, budget=total_deadline
+            )
+        finally:
+            resp.close()
+    finally:
+        session.close()
+
+
 def get_json(url: str, session: requests.Session | None = None, **kwargs: Any) -> dict:
-    """Fetch and decode a JSON document."""
+    """Fetch and decode a JSON document.
+
+    Uses the shared retrying session. A live catalog walk depends on that
+    retry, including a transient S3 503. Public-host item reads call
+    :func:`safe_get` themselves.
+    """
     sess = session or default_session()
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
     resp = sess.get(url, **kwargs)
