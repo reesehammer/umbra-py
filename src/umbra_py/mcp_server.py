@@ -46,7 +46,9 @@ import io
 import json
 import os
 import shlex
+import threading
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
@@ -126,13 +128,92 @@ def _fetch_item(url: str) -> UmbraItem:
     disagree with ``search_catalog`` (newer asset filenames, extra product
     types, ``s3://`` hrefs). When the index has this href, every tool sees
     the same snapshot.
+
+    On the public host (:func:`_cog_streaming_allowed` is false) a miss is not
+    an open fetch. The value must be an index id, a product filename, or an
+    acquisition stem in the local index, or an https URL on Umbra's public
+    open-data bucket. Anything else raises :class:`ValueError` and makes no
+    request. Every ``_fetch_item`` caller (``get_item``, ``quicklook``,
+    ``download_asset``, ``describe_scene``, the composite and stack tools,
+    and the LangChain / LlamaIndex wrappers) goes through this gate.
     """
     indexed = _item_from_index(url)
     if indexed is not None:
         return indexed
+    if not _cog_streaming_allowed():
+        return _fetch_item_public(url)
     from ._http import get_json
 
     return UmbraItem.from_dict(get_json(url), href=url)
+
+
+_PUBLIC_ITEM_REFUSAL = (
+    "{url!r} is not an item id, product filename, or acquisition stem in the "
+    "local catalog index, and it is not an https URL on Umbra's public "
+    "open-data bucket. The public host did not request it."
+)
+
+#: Outbound HTTP in flight on the public host. anyio's worker pool is 40;
+#: this leaves the rest for index-backed tools. One client reading a handful
+#: of uncached bucket URLs still fits. Past the cap the call fails at once.
+_PUBLIC_NET_LIMIT = 8
+_PUBLIC_NET_BUSY = (
+    "The public host is already handling its limit of network requests. Retry in a moment."
+)
+_PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+
+
+def _reset_public_net() -> None:
+    """Drop any leaked public-network permits. Tests call this between cases."""
+    global _PUBLIC_NET
+    _PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+
+
+@contextmanager
+def _public_net_slot():
+    """One public-host outbound-HTTP permit, or a no-op off the public host.
+
+    While the permit is held, :func:`umbra_py._http.get_json` uses
+    :func:`umbra_py._http.safe_get` with the open-data bucket check, including
+    sidecar reads the catalog walk issues on worker threads.
+    """
+    if _cog_streaming_allowed():
+        yield
+        return
+    if not _PUBLIC_NET.acquire(blocking=False):
+        raise ValueError(_PUBLIC_NET_BUSY)
+    from ._http import _public_json_allowlist
+
+    _public_json_allowlist.push(_public_bucket_https)
+    try:
+        yield
+    finally:
+        try:
+            _public_json_allowlist.pop()
+        finally:
+            _PUBLIC_NET.release()
+
+
+def _fetch_item_public(url: str) -> UmbraItem:
+    """Index filename/stem, or one allowlisted JSON GET. No other request."""
+    if is_asset_name(url):
+        try:
+            return resolve_asset_name(url)
+        except CatalogError as exc:
+            raise ValueError(asset_name_error_text(exc)) from exc
+    if not _public_bucket_https(url):
+        raise ValueError(_PUBLIC_ITEM_REFUSAL.format(url=url))
+    from ._http import safe_get
+
+    with _public_net_slot():
+        raw = safe_get(url, _public_bucket_https)
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"The document at {url!r} was not JSON.") from exc
+    if not isinstance(doc, dict):
+        raise ValueError(f"The document at {url!r} was not a JSON object.")
+    return UmbraItem.from_dict(doc, href=url)
 
 
 def _png_bytes(image: Any) -> bytes:
@@ -211,6 +292,10 @@ _LINK_NOTE = (
     "public object, not a download. A local `uvx --from 'umbra-py[mcp]' "
     "umbra-mcp` server can download this asset to your own disk "
     "(download_asset with confirm=true)."
+)
+_COMMANDS_OMITTED_NOTE = (
+    "Fetch commands are omitted because this href is not an https URL on "
+    "Umbra's public open-data bucket."
 )
 
 
@@ -298,7 +383,8 @@ def _head_content_length(href: str, *, raise_on_failure: bool = False) -> int | 
     from ._http import DEFAULT_TIMEOUT
 
     try:
-        head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
+        with _public_net_slot():
+            head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
         if raise_on_failure:
             raise
@@ -361,8 +447,14 @@ def _safe_download_filename(named: Any, href: str, fallback: str) -> str:
 
 def _how_to_fetch(
     item_arg: str, asset: str, filename: str, href: str, dest_dir: str
-) -> dict[str, str]:
-    """Copy-paste commands. Flags match ``umbra download --help``."""
+) -> dict[str, str | None]:
+    """Copy-paste commands. Flags match ``umbra download --help``.
+
+    Both commands are null unless ``href`` is https on the public open-data
+    bucket. The keys stay so a caller can read them either way.
+    """
+    if not _public_bucket_https(href):
+        return {"curl": None, "umbra": None}
     dest = dest_dir if isinstance(dest_dir, str) and dest_dir else "."
     curl = f"curl -L -C - -o {shlex.quote(filename)} {shlex.quote(href)}"
     umbra = (
@@ -381,6 +473,10 @@ def _link_plan(
     item_arg: str,
     dest_dir: str,
 ) -> dict[str, Any]:
+    commands = _how_to_fetch(item_arg, asset, filename, href, dest_dir)
+    note = _LINK_NOTE
+    if commands["curl"] is None:
+        note = f"{note} {_COMMANDS_OMITTED_NOTE}"
     return {
         "mode": "link",
         "downloaded": False,
@@ -388,8 +484,8 @@ def _link_plan(
         "filename": filename,
         "href": href,
         "bytes": size,
-        "how_to_fetch": _how_to_fetch(item_arg, asset, filename, href, dest_dir),
-        "note": _LINK_NOTE,
+        "how_to_fetch": commands,
+        "note": note,
     }
 
 
@@ -402,9 +498,10 @@ def _public_host_confirmed_download(
 ) -> dict[str, Any]:
     """Link plan. Never GETs the asset and never writes a file.
 
-    ``bytes`` is the STAC ``file:size`` or ``size`` when that is recorded.
-    Otherwise an allowlisted href is HEADed for ``Content-Length``. A href
-    that is not on the public bucket is not requested, and ``bytes`` is null.
+    When ``href`` is https on the public bucket, ``bytes`` is the STAC
+    ``file:size`` or ``size`` if that is recorded, otherwise ``Content-Length``
+    from HEAD. Otherwise the href is not requested, ``bytes`` is null, and
+    ``how_to_fetch`` leaves both commands null.
     """
     if not isinstance(href, str) or not href.startswith(("http://", "https://")):
         raise ValueError(
@@ -417,8 +514,11 @@ def _public_host_confirmed_download(
     item_arg = url
     if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
         item_arg = item.href
-    stac_size = _stac_asset_size(body)
-    size = stac_size if stac_size is not None else _head_content_length(href)
+    if _public_bucket_https(href):
+        stac_size = _stac_asset_size(body)
+        size = stac_size if stac_size is not None else _head_content_length(href)
+    else:
+        size = None
     return _link_plan(
         asset=asset,
         filename=filename,
@@ -694,7 +794,8 @@ def search_catalog(
                 "semantic=True needs `area` set to the plain-language site "
                 "description to resolve (e.g. 'grain storage north dakota')"
             )
-        resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
+        with _public_net_slot():
+            resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
@@ -718,30 +819,32 @@ def search_catalog(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
     geometry = _parse_geometry(intersects) if intersects is not None else None
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
     try:
-        results = source.search(
-            bbox=resolved_bbox,
-            intersects=geometry,
-            start=start,
-            end=end,
-            product_types=list(products) if products else None,
-            area=search_area,
-            fuzzy=search_fuzzy,
-            polarizations=list(polarizations) if polarizations else None,
-            min_incidence=min_incidence,
-            max_incidence=max_incidence,
-            max_resolution=max_resolution,
-            canonical=canonical,
-            limit=limit,
-            max_per_task=max_per_task,
-        )
-        cards = [item.to_llm_context() for item in results]
+        with _public_net_slot() if not is_index else nullcontext():
+            results = source.search(
+                bbox=resolved_bbox,
+                intersects=geometry,
+                start=start,
+                end=end,
+                product_types=list(products) if products else None,
+                area=search_area,
+                fuzzy=search_fuzzy,
+                polarizations=list(polarizations) if polarizations else None,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                canonical=canonical,
+                limit=limit,
+                max_per_task=max_per_task,
+            )
+            cards = [item.to_llm_context() for item in results]
     finally:
         if isinstance(source, CatalogIndex):
             source.close()
@@ -965,7 +1068,8 @@ def find_repeat_sites(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
     geometry = _parse_geometry(intersects) if intersects is not None else None
 
     token = _canopy_token()
@@ -1004,22 +1108,23 @@ def find_repeat_sites(
                 max_span_days=max_span_days,
             )
         else:
-            pool = list(
-                source.search(
-                    bbox=resolved_bbox,
-                    intersects=geometry,
-                    start=start,
-                    end=end,
-                    product_types=list(products) if products else None,
-                    area=area,
-                    fuzzy=fuzzy,
-                    polarizations=list(polarizations) if polarizations else None,
-                    min_incidence=min_incidence,
-                    max_incidence=max_incidence,
-                    max_resolution=max_resolution,
-                    limit=limit,
+            with _public_net_slot():
+                pool = list(
+                    source.search(
+                        bbox=resolved_bbox,
+                        intersects=geometry,
+                        start=start,
+                        end=end,
+                        product_types=list(products) if products else None,
+                        area=area,
+                        fuzzy=fuzzy,
+                        polarizations=list(polarizations) if polarizations else None,
+                        min_incidence=min_incidence,
+                        max_incidence=max_incidence,
+                        max_resolution=max_resolution,
+                        limit=limit,
+                    )
                 )
-            )
             sites = rank_site_coverage(
                 pool,
                 top=top,
@@ -1090,6 +1195,11 @@ def get_item(url: str) -> dict[str, Any]:
     sidecar URL) as their hand-off pointer. A filename or stem still resolves
     from the local open-data index when a token is set.
 
+    On the public host a URL is fetched only when it is https on Umbra's
+    public open-data bucket. Any other URL is refused before a request.
+    A bare id that is not in the local index is refused the same way, and
+    the commercial archive is not called.
+
     The card (:meth:`UmbraItem.to_llm_context`) carries the id, ISO datetime,
     place, bbox, resolution, polarization *with the change-detection caveat*,
     the per-product-type explanations and asset URLs, and the mandatory
@@ -1101,7 +1211,9 @@ def get_item(url: str) -> dict[str, Any]:
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
-    if token and "://" not in url:
+    # Public mode does not call Canopy. ``umbra serve --public`` already
+    # refuses the token; this keeps a bare id on that host index-only.
+    if token and "://" not in url and _cog_streaming_allowed():
         item = UmbraCatalog(token=token).get_item(url)
         if item is None:
             raise ValueError(f"No item {url!r} in the Canopy commercial archive.")
@@ -1116,7 +1228,8 @@ def geocode_place(query: str) -> dict[str, Any]:
     ...}`` so the agent can inspect the box before searching, or pass it
     straight to ``search_catalog``'s ``bbox``.
     """
-    box, display = _geocode_place(query)
+    with _public_net_slot():
+        box, display = _geocode_place(query)
     return {"bbox": list(box), "display_name": display}
 
 
@@ -1612,15 +1725,18 @@ def download_asset(
     On a public host (``umbra serve --public``, COG streaming off),
     ``confirm=True`` does not transfer the file. It returns a link plan:
     ``mode`` ``"link"``, ``downloaded`` false, ``asset``, ``filename`` (a
-    basename), the direct public ``href``, ``bytes``, and ``how_to_fetch`` —
-    ``curl -L -C - -o <filename> <href>`` and
+    basename), the direct public ``href``, ``bytes``, and ``how_to_fetch``.
+    When the href is https on the public open-data bucket, ``how_to_fetch``
+    is ``curl -L -C - -o <filename> <href>`` and
     ``umbra download ITEM --asset ASSET --dest DIR``. ``bytes`` is the STAC
-    ``file:size`` or ``size`` when that is a non-negative integer. Otherwise
-    the host HEADs for ``Content-Length`` only when the href is https on the
-    public open-data bucket, with no redirects and no retries. Any other href
-    is not requested, and ``bytes`` is null. A 404 or 410 from that HEAD
-    raises. Any other HEAD failure leaves ``bytes`` null and still returns
-    the plan. The hosted server never transfers the file. A local
+    ``file:size`` or ``size`` when that is a non-negative integer; otherwise
+    the host HEADs that href for ``Content-Length``, with no redirects and
+    no retries. A href that is not on that bucket is not requested:
+    ``how_to_fetch.curl`` and ``how_to_fetch.umbra`` are null, ``bytes`` is
+    null, and ``note`` says the commands were omitted. A 404 or 410 from
+    an allowlisted HEAD raises. Any other HEAD failure leaves ``bytes``
+    null and still returns the plan. The hosted server never transfers the
+    file. A local
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
     disk. ``confirm=False`` on this host returns the same size-and-hint
     object and does not write a file. It HEADs for ``Content-Length`` only
@@ -1740,7 +1856,8 @@ def watch_site(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
@@ -1763,19 +1880,22 @@ def watch_site(
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
-        result = watch(
-            cast(SearchSource, source),
-            name=watch_name,
-            store=MetaWatchStore(store_index),
-            reset=reset,
-            bbox=resolved_bbox,
-            area=area,
-            fuzzy=fuzzy,
-            product_types=resolved_products,
-            start=start,
-            end=end,
-        )
-        payload = result.to_dict()
+        # A live walk holds one public-network permit for the whole search.
+        # An index-backed watch does not: it never leaves the machine.
+        with _public_net_slot() if not is_index else nullcontext():
+            result = watch(
+                cast(SearchSource, source),
+                name=watch_name,
+                store=MetaWatchStore(store_index),
+                reset=reset,
+                bbox=resolved_bbox,
+                area=area,
+                fuzzy=fuzzy,
+                product_types=resolved_products,
+                start=start,
+                end=end,
+            )
+            payload = result.to_dict()
     finally:
         store_index.close()
 
@@ -1883,10 +2003,11 @@ def find_similar_text(
             f"No scene-embedding index at {path}. Build one first with "
             "'umbra embed build' (text-to-scene search needs it)."
         )
-    text_embedder = emb.default_text_embedder(model=model)
-    with emb.SceneEmbeddingIndex(path) as index:
-        matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
-        stored_model = index.stored_model()
+    with _public_net_slot():
+        text_embedder = emb.default_text_embedder(model=model)
+        with emb.SceneEmbeddingIndex(path) as index:
+            matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
+            stored_model = index.stored_model()
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 

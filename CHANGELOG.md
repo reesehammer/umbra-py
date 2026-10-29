@@ -17,9 +17,20 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
 - **Hosted `download_asset(confirm=true)` returns a link plan** instead of
-  an error: a direct public URL (HTTPS for Umbra's bucket) plus fetch
-  commands. The hosted server never transfers files. A 404 or 410 on the
-  size check raises, and `bytes` is null when the size can't be read.
+  an error: a direct public URL. `how_to_fetch` includes `curl` and
+  `umbra download` when that URL is https on Umbra's public bucket.
+  Otherwise those two commands are null, `bytes` is null, and the note
+  says the commands were omitted. The hosted server never transfers files.
+  A 404 or 410 on an allowlisted size check raises, and `bytes` is null
+  when that size can't be read.
+- **Hosted item tools only read the catalog index or Umbra's public bucket.**
+  On the public host, `get_item`, `quicklook`, `download_asset`,
+  `describe_scene`, and the other item-URL tools accept an index id, a
+  product filename, an acquisition stem, or an https URL on the open-data
+  bucket. Anything else is refused before a request. Those JSON reads do
+  not follow redirects, stop at about 2 MB, and share a 10 second deadline.
+  A busy public host returns an error instead of starting another network
+  read.
 
 ## [0.1.4] — 2026-10-26
 
