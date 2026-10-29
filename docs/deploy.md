@@ -526,7 +526,7 @@ thumbnails; a skipped thumbnail publish warns instead. It warns ("Hosted
 API thumbnails not merged") when the API is `degraded`, or when the sidecar
 it merged is not the one just published.
 
-The redeploy is `npx @railway/cli redeploy --service umbra-py --yes`, run with
+The redeploy is `npx -y @railway/cli@5.71.0 redeploy --service umbra-py --yes`, run with
 the repository secret **`RAILWAY_TOKEN`**:
 
 - It must be a **project token** (project **Settings → Tokens**), created for

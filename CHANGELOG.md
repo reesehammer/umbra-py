@@ -9,6 +9,16 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Security
+- **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
+  (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
+  `pmtiles@3.2.1`; the `geotiff.js` digest is now always applied) and send a
+  Content-Security-Policy for unpkg, the OpenStreetMap tile hosts, and the
+  Umbra open-data bucket. `umbra serve` sends `X-Content-Type-Options: nosniff`
+  and `Referrer-Policy: strict-origin-when-cross-origin` on every response
+  (OpenStreetMap refuses a tile request that sends no Referer). A `stac_href`
+  that is not http(s) is not turned into a link.
+
 ### Changed
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
@@ -18,6 +28,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 - **`requests` requires 2.33.0 or newer.** That release fixes PYSEC-2023-74,
   PYSEC-2026-1873, PYSEC-2026-1872, and PYSEC-2026-2275. It supports Python
   3.10 and newer, the same floor as umbra-py.
+- **Workflow credentials stay on the steps that use them.** The weekly
+  catalog publish redeploys the hosted API from a job whose token can only
+  read the repository. `RAILWAY_TOKEN` is set on the redeploy and confirm
+  steps, and the embedding key is not on the crawl. GitHub Actions are
+  pinned to commit SHAs, and `mcp-publisher` is downloaded at v1.8.6 after
+  a sha256 check.
 - **Hosted `download_asset` preview (`confirm=false`) only checks size against Umbra's public bucket**
   and never follows redirects. A href outside that bucket is not requested;
   `bytes` is the STAC `file:size` or `size`, or null.
