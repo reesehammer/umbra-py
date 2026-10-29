@@ -10,6 +10,9 @@ concurrency:
   group: docker-image-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Build the self-hosting `umbra serve` image and smoke-test it end to end,
   # so a broken Dockerfile / entrypoint fails review instead of a user's first
@@ -19,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Retries public.ecr.aws 429s, then mirror.gcr.io. Dockerfiles unchanged.
       - name: Build image (serve extra)

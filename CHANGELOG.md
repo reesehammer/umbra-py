@@ -10,6 +10,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Changed
+- **Workflow credentials stay on the steps that use them.** The weekly
+  catalog publish redeploys the hosted API from a job whose token can only
+  read the repository. `RAILWAY_TOKEN` is set on the redeploy and confirm
+  steps, and the embedding key is not on the crawl. GitHub Actions are
+  pinned to commit SHAs, and `mcp-publisher` is downloaded at v1.8.6 after
+  a sha256 check.
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.

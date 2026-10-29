@@ -163,6 +163,16 @@ def test_the_scan_actually_found_the_published_commands():
     } <= scanned, scanned
 
 
+def _step_positions(steps: list[dict]) -> dict[str, int]:
+    position = {}
+    for i, step in enumerate(steps):
+        if step.get("id"):
+            position[step["id"]] = i
+        if step.get("name"):
+            position[step["name"]] = i
+    return position
+
+
 def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     """The hosted API boots onto whatever is released when it is redeployed.
 
@@ -170,41 +180,47 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     one gated on the token alone was a silent skip; a confirm that compared only
     the acquisition count passed against a stale API whenever a week added
     nothing. Pin the order, the gating and the snapshot comparison.
+
+    The release job holds ``contents: write`` and never sees ``RAILWAY_TOKEN``.
+    The deploy job holds the token and ``contents: read``, and it starts only
+    after the publish job — including the thumbnail upload — has finished.
     """
     document = yaml.safe_load((WORKFLOW_DIR / "publish-index.yml").read_text())
-    steps = document["jobs"]["publish"]["steps"]
-    position = {}
-    for i, step in enumerate(steps):
-        if step.get("id"):
-            position[step["id"]] = i
-        if step.get("name"):
-            position[step["name"]] = i
-    redeploy, confirm = steps[position["redeploy"]], steps[position[CONFIRM_STEP]]
+    publish_job = document["jobs"]["publish"]
+    deploy_job = document["jobs"]["deploy"]
+    embed_job = document["jobs"]["embed"]
+    steps = publish_job["steps"]
+    deploy_steps = deploy_job["steps"]
+    position = _step_positions(steps)
+    deploy_position = _step_positions(deploy_steps)
 
-    order = [
-        position[key]
-        for key in (
-            "publish",
-            THUMBS_STEP,
-            VERIFY_STEP,
-            "redeploy",
-            CONFIRM_STEP,
-            COVERAGE_STEP,
-            MCP_SMOKE_STEP,
-        )
-    ]
-    assert order == sorted(order), order
-    assert "steps.publish.outcome == 'success'" in redeploy["if"]
+    release_order = [position[key] for key in ("publish", THUMBS_STEP, VERIFY_STEP, COVERAGE_STEP)]
+    assert release_order == sorted(release_order), release_order
+    deploy_order = [deploy_position[key] for key in ("redeploy", CONFIRM_STEP, MCP_SMOKE_STEP)]
+    assert deploy_order == sorted(deploy_order), deploy_order
+    assert deploy_job["needs"] == "publish"
+    assert embed_job["needs"] == "publish"
+
+    redeploy = deploy_steps[deploy_position["redeploy"]]
+    confirm = deploy_steps[deploy_position[CONFIRM_STEP]]
+    assert "needs.publish.outputs.published == 'success'" in redeploy["if"]
     assert "!cancelled()" in redeploy["if"] and "RAILWAY_TOKEN" not in redeploy["if"]
     assert "::warning" in redeploy["run"] and "GITHUB_STEP_SUMMARY" in redeploy["run"]
-    assert "steps.publish.outputs.etag" in confirm["env"]["WANT_SNAPSHOT"]
+    assert "@railway/cli@5.71.0" in redeploy["run"]
+    assert "@latest" not in redeploy["run"]
+    assert redeploy["env"]["RAILWAY_TOKEN"] == "${{ secrets.RAILWAY_TOKEN }}"
+    assert "needs.publish.outputs.etag" in confirm["env"]["WANT_SNAPSHOT"]
+    assert "needs.publish.outputs.ids" in confirm["env"]["WANT_IDS"]
+    assert confirm["env"]["RAILWAY_TOKEN"] == "${{ secrets.RAILWAY_TOKEN }}"
     assert "'snapshot'" in confirm["run"]
     assert "published_thumbs_snapshot" in confirm["run"]
     assert confirm.get("id") == "confirm"
-    smoke = steps[position[MCP_SMOKE_STEP]]
+    smoke = deploy_steps[deploy_position[MCP_SMOKE_STEP]]
     assert "steps.confirm.outcome == 'success'" in smoke["if"]
-    assert "steps.publish.outcome == 'success'" in smoke["if"]
-    assert "RAILWAY_TOKEN" in smoke["if"]
+    assert "steps.redeploy.outputs.token == 'true'" in smoke["if"]
+    assert "steps.redeploy.outputs.token == 'true'" in confirm["if"]
+    assert "token=true" in redeploy["run"] and "token=false" in redeploy["run"]
+    assert "env" not in smoke
     assert "assert_hosted_core_tools" in smoke["run"]
     gate = steps[position[COVERAGE_STEP]]
     assert "if" not in gate
@@ -230,12 +246,36 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     workflow = (WORKFLOW_DIR / "publish-index.yml").read_text(encoding="utf-8")
     assert "catalog.thumbs.db --clobber" not in workflow
     assert "runs-on: ubuntu-24.04" in workflow
-    assert "actions/cache/restore@v6" in workflow
-    assert "actions/cache/save@v6" in workflow
+    assert re.search(r"actions/cache/restore@[0-9a-f]{40} # v6\.\d+\.\d+", workflow)
+    assert re.search(r"actions/cache/save@[0-9a-f]{40} # v6\.\d+\.\d+", workflow)
     assert "--validation index-validation.json" in workflow
     assert "indexed_preview_count" in workflow
-    assert document["permissions"]["actions"] == "write"
-    assert document["permissions"]["contents"] == "write"
+    assert document["permissions"] == {"contents": "read"}
+    assert publish_job["permissions"]["contents"] == "write"
+    assert publish_job["permissions"]["actions"] == "write"
+    assert deploy_job["permissions"] == {"contents": "read"}
+    # GitHub rejects the secrets context in `if`, so one step records whether
+    # the embedding key is set. That value is not on the crawl or pip steps.
+    # The Railway token is absent entirely: this job can edit the release.
+    assert "env" not in publish_job
+    for step in steps:
+        env = step.get("env") or {}
+        assert "RAILWAY_TOKEN" not in env
+        assert "OPENAI_BASE_URL" not in env
+        assert "UMBRA_SCENE_EMBED_MODEL" not in env
+        if step.get("id") != "embed-key":
+            assert "OPENAI_API_KEY" not in env
+    embed_key = steps[position["embed-key"]]
+    assert embed_key["env"]["OPENAI_API_KEY"] == "${{ secrets.OPENAI_API_KEY }}"
+    assert "pip install" not in embed_key["run"]
+    assert "umbra " not in embed_key["run"]
+    assert "RAILWAY_TOKEN" not in yaml.dump(publish_job)
+    for step in embed_job["steps"]:
+        assert "RAILWAY_TOKEN" not in (step.get("env") or {})
+    embed_env = yaml.dump(embed_job)
+    assert "OPENAI_API_KEY" in embed_env
+    assert "RAILWAY_TOKEN" not in embed_env
+    assert "OPENAI_API_KEY" not in yaml.dump(deploy_job)
 
 
 THUMBS_STEP = "Publish the thumbnail sidecar"
@@ -244,6 +284,67 @@ VERIFY_STEP = "Verify the thumbnail release assets"
 CONFIRM_STEP = "Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)"
 COVERAGE_STEP = "Coverage gate (99% of acquisitions with a sidecar)"
 MCP_SMOKE_STEP = "Confirm the hosted MCP lists the stable tools"
+
+
+_ACTION_PIN = re.compile(
+    r"^(\s*)-\s+uses:\s+(\S+)@([0-9a-f]{40})\s+#\s+(v\d+\.\d+\.\d+)\s*$"
+    r"|^\s*uses:\s+(\S+)@([0-9a-f]{40})\s+#\s+(v\d+\.\d+\.\d+)\s*$"
+)
+
+
+def test_third_party_actions_are_pinned_to_commits():
+    """Every ``uses:`` is a full commit SHA with the release tag in a comment.
+
+    A moving tag (``@v7``, ``@release/v1``) can be repointed. Dependabot updates
+    the SHA from the ``# vX.Y.Z`` comment, so the comment has to stay.
+    """
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or "uses:" not in line:
+                continue
+            if _ACTION_PIN.match(line) is None:
+                pytest.fail(f"{path.name}:{lineno} is not a SHA pin with a version comment: {line}")
+
+
+def test_workflows_without_a_token_read_the_repo_only():
+    """ci, docker, and docs declare contents: read at the top level."""
+    for name in ("ci.yml", "docker.yml", "docs.yml"):
+        document = yaml.safe_load((WORKFLOW_DIR / name).read_text(encoding="utf-8"))
+        assert document["permissions"] == {"contents": "read"}, name
+
+
+def test_docs_showcase_keys_stay_on_the_narrate_step():
+    """Index and basemap download run with no model keys."""
+    document = yaml.safe_load((WORKFLOW_DIR / "docs.yml").read_text(encoding="utf-8"))
+    keyed = []
+    for step in document["jobs"]["build"]["steps"]:
+        env = step.get("env") or {}
+        secret_names = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
+        if any(name in env for name in secret_names):
+            keyed.append(step["name"])
+    assert keyed == ["Build catalog showcase"]
+    fetch = next(
+        step
+        for step in document["jobs"]["build"]["steps"]
+        if step.get("name") == "Fetch the catalog index and basemap"
+    )
+    assert "env" not in fetch
+    assert "umbra index fetch" in fetch["run"]
+    assert "umbra tiles --fetch" in fetch["run"]
+
+
+def test_mcp_publisher_is_a_fixed_checksummed_release():
+    text = (WORKFLOW_DIR / "release.yml").read_text(encoding="utf-8")
+    assert "releases/latest" not in text
+    assert 'version="1.8.6"' in text
+    assert "1fbe93fc0783c2394d8012c8d6e50a59e98cb2cc2d216264cc69f405d0e21340" in text
+    assert "sha256sum -c -" in text
+    assert "registry_${version}_checksums.txt" in text
+    # The tag/version check that gates PyPI upload is unchanged in spirit:
+    # the built version still has to equal the release tag.
+    assert 'tag="${GITHUB_REF_NAME#v}"' in text
+    assert '"$pkg_version" != "$tag"' in text
 
 
 def test_workflows_pin_ubuntu_24_04():
