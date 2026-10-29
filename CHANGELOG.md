@@ -15,8 +15,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `pmtiles@3.2.1`; the `geotiff.js` digest is now always applied) and send a
   Content-Security-Policy for unpkg, the OpenStreetMap tile hosts, and the
   Umbra open-data bucket. `umbra serve` sends `X-Content-Type-Options: nosniff`
-  and `Referrer-Policy: no-referrer` on every response. A `stac_href` that is
-  not http(s) is not turned into a link.
+  and `Referrer-Policy: strict-origin-when-cross-origin` on every response
+  (OpenStreetMap refuses a tile request that sends no Referer). A `stac_href`
+  that is not http(s) is not turned into a link.
 
 ### Changed
 - **Citation metadata uses the Zenodo concept DOI**

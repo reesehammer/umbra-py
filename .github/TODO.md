@@ -10,20 +10,6 @@ still open.
 
 ---
 
-## Folium map pages still load third-party CDNs without SRI
-
-- **Surfaced in:** the front-end SRI/CSP work (PR-G). The hand-written demo,
-  PMTiles, and scene viewers were in scope; Folium's own template was not.
-- **Code:** `src/umbra_py/viz/maps.py` (`folium.Map`, `swipe_map`) and
-  `POST /artifacts/swipe` in `src/umbra_py/serve.py`.
-
-Folium pulls Leaflet, jQuery, Bootstrap, and plugins from jsDelivr, cdnjs,
-and code.jquery.com, with no integrity attributes. `umbra map` and the swipe
-artifact serve that HTML. A Content-Security-Policy written for the unpkg
-pages would blank it, so those responses are exempt from the map-page policy.
-Smallest change: give Folium an SRI-tagged asset set (or a template override)
-and a CSP that lists the hosts that template actually loads.
-
 ## Site ranking counts both republished copies
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294

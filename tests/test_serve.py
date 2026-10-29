@@ -2002,7 +2002,7 @@ def test_swipe_endpoint_serves_html_from_its_own_cache(art_client, recorder):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert resp.headers["x-content-type-options"] == "nosniff"
-    assert resp.headers["referrer-policy"] == "no-referrer"
+    assert resp.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     # Folium's template loads a different CDN set; the map-page CSP would blank it.
     assert "content-security-policy" not in resp.headers
     assert resp.headers["x-umbra-cache"] == "miss"
@@ -3083,7 +3083,7 @@ def test_security_headers_on_json_and_docs(client):
     FastAPI's docs HTML loads jsDelivr, so it does not get the map-page CSP."""
     landing = client.get("/")
     assert landing.headers["x-content-type-options"] == "nosniff"
-    assert landing.headers["referrer-policy"] == "no-referrer"
+    assert landing.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "content-security-policy" not in landing.headers
 
     search = client.get("/search?limit=1")
@@ -3098,7 +3098,7 @@ def test_security_headers_on_json_and_docs(client):
     assert docs.status_code == 200
     assert docs.headers["content-type"].startswith("text/html")
     assert docs.headers["x-content-type-options"] == "nosniff"
-    assert docs.headers["referrer-policy"] == "no-referrer"
+    assert docs.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "content-security-policy" not in docs.headers
 
 
@@ -3124,7 +3124,7 @@ def test_security_headers_survive_a_rate_limit_response(index_path, tmp_path):
     blocked = limited.get("/search?limit=1")
     assert blocked.status_code == 429
     assert blocked.headers["x-content-type-options"] == "nosniff"
-    assert blocked.headers["referrer-policy"] == "no-referrer"
+    assert blocked.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "content-security-policy" not in blocked.headers
 
 

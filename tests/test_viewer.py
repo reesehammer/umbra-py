@@ -146,7 +146,7 @@ def test_make_viewer_server_serves_page_and_tile(tmp_path):
         with urllib.request.urlopen(url, timeout=5) as resp:
             assert resp.status == 200
             assert resp.headers["X-Content-Type-Options"] == "nosniff"
-            assert resp.headers["Referrer-Policy"] == "no-referrer"
+            assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
             assert "Content-Security-Policy" in resp.headers
             assert "https://unpkg.com" in resp.headers["Content-Security-Policy"]
             page = resp.read().decode()

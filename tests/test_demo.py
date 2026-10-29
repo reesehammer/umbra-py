@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import unescape
 
 from umbra_py import demo
 from umbra_py.models import UmbraItem
@@ -278,7 +279,9 @@ def test_build_demo_pins_cdn_versions():
 def _csp(html: str) -> str:
     match = re.search(r'http-equiv="Content-Security-Policy" content="([^"]*)"', html)
     assert match, "page has no Content-Security-Policy meta tag"
-    return match.group(1)
+    # The attribute is HTML-escaped (quotes become entities). The browser
+    # decodes them before parsing the policy; compare the decoded text.
+    return unescape(match.group(1))
 
 
 def _assert_stac_href_is_gated(html: str) -> None:
@@ -304,7 +307,7 @@ def test_cdn_tags_carry_sri_and_crossorigin(sample_item_dict):
         assert re.fullmatch(r"sha384-[A-Za-z0-9+/]+=*", sri), sri
         assert url in html and sri in html
     assert html.count('crossorigin="anonymous"') >= len(pinned)
-    assert 'name="referrer" content="no-referrer"' in html
+    assert 'name="referrer" content="strict-origin-when-cross-origin"' in html
 
 
 def test_pmtiles_demo_pins_maplibre_and_pmtiles(sample_item_dict):
@@ -340,6 +343,55 @@ def test_page_csp_names_cdn_tiles_bucket_and_server(sample_item_dict):
 
     hostile = demo.build_demo([item], server_url="javascript:alert(1)")
     assert "javascript:" not in _csp(hostile)
+
+
+def test_referrer_policy_sends_an_origin_so_osm_tiles_load(sample_item_dict):
+    """OpenStreetMap's tile servers answer a request with no Referer with an
+    "Access blocked" placeholder (``x-blocked: No referer sent. Access denied.``).
+
+    ``strict-origin-when-cross-origin`` still sends the origin on cross-origin
+    requests, so the basemap loads, and it keeps the path and a ``file://`` URL
+    off those requests. ``no-referrer`` blanks the tiles on the showcase, the
+    demo, and ``umbra view``.
+    """
+    assert demo.REFERRER_POLICY == "strict-origin-when-cross-origin"
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    assert 'name="referrer" content="strict-origin-when-cross-origin"' in html
+
+
+def test_security_meta_escapes_csp_quotes():
+    """A quote in the policy text must not break out of the meta attribute.
+    The browser decodes the entities before it parses the CSP."""
+    meta = demo._security_meta("""default-src 'none'; img-src "evil\"""")
+    assert "&#x27;none&#x27;" in meta
+    assert "&quot;evil&quot;" in meta
+    csp_tag = meta.split("\n", 1)[1]
+    assert csp_tag.count('content="') == 1
+    assert csp_tag.endswith('"/>')
+
+
+def test_csp_rejects_an_origin_whose_netloc_is_not_a_plain_host(sample_item_dict):
+    """Userinfo or CSP punctuation in the netloc must not be copied into the
+    policy. A normal host[:port] still is."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    injected = demo.build_demo(
+        [item],
+        server_url="https://evil.example;script-src https://evil.example/cog.tif",
+    )
+    injected_csp = _csp(injected)
+    assert "evil.example" not in injected_csp
+    assert injected_csp.count("script-src") == 1
+
+    creds = demo.build_demo([item], server_url="https://user:pass@tiles.example/x")
+    assert "tiles.example" not in _csp(creds)
+    assert "user:pass" not in _csp(creds)
+
+    odd_port = demo.build_demo([item], server_url="http://tiles.example:99999/")
+    assert "tiles.example" not in _csp(odd_port)
+
+    ok = demo.build_demo([item], server_url="http://127.0.0.1:8000/api")
+    assert "http://127.0.0.1:8000" in _csp(ok)
 
 
 def test_pmtiles_csp_allows_the_worker_and_a_github_release_redirect():

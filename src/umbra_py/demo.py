@@ -125,10 +125,11 @@ offline-testable. (Contrast ``umbra gallery``, which streams thumbnails through
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 from collections.abc import Iterable
-from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -163,10 +164,13 @@ MARKERCLUSTER_CSS_DEFAULT_SRI = (
 MARKERCLUSTER_JS_SRI = "sha384-eXVCORTRlv4FUUgS/xmOyr66XBVraen8ATNLMESp92FKXLAMiKkerixTiBvXriZr"
 
 #: Referrer policy on generated pages (``<meta name="referrer">``) and on
-#: ``umbra serve`` responses. ``no-referrer`` keeps the page URL — including a
-#: ``file://`` path or a search — off requests to the CDN, the tile host, and
-#: any STAC link the reader opens.
-REFERRER_POLICY = "no-referrer"
+#: ``umbra serve`` and scene-viewer responses. OpenStreetMap's tile servers
+#: answer a request that sends no Referer with an "Access blocked" placeholder
+#: (response header ``x-blocked: No referer sent. Access denied.``), which
+#: blanks the basemap. ``strict-origin-when-cross-origin`` still sends the
+#: origin on cross-origin requests, and keeps the path and a ``file://`` URL
+#: off them.
+REFERRER_POLICY = "strict-origin-when-cross-origin"
 
 # Hosts a generated map page actually requests. Scripts, styles, and Leaflet's
 # marker images come from unpkg (the images are CSS-relative to the stylesheet).
@@ -208,12 +212,38 @@ def _is_http_url(url: Any) -> bool:
     return isinstance(url, str) and url.startswith(("http://", "https://"))
 
 
+# A CSP source is ``scheme://host[:port]``. Userinfo, whitespace, or punctuation
+# in the netloc (``user:pass@host``, ``host;script-src …``) would either name
+# the wrong host or inject another directive. IPv6 is the bracket form.
+_PLAIN_NETLOC = re.compile(
+    r"\A(?:"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+    r"|\[[0-9A-Fa-f:.]+\]"
+    r")(?::[0-9]{1,5})?\Z"
+)
+
+
+def _is_plain_netloc(netloc: str) -> bool:
+    """True for ``host`` or ``host:port`` (port 0–65535), including bracketed IPv6."""
+    if _PLAIN_NETLOC.fullmatch(netloc) is None:
+        return False
+    if netloc.startswith("["):
+        rest = netloc[netloc.find("]") + 1 :]
+        port = rest[1:] if rest.startswith(":") else ""
+    elif ":" in netloc:
+        port = netloc.rsplit(":", 1)[1]
+    else:
+        port = ""
+    return port == "" or int(port) <= 65535
+
+
 def _http_origin(url: str | None) -> str | None:
-    """``scheme://host[:port]`` for an http(s) URL, else ``None``."""
+    """``scheme://host[:port]`` for an http(s) URL with a plain netloc, else ``None``."""
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return None
     parts = urlsplit(url)
-    if not parts.netloc:
+    if not _is_plain_netloc(parts.netloc):
         return None
     return f"{parts.scheme}://{parts.netloc}"
 
@@ -255,7 +285,8 @@ def _content_security_policy(
 
     ``extra_origins`` are absolute URLs the page was built to call (an
     ``umbra serve`` base, an absolute ``.pmtiles`` archive). Only http(s)
-    origins are added, so a ``javascript:`` value cannot widen the policy.
+    origins with a plain ``host[:port]`` netloc are added, so a ``javascript:``
+    value or a netloc carrying userinfo or CSP punctuation cannot widen it.
     ``workers`` allows MapLibre's ``blob:`` worker. ``bucket`` allows COG
     range reads against the public Umbra bucket.
     """
@@ -283,11 +314,16 @@ def _content_security_policy(
 
 
 def _security_meta(csp: str) -> str:
-    """Referrer policy and CSP for a static page (no response headers required)."""
+    """Referrer policy and CSP for a static page (no response headers required).
+
+    The policy is HTML-escaped into the attribute. The browser decodes the
+    entities before it parses the CSP, so ``'self'`` still means ``'self'``.
+    """
+    safe = html.escape(csp, quote=True)
     return (
         f'<meta name="referrer" content="{REFERRER_POLICY}"/>\n'
         '<meta http-equiv="Content-Security-Policy" '
-        f'content="{csp}"/>'
+        f'content="{safe}"/>'
     )
 
 
@@ -478,7 +514,7 @@ def build_demo(
 
     csp = _content_security_policy(extra_origins=[server_url], bucket=bool(lazy))
     return _PAGE_TEMPLATE.format(
-        title=escape(title),
+        title=html.escape(title),
         security_meta=_security_meta(csp),
         head_links=_HEAD_LINKS,
         script_links=_SCRIPT_LINKS,
@@ -566,7 +602,7 @@ def _build_pmtiles_demo(
         bucket=bool(lazy_imagery),
     )
     return _PAGE_TEMPLATE.format(
-        title=escape(title),
+        title=html.escape(title),
         security_meta=_security_meta(csp),
         head_links=_cdn_stylesheet(MAPLIBRE_CSS, MAPLIBRE_CSS_SRI),
         script_links="\n".join(
