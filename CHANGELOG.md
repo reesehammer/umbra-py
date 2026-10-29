@@ -14,8 +14,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
 - **Hosted `download_asset(confirm=true)` returns a link plan** instead of
-  an error: a direct HTTPS URL plus fetch commands. The hosted server never
-  transfers files.
+  an error: a direct public URL (HTTPS for Umbra's bucket) plus fetch
+  commands. The hosted server never transfers files. A 404 or 410 on the
+  size check raises, and `bytes` is null when the size can't be read.
 
 ## [0.1.4] — 2026-10-26
 

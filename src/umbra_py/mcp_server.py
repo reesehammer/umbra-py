@@ -255,12 +255,16 @@ def _public_bucket_https(href: str) -> bool:
     """
     if not isinstance(href, str) or not href:
         return False
-    parts = urlsplit(href)
+    try:
+        parts = urlsplit(href)
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return False
     if parts.scheme != "https" or parts.username or parts.password:
         return False
-    if parts.port not in (None, 443):
+    if port not in (None, 443):
         return False
-    host = parts.hostname
     if not host:
         return False
     host = host.lower().rstrip(".")
@@ -300,16 +304,22 @@ def _head_content_length(href: str) -> int | None:
 
 
 def _plain_basename(name: str) -> str:
-    """Last path segment, or ``""`` when that segment is empty or ``..``.
+    """Last path segment, or ``""`` when it is not a safe filename.
 
-    Separators are ``/`` and ``\\``. A STAC ``umbra-py:filename`` is not a
-    path the host chose, so ``../../.bashrc`` becomes ``.bashrc``.
+    Separators are ``/`` and ``\\``. A leading dot, a control character
+    (below 0x20, or DEL), or more than 255 bytes is rejected so the caller
+    can fall back to the href basename.
     """
-    cleaned = name.replace("\\", "/").replace("\x00", "").strip()
+    cleaned = name.replace("\\", "/").strip()
     if not cleaned:
         return ""
     base = cleaned.rsplit("/", 1)[-1].strip()
-    if base in {"", ".", ".."}:
+    if (
+        not base
+        or base.startswith(".")
+        or len(base.encode("utf-8")) > 255
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in base)
+    ):
         return ""
     return base
 
@@ -386,10 +396,7 @@ def _public_host_confirmed_download(
     if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
         item_arg = item.href
     stac_size = _stac_asset_size(body)
-    if stac_size is not None or not _public_bucket_https(href):
-        size = stac_size
-    else:
-        size = _head_content_length(href)
+    size = stac_size if stac_size is not None else _head_content_length(href)
     return _link_plan(
         asset=asset,
         filename=filename,
@@ -415,12 +422,11 @@ def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(fn)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
-            result = fn(*args, **kwargs)
+            return fn(*args, **kwargs)
         except ToolError:
             raise
         except (ValueError, UmbraError) as exc:
             raise ToolError(str(exc)) from exc
-        return result
 
     return wrapped
 
@@ -1594,8 +1600,7 @@ def download_asset(
     raises. Any other HEAD failure leaves ``bytes`` null and still returns
     the plan. The hosted server never transfers the file. A local
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
-    disk. ``confirm=False`` is unchanged. LangChain and LlamaIndex call this
-    same function.
+    disk. ``confirm=False`` is unchanged.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem

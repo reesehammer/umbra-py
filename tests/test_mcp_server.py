@@ -1513,7 +1513,7 @@ def test_public_host_head_content_length_is_the_size(sample_item_dict, monkeypat
 
 
 @responses.activate
-def test_public_host_unknown_metadata_size_is_a_link(sample_item_dict, monkeypatch):
+def test_public_host_missing_content_length_leaves_bytes_null(sample_item_dict, monkeypatch):
     """A 200 HEAD with no Content-Length leaves bytes null and does not GET."""
     href = _register_https_metadata(sample_item_dict)
     responses.add(responses.HEAD, href, status=200)
@@ -1526,7 +1526,7 @@ def test_public_host_unknown_metadata_size_is_a_link(sample_item_dict, monkeypat
 
 @pytest.mark.parametrize("asset", ["GEC", "SICD", "SIDD", "CPHD"])
 @responses.activate
-def test_public_host_large_products_are_always_links(sample_item_dict, monkeypatch, asset):
+def test_public_host_product_size_comes_from_head(sample_item_dict, monkeypatch, asset):
     _public_item(sample_item_dict)
     href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href(asset)
     responses.add(responses.HEAD, href, headers={"Content-Length": "10"}, status=200)
@@ -1698,9 +1698,10 @@ def test_public_host_filename_is_a_basename(sample_item_dict, monkeypatch):
     ms.configure(cog_streaming=False)
 
     out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
-    assert out["filename"] == ".bashrc"
+    assert out["filename"] == href.rstrip("/").split("/")[-1]
+    assert ".bashrc" not in out["filename"]
     assert "../" not in out["how_to_fetch"]["curl"]
-    assert ".bashrc" in out["how_to_fetch"]["curl"]
+    assert ".bashrc" not in out["how_to_fetch"]["curl"]
 
 
 @responses.activate
@@ -1733,6 +1734,32 @@ def test_public_bucket_https_matches_emitted_hosts():
     assert not ms._public_bucket_https("https://s3.amazonaws.com/umbra-open-data-catalog/a.tif")
 
 
+@pytest.mark.parametrize(
+    ("href", "allowed"),
+    [
+        ("https://umbra-open-data-catalog.s3.amazonaws.com.evil.com/x", False),
+        ("https://umbra-open-data-catalog.s3.amazonaws.com:8443/x", False),
+        ("https://umbra-open-data-catalog.s3.amazonaws.com\\@evil.com/x", False),
+        (
+            "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/%2e%2e/other/a",
+            False,
+        ),
+        (
+            "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog%2f..%2fother/a",
+            False,
+        ),
+        ("https://umbra-open-data-catalog.s3.amazonaws%2ecom/x", False),
+        ("https://umbra-open-data-catalog.s3.amazonaws.com:abc/x", False),
+        ("https://[::1/", False),
+        ("https://umbra-open-data-catalog.s3.amazonaws.com:443/x", True),
+        ("https://UMBRA-OPEN-DATA-CATALOG.S3.AMAZONAWS.COM/sar-data/a.tif", True),
+        ("https://umbra-open-data-catalog.s3.amazonaws.com./sar-data/a.tif", True),
+    ],
+)
+def test_public_bucket_https_rejects_lookalikes(href, allowed):
+    assert ms._public_bucket_https(href) is allowed
+
+
 @responses.activate
 def test_public_host_missing_href_is_still_an_error(sample_item_dict, monkeypatch):
     item = copy.deepcopy(sample_item_dict)
@@ -1745,7 +1772,7 @@ def test_public_host_missing_href_is_still_an_error(sample_item_dict, monkeypatc
 
 
 @responses.activate
-def test_public_host_other_small_kinds_stay_links(sample_item_dict, monkeypatch):
+def test_public_host_small_file_reports_its_head_size(sample_item_dict, monkeypatch):
     """A small non-product file is still a link. The host does not GET it."""
     href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/notes.txt"
     item = copy.deepcopy(sample_item_dict)

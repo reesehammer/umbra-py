@@ -212,7 +212,8 @@ def llms_txt() -> str:
         "a `umbra://context` resource and `monitor-site` / `watch-site` / "
         "`find-similar-scenes` / `survey-region` prompts. On a public host "
         "(`umbra serve --public`), `download_asset(confirm=true)` returns a "
-        "direct HTTPS link plan instead of transferring the file. A local "
+        "direct public URL (HTTPS for Umbra's bucket) instead of transferring "
+        "the file. A local "
         "`uvx --from 'umbra-py[mcp]' umbra-mcp` server downloads to disk."
     )
     lines.append(
@@ -356,8 +357,8 @@ def llms_full_txt() -> str:
         "the rendered PNG as an MCP image block. Also serves a `umbra://context` "
         "resource and the `monitor-site` / `watch-site` / `find-similar-scenes` / "
         "`survey-region` prompts. On a public host (`umbra serve --public`), "
-        "`download_asset(confirm=true)` returns a direct HTTPS link plan "
-        "instead of transferring the file. A local "
+        "`download_asset(confirm=true)` returns a direct public URL (HTTPS for "
+        "Umbra's bucket) instead of transferring the file. A local "
         "`uvx --from 'umbra-py[mcp]' umbra-mcp` server downloads to disk."
     )
     lines.append(
