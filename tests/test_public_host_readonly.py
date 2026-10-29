@@ -184,9 +184,10 @@ def test_public_watch_caps_the_name(sample_item_dict, public_mode, monkeypatch, 
     huge = "n" * 500
 
     out = ms.watch_site(local=True, name=huge)
+    assert out["watch"] == huge[: ms._PUBLIC_WATCH_NAME_MAX]
     assert len(out["watch"]) == ms._PUBLIC_WATCH_NAME_MAX
     assert huge not in json.dumps(out)
-    assert "shortened" in out["note"]
+    assert "does not store" in out["note"]
     assert _watch_rows(path) == 0
 
     same = ms.watch_site(local=True, name=huge)
@@ -248,13 +249,6 @@ def test_public_errors_omit_filesystem_paths(public_mode, monkeypatch, tmp_path)
     with pytest.raises(ValueError) as named:
         ms.get_item("2025-05-17-17-43-46_UMBRA-08_GEC.tif")
     assert str(tmp_path) not in str(named.value)
-
-    url = "https://umbra-open-data-catalog.s3.amazonaws.com/sar-data/tasks/foo.tif"
-    redacted = ms._redact_internal_paths(f"No local index at /data/umbra-py/catalog.db. See {url}.")
-    assert url in redacted
-    assert "/data/umbra-py" not in redacted
-    file_uri = ms._redact_internal_paths("open file:/data/umbra-py/catalog.db?mode=ro")
-    assert "/data/" not in file_uri
 
 
 def test_local_errors_still_name_the_index(monkeypatch, tmp_path):

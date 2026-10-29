@@ -3108,12 +3108,7 @@ def build_app(
             try:
                 return open_source(index_path, live=live, readonly=public)
             except FileNotFoundError as exc:
-                detail = str(exc)
-                if public:
-                    from .mcp_server import _redact_internal_paths
-
-                    detail = _redact_internal_paths(detail)
-                raise HTTPException(status_code=503, detail=detail) from exc
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         except BaseException:
             _slots.release()
             raise
@@ -3378,12 +3373,7 @@ def build_app(
             return _health_deadline()
 
     def _unhealthy(exc: Exception) -> Any:
-        detail = f"{type(exc).__name__}: {exc}"
-        if public:
-            from .mcp_server import _redact_internal_paths
-
-            detail = _redact_internal_paths(detail)
-        doc = health_document(backend="index", ready=False, error=detail)
+        doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
         return JSONResponse(status_code=503, content=doc)
 
     @app.get("/collections", tags=["STAC"])

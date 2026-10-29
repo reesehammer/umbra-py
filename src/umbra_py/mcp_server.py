@@ -42,11 +42,9 @@ extra either. ``server.json`` publishes the stdio command to the MCP registry.
 from __future__ import annotations
 
 import functools
-import hashlib
 import io
 import json
 import os
-import re
 import shlex
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
@@ -177,25 +175,6 @@ def _public_host() -> bool:
     ``umbra serve`` leave streaming on, and those keep the writable index.
     """
     return not _cog_streaming_allowed()
-
-
-# Absolute POSIX paths (at least a directory and a name). The lookbehind
-# skips the path half of an ``https://host/key`` URL, which is preceded by
-# a host character. A trailing period stays in the sentence.
-_FS_PATH_RE = re.compile(r"(?<![:\w/])/(?:[\w.@+\-]+/)+[\w.@+\-]+")
-_FILE_URI_RE = re.compile(r"file:(?://)?(?:/[^\s'\"?]+)+")
-
-
-def _redact_internal_paths(text: str) -> str:
-    """Drop filesystem paths from a string the public host would return.
-
-    Local servers keep the path so a person can find the file. HTTP URLs are
-    left alone: an asset href is not the server's disk.
-    """
-    if not _public_host():
-        return text
-    text = _FS_PATH_RE.sub("[redacted]", text)
-    return _FILE_URI_RE.sub("[redacted]", text)
 
 
 def _with_optional_path(prefix: str, path: os.PathLike[str] | str, suffix: str) -> str:
@@ -497,7 +476,7 @@ def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
         except ToolError:
             raise
         except (ValueError, UmbraError) as exc:
-            raise ToolError(_redact_internal_paths(str(exc))) from exc
+            raise ToolError(str(exc)) from exc
 
     return wrapped
 
@@ -1156,7 +1135,7 @@ def get_item(url: str) -> dict[str, Any]:
         try:
             return resolve_asset_name(url, readonly=_public_host()).to_llm_context()
         except CatalogError as exc:
-            raise ValueError(_redact_internal_paths(asset_name_error_text(exc))) from exc
+            raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
     if token and "://" not in url:
         item = UmbraCatalog(token=token).get_item(url)
@@ -1720,7 +1699,7 @@ def download_asset(
         try:
             item = resolve_asset_name(url, readonly=_public_host())
         except CatalogError as exc:
-            raise ValueError(_redact_internal_paths(asset_name_error_text(exc))) from exc
+            raise ValueError(asset_name_error_text(exc)) from exc
     else:
         item = _fetch_item(url)
     href = item.asset_href(asset)
@@ -1784,13 +1763,9 @@ class _StatelessWatchStore:
         return None
 
 
-def _bounded_public_watch_name(name: str) -> tuple[str, bool]:
-    """Cap ``name`` at :data:`_PUBLIC_WATCH_NAME_MAX`, keeping a short hash of the original."""
-    if len(name) <= _PUBLIC_WATCH_NAME_MAX:
-        return name, False
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
-    keep = _PUBLIC_WATCH_NAME_MAX - len(digest) - 1
-    return f"{name[:keep]}-{digest}", True
+def _bounded_public_watch_name(name: str) -> str:
+    """Cap a public watch name at :data:`_PUBLIC_WATCH_NAME_MAX` characters."""
+    return name[:_PUBLIC_WATCH_NAME_MAX]
 
 
 def watch_site(
@@ -1871,9 +1846,8 @@ def watch_site(
         end=end,
         fuzzy=fuzzy,
     )
-    shortened = False
     if public:
-        watch_name, shortened = _bounded_public_watch_name(watch_name)
+        watch_name = _bounded_public_watch_name(watch_name)
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
@@ -1899,10 +1873,7 @@ def watch_site(
 
     if public:
         payload["new_total"] = new_total
-        note = _PUBLIC_WATCH_NOTE
-        if shortened:
-            note += f" The watch name was shortened to {_PUBLIC_WATCH_NAME_MAX} characters."
-        payload["note"] = note
+        payload["note"] = _PUBLIC_WATCH_NOTE
     payload["source"] = _source_label(is_index, bool(token))
     payload["resolved_place"] = resolved_place
     payload["resolved_bbox"] = list(resolved_bbox) if resolved_bbox else None

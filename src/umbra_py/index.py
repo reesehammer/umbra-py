@@ -1604,29 +1604,18 @@ class CatalogIndex:
         - ``busy_timeout`` (always applied): a connection that finds the
           database locked waits up to :data:`_BUSY_TIMEOUT_MS` for the lock to
           clear instead of raising ``database is locked`` at once.
-        - ``journal_mode=WAL`` (best-effort, writable opens only): under
-          write-ahead logging, readers never block on a writer and a single
-          writer never blocks readers, so the read-heavy shared-snapshot
-          workload no longer contends with the occasional write. WAL is a
-          persistent property of the file, so setting it once carries into
-          every later open. It needs a writable database and directory -- which
-          a writable open already requires, since it ensures the schema (a
-          write) on open -- so it never tightens the access that open already
-          assumed. Should it be refused anyway (e.g. a read-only mount), the
-          attempt is swallowed and the connection stays in its existing journal
-          mode; ``busy_timeout`` still applies. A ``readonly=True`` connection
-          skips the pragma and sets ``query_only`` instead, so a serving reader
-          cannot create ``-wal`` files.
+        - ``journal_mode=WAL`` (best-effort): under write-ahead logging, readers
+          never block on a writer and a single writer never blocks readers, so
+          the read-heavy shared-snapshot workload no longer contends with the
+          occasional write. WAL is a persistent property of the file, so setting
+          it once carries into every later open. It needs a writable database
+          and directory -- which this class already requires, since it ensures
+          the schema (a write) on every open -- so it never tightens the access
+          the index already assumed. Should it be refused anyway (e.g. a
+          read-only mount), the attempt is swallowed and the connection stays in
+          its existing journal mode; ``busy_timeout`` still applies.
         """
         self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-        if self.readonly:
-            # ``mode=ro`` already rejects writes. ``query_only`` makes a write
-            # through this connection fail even if a later statement would
-            # otherwise be allowed (for example a schema probe that mutates).
-            # Do not set ``journal_mode``: that pragma can create ``-wal``
-            # files, and a serving reader must not touch the snapshot.
-            self._conn.execute("PRAGMA query_only = ON")
-            return
         try:
             self._conn.execute("PRAGMA journal_mode = WAL")
         except sqlite3.OperationalError:
@@ -1885,10 +1874,7 @@ class CatalogIndex:
         self._conn.commit()
 
     def close(self) -> None:
-        # A ``mode=ro`` connection has nothing to commit. ``COMMIT`` on
-        # ``query_only`` is an error, so the serving path skips it.
-        if not self.readonly:
-            self._conn.commit()
+        self._conn.commit()
         self._conn.close()
 
     def __enter__(self) -> CatalogIndex:
