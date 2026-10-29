@@ -2,14 +2,15 @@
 
 A step timestamp such as ``#11 3.429 Downloading fastapi`` is not a rate
 limit. After the ECR attempts are spent, the job passes
-``PYTHON_IMAGE=mirror.gcr.io/library/python:3.12-slim``. Dockerfiles are
-unchanged; Railway builds ``deploy/Dockerfile.mcp``.
+``PYTHON_IMAGE=mirror.gcr.io/library/python:3.12-slim@<digest>`` using the
+digest pinned in the Dockerfile. Railway builds ``deploy/Dockerfile.mcp``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import textwrap
@@ -20,8 +21,17 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "docker-build-ci.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker.yml"
-MIRROR_PYTHON = "mirror.gcr.io/library/python:3.12-slim"
 RATE_LIMIT = "429 Too Many Requests - toomanyrequests: Data limit exceeded"
+
+
+def _mirror_python() -> str:
+    """The CI fallback image: same digest as ``ARG PYTHON_IMAGE``."""
+    text = (REPO_ROOT / "deploy" / "Dockerfile").read_text(encoding="utf-8")
+    line = next(item for item in text.splitlines() if item.startswith("ARG PYTHON_IMAGE="))
+    digest = line.split("@", 1)[1].strip()
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    return f"mirror.gcr.io/library/python:3.12-slim@{digest}"
+
 
 FAKE_DOCKER = """\
 #!/usr/bin/env python3
@@ -101,7 +111,7 @@ def test_timestamp_and_digest_are_not_a_rate_limit(tmp_path: Path):
     assert result.returncode == 2
     assert len(_calls(tmp_path)) == 1
     assert "3.429 Downloading fastapi" in result.stdout
-    assert MIRROR_PYTHON not in result.stderr
+    assert _mirror_python() not in result.stderr
     assert "rate-limited" not in result.stderr
 
 
@@ -111,8 +121,9 @@ def test_exhausted_ecr_retries_fall_back_to_the_mirror(tmp_path: Path):
     calls = _calls(tmp_path)
     assert len(calls) == 6
     assert all("PYTHON_IMAGE" not in " ".join(argv) for argv in calls[:5])
-    assert f"PYTHON_IMAGE={MIRROR_PYTHON}" in " ".join(calls[5])
-    assert f"building from {MIRROR_PYTHON}" in result.stderr
+    mirror = _mirror_python()
+    assert f"PYTHON_IMAGE={mirror}" in " ".join(calls[5])
+    assert f"building from {mirror}" in result.stderr
 
 
 def test_mirror_error_keeps_its_exit_code(tmp_path: Path):
@@ -141,7 +152,46 @@ def test_workflow_is_plain_docker_build_with_no_cache():
     assert "cache-from" not in raw
     assert "export-actions-env" not in raw
     script = SCRIPT.read_text(encoding="utf-8")
-    assert "docker build -f deploy/Dockerfile" in script
+    assert "UMBRA_DOCKERFILE:-deploy/Dockerfile" in script
+    assert "docker build -f" in script
     assert "cache-from" not in script
     assert "toomanyrequests|429 Too Many Requests" in script
-    assert "Dockerfiles unchanged; Railway builds deploy/Dockerfile.mcp" in script
+    assert "Railway builds deploy/Dockerfile.mcp" in script
+    assert "mirror.gcr.io/library/python:3.12-slim@" in script
+
+
+def test_hosted_job_scans_fixable_library_critical_only():
+    """Report OS and library findings. Fail only on a fixable library CRITICAL."""
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    document = yaml.safe_load(raw)
+    steps = document["jobs"]["hosted"]["steps"]
+    build = next(step for step in steps if step.get("name") == "Build hosted image")
+    assert "UMBRA_DOCKERFILE=deploy/Dockerfile.mcp" in build["run"]
+    assert "UMBRA_SKIP_EXTRAS_ARG=1" in build["run"]
+    assert "UMBRA_EXTRAS" not in build["run"]
+    check = next(step for step in steps if step.get("name") == "pip check inside the hosted image")
+    assert "pip check" in check["run"]
+    assert "--entrypoint python" in check["run"]
+    assert any(step.get("name") == "Hosted image serves /livez" for step in steps)
+    trivy = [step for step in steps if "trivy-action@" in step.get("uses", "")]
+    assert len(trivy) == 2
+    mirrors = ("mirror.gcr.io", "public.ecr.aws")
+    for step in trivy:
+        sha = step["uses"].split("@", 1)[1]
+        assert re.fullmatch(r"[0-9a-f]{40}", sha), step["uses"]
+        assert step["with"]["image-ref"] == "umbra-py:public"
+        repos = step["env"]["TRIVY_DB_REPOSITORY"]
+        assert all(mirror in repos for mirror in mirrors)
+        assert "ghcr.io" not in repos
+    report, gate = trivy
+    assert report["with"]["vuln-type"] == "os,library"
+    assert report["with"]["format"] == "table"
+    assert str(report["with"]["exit-code"]) == "0"
+    assert "UNKNOWN" in report["with"]["severity"]
+    assert "CRITICAL" in report["with"]["severity"]
+    assert gate["with"]["vuln-type"] == "library"
+    assert str(gate["with"]["exit-code"]) == "1"
+    assert str(gate["with"]["ignore-unfixed"]).lower() == "true"
+    assert gate["with"]["severity"] == "CRITICAL"
+    assert "setup-buildx" not in raw
+    assert "cache-from" not in raw

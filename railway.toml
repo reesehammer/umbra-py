@@ -5,9 +5,10 @@
 # deploy/; dockerfilePath is repo-root-relative.
 # Railway's startCommand replaces the image ENTRYPOINT in exec form, so the
 # flag has to be handed to the entrypoint -- a bare `serve` is not on PATH
-# as a binary. deploy/Dockerfile.mcp hardcodes pip install ".[mcp,viz,serve]"; do
-# not set a UMBRA_EXTRAS build-arg in the Railway UI (it used to override
-# the image to MCP-only and crash `umbra serve --public`).
+# as a binary. deploy/Dockerfile.mcp installs .[mcp,viz,serve] from the hashed
+# lock in deploy/requirements.txt. Do not set a UMBRA_EXTRAS build-arg in the
+# Railway UI (an older image took that arg and could ship without FastAPI,
+# and `umbra serve --public` then crashed).
 #
 # One URL, two front doors:
 #   https://<service>.up.railway.app/        STAC API (`/search`, `/docs`)
