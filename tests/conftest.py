@@ -58,9 +58,6 @@ def _clear_public_host_env(monkeypatch):
     """Public-host knobs must not leak from the developer environment into tests."""
     for name in (
         "UMBRA_PUBLIC_BASE_URL",
-        "RAILWAY_PUBLIC_DOMAIN",
-        "UMBRA_CLIENT_IP_HEADER",
         "UMBRA_TRUSTED_PROXY_HOPS",
-        "UMBRA_CLIENT_CONCURRENCY",
     ):
         monkeypatch.delenv(name, raising=False)

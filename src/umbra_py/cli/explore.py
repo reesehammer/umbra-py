@@ -119,9 +119,8 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     "--proxy-headers",
     is_flag=True,
     help="Trust X-Forwarded-For from the reverse proxy (uvicorn, leftmost hop). "
-    "--public does not use this: it reads X-Real-IP (UMBRA_CLIENT_IP_HEADER) "
-    "and, if that header is absent, the rightmost UMBRA_TRUSTED_PROXY_HOPS "
-    "of X-Forwarded-For.",
+    "--public does not use this: it reads X-Real-IP and, if that header is "
+    "absent, the rightmost UMBRA_TRUSTED_PROXY_HOPS of X-Forwarded-For.",
 )
 @click.option(
     "--stack-lazy",

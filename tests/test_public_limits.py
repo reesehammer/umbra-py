@@ -61,21 +61,6 @@ def _client(app, **kwargs: object):
 # --------------------------------------------------------------------------
 
 
-def test_rate_limiter_evicts_the_least_recent_client():
-    clock = {"now": 0.0}
-    limiter = serve.RateLimiter(limit=1, window_s=60, max_clients=2, time_fn=lambda: clock["now"])
-    assert limiter.hit("a")[0] is True
-    assert limiter.hit("b")[0] is True
-    # ``a`` was seen again, so it is newer than ``b`` and must survive.
-    assert limiter.hit("a")[0] is False
-    assert limiter.hit("c")[0] is True
-    assert limiter.hit("a")[0] is False
-    # ``b`` was the one dropped, so it is a new client inside the old window.
-    assert limiter.hit("b")[0] is True
-    clock["now"] = 61.0
-    assert limiter.hit("a")[0] is True
-
-
 def test_forwarded_client_never_trusts_the_leftmost_hop():
     assert serve._forwarded_client("198.51.100.1, 203.0.113.9", 1) == "203.0.113.9"
     assert serve._forwarded_client("198.51.100.1, 203.0.113.9", 2) == "198.51.100.1"
@@ -86,8 +71,8 @@ def test_forwarded_client_never_trusts_the_leftmost_hop():
     assert serve._forwarded_client("not-an-ip", 1) is None
 
 
-def test_public_client_ip_prefers_x_real_ip_and_ignores_loopback_headers(monkeypatch):
-    monkeypatch.delenv("UMBRA_CLIENT_IP_HEADER", raising=False)
+def test_public_client_ip_prefers_x_real_ip_and_buckets_ipv6(monkeypatch):
+    monkeypatch.delenv("UMBRA_TRUSTED_PROXY_HOPS", raising=False)
     headers = {
         "x-real-ip": "203.0.113.9",
         "x-forwarded-for": "198.51.100.1, 203.0.113.50",
@@ -99,8 +84,14 @@ def test_public_client_ip_prefers_x_real_ip_and_ignores_loopback_headers(monkeyp
         serve.public_client_ip("10.0.0.8", {"x-forwarded-for": "1.1.1.1, 203.0.113.9"})
         == "203.0.113.9"
     )
-    monkeypatch.setenv("UMBRA_CLIENT_IP_HEADER", "none")
-    assert serve.public_client_ip("10.0.0.8", headers) == "10.0.0.8"
+    assert serve.public_client_ip("10.0.0.8", {"x-real-ip": "2001:db8:1:2::1"}) == (
+        "2001:db8:1:2::/64"
+    )
+    assert serve.public_client_ip("10.0.0.8", {"x-real-ip": "2001:db8:1:2::abcd"}) == (
+        "2001:db8:1:2::/64"
+    )
+    assert serve.public_client_ip("10.0.0.8", {"x-real-ip": "::ffff:203.0.113.9"}) == "203.0.113.9"
+    assert serve.public_client_ip("2001:db8:9:9::5", {}) == "2001:db8:9:9::/64"
 
 
 @pytestmark_public_app
@@ -150,6 +141,33 @@ def test_public_rate_limit_uses_the_rightmost_forwarded_hop(tmp_path):
             headers={"x-forwarded-for": "203.0.113.9, 203.0.113.10"},
         )
         assert fresh.status_code == 200
+
+
+@pytestmark_public_app
+def test_public_rate_limit_collapses_ipv6_to_a_64(tmp_path):
+    index_path = _index(tmp_path)
+    app = serve.build_app(index_path, public=True, rate_limit=2, cache_dir=tmp_path / "art")
+    with _client(app) as client:
+        assert (
+            client.get("/search?limit=1", headers={"x-real-ip": "2001:db8:1:2::1"}).status_code
+            == 200
+        )
+        assert (
+            client.get("/search?limit=1", headers={"x-real-ip": "2001:db8:1:2::abcd"}).status_code
+            == 200
+        )
+        blocked = client.get("/search?limit=1", headers={"x-real-ip": "2001:db8:1:2::ffff"})
+        assert blocked.status_code == 429
+        other = client.get("/search?limit=1", headers={"x-real-ip": "2001:db8:1:3::1"})
+        assert other.status_code == 200
+        v4 = client.get("/search?limit=1", headers={"x-real-ip": "203.0.113.9"})
+        assert v4.status_code == 200
+        assert (
+            client.get("/search?limit=1", headers={"x-real-ip": "203.0.113.9"}).status_code == 200
+        )
+        assert (
+            client.get("/search?limit=1", headers={"x-real-ip": "203.0.113.10"}).status_code == 200
+        )
 
 
 @pytestmark_public_app
@@ -242,15 +260,19 @@ def test_client_in_flight_is_per_client():
 
 @pytestmark_public_app
 @pytest.mark.skipif(not _HAS_HTTPX, reason="httpx")
-def test_public_client_concurrency_rejects_a_second_read(tmp_path, monkeypatch):
+def test_public_client_concurrency_rejects_a_third_read(tmp_path, monkeypatch):
     import httpx
 
-    monkeypatch.setenv("UMBRA_CLIENT_CONCURRENCY", "1")
     started = threading.Event()
     release = threading.Event()
+    lock = threading.Lock()
+    holding = {"n": 0}
 
     def block(source, **kwargs):
-        started.set()
+        with lock:
+            holding["n"] += 1
+            if holding["n"] >= 2:
+                started.set()
         assert release.wait(5)
         return [], False
 
@@ -261,22 +283,25 @@ def test_public_client_concurrency_rejects_a_second_read(tmp_path, monkeypatch):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             first = asyncio.create_task(client.get("/search", params={"limit": 1}))
+            second = asyncio.create_task(client.get("/search", params={"limit": 1}))
             for _ in range(50):
                 if started.is_set():
                     break
                 await asyncio.sleep(0.02)
             assert started.is_set()
-            second = await client.get("/search", params={"limit": 1})
+            third = await client.get("/search", params={"limit": 1})
             release.set()
             first_response = await first
-            third = await client.get("/search", params={"limit": 1})
-            return first_response, second, third
+            second_response = await second
+            fourth = await client.get("/search", params={"limit": 1})
+            return first_response, second_response, third, fourth
 
-    first, second, third = asyncio.run(_run())
+    first, second, third, fourth = asyncio.run(_run())
     assert first.status_code == 200
-    assert second.status_code == 429
-    assert "in flight" in second.json()["detail"]
-    assert third.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert "in flight" in third.json()["detail"]
+    assert fourth.status_code == 200
 
 
 @pytestmark_public_app
@@ -286,7 +311,6 @@ def test_public_timeout_interrupts_the_query_and_releases_the_slot(tmp_path, mon
 
     monkeypatch.setenv("UMBRA_REQUEST_TIMEOUT_S", "0.3")
     monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "1")
-    monkeypatch.setenv("UMBRA_CLIENT_CONCURRENCY", "2")
 
     def slow(source, **kwargs):
         source._conn.execute(
@@ -415,55 +439,141 @@ def test_chunked_body_over_the_cap_is_413():
     assert messages[0]["status"] == 413
 
 
+def _post(client, body, raw):
+    if raw is None:
+        return client.post("/search", json=body)
+    return client.post("/search", content=raw, headers={"content-type": "application/json"})
+
+
 @pytestmark_serve
-def test_post_search_rejects_malformed_bodies(tmp_path):
+def test_local_post_search_matches_the_untyped_body(tmp_path):
+    """Local POST keeps the pre-public parser: type errors are 500, not 400."""
     app = serve.build_app(_index(tmp_path), artifacts=False, cache_dir=tmp_path / "art")
-    cases: list[tuple[str, dict | None, bytes | None]] = [
+    rejected = [
+        ("bbox bad", {"bbox": [1, 2, "a", 4]}, None),
+        ("datetime bad", {"datetime": "not/a/date"}, None),
+        ("query string", {"query": "x"}, None),
+        ("bbox nan", None, b'{"bbox":[NaN,0,1,1]}'),
+        ("min incidence inf", None, b'{"min_incidence": Infinity}'),
+    ]
+    deep = (b'{"a":' * 10000) + b"0" + (b"}" * 10000)
+    server_errors = [
         ("token abc", {"token": "abc"}, None),
-        ("token negative", {"token": -5}, None),
+        ("limit abc", {"limit": "abc"}, None),
+        ("ids scalar", {"ids": 5}, None),
+        ("collections scalar", {"collections": 5}, None),
         ("token huge", {"token": 10**30}, None),
+        ("deep json", None, deep),
+    ]
+    unprocessable = [
+        ("json array", None, b"[1,2,3]"),
+    ]
+    accepted = [
+        ("token negative", {"token": -5}, None),
+        ("fuzzy object", {"fuzzy": {"a": 1}, "area": "x"}, None),
+        ("area object", {"area": {"a": 1}}, None),
+        ("product_types repeated", {"product_types": ["GEC"] * 50}, None),
+        ("limit large", {"limit": 600}, None),
+    ]
+    with _client(app, raise_server_exceptions=False) as client:
+        for label, body, raw in rejected:
+            resp = _post(client, body, raw)
+            assert resp.status_code == 400, (label, resp.status_code, resp.text[:240])
+        for label, body, raw in server_errors:
+            resp = _post(client, body, raw)
+            assert resp.status_code == 500, (label, resp.status_code, resp.text[:240])
+        for label, body, raw in unprocessable:
+            resp = _post(client, body, raw)
+            assert resp.status_code == 422, (label, resp.status_code, resp.text[:240])
+        for label, body, raw in accepted:
+            resp = _post(client, body, raw)
+            assert resp.status_code == 200, (label, resp.status_code, resp.text[:240])
+
+
+@pytestmark_public_app
+def test_public_post_search_rejects_types_and_clamps_numbers(tmp_path, monkeypatch):
+    seen = _seen_limits(monkeypatch)
+    app = serve.build_app(_index(tmp_path), public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    rejected = [
+        ("token abc", {"token": "abc"}, None),
         ("limit abc", {"limit": "abc"}, None),
         ("limit 1e400", {"limit": "1e400"}, None),
+        ("limit bool", {"limit": True}, None),
+        ("limit fraction", {"limit": 1.5}, None),
         ("ids scalar", {"ids": 5}, None),
         ("ids dict", {"ids": [{"a": 1}]}, None),
-        ("ids 40000", {"ids": [f"x{i}" for i in range(40000)]}, None),
         ("collections scalar", {"collections": 5}, None),
         ("query string", {"query": "x"}, None),
         ("fuzzy object", {"fuzzy": {"a": 1}, "area": "x"}, None),
         ("area object", {"area": {"a": 1}}, None),
         ("bbox bad", {"bbox": [1, 2, "a", 4]}, None),
         ("datetime bad", {"datetime": "not/a/date"}, None),
-        ("product_types huge", {"product_types": ["GEC"] * 50}, None),
         ("bbox nan", None, b'{"bbox":[NaN,0,1,1]}'),
-        ("deep json", None, (b"[" * 5000) + (b"]" * 5000)),
+        ("json array", None, b"[1,2,3]"),
+        ("deep json", None, (b'{"a":' * 10000) + b"0" + (b"}" * 10000)),
     ]
     with _client(app, raise_server_exceptions=False) as client:
-        for label, body, raw in cases:
-            if raw is None:
-                resp = client.post("/search", json=body)
-            else:
-                resp = client.post(
-                    "/search",
-                    content=raw,
-                    headers={"content-type": "application/json"},
-                )
+        for label, body, raw in rejected:
+            resp = _post(client, body, raw)
             assert resp.status_code == 400, (label, resp.status_code, resp.text[:240])
-        empty_limit = client.post("/search", json={"limit": None})
-        assert empty_limit.status_code == 200
-        assert len(empty_limit.json()["features"]) <= serve.DEFAULT_LIMIT
+        for label, body in (
+            ("limit zero", {"limit": 0}),
+            ("limit negative", {"limit": -5}),
+            ("limit 10000", {"limit": 10000}),
+            ("limit huge", {"limit": 10**30}),
+            ("token negative", {"token": -5}),
+            ("token huge", {"token": 10**30}),
+            ("ids long", {"ids": [f"x{i}" for i in range(100)]}),
+            ("product_types repeated", {"product_types": ["GEC"] * 50}),
+            ("limit null", {"limit": None}),
+        ):
+            resp = client.post("/search", json=body)
+            assert resp.status_code == 200, (label, resp.status_code, resp.text[:240])
+        assert seen[-1] == serve.DEFAULT_LIMIT
+        huge = client.post("/search", json={"limit": 10000})
+        assert huge.status_code == 200
+        assert seen[-1] == serve.PUBLIC_SEARCH_LIMIT
 
 
 @pytestmark_public_app
-def test_stac_links_use_the_configured_origin(tmp_path, monkeypatch):
-    app = serve.build_app(_index(tmp_path), public=True, rate_limit=0, cache_dir=tmp_path / "art")
-    with _client(app) as client:
+def test_stac_links_follow_the_edge_and_ignore_loopback_forwarding(tmp_path, monkeypatch):
+    index_path = _index(tmp_path)
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    edge = {
+        "host": "api.umbra-py.space",
+        "x-forwarded-proto": "https",
+    }
+    with _client(app, client=("10.0.0.8", 443)) as client:
         reflected = client.get("/", headers={"host": "evil.example"}).json()
         assert reflected["links"][0]["href"].startswith("http://evil.example")
-        monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "example.up.railway.app")
-        railway = client.get("/", headers={"host": "evil.example"}).json()
-        assert railway["links"][0]["href"].startswith("https://example.up.railway.app")
-        assert "evil.example" not in railway["links"][0]["href"]
-        monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://api.umbra-py.space")
+        railway = client.get("/", headers=edge).json()
+        assert all(
+            link["href"].startswith("https://api.umbra-py.space") for link in railway["links"]
+        )
+        forwarded_host = client.get(
+            "/",
+            headers={
+                "host": "internal",
+                "x-forwarded-host": "api.umbra-py.space",
+                "x-forwarded-proto": "https",
+            },
+        ).json()
+        assert forwarded_host["links"][0]["href"].startswith("https://api.umbra-py.space")
+    loopback = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "loop")
+    with _client(loopback, client=("127.0.0.1", 12345)) as client:
+        ignored = client.get(
+            "/",
+            headers={
+                "host": "testserver",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "api.umbra-py.space",
+            },
+        ).json()
+        assert ignored["links"][0]["href"].startswith("http://testserver")
+        assert "api.umbra-py.space" not in ignored["links"][0]["href"]
+    monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://api.umbra-py.space")
+    forced = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "forced")
+    with _client(forced, client=("127.0.0.1", 12345)) as client:
         custom = client.get("/search?limit=1", headers={"host": "evil.example"}).json()
         assert all(
             link["href"].startswith("https://api.umbra-py.space") for link in custom["links"]
@@ -608,3 +718,128 @@ def test_public_geocode_does_not_cache_a_failure_and_drops_the_oldest(monkeypatc
     # ``a`` was used again, so ``b`` is the entry the cache drops.
     gate.resolve("b")
     assert calls[-2:] == ["c", "b"]
+
+
+def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
+    clock = {"now": 0.0}
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    gate = ms.PublicGeocodeGate(
+        max_size=8,
+        min_interval=1.0,
+        time_fn=lambda: clock["now"],
+        sleep_fn=sleep,
+    )
+    calls: list[str] = []
+
+    def fake(query: str):
+        calls.append(query)
+        if query == "zzz":
+            raise GeocodeError("No place matched 'zzz'.")
+        if query == "down":
+            raise GeocodeError("Could not reach the geocoding service: timeout")
+        return ((0.0, 0.0, 1.0, 1.0), query)
+
+    monkeypatch.setattr(ms, "_nominatim_geocode", fake)
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    assert calls == ["zzz"]
+    clock["now"] += 601
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    assert calls == ["zzz", "zzz"]
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        gate.resolve("down")
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        gate.resolve("down")
+    assert calls[-2:] == ["down", "down"]
+
+    gate._waiters = 5
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert "Paris" not in calls
+    gate._waiters = 0
+    gate._next_at = clock["now"] + 5.1
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert "Paris" not in calls
+
+
+def test_body_limit_replay_forwards_the_next_message():
+    seen: list[dict] = []
+
+    async def app(scope, receive, send):
+        seen.append(await receive())
+        seen.append(await receive())
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    wrapped = serve.BodyLimitMiddleware(app, max_bytes=100)
+    pending = [
+        {"type": "http.request", "body": b'{"a":1}', "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+    async def receive():
+        return pending.pop(0)
+
+    async def send(message):
+        return None
+
+    asyncio.run(
+        wrapped(
+            {"type": "http", "method": "POST", "headers": [], "client": ("203.0.113.9", 1)},
+            receive,
+            send,
+        )
+    )
+    assert seen[0]["type"] == "http.request"
+    assert seen[0]["body"] == b'{"a":1}'
+    assert seen[1]["type"] == "http.disconnect"
+
+
+@pytestmark_public_app
+def test_public_mcp_initialize_and_search_catalog(tmp_path, monkeypatch):
+    from umbra_py.mcp_smoke import decode_rpc
+
+    index_path = _index(tmp_path)
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(index_path))
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-06-18",
+    }
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "geod", "version": "0"},
+        },
+    }
+    call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "search_catalog", "arguments": {"limit": 1, "local": True}},
+    }
+    with _client(app) as client:
+        opened = client.post("/mcp", json=initialize, headers=headers)
+        assert opened.status_code == 200
+        assert opened.text.strip()
+        init_rpc = decode_rpc(opened.text)
+        assert "serverInfo" in json.dumps(init_rpc["result"])
+        searched = client.post("/mcp", json=call, headers=headers)
+        assert searched.status_code == 200
+        assert searched.text.strip()
+        result = decode_rpc(searched.text)
+        rendered = json.dumps(result)
+        assert "item-0" in rendered
+        assert "attribution" in rendered

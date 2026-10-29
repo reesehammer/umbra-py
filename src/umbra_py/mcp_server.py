@@ -67,7 +67,7 @@ from .constants import (
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import CatalogError, MissingDependencyError, UmbraError
+from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
 from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
@@ -199,13 +199,30 @@ def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any
     return payload
 
 
+#: A miss that would wait longer than this, or join more than this many
+#: callers already waiting on Nominatim, fails immediately.
+_GEOCODE_MAX_WAIT_S = 5.0
+_GEOCODE_MAX_WAITERS = 5
+#: How long a "no such place" answer is remembered. A network failure is not.
+_GEOCODE_NEGATIVE_TTL_S = 600.0
+_GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
+
+
+def _geocode_not_found(exc: GeocodeError) -> bool:
+    text = str(exc)
+    return text.startswith("No place matched") or "no usable bounding box" in text
+
+
 class PublicGeocodeGate:
     """LRU cache and a global Nominatim throttle for the public MCP host.
 
     One shared address is what Nominatim bans. Cache hits do not wait and
-    do not call out. A miss takes the single in-flight slot, waits until a
-    second has passed since the previous call, then resolves. A failure is
-    not cached; it still consumed the slot. Local MCP does not use this.
+    do not call out. A miss takes one of a few in-flight slots, waits until
+    a second has passed since the previous call, then resolves. A miss that
+    would wait more than about five seconds, or join more than five waiters,
+    raises immediately so it does not occupy a worker. "No such place" is
+    remembered for about ten minutes. Any other failure is not cached. Local
+    MCP does not use this.
     """
 
     def __init__(
@@ -222,39 +239,76 @@ class PublicGeocodeGate:
         self._sleep = sleep_fn
         self._lock = threading.Lock()
         self._network = threading.Lock()
-        self._cache: OrderedDict[str, tuple[Any, str]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
         self._next_at = 0.0
+        self._waiters = 0
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
             self._next_at = 0.0
+            self._waiters = 0
 
     def resolve(self, query: str) -> tuple[Any, str]:
         key = " ".join(query.split()).casefold()
+        wait = self._begin(key)
+        if not isinstance(wait, float):
+            return wait
+        try:
+            with self._network:
+                cached = self._cached(key)
+                if cached is not None:
+                    return cached
+                if wait > 0:
+                    self._sleep(wait)
+                try:
+                    result = _nominatim_geocode(query)
+                except GeocodeError as exc:
+                    if _geocode_not_found(exc):
+                        self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+                    raise
+                self._store(key, ("ok", result))
+                return result
+        finally:
+            with self._lock:
+                self._waiters -= 1
+
+    def _begin(self, key: str) -> float | tuple[Any, str]:
         with self._lock:
-            hit = self._cache.get(key)
-            if hit is not None:
-                self._cache.move_to_end(key)
-                return hit
-        with self._network:
-            with self._lock:
-                hit = self._cache.get(key)
-                if hit is not None:
-                    self._cache.move_to_end(key)
-                    return hit
-                now = self._time()
-                wait = self._next_at - now
-                self._next_at = max(self._next_at, now) + self._min_interval
-            if wait > 0:
-                self._sleep(wait)
-            result = _nominatim_geocode(query)
-            with self._lock:
-                self._cache[key] = result
-                self._cache.move_to_end(key)
-                while len(self._cache) > self._max_size:
-                    self._cache.popitem(last=False)
-            return result
+            cached = self._cached_locked(key)
+            if cached is not None:
+                return cached
+            now = self._time()
+            wait = self._next_at - now
+            if self._waiters >= _GEOCODE_MAX_WAITERS or wait > _GEOCODE_MAX_WAIT_S:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._waiters += 1
+            self._next_at = max(self._next_at, now) + self._min_interval
+            return max(0.0, wait)
+
+    def _cached(self, key: str) -> tuple[Any, str] | None:
+        with self._lock:
+            return self._cached_locked(key)
+
+    def _cached_locked(self, key: str) -> tuple[Any, str] | None:
+        hit = self._cache.get(key)
+        if hit is None:
+            return None
+        if hit[0] == "neg":
+            if self._time() >= hit[1]:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            raise GeocodeError(hit[2])
+        self._cache.move_to_end(key)
+        return hit[1]
+
+    def _store(self, key: str, entry: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._cache[key] = entry
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
 
 
 _public_geocode = PublicGeocodeGate()
