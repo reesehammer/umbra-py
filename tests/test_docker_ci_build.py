@@ -160,8 +160,8 @@ def test_workflow_is_plain_docker_build_with_no_cache():
     assert "mirror.gcr.io/library/python:3.12-slim@" in script
 
 
-def test_hosted_job_scans_fixable_critical_only():
-    """Report every severity, and fail the job only for a CRITICAL that has a fix."""
+def test_hosted_job_scans_fixable_library_critical_only():
+    """Report OS and library findings. Fail only on a fixable library CRITICAL."""
     raw = WORKFLOW.read_text(encoding="utf-8")
     document = yaml.safe_load(raw)
     steps = document["jobs"]["hosted"]["steps"]
@@ -169,14 +169,27 @@ def test_hosted_job_scans_fixable_critical_only():
     assert "UMBRA_DOCKERFILE=deploy/Dockerfile.mcp" in build["run"]
     assert "UMBRA_SKIP_EXTRAS_ARG=1" in build["run"]
     assert "UMBRA_EXTRAS" not in build["run"]
+    check = next(step for step in steps if step.get("name") == "pip check inside the hosted image")
+    assert "pip check" in check["run"]
+    assert "--entrypoint python" in check["run"]
+    assert any(step.get("name") == "Hosted image serves /livez" for step in steps)
     trivy = [step for step in steps if "trivy-action@" in step.get("uses", "")]
     assert len(trivy) == 2
+    mirrors = ("mirror.gcr.io", "public.ecr.aws")
     for step in trivy:
         sha = step["uses"].split("@", 1)[1]
         assert re.fullmatch(r"[0-9a-f]{40}", sha), step["uses"]
         assert step["with"]["image-ref"] == "umbra-py:public"
+        repos = step["env"]["TRIVY_DB_REPOSITORY"]
+        assert all(mirror in repos for mirror in mirrors)
+        assert "ghcr.io" not in repos
     report, gate = trivy
+    assert report["with"]["vuln-type"] == "os,library"
+    assert report["with"]["format"] == "table"
     assert str(report["with"]["exit-code"]) == "0"
+    assert "UNKNOWN" in report["with"]["severity"]
+    assert "CRITICAL" in report["with"]["severity"]
+    assert gate["with"]["vuln-type"] == "library"
     assert str(gate["with"]["exit-code"]) == "1"
     assert str(gate["with"]["ignore-unfixed"]).lower() == "true"
     assert gate["with"]["severity"] == "CRITICAL"

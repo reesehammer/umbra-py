@@ -64,9 +64,11 @@ jobs:
         if: always()
         run: docker rm -f umbra-serve || true
 
-  # The image Railway builds (deploy/Dockerfile.mcp). The table lists every
-  # severity. The job fails only when Trivy finds a CRITICAL CVE that already
-  # has a fix, so an unfixed finding in the Debian base does not block review.
+  # The image Railway builds (deploy/Dockerfile.mcp). The report lists OS and
+  # library findings at every severity. The gate fails only on a fixable
+  # CRITICAL in a library package, so a Debian CVE in the frozen base image
+  # does not turn main red. DB downloads try mirror.gcr.io, then ECR Public,
+  # and do not contact ghcr.io.
   hosted:
     runs-on: ubuntu-24.04
     steps:
@@ -79,23 +81,34 @@ jobs:
           UMBRA_SKIP_EXTRAS_ARG=1 \
           bash .github/scripts/docker-build-ci.sh
 
+      # In the image, not the Dockerfile: a metadata warning must not fail
+      # the Railway build. The install itself is --no-deps.
+      - name: pip check inside the hosted image
+        run: docker run --rm --entrypoint python umbra-py:public -m pip check
+
       - name: Report image vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-db,public.ecr.aws/aquasecurity/trivy-db
+          TRIVY_JAVA_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-java-db,public.ecr.aws/aquasecurity/trivy-java-db
         with:
           image-ref: umbra-py:public
           format: table
           exit-code: "0"
           vuln-type: os,library
-          severity: LOW,MEDIUM,HIGH,CRITICAL
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
-      - name: Fail on fixable CRITICAL
+      - name: Fail on fixable library CRITICAL
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-db,public.ecr.aws/aquasecurity/trivy-db
+          TRIVY_JAVA_DB_REPOSITORY: mirror.gcr.io/aquasec/trivy-java-db,public.ecr.aws/aquasecurity/trivy-java-db
         with:
           image-ref: umbra-py:public
           format: table
           exit-code: "1"
           ignore-unfixed: "true"
-          vuln-type: os,library
+          vuln-type: library
           severity: CRITICAL
 
       - name: Hosted image serves /livez

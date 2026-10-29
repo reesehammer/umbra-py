@@ -12,8 +12,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ### Changed
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
-  with hash checking, then installs this package with `--no-deps`. Regenerate
-  that file with the command in its header.
+  with hash checking. Hatchling comes from `deploy/build-requirements.txt`
+  the same way, and this package is installed with `--no-deps` and
+  `--no-build-isolation`. Regenerate each file with the command in its header.
 - **`requests` requires 2.33.0 or newer.** That release fixes PYSEC-2023-74,
   PYSEC-2026-1873, PYSEC-2026-1872, and PYSEC-2026-2275. It supports Python
   3.10 and newer, the same floor as umbra-py.
