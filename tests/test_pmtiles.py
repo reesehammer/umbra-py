@@ -584,6 +584,29 @@ def test_build_raises_without_a_footprint():
 
 
 # --- viewer wiring --------------------------------------------------------
+def test_build_viewer_pins_cdn_sri_and_rejects_javascript_href():
+    """The MapLibre page integrity-checks its CDN tags and will not assign a
+    non-http ``stac_href`` to an anchor."""
+    import re
+
+    html = pmtiles.build_viewer("catalog.pmtiles", title="My catalog")
+    for url, sri in (
+        (pmtiles.MAPLIBRE_CSS, pmtiles.MAPLIBRE_CSS_SRI),
+        (pmtiles.MAPLIBRE_JS, pmtiles.MAPLIBRE_JS_SRI),
+        (pmtiles.PMTILES_JS, pmtiles.PMTILES_JS_SRI),
+    ):
+        assert re.fullmatch(r"sha384-[A-Za-z0-9+/]+=*", sri)
+        assert url in html and sri in html
+    assert 'crossorigin="anonymous"' in html
+    assert 'http-equiv="Content-Security-Policy"' in html
+    assert "worker-src blob:" in html
+    assign = html.find("a.href = p.stac_href")
+    assert assign != -1
+    assert "umbraIsHttpUrl" in html[max(0, assign - 220) : assign]
+    # The predicate itself is the case-insensitive http(s) check.
+    assert "/^https?:\\/\\//i" in html
+
+
 def test_build_viewer_points_at_the_archive_and_layer():
     html = pmtiles.build_viewer("catalog.pmtiles", title="My catalog")
     assert "<title>My catalog</title>" in html

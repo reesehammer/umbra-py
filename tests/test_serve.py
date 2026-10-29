@@ -2001,6 +2001,10 @@ def test_swipe_endpoint_serves_html_from_its_own_cache(art_client, recorder):
     resp = art_client.post("/artifacts/swipe", json={"ids": ["item-0", "item-2"]})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    # Folium's template loads a different CDN set; the map-page CSP would blank it.
+    assert "content-security-policy" not in resp.headers
     assert resp.headers["x-umbra-cache"] == "miss"
     kind, ids, _ = recorder.calls[0]
     assert kind == "swipe"
@@ -3072,6 +3076,56 @@ def test_license_headers_are_on_every_response(client):
     assert resp.headers.get("X-Umbra-License") == "CC-BY-4.0"
     assert "Contains Umbra open data" in resp.headers.get("X-Umbra-Attribution", "")
     assert 'rel="license"' in resp.headers.get("Link", "")
+
+
+def test_security_headers_on_json_and_docs(client):
+    """nosniff and a referrer policy on API responses. JSON gets no CSP.
+    FastAPI's docs HTML loads jsDelivr, so it does not get the map-page CSP."""
+    landing = client.get("/")
+    assert landing.headers["x-content-type-options"] == "nosniff"
+    assert landing.headers["referrer-policy"] == "no-referrer"
+    assert "content-security-policy" not in landing.headers
+
+    search = client.get("/search?limit=1")
+    assert search.status_code == 200
+    assert search.headers["content-type"].startswith("application/geo+json") or search.headers[
+        "content-type"
+    ].startswith("application/json")
+    assert search.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" not in search.headers
+
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+    assert docs.headers["content-type"].startswith("text/html")
+    assert docs.headers["x-content-type-options"] == "nosniff"
+    assert docs.headers["referrer-policy"] == "no-referrer"
+    assert "content-security-policy" not in docs.headers
+
+
+def test_map_page_csp_is_not_attached_to_json_or_folium_html():
+    csp = serve._csp_for_response("text/html; charset=utf-8", "/explorer")
+    assert csp is not None
+    assert "https://unpkg.com" in csp
+    assert "https://*.tile.openstreetmap.org" in csp
+    assert serve._csp_for_response("application/json", "/search") is None
+    assert serve._csp_for_response("application/geo+json", "/search") is None
+    assert serve._csp_for_response("text/html", "/docs") is None
+    assert serve._csp_for_response("text/html", "/redoc") is None
+    assert serve._csp_for_response("text/html", "/artifacts/swipe") is None
+    assert serve._csp_for_response("text/html", "/jobs/abc/result") is None
+
+
+def test_security_headers_survive_a_rate_limit_response(index_path, tmp_path):
+    """The header middleware sits outside the rate-limit guard, so a 429 the
+    guard returns itself still carries nosniff."""
+    app = serve.build_app(index_path, artifacts=False, rate_limit=1, cache_dir=tmp_path / "art")
+    limited = TestClient(app)
+    assert limited.get("/search?limit=1").status_code == 200
+    blocked = limited.get("/search?limit=1")
+    assert blocked.status_code == 429
+    assert blocked.headers["x-content-type-options"] == "nosniff"
+    assert blocked.headers["referrer-policy"] == "no-referrer"
+    assert "content-security-policy" not in blocked.headers
 
 
 def test_public_policy_disables_artifacts_and_rate_limits(index_path, tmp_path):

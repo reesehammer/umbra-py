@@ -120,6 +120,17 @@ def test_tile_off_scene_returns_none(tmp_path):
     assert tiler.tile(z, x, y) is None
 
 
+def test_viewer_template_pins_leaflet_with_sri():
+    """The scene viewer page slots SRI, CORS, and a CSP meta tag."""
+    from umbra_py.viewer import _HTML_TEMPLATE
+
+    assert 'integrity="{leaflet_js_sri}"' in _HTML_TEMPLATE
+    assert 'integrity="{leaflet_css_sri}"' in _HTML_TEMPLATE
+    assert 'crossorigin="anonymous"' in _HTML_TEMPLATE
+    # The CSP and referrer policy are the shared meta block, filled at render.
+    assert "{security_meta}" in _HTML_TEMPLATE
+
+
 def test_make_viewer_server_serves_page_and_tile(tmp_path):
     pytest.importorskip("rasterio")
     from rasterio.warp import transform_bounds
@@ -134,9 +145,15 @@ def test_make_viewer_server_serves_page_and_tile(tmp_path):
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             assert resp.status == 200
+            assert resp.headers["X-Content-Type-Options"] == "nosniff"
+            assert resp.headers["Referrer-Policy"] == "no-referrer"
+            assert "Content-Security-Policy" in resp.headers
+            assert "https://unpkg.com" in resp.headers["Content-Security-Policy"]
             page = resp.read().decode()
         assert "test-acq" in page
         assert "tiles/{z}/{x}/{y}.png" in page
+        assert "sha384-" in page
+        assert 'crossorigin="anonymous"' in page
 
         w, s, e, n = transform_bounds(crs, "EPSG:4326", *bounds)
         z = 17
@@ -144,6 +161,9 @@ def test_make_viewer_server_serves_page_and_tile(tmp_path):
         with urllib.request.urlopen(f"{url}tiles/{z}/{x}/{y}.png", timeout=5) as resp:
             assert resp.status == 200
             assert resp.headers["Content-Type"] == "image/png"
+            assert resp.headers["X-Content-Type-Options"] == "nosniff"
+            # A tile is not a document; the map CSP stays on the HTML page.
+            assert "Content-Security-Policy" not in resp.headers
             assert resp.read()[:8] == b"\x89PNG\r\n\x1a\n"
     finally:
         httpd.shutdown()
@@ -225,7 +245,7 @@ def test_viewer_html_escapes_remote_metadata_and_href():
             properties={"platform": "<img src=x onerror=alert('plat')>"},
         )
 
-    html = _viewer_html(_StubTiler())
+    html = _viewer_html(_StubTiler(), "default-src 'none'")
     assert "<script>alert('id')" not in html
     assert "onerror=alert('plat')" not in html
     assert "javascript:alert" not in html

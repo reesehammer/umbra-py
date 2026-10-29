@@ -9,6 +9,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Security
+- **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
+  (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
+  `pmtiles@3.2.1`; the `geotiff.js` digest is now always applied) and send a
+  Content-Security-Policy for unpkg, the OpenStreetMap tile hosts, and the
+  Umbra open-data bucket. `umbra serve` sends `X-Content-Type-Options: nosniff`
+  and `Referrer-Policy: no-referrer` on every response. A `stac_href` that is
+  not http(s) is not turned into a link.
+
 ### Changed
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
