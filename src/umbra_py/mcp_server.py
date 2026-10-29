@@ -47,8 +47,10 @@ import io
 import json
 import os
 import shlex
+import time
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
@@ -59,6 +61,8 @@ from .constants import (
     CANOPY_TOKEN_ENV,
     DATA_LICENSE,
     POLARIZATION_CAVEAT,
+    S3_BUCKET,
+    S3_REGION,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
@@ -197,6 +201,23 @@ def _require_cog_streaming(tool: str) -> None:
 #: this cap, or whose size cannot be proven before the read, is a link plan.
 INLINE_ASSET_MAX_BYTES = 2 * 1024 * 1024
 
+#: Wall-clock budget for one public-host inline read. ``DEFAULT_TIMEOUT`` is
+#: per socket operation, so a slow drip would otherwise hold a worker across
+#: many reads. Past this deadline the host returns a link plan.
+INLINE_READ_DEADLINE_S = 10.0
+
+#: HTTPS hosts the public catalog actually emits for the open bucket.
+#: Virtual-hosted: published STAC asset hrefs (no region, and the regional
+#: form ``catalog._object_key`` accepts). Path-style: ``UmbraCatalog._url_for``
+#: and :func:`umbra_py.models._derive_data_url` (``s3.<region>.amazonaws.com/<bucket>/...``).
+_BUCKET_VIRTUAL_HOSTS = frozenset(
+    {
+        f"{S3_BUCKET}.s3.amazonaws.com",
+        f"{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com",
+    }
+)
+_BUCKET_PATH_HOST = f"s3.{S3_REGION}.amazonaws.com"
+
 #: Schema v2 families small enough to inline. Collision suffixes (``metadata_2``)
 #: share the family. Everything else — including GEC, CSI, SIDD, SICD, CPHD,
 #: ``csi_sidd``, and ``file`` / ``file_tif`` — is a link.
@@ -255,33 +276,83 @@ def _header_length(headers: Any) -> int | None:
         return None
 
 
+class _InlineReadDeadline(Exception):
+    """The public-host inline read passed :data:`INLINE_READ_DEADLINE_S`."""
+
+
+def _public_bucket_https(href: str) -> bool:
+    """Whether ``href`` is https on Umbra's public open-data bucket.
+
+    The public host may HEAD or GET only these URLs. Anything else — another
+    host, plain http, a userinfo trick, a non-443 port, or a path-style URL
+    whose first segment is not the open bucket — is a link plan and is never
+    requested. Redirects are not followed; this check is the URL as given.
+    """
+    if not isinstance(href, str) or not href:
+        return False
+    parts = urlsplit(href)
+    if parts.scheme != "https" or parts.username or parts.password:
+        return False
+    if parts.port not in (None, 443):
+        return False
+    host = parts.hostname
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    path = unquote(parts.path)
+    segments = [segment for segment in path.split("/") if segment != ""]
+    if ".." in segments or "\\" in path:
+        return False
+    if host in _BUCKET_VIRTUAL_HOSTS:
+        return True
+    return host == _BUCKET_PATH_HOST and bool(segments) and segments[0] == S3_BUCKET
+
+
 def _head_content_length(href: str) -> int | None:
     """``Content-Length`` from HEAD, or None when the check fails or omits it.
 
     A failure here must not become an error: the public host still returns a
-    link, with ``bytes`` null when nothing else recorded a size.
+    link, with ``bytes`` null when nothing else recorded a size. Only an
+    allowlisted https URL is requested, with no retries and no redirects. A
+    3xx is a failed check, not a size.
     """
+    if not _public_bucket_https(href):
+        return None
     import requests
 
-    from ._http import DEFAULT_TIMEOUT, default_session
+    from ._http import DEFAULT_TIMEOUT
 
     try:
-        head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+        # ``requests.head``, not the shared retrying session: a public-host
+        # size check must not repeat a request, and must not follow Location.
+        head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException:
+        return None
+    try:
+        if 300 <= head.status_code < 400:
+            return None
         head.raise_for_status()
     except requests.RequestException:
         return None
     return _header_length(head.headers)
 
 
-def _read_up_to(chunks: Iterable[bytes], cap: int) -> bytes | None:
+def _read_up_to(
+    chunks: Iterable[bytes], cap: int, *, deadline_s: float | None = None
+) -> bytes | None:
     """Concatenate ``chunks`` up to ``cap`` bytes.
 
     Returns None once the body exceeds ``cap``, and stops pulling further
     chunks. At most ``cap + 1`` bytes are retained. A body of exactly ``cap``
-    bytes is a complete read.
+    bytes is a complete read. When ``deadline_s`` is set, raises
+    :class:`_InlineReadDeadline` once the wall clock passes it and does not
+    pull a further chunk.
     """
     buf = bytearray()
+    started = time.monotonic()
     for chunk in chunks:
+        if deadline_s is not None and time.monotonic() - started > deadline_s:
+            raise _InlineReadDeadline
         if not chunk:
             continue
         room = cap - len(buf) + 1
@@ -303,19 +374,29 @@ def _fetch_capped(href: str, cap: int) -> tuple[str, bytes, str | None, int | No
     - ``over`` — a ``Content-Length`` above ``cap`` (body not read;
       ``declared_length`` is that value) or a stream that crossed the cap
       (``declared_length`` is None; the true size is unknown).
-    - ``error`` — the transfer failed. Nothing was inlined.
+    - ``error`` — the transfer failed, the URL is not the public bucket, the
+      response is a redirect, or the read passed
+      :data:`INLINE_READ_DEADLINE_S`. Nothing was inlined.
+
+    Uses :func:`requests.get` directly so the shared session's retries do not
+    run, and does not follow redirects.
     """
+    if not _public_bucket_https(href):
+        return ("error", b"", None, None)
     import requests
 
-    from ._http import DEFAULT_TIMEOUT, default_session
-
     try:
-        resp = default_session().get(
-            href, stream=True, allow_redirects=True, timeout=DEFAULT_TIMEOUT
+        resp = requests.get(
+            href,
+            stream=True,
+            allow_redirects=False,
+            timeout=INLINE_READ_DEADLINE_S,
         )
     except requests.RequestException:
         return ("error", b"", None, None)
     try:
+        if 300 <= resp.status_code < 400:
+            return ("error", b"", None, None)
         try:
             resp.raise_for_status()
         except requests.RequestException:
@@ -326,7 +407,13 @@ def _fetch_capped(href: str, cap: int) -> tuple[str, bytes, str | None, int | No
         if declared is not None and declared > cap:
             return ("over", b"", content_type, declared)
         try:
-            body = _read_up_to(resp.iter_content(chunk_size=64 * 1024), cap)
+            body = _read_up_to(
+                resp.iter_content(chunk_size=64 * 1024),
+                cap,
+                deadline_s=INLINE_READ_DEADLINE_S,
+            )
+        except _InlineReadDeadline:
+            return ("error", b"", content_type, None)
         except requests.RequestException:
             # A body that does not match Content-Length (or a dropped
             # connection) must not raise out of confirm=true, and must not
@@ -371,6 +458,34 @@ def _image_format(data: bytes) -> str | None:
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+def _plain_basename(name: str) -> str:
+    """Last path segment, or ``""`` when that segment is empty or ``..``.
+
+    Separators are ``/`` and ``\\``. A STAC ``umbra-py:filename`` is not a
+    path the host chose, so ``../../.bashrc`` becomes ``.bashrc``.
+    """
+    cleaned = name.replace("\\", "/").replace("\x00", "").strip()
+    if not cleaned:
+        return ""
+    base = cleaned.rsplit("/", 1)[-1].strip()
+    if base in {"", ".", ".."}:
+        return ""
+    return base
+
+
+def _safe_download_filename(named: Any, href: str, fallback: str) -> str:
+    """Basename for ``curl -o``. Falls back to the href, then the asset key."""
+    from .download import _filename_from_url
+
+    base = _plain_basename(named) if isinstance(named, str) else ""
+    if base:
+        return base
+    from_href = _plain_basename(_filename_from_url(href))
+    if from_href and from_href != "download":
+        return from_href
+    return _plain_basename(fallback) or "download"
 
 
 def _how_to_fetch(
@@ -427,12 +542,22 @@ def _public_host_confirmed_download(
         )
     key, body = item._resolve_asset(asset)
     named = body.get(ASSET_FILENAME_FIELD)
-    filename = named.strip() if isinstance(named, str) and named.strip() else key
+    filename = _safe_download_filename(named, href, key)
     item_arg = url
     if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
         item_arg = item.href
     family = _asset_family(key)
     stac_size = _stac_asset_size(body)
+    # A foreign href is not probed. bytes comes from the STAC record only.
+    if not _public_bucket_https(href):
+        return _link_plan(
+            asset=asset,
+            filename=filename,
+            href=href,
+            size=stac_size,
+            item_arg=item_arg,
+            dest_dir=dest_dir,
+        )
     head_size = _head_content_length(href)
     recorded = [size for size in (head_size, stac_size) if size is not None]
     # HEAD is the live object. Fall back to the STAC record when HEAD omitted
@@ -528,8 +653,6 @@ def _with_inline_image_block(result: Any) -> Any:
     except (ValueError, TypeError):
         return result
     fmt = media.split("/", 1)[1].split(";", 1)[0].strip().lower() or "png"
-    if fmt == "jpg":
-        fmt = "jpeg"
     shown = {key: value for key, value in result.items() if key != "content_base64"}
     shown["image"] = "attached"
     return CallToolResult(
@@ -1727,18 +1850,22 @@ def download_asset(
     On a public host (``umbra serve --public``, COG streaming off),
     ``confirm=True`` does not write a file and does not raise. It returns a
     link plan: ``mode`` ``"link"``, ``downloaded`` false, ``asset``,
-    ``filename``, the direct public ``href``, ``bytes`` (STAC ``file:size`` or
+    ``filename``, the direct public ``href``,     ``bytes`` (STAC ``file:size`` or
     ``size``, else HEAD ``Content-Length``, or null when neither is known),
     and ``how_to_fetch`` — ``curl -L -C - -o <filename> <href>`` and
-    ``umbra download ITEM --asset ASSET --dest DIR``. The hosted server does
-    not write files. A local ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server
-    downloads to your own disk. Metadata and ``stac_metadata`` JSON, and
+    ``umbra download ITEM --asset ASSET --dest DIR``. ``filename`` is a
+    basename. The hosted server does not write files. It HEADs or GETs an
+    asset only when the href is https on the public open-data bucket, and it
+    does not follow redirects; any other href is a link plan (STAC size, or
+    null) and is not inlined. A local ``uvx --from 'umbra-py[mcp]' umbra-mcp``
+    server downloads to your own disk. Metadata and ``stac_metadata`` JSON, and
     ``di_gif`` previews, at or under 2 MiB come back inline (``mode``
     ``"inline"``): JSON in ``content``, a preview as ``content_base64`` plus
     an MCP image block. GEC, CSI, SIDD, SICD, and CPHD are always a link,
-    whatever their size. An unknown size, or a body over the cap, is a link;
-    this host does not proxy or stream those bytes. ``confirm=False`` is
-    unchanged. LangChain and LlamaIndex call this same function.
+    whatever their size. An unknown size, a body over the cap, or an inline
+    read that passes 10 seconds, is a link; this host does not proxy or
+    stream those bytes. ``confirm=False`` is unchanged. LangChain and
+    LlamaIndex call this same function.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem

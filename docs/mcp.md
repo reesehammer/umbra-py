@@ -75,9 +75,12 @@ server.
 
 On this host `confirm=true` returns a **download plan**, not a file and not
 an error. `mode` is `"link"`, `downloaded` is false, and the plan names
-`asset`, `filename`, the direct public `href`, and `bytes` (from the STAC
-asset's `file:size` or `size`, otherwise HEAD `Content-Length`, or null
-when neither is known). `how_to_fetch` has two commands:
+`asset`, `filename` (a basename), the direct public `href`, and `bytes`
+(from the STAC asset's `file:size` or `size`, otherwise HEAD
+`Content-Length`, or null when neither is known). The host HEADs or GETs
+only an `https` href on the public open-data bucket, and it does not follow
+redirects. Any other href is a link with the STAC size, or null, and is not
+inlined. `how_to_fetch` has two commands:
 
 ```bash
 curl -L -C - -o <filename> <href>
@@ -95,8 +98,9 @@ uvx --from 'umbra-py[mcp]' umbra-mcp
 
 Metadata (`metadata`, `stac_metadata`) and detected-image previews
 (`di_gif`) at or under 2 MiB come back inline (`mode` `"inline"`): JSON in
-the result, a preview as an image block. A body over that cap is a link.
-The host stops reading once the cap is crossed.
+the result, a preview as an image block. A body over that cap, or a read
+that passes 10 seconds, is a link. The host stops reading once the cap is
+crossed.
 
 A local server still downloads when `confirm=true` (`{asset, path, bytes}`).
 

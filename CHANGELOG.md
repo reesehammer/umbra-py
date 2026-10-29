@@ -21,7 +21,14 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `umbra download`). The host does not write the file. Metadata and
   detected-image previews at or under 2 MiB come back inline
   (`mode: "inline"`). GEC, CSI, SIDD, SICD, and CPHD are always a link.
-  `confirm=false` and a local server are unchanged.
+  `confirm=false` and a local server are unchanged. The public host
+  requests an asset only when its href is https on the open-data bucket
+  (`umbra-open-data-catalog.s3.amazonaws.com`,
+  `umbra-open-data-catalog.s3.us-west-2.amazonaws.com`, or
+  `s3.us-west-2.amazonaws.com/umbra-open-data-catalog/...`) and does not
+  follow redirects. Any other href is a link plan with the STAC size, or
+  null, and is not inlined. An inline read stops after 10 seconds.
+  `filename` is a basename.
 
 ## [0.1.4] — 2026-10-26
 

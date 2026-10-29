@@ -15,6 +15,7 @@ import copy
 import json
 import struct
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1496,6 +1497,24 @@ def test_capped_read_returns_a_body_of_exactly_the_cap():
     assert ms._read_up_to([b"abcdefgh"], 8) == b"abcdefgh"
 
 
+def test_capped_read_stops_when_the_deadline_passes():
+    """A slow drip must not keep the inline read going past the deadline."""
+    pulled = 0
+
+    def chunks():
+        nonlocal pulled
+        yield b"{"
+        pulled += 1
+        time.sleep(0.2)
+        yield b"x"
+        pulled += 1
+        raise AssertionError("read past the deadline")
+
+    with pytest.raises(ms._InlineReadDeadline):
+        ms._read_up_to(chunks(), 100, deadline_s=0.05)
+    assert pulled == 1
+
+
 def test_inline_asset_cap_is_two_mebibytes():
     assert ms.INLINE_ASSET_MAX_BYTES == 2 * 1024 * 1024
 
@@ -1517,11 +1536,28 @@ def _public_item(sample_item_dict, assets=None):
     return item
 
 
+def _register_https_metadata(sample_item_dict, **fields) -> str:
+    """Serve the sample item with its metadata href upgraded to https.
+
+    The published sample records that sidecar as ``http://``. The public host
+    only fetches https on the open bucket, so tests that exercise HEAD or an
+    inline GET have to use the https form of the same host.
+    """
+    item = copy.deepcopy(sample_item_dict)
+    asset = item["assets"]["metadata"]
+    href = asset["href"]
+    if href.startswith("http://"):
+        href = "https://" + href[len("http://") :]
+    asset["href"] = href
+    asset.update(fields)
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    return href
+
+
 @responses.activate
 def test_public_host_inlines_a_small_metadata_json(sample_item_dict, monkeypatch):
     body = b'{"sensor": "umbra", "ok": true}'
-    _public_item(sample_item_dict)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict)
     responses.add(responses.HEAD, href, headers={"Content-Length": str(len(body))}, status=200)
     responses.add(
         responses.GET,
@@ -1615,8 +1651,7 @@ def test_public_host_inlines_a_small_preview_image(sample_item_dict, monkeypatch
 
 @responses.activate
 def test_public_host_over_cap_metadata_is_a_link(sample_item_dict, monkeypatch):
-    _public_item(sample_item_dict)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict)
     size = ms.INLINE_ASSET_MAX_BYTES + 1
     responses.add(responses.HEAD, href, headers={"Content-Length": str(size)}, status=200)
     _forbid_asset_get(href)
@@ -1629,8 +1664,7 @@ def test_public_host_over_cap_metadata_is_a_link(sample_item_dict, monkeypatch):
 @responses.activate
 def test_public_host_unknown_metadata_size_is_a_link(sample_item_dict, monkeypatch):
     """No STAC size and no Content-Length: do not GET to find out."""
-    _public_item(sample_item_dict)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict)
     responses.add(responses.HEAD, href, status=200)
     _forbid_asset_get(href)
     _forbid_disk_download(monkeypatch)
@@ -1668,10 +1702,7 @@ def test_public_host_uses_stac_size_when_head_fails(sample_item_dict, monkeypatc
 
 @responses.activate
 def test_public_host_ignores_a_boolean_stac_size(sample_item_dict, monkeypatch):
-    item = copy.deepcopy(sample_item_dict)
-    item["assets"]["metadata"]["file:size"] = True
-    responses.add(responses.GET, ITEM_URL, json=item, status=200)
-    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict, **{"file:size": True})
     responses.add(responses.HEAD, href, status=200)
     _forbid_asset_get(href)
     _forbid_disk_download(monkeypatch)
@@ -1682,10 +1713,7 @@ def test_public_host_ignores_a_boolean_stac_size(sample_item_dict, monkeypatch):
 
 @responses.activate
 def test_public_host_either_size_over_cap_blocks_inline(sample_item_dict, monkeypatch):
-    item = copy.deepcopy(sample_item_dict)
-    item["assets"]["metadata"]["file:size"] = 10
-    responses.add(responses.GET, ITEM_URL, json=item, status=200)
-    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict, **{"file:size": 10})
     big = ms.INLINE_ASSET_MAX_BYTES + 5
     responses.add(responses.HEAD, href, headers={"Content-Length": str(big)}, status=200)
     _forbid_asset_get(href)
@@ -1698,8 +1726,7 @@ def test_public_host_either_size_over_cap_blocks_inline(sample_item_dict, monkey
 @responses.activate
 def test_public_host_stream_over_cap_does_not_inline(sample_item_dict, monkeypatch):
     """HEAD understates the body. The host stops and returns a link, not the bytes."""
-    _public_item(sample_item_dict)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict)
     huge = b"x" * (ms.INLINE_ASSET_MAX_BYTES + 32)
     responses.add(responses.HEAD, href, headers={"Content-Length": "8"}, status=200)
     responses.add(
@@ -1745,8 +1772,7 @@ def test_public_host_non_image_preview_is_a_link(sample_item_dict, monkeypatch):
 @responses.activate
 def test_public_host_undecodable_metadata_is_a_link(sample_item_dict, monkeypatch):
     body = b"\xff\xfe\x00\x01"
-    _public_item(sample_item_dict)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    href = _register_https_metadata(sample_item_dict)
     responses.add(responses.HEAD, href, headers={"Content-Length": str(len(body))}, status=200)
     responses.add(responses.GET, href, body=body, status=200)
     _forbid_disk_download(monkeypatch)
@@ -1755,6 +1781,209 @@ def test_public_host_undecodable_metadata_is_a_link(sample_item_dict, monkeypatc
     assert out["mode"] == "link"
     assert "content" not in out
     assert out["bytes"] == len(body)
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    "href",
+    [
+        "http://127.0.0.1/secret.json",
+        "https://evil.example/secret.json",
+        "https://user@umbra-open-data-catalog.s3.amazonaws.com/x.json",
+        "http://umbra-open-data-catalog.s3.amazonaws.com/x.json",
+        "https://s3.us-west-2.amazonaws.com/other-bucket/x.json",
+    ],
+)
+@responses.activate
+def test_public_host_does_not_fetch_a_foreign_href(sample_item_dict, monkeypatch, href):
+    """A non-bucket href is a link. The host does not HEAD or GET it."""
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"] = {
+        "href": href,
+        "type": "application/json",
+        "file:size": 12,
+        "umbra-py:filename": "scene_METADATA.json",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+
+    def boom(request):
+        raise AssertionError(f"public host fetched {request.url}")
+
+    responses.add_callback(responses.HEAD, href, callback=boom)
+    responses.add_callback(responses.GET, href, callback=boom)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    _assert_link_plan(out, href=href, asset="metadata", size=12)
+    assert "content" not in out
+    assert "content_base64" not in out
+
+
+@responses.activate
+def test_public_host_does_not_follow_a_bucket_redirect(sample_item_dict, monkeypatch):
+    """A 302 from the bucket is not followed and its body is not inlined."""
+    href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/meta.json"
+    target = "http://127.0.0.1/secret.json"
+    secret = b'{"pwned": true}'
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"] = {
+        "href": href,
+        "type": "application/json",
+        "file:size": len(secret),
+        "umbra-py:filename": "scene_METADATA.json",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+
+    def redirect(_request):
+        return (302, {"Location": target, "Content-Length": str(len(secret))}, b"")
+
+    responses.add_callback(responses.HEAD, href, callback=redirect)
+    responses.add_callback(responses.GET, href, callback=redirect)
+    responses.add(
+        responses.GET,
+        target,
+        body=secret,
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(secret))},
+    )
+    responses.add(responses.HEAD, target, headers={"Content-Length": str(len(secret))}, status=200)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "link"
+    assert out["downloaded"] is False
+    assert "content" not in out
+    assert "content_base64" not in out
+    assert all("127.0.0.1" not in call.request.url for call in responses.calls)
+
+
+@responses.activate
+def test_public_host_inlines_path_style_bucket_metadata(sample_item_dict, monkeypatch):
+    """Catalog-built path-style URLs are on the allowlist."""
+    href = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/sar-data/tasks/x/meta.json"
+    body = b'{"sensor": "umbra"}'
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"] = {
+        "href": href,
+        "type": "application/json",
+        "file:size": len(body),
+        "umbra-py:filename": "scene_METADATA.json",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(responses.HEAD, href, headers={"Content-Length": str(len(body))}, status=200)
+    responses.add(
+        responses.GET,
+        href,
+        body=body,
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+    )
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "inline"
+    assert out["content"] == {"sensor": "umbra"}
+
+
+@responses.activate
+def test_public_host_slow_inline_read_is_a_link(sample_item_dict, monkeypatch):
+    """A slow body past the deadline is a link, and the read is not retried."""
+    monkeypatch.setattr(ms, "INLINE_READ_DEADLINE_S", 0.05)
+    href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/meta.json"
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"] = {
+        "href": href,
+        "type": "application/json",
+        "file:size": 4,
+        "umbra-py:filename": "scene_METADATA.json",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(responses.HEAD, href, headers={"Content-Length": "4"}, status=200)
+    gets = 0
+
+    class _Slow:
+        status_code = 200
+        headers = {"Content-Type": "application/json", "Content-Length": "4"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=65536):
+            yield b"{"
+            time.sleep(0.2)
+            yield b"a"
+            raise AssertionError("read past the deadline")
+
+        def close(self):
+            return None
+
+    def fake_get(url, **kwargs):
+        nonlocal gets
+        gets += 1
+        assert url == href
+        assert kwargs.get("allow_redirects") is False
+        assert kwargs.get("stream") is True
+        return _Slow()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "link"
+    assert out["downloaded"] is False
+    assert "content" not in out
+    assert gets == 1
+
+
+@responses.activate
+def test_public_host_filename_is_a_basename(sample_item_dict, monkeypatch):
+    """``umbra-py:filename`` cannot put ``../`` into the curl command."""
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["GEC"]["umbra-py:filename"] = "../../.bashrc"
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "10"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
+    assert out["filename"] == ".bashrc"
+    assert "../" not in out["how_to_fetch"]["curl"]
+    assert ".bashrc" in out["how_to_fetch"]["curl"]
+
+
+@responses.activate
+def test_public_host_unsafe_filename_falls_back_to_the_href(sample_item_dict, monkeypatch):
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["GEC"]["umbra-py:filename"] = "..\\..\\"
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "10"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
+    assert out["filename"] == href.rstrip("/").split("/")[-1]
+    assert ".." not in out["filename"]
+    assert ".." not in out["how_to_fetch"]["curl"]
+
+
+def test_public_bucket_https_matches_emitted_hosts():
+    virtual = "https://umbra-open-data-catalog.s3.amazonaws.com/sar-data/a.tif"
+    regional = "https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/sar-data/a.tif"
+    path_style = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/sar-data/a.tif"
+    assert ms._public_bucket_https(virtual)
+    assert ms._public_bucket_https(regional)
+    assert ms._public_bucket_https(path_style)
+    assert not ms._public_bucket_https(
+        "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/../other/a.tif"
+    )
+    assert not ms._public_bucket_https("https://s3.amazonaws.com/umbra-open-data-catalog/a.tif")
 
 
 @responses.activate
