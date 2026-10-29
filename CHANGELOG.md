@@ -10,6 +10,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Changed
+- **`requests` requires 2.33.0 or newer.** That release fixes PYSEC-2023-74,
+  PYSEC-2026-1873, PYSEC-2026-1872, and PYSEC-2026-2275. It supports Python
+  3.10 and newer, the same floor as umbra-py.
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
