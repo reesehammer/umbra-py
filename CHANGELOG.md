@@ -16,9 +16,31 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   steps, and the embedding key is not on the crawl. GitHub Actions are
   pinned to commit SHAs, and `mcp-publisher` is downloaded at v1.8.6 after
   a sha256 check.
+- **Hosted `download_asset` preview (`confirm=false`) only checks size against Umbra's public bucket**
+  and never follows redirects. A href outside that bucket is not requested;
+  `bytes` is the STAC `file:size` or `size`, or null.
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
+- **Hosted `download_asset(confirm=true)` returns a link plan** instead of
+  an error: a direct public URL. `how_to_fetch` includes `curl` and
+  `umbra download` when that URL is https on Umbra's public bucket.
+  Otherwise those two commands are null, `bytes` is null, and the note
+  says the commands were omitted. The hosted server never transfers files.
+  A 404 or 410 on an allowlisted size check raises, and `bytes` is null
+  when that size can't be read.
+- **Hosted item tools only read the catalog index or Umbra's public bucket.**
+  On the public host, `get_item`, `quicklook`, `download_asset`,
+  `describe_scene`, and the other item-URL tools accept an index id, a
+  product filename, an acquisition stem, or an https URL on the open-data
+  bucket. Anything else is refused before a request. Those JSON reads do
+  not follow redirects, stop at about 2 MB, and share a 10 second deadline.
+  A busy public host returns an error instead of starting another item read.
+- **A hosted size check that cannot start still returns the download plan.**
+  `download_asset(confirm=true)` sets `bytes` to null when the public host
+  is already at its limit of quick requests. A live catalog walk keeps the
+  retrying HTTP session, so a transient S3 failure is retried, and that
+  walk does not take a permit a geocode or a single item read needs.
 
 ## [0.1.4] — 2026-10-26
 

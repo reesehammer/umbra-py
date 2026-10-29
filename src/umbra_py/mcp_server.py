@@ -45,17 +45,24 @@ import functools
 import io
 import json
 import os
+import shlex
+import threading
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
 from .constants import (
     AI_PROVENANCE,
+    ASSET_FILENAME_FIELD,
     ATTRIBUTION,
     CANOPY_TOKEN_ENV,
     DATA_LICENSE,
     POLARIZATION_CAVEAT,
+    S3_BUCKET,
+    S3_REGION,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
@@ -121,13 +128,100 @@ def _fetch_item(url: str) -> UmbraItem:
     disagree with ``search_catalog`` (newer asset filenames, extra product
     types, ``s3://`` hrefs). When the index has this href, every tool sees
     the same snapshot.
+
+    On the public host (:func:`_cog_streaming_allowed` is false) a miss is not
+    an open fetch. The value must be an index id, a product filename, or an
+    acquisition stem in the local index, or an https URL on Umbra's public
+    open-data bucket. Anything else raises :class:`ValueError` and makes no
+    request. Every ``_fetch_item`` caller (``get_item``, ``quicklook``,
+    ``download_asset``, ``describe_scene``, the composite and stack tools,
+    and the LangChain / LlamaIndex wrappers) goes through this gate.
     """
     indexed = _item_from_index(url)
     if indexed is not None:
         return indexed
+    if not _cog_streaming_allowed():
+        return _fetch_item_public(url)
     from ._http import get_json
 
     return UmbraItem.from_dict(get_json(url), href=url)
+
+
+_PUBLIC_ITEM_REFUSAL = (
+    "{url!r} is not an item id, product filename, or acquisition stem in the "
+    "local catalog index, and it is not an https URL on Umbra's public "
+    "open-data bucket. The public host did not request it."
+)
+
+
+class PublicHostBusy(ValueError):
+    """The public host refused to start another outbound request."""
+
+
+#: Quick outbound calls: HEAD, geocode, one item GET. anyio's worker pool is
+#: 40; this leaves the rest for index-backed tools. One client reading a
+#: handful of uncached bucket URLs still fits. Past the cap the call fails
+#: at once.
+_PUBLIC_NET_LIMIT = 8
+#: Live catalog walks and semantic or embedding model calls. Separate from
+#: the quick pool so a walk cannot fill every permit a geocode needs.
+_PUBLIC_NET_LONG_LIMIT = 2
+_PUBLIC_NET_BUSY = (
+    "The public host is already handling its limit of network requests. Retry in a moment."
+)
+_PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+_PUBLIC_NET_LONG = threading.BoundedSemaphore(_PUBLIC_NET_LONG_LIMIT)
+
+
+def _reset_public_net() -> None:
+    """Drop any leaked public-network permits. Tests call this between cases."""
+    global _PUBLIC_NET, _PUBLIC_NET_LONG
+    _PUBLIC_NET = threading.BoundedSemaphore(_PUBLIC_NET_LIMIT)
+    _PUBLIC_NET_LONG = threading.BoundedSemaphore(_PUBLIC_NET_LONG_LIMIT)
+
+
+@contextmanager
+def _public_net_slot(*, long: bool = False):
+    """One public-host outbound permit, or a no-op off the public host.
+
+    ``long=False`` is the quick pool (:data:`_PUBLIC_NET_LIMIT`): HEAD,
+    geocode, and a single item GET. ``long=True`` is the pool for a live
+    catalog walk or a semantic or embedding model call
+    (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
+    :class:`PublicHostBusy` at once when it is full, with the same message.
+    """
+    if _cog_streaming_allowed():
+        yield
+        return
+    pool = _PUBLIC_NET_LONG if long else _PUBLIC_NET
+    if not pool.acquire(blocking=False):
+        raise PublicHostBusy(_PUBLIC_NET_BUSY)
+    try:
+        yield
+    finally:
+        pool.release()
+
+
+def _fetch_item_public(url: str) -> UmbraItem:
+    """Index filename/stem, or one allowlisted JSON GET. No other request."""
+    if is_asset_name(url):
+        try:
+            return resolve_asset_name(url)
+        except CatalogError as exc:
+            raise ValueError(asset_name_error_text(exc)) from exc
+    if not _public_bucket_https(url):
+        raise ValueError(_PUBLIC_ITEM_REFUSAL.format(url=url))
+    from ._http import safe_get
+
+    with _public_net_slot():
+        raw = safe_get(url, _public_bucket_https)
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"The document at {url!r} was not JSON.") from exc
+    if not isinstance(doc, dict):
+        raise ValueError(f"The document at {url!r} was not a JSON object.")
+    return UmbraItem.from_dict(doc, href=url)
 
 
 def _png_bytes(image: Any) -> bytes:
@@ -189,40 +283,263 @@ def _require_cog_streaming(tool: str) -> None:
     raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
-def _refuse_public_asset_download(href: str) -> None:
-    """Refuse ``download_asset(confirm=True)`` when this host must not store Umbra files.
+#: HTTPS hosts the public catalog actually emits for the open bucket.
+#: Virtual-hosted: published STAC asset hrefs (no region, and the regional
+#: form ``catalog._object_key`` accepts). Path-style: ``UmbraCatalog._url_for``
+#: and :func:`umbra_py.models._derive_data_url` (``s3.<region>.amazonaws.com/<bucket>/...``).
+_BUCKET_VIRTUAL_HOSTS = frozenset(
+    {
+        f"{S3_BUCKET}.s3.amazonaws.com",
+        f"{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com",
+    }
+)
+_BUCKET_PATH_HOST = f"s3.{S3_REGION}.amazonaws.com"
 
-    Same gate as :func:`_require_cog_streaming`: ``cog_streaming`` off
-    (``umbra serve --public`` / ``UMBRA_MCP_COG_STREAMING=0``). The error names
-    the asset href and its size in bytes so the client can fetch the file
-    itself. A HEAD that fails (network error, timeout, or a non-2xx status)
-    still refuses; the message then says the size is unknown. A local or
-    stdio server returns immediately, with no extra request.
+_LINK_NOTE = (
+    "The hosted server does not write files. This is a direct link to the "
+    "public object, not a download. A local `uvx --from 'umbra-py[mcp]' "
+    "umbra-mcp` server can download this asset to your own disk "
+    "(download_asset with confirm=true)."
+)
+_COMMANDS_OMITTED_NOTE = (
+    "Fetch commands are omitted because this href is not an https URL on "
+    "Umbra's public open-data bucket."
+)
+
+
+def _nonneg_int(value: Any) -> int | None:
+    """A non-negative integer, or None. Booleans are not sizes."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _stac_asset_size(asset: dict[str, Any]) -> int | None:
+    """Bytes recorded on the STAC asset (``file:size``, else ``size``)."""
+    for key in ("file:size", "size"):
+        if key not in asset:
+            continue
+        parsed = _nonneg_int(asset.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _header_length(headers: Any) -> int | None:
+    raw = headers.get("Content-Length")
+    if raw is None:
+        return None
+    try:
+        return _nonneg_int(int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _public_bucket_https(href: str) -> bool:
+    """Whether ``href`` is https on Umbra's public open-data bucket.
+
+    The public host may HEAD only these URLs, and only to read
+    ``Content-Length``. Anything else — another host, plain http, a userinfo
+    trick, a non-443 port, or a path-style URL whose first segment is not the
+    open bucket — is not requested. Redirects are not followed; this check is
+    the URL as given.
     """
-    if _cog_streaming_allowed():
-        return
+    if not isinstance(href, str) or not href:
+        return False
+    try:
+        parts = urlsplit(href)
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.username or parts.password:
+        return False
+    if port not in (None, 443):
+        return False
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    path = unquote(parts.path)
+    segments = [segment for segment in path.split("/") if segment != ""]
+    if ".." in segments or "\\" in path:
+        return False
+    if host in _BUCKET_VIRTUAL_HOSTS:
+        return True
+    return host == _BUCKET_PATH_HOST and bool(segments) and segments[0] == S3_BUCKET
+
+
+def _head_content_length(href: str, *, raise_on_failure: bool = False) -> int | None:
+    """``Content-Length`` from HEAD, or None when it is missing or the check fails.
+
+    Only an allowlisted https URL is requested, via :func:`requests.head` so
+    the shared session does not retry, and redirects are not followed. A 404
+    or 410 raises :class:`requests.HTTPError`. Any other non-2xx, including a
+    redirect, or a network error, returns None so ``confirm=true`` still emits
+    a link plan.
+
+    ``raise_on_failure`` is the public ``confirm=false`` preview. A redirect
+    is still not followed and returns None. Any other non-2xx raises
+    :class:`requests.HTTPError`, and a network error propagates — that preview
+    used to ``raise_for_status`` on the response it got back.
+    """
+    if not _public_bucket_https(href):
+        return None
     import requests
 
-    from ._http import DEFAULT_TIMEOUT, default_session
+    from ._http import DEFAULT_TIMEOUT
 
-    size: int | None = None
     try:
-        head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
-        head.raise_for_status()
-        length = head.headers.get("Content-Length")
-        if length is not None:
-            size = int(length)
+        with _public_net_slot():
+            head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
-        size = None
-    if size is None:
-        sized = f"{href} (size unknown)"
-    else:
-        sized = f"{href} ({size} bytes)"
-    raise ValueError(
-        "download_asset would write this file on the public community host. "
-        "The public community instance does not proxy the archive — download "
-        f"{sized} locally with your own downloader, or run a local "
-        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server for download_asset."
+        if raise_on_failure:
+            raise
+        return None
+    # A redirect is not a size. Do not read its Content-Length or follow it.
+    if 300 <= head.status_code < 400:
+        return None
+    if not 200 <= head.status_code < 300:
+        if head.status_code in (404, 410) or raise_on_failure:
+            head.raise_for_status()
+        return None
+    return _header_length(head.headers)
+
+
+def _public_confirm_preview_size(item: UmbraItem, asset: str, href: str) -> int | None:
+    """Byte size for ``confirm=false`` on the public host.
+
+    An allowlisted href is HEADed. Anything else is not requested; the size
+    is the STAC ``file:size`` or ``size``.
+    """
+    if _public_bucket_https(href):
+        return _head_content_length(href, raise_on_failure=True)
+    body = item._resolve_asset(asset)[1]
+    return _stac_asset_size(body)
+
+
+def _plain_basename(name: str) -> str:
+    """Last path segment, or ``""`` when it is not a safe filename.
+
+    Separators are ``/`` and ``\\``. A leading dot, a control character
+    (below 0x20, or DEL), or more than 255 bytes is rejected so the caller
+    can fall back to the href basename.
+    """
+    cleaned = name.replace("\\", "/").strip()
+    if not cleaned:
+        return ""
+    base = cleaned.rsplit("/", 1)[-1].strip()
+    if (
+        not base
+        or base.startswith(".")
+        or len(base.encode("utf-8")) > 255
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in base)
+    ):
+        return ""
+    return base
+
+
+def _safe_download_filename(named: Any, href: str, fallback: str) -> str:
+    """Basename for ``curl -o``. Falls back to the href, then the asset key."""
+    from .download import _filename_from_url
+
+    base = _plain_basename(named) if isinstance(named, str) else ""
+    if base:
+        return base
+    from_href = _plain_basename(_filename_from_url(href))
+    if from_href and from_href != "download":
+        return from_href
+    return _plain_basename(fallback) or "download"
+
+
+def _how_to_fetch(
+    item_arg: str, asset: str, filename: str, href: str, dest_dir: str
+) -> dict[str, str | None]:
+    """Copy-paste commands. Flags match ``umbra download --help``.
+
+    Both commands are null unless ``href`` is https on the public open-data
+    bucket. The keys stay so a caller can read them either way.
+    """
+    if not _public_bucket_https(href):
+        return {"curl": None, "umbra": None}
+    dest = dest_dir if isinstance(dest_dir, str) and dest_dir else "."
+    curl = f"curl -L -C - -o {shlex.quote(filename)} {shlex.quote(href)}"
+    umbra = (
+        "umbra download "
+        f"{shlex.quote(item_arg)} --asset {shlex.quote(asset)} --dest {shlex.quote(dest)}"
+    )
+    return {"curl": curl, "umbra": umbra}
+
+
+def _link_plan(
+    *,
+    asset: str,
+    filename: str,
+    href: str,
+    size: int | None,
+    item_arg: str,
+    dest_dir: str,
+) -> dict[str, Any]:
+    commands = _how_to_fetch(item_arg, asset, filename, href, dest_dir)
+    note = _LINK_NOTE
+    if commands["curl"] is None:
+        note = f"{note} {_COMMANDS_OMITTED_NOTE}"
+    return {
+        "mode": "link",
+        "downloaded": False,
+        "asset": asset,
+        "filename": filename,
+        "href": href,
+        "bytes": size,
+        "how_to_fetch": commands,
+        "note": note,
+    }
+
+
+def _public_host_confirmed_download(
+    item: UmbraItem,
+    asset: str,
+    url: str,
+    dest_dir: str,
+    href: str,
+) -> dict[str, Any]:
+    """Link plan. Never GETs the asset and never writes a file.
+
+    When ``href`` is https on the public bucket, ``bytes`` is the STAC
+    ``file:size`` or ``size`` if that is recorded, otherwise ``Content-Length``
+    from HEAD. Otherwise the href is not requested, ``bytes`` is null, and
+    ``how_to_fetch`` leaves both commands null.
+    """
+    if not isinstance(href, str) or not href.startswith(("http://", "https://")):
+        raise ValueError(
+            f"No public HTTP(S) href for asset {asset!r} on item {item.id!r}. "
+            "Nothing to link, and nothing was downloaded."
+        )
+    key, body = item._resolve_asset(asset)
+    named = body.get(ASSET_FILENAME_FIELD)
+    filename = _safe_download_filename(named, href, key)
+    item_arg = url
+    if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
+        item_arg = item.href
+    size: int | None = None
+    if _public_bucket_https(href):
+        stac_size = _stac_asset_size(body)
+        if stac_size is not None:
+            size = stac_size
+        else:
+            try:
+                size = _head_content_length(href)
+            except PublicHostBusy:
+                # The plan is still the answer. The size can be read later.
+                size = None
+    return _link_plan(
+        asset=asset,
+        filename=filename,
+        href=href,
+        size=size,
+        item_arg=item_arg,
+        dest_dir=dest_dir,
     )
 
 
@@ -491,7 +808,8 @@ def search_catalog(
                 "semantic=True needs `area` set to the plain-language site "
                 "description to resolve (e.g. 'grain storage north dakota')"
             )
-        resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
+        with _public_net_slot(long=True):
+            resolved_area, semantic_matches = _resolve_semantic_area(area, min_score=min_score)
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
@@ -515,30 +833,32 @@ def search_catalog(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
     geometry = _parse_geometry(intersects) if intersects is not None else None
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
     try:
-        results = source.search(
-            bbox=resolved_bbox,
-            intersects=geometry,
-            start=start,
-            end=end,
-            product_types=list(products) if products else None,
-            area=search_area,
-            fuzzy=search_fuzzy,
-            polarizations=list(polarizations) if polarizations else None,
-            min_incidence=min_incidence,
-            max_incidence=max_incidence,
-            max_resolution=max_resolution,
-            canonical=canonical,
-            limit=limit,
-            max_per_task=max_per_task,
-        )
-        cards = [item.to_llm_context() for item in results]
+        with _public_net_slot(long=True) if not is_index else nullcontext():
+            results = source.search(
+                bbox=resolved_bbox,
+                intersects=geometry,
+                start=start,
+                end=end,
+                product_types=list(products) if products else None,
+                area=search_area,
+                fuzzy=search_fuzzy,
+                polarizations=list(polarizations) if polarizations else None,
+                min_incidence=min_incidence,
+                max_incidence=max_incidence,
+                max_resolution=max_resolution,
+                canonical=canonical,
+                limit=limit,
+                max_per_task=max_per_task,
+            )
+            cards = [item.to_llm_context() for item in results]
     finally:
         if isinstance(source, CatalogIndex):
             source.close()
@@ -762,7 +1082,8 @@ def find_repeat_sites(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
     geometry = _parse_geometry(intersects) if intersects is not None else None
 
     token = _canopy_token()
@@ -801,22 +1122,23 @@ def find_repeat_sites(
                 max_span_days=max_span_days,
             )
         else:
-            pool = list(
-                source.search(
-                    bbox=resolved_bbox,
-                    intersects=geometry,
-                    start=start,
-                    end=end,
-                    product_types=list(products) if products else None,
-                    area=area,
-                    fuzzy=fuzzy,
-                    polarizations=list(polarizations) if polarizations else None,
-                    min_incidence=min_incidence,
-                    max_incidence=max_incidence,
-                    max_resolution=max_resolution,
-                    limit=limit,
+            with _public_net_slot(long=True):
+                pool = list(
+                    source.search(
+                        bbox=resolved_bbox,
+                        intersects=geometry,
+                        start=start,
+                        end=end,
+                        product_types=list(products) if products else None,
+                        area=area,
+                        fuzzy=fuzzy,
+                        polarizations=list(polarizations) if polarizations else None,
+                        min_incidence=min_incidence,
+                        max_incidence=max_incidence,
+                        max_resolution=max_resolution,
+                        limit=limit,
+                    )
                 )
-            )
             sites = rank_site_coverage(
                 pool,
                 top=top,
@@ -887,6 +1209,10 @@ def get_item(url: str) -> dict[str, Any]:
     sidecar URL) as their hand-off pointer. A filename or stem still resolves
     from the local open-data index when a token is set.
 
+    On the public host a URL is fetched only when it is https on Umbra's
+    public open-data bucket. Any other URL is refused before a request.
+    A bare id that is not in the local index is refused the same way.
+
     The card (:meth:`UmbraItem.to_llm_context`) carries the id, ISO datetime,
     place, bbox, resolution, polarization *with the change-detection caveat*,
     the per-product-type explanations and asset URLs, and the mandatory
@@ -913,7 +1239,8 @@ def geocode_place(query: str) -> dict[str, Any]:
     ...}`` so the agent can inspect the box before searching, or pass it
     straight to ``search_catalog``'s ``bbox``.
     """
-    box, display = _geocode_place(query)
+    with _public_net_slot():
+        box, display = _geocode_place(query)
     return {"bbox": list(box), "display_name": display}
 
 
@@ -1402,15 +1729,34 @@ def download_asset(
 
     SAR products can be multiple GB, so this is a two-step handshake: call it
     first with ``confirm=False`` (the default) to get the byte size without
-    downloading, then again with ``confirm=True`` to actually fetch. Returns
-    ``{asset, path, bytes}`` on download, or a size-and-hint object when
-    confirmation is still required.
+    downloading, then again with ``confirm=True`` to fetch it. On a
+    local or stdio server, ``confirm=True`` returns ``{asset, path, bytes}``.
+    ``confirm=False`` returns a size-and-hint object and does not write a file.
 
     On a public host (``umbra serve --public``, COG streaming off),
-    ``confirm=True`` is refused. The error includes the asset href and its
-    size in bytes and tells you to download the file locally (or run a local
-    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
-    ``confirm=False`` still returns the size.
+    ``confirm=True`` does not transfer the file. It returns a link plan:
+    ``mode`` ``"link"``, ``downloaded`` false, ``asset``, ``filename`` (a
+    basename), the direct public ``href``, ``bytes``, and ``how_to_fetch``.
+    When the href is https on the public open-data bucket, ``how_to_fetch``
+    is ``curl -L -C - -o <filename> <href>`` and
+    ``umbra download ITEM --asset ASSET --dest DIR``. ``bytes`` is the STAC
+    ``file:size`` or ``size`` when that is a non-negative integer; otherwise
+    the host HEADs that href for ``Content-Length``, with no redirects and
+    no retries. A href that is not on that bucket is not requested:
+    ``how_to_fetch.curl`` and ``how_to_fetch.umbra`` are null, ``bytes`` is
+    null, and ``note`` says the commands were omitted. A 404 or 410 from
+    an allowlisted HEAD raises. Any other HEAD failure, including a full
+    quick-request slot, leaves ``bytes`` null and still returns the plan.
+    The hosted server never transfers the file. A local
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
+    disk. ``confirm=False`` on this host returns the same size-and-hint
+    object and does not write a file. It HEADs for ``Content-Length`` only
+    when the href is https on the public open-data bucket, with no retries,
+    and it does not follow redirects. A 404 or 410 raises, and so does any
+    other non-redirect HEAD error. A redirect leaves ``bytes`` null. A href
+    outside the bucket is not requested; ``bytes`` is the STAC ``file:size``
+    or ``size`` when that is a non-negative integer, otherwise null. A local
+    server still HEADs the href and follows redirects.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
@@ -1431,7 +1777,6 @@ def download_asset(
     keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
-    from .download import download_asset as _download_asset
 
     if not isinstance(url, str) or not url.strip():
         raise ValueError(
@@ -1448,11 +1793,17 @@ def download_asset(
     href = item.asset_href(asset)
 
     if not confirm:
-        session = default_session()
-        head = session.head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
-        head.raise_for_status()
-        length = head.headers.get("Content-Length")
-        size = int(length) if length is not None else None
+        # Local servers still HEAD whatever href the item carries and follow
+        # redirects. The public host must not: a caller-supplied STAC item can
+        # point the preview at loopback or the platform's private network.
+        if _cog_streaming_allowed():
+            session = default_session()
+            head = session.head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
+            head.raise_for_status()
+            length = head.headers.get("Content-Length")
+            size = int(length) if length is not None else None
+        else:
+            size = _public_confirm_preview_size(item, asset, href)
         return {
             "confirm_required": True,
             "asset": asset,
@@ -1464,7 +1815,11 @@ def download_asset(
             + "Call again with confirm=true to download it.",
         }
 
-    _refuse_public_asset_download(href)
+    if not _cog_streaming_allowed():
+        return _public_host_confirmed_download(item, asset, url, dest_dir, href)
+
+    from .download import download_asset as _download_asset
+
     path = _download_asset(item, asset, dest_dir)
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
@@ -1512,7 +1867,8 @@ def watch_site(
     resolved_bbox = cast("tuple[float, float, float, float] | None", tuple(bbox) if bbox else None)
     resolved_place = None
     if place and resolved_bbox is None:
-        resolved_bbox, resolved_place = _geocode_place(place)
+        with _public_net_slot():
+            resolved_bbox, resolved_place = _geocode_place(place)
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
@@ -1535,19 +1891,22 @@ def watch_site(
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
-        result = watch(
-            cast(SearchSource, source),
-            name=watch_name,
-            store=MetaWatchStore(store_index),
-            reset=reset,
-            bbox=resolved_bbox,
-            area=area,
-            fuzzy=fuzzy,
-            product_types=resolved_products,
-            start=start,
-            end=end,
-        )
-        payload = result.to_dict()
+        # A live walk holds one long-pool permit for the whole search.
+        # An index-backed watch does not: it never leaves the machine.
+        with _public_net_slot(long=True) if not is_index else nullcontext():
+            result = watch(
+                cast(SearchSource, source),
+                name=watch_name,
+                store=MetaWatchStore(store_index),
+                reset=reset,
+                bbox=resolved_bbox,
+                area=area,
+                fuzzy=fuzzy,
+                product_types=resolved_products,
+                start=start,
+                end=end,
+            )
+            payload = result.to_dict()
     finally:
         store_index.close()
 
@@ -1655,10 +2014,11 @@ def find_similar_text(
             f"No scene-embedding index at {path}. Build one first with "
             "'umbra embed build' (text-to-scene search needs it)."
         )
-    text_embedder = emb.default_text_embedder(model=model)
-    with emb.SceneEmbeddingIndex(path) as index:
-        matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
-        stored_model = index.stored_model()
+    with _public_net_slot(long=True):
+        text_embedder = emb.default_text_embedder(model=model)
+        with emb.SceneEmbeddingIndex(path) as index:
+            matches = index.similar_to_text(query, text_embedder, top_k=top_k, min_score=min_score)
+            stored_model = index.stored_model()
     return _scene_matches_payload(matches, stored_model, {"kind": "text", "text": query})
 
 
