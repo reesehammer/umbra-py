@@ -13,22 +13,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 - **Citation metadata uses the Zenodo concept DOI**
   `10.5281/zenodo.23676715`. Cite all versions with that DOI; it resolves to
   the latest archived release.
-- **Hosted `download_asset(confirm=true)` returns a link plan.** On the
-  public MCP host (COG streaming off), confirming a download no longer
-  raises. The tool returns `mode: "link"`, `downloaded: false`, the direct
-  public `href`, the filename, `bytes` when STAC or HEAD knows the size
-  (null otherwise), and `how_to_fetch` (`curl -L -C -` and
-  `umbra download`). The host does not write the file. Metadata and
-  detected-image previews at or under 2 MiB come back inline
-  (`mode: "inline"`). GEC, CSI, SIDD, SICD, and CPHD are always a link.
-  `confirm=false` and a local server are unchanged. The public host
-  requests an asset only when its href is https on the open-data bucket
-  (`umbra-open-data-catalog.s3.amazonaws.com`,
-  `umbra-open-data-catalog.s3.us-west-2.amazonaws.com`, or
-  `s3.us-west-2.amazonaws.com/umbra-open-data-catalog/...`) and does not
-  follow redirects. Any other href is a link plan with the STAC size, or
-  null, and is not inlined. An inline read stops after 10 seconds.
-  `filename` is a basename.
+- **Hosted `download_asset(confirm=true)` returns a link plan** instead of
+  an error: a direct HTTPS URL plus fetch commands. The hosted server never
+  transfers files.
 
 ## [0.1.4] — 2026-10-26
 

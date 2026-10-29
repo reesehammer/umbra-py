@@ -41,14 +41,12 @@ extra either. ``server.json`` publishes the stdio command to the MCP registry.
 
 from __future__ import annotations
 
-import base64
 import functools
 import io
 import json
 import os
 import shlex
-import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
@@ -196,16 +194,6 @@ def _require_cog_streaming(tool: str) -> None:
     raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
-#: Largest metadata or preview body the public host will place in a tool
-#: result. Radar products are never inlined, whatever their size. A body over
-#: this cap, or whose size cannot be proven before the read, is a link plan.
-INLINE_ASSET_MAX_BYTES = 2 * 1024 * 1024
-
-#: Wall-clock budget for one public-host inline read. ``DEFAULT_TIMEOUT`` is
-#: per socket operation, so a slow drip would otherwise hold a worker across
-#: many reads. Past this deadline the host returns a link plan.
-INLINE_READ_DEADLINE_S = 10.0
-
 #: HTTPS hosts the public catalog actually emits for the open bucket.
 #: Virtual-hosted: published STAC asset hrefs (no region, and the regional
 #: form ``catalog._object_key`` accepts). Path-style: ``UmbraCatalog._url_for``
@@ -218,32 +206,12 @@ _BUCKET_VIRTUAL_HOSTS = frozenset(
 )
 _BUCKET_PATH_HOST = f"s3.{S3_REGION}.amazonaws.com"
 
-#: Schema v2 families small enough to inline. Collision suffixes (``metadata_2``)
-#: share the family. Everything else — including GEC, CSI, SIDD, SICD, CPHD,
-#: ``csi_sidd``, and ``file`` / ``file_tif`` — is a link.
-_INLINE_ASSET_FAMILIES = frozenset({"metadata", "stac_metadata", "di_gif"})
-_PREVIEW_ASSET_FAMILIES = frozenset({"di_gif"})
-
 _LINK_NOTE = (
     "The hosted server does not write files. This is a direct link to the "
     "public object, not a download. A local `uvx --from 'umbra-py[mcp]' "
     "umbra-mcp` server can download this asset to your own disk "
     "(download_asset with confirm=true)."
 )
-_INLINE_NOTE = (
-    "The hosted server does not write files. The bytes are in this result, "
-    "not a file on the server. A local `uvx --from 'umbra-py[mcp]' umbra-mcp` "
-    "server can download this asset to your own disk "
-    "(download_asset with confirm=true)."
-)
-
-
-def _asset_family(v2_key: str) -> str:
-    """``metadata_2`` → ``metadata``. ``stac_metadata`` stays put."""
-    base, sep, suffix = v2_key.rpartition("_")
-    if sep and suffix.isdigit() and base:
-        return base
-    return v2_key
 
 
 def _nonneg_int(value: Any) -> int | None:
@@ -276,17 +244,14 @@ def _header_length(headers: Any) -> int | None:
         return None
 
 
-class _InlineReadDeadline(Exception):
-    """The public-host inline read passed :data:`INLINE_READ_DEADLINE_S`."""
-
-
 def _public_bucket_https(href: str) -> bool:
     """Whether ``href`` is https on Umbra's public open-data bucket.
 
-    The public host may HEAD or GET only these URLs. Anything else — another
-    host, plain http, a userinfo trick, a non-443 port, or a path-style URL
-    whose first segment is not the open bucket — is a link plan and is never
-    requested. Redirects are not followed; this check is the URL as given.
+    The public host may HEAD only these URLs, and only to read
+    ``Content-Length``. Anything else — another host, plain http, a userinfo
+    trick, a non-443 port, or a path-style URL whose first segment is not the
+    open bucket — is not requested. Redirects are not followed; this check is
+    the URL as given.
     """
     if not isinstance(href, str) or not href:
         return False
@@ -309,12 +274,13 @@ def _public_bucket_https(href: str) -> bool:
 
 
 def _head_content_length(href: str) -> int | None:
-    """``Content-Length`` from HEAD, or None when the check fails or omits it.
+    """``Content-Length`` from HEAD, or None when it is missing or the check fails.
 
-    A failure here must not become an error: the public host still returns a
-    link, with ``bytes`` null when nothing else recorded a size. Only an
-    allowlisted https URL is requested, with no retries and no redirects. A
-    3xx is a failed check, not a size.
+    Only an allowlisted https URL is requested, via :func:`requests.head` so
+    the shared session does not retry, and redirects are not followed. A 404
+    or 410 raises :class:`requests.HTTPError`, the same way ``confirm=false``
+    does. Any other non-2xx, including a redirect, or a network error, returns
+    None so the caller still emits a link plan.
     """
     if not _public_bucket_https(href):
         return None
@@ -323,141 +289,14 @@ def _head_content_length(href: str) -> int | None:
     from ._http import DEFAULT_TIMEOUT
 
     try:
-        # ``requests.head``, not the shared retrying session: a public-host
-        # size check must not repeat a request, and must not follow Location.
         head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
         return None
-    try:
-        if 300 <= head.status_code < 400:
-            return None
+    if head.status_code in (404, 410):
         head.raise_for_status()
-    except requests.RequestException:
+    if head.status_code < 200 or head.status_code >= 300:
         return None
     return _header_length(head.headers)
-
-
-def _read_up_to(
-    chunks: Iterable[bytes], cap: int, *, deadline_s: float | None = None
-) -> bytes | None:
-    """Concatenate ``chunks`` up to ``cap`` bytes.
-
-    Returns None once the body exceeds ``cap``, and stops pulling further
-    chunks. At most ``cap + 1`` bytes are retained. A body of exactly ``cap``
-    bytes is a complete read. When ``deadline_s`` is set, raises
-    :class:`_InlineReadDeadline` once the wall clock passes it and does not
-    pull a further chunk.
-    """
-    buf = bytearray()
-    started = time.monotonic()
-    for chunk in chunks:
-        if deadline_s is not None and time.monotonic() - started > deadline_s:
-            raise _InlineReadDeadline
-        if not chunk:
-            continue
-        room = cap - len(buf) + 1
-        if len(chunk) > room:
-            buf.extend(chunk[:room])
-        else:
-            buf.extend(chunk)
-        if len(buf) > cap:
-            return None
-    return bytes(buf)
-
-
-def _fetch_capped(href: str, cap: int) -> tuple[str, bytes, str | None, int | None]:
-    """GET ``href`` without pulling more than ``cap`` bytes through the host.
-
-    Returns ``(status, body, content_type, declared_length)``.
-
-    - ``ok`` — body length is at most ``cap``.
-    - ``over`` — a ``Content-Length`` above ``cap`` (body not read;
-      ``declared_length`` is that value) or a stream that crossed the cap
-      (``declared_length`` is None; the true size is unknown).
-    - ``error`` — the transfer failed, the URL is not the public bucket, the
-      response is a redirect, or the read passed
-      :data:`INLINE_READ_DEADLINE_S`. Nothing was inlined.
-
-    Uses :func:`requests.get` directly so the shared session's retries do not
-    run, and does not follow redirects.
-    """
-    if not _public_bucket_https(href):
-        return ("error", b"", None, None)
-    import requests
-
-    try:
-        resp = requests.get(
-            href,
-            stream=True,
-            allow_redirects=False,
-            timeout=INLINE_READ_DEADLINE_S,
-        )
-    except requests.RequestException:
-        return ("error", b"", None, None)
-    try:
-        if 300 <= resp.status_code < 400:
-            return ("error", b"", None, None)
-        try:
-            resp.raise_for_status()
-        except requests.RequestException:
-            return ("error", b"", None, None)
-        raw_type = resp.headers.get("Content-Type")
-        content_type = raw_type if isinstance(raw_type, str) and raw_type.strip() else None
-        declared = _header_length(resp.headers)
-        if declared is not None and declared > cap:
-            return ("over", b"", content_type, declared)
-        try:
-            body = _read_up_to(
-                resp.iter_content(chunk_size=64 * 1024),
-                cap,
-                deadline_s=INLINE_READ_DEADLINE_S,
-            )
-        except _InlineReadDeadline:
-            return ("error", b"", content_type, None)
-        except requests.RequestException:
-            # A body that does not match Content-Length (or a dropped
-            # connection) must not raise out of confirm=true, and must not
-            # be returned as an inline payload.
-            return ("error", b"", content_type, None)
-        if body is None:
-            return ("over", b"", content_type, None)
-        return ("ok", body, content_type, declared)
-    finally:
-        resp.close()
-
-
-def _decode_text(data: bytes, content_type: str | None) -> str | None:
-    encodings: list[str] = []
-    if content_type:
-        for part in content_type.split(";")[1:]:
-            piece = part.strip()
-            if piece.lower().startswith("charset="):
-                encodings.append(piece.split("=", 1)[1].strip().strip("\"'"))
-    encodings.append("utf-8")
-    seen: set[str] = set()
-    for enc in encodings:
-        key = enc.lower()
-        if not enc or key in seen:
-            continue
-        seen.add(key)
-        try:
-            return data.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return None
-
-
-def _image_format(data: bytes) -> str | None:
-    """Magic-byte image type, or None when the body is not a preview image."""
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "gif"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "jpeg"
-    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "webp"
-    return None
 
 
 def _plain_basename(name: str) -> str:
@@ -529,11 +368,11 @@ def _public_host_confirmed_download(
     dest_dir: str,
     href: str,
 ) -> dict[str, Any]:
-    """Link plan, or an inline body for a small metadata/preview asset.
+    """Link plan. Never GETs the asset and never writes a file.
 
-    Never calls :func:`umbra_py.download.download_asset`. A radar product is
-    never fetched. A small kind is fetched only when a recorded size is at
-    most :data:`INLINE_ASSET_MAX_BYTES`, and that read stops at the cap.
+    ``bytes`` is the STAC ``file:size`` or ``size`` when that is recorded.
+    Otherwise an allowlisted href is HEADed for ``Content-Length``. A href
+    that is not on the public bucket is not requested, and ``bytes`` is null.
     """
     if not isinstance(href, str) or not href.startswith(("http://", "https://")):
         raise ValueError(
@@ -546,121 +385,18 @@ def _public_host_confirmed_download(
     item_arg = url
     if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
         item_arg = item.href
-    family = _asset_family(key)
     stac_size = _stac_asset_size(body)
-    # A foreign href is not probed. bytes comes from the STAC record only.
-    if not _public_bucket_https(href):
-        return _link_plan(
-            asset=asset,
-            filename=filename,
-            href=href,
-            size=stac_size,
-            item_arg=item_arg,
-            dest_dir=dest_dir,
-        )
-    head_size = _head_content_length(href)
-    recorded = [size for size in (head_size, stac_size) if size is not None]
-    # HEAD is the live object. Fall back to the STAC record when HEAD omitted
-    # Content-Length or failed. Disagreeing sizes still block inlining below.
-    reported = head_size if head_size is not None else stac_size
-
-    def link(size: int | None) -> dict[str, Any]:
-        return _link_plan(
-            asset=asset,
-            filename=filename,
-            href=href,
-            size=size,
-            item_arg=item_arg,
-            dest_dir=dest_dir,
-        )
-
-    if family not in _INLINE_ASSET_FAMILIES:
-        return link(reported)
-    if not recorded:
-        return link(None)
-    # Either signal over the cap blocks the read. Report the larger figure so
-    # a stale small HEAD cannot hide a STAC size that already exceeds the cap.
-    if any(size > INLINE_ASSET_MAX_BYTES for size in recorded):
-        return link(max(recorded))
-
-    status, payload, content_type, declared = _fetch_capped(href, INLINE_ASSET_MAX_BYTES)
-    if status == "error":
-        return link(reported)
-    if status != "ok":
-        # A Content-Length above the cap is a real size. A stream that crossed
-        # the cap means the advertised size was wrong; don't repeat it.
-        over = declared if declared is not None and declared > INLINE_ASSET_MAX_BYTES else None
-        return link(over)
-
-    if family in _PREVIEW_ASSET_FAMILIES:
-        image_fmt = _image_format(payload)
-        if image_fmt is None:
-            return link(len(payload))
-        return {
-            "mode": "inline",
-            "downloaded": False,
-            "asset": asset,
-            "filename": filename,
-            "href": href,
-            "bytes": len(payload),
-            "media_type": f"image/{image_fmt}",
-            "content_base64": base64.b64encode(payload).decode("ascii"),
-            "note": _INLINE_NOTE,
-        }
-
-    text = _decode_text(payload, content_type)
-    if text is None:
-        return link(len(payload))
-    media = "text/plain"
-    content: Any = text
-    try:
-        content = json.loads(text)
-        media = "application/json"
-    except json.JSONDecodeError:
-        pass
-    return {
-        "mode": "inline",
-        "downloaded": False,
-        "asset": asset,
-        "filename": filename,
-        "href": href,
-        "bytes": len(payload),
-        "media_type": media,
-        "content": content,
-        "note": _INLINE_NOTE,
-    }
-
-
-def _with_inline_image_block(result: Any) -> Any:
-    """Attach an MCP image block for an inlined preview.
-
-    The callable itself stays a dict (LangChain / LlamaIndex read
-    ``content_base64``). The registered tool adds the image the model sees,
-    and keeps the same dict as structured content. Link plans and JSON
-    inlines are unchanged.
-    """
-    if not isinstance(result, dict) or result.get("mode") != "inline":
-        return result
-    media = result.get("media_type")
-    encoded = result.get("content_base64")
-    if not isinstance(media, str) or not media.startswith("image/") or not isinstance(encoded, str):
-        return result
-    from mcp_types import CallToolResult, TextContent
-
-    _, Image = _require_mcp()
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (ValueError, TypeError):
-        return result
-    fmt = media.split("/", 1)[1].split(";", 1)[0].strip().lower() or "png"
-    shown = {key: value for key, value in result.items() if key != "content_base64"}
-    shown["image"] = "attached"
-    return CallToolResult(
-        content=[
-            Image(data=raw, format=fmt).to_image_content(),
-            TextContent(type="text", text=json.dumps(shown, indent=2)),
-        ],
-        structured_content=result,
+    if stac_size is not None or not _public_bucket_https(href):
+        size = stac_size
+    else:
+        size = _head_content_length(href)
+    return _link_plan(
+        asset=asset,
+        filename=filename,
+        href=href,
+        size=size,
+        item_arg=item_arg,
+        dest_dir=dest_dir,
     )
 
 
@@ -684,8 +420,6 @@ def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
             raise
         except (ValueError, UmbraError) as exc:
             raise ToolError(str(exc)) from exc
-        if fn.__name__ == "download_asset":
-            return _with_inline_image_block(result)
         return result
 
     return wrapped
@@ -1843,29 +1577,25 @@ def download_asset(
 
     SAR products can be multiple GB, so this is a two-step handshake: call it
     first with ``confirm=False`` (the default) to get the byte size without
-    downloading, then again with ``confirm=True`` to actually fetch. On a
+    downloading, then again with ``confirm=True`` to fetch it. On a
     local or stdio server, ``confirm=True`` returns ``{asset, path, bytes}``.
     ``confirm=False`` returns a size-and-hint object and does not write a file.
 
     On a public host (``umbra serve --public``, COG streaming off),
-    ``confirm=True`` does not write a file and does not raise. It returns a
-    link plan: ``mode`` ``"link"``, ``downloaded`` false, ``asset``,
-    ``filename``, the direct public ``href``,     ``bytes`` (STAC ``file:size`` or
-    ``size``, else HEAD ``Content-Length``, or null when neither is known),
-    and ``how_to_fetch`` — ``curl -L -C - -o <filename> <href>`` and
-    ``umbra download ITEM --asset ASSET --dest DIR``. ``filename`` is a
-    basename. The hosted server does not write files. It HEADs or GETs an
-    asset only when the href is https on the public open-data bucket, and it
-    does not follow redirects; any other href is a link plan (STAC size, or
-    null) and is not inlined. A local ``uvx --from 'umbra-py[mcp]' umbra-mcp``
-    server downloads to your own disk. Metadata and ``stac_metadata`` JSON, and
-    ``di_gif`` previews, at or under 2 MiB come back inline (``mode``
-    ``"inline"``): JSON in ``content``, a preview as ``content_base64`` plus
-    an MCP image block. GEC, CSI, SIDD, SICD, and CPHD are always a link,
-    whatever their size. An unknown size, a body over the cap, or an inline
-    read that passes 10 seconds, is a link; this host does not proxy or
-    stream those bytes. ``confirm=False`` is unchanged. LangChain and
-    LlamaIndex call this same function.
+    ``confirm=True`` does not transfer the file. It returns a link plan:
+    ``mode`` ``"link"``, ``downloaded`` false, ``asset``, ``filename`` (a
+    basename), the direct public ``href``, ``bytes``, and ``how_to_fetch`` —
+    ``curl -L -C - -o <filename> <href>`` and
+    ``umbra download ITEM --asset ASSET --dest DIR``. ``bytes`` is the STAC
+    ``file:size`` or ``size`` when that is a non-negative integer. Otherwise
+    the host HEADs for ``Content-Length`` only when the href is https on the
+    public open-data bucket, with no redirects and no retries. Any other href
+    is not requested, and ``bytes`` is null. A 404 or 410 from that HEAD
+    raises. Any other HEAD failure leaves ``bytes`` null and still returns
+    the plan. The hosted server never transfers the file. A local
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
+    disk. ``confirm=False`` is unchanged. LangChain and LlamaIndex call this
+    same function.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem

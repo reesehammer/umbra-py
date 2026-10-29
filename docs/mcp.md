@@ -53,8 +53,7 @@ Removing or retyping a field is a deprecation, on the same alias rule.
 A refusal on this host (a tool that would stream an Umbra GeoTIFF) is
 behavior. The tool stays listed. The call returns a tool error that names
 the next step. `download_asset` with `confirm=true` does not error and does
-not write a file on this host. It returns a link plan. Small metadata and
-preview files come back inline.
+not transfer a file on this host. It returns a link plan.
 
 ## download_asset
 
@@ -76,31 +75,22 @@ server.
 On this host `confirm=true` returns a **download plan**, not a file and not
 an error. `mode` is `"link"`, `downloaded` is false, and the plan names
 `asset`, `filename` (a basename), the direct public `href`, and `bytes`
-(from the STAC asset's `file:size` or `size`, otherwise HEAD
-`Content-Length`, or null when neither is known). The host HEADs or GETs
-only an `https` href on the public open-data bucket, and it does not follow
-redirects. Any other href is a link with the STAC size, or null, and is not
-inlined. `how_to_fetch` has two commands:
+(the STAC asset's `file:size` or `size` when present; otherwise HEAD
+`Content-Length` when the href is `https` on the public open-data bucket;
+otherwise null). The host does not GET the asset and does not follow
+redirects. `how_to_fetch` has two commands:
 
 ```bash
 curl -L -C - -o <filename> <href>
 umbra download <item> --asset <asset> --dest <dir>
 ```
 
-The hosted server does not write files and does not proxy radar products.
-GEC, CSI, SIDD, SICD, and CPHD are always a link, whatever their size. An
-unknown size is a link too. To save the file on your own disk, run a local
-server and call `download_asset` with `confirm=true` there:
+The hosted server does not transfer files. To save the file on your own
+disk, run a local server and call `download_asset` with `confirm=true` there:
 
 ```bash
 uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
-
-Metadata (`metadata`, `stac_metadata`) and detected-image previews
-(`di_gif`) at or under 2 MiB come back inline (`mode` `"inline"`): JSON in
-the result, a preview as an image block. A body over that cap, or a read
-that passes 10 seconds, is a link. The host stops reading once the cap is
-crossed.
 
 A local server still downloads when `confirm=true` (`{asset, path, bytes}`).
 

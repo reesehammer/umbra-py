@@ -40,9 +40,8 @@ fall back to the quicklook plus a local download.
 
 Call `download_asset` with `confirm` true. On the hosted server that returns
 a link plan (`mode` `link`, `downloaded` false) with the public `href` and
-a `curl -L -C -` command. It does not save the file. Small metadata and
-preview files may come back inline. For a copy on your disk, run a local
-server and call `download_asset` there:
+a `curl -L -C -` command. It does not transfer the file. For a copy on your
+disk, run a local server and call `download_asset` there:
 `uvx --from 'umbra-py[mcp]' umbra-mcp`.
 
 ## Honesty
