@@ -3152,6 +3152,11 @@ def build_app(
             return response
 
     app.add_middleware(_GuardMiddleware)
+    # Outside the guard, and separate from it: nosniff and the referrer policy
+    # on every response, including a 429 the guard returns itself. Inside the
+    # search logger, which stays the outermost user middleware so its line is
+    # the status the client actually got.
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Outside the guards, so the line records the status the client actually
     # got (including a rate-limit 429) and the time spent in the guards. Pure
@@ -3161,9 +3166,6 @@ def build_app(
     from ._mcp_log import StacSearchLog
 
     app.add_middleware(StacSearchLog)
-    # Further out, and separate from the guard above: nosniff and the referrer
-    # policy on every response, including one the guard returns itself.
-    app.add_middleware(SecurityHeadersMiddleware)
 
     # One abandoned probe used to leave its scan running, and the next probe
     # started another. A handful of slots keeps that from filling the thread
