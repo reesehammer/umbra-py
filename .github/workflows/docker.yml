@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Retries public.ecr.aws 429s, then mirror.gcr.io. Dockerfiles unchanged.
+      # Retries public.ecr.aws 429s, then mirror.gcr.io at the same digest.
       - name: Build image (serve extra)
         run: bash .github/scripts/docker-build-ci.sh
 
@@ -63,3 +63,61 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f umbra-serve || true
+
+  # The image Railway builds (deploy/Dockerfile.mcp). The table lists every
+  # severity. The job fails only when Trivy finds a CRITICAL CVE that already
+  # has a fix, so an unfixed finding in the Debian base does not block review.
+  hosted:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build hosted image
+        run: |
+          UMBRA_DOCKERFILE=deploy/Dockerfile.mcp \
+          UMBRA_IMAGE_TAG=umbra-py:public \
+          UMBRA_SKIP_EXTRAS_ARG=1 \
+          bash .github/scripts/docker-build-ci.sh
+
+      - name: Report image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: umbra-py:public
+          format: table
+          exit-code: "0"
+          vuln-type: os,library
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+
+      - name: Fail on fixable CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: umbra-py:public
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "true"
+          vuln-type: os,library
+          severity: CRITICAL
+
+      - name: Hosted image serves /livez
+        run: |
+          docker run -d --name umbra-public \
+            -e UMBRA_FETCH_INDEX=0 -p 8000:8000 umbra-py:public
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/livez \
+              | python -c "import sys,json; d=json.load(sys.stdin); assert d['status']=='ok'"; then
+              echo "livez OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "server did not serve /livez in time" >&2
+          docker logs umbra-public || true
+          exit 1
+
+      - name: Server logs
+        if: always()
+        run: docker logs umbra-public || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f umbra-public || true

@@ -12,8 +12,10 @@
 # Mount a volume there after the service is green so later deploys skip the fetch.
 # Official CPython (`python:3.12-slim`) from Amazon ECR Public, where Docker
 # publishes Official Images. A build then does not depend on an anonymous
-# Docker Hub pull. Override with --build-arg PYTHON_IMAGE=...
-ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
+# Docker Hub pull. Pinned to the manifest-list digest (looked up 2026-10-29;
+# the same digest is on mirror.gcr.io, which CI uses when ECR returns 429).
+# Override with --build-arg PYTHON_IMAGE=...
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 FROM ${PYTHON_IMAGE} AS runtime
 
 # Extras are hardcoded, not an ARG. A Railway dashboard build-arg of
@@ -45,7 +47,15 @@ COPY src ./src
 # needs, not documentation.
 COPY docs/schemas ./docs/schemas
 
-RUN pip install ".[mcp,viz,serve]"
+# Hashed lock of .[mcp,viz,serve] for CPython 3.12 on linux (manylinux_2_28
+# wheels, which install on this image). Pip checks every hash, then the
+# package is installed with --no-deps so the resolver cannot move a
+# dependency off the lock. Regenerate deploy/requirements.txt with the
+# command in its header.
+COPY deploy/requirements.txt /tmp/requirements.txt
+RUN pip install --require-hashes --only-binary=:all: -r /tmp/requirements.txt \
+    && pip install --no-deps ".[mcp,viz,serve]" \
+    && rm -f /tmp/requirements.txt
 
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

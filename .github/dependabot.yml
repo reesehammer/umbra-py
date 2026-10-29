@@ -19,3 +19,18 @@ updates:
     groups:
       python:
         patterns: ["*"]
+
+  # Hashed lock for the hosted image (Python 3.12, linux x86_64, wheels
+  # only). The file header is the regeneration command; keep
+  # --generate-hashes and the platform flag if a PR edits the file by hand.
+  # The base-image digest lives in ARG PYTHON_IMAGE. Dependabot's docker
+  # updater reads FROM, not that ARG, so bump the digest by editing both
+  # Dockerfiles. .github/scripts/docker-build-ci.sh reads it from the file
+  # being built.
+  - package-ecosystem: pip
+    directory: "/deploy"
+    schedule:
+      interval: weekly
+    groups:
+      hosted-image:
+        patterns: ["*"]
