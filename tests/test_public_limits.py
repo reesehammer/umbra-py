@@ -453,8 +453,6 @@ def test_local_post_search_matches_the_untyped_body(tmp_path):
         ("bbox bad", {"bbox": [1, 2, "a", 4]}, None),
         ("datetime bad", {"datetime": "not/a/date"}, None),
         ("query string", {"query": "x"}, None),
-        ("bbox nan", None, b'{"bbox":[NaN,0,1,1]}'),
-        ("min incidence inf", None, b'{"min_incidence": Infinity}'),
     ]
     deep = (b'{"a":' * 10000) + b"0" + (b"}" * 10000)
     server_errors = [
@@ -463,8 +461,9 @@ def test_local_post_search_matches_the_untyped_body(tmp_path):
         ("ids scalar", {"ids": 5}, None),
         ("collections scalar", {"collections": 5}, None),
         ("token huge", {"token": 10**30}, None),
-        ("deep json", None, deep),
     ]
+    # FastAPI's Body parser answers a recursion-depth JSON document with 400
+    # before the route runs. That is the historical local response.
     unprocessable = [
         ("json array", None, b"[1,2,3]"),
     ]
@@ -474,6 +473,8 @@ def test_local_post_search_matches_the_untyped_body(tmp_path):
         ("area object", {"area": {"a": 1}}, None),
         ("product_types repeated", {"product_types": ["GEC"] * 50}, None),
         ("limit large", {"limit": 600}, None),
+        ("bbox nan", None, b'{"bbox":[NaN,0,1,1]}'),
+        ("min incidence inf", None, b'{"min_incidence": Infinity}'),
     ]
     with _client(app, raise_server_exceptions=False) as client:
         for label, body, raw in rejected:
@@ -482,12 +483,27 @@ def test_local_post_search_matches_the_untyped_body(tmp_path):
         for label, body, raw in server_errors:
             resp = _post(client, body, raw)
             assert resp.status_code == 500, (label, resp.status_code, resp.text[:240])
+        deep_resp = _post(client, None, deep)
+        assert deep_resp.status_code == 400, deep_resp.text[:240]
         for label, body, raw in unprocessable:
             resp = _post(client, body, raw)
             assert resp.status_code == 422, (label, resp.status_code, resp.text[:240])
         for label, body, raw in accepted:
             resp = _post(client, body, raw)
             assert resp.status_code == 200, (label, resp.status_code, resp.text[:240])
+        nan_get = client.get("/search", params={"bbox": "nan,0,1,1"})
+        assert nan_get.status_code == 200
+
+
+@pytestmark_serve
+def test_local_openapi_post_search_keeps_the_request_body(tmp_path):
+    app = serve.build_app(_index(tmp_path), artifacts=False, cache_dir=tmp_path / "art")
+    with _client(app) as client:
+        spec = client.get("/openapi.json").json()
+        operation = spec["paths"]["/search"]["post"]
+        assert "requestBody" in operation
+        schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        assert schema.get("type") == "object" or "properties" in schema or "$ref" in schema
 
 
 @pytestmark_public_app
@@ -509,6 +525,7 @@ def test_public_post_search_rejects_types_and_clamps_numbers(tmp_path, monkeypat
         ("bbox bad", {"bbox": [1, 2, "a", 4]}, None),
         ("datetime bad", {"datetime": "not/a/date"}, None),
         ("bbox nan", None, b'{"bbox":[NaN,0,1,1]}'),
+        ("min incidence inf", None, b'{"min_incidence": Infinity}'),
         ("json array", None, b"[1,2,3]"),
         ("deep json", None, (b'{"a":' * 10000) + b"0" + (b"}" * 10000)),
     ]
@@ -579,17 +596,40 @@ def test_stac_links_follow_the_edge_and_ignore_loopback_forwarding(tmp_path, mon
             link["href"].startswith("https://api.umbra-py.space") for link in custom["links"]
         )
         assert "evil.example" not in json.dumps(custom["links"])
+    monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://api.umbra-py.space/")
+    slashed = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "slash")
+    with _client(slashed) as client:
+        href = client.get("/").json()["links"][0]["href"]
+        assert href.startswith("https://api.umbra-py.space/")
+    monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://api.umbra-py.space/extra")
+    ignored_origin = serve.build_app(
+        index_path, public=True, rate_limit=0, cache_dir=tmp_path / "bad-origin"
+    )
+    with _client(ignored_origin) as client:
+        href = client.get("/").json()["links"][0]["href"]
+        assert href.startswith("http://testserver")
 
 
 @pytestmark_serve
-def test_local_links_stay_on_the_request_unless_an_origin_is_configured(tmp_path, monkeypatch):
+def test_local_links_ignore_the_public_origin(tmp_path, monkeypatch):
     app = serve.build_app(_index(tmp_path), artifacts=False, cache_dir=tmp_path / "art")
+    monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://maps.example")
     with _client(app) as client:
         href = client.get("/").json()["links"][0]["href"]
         assert href.startswith("http://testserver")
-        monkeypatch.setenv("UMBRA_PUBLIC_BASE_URL", "https://maps.example")
-        moved = client.get("/").json()["links"][0]["href"]
-        assert moved.startswith("https://maps.example")
+
+
+@pytestmark_public_app
+def test_public_mcp_slash_redirect_uses_forwarded_https(tmp_path):
+    app = serve.build_app(_index(tmp_path), public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    with _client(app, client=("10.0.0.8", 443)) as client:
+        resp = client.get(
+            "/mcp/",
+            headers={"host": "api.umbra-py.space", "x-forwarded-proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 307
+        assert resp.headers["location"].startswith("https://api.umbra-py.space/mcp")
 
 
 # --------------------------------------------------------------------------
@@ -767,6 +807,22 @@ def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
     with pytest.raises(GeocodeError, match="retry"):
         gate.resolve("Paris")
     assert "Paris" not in calls
+
+    class _TimedOut:
+        def acquire(self, timeout: float = -1) -> bool:
+            assert 0 < timeout <= ms._GEOCODE_MAX_WAIT_S
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("the lock was not acquired")
+
+    gate._network = _TimedOut()  # type: ignore[assignment]
+    gate._waiters = 0
+    gate._next_at = 0.0
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert "Paris" not in calls
+    assert gate._waiters == 0
 
 
 def test_body_limit_replay_forwards_the_next_message():

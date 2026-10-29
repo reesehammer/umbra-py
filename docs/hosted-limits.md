@@ -124,20 +124,23 @@ A server without `--public` keeps the previous body handling.
 Public `geocode_place`, and a `place` filter on the public MCP tools that
 geocode, share one Nominatim throttle of about **1 request per second** and
 an LRU cache of 256 names. A repeated name does not call out. A place that
-does not resolve is remembered for about 10 minutes. A miss that would wait
-more than about 5 seconds, or join more than 5 waiters, returns a retryable
-error instead of holding a worker. Local MCP and the CLI call Nominatim
-directly.
+does not resolve is remembered for about 10 minutes. A miss that would spend
+more than about 5 seconds waiting for the in-flight call and the gap, or
+join more than 5 waiters, returns a retryable error instead of holding a
+worker. Local MCP and the CLI call Nominatim directly.
 
 ## Link origin
 
-STAC `links[].href` uses `UMBRA_PUBLIC_BASE_URL` when that optional variable
-is set (no trailing slash). When it is unset, `--public` builds the origin
-from `X-Forwarded-Proto` and `X-Forwarded-Host` (or `Host`) if the socket
-peer is not loopback. Railway's edge overwrites those headers, which is how
-`https://api.umbra-py.space` stays the link base without a new variable. A
-loopback peer, or a header that is not `http`/`https` plus a plain host,
-keeps the request URL. That is the right origin for a laptop.
+STAC `links[].href` on this host uses `UMBRA_PUBLIC_BASE_URL` when that
+optional variable is a bare `http(s)://host[:port]` origin (a trailing slash
+is removed). Any other value is ignored. When it is unset, `--public` builds
+the origin from `X-Forwarded-Proto` and `X-Forwarded-Host` (or `Host`) if the
+socket peer is not loopback. Railway's edge overwrites those headers, which
+is how `https://api.umbra-py.space` stays the link base without a new
+variable. The same proto is what `GET /mcp/` redirects with, so the
+trailing-slash redirect stays `https`. A loopback peer, or a header that is
+not `http`/`https` plus a plain host, keeps the request URL. A server
+without `--public` does not read `UMBRA_PUBLIC_BASE_URL`.
 
 ## CORS
 

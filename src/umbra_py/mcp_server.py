@@ -217,12 +217,11 @@ class PublicGeocodeGate:
     """LRU cache and a global Nominatim throttle for the public MCP host.
 
     One shared address is what Nominatim bans. Cache hits do not wait and
-    do not call out. A miss takes one of a few in-flight slots, waits until
-    a second has passed since the previous call, then resolves. A miss that
-    would wait more than about five seconds, or join more than five waiters,
-    raises immediately so it does not occupy a worker. "No such place" is
-    remembered for about ten minutes. Any other failure is not cached. Local
-    MCP does not use this.
+    do not call out. A miss waits for the single in-flight call and for the
+    one-second gap, and that whole wait is capped at about five seconds.
+    More than five waiters, or a lock that is not free inside the remaining
+    budget, fails immediately. "No such place" is remembered for about ten
+    minutes. Any other failure is not cached. Local MCP does not use this.
     """
 
     def __init__(
@@ -251,40 +250,46 @@ class PublicGeocodeGate:
 
     def resolve(self, query: str) -> tuple[Any, str]:
         key = " ".join(query.split()).casefold()
-        wait = self._begin(key)
-        if not isinstance(wait, float):
-            return wait
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        deadline = self._time() + _GEOCODE_MAX_WAIT_S
+        self._admit()
+        acquired = False
         try:
-            with self._network:
-                cached = self._cached(key)
-                if cached is not None:
-                    return cached
-                if wait > 0:
-                    self._sleep(wait)
-                try:
-                    result = _nominatim_geocode(query)
-                except GeocodeError as exc:
-                    if _geocode_not_found(exc):
-                        self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
-                    raise
-                self._store(key, ("ok", result))
-                return result
-        finally:
-            with self._lock:
-                self._waiters -= 1
-
-    def _begin(self, key: str) -> float | tuple[Any, str]:
-        with self._lock:
-            cached = self._cached_locked(key)
+            remaining = deadline - self._time()
+            if remaining <= 0 or not self._network.acquire(timeout=remaining):
+                raise GeocodeError(_GEOCODE_BUSY)
+            acquired = True
+            cached = self._cached(key)
             if cached is not None:
                 return cached
             now = self._time()
-            wait = self._next_at - now
-            if self._waiters >= _GEOCODE_MAX_WAITERS or wait > _GEOCODE_MAX_WAIT_S:
+            throttle = max(0.0, self._next_at - now)
+            if throttle > deadline - now:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._next_at = now + throttle + self._min_interval
+            if throttle > 0:
+                self._sleep(throttle)
+            try:
+                result = _nominatim_geocode(query)
+            except GeocodeError as exc:
+                if _geocode_not_found(exc):
+                    self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+                raise
+            self._store(key, ("ok", result))
+            return result
+        finally:
+            if acquired:
+                self._network.release()
+            with self._lock:
+                self._waiters -= 1
+
+    def _admit(self) -> None:
+        with self._lock:
+            if self._waiters >= _GEOCODE_MAX_WAITERS:
                 raise GeocodeError(_GEOCODE_BUSY)
             self._waiters += 1
-            self._next_at = max(self._next_at, now) + self._min_interval
-            return max(0.0, wait)
 
     def _cached(self, key: str) -> tuple[Any, str] | None:
         with self._lock:

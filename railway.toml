@@ -25,7 +25,7 @@
 # STAC links need no new variable. --public builds them from
 # X-Forwarded-Proto and X-Forwarded-Host or Host when the peer is the edge,
 # so https://api.umbra-py.space stays the origin. Optional
-# UMBRA_PUBLIC_BASE_URL overrides that.
+# UMBRA_PUBLIC_BASE_URL overrides that only as http(s)://host[:port].
 # The rate limit reads X-Real-IP. UMBRA_TRUSTED_PROXY_HOPS (default 1) is
 # only the rightmost X-Forwarded-For fallback. One client may hold 2 catalog
 # reads. None of those need to be set for the defaults to be safe.

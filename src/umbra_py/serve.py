@@ -414,11 +414,13 @@ def _require_serve():
 # --------------------------------------------------------------------------
 
 
-def parse_bbox(value: str | list[float] | None) -> BBox | None:
+def parse_bbox(value: str | list[float] | None, *, finite: bool = False) -> BBox | None:
     """Parse a STAC ``bbox`` (``"minlon,minlat,maxlon,maxlat"`` or a list).
 
     Accepts the 6-element 3D form and drops the elevation components, matching
     the 2D footprint bbox the index stores. Returns ``None`` for empty input.
+    ``finite=True`` rejects NaN and infinity; the local server leaves that
+    off so a non-finite bbox stays the historical response.
     """
     if value is None:
         return None
@@ -436,7 +438,7 @@ def parse_bbox(value: str | list[float] | None) -> BBox | None:
         kept = (parts[0], parts[1], parts[3], parts[4])
     else:
         raise ValueError("bbox must have 4 or 6 comma-separated numbers")
-    if any(not math.isfinite(p) for p in parts):
+    if finite and any(not math.isfinite(p) for p in parts):
         raise ValueError("bbox values must be finite numbers")
     return kept
 
@@ -561,15 +563,18 @@ def _as_float(prop: str, value: Any) -> float:
         raise ValueError(f"query.{prop} value must be a number, got {value!r}") from exc
 
 
-def _opt_float(value: Any, field: str) -> float | None:
-    """Coerce an optional top-level POST body field to a float (``None`` stays)."""
+def _opt_float(value: Any, field: str, *, finite: bool = False) -> float | None:
+    """Coerce an optional top-level POST body field to a float (``None`` stays).
+
+    ``finite=True`` rejects NaN and infinity. Local search does not set it.
+    """
     if value is None:
         return None
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field} must be a number, got {value!r}") from exc
-    if not math.isfinite(number):
+    if finite and not math.isfinite(number):
         raise ValueError(f"{field} must be a number, got {value!r}")
     return number
 
@@ -1415,7 +1420,7 @@ def parse_search_body(body: Mapping[str, Any]) -> SearchBody:
     """
     if body.get("intersects") is not None and body.get("bbox") is not None:
         raise ValueError("bbox and intersects are mutually exclusive")
-    bbox = parse_bbox(body.get("bbox"))
+    bbox = parse_bbox(body.get("bbox"), finite=True)
     intersects = parse_intersects(body.get("intersects"))
     datetime = _optional_str(body.get("datetime"), "datetime")
     start, end = parse_datetime(datetime)
@@ -1433,13 +1438,13 @@ def parse_search_body(body: Mapping[str, Any]) -> SearchBody:
         area = area_text.strip() if area_text else parsed_query.area
     top_pols = parse_polarizations(body.get("polarizations"))
     polarizations = top_pols if top_pols is not None else parsed_query.polarizations
-    min_incidence = _opt_float(body.get("min_incidence"), "min_incidence")
+    min_incidence = _opt_float(body.get("min_incidence"), "min_incidence", finite=True)
     if min_incidence is None:
         min_incidence = parsed_query.min_incidence
-    max_incidence = _opt_float(body.get("max_incidence"), "max_incidence")
+    max_incidence = _opt_float(body.get("max_incidence"), "max_incidence", finite=True)
     if max_incidence is None:
         max_incidence = parsed_query.max_incidence
-    max_resolution = _opt_float(body.get("max_resolution"), "max_resolution")
+    max_resolution = _opt_float(body.get("max_resolution"), "max_resolution", finite=True)
     if max_resolution is None:
         max_resolution = parsed_query.max_resolution
     if "canonical" in body:
@@ -2762,21 +2767,52 @@ def _forwarded_origin(headers: Mapping[str, str]) -> str | None:
     return f"{proto}://{host}"
 
 
+def _configured_public_origin() -> str | None:
+    """``UMBRA_PUBLIC_BASE_URL`` when it is an ``http(s)://host[:port]`` origin.
+
+    A trailing slash is stripped. Anything else (a path, userinfo, a bad
+    scheme) is ignored, with a warning, so a bad deploy value cannot
+    rewrite every STAC link.
+    """
+    raw = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    if not raw:
+        return None
+    candidate = raw.rstrip("/")
+    parts = urlsplit(candidate)
+    if (
+        parts.scheme in {"http", "https"}
+        and parts.netloc
+        and parts.username is None
+        and parts.password is None
+        and not parts.path
+        and not parts.query
+        and not parts.fragment
+        and _plain_host(parts.netloc)
+    ):
+        return f"{parts.scheme}://{parts.netloc}"
+    _log.warning(
+        "Ignoring %s=%r; expected an http(s)://host[:port] origin.",
+        PUBLIC_BASE_URL_ENV,
+        raw,
+    )
+    return None
+
+
 def configured_link_base(request: Any, *, public: bool) -> str | None:
     """Absolute origin for STAC links, or ``None`` to keep the request URL.
 
-    ``UMBRA_PUBLIC_BASE_URL`` wins in every mode. Otherwise a public request
-    whose socket peer is not loopback — the trusted edge, which overwrites
-    ``X-Forwarded-Proto`` and ``X-Forwarded-Host`` — uses those headers.
-    A loopback peer, a non-public server, or a header that is missing or
-    not a plain origin keeps the request URL. Hardcoding the community
-    hostname would point a self-hosted ``--public`` at someone else's API.
+    Only ``--public`` reads ``UMBRA_PUBLIC_BASE_URL``, and only when that
+    value is a bare ``http(s)://host[:port]`` origin. Otherwise a public
+    request whose socket peer is not loopback — the trusted edge, which
+    overwrites ``X-Forwarded-Proto`` and ``X-Forwarded-Host`` — uses those
+    headers. A loopback peer, a non-public server, or a header that is
+    missing or not a plain origin keeps the request URL.
     """
-    raw = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
-    if raw:
-        return raw.rstrip("/")
     if not public:
         return None
+    configured = _configured_public_origin()
+    if configured:
+        return configured
     client = getattr(request, "client", None)
     peer = getattr(client, "host", None) if client is not None else None
     if _peer_is_loopback(peer):
@@ -2819,6 +2855,11 @@ class ClientIpMiddleware:
     limiter, the access log, and the in-flight cap all see the same address.
     uvicorn's ``forwarded_allow_ips="*"`` is not used: that trusts the
     leftmost ``X-Forwarded-For`` entry and never reads ``X-Real-IP``.
+
+    Public mode also leaves ``scope["scheme"]`` as ``http``, so a trailing-slash
+    redirect would send ``GET /mcp/`` to ``http://``. For a non-loopback peer
+    the scheme is the first ``X-Forwarded-Proto`` token when that token is
+    ``http`` or ``https``.
     """
 
     def __init__(self, app: Any) -> None:
@@ -2828,7 +2869,12 @@ class ClientIpMiddleware:
         if scope.get("type") == "http":
             peer = scope.get("client")
             peer_host = peer[0] if peer else None
-            ip = public_client_ip(peer_host, _scope_headers(scope))
+            headers = _scope_headers(scope)
+            if not _peer_is_loopback(peer_host):
+                proto = headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+                if proto in {"http", "https"}:
+                    scope["scheme"] = proto
+            ip = public_client_ip(peer_host, headers)
             port = peer[1] if peer and len(peer) > 1 else 0
             scope["client"] = (ip, port)
         await self.app(scope, receive, send)
@@ -4354,7 +4400,7 @@ def build_app(
                 status_code=400, detail="bbox and intersects are mutually exclusive"
             )
         try:
-            parsed_bbox = parse_bbox(bbox)
+            parsed_bbox = parse_bbox(bbox, finite=public)
             parsed_geometry = parse_intersects(intersects)
             start, end = parse_datetime(datetime)
             wanted_products = parse_product_types(product_types)
@@ -4385,41 +4431,70 @@ def build_app(
             )
         )
 
-    @app.post("/search", tags=["STAC"])
-    async def post_search(request: Request) -> Any:
-        # Public mode parses the body itself: a wrong type, non-numeric
-        # paging field, or JSON the parser cannot walk is HTTP 400. A
-        # numeric limit/token is clamped. Local mode is the historical
-        # FastAPI body: invalid JSON is 422, and a type error in ``token``
-        # / ``ids`` / ``limit`` stays an uncaught 500.
-        if public:
+    def _post_response(
+        request: Request, parsed: SearchBody, body: Mapping[str, Any], limit: int, offset: int
+    ) -> JSONResponse:
+        source = _open()
+        try:
+            page, has_next = run_search(
+                source,
+                bbox=parsed.bbox,
+                intersects=parsed.intersects,
+                start=parsed.start,
+                end=parsed.end,
+                ids=parsed.ids,
+                product_types=parsed.product_types,
+                area=parsed.area,
+                fuzzy=parsed.fuzzy,
+                polarizations=parsed.polarizations,
+                min_incidence=parsed.min_incidence,
+                max_incidence=parsed.max_incidence,
+                max_resolution=parsed.max_resolution,
+                canonical=parsed.canonical,
+                limit=limit,
+                offset=offset,
+            )
+        finally:
+            _close(source)
+        # STAC API Item Search: a POST page link is POST /search again, and its
+        # body is this request's body with ``token`` replaced. A GET of
+        # ``/search?token=N`` would drop limit, collections, and every other
+        # filter that lived only in the JSON.
+        base = _base(request)
+        search_href = f"{base}/search"
+        prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
+        next_body = _body_with_token(body, offset + limit) if has_next else None
+        result = search_result(
+            page,
+            base,
+            returned=len(page),
+            next_href=search_href if next_body is not None else None,
+            prev_href=search_href if prev_body is not None else None,
+            next_body=next_body,
+            prev_body=prev_body,
+            self_href=search_href,
+        )
+        return JSONResponse(content=result, media_type=geojson)
+
+    if public:
+
+        @app.post("/search", tags=["STAC"])
+        async def post_search(request: Request) -> Any:
+            """Public body: wrong types are HTTP 400, numeric paging is clamped."""
             try:
                 parsed = parse_search_body(parse_json_object(await request.body()))
             except (ValueError, TypeError, OverflowError, RecursionError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             _check_collections(parsed.collections)
             limit = _clamp_limit(parsed.limit, cap=_search_limit_cap(public=True))
-            offset = parsed.offset
-            body = parsed.raw
-        else:
-            raw_body = await request.body()
-            if not raw_body or not raw_body.strip():
-                body = {}
-            else:
-                try:
-                    loaded = json.loads(raw_body)
-                except json.JSONDecodeError as exc:
-                    raise HTTPException(
-                        status_code=422, detail="Request body is not valid JSON."
-                    ) from exc
-                if loaded is None:
-                    body = {}
-                elif not isinstance(loaded, dict):
-                    raise HTTPException(
-                        status_code=422, detail="Search body must be a JSON object."
-                    )
-                else:
-                    body = loaded
+            return await _bounded(
+                lambda: _post_response(request, parsed, parsed.raw, limit, parsed.offset)
+            )
+
+    else:
+
+        @app.post("/search", tags=["STAC"])
+        async def post_search(request: Request, body: dict[str, Any] = Body(default={})) -> Any:
             _check_collections(body.get("collections"))
             if body.get("intersects") is not None and body.get("bbox") is not None:
                 raise HTTPException(
@@ -4474,51 +4549,7 @@ def build_app(
                 offset=offset,
                 raw=body,
             )
-        base = _base(request)
-
-        def _run() -> JSONResponse:
-            source = _open()
-            try:
-                page, has_next = run_search(
-                    source,
-                    bbox=parsed.bbox,
-                    intersects=parsed.intersects,
-                    start=parsed.start,
-                    end=parsed.end,
-                    ids=parsed.ids,
-                    product_types=parsed.product_types,
-                    area=parsed.area,
-                    fuzzy=parsed.fuzzy,
-                    polarizations=parsed.polarizations,
-                    min_incidence=parsed.min_incidence,
-                    max_incidence=parsed.max_incidence,
-                    max_resolution=parsed.max_resolution,
-                    canonical=parsed.canonical,
-                    limit=limit,
-                    offset=offset,
-                )
-            finally:
-                _close(source)
-            # STAC API Item Search: a POST page link is POST /search again, and its
-            # body is this request's body with ``token`` replaced. A GET of
-            # ``/search?token=N`` would drop limit, collections, and every other
-            # filter that lived only in the JSON.
-            search_href = f"{base}/search"
-            prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
-            next_body = _body_with_token(body, offset + limit) if has_next else None
-            result = search_result(
-                page,
-                _base(request),
-                returned=len(page),
-                next_href=search_href if next_body is not None else None,
-                prev_href=search_href if prev_body is not None else None,
-                next_body=next_body,
-                prev_body=prev_body,
-                self_href=search_href,
-            )
-            return JSONResponse(content=result, media_type=geojson)
-
-        return await _bounded(_run)
+            return await _bounded(lambda: _post_response(request, parsed, body, limit, offset))
 
     @app.get(
         "/sites",
