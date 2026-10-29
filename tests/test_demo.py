@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import unescape
 
 from umbra_py import demo
 from umbra_py.models import UmbraItem
@@ -273,6 +274,183 @@ def test_build_demo_pins_cdn_versions():
     marker-cluster plugin must be pinned, like the geotiff.js dep."""
     assert re.search(r"leaflet@\d+\.\d+", demo.LEAFLET_JS)
     assert re.search(r"markercluster@\d+\.\d+", demo.MARKERCLUSTER_JS)
+
+
+def _csp(html: str) -> str:
+    match = re.search(r'http-equiv="Content-Security-Policy" content="([^"]*)"', html)
+    assert match, "page has no Content-Security-Policy meta tag"
+    # The attribute is HTML-escaped (quotes become entities). The browser
+    # decodes them before parsing the policy; compare the decoded text.
+    return unescape(match.group(1))
+
+
+def _assert_stac_href_is_gated(html: str) -> None:
+    """``a.href = ...stac_href`` sits under the http(s) predicate."""
+    assign = html.find("a.href = p.stac_href")
+    assert assign != -1
+    window = html[max(0, assign - 220) : assign]
+    assert "umbraIsHttpUrl" in window
+
+
+def test_cdn_tags_carry_sri_and_crossorigin(sample_item_dict):
+    """Every third-party stylesheet and script is integrity-checked."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    pinned = (
+        (demo.LEAFLET_CSS, demo.LEAFLET_CSS_SRI),
+        (demo.LEAFLET_JS, demo.LEAFLET_JS_SRI),
+        (demo.MARKERCLUSTER_CSS, demo.MARKERCLUSTER_CSS_SRI),
+        (demo.MARKERCLUSTER_CSS_DEFAULT, demo.MARKERCLUSTER_CSS_DEFAULT_SRI),
+        (demo.MARKERCLUSTER_JS, demo.MARKERCLUSTER_JS_SRI),
+    )
+    for url, sri in pinned:
+        assert re.fullmatch(r"sha384-[A-Za-z0-9+/]+=*", sri), sri
+        assert url in html and sri in html
+    assert html.count('crossorigin="anonymous"') >= len(pinned)
+    assert 'name="referrer" content="strict-origin-when-cross-origin"' in html
+
+
+def test_pmtiles_demo_pins_maplibre_and_pmtiles(sample_item_dict):
+    from umbra_py import pmtiles
+
+    html = demo.build_demo([], pmtiles_url="catalog.pmtiles")
+    for url, sri in (
+        (pmtiles.MAPLIBRE_CSS, pmtiles.MAPLIBRE_CSS_SRI),
+        (pmtiles.MAPLIBRE_JS, pmtiles.MAPLIBRE_JS_SRI),
+        (pmtiles.PMTILES_JS, pmtiles.PMTILES_JS_SRI),
+    ):
+        assert re.fullmatch(r"sha384-[A-Za-z0-9+/]+=*", sri), sri
+        assert url in html and sri in html
+    assert 'crossorigin="anonymous"' in html
+
+
+def test_page_csp_names_cdn_tiles_bucket_and_server(sample_item_dict):
+    """The policy allows the hosts the page actually requests, and a non-http
+    server URL cannot widen it."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item], server_url="http://localhost:8000/")
+    csp = _csp(html)
+    assert "default-src 'none'" in csp
+    assert "script-src 'unsafe-inline' https://unpkg.com" in csp
+    assert "style-src 'unsafe-inline' https://unpkg.com" in csp
+    assert "https://*.tile.openstreetmap.org" in csp
+    assert "https://tile.openstreetmap.org" in csp
+    assert "https://s3.us-west-2.amazonaws.com" in csp
+    assert "https://umbra-open-data-catalog.s3.amazonaws.com" in csp
+    assert "http://localhost:8000" in csp
+    # Leaflet does not start a worker. MapLibre does; this page must not.
+    assert "worker-src" not in csp
+
+    hostile = demo.build_demo([item], server_url="javascript:alert(1)")
+    assert "javascript:" not in _csp(hostile)
+
+
+def test_referrer_policy_sends_an_origin_so_osm_tiles_load(sample_item_dict):
+    """OpenStreetMap's tile servers answer a request with no Referer with an
+    "Access blocked" placeholder (``x-blocked: No referer sent. Access denied.``).
+
+    ``strict-origin-when-cross-origin`` still sends the origin on cross-origin
+    requests, so the basemap loads, and it keeps the path and a ``file://`` URL
+    off those requests. ``no-referrer`` blanks the tiles on the showcase, the
+    demo, and ``umbra view``.
+    """
+    assert demo.REFERRER_POLICY == "strict-origin-when-cross-origin"
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    html = demo.build_demo([item])
+    assert 'name="referrer" content="strict-origin-when-cross-origin"' in html
+
+
+def test_security_meta_escapes_csp_quotes():
+    """A quote in the policy text must not break out of the meta attribute.
+    The browser decodes the entities before it parses the CSP."""
+    meta = demo._security_meta("""default-src 'none'; img-src "evil\"""")
+    assert "&#x27;none&#x27;" in meta
+    assert "&quot;evil&quot;" in meta
+    csp_tag = meta.split("\n", 1)[1]
+    assert csp_tag.count('content="') == 1
+    assert csp_tag.endswith('"/>')
+
+
+def test_csp_rejects_an_origin_whose_netloc_is_not_a_plain_host(sample_item_dict):
+    """Userinfo or CSP punctuation in the netloc must not be copied into the
+    policy. A normal host[:port] still is."""
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    injected = demo.build_demo(
+        [item],
+        server_url="https://evil.example;script-src https://evil.example/cog.tif",
+    )
+    injected_csp = _csp(injected)
+    assert "evil.example" not in injected_csp
+    assert injected_csp.count("script-src") == 1
+
+    creds = demo.build_demo([item], server_url="https://user:pass@tiles.example/x")
+    assert "tiles.example" not in _csp(creds)
+    assert "user:pass" not in _csp(creds)
+
+    odd_port = demo.build_demo([item], server_url="http://tiles.example:99999/")
+    assert "tiles.example" not in _csp(odd_port)
+
+    ok = demo.build_demo([item], server_url="http://127.0.0.1:8000/api")
+    assert "http://127.0.0.1:8000" in _csp(ok)
+
+
+def test_pmtiles_csp_allows_the_worker_and_a_github_release_redirect():
+    url = "https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.pmtiles"
+    csp = _csp(demo.build_demo([], pmtiles_url=url, lazy_imagery=False))
+    assert "worker-src blob:" in csp
+    assert "child-src blob:" in csp
+    assert "https://github.com" in csp
+    assert "https://release-assets.githubusercontent.com" in csp
+    # No COG fetch on a metadata-only page, so the bucket is not a connect host.
+    assert "s3.us-west-2.amazonaws.com" not in csp
+    # A relative archive stays on the page's own origin.
+    local = _csp(demo.build_demo([], pmtiles_url="catalog.pmtiles"))
+    assert "connect-src 'self'" in local
+    assert "catalog.pmtiles" not in local
+
+
+def test_stac_href_assignment_rejects_a_javascript_url(sample_item_dict):
+    """Both demo modes gate ``a.href`` on the http(s) predicate, and that
+    predicate rejects a ``javascript:`` URL."""
+    import shutil
+    import subprocess
+
+    item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
+    pages = (
+        demo.build_demo([item]),
+        demo.build_demo([], pmtiles_url="catalog.pmtiles"),
+    )
+    for html in pages:
+        _assert_stac_href_is_gated(html)
+        assert "/^https?:\\/\\//i" in html
+
+    node = shutil.which("node")
+    if node is None:
+        return
+    match = re.search(r"window\.umbraIsHttpUrl = function \(value\) \{.*?\};", pages[0], re.S)
+    assert match
+    script = (
+        match.group(0).replace("window.", "global.", 1)
+        + """
+const cases = [
+  ["javascript:alert(1)", false],
+  ["JavaScript:alert(1)", false],
+  ["data:text/html,hi", false],
+  ["https://example/item.json", true],
+  ["http://example/item.json", true],
+  ["HTTP://example/item.json", true],
+  ["", false],
+  [null, false],
+];
+for (const [value, expected] of cases) {
+  if (global.umbraIsHttpUrl(value) !== expected) {
+    console.error("mismatch", JSON.stringify(value), global.umbraIsHttpUrl(value));
+    process.exit(1);
+  }
+}
+"""
+    )
+    subprocess.run([node, "-e", script], check=True)
 
 
 def test_build_demo_neutralises_script_breakout():

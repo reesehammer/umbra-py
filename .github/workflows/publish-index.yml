@@ -41,35 +41,34 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC, off the whole-hour spike
   workflow_dispatch:
 
+# Default is read. The publish job raises contents and actions for the
+# release upload and the thumbnail cache. The deploy job stays at contents
+# read and is the only job that sees RAILWAY_TOKEN.
 permissions:
-  contents: write
-  # actions/cache save and restore for the thumbnail seed. A workflow that
-  # sets permissions drops every scope it does not name.
-  actions: write
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # actions/cache save and restore for the thumbnail seed. A job that
+      # sets permissions drops every scope it does not name.
+      actions: write
     # Don't crawl Umbra's bucket from forks; schedules there stay off anyway.
     if: github.repository == 'reesehammer/umbra-py'
     # Named ``tasks/`` is tens of directories; ``task-data/`` is ~10k UUID
     # collects. The crawl is still one LIST (+ sidecar GET) per task.
     timeout-minutes: 240
-    # Mapped here (not inline) so the optional embedding step can gate on the
-    # secret being present via the `env` context, which `if:` can read.
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-      UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
-      # Railway *project* token for the production environment (the CLI reads
-      # RAILWAY_TOKEN as a project token). When set, the hosted API is
-      # redeployed after each publish so its entrypoint swaps in the new
-      # snapshot; when unset, the run warns that the API still needs a restart.
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    outputs:
+      etag: ${{ steps.publish.outputs.etag }}
+      ids: ${{ steps.publish.outputs.ids }}
+      published: ${{ steps.publish.outcome }}
+      thumbs: ${{ steps.thumbs.outputs.publish }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -164,6 +163,8 @@ jobs:
           etag="$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_DB_URL)[0] or '')" || true)"
           echo "Published catalog.db snapshot: ${etag:-unknown}"
           echo "etag=${etag}" >> "$GITHUB_OUTPUT"
+          ids="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")" || exit 1
+          echo "ids=${ids}" >> "$GITHUB_OUTPUT"
 
       # Coverage parity (PRD P1-1): compare the index with a fresh listing of the
       # bucket, by prefix, sidecar layout and product, and publish the report next
@@ -245,7 +246,7 @@ jobs:
       - name: Restore the thumbnail seed
         id: thumbs-seed
         continue-on-error: true
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: catalog.thumbs.seed.db
           # A new key every run; restore-keys picks up the previous run's seed.
@@ -371,27 +372,6 @@ jobs:
         run: |
           python -c "import umbra_py.thumbs_release as t; t.assert_remote_thumbnail_release()"
 
-      # The hosted API keeps catalog.db and catalog.thumbs.db on a persistent
-      # volume and refreshes both on boot (deploy/docker-entrypoint.sh), so a
-      # redeploy is what makes it load this snapshot. It sits after the sidecar
-      # publish so that boot sees this week's previews too, and runs whenever the
-      # index itself was published -- a failed or skipped bake/sidecar upload
-      # still redeploys the new index. The confirm step near the end of the job
-      # checks /healthz picked it up.
-      - name: Redeploy the hosted API
-        id: redeploy
-        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
-        continue-on-error: true
-        run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            msg="RAILWAY_TOKEN is not set: the hosted API (https://api.umbra-py.space) was NOT redeployed and still serves the previous snapshot. Restart the Railway service, or add the RAILWAY_TOKEN secret (see docs/deploy.md)."
-            echo "::warning title=Hosted API not redeployed::${msg}"
-            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
-            echo "> ${msg}" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npx -y @railway/cli@latest redeploy --service umbra-py --yes
-
       # Scene embeddings are model-derived and model-specific, so — unlike the
       # deterministic artifacts above — publishing them is opt-in: it needs a
       # multimodal (CLIP-family) embedding key and streams a quicklook per
@@ -400,12 +380,20 @@ jobs:
       # publish (continue-on-error), so `umbra embed fetch` can pull a
       # `catalog.embed.db` beside `catalog.db` once a key is set. See
       # STRATEGY.md 5.2 ("offer it upstream"); the C5 similarity workstream.
+      # A step `if` cannot read secrets, so an empty key exits before install.
+      # The OpenAI variables exist only on this step.
       - name: Build and publish scene embeddings (opt-in, needs OPENAI_API_KEY)
-        if: ${{ env.OPENAI_API_KEY != '' }}
         continue-on-error: true
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          UMBRA_SCENE_EMBED_MODEL: ${{ secrets.UMBRA_SCENE_EMBED_MODEL }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY is not set; skipping scene embeddings."
+            exit 0
+          fi
           pip install -e ".[ai,viz]"
           umbra embed build --local --index-db catalog.db \
             --bbox -180,-90,180,90 --limit 100000000 --embed-db catalog.embed.db
@@ -414,6 +402,79 @@ jobs:
           gh release edit catalog-index --notes "$(gh release view catalog-index --json body -q .body)
 
           - \`catalog.embed.db\` — scene-embedding sidecar for \`umbra embed fetch\` (visual similarity search, no rebuild). Vectors are model-specific: **embedding model \`${model}\`** — query with the matching model."
+
+      # pct_indexable is indexed / expected. expected is acquisitions with a
+      # sidecar minus the deduped duplicates and quarantined rows named in
+      # index-validation.json. A sidecar the validation report does not name
+      # stays in the denominator, so a real gap still fails this step.
+      # The MCP probe lives in the deploy job, so a failed tools/list cannot
+      # skip this gate.
+      - name: Coverage gate (99% of acquisitions with a sidecar)
+        run: |
+          python -c "import json, sys; from umbra_py.parity import COVERAGE_GATE_PCT; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= COVERAGE_GATE_PCT else 1)"
+
+      # After the thumbnail publish step has copied a non-shrinking export
+      # onto catalog.thumbs.seed.db. Runs when that upload was skipped and
+      # when this gate fails, so a red coverage check does not throw away the
+      # previews this run baked.
+      - name: Save the thumbnail seed
+        if: ${{ !cancelled() && hashFiles('catalog.thumbs.seed.db') != '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: catalog.thumbs.seed.db
+          key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # contents: read only. This job cannot edit the catalog-index release.
+  # RAILWAY_TOKEN is a Railway project token and is present only on the
+  # redeploy and confirm steps. When it is unset, redeploy warns and exits
+  # 0, and confirm and the MCP probe are skipped.
+  deploy:
+    name: Redeploy the hosted API
+    needs: publish
+    if: >-
+      ${{ !cancelled() && github.repository == 'reesehammer/umbra-py'
+      && needs.publish.outputs.published == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install umbra-py
+        run: pip install -e .
+
+      # The hosted API keeps catalog.db and catalog.thumbs.db on a persistent
+      # volume and refreshes both on boot (deploy/docker-entrypoint.sh), so a
+      # redeploy is what makes it load this snapshot. It runs whenever the
+      # index itself was published -- a failed or skipped bake/sidecar upload
+      # still redeploys the new index. The confirm step checks /healthz.
+      - name: Redeploy the hosted API
+        id: redeploy
+        if: ${{ !cancelled() && needs.publish.outputs.published == 'success' }}
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "token=false" >> "$GITHUB_OUTPUT"
+            msg="RAILWAY_TOKEN is not set: the hosted API (https://api.umbra-py.space) was NOT redeployed and still serves the previous snapshot. Restart the Railway service, or add the RAILWAY_TOKEN secret (see docs/deploy.md)."
+            echo "::warning title=Hosted API not redeployed::${msg}"
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ${msg}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "token=true" >> "$GITHUB_OUTPUT"
+          # @railway/cli 5.71.0, the `latest` dist-tag on registry.npmjs.org
+          # when this pin was taken.
+          # integrity sha512-aLS50FAUwTENen3tBqBn9j3ID5OeYhdDcl+oSVv8mclntHD5yvF/Zh+2oD8emP/I4cUCEGDeDyJ8OVv4QBD9ww==
+          npx -y @railway/cli@5.71.0 redeploy --service umbra-py --yes
 
       # Compares /healthz `snapshot` (the ETag of the catalog.db the API swapped
       # in) with the asset this run published; the acquisition count alone can't
@@ -424,11 +485,13 @@ jobs:
       # is not the published one) is a warning: the index serves, previews lag.
       - name: Confirm the hosted API serves this snapshot (needs RAILWAY_TOKEN)
         id: confirm
-        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' }}
+        if: ${{ !cancelled() && steps.redeploy.outputs.token == 'true' }}
         env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           REDEPLOY_OUTCOME: ${{ steps.redeploy.outcome }}
-          WANT_SNAPSHOT: ${{ steps.publish.outputs.etag }}
-          THUMBS_PUBLISH: ${{ steps.thumbs.outputs.publish }}
+          WANT_SNAPSHOT: ${{ needs.publish.outputs.etag }}
+          WANT_IDS: ${{ needs.publish.outputs.ids }}
+          THUMBS_PUBLISH: ${{ needs.publish.outputs.thumbs }}
         run: |
           if [ "$REDEPLOY_OUTCOME" != "success" ]; then
             echo "::error title=Hosted API not redeployed::Railway redeploy ${REDEPLOY_OUTCOME}; the hosted API still serves the previous snapshot and needs a restart."
@@ -439,7 +502,11 @@ jobs:
             echo "::error::Could not read the published catalog.db ETag to compare against." >&2
             exit 1
           fi
-          want_ids="$(python -c "import sqlite3; print(sqlite3.connect('catalog.db').execute('SELECT COUNT(DISTINCT id) FROM items').fetchone()[0])")"
+          want_ids="${WANT_IDS:-}"
+          if [ -z "$want_ids" ]; then
+            echo "::error::The publish job did not report how many distinct ids the index holds." >&2
+            exit 1
+          fi
           want_thumbs="$(python -c "import umbra_py.index as i; print(i.published_thumbs_snapshot())")"
           if [ -z "$want_thumbs" ]; then
             if [ "${THUMBS_PUBLISH:-}" = "skipped" ]; then
@@ -473,33 +540,11 @@ jobs:
           echo "::error title=Hosted API stale::https://api.umbra-py.space/healthz did not report snapshot ${want} within 30 minutes."
           exit 1
 
-      # pct_indexable is indexed / expected. expected is acquisitions with a
-      # sidecar minus the deduped duplicates and quarantined rows named in
-      # index-validation.json. A sidecar the validation report does not name
-      # stays in the denominator, so a real gap still fails this step.
-      # This step stays ahead of the MCP probe: a failed tools/list must not
-      # skip the gate.
-      - name: Coverage gate (99% of acquisitions with a sidecar)
-        run: |
-          python -c "import json, sys; from umbra_py.parity import COVERAGE_GATE_PCT; t = json.load(open('coverage.json'))['totals']; print(t); sys.exit(0 if t['pct_indexable'] >= COVERAGE_GATE_PCT else 1)"
-
-      # Same redeploy the snapshot check just waited out. tools/list is the
-      # canary a desktop client runs: the six stable names are present.
-      # Retries live in umbra_py.mcp_smoke (30s per attempt) so a container
-      # whose /healthz is up but whose first MCP request is still cold
-      # (~25s) does not fail the publish. It runs after the coverage gate
-      # so a red probe cannot skip that gate.
+      # tools/list is the canary a desktop client runs: the six stable names
+      # are present. Retries live in umbra_py.mcp_smoke (30s per attempt) so a
+      # container whose /healthz is up but whose first MCP request is still
+      # cold (~25s) does not fail the publish. The coverage gate is in the
+      # publish job, so a red probe cannot skip it.
       - name: Confirm the hosted MCP lists the stable tools
-        if: ${{ !cancelled() && steps.publish.outcome == 'success' && env.RAILWAY_TOKEN != '' && steps.confirm.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.redeploy.outputs.token == 'true' && steps.confirm.outcome == 'success' }}
         run: python -c "import umbra_py.mcp_smoke as s; s.assert_hosted_core_tools()"
-
-      # After the thumbnail publish step has copied a non-shrinking export
-      # onto catalog.thumbs.seed.db. Runs when that upload was skipped and
-      # when this gate fails, so a red coverage check does not throw away the
-      # previews this run baked.
-      - name: Save the thumbnail seed
-        if: ${{ !cancelled() && hashFiles('catalog.thumbs.seed.db') != '' }}
-        uses: actions/cache/save@v6
-        with:
-          path: catalog.thumbs.seed.db
-          key: thumbs-seed-${{ github.run_id }}-${{ github.run_attempt }}
