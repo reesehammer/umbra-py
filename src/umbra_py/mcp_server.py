@@ -45,17 +45,22 @@ import functools
 import io
 import json
 import os
+import shlex
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
 from .catalog import UmbraCatalog
 from .constants import (
     AI_PROVENANCE,
+    ASSET_FILENAME_FIELD,
     ATTRIBUTION,
     CANOPY_TOKEN_ENV,
     DATA_LICENSE,
     POLARIZATION_CAVEAT,
+    S3_BUCKET,
+    S3_REGION,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
@@ -189,40 +194,216 @@ def _require_cog_streaming(tool: str) -> None:
     raise ValueError(_COG_REFUSAL.format(tool=tool))
 
 
-def _refuse_public_asset_download(href: str) -> None:
-    """Refuse ``download_asset(confirm=True)`` when this host must not store Umbra files.
+#: HTTPS hosts the public catalog actually emits for the open bucket.
+#: Virtual-hosted: published STAC asset hrefs (no region, and the regional
+#: form ``catalog._object_key`` accepts). Path-style: ``UmbraCatalog._url_for``
+#: and :func:`umbra_py.models._derive_data_url` (``s3.<region>.amazonaws.com/<bucket>/...``).
+_BUCKET_VIRTUAL_HOSTS = frozenset(
+    {
+        f"{S3_BUCKET}.s3.amazonaws.com",
+        f"{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com",
+    }
+)
+_BUCKET_PATH_HOST = f"s3.{S3_REGION}.amazonaws.com"
 
-    Same gate as :func:`_require_cog_streaming`: ``cog_streaming`` off
-    (``umbra serve --public`` / ``UMBRA_MCP_COG_STREAMING=0``). The error names
-    the asset href and its size in bytes so the client can fetch the file
-    itself. A HEAD that fails (network error, timeout, or a non-2xx status)
-    still refuses; the message then says the size is unknown. A local or
-    stdio server returns immediately, with no extra request.
+_LINK_NOTE = (
+    "The hosted server does not write files. This is a direct link to the "
+    "public object, not a download. A local `uvx --from 'umbra-py[mcp]' "
+    "umbra-mcp` server can download this asset to your own disk "
+    "(download_asset with confirm=true)."
+)
+
+
+def _nonneg_int(value: Any) -> int | None:
+    """A non-negative integer, or None. Booleans are not sizes."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _stac_asset_size(asset: dict[str, Any]) -> int | None:
+    """Bytes recorded on the STAC asset (``file:size``, else ``size``)."""
+    for key in ("file:size", "size"):
+        if key not in asset:
+            continue
+        parsed = _nonneg_int(asset.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _header_length(headers: Any) -> int | None:
+    raw = headers.get("Content-Length")
+    if raw is None:
+        return None
+    try:
+        return _nonneg_int(int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _public_bucket_https(href: str) -> bool:
+    """Whether ``href`` is https on Umbra's public open-data bucket.
+
+    The public host may HEAD only these URLs, and only to read
+    ``Content-Length``. Anything else — another host, plain http, a userinfo
+    trick, a non-443 port, or a path-style URL whose first segment is not the
+    open bucket — is not requested. Redirects are not followed; this check is
+    the URL as given.
     """
-    if _cog_streaming_allowed():
-        return
+    if not isinstance(href, str) or not href:
+        return False
+    try:
+        parts = urlsplit(href)
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.username or parts.password:
+        return False
+    if port not in (None, 443):
+        return False
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    path = unquote(parts.path)
+    segments = [segment for segment in path.split("/") if segment != ""]
+    if ".." in segments or "\\" in path:
+        return False
+    if host in _BUCKET_VIRTUAL_HOSTS:
+        return True
+    return host == _BUCKET_PATH_HOST and bool(segments) and segments[0] == S3_BUCKET
+
+
+def _head_content_length(href: str) -> int | None:
+    """``Content-Length`` from HEAD, or None when it is missing or the check fails.
+
+    Only an allowlisted https URL is requested, via :func:`requests.head` so
+    the shared session does not retry, and redirects are not followed. A 404
+    or 410 raises :class:`requests.HTTPError`, the same way ``confirm=false``
+    does. Any other non-2xx, including a redirect, or a network error, returns
+    None so the caller still emits a link plan.
+    """
+    if not _public_bucket_https(href):
+        return None
     import requests
 
-    from ._http import DEFAULT_TIMEOUT, default_session
+    from ._http import DEFAULT_TIMEOUT
 
-    size: int | None = None
     try:
-        head = default_session().head(href, allow_redirects=True, timeout=DEFAULT_TIMEOUT)
-        head.raise_for_status()
-        length = head.headers.get("Content-Length")
-        if length is not None:
-            size = int(length)
+        head = requests.head(href, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
-        size = None
-    if size is None:
-        sized = f"{href} (size unknown)"
-    else:
-        sized = f"{href} ({size} bytes)"
-    raise ValueError(
-        "download_asset would write this file on the public community host. "
-        "The public community instance does not proxy the archive — download "
-        f"{sized} locally with your own downloader, or run a local "
-        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server for download_asset."
+        return None
+    if head.status_code in (404, 410):
+        head.raise_for_status()
+    if head.status_code < 200 or head.status_code >= 300:
+        return None
+    return _header_length(head.headers)
+
+
+def _plain_basename(name: str) -> str:
+    """Last path segment, or ``""`` when it is not a safe filename.
+
+    Separators are ``/`` and ``\\``. A leading dot, a control character
+    (below 0x20, or DEL), or more than 255 bytes is rejected so the caller
+    can fall back to the href basename.
+    """
+    cleaned = name.replace("\\", "/").strip()
+    if not cleaned:
+        return ""
+    base = cleaned.rsplit("/", 1)[-1].strip()
+    if (
+        not base
+        or base.startswith(".")
+        or len(base.encode("utf-8")) > 255
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in base)
+    ):
+        return ""
+    return base
+
+
+def _safe_download_filename(named: Any, href: str, fallback: str) -> str:
+    """Basename for ``curl -o``. Falls back to the href, then the asset key."""
+    from .download import _filename_from_url
+
+    base = _plain_basename(named) if isinstance(named, str) else ""
+    if base:
+        return base
+    from_href = _plain_basename(_filename_from_url(href))
+    if from_href and from_href != "download":
+        return from_href
+    return _plain_basename(fallback) or "download"
+
+
+def _how_to_fetch(
+    item_arg: str, asset: str, filename: str, href: str, dest_dir: str
+) -> dict[str, str]:
+    """Copy-paste commands. Flags match ``umbra download --help``."""
+    dest = dest_dir if isinstance(dest_dir, str) and dest_dir else "."
+    curl = f"curl -L -C - -o {shlex.quote(filename)} {shlex.quote(href)}"
+    umbra = (
+        "umbra download "
+        f"{shlex.quote(item_arg)} --asset {shlex.quote(asset)} --dest {shlex.quote(dest)}"
+    )
+    return {"curl": curl, "umbra": umbra}
+
+
+def _link_plan(
+    *,
+    asset: str,
+    filename: str,
+    href: str,
+    size: int | None,
+    item_arg: str,
+    dest_dir: str,
+) -> dict[str, Any]:
+    return {
+        "mode": "link",
+        "downloaded": False,
+        "asset": asset,
+        "filename": filename,
+        "href": href,
+        "bytes": size,
+        "how_to_fetch": _how_to_fetch(item_arg, asset, filename, href, dest_dir),
+        "note": _LINK_NOTE,
+    }
+
+
+def _public_host_confirmed_download(
+    item: UmbraItem,
+    asset: str,
+    url: str,
+    dest_dir: str,
+    href: str,
+) -> dict[str, Any]:
+    """Link plan. Never GETs the asset and never writes a file.
+
+    ``bytes`` is the STAC ``file:size`` or ``size`` when that is recorded.
+    Otherwise an allowlisted href is HEADed for ``Content-Length``. A href
+    that is not on the public bucket is not requested, and ``bytes`` is null.
+    """
+    if not isinstance(href, str) or not href.startswith(("http://", "https://")):
+        raise ValueError(
+            f"No public HTTP(S) href for asset {asset!r} on item {item.id!r}. "
+            "Nothing to link, and nothing was downloaded."
+        )
+    key, body = item._resolve_asset(asset)
+    named = body.get(ASSET_FILENAME_FIELD)
+    filename = _safe_download_filename(named, href, key)
+    item_arg = url
+    if isinstance(item.href, str) and item.href.startswith(("http://", "https://")):
+        item_arg = item.href
+    stac_size = _stac_asset_size(body)
+    size = stac_size if stac_size is not None else _head_content_length(href)
+    return _link_plan(
+        asset=asset,
+        filename=filename,
+        href=href,
+        size=size,
+        item_arg=item_arg,
+        dest_dir=dest_dir,
     )
 
 
@@ -1402,15 +1583,24 @@ def download_asset(
 
     SAR products can be multiple GB, so this is a two-step handshake: call it
     first with ``confirm=False`` (the default) to get the byte size without
-    downloading, then again with ``confirm=True`` to actually fetch. Returns
-    ``{asset, path, bytes}`` on download, or a size-and-hint object when
-    confirmation is still required.
+    downloading, then again with ``confirm=True`` to fetch it. On a
+    local or stdio server, ``confirm=True`` returns ``{asset, path, bytes}``.
+    ``confirm=False`` returns a size-and-hint object and does not write a file.
 
     On a public host (``umbra serve --public``, COG streaming off),
-    ``confirm=True`` is refused. The error includes the asset href and its
-    size in bytes and tells you to download the file locally (or run a local
-    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
-    ``confirm=False`` still returns the size.
+    ``confirm=True`` does not transfer the file. It returns a link plan:
+    ``mode`` ``"link"``, ``downloaded`` false, ``asset``, ``filename`` (a
+    basename), the direct public ``href``, ``bytes``, and ``how_to_fetch`` —
+    ``curl -L -C - -o <filename> <href>`` and
+    ``umbra download ITEM --asset ASSET --dest DIR``. ``bytes`` is the STAC
+    ``file:size`` or ``size`` when that is a non-negative integer. Otherwise
+    the host HEADs for ``Content-Length`` only when the href is https on the
+    public open-data bucket, with no redirects and no retries. Any other href
+    is not requested, and ``bytes`` is null. A 404 or 410 from that HEAD
+    raises. Any other HEAD failure leaves ``bytes`` null and still returns
+    the plan. The hosted server never transfers the file. A local
+    ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server downloads to your own
+    disk. ``confirm=False`` is unchanged.
 
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
@@ -1431,7 +1621,6 @@ def download_asset(
     keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
-    from .download import download_asset as _download_asset
 
     if not isinstance(url, str) or not url.strip():
         raise ValueError(
@@ -1464,7 +1653,11 @@ def download_asset(
             + "Call again with confirm=true to download it.",
         }
 
-    _refuse_public_asset_download(href)
+    if not _cog_streaming_allowed():
+        return _public_host_confirmed_download(item, asset, url, dest_dir, href)
+
+    from .download import download_asset as _download_asset
+
     path = _download_asset(item, asset, dest_dir)
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 

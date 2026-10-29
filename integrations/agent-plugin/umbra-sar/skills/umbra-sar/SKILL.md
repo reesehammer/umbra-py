@@ -38,9 +38,11 @@ allows cross-origin GET with Range requests, so a map's COG layer may be able
 to stream it directly. This is not verified for every reader, and if it fails,
 fall back to the quicklook plus a local download.
 
-For a copy on disk, use the client's own downloader. On the hosted server,
-`download_asset` is a size check only: pass `confirm` false and read `bytes`.
-Do not pass `confirm` true there.
+Call `download_asset` with `confirm` true. On the hosted server that returns
+a link plan (`mode` `link`, `downloaded` false) with the public `href` and
+a `curl -L -C -` command. It does not transfer the file. For a copy on your
+disk, run a local server and call `download_asset` there:
+`uvx --from 'umbra-py[mcp]' umbra-mcp`.
 
 ## Honesty
 
