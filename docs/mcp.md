@@ -50,9 +50,11 @@ Result cards follow the published JSON schemas: stable within a minor
 version, and changed only with a changelog entry. A new field may appear.
 Removing or retyping a field is a deprecation, on the same alias rule.
 
-A refusal on this host (a tool that would stream an Umbra GeoTIFF, and
-`download_asset` with `confirm=true`) is behavior. The tool stays listed.
-The call returns a tool error that names the next step.
+A refusal on this host (a tool that would stream an Umbra GeoTIFF) is
+behavior. The tool stays listed. The call returns a tool error that names
+the next step. `download_asset` with `confirm=true` does not error and does
+not write a file on this host. It returns a link plan. Small metadata and
+preview files come back inline.
 
 ## download_asset
 
@@ -68,11 +70,35 @@ like `get_item`. On this host the catalog index resolves a filename or
 stem. A local server resolves one the same way after `umbra index fetch`.
 
 `confirm=false` (the default) returns the byte size and the asset href
-without downloading. On this host `confirm=true` is refused: the tool
-error includes that href and the size, and you download the file with
-your own client. A local server still downloads when `confirm=true`.
+without downloading. That shape is unchanged on this host and on a local
+server.
 
-On the hosted server, `confirm=true` is refused.
+On this host `confirm=true` returns a **download plan**, not a file and not
+an error. `mode` is `"link"`, `downloaded` is false, and the plan names
+`asset`, `filename`, the direct public `href`, and `bytes` (from the STAC
+asset's `file:size` or `size`, otherwise HEAD `Content-Length`, or null
+when neither is known). `how_to_fetch` has two commands:
+
+```bash
+curl -L -C - -o <filename> <href>
+umbra download <item> --asset <asset> --dest <dir>
+```
+
+The hosted server does not write files and does not proxy radar products.
+GEC, CSI, SIDD, SICD, and CPHD are always a link, whatever their size. An
+unknown size is a link too. To save the file on your own disk, run a local
+server and call `download_asset` with `confirm=true` there:
+
+```bash
+uvx --from 'umbra-py[mcp]' umbra-mcp
+```
+
+Metadata (`metadata`, `stac_metadata`) and detected-image previews
+(`di_gif`) at or under 2 MiB come back inline (`mode` `"inline"`): JSON in
+the result, a preview as an image block. A body over that cap is a link.
+The host stops reading once the cap is crossed.
+
+A local server still downloads when `confirm=true` (`{asset, path, bytes}`).
 
 ## Claude Code (recommended: one command)
 
@@ -80,6 +106,14 @@ Remote Streamable HTTP. Claude Code calls this transport `http`:
 
 ```bash
 claude mcp add --transport http umbra https://api.umbra-py.space/mcp --scope user
+```
+
+Use this server for search, quicklooks, and download links. It does not
+save Umbra files to your disk. For that, add a second, local server and
+call `download_asset` with `confirm=true` on `umbra-local`:
+
+```bash
+claude mcp add --transport stdio umbra-local --scope user -- uvx --from 'umbra-py[mcp]' umbra-mcp
 ```
 
 Check it:
@@ -133,13 +167,21 @@ Or paste into `claude_desktop_config.json` and restart Desktop:
   "mcpServers": {
     "umbra": {
       "url": "https://api.umbra-py.space/mcp"
+    },
+    "umbra-local": {
+      "command": "uvx",
+      "args": ["--from", "umbra-py[mcp]", "umbra-mcp"]
     }
   }
 }
 ```
 
+`umbra` is the hosted server: search, quicklooks, and download links.
+`umbra-local` is optional. Use it when you want `download_asset` to write
+the file on your computer. The hosted server does not do that.
+
 Desktop does not use `claude mcp add`. Do not copy the Desktop block into
-Claude Code without adding `"type": "http"`.
+Claude Code without adding `"type": "http"` on the hosted entry.
 
 Already configured Desktop? Claude Code can import it:
 
@@ -155,9 +197,10 @@ and no session id.
 A usual flow is `search_catalog`, then the `bbox` on each card as a
 footprint, then `quicklook`, then `get_item`, then the GEC product `url`.
 Umbra's bucket allows a cross-origin GET with Range requests. Whether a
-given browser COG reader works is not verified. Otherwise download the
-file with your own downloader. On this host `download_asset` is the size
-check (`confirm=false`).
+given browser COG reader works is not verified. `download_asset` with
+`confirm=true` on this host returns the direct href and a `curl` command
+(`mode` `"link"`). It does not save the file. A local
+`uvx --from 'umbra-py[mcp]' umbra-mcp` server downloads to disk.
 
 A client that can limit which tools it loads can keep the
 [stable core](#stable-tools).
@@ -165,7 +208,9 @@ A client that can limit which tools it loads can keep the
 ## Local stdio (no public host)
 
 Use this when you want the server on your laptop (`UMBRA_INDEX_DB`, a
-Canopy token, or offline). Needs [uv](https://docs.astral.sh/uv/).
+Canopy token, offline use, or a download onto your own disk). The hosted
+server hands back a link; this one writes the file when `download_asset`
+is called with `confirm=true`. Needs [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uvx --from 'umbra-py[mcp]' umbra-mcp

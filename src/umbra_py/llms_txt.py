@@ -210,7 +210,11 @@ def llms_txt() -> str:
         "prebuilt scene-embedding index) as MCP tools; the imagery tools return "
         "the rendered PNG as an image block, so the agent *sees* the scene. Ships "
         "a `umbra://context` resource and `monitor-site` / `watch-site` / "
-        "`find-similar-scenes` / `survey-region` prompts."
+        "`find-similar-scenes` / `survey-region` prompts. On a public host "
+        "(`umbra serve --public`), `download_asset(confirm=true)` returns a "
+        "direct HTTPS link plan instead of writing the file (metadata and "
+        "`di_gif` previews at or under 2 MiB are inlined). A local "
+        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server downloads to disk."
     )
     lines.append(
         "- STAC API (`umbra serve`, the `[serve]` extra): a read-only STAC API "
@@ -352,7 +356,11 @@ def llms_full_txt() -> str:
         "prebuilt scene-embedding index) as MCP tools. The imagery tools return "
         "the rendered PNG as an MCP image block. Also serves a `umbra://context` "
         "resource and the `monitor-site` / `watch-site` / `find-similar-scenes` / "
-        "`survey-region` prompts."
+        "`survey-region` prompts. On a public host (`umbra serve --public`), "
+        "`download_asset(confirm=true)` returns a direct HTTPS link plan "
+        "instead of writing the file (metadata and `di_gif` previews at or "
+        "under 2 MiB are inlined). A local "
+        "`uvx --from 'umbra-py[mcp]' umbra-mcp` server downloads to disk."
     )
     lines.append(
         "- **STAC API** (`umbra serve`, `[serve]` extra) — a read-only STAC API "

@@ -10,6 +10,7 @@ access is required and the suite stays deterministic.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import struct
@@ -891,7 +892,13 @@ def test_json_tools_keep_structured_output():
         "narrate_change",
     ):
         assert schemas[name] is None, name
-    for name in ("search_catalog", "get_item", "stack_stats", "stack_provenance"):
+    for name in (
+        "search_catalog",
+        "get_item",
+        "stack_stats",
+        "stack_provenance",
+        "download_asset",
+    ):
         assert schemas[name] is not None, name
 
 
@@ -1309,54 +1316,73 @@ def test_download_asset_confirm_gate(sample_item_dict):
     assert out["confirm_required"] is True
     assert out["bytes"] == 2500000
     assert "confirm=true" in out["hint"]
+    assert "mode" not in out
+    assert "downloaded" not in out
 
 
-@responses.activate
-def test_public_host_refuses_download_asset_confirm(sample_item_dict, tmp_path, monkeypatch):
-    """``confirm=true`` on a public host must not write the asset to server disk.
-
-    The client gets a ToolError naming the href, the size in bytes, and how to
-    fetch the file itself. The direct callable still raises ValueError, the
-    same way the other COG-streaming refusals do.
-    """
-    from mcp.server.mcpserver.exceptions import ToolError
-
-    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
-    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
-    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
-
+def _forbid_disk_download(monkeypatch) -> None:
     def boom(*_a, **_k):
         raise AssertionError("public host wrote an asset to disk")
 
     monkeypatch.setattr("umbra_py.download.download_asset", boom)
+
+
+def _forbid_asset_get(href: str) -> None:
+    def boom(request):
+        raise AssertionError(f"public host fetched {request.url}")
+
+    responses.add_callback(responses.GET, href, callback=boom)
+
+
+def _assert_link_plan(out: dict, *, href: str, asset: str, size: int | None) -> None:
+    assert out["mode"] == "link"
+    assert out["downloaded"] is False
+    assert out["asset"] == asset
+    assert out["href"] == href
+    assert out["bytes"] == size
+    assert isinstance(out["filename"], str) and out["filename"]
+    assert "path" not in out
+    assert "content" not in out
+    assert "content_base64" not in out
+    commands = out["how_to_fetch"]
+    assert commands["curl"].startswith("curl -L -C - -o ")
+    assert href in commands["curl"]
+    assert out["filename"] in commands["curl"]
+    assert commands["umbra"].startswith("umbra download ")
+    assert "--asset" in commands["umbra"]
+    assert "--dest" in commands["umbra"]
+    assert asset in commands["umbra"]
+    assert "does not write" in out["note"]
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in out["note"]
+
+
+@responses.activate
+def test_public_host_confirm_returns_a_link_plan(sample_item_dict, tmp_path, monkeypatch):
+    """``confirm=true`` on a public host returns a plan and does not fetch the product."""
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "2500000"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
     ms.configure(cog_streaming=False)
 
-    with pytest.raises(ValueError, match="does not proxy") as direct:
-        ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path), confirm=True)
-    text = str(direct.value)
-    assert href in text
-    assert "2500000 bytes" in text
-    assert "your own downloader" in text
-    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in text
-    assert "download_asset" in text
+    out = ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path), confirm=True)
+    _assert_link_plan(out, href=href, asset="GEC", size=2500000)
     assert not any(tmp_path.iterdir())
-    assert not any(
-        call.request.method == "GET" and call.request.url == href for call in responses.calls
-    )
 
     server = ms.build_server()
-    with pytest.raises(ToolError, match="does not proxy") as excinfo:
-        asyncio.run(
-            server.call_tool(
-                "download_asset",
-                {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
-            )
+    result = asyncio.run(
+        server.call_tool(
+            "download_asset",
+            {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
         )
-    message = str(excinfo.value)
-    assert href in message
-    assert "2500000 bytes" in message
-    assert "your own downloader" in message
-    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    )
+    assert result.is_error is False
+    assert result.structured_content["mode"] == "link"
+    assert result.structured_content["downloaded"] is False
+    assert result.structured_content["href"] == href
+    assert result.structured_content["bytes"] == 2500000
+    assert "path" not in result.structured_content
     assert not any(tmp_path.iterdir())
 
 
@@ -1368,41 +1394,43 @@ def test_public_host_refuses_download_asset_confirm(sample_item_dict, tmp_path, 
     ],
 )
 @responses.activate
-def test_public_host_refusal_survives_a_failed_head(sample_item_dict, tmp_path, monkeypatch, head):
-    """A failed size check must not replace the public-host refusal.
-
-    403 (``raise_for_status``) and a connection error both still produce a
-    ToolError naming the href and ``size unknown``, and nothing is downloaded.
-    """
-    from mcp.server.mcpserver.exceptions import ToolError
-
+def test_public_host_link_plan_when_size_is_unknown(sample_item_dict, tmp_path, monkeypatch, head):
+    """A failed size check still returns a plan, with ``bytes`` null, and no GET."""
     responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
     href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
     responses.add(responses.HEAD, href, **head)
-
-    def boom(*_a, **_k):
-        raise AssertionError("public host wrote an asset to disk")
-
-    monkeypatch.setattr("umbra_py.download.download_asset", boom)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
     ms.configure(cog_streaming=False)
 
-    server = ms.build_server()
-    with pytest.raises(ToolError, match="size unknown") as excinfo:
-        asyncio.run(
-            server.call_tool(
-                "download_asset",
-                {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
-            )
-        )
-    message = str(excinfo.value)
-    assert href in message
-    assert "(size unknown)" in message
-    assert "your own downloader" in message
-    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    out = ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path), confirm=True)
+    _assert_link_plan(out, href=href, asset="GEC", size=None)
     assert not any(tmp_path.iterdir())
-    assert not any(
-        call.request.method == "GET" and call.request.url == href for call in responses.calls
+
+    server = ms.build_server()
+    result = asyncio.run(
+        server.call_tool(
+            "download_asset",
+            {"url": ITEM_URL, "asset": "GEC", "dest_dir": str(tmp_path), "confirm": True},
+        )
     )
+    assert result.is_error is False
+    assert result.structured_content["bytes"] is None
+    assert result.structured_content["mode"] == "link"
+
+
+@responses.activate
+def test_public_host_link_plan_follows_cog_streaming_env(sample_item_dict, monkeypatch):
+    """``UMBRA_MCP_COG_STREAMING=0`` is the same public-host gate as configure(False)."""
+    monkeypatch.setenv(ms.COG_STREAMING_ENV, "0")
+    ms.configure(cog_streaming=None)
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, headers={"Content-Length": "10"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
+    _assert_link_plan(out, href=href, asset="GEC", size=10)
 
 
 @responses.activate
@@ -1444,6 +1472,321 @@ def test_download_asset_confirm_still_downloads_off_the_public_host(
     assert out["bytes"] == len(body)
     assert Path(out["path"]).read_bytes() == body
     assert Path(out["path"]).parent == tmp_path
+    assert "mode" not in out
+    assert "downloaded" not in out
+
+
+def test_capped_read_stops_pulling_once_the_cap_is_crossed():
+    """A lying Content-Length must not pull the rest of a large body through."""
+    cap = 8
+    pulled = 0
+
+    def chunks():
+        nonlocal pulled
+        for _ in range(cap + 5):
+            pulled += 1
+            yield b"x"
+        raise AssertionError("read past the cap")
+
+    assert ms._read_up_to(chunks(), cap) is None
+    assert pulled == cap + 1
+
+
+def test_capped_read_returns_a_body_of_exactly_the_cap():
+    assert ms._read_up_to([b"abcdefgh"], 8) == b"abcdefgh"
+
+
+def test_inline_asset_cap_is_two_mebibytes():
+    assert ms.INLINE_ASSET_MAX_BYTES == 2 * 1024 * 1024
+
+
+def test_asset_family_strips_only_a_numeric_suffix():
+    assert ms._asset_family("metadata_2") == "metadata"
+    assert ms._asset_family("stac_metadata") == "stac_metadata"
+    assert ms._asset_family("stac_metadata_3") == "stac_metadata"
+    assert ms._asset_family("gec_2") == "gec"
+    assert ms._asset_family("di_gif") == "di_gif"
+    assert ms._asset_family("csi_sidd") == "csi_sidd"
+
+
+def _public_item(sample_item_dict, assets=None):
+    item = copy.deepcopy(sample_item_dict)
+    if assets is not None:
+        item["assets"] = assets
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    return item
+
+
+@responses.activate
+def test_public_host_inlines_a_small_metadata_json(sample_item_dict, monkeypatch):
+    body = b'{"sensor": "umbra", "ok": true}'
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    responses.add(responses.HEAD, href, headers={"Content-Length": str(len(body))}, status=200)
+    responses.add(
+        responses.GET,
+        href,
+        body=body,
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+    )
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "inline"
+    assert out["downloaded"] is False
+    assert out["asset"] == "metadata"
+    assert out["href"] == href
+    assert out["bytes"] == len(body)
+    assert out["media_type"] == "application/json"
+    assert out["content"] == {"sensor": "umbra", "ok": True}
+    assert "path" not in out
+    assert "content_base64" not in out
+    assert "does not write" in out["note"]
+
+    server = ms.build_server()
+    result = asyncio.run(
+        server.call_tool(
+            "download_asset",
+            {"url": ITEM_URL, "asset": "metadata", "confirm": True},
+        )
+    )
+    assert result.is_error is False
+    assert result.structured_content["mode"] == "inline"
+    assert result.structured_content["content"] == {"sensor": "umbra", "ok": True}
+    assert all(type(block).__name__ != "ImageContent" for block in result.content)
+
+
+_TINY_GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00"
+    b"\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,"
+    b"\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+
+
+@responses.activate
+def test_public_host_inlines_a_small_preview_image(sample_item_dict, monkeypatch):
+    gif_href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/scene_DI-GIF.gif"
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["preview"] = {
+        "href": gif_href,
+        "type": "image/gif",
+        "umbra-py:filename": "scene_DI-GIF.gif",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(
+        responses.HEAD, gif_href, headers={"Content-Length": str(len(_TINY_GIF))}, status=200
+    )
+    responses.add(
+        responses.GET,
+        gif_href,
+        body=_TINY_GIF,
+        status=200,
+        headers={"Content-Type": "image/gif", "Content-Length": str(len(_TINY_GIF))},
+    )
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+
+    out = ms.download_asset(ITEM_URL, "di_gif", confirm=True)
+    assert out["mode"] == "inline"
+    assert out["downloaded"] is False
+    assert out["media_type"] == "image/gif"
+    assert out["bytes"] == len(_TINY_GIF)
+    assert base64.b64decode(out["content_base64"]) == _TINY_GIF
+    assert out["filename"] == "scene_DI-GIF.gif"
+    assert "content" not in out
+    assert "path" not in out
+
+    server = ms.build_server()
+    result = asyncio.run(
+        server.call_tool("download_asset", {"url": ITEM_URL, "asset": "di_gif", "confirm": True})
+    )
+    assert result.is_error is False
+    assert result.structured_content["mode"] == "inline"
+    kinds = [type(block).__name__ for block in result.content]
+    assert kinds[0] == "ImageContent"
+    assert result.content[0].mime_type == "image/gif"
+    assert base64.b64decode(result.content[0].data) == _TINY_GIF
+    text = result.content[1].text
+    assert "content_base64" not in text
+    assert '"image": "attached"' in text
+
+
+@responses.activate
+def test_public_host_over_cap_metadata_is_a_link(sample_item_dict, monkeypatch):
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    size = ms.INLINE_ASSET_MAX_BYTES + 1
+    responses.add(responses.HEAD, href, headers={"Content-Length": str(size)}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    _assert_link_plan(out, href=href, asset="metadata", size=size)
+
+
+@responses.activate
+def test_public_host_unknown_metadata_size_is_a_link(sample_item_dict, monkeypatch):
+    """No STAC size and no Content-Length: do not GET to find out."""
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    responses.add(responses.HEAD, href, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    _assert_link_plan(out, href=href, asset="metadata", size=None)
+
+
+@pytest.mark.parametrize("asset", ["GEC", "SICD", "SIDD", "CPHD"])
+@responses.activate
+def test_public_host_large_products_are_always_links(sample_item_dict, monkeypatch, asset):
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href(asset)
+    responses.add(responses.HEAD, href, headers={"Content-Length": "10"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, asset, confirm=True)
+    _assert_link_plan(out, href=href, asset=asset, size=10)
+
+
+@responses.activate
+def test_public_host_uses_stac_size_when_head_fails(sample_item_dict, monkeypatch):
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["GEC"]["file:size"] = 4242
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("GEC")
+    responses.add(responses.HEAD, href, status=403)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "GEC", confirm=True)
+    _assert_link_plan(out, href=href, asset="GEC", size=4242)
+
+
+@responses.activate
+def test_public_host_ignores_a_boolean_stac_size(sample_item_dict, monkeypatch):
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"]["file:size"] = True
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("metadata")
+    responses.add(responses.HEAD, href, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    _assert_link_plan(out, href=href, asset="metadata", size=None)
+
+
+@responses.activate
+def test_public_host_either_size_over_cap_blocks_inline(sample_item_dict, monkeypatch):
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["metadata"]["file:size"] = 10
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    href = UmbraItem.from_dict(item, href=ITEM_URL).asset_href("metadata")
+    big = ms.INLINE_ASSET_MAX_BYTES + 5
+    responses.add(responses.HEAD, href, headers={"Content-Length": str(big)}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    _assert_link_plan(out, href=href, asset="metadata", size=big)
+
+
+@responses.activate
+def test_public_host_stream_over_cap_does_not_inline(sample_item_dict, monkeypatch):
+    """HEAD understates the body. The host stops and returns a link, not the bytes."""
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    huge = b"x" * (ms.INLINE_ASSET_MAX_BYTES + 32)
+    responses.add(responses.HEAD, href, headers={"Content-Length": "8"}, status=200)
+    responses.add(
+        responses.GET,
+        href,
+        body=huge,
+        status=200,
+        headers={"Content-Length": "8"},
+    )
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "link"
+    assert out["downloaded"] is False
+    assert "content" not in out
+    assert "content_base64" not in out
+    # HEAD said 8. The overrun raises inside the read, so the plan keeps that
+    # recorded size and does not inline a prefix of the body.
+    assert out["bytes"] == 8
+
+
+@responses.activate
+def test_public_host_non_image_preview_is_a_link(sample_item_dict, monkeypatch):
+    gif_href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/scene_DI-GIF.gif"
+    body = b'{"not": "an image"}'
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["preview"] = {
+        "href": gif_href,
+        "type": "image/gif",
+        "umbra-py:filename": "scene_DI-GIF.gif",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(responses.HEAD, gif_href, headers={"Content-Length": str(len(body))}, status=200)
+    responses.add(responses.GET, gif_href, body=body, status=200)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "di_gif", confirm=True)
+    assert out["mode"] == "link"
+    assert "content_base64" not in out
+    assert out["bytes"] == len(body)
+
+
+@responses.activate
+def test_public_host_undecodable_metadata_is_a_link(sample_item_dict, monkeypatch):
+    body = b"\xff\xfe\x00\x01"
+    _public_item(sample_item_dict)
+    href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("metadata")
+    responses.add(responses.HEAD, href, headers={"Content-Length": str(len(body))}, status=200)
+    responses.add(responses.GET, href, body=body, status=200)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "metadata", confirm=True)
+    assert out["mode"] == "link"
+    assert "content" not in out
+    assert out["bytes"] == len(body)
+
+
+@responses.activate
+def test_public_host_missing_href_is_still_an_error(sample_item_dict, monkeypatch):
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"] = {"metadata": {"href": "", "type": "application/json"}}
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    with pytest.raises(ValueError, match="No public HTTP"):
+        ms.download_asset(ITEM_URL, "metadata", confirm=True)
+
+
+@responses.activate
+def test_public_host_other_small_kinds_stay_links(sample_item_dict, monkeypatch):
+    """A tiny non-preview file is not inlined. Only metadata and di_gif are."""
+    href = "https://umbra-open-data-catalog.s3.amazonaws.com/x/notes.txt"
+    item = copy.deepcopy(sample_item_dict)
+    item["assets"]["notes"] = {
+        "href": href,
+        "type": "text/plain",
+        "umbra-py:filename": "notes.txt",
+    }
+    responses.add(responses.GET, ITEM_URL, json=item, status=200)
+    responses.add(responses.HEAD, href, headers={"Content-Length": "4"}, status=200)
+    _forbid_asset_get(href)
+    _forbid_disk_download(monkeypatch)
+    ms.configure(cog_streaming=False)
+    out = ms.download_asset(ITEM_URL, "notes.txt", confirm=True)
+    assert out["mode"] == "link"
+    assert out["downloaded"] is False
+    assert out["bytes"] == 4
 
 
 @pytest.mark.parametrize("url", ["", "   ", None])
@@ -1470,6 +1813,9 @@ def test_download_asset_tool_describes_v2_keys_and_filename_urls():
     assert "file_tif" in desc
     assert "umbra-py:filename" in desc
     assert "acquisition stem" in desc
+    assert "mode" in desc and "link" in desc
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in desc
+    assert "confirm=False" in desc or "confirm=false" in desc
 
 
 @responses.activate
