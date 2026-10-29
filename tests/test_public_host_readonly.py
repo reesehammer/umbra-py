@@ -177,6 +177,71 @@ def test_public_watch_without_an_index_does_not_create_one(
     assert not path.exists()
 
 
+def test_public_live_watch_uses_the_long_pool(sample_item_dict, public_mode, monkeypatch, tmp_path):
+    """A live watch takes a long-pool permit and does not touch the quick pool."""
+    path = tmp_path / "catalog.db"
+    monkeypatch.setattr(ms, "default_index_path", lambda: path)
+    monkeypatch.setattr(ms, "UmbraCatalog", _fake_catalog(_items(sample_item_dict, 1)))
+
+    quick = 0
+    while ms._PUBLIC_NET.acquire(blocking=False):
+        quick += 1
+    try:
+        out = ms.watch_site(area="anywhere", local=False)
+    finally:
+        for _ in range(quick):
+            ms._PUBLIC_NET.release()
+    assert out["source"] == "live-catalog"
+    assert not path.exists()
+
+    class _Refuse:
+        def search(self, **_kwargs):
+            raise AssertionError("walked while the long pool was full")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *_a, **_k: _Refuse())
+    held = 0
+    while ms._PUBLIC_NET_LONG.acquire(blocking=False):
+        held += 1
+    try:
+        with pytest.raises(ms.PublicHostBusy, match="limit of network requests"):
+            ms.watch_site(area="anywhere", local=False)
+    finally:
+        for _ in range(held):
+            ms._PUBLIC_NET_LONG.release()
+    assert not path.exists()
+
+
+def test_public_fetch_item_filename_stays_readonly(
+    sample_item_dict, public_mode, monkeypatch, tmp_path
+):
+    """A public filename miss goes through resolve_asset_name, still read-only."""
+    from umbra_py import index as index_mod
+
+    missing = tmp_path / "missing.db"
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(missing))
+    stem = "2024-01-01-02-10-11_UMBRA-04"
+    with pytest.raises(ValueError) as exc:
+        ms._fetch_item(f"{stem}_GEC.tif")
+    assert str(missing) not in str(exc.value)
+    assert "No local catalog index" in str(exc.value)
+
+    path = tmp_path / "catalog.db"
+    indexed = _items(sample_item_dict, 1)
+    _index(path, indexed)
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(path))
+    seen: list[bool] = []
+    real = index_mod.CatalogIndex
+
+    def spy(db, *, readonly: bool = False):
+        seen.append(readonly)
+        return real(db, readonly=readonly)
+
+    monkeypatch.setattr(index_mod, "CatalogIndex", spy)
+    item = ms._fetch_item(stem)
+    assert item.id == indexed[0].id
+    assert seen == [True]
+
+
 def test_public_watch_caps_the_name(sample_item_dict, public_mode, monkeypatch, tmp_path):
     path = tmp_path / "catalog.db"
     _index(path, _items(sample_item_dict, 1))
