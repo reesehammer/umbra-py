@@ -177,8 +177,8 @@ CATALOG_SHA256_ASSET = "catalog.sha256"
 #: ``UMBRA_INDEX_URL`` use a non-https URL. The CLI flag is ``--insecure-url``.
 INSECURE_INDEX_URL_ENV = "UMBRA_INSECURE_INDEX_URL"
 
-#: Directory that local MCP ``download_asset(confirm=true)`` may write under.
-#: Unset means the process working directory. ``dest_dir`` outside it errors.
+#: When set, local MCP ``download_asset(confirm=true)`` may write only under
+#: this directory. Unset leaves ``dest_dir`` unchanged, including an absolute path.
 MCP_DOWNLOAD_ROOT_ENV = "UMBRA_MCP_DOWNLOAD_ROOT"
 
 #: Stable download URL for the prebuilt SQLite index. GitHub redirects this
@@ -216,14 +216,6 @@ CATALOG_INDEX_THUMBS_MANIFEST_URL = (
 CATALOG_INDEX_EMBED_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/"
     f"{CATALOG_INDEX_RELEASE}/{CATALOG_EMBED_ASSET}"
-)
-
-#: Stable download URL for :data:`CATALOG_SHA256_ASSET` (same rolling-release
-#: redirect as :data:`CATALOG_INDEX_DB_URL`). A mirror passed as ``--url``
-#: is checked against the sibling of that URL, not this constant.
-CATALOG_INDEX_SHA256_URL = (
-    f"https://github.com/{GITHUB_REPO}/releases/download/"
-    f"{CATALOG_INDEX_RELEASE}/{CATALOG_SHA256_ASSET}"
 )
 
 #: License Umbra applies to all open data.

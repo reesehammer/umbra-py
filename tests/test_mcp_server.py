@@ -25,7 +25,11 @@ pytest.importorskip("mcp")
 from mcp.server.mcpserver import Image  # noqa: E402
 
 from umbra_py import mcp_server as ms  # noqa: E402
-from umbra_py.exceptions import AssetNotFoundError, MissingDependencyError  # noqa: E402
+from umbra_py.exceptions import (  # noqa: E402
+    AssetNotFoundError,
+    DownloadError,
+    MissingDependencyError,
+)
 from umbra_py.models import UmbraItem  # noqa: E402
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -1428,7 +1432,7 @@ def test_download_asset_confirm_still_downloads_off_the_public_host(
 ):
     """A local or stdio server (COG streaming allowed) still downloads on confirm."""
     monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
-    monkeypatch.setenv("UMBRA_MCP_DOWNLOAD_ROOT", str(tmp_path))
+    monkeypatch.delenv("UMBRA_MCP_DOWNLOAD_ROOT", raising=False)
     ms.configure(cog_streaming=None)
     responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
     href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")
@@ -1445,6 +1449,20 @@ def test_download_asset_confirm_still_downloads_off_the_public_host(
     assert out["bytes"] == len(body)
     assert Path(out["path"]).read_bytes() == body
     assert Path(out["path"]).parent == tmp_path
+
+
+@responses.activate
+def test_download_asset_confines_dest_only_when_the_root_is_set(
+    sample_item_dict, tmp_path, monkeypatch
+):
+    monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("UMBRA_MCP_DOWNLOAD_ROOT", str(root))
+    ms.configure(cog_streaming=None)
+    responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
+    with pytest.raises(DownloadError, match="UMBRA_MCP_DOWNLOAD_ROOT"):
+        ms.download_asset(ITEM_URL, "GEC", dest_dir=str(tmp_path / "elsewhere"), confirm=True)
 
 
 @pytest.mark.parametrize("url", ["", "   ", None])

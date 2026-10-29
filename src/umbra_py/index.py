@@ -596,12 +596,18 @@ def _sha256_file(path: Path) -> str:
 
 
 def sha256_manifest_url(asset_url: str) -> str:
-    """Sibling ``catalog.sha256`` URL for a release asset URL."""
+    """Sibling ``catalog.sha256`` URL for a release asset URL.
+
+    The query string is kept, so a presigned ``catalog.db`` URL still carries
+    its parameters on the sibling. The fragment is dropped.
+    """
     parts = urlsplit(asset_url.strip())
     base, sep, _name = parts.path.rpartition("/")
     if not sep or not parts.scheme:
         raise IndexRefreshError(f"Index URL {asset_url!r} has no asset name to check.")
-    return urlunsplit((parts.scheme, parts.netloc, f"{base}/{CATALOG_SHA256_ASSET}", "", ""))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, f"{base}/{CATALOG_SHA256_ASSET}", parts.query, "")
+    )
 
 
 def _asset_name_from_url(asset_url: str) -> str:
@@ -641,9 +647,9 @@ def parse_sha256_manifest(text: str) -> dict[str, str]:
 def write_release_manifest(dest: str | os.PathLike, paths: Iterable[str | os.PathLike]) -> None:
     """Write a GNU sha256sum file of ``paths`` (basenames) for the catalog release.
 
-    The publish workflow uploads this as ``catalog.sha256`` and passes the same
-    file to ``actions/attest-build-provenance`` as ``subject-checksums``, so the
-    attestation subjects are these digests.
+    The publish workflow uploads this as ``catalog.sha256`` before clients can
+    see the new ``catalog.db``. The catalog.db digest is what the attest job
+    publishes; this client checks the manifest, not that signature.
     """
     lines: list[str] = []
     for raw in paths:
@@ -668,9 +674,10 @@ def _read_capped(resp: Any, limit: int) -> bytes:
 def _verify_release_sha256(sess: Any, asset_url: str, path: Path) -> str:
     """Check ``path`` against the release sha256 manifest.
 
-    Returns ``verified`` or ``unverified`` (HTTP 404: an older release with no
-    manifest; a warning is issued and the snapshot is still accepted). A
-    manifest that is present but does not match raises :class:`IndexRefreshError`.
+    Returns ``verified`` or ``unverified``. HTTP 403, 404, and 410 mean the
+    manifest is missing: a warning is issued and the snapshot is still
+    accepted. Any other failure raises :class:`IndexRefreshError`. A manifest
+    that is present but does not match raises too.
     """
     manifest_url = sha256_manifest_url(asset_url)
     try:
@@ -680,10 +687,11 @@ def _verify_release_sha256(sess: Any, asset_url: str, path: Path) -> str:
             f"Could not fetch the sha256 manifest {manifest_url!r}: {exc}"
         ) from exc
     try:
-        if resp.status_code == 404:
+        if resp.status_code in (403, 404, 410):
             warnings.warn(
-                f"No sha256 manifest at {manifest_url}; {path.name} was not "
-                "integrity-checked. Releases published before catalog.sha256 omit it.",
+                f"No sha256 manifest at {manifest_url} (HTTP {resp.status_code}); "
+                f"{path.name} was not integrity-checked. A missing catalog.sha256 "
+                "is accepted.",
                 stacklevel=3,
             )
             return "unverified"
@@ -726,9 +734,18 @@ def _enable_sqlite_defensive(conn: sqlite3.Connection) -> None:
     setconfig(flag, True)
 
 
+def _sqlite_ro_uri(path: Path) -> str:
+    """Read-only SQLite URI for ``path``.
+
+    :meth:`Path.as_uri` percent-encodes ``#`` and ``%``, so they stay in the
+    path instead of ending the URI. ``mode=ro`` is the query string.
+    """
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def _open_untrusted_snapshot(path: Path) -> sqlite3.Connection:
     """Open a downloaded SQLite file read-only, without trusting its schema."""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
     _enable_sqlite_defensive(conn)
     conn.execute("PRAGMA trusted_schema = OFF")
     return conn
@@ -788,6 +805,13 @@ def _validate_snapshot(path: Path) -> tuple[int, str | None]:
         try:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if check != "ok":
+                raise IndexRefreshError(f"Downloaded snapshot {path} failed quick_check: {check}")
+            if version > _SCHEMA_VERSION:
+                raise IndexRefreshError(
+                    f"Downloaded snapshot has schema version {version}; this umbra-py reads "
+                    f"up to {_SCHEMA_VERSION}. Upgrade umbra-py before refreshing."
+                )
             _reject_unexpected_objects(conn, _SCHEMA, path)
             rows = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
             row = conn.execute("SELECT value FROM meta WHERE key = 'built_at'").fetchone()
@@ -797,13 +821,6 @@ def _validate_snapshot(path: Path) -> tuple[int, str | None]:
         raise IndexRefreshError(
             f"Downloaded snapshot {path} is not a readable index: {exc}"
         ) from exc
-    if check != "ok":
-        raise IndexRefreshError(f"Downloaded snapshot {path} failed quick_check: {check}")
-    if version > _SCHEMA_VERSION:
-        raise IndexRefreshError(
-            f"Downloaded snapshot has schema version {version}; this umbra-py reads "
-            f"up to {_SCHEMA_VERSION}. Upgrade umbra-py before refreshing."
-        )
     if rows <= 0:
         raise IndexRefreshError(f"Downloaded snapshot {path} has no items.")
     return rows, (row[0] if row else None)
@@ -945,7 +962,7 @@ def _clean_leftovers(path: Path) -> dict[str, int]:
 def _index_rows(path: Path) -> int | None:
     """``COUNT(*)`` of an index's items, or ``None`` when it cannot be read at all."""
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
         try:
             return conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         finally:
@@ -976,12 +993,13 @@ def refresh_from_release(
     then swap it in with an atomic ``os.replace`` and record the new identity.
 
     After the download, the sibling ``catalog.sha256`` manifest is fetched.
-    A matching digest is ``integrity="verified"``. HTTP 404 (a release from
-    before the manifest existed) warns and still accepts the file
-    (``integrity="unverified"``), so a boot ``umbra index fetch --if-changed``
-    keeps working against the current release. A manifest that is present but
-    does not match raises, and the previous index stays. ``url`` must be https
-    unless ``insecure`` or ``UMBRA_INSECURE_INDEX_URL`` is set.
+    A matching digest is ``integrity="verified"``. HTTP 403, 404, and 410 (no
+    manifest) warn and still accept the file (``integrity="unverified"``), so
+    a boot ``umbra index fetch --if-changed`` keeps working against a release
+    that has not published one. A manifest that is present but does not match
+    raises, and the previous index stays. ``url`` must be https unless
+    ``insecure`` or ``UMBRA_INSECURE_INDEX_URL`` is set. The manifest URL keeps
+    the asset URL's query string.
 
     An unchanged snapshot is still re-downloaded when the current file cannot
     be read at all (reason ``"unreadable"``), so a volume that once filled up

@@ -1412,8 +1412,8 @@ def download_asset(
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
     ``confirm=False`` still returns the size.
 
-    On a local server, ``dest_dir`` must resolve inside ``UMBRA_MCP_DOWNLOAD_ROOT``
-    (default: the current working directory). A path outside that root is an error.
+    On a local server, ``dest_dir`` is unchanged unless ``UMBRA_MCP_DOWNLOAD_ROOT``
+    is set. When that variable is set, ``dest_dir`` must resolve inside it.
     The argument itself is unchanged.
 
     ``url`` is a STAC JSON URL, or a product filename

@@ -11,18 +11,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ### Security
 - **`umbra index fetch` checks the published snapshot.** The weekly workflow
-  uploads `catalog.sha256` and attests those digests. A fetch verifies
-  `catalog.db` when the manifest is present, and warns and continues when an
-  older release has none. Index URLs (`--url`, including `UMBRA_INDEX_URL`)
-  must be https unless `--insecure-url` or `UMBRA_INSECURE_INDEX_URL=1`.
-  A downloaded snapshot is opened read-only with SQLite's defensive settings;
-  triggers and unexpected objects are rejected.
+  uploads `catalog.sha256` and attests the `catalog.db` digest. A fetch verifies
+  `catalog.db` when the manifest is present, and warns and continues when it is
+  missing (HTTP 403, 404, or 410). Index URLs (`--url`, including
+  `UMBRA_INDEX_URL`) must be https unless `--insecure-url` or
+  `UMBRA_INSECURE_INDEX_URL=1`. A downloaded snapshot is opened read-only with
+  SQLite's defensive settings; triggers and unexpected objects are rejected.
 - **Downloads no longer trust the filename in an asset URL.** The basename is
   percent-decoded once; a leading dot, a control character, or a backslash is
   refused, and the file must stay inside the destination directory.
   `umbra download --max-bytes` caps a transfer. Local MCP
-  `download_asset(confirm=true)` keeps `dest_dir`, and refuses a path outside
-  `UMBRA_MCP_DOWNLOAD_ROOT` (default: the working directory).
+  `download_asset(confirm=true)` keeps `dest_dir`. When
+  `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
 - **Citation metadata uses the Zenodo concept DOI**

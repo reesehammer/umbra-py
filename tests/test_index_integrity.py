@@ -16,8 +16,10 @@ from umbra_py.constants import CATALOG_SHA256_ASSET, INSECURE_INDEX_URL_ENV
 from umbra_py.exceptions import IndexRefreshError
 from umbra_py.index import (
     _SCHEMA,
+    _SCHEMA_VERSION,
     CatalogIndex,
     _enable_sqlite_defensive,
+    _index_rows,
     _open_untrusted_snapshot,
     _schema_object_names,
     _validate_snapshot,
@@ -118,19 +120,40 @@ def test_sha256_manifest_round_trip(tmp_path):
     assert parsed["catalog.db"] == hashlib.sha256(b"abc").hexdigest()
     assert parsed["notes.md"] == hashlib.sha256(b"notes").hexdigest()
     assert sha256_manifest_url(URL) == MANIFEST
+    signed = (
+        "https://example.test/releases/download/catalog-index/catalog.db"
+        "?X-Amz-Signature=abc&token=1#frag"
+    )
+    assert sha256_manifest_url(signed) == (
+        "https://example.test/releases/download/catalog-index/catalog.sha256"
+        "?X-Amz-Signature=abc&token=1"
+    )
     binary = hashlib.sha256(b"abc").hexdigest() + " *catalog.db\n"
     assert parse_sha256_manifest(binary)["catalog.db"] == hashlib.sha256(b"abc").hexdigest()
     with pytest.raises(IndexRefreshError, match="basename"):
         parse_sha256_manifest(hashlib.sha256(b"abc").hexdigest() + "  ../catalog.db\n")
 
 
+@pytest.mark.parametrize("status", [403, 404, 410])
 @responses.activate
-def test_missing_manifest_warns_and_still_fetches(tmp_path):
+def test_missing_manifest_warns_and_still_fetches(tmp_path, status):
     body = _snapshot(tmp_path)
-    _serve(body)
+    _serve(body, manifest_status=status)
     with pytest.warns(UserWarning, match="catalog.sha256"):
         result = refresh_from_release(tmp_path / "catalog.db", url=URL)
     assert result.changed and result.integrity == "unverified" and result.items == 2
+
+
+@responses.activate
+def test_other_manifest_errors_fail_closed(tmp_path):
+    dest = tmp_path / "catalog.db"
+    dest.write_bytes(_snapshot(tmp_path, n=3))
+    body = _snapshot(tmp_path / "next", n=4)
+    _serve(body, manifest_status=500)
+    with pytest.raises(IndexRefreshError, match="sha256 manifest"):
+        refresh_from_release(dest, url=URL)
+    with CatalogIndex(dest) as idx:
+        assert len(idx) == 3
 
 
 @responses.activate
@@ -239,6 +262,29 @@ def test_unexpected_sqlite_objects_are_rejected(tmp_path, sql):
     path = _with_extra_sql(tmp_path, sql)
     with pytest.raises(IndexRefreshError, match="unexpected sqlite objects"):
         _validate_snapshot(path)
+
+
+def test_newer_schema_says_upgrade_before_the_allowlist(tmp_path):
+    path = _with_extra_sql(tmp_path, "CREATE TABLE evil(x)")
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    with pytest.raises(IndexRefreshError, match="Upgrade umbra-py"):
+        _validate_snapshot(path)
+
+
+def test_ro_uri_quotes_hash_and_percent(tmp_path):
+    folder = tmp_path / "a#b%c"
+    folder.mkdir()
+    path = folder / "catalog.db"
+    path.write_bytes(_snapshot(tmp_path / "src"))
+    conn = _open_untrusted_snapshot(path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 2
+    finally:
+        conn.close()
+    assert _index_rows(path) == 2
 
 
 @pytest.mark.skipif(not PUBLISHED.exists(), reason="published catalog.db was not downloaded")

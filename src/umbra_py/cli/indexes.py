@@ -1473,15 +1473,9 @@ def embed_info(embed_db) -> None:
 @click.option(
     "--url",
     default=None,
-    help="Override the release asset URL (advanced -- e.g. to pull from a fork). "
-    "Must be https unless --insecure-url.",
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
 )
-@click.option(
-    "--insecure-url",
-    is_flag=True,
-    help="Allow a non-https --url. Also UMBRA_INSECURE_INDEX_URL=1.",
-)
-def embed_fetch(embed_db, url, insecure_url) -> None:
+def embed_fetch(embed_db, url) -> None:
     """Download the published scene-embedding index for instant similarity search.
 
     Building the index embeds every quicklook in the archive -- the one expensive,
@@ -1494,7 +1488,6 @@ def embed_fetch(embed_db, url, insecure_url) -> None:
     from .. import embed as emb
 
     path = _embed_path(embed_db, None)
-    _shared._require_release_https(url, insecure_url)
 
     with OrbitSpinner("Fetching prebuilt scene index") as spinner:
 

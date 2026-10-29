@@ -10,26 +10,6 @@ still open.
 
 ---
 
-## Client-side verification of the catalog attestation
-
-- **Surfaced in:** the catalog sha256 / download-confinement work (PR-F).
-- **Code:** `src/umbra_py/index.py` (`_verify_release_sha256`),
-  `.github/workflows/publish-index.yml` (the attest step).
-
-`umbra index fetch` checks `catalog.sha256` and the workflow attests those
-digests with `actions/attest-build-provenance`. The client does not check the
-Sigstore signature (`gh attestation verify` does). A lightweight check was
-skipped on purpose: verifying the bundle needs a sigstore dependency, and
-trusting the attestations API JSON without the signature would not be a
-check. Smallest change: optional verification behind an extra, failing closed
-only when a manifest is present and its digest has no attestation from
-`publish-index.yml`.
-
-`umbra tiles --fetch` and `umbra embed fetch` still do not consult
-`catalog.sha256`. The manifest lists `catalog.db` and the files uploaded
-with it (parquet and the validation report), not the later pmtiles, thumbnail,
-or embed assets. Thumbnail parts already have their own manifest.
-
 ## Site ranking counts both republished copies
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294

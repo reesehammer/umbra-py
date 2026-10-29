@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 import responses
@@ -108,21 +109,19 @@ def test_download_help_shows_max_bytes():
     assert "--dest" in result.output
 
 
-def test_confine_download_dir_defaults_to_cwd_and_rejects_escapes(tmp_path, monkeypatch):
+def test_confine_download_dir_is_off_until_the_root_is_set(tmp_path, monkeypatch):
     monkeypatch.delenv(MCP_DOWNLOAD_ROOT_ENV, raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert mcp_download_root() == tmp_path.resolve()
-    assert confine_download_dir("nested") == (tmp_path / "nested").resolve()
-    assert confine_download_dir(".") == tmp_path.resolve()
-    with pytest.raises(DownloadError, match="outside"):
-        confine_download_dir("..")
-    with pytest.raises(DownloadError, match="outside"):
-        confine_download_dir(tmp_path.parent)
+    assert mcp_download_root() is None
+    assert confine_download_dir(tmp_path / "elsewhere") == tmp_path / "elsewhere"
+    assert confine_download_dir("nested") == Path("nested")
 
     root = tmp_path / "root"
     root.mkdir()
     monkeypatch.setenv(MCP_DOWNLOAD_ROOT_ENV, str(root))
+    assert mcp_download_root() == root.resolve()
     assert confine_download_dir("child") == (root / "child").resolve()
     assert confine_download_dir(root / "child") == (root / "child").resolve()
     with pytest.raises(DownloadError, match="UMBRA_MCP_DOWNLOAD_ROOT"):
         confine_download_dir(tmp_path / "elsewhere")
+    with pytest.raises(DownloadError, match="outside"):
+        confine_download_dir("..")

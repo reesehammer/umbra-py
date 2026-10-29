@@ -236,6 +236,33 @@ def test_publish_redeploys_after_both_index_and_thumbnails_are_released():
     assert "indexed_preview_count" in workflow
     assert document["permissions"]["actions"] == "write"
     assert document["permissions"]["contents"] == "write"
+    assert "id-token" not in document["permissions"]
+    assert "attestations" not in document["permissions"]
+    assert position["integrity"] < position["publish"]
+    publish = steps[position["publish"]]
+    assert "steps.integrity.outcome == 'success'" in publish["if"]
+    assert "steps.integrity.outcome == 'success'" in redeploy["if"]
+    script = publish["run"]
+    delete_at = script.index("gh release delete-asset catalog-index catalog.sha256 --yes")
+    upload_db = script.index("catalog.db umbra-open-data.parquet")
+    upload_manifest = script.index("gh release upload catalog-index catalog.sha256 --clobber")
+    assert delete_at < upload_db < upload_manifest
+    attest = document["jobs"]["attest"]
+    assert attest["needs"] == "publish"
+    assert attest["continue-on-error"] is True
+    assert attest["permissions"] == {
+        "id-token": "write",
+        "attestations": "write",
+        "contents": "read",
+    }
+    assert "secrets" not in attest
+    attested = attest["steps"][0]
+    assert attested["with"]["subject-name"] == "catalog.db"
+    assert (
+        attested["with"]["subject-digest"]
+        == "sha256:${{ needs.publish.outputs.catalog_db_sha256 }}"
+    )
+    assert "4d101475d8b20a2381f78447822ac1eab6504dd8" in attested["uses"]
 
 
 THUMBS_STEP = "Publish the thumbnail sidecar"

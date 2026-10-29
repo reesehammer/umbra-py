@@ -63,25 +63,29 @@ def _ensure_inside(root: Path, candidate: Path) -> None:
         ) from None
 
 
-def mcp_download_root() -> Path:
-    """Directory local MCP ``download_asset(confirm=true)`` may write under.
+def mcp_download_root() -> Path | None:
+    """``UMBRA_MCP_DOWNLOAD_ROOT`` when set, otherwise ``None``.
 
-    ``UMBRA_MCP_DOWNLOAD_ROOT`` when set, otherwise the process working directory.
+    Unset means local MCP ``download_asset`` does not add a root: ``dest_dir``
+    is used as given, including an absolute path.
     """
     raw = os.environ.get(MCP_DOWNLOAD_ROOT_ENV)
-    if raw:
-        return Path(raw).expanduser().resolve()
-    return Path.cwd().resolve()
+    if raw is None or not raw.strip():
+        return None
+    return Path(raw).expanduser().resolve()
 
 
 def confine_download_dir(dest_dir: str | os.PathLike, *, root: Path | None = None) -> Path:
-    """Resolve ``dest_dir`` and require it to stay inside ``root``.
+    """Return ``dest_dir``, confined only when a download root is configured.
 
-    Relative paths are resolved against ``root`` (not the working directory,
-    unless that is the root). An absolute path must already be inside it.
+    With ``UMBRA_MCP_DOWNLOAD_ROOT`` unset and no explicit ``root``, the path
+    is returned unchanged. With a root, a relative path resolves against it
+    and a path that escapes it raises :class:`DownloadError`.
     """
     base = root.resolve() if root is not None else mcp_download_root()
     raw = Path(dest_dir).expanduser()
+    if base is None:
+        return raw
     candidate = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
     try:
         candidate.relative_to(base)
