@@ -1536,7 +1536,9 @@ def sites_result(
     }
 
 
-def open_source(index_path: str | os.PathLike | None = None, *, live: bool = False) -> Any:
+def open_source(
+    index_path: str | os.PathLike | None = None, *, live: bool = False, readonly: bool = False
+) -> Any:
     """Open the search backend for the server.
 
     Index-first: opens the on-disk :class:`CatalogIndex` (default path unless
@@ -1544,6 +1546,8 @@ def open_source(index_path: str | os.PathLike | None = None, *, live: bool = Fal
     ``live=True`` forces a live S3 walk instead -- correct but slow, so it is
     opt-in. A fresh backend is opened per request (SQLite connections are not
     shared across threads), so callers should close index sources they open.
+    ``readonly=True`` (``umbra serve --public``) opens ``mode=ro`` so a request
+    cannot write the shared snapshot. The message then omits the filesystem path.
     """
     if live:
         from .catalog import UmbraCatalog
@@ -1551,12 +1555,15 @@ def open_source(index_path: str | os.PathLike | None = None, *, live: bool = Fal
         return UmbraCatalog()
     path = Path(index_path) if index_path is not None else default_index_path()
     if not path.exists():
-        raise FileNotFoundError(
-            f"No local index at {path}. Fetch the published snapshot with "
+        hint = (
+            "Fetch the published snapshot with "
             "'umbra index fetch', build one with 'umbra index build', or run "
             "'umbra serve --live' to walk S3 per request (slow)."
         )
-    return CatalogIndex(path)
+        if readonly:
+            raise FileNotFoundError(f"No local index. {hint}")
+        raise FileNotFoundError(f"No local index at {path}. {hint}")
+    return CatalogIndex(path, readonly=readonly)
 
 
 # --------------------------------------------------------------------------
@@ -3065,6 +3072,10 @@ def build_app(
         # read walk overflow pages. A large file is moved after the socket is
         # up so the deploy health check (liveness) is not waiting on that copy.
         if not live:
+            # Preview relocation is the server's own maintenance write. It is
+            # not a request path: ``umbra index fetch`` runs before serve, and
+            # this thread finishes a move the fetch left pending. Request
+            # opens stay read-only when ``public`` is set.
             src = Path(index_path) if index_path is not None else default_index_path()
             if thumbs_pending(src):
                 threading.Thread(
@@ -3180,7 +3191,7 @@ def build_app(
             )
         try:
             try:
-                return open_source(index_path, live=live)
+                return open_source(index_path, live=live, readonly=public)
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
         except BaseException:
@@ -3369,7 +3380,7 @@ def build_app(
 
     def _health_read() -> Any:
         try:
-            source = open_source(index_path, live=False)
+            source = open_source(index_path, live=False, readonly=public)
         except FileNotFoundError:
             return health_document(backend="index", ready=False)
         except (sqlite3.DatabaseError, UmbraError) as exc:

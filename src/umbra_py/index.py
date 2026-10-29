@@ -1483,7 +1483,9 @@ def _asset_name_strings(item: UmbraItem) -> list[str]:
     return found
 
 
-def resolve_asset_name(name: str, *, path: str | os.PathLike | None = None) -> UmbraItem:
+def resolve_asset_name(
+    name: str, *, path: str | os.PathLike | None = None, readonly: bool = False
+) -> UmbraItem:
     """Resolve one product filename or acquisition stem via the local index.
 
     ``name`` is a GEC/SICD (or other product) filename such as
@@ -1506,11 +1508,13 @@ def resolve_asset_name(name: str, *, path: str | os.PathLike | None = None) -> U
         )
     db = Path(path) if path is not None else default_index_path()
     if not db.is_file():
+        # A public host passes ``readonly`` and must not echo the server path.
+        where = "" if readonly else f" at {db}"
         raise CatalogError(
-            f"No local catalog index at {db}.",
+            f"No local catalog index{where}.",
             hint="Fetch the weekly snapshot with 'umbra index fetch', then retry.",
         )
-    with CatalogIndex(db) as index:
+    with CatalogIndex(db, readonly=readonly) as index:
         matches = index.find_by_asset_name(name)
     if not matches:
         raise CatalogError(
@@ -1538,6 +1542,15 @@ def asset_name_error_text(exc: CatalogError) -> str:
     return str(exc)
 
 
+def _sqlite_ro_uri(path: Path) -> str:
+    """SQLite URI that opens ``path`` with ``mode=ro``.
+
+    The connection cannot create the file or write it. A later ``INSERT`` /
+    ``UPDATE`` raises ``sqlite3.OperationalError`` rather than persisting.
+    """
+    return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
+
+
 class CatalogIndex:
     """A local SQLite index of Umbra acquisitions.
 
@@ -1549,10 +1562,27 @@ class CatalogIndex:
             index.build(area="centerfield")          # walk S3 once, persist
             for item in index.search(area="centerfield"):  # local, instant
                 print(item.summary())
+
+    ``readonly=True`` opens an existing file with ``mode=ro`` and does not
+    migrate, relocate previews, or create the file. That is the public host's
+    serving connection: a write through it fails instead of changing the
+    shared snapshot. ``umbra index fetch`` and other maintenance opens stay
+    writable (the default).
     """
 
-    def __init__(self, path: str | os.PathLike | None = None) -> None:
+    def __init__(self, path: str | os.PathLike | None = None, *, readonly: bool = False) -> None:
         self.path = Path(path) if path is not None else default_index_path()
+        self.readonly = readonly
+        if readonly:
+            if not self.path.is_file():
+                raise FileNotFoundError(
+                    "No local catalog index is available. Fetch the published snapshot with "
+                    "'umbra index fetch', or build one with 'umbra index build'."
+                )
+            self._conn = sqlite3.connect(_sqlite_ro_uri(self.path), uri=True)
+            self._configure_connection()
+            self._require_readable_schema()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
         self._configure_connection()
@@ -1640,6 +1670,30 @@ class CatalogIndex:
         self._migrate()
         self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _require_readable_schema(self) -> None:
+        """Refuse a read-only open that would need a migration or a repair.
+
+        The writable open migrates in place. A serving connection must not:
+        the public snapshot is already at :data:`_SCHEMA_VERSION`, and a
+        write here would change the file every request shares. The error
+        names the version and not the filesystem path.
+        """
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        names = {row[0] for row in self._conn.execute("SELECT name FROM sqlite_master")}
+        if (
+            version == _SCHEMA_VERSION
+            and "item_thumbnails" in names
+            and "idx_items_search" in names
+        ):
+            return
+        self._conn.close()
+        raise IndexSchemaError(
+            f"Catalog index has schema version {version}, but this umbra-py "
+            f"supports version {_SCHEMA_VERSION} and cannot migrate a read-only "
+            "index. Rebuild it with 'umbra index build' or refetch with "
+            "'umbra index fetch' before serving it."
+        )
 
     def _migrate(self) -> None:
         """Apply additive, idempotent migrations to reach the current schema.
