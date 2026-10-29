@@ -429,7 +429,14 @@ def index_export_thumbnails(db_path, out_path) -> None:
 @click.option(
     "--url",
     default=None,
-    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork). "
+    "Must be https unless --insecure-url.",
+)
+@click.option(
+    "--insecure-url",
+    is_flag=True,
+    help="Allow a non-https --url. Also UMBRA_INSECURE_INDEX_URL=1. "
+    "The container passes UMBRA_INDEX_URL as --url, so the same rule applies.",
 )
 @click.option(
     "--overwrite",
@@ -443,7 +450,7 @@ def index_export_thumbnails(db_path, out_path) -> None:
     "and merge only when the sidecar or the index changed since the last merge. If the "
     "check fails, the existing sidecar is kept and still merged.",
 )
-def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> None:
+def index_fetch_thumbnails(db_path, src_path, url, insecure_url, overwrite, if_changed) -> None:
     """Download the published SAR thumbnails and merge them into the index.
 
     Every preview otherwise streams a scene's cloud-optimized GeoTIFF overview
@@ -468,8 +475,9 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> Non
         raise click.ClickException(
             f"No index at {path}. Create one first with 'umbra index fetch' or 'umbra index build'."
         )
+    _shared._require_release_https(url, insecure_url)
     if if_changed and not src_path:
-        _fetch_thumbnails_if_changed(path, url, overwrite)
+        _fetch_thumbnails_if_changed(path, url, overwrite, insecure_url)
         return
     if src_path:
         source = Path(src_path)
@@ -482,7 +490,9 @@ def index_fetch_thumbnails(db_path, src_path, url, overwrite, if_changed) -> Non
                 else:
                     spinner.label = f"Fetching baked thumbnails ({done / 1e6:.0f} MB)"
 
-            source = fetch_prebuilt_thumbnails(default_thumbs_path(path), url=url, progress=tally)
+            source = fetch_prebuilt_thumbnails(
+                default_thumbs_path(path), url=url, progress=tally, insecure=insecure_url
+            )
     with CatalogIndex(path) as idx:
         with OrbitSpinner("Merging thumbnails into the index"):
             applied = idx.import_thumbnails(source, overwrite=overwrite)
@@ -502,7 +512,9 @@ def _echo_cleaned(cleaned: dict[str, int], beside: Path) -> None:
         )
 
 
-def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -> None:
+def _fetch_thumbnails_if_changed(
+    path: Path, url: str | None, overwrite: bool, insecure: bool
+) -> None:
     """``fetch-thumbnails --if-changed``: refresh the sidecar, merge when anything moved.
 
     The published ``catalog.db`` carries no thumbnails, so a refreshed index
@@ -514,7 +526,7 @@ def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -
     """
     sidecar = default_thumbs_path(path)
     try:
-        result = refresh_thumbnails_from_release(sidecar, url=url)
+        result = refresh_thumbnails_from_release(sidecar, url=url, insecure=insecure)
     except InsufficientSpaceError as exc:
         if not sidecar.exists():
             raise click.ClickException(str(exc)) from exc
@@ -559,7 +571,13 @@ def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -
 @click.option(
     "--url",
     default=None,
-    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork). "
+    "Must be https unless --insecure-url. UMBRA_INDEX_URL is this URL.",
+)
+@click.option(
+    "--insecure-url",
+    is_flag=True,
+    help="Allow a non-https --url. Also UMBRA_INSECURE_INDEX_URL=1.",
 )
 @click.option(
     "--if-changed",
@@ -574,7 +592,7 @@ def _fetch_thumbnails_if_changed(path: Path, url: str | None, overwrite: bool) -
     help="With --if-changed: download even if unchanged, and accept a snapshot much "
     "smaller than the current index.",
 )
-def index_fetch(db_path, url, if_changed, force) -> None:
+def index_fetch(db_path, url, insecure_url, if_changed, force) -> None:
     """Download the published prebuilt catalog index for instant local search.
 
     Umbra has no STAC API, so the first 'umbra index build' crawls the whole
@@ -584,12 +602,18 @@ def index_fetch(db_path, url, if_changed, force) -> None:
     makes that refresh a single HEAD request when nothing was rebuilt.
     """
     path = _shared._index_path(db_path)
+    _shared._require_release_https(url, insecure_url)
     if if_changed:
         try:
-            result = refresh_from_release(path, url=url, force=force)
+            result = refresh_from_release(path, url=url, force=force, insecure=insecure_url)
         except UmbraError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_cleaned(result.cleaned, path)
+        if result.integrity == "unverified":
+            click.echo(
+                "Warning: this release has no catalog.sha256 manifest; "
+                "the snapshot was not integrity-checked."
+            )
         if not result.changed:
             click.echo(
                 f"Index is current (snapshot {result.etag or result.last_modified}). ({path})"
@@ -610,7 +634,7 @@ def index_fetch(db_path, url, if_changed, force) -> None:
             else:
                 spinner.label = f"Fetching prebuilt catalog index ({done / 1e6:.0f} MB)"
 
-        with CatalogIndex.from_release(path, url=url, progress=tally) as idx:
+        with CatalogIndex.from_release(path, url=url, progress=tally, insecure=insecure_url) as idx:
             s = idx.stats()
     built = s["built_at"]
     built_note = f", built {built}" if built else ""
@@ -1449,9 +1473,15 @@ def embed_info(embed_db) -> None:
 @click.option(
     "--url",
     default=None,
-    help="Override the release asset URL (advanced -- e.g. to pull from a fork).",
+    help="Override the release asset URL (advanced -- e.g. to pull from a fork). "
+    "Must be https unless --insecure-url.",
 )
-def embed_fetch(embed_db, url) -> None:
+@click.option(
+    "--insecure-url",
+    is_flag=True,
+    help="Allow a non-https --url. Also UMBRA_INSECURE_INDEX_URL=1.",
+)
+def embed_fetch(embed_db, url, insecure_url) -> None:
     """Download the published scene-embedding index for instant similarity search.
 
     Building the index embeds every quicklook in the archive -- the one expensive,
@@ -1464,6 +1494,7 @@ def embed_fetch(embed_db, url) -> None:
     from .. import embed as emb
 
     path = _embed_path(embed_db, None)
+    _shared._require_release_https(url, insecure_url)
 
     with OrbitSpinner("Fetching prebuilt scene index") as spinner:
 

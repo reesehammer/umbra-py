@@ -151,7 +151,7 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_PORT`        | `8000`    | Port the server listens on.                                            |
 | `UMBRA_FETCH_INDEX` | `1`       | Fetch the published index on boot, refreshing it when the snapshot changed; `0` skips. |
 | `UMBRA_SERVE_LIVE`  | unset     | `1` serves from a live S3 walk per request — no index (correct, slow). |
-| `UMBRA_INDEX_URL`   | unset     | Override the published-index asset URL (e.g. a fork or mirror).        |
+| `UMBRA_INDEX_URL`   | unset     | Override the published-index asset URL (e.g. a fork or mirror). Must be https unless `UMBRA_INSECURE_INDEX_URL=1`. |
 | `UMBRA_INDEX_DB`    | `/data/umbra-py/catalog.db` | Explicit index path.                                   |
 | `UMBRA_SERVE_ARGS`  | unset     | Extra flags forwarded to `umbra serve` (e.g. `--no-artifacts`).        |
 | `UMBRA_REQUEST_TIMEOUT_S` | `15` | Catalog-read deadline. Past it, `/healthz` and `/search` return 503. |

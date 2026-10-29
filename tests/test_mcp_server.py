@@ -1428,6 +1428,7 @@ def test_download_asset_confirm_still_downloads_off_the_public_host(
 ):
     """A local or stdio server (COG streaming allowed) still downloads on confirm."""
     monkeypatch.delenv(ms.COG_STREAMING_ENV, raising=False)
+    monkeypatch.setenv("UMBRA_MCP_DOWNLOAD_ROOT", str(tmp_path))
     ms.configure(cog_streaming=None)
     responses.add(responses.GET, ITEM_URL, json=sample_item_dict, status=200)
     href = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL).asset_href("GEC")

@@ -570,10 +570,13 @@ def demo(
     click.echo(f"Wrote interactive explorer over {len(items)} acquisition(s) to {path}")
 
 
-def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_prebuilt_pmtiles):
+def _tiles_fetch(
+    out_path, viewer_path, fetch_url, insecure_url, default_pmtiles_path, fetch_prebuilt_pmtiles
+):
     """Download the published whole-catalog PMTiles basemap (``umbra tiles --fetch``)."""
     if out_path is not None and not out_path.lower().endswith(".pmtiles"):
         raise click.ClickException("Tiles output must be a .pmtiles file.")
+    _shared._require_release_https(fetch_url, insecure_url)
     dest = Path(out_path) if out_path else default_pmtiles_path()
 
     with OrbitSpinner("Fetching prebuilt catalog basemap") as spinner:
@@ -660,7 +663,14 @@ def _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_p
     "--url",
     "fetch_url",
     default=None,
-    help="With --fetch, override the release asset URL (advanced -- e.g. to pull from a fork).",
+    help="With --fetch, override the release asset URL (advanced -- e.g. to pull from a fork). "
+    "Must be https unless --insecure-url.",
+)
+@click.option(
+    "--insecure-url",
+    "insecure_url",
+    is_flag=True,
+    help="With --fetch, allow a non-https --url. Also UMBRA_INSECURE_INDEX_URL=1.",
 )
 @click.option(
     "--min-zoom",
@@ -733,6 +743,7 @@ def tiles(
     out_path,
     fetch,
     fetch_url,
+    insecure_url,
     min_zoom,
     max_zoom,
     footprints,
@@ -777,7 +788,14 @@ def tiles(
     )
 
     if fetch:
-        _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_prebuilt_pmtiles)
+        _tiles_fetch(
+            out_path,
+            viewer_path,
+            fetch_url,
+            insecure_url,
+            default_pmtiles_path,
+            fetch_prebuilt_pmtiles,
+        )
         return
 
     if fetch_url is not None:

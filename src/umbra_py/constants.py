@@ -167,6 +167,20 @@ CATALOG_THUMBS_MANIFEST_ASSET = "catalog.thumbs.manifest.json"
 #: recorded prominently on the release (see ``.github/workflows/publish-index.yml``).
 CATALOG_EMBED_ASSET = "catalog.embed.db"
 
+#: GNU sha256sum manifest of the snapshot assets on the same release
+#: (``catalog.db`` and the files uploaded with it). ``umbra index fetch``
+#: checks ``catalog.db`` against it. A release published before this file
+#: existed has no manifest; the fetch warns and still accepts the snapshot.
+CATALOG_SHA256_ASSET = "catalog.sha256"
+
+#: Set to ``1`` / ``true`` / ``yes`` / ``on`` to let ``--url`` and
+#: ``UMBRA_INDEX_URL`` use a non-https URL. The CLI flag is ``--insecure-url``.
+INSECURE_INDEX_URL_ENV = "UMBRA_INSECURE_INDEX_URL"
+
+#: Directory that local MCP ``download_asset(confirm=true)`` may write under.
+#: Unset means the process working directory. ``dest_dir`` outside it errors.
+MCP_DOWNLOAD_ROOT_ENV = "UMBRA_MCP_DOWNLOAD_ROOT"
+
 #: Stable download URL for the prebuilt SQLite index. GitHub redirects this
 #: ``/releases/download/<tag>/<asset>`` path to the current asset, so it always
 #: points at the latest weekly snapshot without an API call.
@@ -202,6 +216,14 @@ CATALOG_INDEX_THUMBS_MANIFEST_URL = (
 CATALOG_INDEX_EMBED_URL = (
     f"https://github.com/{GITHUB_REPO}/releases/download/"
     f"{CATALOG_INDEX_RELEASE}/{CATALOG_EMBED_ASSET}"
+)
+
+#: Stable download URL for :data:`CATALOG_SHA256_ASSET` (same rolling-release
+#: redirect as :data:`CATALOG_INDEX_DB_URL`). A mirror passed as ``--url``
+#: is checked against the sibling of that URL, not this constant.
+CATALOG_INDEX_SHA256_URL = (
+    f"https://github.com/{GITHUB_REPO}/releases/download/"
+    f"{CATALOG_INDEX_RELEASE}/{CATALOG_SHA256_ASSET}"
 )
 
 #: License Umbra applies to all open data.

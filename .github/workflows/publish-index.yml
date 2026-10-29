@@ -46,6 +46,12 @@ permissions:
   # actions/cache save and restore for the thumbnail seed. A workflow that
   # sets permissions drops every scope it does not name.
   actions: write
+  # catalog.sha256 attestation (the step "Attest the catalog snapshot").
+  # A sibling change that splits publish from deploy should keep id-token
+  # and attestations on the job that builds the snapshot, and should not
+  # copy them onto the job that holds the deploy token.
+  id-token: write
+  attestations: write
 
 jobs:
   publish:
@@ -164,6 +170,29 @@ jobs:
           etag="$(python -c "import umbra_py._http as h, umbra_py.constants as c, umbra_py.index as i; print(i._head_snapshot(h.default_session(), c.CATALOG_INDEX_DB_URL)[0] or '')" || true)"
           echo "Published catalog.db snapshot: ${etag:-unknown}"
           echo "etag=${etag}" >> "$GITHUB_OUTPUT"
+
+      # Snapshot integrity. Hashes the assets the publish step just uploaded.
+      # catalog.db is still those bytes here; the thumbnail bake later writes
+      # into the local file and must not be hashed. The two steps below are
+      # one unit: a job split can rebase them together onto the publish job.
+      # Client fetches check catalog.sha256. The attestation is what
+      # `gh attestation verify` reads; this client does not verify the
+      # signature itself.
+      - name: Publish the catalog sha256 manifest
+        id: integrity
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -c "import umbra_py.index as i; i.write_release_manifest('catalog.sha256', ['catalog.db', 'umbra-open-data.parquet', 'index-validation.json', 'index-validation.md'])"
+          gh release upload catalog-index catalog.sha256 --clobber
+
+      - name: Attest the catalog snapshot
+        if: ${{ !cancelled() && steps.integrity.outcome == 'success' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: catalog.sha256
 
       # Coverage parity (PRD P1-1): compare the index with a fresh listing of the
       # bucket, by prefix, sidecar layout and product, and publish the report next

@@ -6,10 +6,12 @@ import hashlib
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import requests
 
 from ._http import DEFAULT_TIMEOUT, default_session
+from .constants import MCP_DOWNLOAD_ROOT_ENV
 from .exceptions import DownloadError
 from .models import UmbraItem
 
@@ -18,8 +20,77 @@ _CHUNK = 1 << 20  # 1 MiB
 
 
 def _filename_from_url(url: str) -> str:
-    name = url.split("?")[0].rstrip("/").split("/")[-1]
-    return name or "download"
+    """Basename of ``url``, percent-decoded once, or ``download`` if it has none.
+
+    Query and fragment are stripped first. ``/`` and ``\\`` are separators, so
+    only the last segment is kept. That segment is decoded once (``%252e``
+    stays ``%2e``). A leading dot, a control character, or a slash or
+    backslash that survived the decode is refused — those are how an href
+    names a hidden file or a path instead of a filename.
+    """
+    cut = url.split("#", 1)[0].split("?", 1)[0]
+    path = urlsplit(cut).path if "://" in cut else cut
+    segment = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    name = unquote(segment) or "download"
+    _reject_download_filename(name)
+    return name
+
+
+def _reject_download_filename(name: str) -> None:
+    if (
+        not name
+        or name.startswith(".")
+        or "/" in name
+        or "\\" in name
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
+    ):
+        raise DownloadError(f"Refusing unsafe download filename {name!r}.")
+
+
+def _ensure_inside(root: Path, candidate: Path) -> None:
+    """Raise when ``candidate`` does not resolve inside ``root``.
+
+    ``resolve`` follows a symlink, so a name that points at a file outside
+    ``root`` is refused before anything is written or returned.
+    """
+    root_resolved = root.resolve()
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        raise DownloadError(
+            f"Refusing to write {resolved}; it is outside {root_resolved}."
+        ) from None
+
+
+def mcp_download_root() -> Path:
+    """Directory local MCP ``download_asset(confirm=true)`` may write under.
+
+    ``UMBRA_MCP_DOWNLOAD_ROOT`` when set, otherwise the process working directory.
+    """
+    raw = os.environ.get(MCP_DOWNLOAD_ROOT_ENV)
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def confine_download_dir(dest_dir: str | os.PathLike, *, root: Path | None = None) -> Path:
+    """Resolve ``dest_dir`` and require it to stay inside ``root``.
+
+    Relative paths are resolved against ``root`` (not the working directory,
+    unless that is the root). An absolute path must already be inside it.
+    """
+    base = root.resolve() if root is not None else mcp_download_root()
+    raw = Path(dest_dir).expanduser()
+    candidate = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        raise DownloadError(
+            f"dest_dir {os.fspath(dest_dir)!r} is outside the download root {base}. "
+            f"Set {MCP_DOWNLOAD_ROOT_ENV} to allow that directory."
+        ) from None
+    return candidate
 
 
 def _single_part_md5(etag: str | None) -> str | None:
@@ -59,23 +130,37 @@ def download_url(
     verify: bool = True,
     session: requests.Session | None = None,
     progress: ProgressCallback | None = None,
+    max_bytes: int | None = None,
 ) -> Path:
     """Stream ``url`` to ``dest``.
 
-    ``dest`` may be a directory (the server filename is used) or a full file
-    path. Partial downloads are written to a ``.part`` sidecar and resumed via
-    an HTTP ``Range`` request when ``resume`` is true.
+    ``dest`` may be a directory (the filename is the URL's basename; see
+    :func:`_filename_from_url`) or a full file path. A trailing path separator
+    means a directory even when it does not exist yet. The file is refused
+    when that basename is unsafe or the resolved path leaves the directory.
+    Partial downloads are written to a ``.part`` sidecar and resumed via an
+    HTTP ``Range`` request when ``resume`` is true.
 
     When ``verify`` is true (the default) and the server exposes a single-part
     S3 ``ETag`` (the object's hex MD5), the finished file is hashed and compared
     against it, so on-the-wire corruption a correct byte count can't catch fails
     loudly. Multipart ETags (``"<hash>-<n>"``) are not a plain MD5 and are
     skipped.
+
+    ``max_bytes``, when set, refuses a transfer larger than that many bytes
+    (Content-Length when the server sends one, and the bytes actually read
+    either way). An existing finished file is still returned when
+    ``overwrite`` is false; the cap applies to a transfer.
     """
+    if max_bytes is not None and max_bytes < 0:
+        raise DownloadError("max_bytes must be zero or a positive number of bytes.")
     sess = session or default_session()
+    raw_dest = os.fspath(dest)
     dest = Path(dest)
-    if dest.is_dir() or str(dest).endswith(os.sep):
-        dest = dest / _filename_from_url(url)
+    if dest.is_dir() or raw_dest.endswith(("/", os.sep)):
+        root = dest
+        dest = root / _filename_from_url(url)
+        _ensure_inside(root, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() and not overwrite:
@@ -129,8 +214,19 @@ def download_url(
     if "Content-Length" in resp.headers:
         total = int(resp.headers["Content-Length"]) + (existing if append else 0)
 
+    if max_bytes is not None and (
+        existing > max_bytes or (total is not None and total > max_bytes)
+    ):
+        part.unlink(missing_ok=True)
+        etag_path.unlink(missing_ok=True)
+        raise DownloadError(
+            f"Download of {url!r} exceeds max_bytes ({max_bytes}); "
+            f"server reported {total if total is not None else existing} bytes."
+        )
+
     downloaded = existing
     mode = "ab" if append else "wb"
+    over_cap = False
     try:
         with open(part, mode) as fh:
             for chunk in resp.iter_content(chunk_size=_CHUNK):
@@ -138,6 +234,9 @@ def download_url(
                     continue
                 fh.write(chunk)
                 downloaded += len(chunk)
+                if max_bytes is not None and downloaded > max_bytes:
+                    over_cap = True
+                    break
                 if progress is not None:
                     progress(downloaded, total)
     except requests.RequestException as exc:
@@ -145,6 +244,11 @@ def download_url(
         # the .part, so leave it in place for a later resume rather than losing
         # the progress.
         raise DownloadError(f"Interrupted download of {url!r}: {exc}") from exc
+    if over_cap:
+        # A resume cannot shrink a body that is already over the cap.
+        part.unlink(missing_ok=True)
+        etag_path.unlink(missing_ok=True)
+        raise DownloadError(f"Download of {url!r} exceeded max_bytes ({max_bytes}).")
 
     # Guard against a silently truncated body (a proxy or server that closes the
     # connection cleanly mid-stream, so no exception is raised). Leave the .part

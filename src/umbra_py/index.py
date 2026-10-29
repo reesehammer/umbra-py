@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import hmac
 import json
 import logging
 import os
@@ -33,18 +34,20 @@ import re
 import shutil
 import sqlite3
 import threading
+import warnings
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
-from .constants import CATALOG_INDEX_DB_URL
+from .constants import CATALOG_INDEX_DB_URL, CATALOG_SHA256_ASSET, INSECURE_INDEX_URL_ENV
 from .exceptions import CatalogError, IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem, _iso_utc, _parse_datetime
@@ -412,6 +415,7 @@ def fetch_prebuilt_thumbnails(
     *,
     url: str | None = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> Path:
     """Download the published baked-thumbnail sidecar.
 
@@ -431,6 +435,8 @@ def fetch_prebuilt_thumbnails(
     existing file. ``url`` overrides the release asset location (a sidecar, or
     a ``catalog.thumbs.manifest.json``).
     """
+    if url is not None:
+        url = require_index_https(url, insecure=insecure)
     sess = default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -552,19 +558,237 @@ class RefreshResult:
     #: Stale scratch files an earlier refresh left behind and this one removed
     #: before downloading (file name -> bytes freed).
     cleaned: dict[str, int] = field(default_factory=dict)
+    #: ``verified`` when ``catalog.sha256`` matched the download, ``unverified``
+    #: when that release has no manifest, ``None`` when nothing was downloaded.
+    integrity: str | None = None
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+#: A sha256 manifest is a short text file. Anything larger is not one.
+_MANIFEST_MAX_BYTES = 1 << 20
+
+
+def require_index_https(url: str, *, insecure: bool = False) -> str:
+    """Return ``url`` when it is https, or when the insecure opt-out is set.
+
+    The opt-out is ``insecure=True`` (the ``--insecure-url`` flag) or the
+    environment variable :data:`~umbra_py.constants.INSECURE_INDEX_URL_ENV`.
+    ``UMBRA_INDEX_URL`` reaches this check because the container passes it as
+    ``--url``.
+    """
+    cleaned = url.strip()
+    scheme = urlsplit(cleaned).scheme.lower()
+    opted_out = insecure or os.environ.get(INSECURE_INDEX_URL_ENV, "").strip().lower() in _TRUTHY
+    if scheme == "https" or (opted_out and scheme):
+        return cleaned
+    raise IndexRefreshError(
+        f"Refusing index URL {cleaned!r}: catalog snapshots must be fetched over https. "
+        "Pass --insecure-url or set UMBRA_INSECURE_INDEX_URL=1 to override."
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_manifest_url(asset_url: str) -> str:
+    """Sibling ``catalog.sha256`` URL for a release asset URL."""
+    parts = urlsplit(asset_url.strip())
+    base, sep, _name = parts.path.rpartition("/")
+    if not sep or not parts.scheme:
+        raise IndexRefreshError(f"Index URL {asset_url!r} has no asset name to check.")
+    return urlunsplit((parts.scheme, parts.netloc, f"{base}/{CATALOG_SHA256_ASSET}", "", ""))
+
+
+def _asset_name_from_url(asset_url: str) -> str:
+    name = urlsplit(asset_url.strip()).path.rstrip("/").rsplit("/", 1)[-1]
+    if not name:
+        raise IndexRefreshError(f"Index URL {asset_url!r} has no asset name to check.")
+    return name
+
+
+def parse_sha256_manifest(text: str) -> dict[str, str]:
+    """Parse a GNU ``sha256sum`` manifest into ``{filename: hex}``.
+
+    Names are basenames. A slash, a backslash, or a leading dot is rejected.
+    """
+    found: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        digest, sep, rest = line.partition(" ")
+        if not sep or not rest:
+            raise IndexRefreshError(f"sha256 manifest line is not 'digest filename': {raw!r}")
+        name = rest.lstrip(" ")
+        if name.startswith("*"):
+            name = name[1:]
+        name = name.strip()
+        if len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest):
+            raise IndexRefreshError(f"sha256 manifest digest is not 64 hex digits: {raw!r}")
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            raise IndexRefreshError(f"sha256 manifest filename is not a basename: {name!r}")
+        found[name] = digest.lower()
+    if not found:
+        raise IndexRefreshError("sha256 manifest is empty.")
+    return found
+
+
+def write_release_manifest(dest: str | os.PathLike, paths: Iterable[str | os.PathLike]) -> None:
+    """Write a GNU sha256sum file of ``paths`` (basenames) for the catalog release.
+
+    The publish workflow uploads this as ``catalog.sha256`` and passes the same
+    file to ``actions/attest-build-provenance`` as ``subject-checksums``, so the
+    attestation subjects are these digests.
+    """
+    lines: list[str] = []
+    for raw in paths:
+        path = Path(raw)
+        lines.append(f"{_sha256_file(path)}  {path.name}\n")
+    if not lines:
+        raise IndexRefreshError("No files to hash for the release manifest.")
+    Path(dest).write_text("".join(lines), encoding="utf-8")
+
+
+def _read_capped(resp: Any, limit: int) -> bytes:
+    buf = bytearray()
+    for chunk in resp.iter_content(65536):
+        if not chunk:
+            continue
+        buf += chunk
+        if len(buf) > limit:
+            raise IndexRefreshError(f"sha256 manifest exceeds {limit} bytes.")
+    return bytes(buf)
+
+
+def _verify_release_sha256(sess: Any, asset_url: str, path: Path) -> str:
+    """Check ``path`` against the release sha256 manifest.
+
+    Returns ``verified`` or ``unverified`` (HTTP 404: an older release with no
+    manifest; a warning is issued and the snapshot is still accepted). A
+    manifest that is present but does not match raises :class:`IndexRefreshError`.
+    """
+    manifest_url = sha256_manifest_url(asset_url)
+    try:
+        resp = sess.get(manifest_url, timeout=60, stream=True)
+    except Exception as exc:
+        raise IndexRefreshError(
+            f"Could not fetch the sha256 manifest {manifest_url!r}: {exc}"
+        ) from exc
+    try:
+        if resp.status_code == 404:
+            warnings.warn(
+                f"No sha256 manifest at {manifest_url}; {path.name} was not "
+                "integrity-checked. Releases published before catalog.sha256 omit it.",
+                stacklevel=3,
+            )
+            return "unverified"
+        try:
+            resp.raise_for_status()
+        except Exception as exc:
+            raise IndexRefreshError(
+                f"Could not fetch the sha256 manifest {manifest_url!r}: {exc}"
+            ) from exc
+        body = _read_capped(resp, _MANIFEST_MAX_BYTES)
+    finally:
+        resp.close()
+    try:
+        listing = parse_sha256_manifest(body.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise IndexRefreshError(f"sha256 manifest {manifest_url!r} is not utf-8 text.") from exc
+    name = _asset_name_from_url(asset_url)
+    expected = listing.get(name)
+    if expected is None:
+        raise IndexRefreshError(f"sha256 manifest {manifest_url!r} does not list {name}.")
+    actual = _sha256_file(path)
+    if not hmac.compare_digest(actual, expected):
+        raise IndexRefreshError(
+            f"sha256 mismatch for {name}: manifest {expected}, downloaded file {actual}."
+        )
+    return "verified"
+
+
+def _enable_sqlite_defensive(conn: sqlite3.Connection) -> None:
+    """Turn on ``SQLITE_DBCONFIG_DEFENSIVE`` when this Python provides it.
+
+    The flag and :meth:`sqlite3.Connection.setconfig` arrived in Python 3.12.
+    On 3.10 and 3.11 the call is skipped; ``PRAGMA trusted_schema=OFF`` and
+    ``mode=ro`` still apply.
+    """
+    flag = getattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", None)
+    setconfig = getattr(conn, "setconfig", None)
+    if flag is None or not callable(setconfig):
+        return
+    setconfig(flag, True)
+
+
+def _open_untrusted_snapshot(path: Path) -> sqlite3.Connection:
+    """Open a downloaded SQLite file read-only, without trusting its schema."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    _enable_sqlite_defensive(conn)
+    conn.execute("PRAGMA trusted_schema = OFF")
+    return conn
+
+
+@lru_cache(maxsize=2)
+def _schema_object_names(schema_sql: str) -> frozenset[tuple[str, str]]:
+    """``(type, name)`` rows SQLite records for a database built from ``schema_sql``.
+
+    Running the schema is what names ``sqlite_autoindex_*`` the same way a real
+    file does, so the allowlist cannot drift from :data:`_SCHEMA`.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(schema_sql)
+        rows = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
+    finally:
+        conn.close()
+    return frozenset((str(typ), str(name)) for typ, name in rows)
+
+
+def _reject_unexpected_objects(conn: sqlite3.Connection, schema_sql: str, path: Path) -> None:
+    """Refuse triggers, views, and any object the schema does not create.
+
+    Missing objects are allowed (an older snapshot this build can still open).
+    Anything else is not.
+    """
+    allowed = _schema_object_names(schema_sql)
+    unexpected = [
+        f"{typ} {name}"
+        for typ, name in conn.execute("SELECT type, name FROM sqlite_master")
+        if (str(typ), str(name)) not in allowed
+    ]
+    if not unexpected:
+        return
+    shown = sorted(unexpected)[:20]
+    detail = ", ".join(shown)
+    extra = len(unexpected) - len(shown)
+    if extra:
+        detail += f" (+{extra} more)"
+    raise IndexRefreshError(f"Downloaded snapshot {path} has unexpected sqlite objects ({detail}).")
 
 
 def _validate_snapshot(path: Path) -> tuple[int, str | None]:
     """Open a downloaded snapshot and prove it is a usable index.
 
+    The file is opened ``mode=ro`` with ``trusted_schema`` off and, on Python
+    3.12+, SQLite's defensive flag. Triggers, views, and any other object
+    outside :data:`_SCHEMA` are rejected.
+
     Raises :class:`IndexRefreshError` on a corrupt file, a schema this build
-    cannot read, or an empty items table. Returns ``(rows, built_at)``.
+    cannot read, an unexpected object, or an empty items table. Returns
+    ``(rows, built_at)``.
     """
     try:
-        conn = sqlite3.connect(str(path))
+        conn = _open_untrusted_snapshot(path)
         try:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            _reject_unexpected_objects(conn, _SCHEMA, path)
             rows = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
             row = conn.execute("SELECT value FROM meta WHERE key = 'built_at'").fetchone()
         finally:
@@ -738,6 +962,7 @@ def refresh_from_release(
     min_ratio: float = 0.5,
     session: Any = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> RefreshResult:
     """Replace the index with the published snapshot only when it changed.
 
@@ -749,6 +974,14 @@ def refresh_from_release(
     it if it has fewer than ``min_ratio`` of the current index's rows (a
     truncated or broken rebuild should not silently shrink a serving index),
     then swap it in with an atomic ``os.replace`` and record the new identity.
+
+    After the download, the sibling ``catalog.sha256`` manifest is fetched.
+    A matching digest is ``integrity="verified"``. HTTP 404 (a release from
+    before the manifest existed) warns and still accepts the file
+    (``integrity="unverified"``), so a boot ``umbra index fetch --if-changed``
+    keeps working against the current release. A manifest that is present but
+    does not match raises, and the previous index stays. ``url`` must be https
+    unless ``insecure`` or ``UMBRA_INSECURE_INDEX_URL`` is set.
 
     An unchanged snapshot is still re-downloaded when the current file cannot
     be read at all (reason ``"unreadable"``), so a volume that once filled up
@@ -771,7 +1004,7 @@ def refresh_from_release(
     sess = session or default_session()
     dest = Path(path) if path is not None else default_index_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src = url or CATALOG_INDEX_DB_URL
+    src = require_index_https(url or CATALOG_INDEX_DB_URL, insecure=insecure)
     with _refresh_lock(dest):
         cleaned = _clean_leftovers(dest)
         etag, last_modified, length = _head_snapshot(sess, src)
@@ -788,6 +1021,7 @@ def refresh_from_release(
         staging = dest.with_name(dest.name + ".next")
         try:
             download_url(src, staging, overwrite=True, session=sess, progress=progress)
+            integrity = _verify_release_sha256(sess, src, staging)
             rows, built_at = _validate_snapshot(staging)
             if current and not force and rows < current * min_ratio:
                 raise IndexRefreshError(
@@ -817,7 +1051,9 @@ def refresh_from_release(
         reason = "unreadable"
     else:
         reason = "changed"
-    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason, cleaned)
+    return RefreshResult(
+        dest, True, etag, last_modified, rows, built_at, reason, cleaned, integrity
+    )
 
 
 #: Index ``meta`` key naming the sidecar snapshot last merged into it, so
@@ -827,11 +1063,16 @@ THUMBS_SNAPSHOT_META_KEY = "thumbs_snapshot"
 
 
 def _validate_thumbs_sidecar(path: Path) -> int:
-    """Prove a downloaded ``catalog.thumbs.db`` is a readable, non-empty sidecar."""
+    """Prove a downloaded ``catalog.thumbs.db`` is a readable, non-empty sidecar.
+
+    Same read-only, untrusted open as :func:`_validate_snapshot`, allowlisted
+    to :data:`_THUMBS_SCHEMA`.
+    """
     try:
-        conn = sqlite3.connect(str(path))
+        conn = _open_untrusted_snapshot(path)
         try:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            _reject_unexpected_objects(conn, _THUMBS_SCHEMA, path)
             rows = conn.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0]
         finally:
             conn.close()
@@ -1014,6 +1255,7 @@ def refresh_thumbnails_from_release(
     force: bool = False,
     session: Any = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> RefreshResult:
     """Replace the thumbnail sidecar with the published one only when it changed.
 
@@ -1042,6 +1284,8 @@ def refresh_thumbnails_from_release(
     This only refreshes the file; :func:`merge_thumbnails_atomically` merges
     it into an index.
     """
+    if url is not None:
+        url = require_index_https(url, insecure=insecure)
     sess = session or default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1794,6 +2038,7 @@ class CatalogIndex:
         *,
         url: str | None = None,
         progress: Callable[[int, int | None], None] | None = None,
+        insecure: bool = False,
     ) -> CatalogIndex:
         """Download the published prebuilt index and open it.
 
@@ -1811,7 +2056,15 @@ class CatalogIndex:
 
         dest = Path(path) if path is not None else default_index_path()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        download_url(url or CATALOG_INDEX_DB_URL, dest, overwrite=True, progress=progress)
+        src = require_index_https(url or CATALOG_INDEX_DB_URL, insecure=insecure)
+        sess = default_session()
+        download_url(src, dest, overwrite=True, session=sess, progress=progress)
+        try:
+            _verify_release_sha256(sess, src, dest)
+            _validate_snapshot(dest)
+        except IndexRefreshError:
+            dest.unlink(missing_ok=True)
+            raise
         return cls(dest)
 
     # -- lifecycle -------------------------------------------------------------
