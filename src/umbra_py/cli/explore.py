@@ -777,7 +777,13 @@ def tiles(
     )
 
     if fetch:
-        _tiles_fetch(out_path, viewer_path, fetch_url, default_pmtiles_path, fetch_prebuilt_pmtiles)
+        _tiles_fetch(
+            out_path,
+            viewer_path,
+            fetch_url,
+            default_pmtiles_path,
+            fetch_prebuilt_pmtiles,
+        )
         return
 
     if fetch_url is not None:

@@ -1412,6 +1412,10 @@ def download_asset(
     ``uvx --from 'umbra-py[mcp]' umbra-mcp`` server for ``download_asset``).
     ``confirm=False`` still returns the size.
 
+    On a local server, ``dest_dir`` is unchanged unless ``UMBRA_MCP_DOWNLOAD_ROOT``
+    is set. When that variable is set, ``dest_dir`` must resolve inside it.
+    The argument itself is unchanged.
+
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
@@ -1431,6 +1435,7 @@ def download_asset(
     keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
+    from .download import confine_download_dir
     from .download import download_asset as _download_asset
 
     if not isinstance(url, str) or not url.strip():
@@ -1465,7 +1470,7 @@ def download_asset(
         }
 
     _refuse_public_asset_download(href)
-    path = _download_asset(item, asset, dest_dir)
+    path = _download_asset(item, asset, confine_download_dir(dest_dir))
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
 
