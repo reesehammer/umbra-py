@@ -9,6 +9,16 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Security
+- **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
+  (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
+  `pmtiles@3.2.1`; the `geotiff.js` digest is now always applied) and send a
+  Content-Security-Policy for unpkg, the OpenStreetMap tile hosts, and the
+  Umbra open-data bucket. `umbra serve` sends `X-Content-Type-Options: nosniff`
+  and `Referrer-Policy: strict-origin-when-cross-origin` on every response
+  (OpenStreetMap refuses a tile request that sends no Referer). A `stac_href`
+  that is not http(s) is not turned into a link.
+
 ### Changed
 - **Workflow credentials stay on the steps that use them.** The weekly
   catalog publish redeploys the hosted API from a job whose token can only

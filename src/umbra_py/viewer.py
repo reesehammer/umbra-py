@@ -278,6 +278,15 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # Imported here so a handler constructed without a server (the
+            # disconnect test) can still stamp the constant. The CSP is the
+            # page's own policy, stored on the server next to the HTML.
+            from .demo import REFERRER_POLICY  # noqa: PLC0415
+
+            self.send_header("Referrer-Policy", REFERRER_POLICY)
+            if content_type.startswith("text/html"):
+                self.send_header("Content-Security-Policy", self.server.csp)
             if status == 200 and content_type == "image/png":
                 self.send_header("Cache-Control", "max-age=3600")
             self.end_headers()
@@ -314,11 +323,20 @@ class _ViewerServer(ThreadingHTTPServer):
     allow_reuse_address = True
     tiler: SceneTiler
     index_html: str
+    csp: str
 
 
-def _viewer_html(tiler: SceneTiler) -> str:
+def _viewer_html(tiler: SceneTiler, csp: str) -> str:
     """The single-page Leaflet viewer wired to this scene's tile endpoint."""
     import json  # noqa: PLC0415
+
+    from .demo import (  # noqa: PLC0415
+        LEAFLET_CSS,
+        LEAFLET_CSS_SRI,
+        LEAFLET_JS,
+        LEAFLET_JS_SRI,
+        _security_meta,
+    )
 
     info = tiler.item.metadata_summary()
     w, s, e, n = tiler.bounds_4326
@@ -347,6 +365,11 @@ def _viewer_html(tiler: SceneTiler) -> str:
     title = f"Umbra SAR &mdash; {escape(str(info['id']))}"
     return _HTML_TEMPLATE.format(
         title=title,
+        security_meta=_security_meta(csp),
+        leaflet_css=LEAFLET_CSS,
+        leaflet_css_sri=LEAFLET_CSS_SRI,
+        leaflet_js=LEAFLET_JS,
+        leaflet_js_sri=LEAFLET_JS_SRI,
         bounds=bounds_js,
         meta_rows=meta_rows,
         stac_link=stac_link,
@@ -361,9 +384,10 @@ _HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{security_meta}
 <title>{title}</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="{leaflet_css}" integrity="{leaflet_css_sri}" crossorigin="anonymous"/>
+<script src="{leaflet_js}" integrity="{leaflet_js_sri}" crossorigin="anonymous"></script>
 <style>
   html,body{{margin:0;height:100%}}
   #map{{position:absolute;inset:0}}
@@ -441,9 +465,16 @@ def make_viewer_server(
         percentile=percentile,
         sample_size=sample_size,
     )
+    from .demo import _content_security_policy  # noqa: PLC0415
+
+    # The page does not fetch COGs in the browser (tiles are rendered here) and
+    # Leaflet does not start a worker. Marker images and the OSM basemap are
+    # the only cross-origin loads.
+    csp = _content_security_policy(workers=False, bucket=False)
     httpd = _ViewerServer((host, port), _ViewerHandler)
     httpd.tiler = tiler
-    httpd.index_html = _viewer_html(tiler)
+    httpd.csp = csp
+    httpd.index_html = _viewer_html(tiler, csp)
     bound_host, bound_port = httpd.server_address[:2]
     # server_address is typed loosely (host may be bytes); a bound TCP host is a
     # string, so decode defensively for the URL rather than formatting bytes.

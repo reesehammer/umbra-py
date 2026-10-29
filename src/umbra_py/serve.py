@@ -192,6 +192,7 @@ from .constants import (
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
+from .demo import REFERRER_POLICY, _content_security_policy
 from .duplicates import PRESERVED_LINK_RELS
 from .exceptions import MissingDependencyError, UmbraError
 from .health_monitor import index_is_stale
@@ -2828,6 +2829,85 @@ _SITES_RESPONSE: dict[str, Any] = {
 
 
 # --------------------------------------------------------------------------
+# Response headers
+# --------------------------------------------------------------------------
+
+#: HTML this process returns that must not get the map-page CSP. FastAPI's
+#: docs UI loads Swagger and ReDoc from jsDelivr. Swipe pages are Folium
+#: documents (jsDelivr, cdnjs, jQuery, Bootstrap). That policy would blank
+#: them. They still get nosniff and the referrer policy. The Leaflet and
+#: MapLibre pages carry their own CSP in a ``<meta>`` tag, because they are
+#: static files, not responses from this process.
+_HTML_CSP_EXEMPT_EXACT = frozenset({"/docs", "/redoc"})
+_HTML_CSP_EXEMPT_PREFIXES = ("/docs/", "/redoc/", "/artifacts/", "/jobs/")
+
+
+def _html_csp_exempt(path: str) -> bool:
+    return path in _HTML_CSP_EXEMPT_EXACT or path.startswith(_HTML_CSP_EXEMPT_PREFIXES)
+
+
+def _csp_for_response(content_type: str, path: str) -> str | None:
+    """Map-page CSP for an HTML response, or ``None`` when it must not be set.
+
+    JSON (and every other non-HTML type) gets no CSP: a document policy on an
+    API body can confuse clients that render or forward headers. Docs UI and
+    Folium artifact HTML are exempt; see :data:`_HTML_CSP_EXEMPT_EXACT`.
+    """
+    media = content_type.split(";", 1)[0].strip().lower()
+    if media != "text/html" or _html_csp_exempt(path):
+        return None
+    return _content_security_policy(workers=True, bucket=True)
+
+
+def _stamp_security_headers(message: dict[str, Any], path: str) -> None:
+    """Add nosniff, Referrer-Policy, and (for safe HTML) CSP to a start message."""
+    raw = list(message.get("headers") or [])
+    present = {key.lower() for key, _ in raw}
+    content_type = ""
+    for key, value in raw:
+        if key.lower() == b"content-type":
+            content_type = value.decode("latin-1")
+            break
+    additions: list[tuple[bytes, bytes]] = [
+        (b"x-content-type-options", b"nosniff"),
+        (b"referrer-policy", REFERRER_POLICY.encode("ascii")),
+    ]
+    csp = _csp_for_response(content_type, path)
+    if csp is not None:
+        additions.append((b"content-security-policy", csp.encode("ascii")))
+    for key, value in additions:
+        if key not in present:
+            raw.append((key, value))
+    message["headers"] = raw
+
+
+class SecurityHeadersMiddleware:
+    """nosniff and a referrer policy on every response.
+
+    Pure ASGI, so it does not buffer a streaming body. Installed outside the
+    rate-limit guard on purpose: that guard is a separate middleware, and a
+    response it returns without calling the app (a 429) still passes through
+    here. CSP is limited to HTML that is not the docs UI or a Folium page.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path") or "")
+
+        async def send_with_headers(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                _stamp_security_headers(message, path)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+# --------------------------------------------------------------------------
 # FastAPI application factory
 # --------------------------------------------------------------------------
 
@@ -3072,12 +3152,17 @@ def build_app(
             return response
 
     app.add_middleware(_GuardMiddleware)
+    # Outside the guard, and separate from it: nosniff and the referrer policy
+    # on every response, including a 429 the guard returns itself. Inside the
+    # search logger, which stays the outermost user middleware so its line is
+    # the status the client actually got.
+    app.add_middleware(SecurityHeadersMiddleware)
 
-    # Outermost user middleware, so the line records the status the client
-    # actually got (including a rate-limit 429) and the time spent in the
-    # guards. Pure ASGI, same peek-and-replay cap as POST /mcp: a logging
-    # failure must not fail the search. Installed for every server — plain
-    # STAC, --mcp, and --public — because /search exists on all three.
+    # Outside the guards, so the line records the status the client actually
+    # got (including a rate-limit 429) and the time spent in the guards. Pure
+    # ASGI, same peek-and-replay cap as POST /mcp: a logging failure must not
+    # fail the search. Installed for every server — plain STAC, --mcp, and
+    # --public — because /search exists on all three.
     from ._mcp_log import StacSearchLog
 
     app.add_middleware(StacSearchLog)

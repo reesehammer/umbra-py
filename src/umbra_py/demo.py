@@ -125,12 +125,14 @@ offline-testable. (Contrast ``umbra gallery``, which streams thumbnails through
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 from collections.abc import Iterable
-from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .constants import ATTRIBUTION, POLARIZATIONS, PRODUCT_ASSETS
 from .models import UmbraItem
@@ -147,6 +149,59 @@ MARKERCLUSTER_CSS_DEFAULT = (
 )
 MARKERCLUSTER_JS = "https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
 
+# Subresource Integrity for the exact bytes at the URLs above. The browser
+# refuses a script or stylesheet whose hash does not match, so a swapped CDN
+# response cannot run. Recompute a digest when its pin changes:
+#
+#   curl -fsSL "$url" | openssl dgst -sha384 -binary | openssl base64 -A
+#
+LEAFLET_CSS_SRI = "sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+LEAFLET_JS_SRI = "sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+MARKERCLUSTER_CSS_SRI = "sha384-pmjIAcz2bAn0xukfxADbZIb3t8oRT9Sv0rvO+BR5Csr6Dhqq+nZs59P0pPKQJkEV"
+MARKERCLUSTER_CSS_DEFAULT_SRI = (
+    "sha384-wgw+aLYNQ7dlhK47ZPK7FRACiq7ROZwgFNg0m04avm4CaXS+Z9Y7nMu8yNjBKYC+"
+)
+MARKERCLUSTER_JS_SRI = "sha384-eXVCORTRlv4FUUgS/xmOyr66XBVraen8ATNLMESp92FKXLAMiKkerixTiBvXriZr"
+
+#: Referrer policy on generated pages (``<meta name="referrer">``) and on
+#: ``umbra serve`` and scene-viewer responses. OpenStreetMap's tile servers
+#: answer a request that sends no Referer with an "Access blocked" placeholder
+#: (response header ``x-blocked: No referer sent. Access denied.``), which
+#: blanks the basemap. ``strict-origin-when-cross-origin`` still sends the
+#: origin on cross-origin requests, and keeps the path and a ``file://`` URL
+#: off them.
+REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+# Hosts a generated map page actually requests. Scripts, styles, and Leaflet's
+# marker images come from unpkg (the images are CSS-relative to the stylesheet).
+# OpenStreetMap tiles are ``{s}.tile.openstreetmap.org`` (a/b/c) plus the bare
+# host the scene viewer uses. COG range reads use the public bucket, path-style
+# and virtual-hosted. A ``github.com/.../releases/download/`` archive 302s to
+# the release-asset host, so that host has to be named too or the read is blocked.
+_CDN_ORIGIN = "https://unpkg.com"
+_OSM_ORIGINS = (
+    "https://tile.openstreetmap.org",
+    "https://*.tile.openstreetmap.org",
+)
+_BUCKET_ORIGINS = (
+    "https://s3.us-west-2.amazonaws.com",
+    "https://s3.amazonaws.com",
+    "https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com",
+    "https://umbra-open-data-catalog.s3.amazonaws.com",
+)
+_GITHUB_RELEASE_ASSET_ORIGINS = (
+    "https://release-assets.githubusercontent.com",
+    "https://objects.githubusercontent.com",
+)
+
+
+def _cdn_stylesheet(href: str, integrity: str) -> str:
+    return f'<link rel="stylesheet" href="{href}" integrity="{integrity}" crossorigin="anonymous"/>'
+
+
+def _cdn_script(src: str, integrity: str) -> str:
+    return f'<script src="{src}" integrity="{integrity}" crossorigin="anonymous"></script>'
+
 
 def _is_http_url(url: Any) -> bool:
     """True only for an ``http(s)`` URL — the schemes safe to make clickable.
@@ -155,6 +210,121 @@ def _is_http_url(url: Any) -> bool:
     particular) must not reach an anchor's ``href``.
     """
     return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
+# A CSP source is ``scheme://host[:port]``. Userinfo, whitespace, or punctuation
+# in the netloc (``user:pass@host``, ``host;script-src …``) would either name
+# the wrong host or inject another directive. IPv6 is the bracket form.
+_PLAIN_NETLOC = re.compile(
+    r"\A(?:"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+    r"|\[[0-9A-Fa-f:.]+\]"
+    r")(?::[0-9]{1,5})?\Z"
+)
+
+
+def _is_plain_netloc(netloc: str) -> bool:
+    """True for ``host`` or ``host:port`` (port 0–65535), including bracketed IPv6."""
+    if _PLAIN_NETLOC.fullmatch(netloc) is None:
+        return False
+    if netloc.startswith("["):
+        rest = netloc[netloc.find("]") + 1 :]
+        port = rest[1:] if rest.startswith(":") else ""
+    elif ":" in netloc:
+        port = netloc.rsplit(":", 1)[1]
+    else:
+        port = ""
+    return port == "" or int(port) <= 65535
+
+
+def _http_origin(url: str | None) -> str | None:
+    """``scheme://host[:port]`` for an http(s) URL with a plain netloc, else ``None``."""
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    parts = urlsplit(url)
+    if not _is_plain_netloc(parts.netloc):
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _csp_origins(urls: Iterable[str | None]) -> tuple[list[str], list[str]]:
+    """http(s) origins from ``urls``, and connect-only hosts a redirect needs.
+
+    A ``github.com/.../releases/download/`` URL 302s to GitHub's release-asset
+    host. The archive is fetched, not used as an image, so those hosts are
+    connect-src only.
+    """
+    origins: list[str] = []
+    connect_only: list[str] = []
+    seen: set[str] = set()
+
+    def add(bucket: list[str], origin: str) -> None:
+        if origin not in seen:
+            seen.add(origin)
+            bucket.append(origin)
+
+    for raw in urls:
+        origin = _http_origin(raw)
+        if origin is None:
+            continue
+        add(origins, origin)
+        if (urlsplit(origin).hostname or "") == "github.com":
+            for asset_host in _GITHUB_RELEASE_ASSET_ORIGINS:
+                add(connect_only, asset_host)
+    return origins, connect_only
+
+
+def _content_security_policy(
+    *,
+    extra_origins: Iterable[str | None] = (),
+    workers: bool = False,
+    bucket: bool = True,
+) -> str:
+    """Content-Security-Policy for one generated Leaflet or MapLibre page.
+
+    ``extra_origins`` are absolute URLs the page was built to call (an
+    ``umbra serve`` base, an absolute ``.pmtiles`` archive). Only http(s)
+    origins with a plain ``host[:port]`` netloc are added, so a ``javascript:``
+    value or a netloc carrying userinfo or CSP punctuation cannot widen it.
+    ``workers`` allows MapLibre's ``blob:`` worker. ``bucket`` allows COG
+    range reads against the public Umbra bucket.
+    """
+    extras, connect_only = _csp_origins(extra_origins)
+    img = ["'self'", "data:", "blob:", _CDN_ORIGIN, *_OSM_ORIGINS, *extras]
+    connect = ["'self'", *_OSM_ORIGINS]
+    if bucket:
+        connect.extend(_BUCKET_ORIGINS)
+    connect.extend(extras)
+    connect.extend(connect_only)
+    directives = [
+        "default-src 'none'",
+        f"script-src 'unsafe-inline' {_CDN_ORIGIN}",
+        f"style-src 'unsafe-inline' {_CDN_ORIGIN}",
+        "img-src " + " ".join(img),
+        "connect-src " + " ".join(connect),
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+    ]
+    if workers:
+        directives.append("worker-src blob:")
+        directives.append("child-src blob:")
+    return "; ".join(directives)
+
+
+def _security_meta(csp: str) -> str:
+    """Referrer policy and CSP for a static page (no response headers required).
+
+    The policy is HTML-escaped into the attribute. The browser decodes the
+    entities before it parses the CSP, so ``'self'`` still means ``'self'``.
+    """
+    safe = html.escape(csp, quote=True)
+    return (
+        f'<meta name="referrer" content="{REFERRER_POLICY}"/>\n'
+        '<meta http-equiv="Content-Security-Policy" '
+        f'content="{safe}"/>'
+    )
 
 
 def _lazy_bounds_for(bbox: tuple[float, float, float, float]) -> list[float]:
@@ -342,8 +512,10 @@ def build_demo(
         driver_script(percentile_low=percentile[0], percentile_high=percentile[1]) if lazy else ""
     )
 
+    csp = _content_security_policy(extra_origins=[server_url], bucket=bool(lazy))
     return _PAGE_TEMPLATE.format(
-        title=escape(title),
+        title=html.escape(title),
+        security_meta=_security_meta(csp),
         head_links=_HEAD_LINKS,
         script_links=_SCRIPT_LINKS,
         styles=_STYLES,
@@ -391,8 +563,11 @@ def _build_pmtiles_demo(
     from .pmtiles import (  # noqa: PLC0415
         FOOTPRINT_LAYER,
         MAPLIBRE_CSS,
+        MAPLIBRE_CSS_SRI,
         MAPLIBRE_JS,
+        MAPLIBRE_JS_SRI,
         PMTILES_JS,
+        PMTILES_JS_SRI,
     )
 
     config = {
@@ -421,11 +596,20 @@ def _build_pmtiles_demo(
         else ""
     )
 
+    csp = _content_security_policy(
+        extra_origins=[server_url, pmtiles_url],
+        workers=True,
+        bucket=bool(lazy_imagery),
+    )
     return _PAGE_TEMPLATE.format(
-        title=escape(title),
-        head_links=f'<link rel="stylesheet" href="{MAPLIBRE_CSS}"/>',
-        script_links=(
-            f'<script src="{MAPLIBRE_JS}"></script>\n<script src="{PMTILES_JS}"></script>'
+        title=html.escape(title),
+        security_meta=_security_meta(csp),
+        head_links=_cdn_stylesheet(MAPLIBRE_CSS, MAPLIBRE_CSS_SRI),
+        script_links="\n".join(
+            (
+                _cdn_script(MAPLIBRE_JS, MAPLIBRE_JS_SRI),
+                _cdn_script(PMTILES_JS, PMTILES_JS_SRI),
+            )
         ),
         styles=_STYLES,
         config_json=config_json,
@@ -445,13 +629,20 @@ def save_demo(items: Iterable[UmbraItem], dest: str | os.PathLike, **kwargs: Any
     return dest
 
 
-_HEAD_LINKS = (
-    f'<link rel="stylesheet" href="{LEAFLET_CSS}"/>\n'
-    f'<link rel="stylesheet" href="{MARKERCLUSTER_CSS}"/>\n'
-    f'<link rel="stylesheet" href="{MARKERCLUSTER_CSS_DEFAULT}"/>'
+_HEAD_LINKS = "\n".join(
+    (
+        _cdn_stylesheet(LEAFLET_CSS, LEAFLET_CSS_SRI),
+        _cdn_stylesheet(MARKERCLUSTER_CSS, MARKERCLUSTER_CSS_SRI),
+        _cdn_stylesheet(MARKERCLUSTER_CSS_DEFAULT, MARKERCLUSTER_CSS_DEFAULT_SRI),
+    )
 )
 
-_SCRIPT_LINKS = f'<script src="{LEAFLET_JS}"></script>\n<script src="{MARKERCLUSTER_JS}"></script>'
+_SCRIPT_LINKS = "\n".join(
+    (
+        _cdn_script(LEAFLET_JS, LEAFLET_JS_SRI),
+        _cdn_script(MARKERCLUSTER_JS, MARKERCLUSTER_JS_SRI),
+    )
+)
 
 _STYLES = """
 *, *::before, *::after { box-sizing: border-box; }
@@ -540,6 +731,14 @@ html, body { margin: 0; height: 100%; }
 # its own copy that could drift. Like every script here it is a *static* string:
 # each app hands it the values it needs at call time.
 _SHARED_JS = """
+// Only http(s) may be assigned to an anchor href. STAC hrefs arrive from
+// remote metadata (the embedded JSON, or vector-tile properties). A
+// javascript: or data: scheme would be a clickable script link. The check is
+// case-insensitive because URL schemes are.
+window.umbraIsHttpUrl = function (value) {
+  return /^https?:\\/\\//i.test(String(value == null ? '' : value));
+};
+
 // One metadata row in the detail panel. textContent never parses HTML, so
 // remote strings need no escaping.
 window.umbraRow = function (label, value) {
@@ -1010,7 +1209,7 @@ _APP_JS = """
     table.appendChild(row('Assets', (p.assets || []).join(', ')));
     panel.appendChild(table);
 
-    if (p.stac_href) {
+    if (window.umbraIsHttpUrl(p.stac_href)) {
       var a = document.createElement('a');
       a.href = p.stac_href; a.target = '_blank'; a.rel = 'noopener';
       a.textContent = 'open STAC item';
@@ -1309,7 +1508,7 @@ _PMTILES_APP_JS = """
 
     // The STAC href comes from remote metadata; only http(s) may reach an
     // anchor (a javascript: scheme would be a clickable script link).
-    if (p.stac_href && /^https?:\\/\\//.test(String(p.stac_href))) {
+    if (window.umbraIsHttpUrl(p.stac_href)) {
       var a = document.createElement('a');
       a.href = p.stac_href; a.target = '_blank'; a.rel = 'noopener';
       a.textContent = 'open STAC item';
@@ -1396,6 +1595,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+{security_meta}
 <title>{title}</title>
 {head_links}
 <style>{styles}</style>
