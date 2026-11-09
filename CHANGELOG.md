@@ -13,13 +13,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 - **`area` on `GET`/`POST /search` and `/sites` falls back to place geocoding**
   when it matches no Umbra task name and the request has no bbox or
   intersects polygon. The response adds `matched_by: geocode` with the
-  resolved place name and bbox; if geocoding fails too, `hint` is
-  `no task named X; try place= or bbox=` instead of a bare empty result.
-  A task-name hit is unchanged. `search_catalog` and `find_repeat_sites`
-  add the same fields without changing tool names, arguments, or defaults.
-  On the public host that geocoding is cached and bounded the same way as
-  `place=` (one in-flight Nominatim call, a one-second gap, at most five
-  waiters, and a ten-minute memory of names that do not resolve).
+  resolved place name and bbox. A name Nominatim does not know is HTTP 200
+  with an empty result and `hint` `no task named X; try place= or bbox=`.
+  When geocoding is busy or Nominatim is unreachable, that same empty
+  HTTP 200 carries `hint` `no task named X; geocoding was unavailable`
+  (not HTTP 503). `search_catalog` and `find_repeat_sites` add the same
+  fields, and on that miss `resolved_area` is the `area` that was tried,
+  without changing tool names, arguments, or defaults. A task-name hit is
+  unchanged. The resolved box is cached in-process (the same LRU and a
+  ten-minute memory of names that do not resolve) on local `umbra serve`
+  and on the public host, so a next link does not call Nominatim again.
+  On the public host that cache is the same gate as `place=` (one
+  in-flight Nominatim call, a one-second gap, at most five waiters).
 
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
@@ -32,6 +37,25 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   that is not http(s) is not turned into a link.
 
 ### Changed
+- **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
+  The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
+  `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a
+  `/64`); each client may hold two catalog reads, and a timed-out read interrupts SQLite.
+  Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
+  (with a `note` when clamped), bodies over 1 MiB are HTTP 413, and a malformed
+  public `POST /search` is HTTP 400.
+  STAC links use optional `UMBRA_PUBLIC_BASE_URL` when it is an `http(s)://host`
+  origin, otherwise the edge's `X-Forwarded-Proto` and host, and `GET /mcp/`
+  keeps that https scheme. Public `geocode_place` caches names and misses,
+  calls Nominatim about once a second, and fails fast when the whole wait
+  would exceed a few seconds. Local `umbra serve` and local MCP are unchanged.
+- **The public host does not write the catalog or reveal its path.**
+  `watch_site` on `umbra serve --public` reports the current matches as new,
+  stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full
+  count), and caps the watch name at 128 characters. Request paths open the
+  index read-only. `index_stats` and `umbra://index/stats` set `path` to null,
+  and public-host errors omit filesystem paths. A local server still persists
+  watch state and still reports the path.
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`

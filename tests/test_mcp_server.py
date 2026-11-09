@@ -300,7 +300,42 @@ def test_search_catalog_area_and_geocode_miss_returns_a_hint(monkeypatch):
     assert out["count"] == 0
     assert out["items"] == []
     assert out["hint"] == "no task named TSMC; try place= or bbox="
+    assert out["resolved_area"] == "TSMC"
     assert "matched_by" not in out
+
+
+def test_search_catalog_and_sites_area_geocode_unavailable_is_a_hint(monkeypatch):
+    """A busy or unreachable fallback is an empty result, not a tool error."""
+    from umbra_py.exceptions import GeocodeError
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after geocoding was unavailable")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    messages = (
+        "Geocoding is busy on this host; retry in a few seconds.",
+        "Could not reach the geocoding service: timed out",
+    )
+    for message in messages:
+
+        def _down(_query: str, message: str = message) -> tuple:
+            raise GeocodeError(message)
+
+        monkeypatch.setattr(ms, "_geocode_place", _down)
+        for call in (
+            lambda: ms.search_catalog(area="Austin", local=False),
+            lambda: ms.find_repeat_sites(area="Austin", local=False),
+        ):
+            out = call()
+            assert out["count"] == 0
+            assert out.get("items", out.get("sites")) == []
+            assert out["hint"] == "no task named Austin; geocoding was unavailable"
+            assert out["resolved_area"] == "Austin"
+            assert "matched_by" not in out
 
 
 def test_find_repeat_sites_area_miss_geocodes(monkeypatch):

@@ -55,7 +55,12 @@ place. `--place` geocodes via Nominatim to a **rectangle**, so it can include
 nearby ground outside the named place. `GET`/`POST /search` and `/sites` (and
 the MCP tools `search_catalog` and `find_repeat_sites`) fall back to that
 geocoder when `area=` matches no task name and no bbox or polygon was given.
-The response then says `matched_by: geocode`. A task-name hit is unchanged.
+The response then says `matched_by: geocode`. A name Nominatim does not know
+is an empty result with `hint` `no task named X; try place= or bbox=`. When
+the geocoder is busy or unreachable, that same empty result (HTTP 200 on
+`/search` and `/sites`) carries `hint` `no task named X; geocoding was unavailable`.
+A task-name hit is unchanged. The resolved box is cached in-process, including
+on a local `umbra serve`, so the next page does not call Nominatim again.
 
 The index is what Umbra has published, rebuilt weekly. `umbra index info`
 (and `index_stats`) report `built_at` and `end`, the newest plausible

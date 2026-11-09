@@ -10,24 +10,6 @@ still open.
 
 ---
 
-## One public Nominatim gate when #318 merges
-
-- **Surfaced in:** the `area=` geocode-fallback branch (not yet a PR).
-- **Code:** `src/umbra_py/geocode.py` (`PublicGeocodeGate`,
-  `geocode_for_host`) and `src/umbra_py/mcp_server.py` (`_geocode_place`).
-  PR #318 adds a second `PublicGeocodeGate` in `mcp_server.py`.
-
-`/search`, `/sites`, and the MCP tools must share one cache and one
-one-request-per-second Nominatim slot. On merge with #318, delete the copy
-in `mcp_server.py` and keep `geocode_for_host`. Two gates would let the
-public host call Nominatim twice a second.
-
-The same handlers (`serve.py` `_do_search` / `post_search` / `get_sites` /
-`post_sites`, and `search_catalog` / `find_repeat_sites`) are where a
-sibling change adds GeoJSON `intersects=`. This fallback does not geocode
-when `intersects` is set. #312's read-only catalog open is compatible: the
-task probe only reads. #315 does not touch these search paths.
-
 ## Site ranking counts both republished copies
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294

@@ -109,9 +109,9 @@ def _parse_boundingbox(raw: Any) -> BBox | None:
 
 
 # A miss that would wait longer than this, or join more than this many
-# callers already waiting on Nominatim, fails immediately. Same bounds as
-# the public-host gate in PR #318: one in-flight call, then the one-second
-# gap, and that whole wait stays under about five seconds.
+# callers already waiting on Nominatim, fails immediately. One in-flight
+# call, then the one-second gap, and that whole wait stays under about
+# five seconds.
 _GEOCODE_MAX_WAIT_S = 5.0
 _GEOCODE_MAX_WAITERS = 5
 #: How long a "no such place" answer is remembered. A network failure is not.
@@ -125,19 +125,21 @@ def _geocode_not_found(exc: GeocodeError) -> bool:
 
 
 class PublicGeocodeGate:
-    """LRU cache and a global Nominatim throttle for the public host.
+    """LRU cache, negative cache, and the public Nominatim throttle.
 
     One shared address is what Nominatim bans. Cache hits do not wait and
-    do not call out. A miss waits for the single in-flight call and for the
-    one-second gap, and that whole wait is capped at about five seconds.
-    More than five waiters, or a lock that is not free inside the remaining
-    budget, fails immediately. "No such place" is remembered for about ten
-    minutes. Any other failure is not cached. Local servers do not use this.
+    do not call out. On the public host a miss waits for the single
+    in-flight call and for the one-second gap, and that whole wait is
+    capped at about five seconds. More than five waiters, or a lock that
+    is not free inside the remaining budget, fails immediately. "No such
+    place" is remembered for about ten minutes. Any other failure is not
+    cached.
 
-    PR #318 adds this same gate inside ``mcp_server.py``. It lives here so
-    ``/search``, ``/sites``, and the MCP tools share one cache and one
-    one-request-per-second slot. On merge with that PR, delete the copy in
-    ``mcp_server.py`` and keep this one.
+    ``/search``, ``/sites``, and public MCP ``place=`` share this one
+    object, so the host calls Nominatim at most once a second in total.
+    Local ``umbra serve`` uses the same cache with ``throttle=False``, so
+    a page link does not call Nominatim again and a local server is not
+    rate-limited. Local MCP and the CLI call :func:`geocode_place` directly.
     """
 
     def __init__(
@@ -164,11 +166,13 @@ class PublicGeocodeGate:
             self._next_at = 0.0
             self._waiters = 0
 
-    def resolve(self, query: str) -> tuple[BBox, str]:
+    def resolve(self, query: str, *, throttle: bool = True) -> tuple[BBox, str]:
         key = " ".join(query.split()).casefold()
         cached = self._cached(key)
         if cached is not None:
             return cached
+        if not throttle:
+            return self._fetch(key, query)
         deadline = self._time() + _GEOCODE_MAX_WAIT_S
         self._admit()
         acquired = False
@@ -181,25 +185,28 @@ class PublicGeocodeGate:
             if cached is not None:
                 return cached
             now = self._time()
-            throttle = max(0.0, self._next_at - now)
-            if throttle > deadline - now:
+            wait = max(0.0, self._next_at - now)
+            if wait > deadline - now:
                 raise GeocodeError(_GEOCODE_BUSY)
-            self._next_at = now + throttle + self._min_interval
-            if throttle > 0:
-                self._sleep(throttle)
-            try:
-                result = geocode_place(query)
-            except GeocodeError as exc:
-                if _geocode_not_found(exc):
-                    self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
-                raise
-            self._store(key, ("ok", result))
-            return result
+            self._next_at = now + wait + self._min_interval
+            if wait > 0:
+                self._sleep(wait)
+            return self._fetch(key, query)
         finally:
             if acquired:
                 self._network.release()
             with self._lock:
                 self._waiters -= 1
+
+    def _fetch(self, key: str, query: str) -> tuple[BBox, str]:
+        try:
+            result = geocode_place(query)
+        except GeocodeError as exc:
+            if _geocode_not_found(exc):
+                self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+            raise
+        self._store(key, ("ok", result))
+        return result
 
     def _admit(self) -> None:
         with self._lock:
@@ -236,13 +243,13 @@ _public_geocode = PublicGeocodeGate()
 
 
 def geocode_for_host(query: str, *, public: bool) -> tuple[BBox, str]:
-    """Resolve ``query`` directly, or through :class:`PublicGeocodeGate` on the public host.
+    """Resolve ``query`` through :data:`_public_geocode`.
 
-    Local MCP and ``umbra serve`` call Nominatim on each miss. ``umbra serve
-    --public`` and the public MCP host share :data:`_public_geocode`, so a
-    cached place is not requested twice and a burst fails fast instead of
-    queueing on Nominatim.
+    ``public=False`` is local ``umbra serve``: the LRU and the negative
+    cache, with no throttle, so a page link reuses the first resolve.
+    ``public=True`` is ``umbra serve --public`` and the public MCP host.
+    Those share this cache and the one-request-per-second slot, so
+    ``place=`` and the ``area=`` fallback together stay at one Nominatim
+    call per second.
     """
-    if not public:
-        return geocode_place(query)
-    return _public_geocode.resolve(query)
+    return _public_geocode.resolve(query, throttle=public)

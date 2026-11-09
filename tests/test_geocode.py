@@ -244,17 +244,39 @@ def test_public_geocode_caches_a_hit_and_spaces_callers(monkeypatch):
     assert slept == [1.0]
 
 
-def test_local_geocode_for_host_is_not_cached(monkeypatch):
+def test_local_geocode_for_host_caches_without_throttling(monkeypatch):
+    """Local serve reuses the LRU and the negative cache, and does not wait."""
+    from umbra_py.geocode import _public_geocode
+
+    _public_geocode.clear()
     calls: list[str] = []
+    slept: list[float] = []
 
     def fake(query: str, **_kwargs):
         calls.append(query)
+        if query == "zzz":
+            raise GeocodeError("No place matched 'zzz'.")
+        if query == "down":
+            raise GeocodeError("Could not reach the geocoding service: timeout")
         return ((0.0, 1.0, 2.0, 3.0), query)
 
     monkeypatch.setattr("umbra_py.geocode.geocode_place", fake)
-    geocode_for_host("A", public=False)
+    monkeypatch.setattr(_public_geocode, "_sleep", lambda seconds: slept.append(seconds))
+    assert geocode_for_host("A", public=False)[1] == "A"
+    assert geocode_for_host("A", public=False)[1] == "A"
     geocode_for_host("B", public=False)
     assert calls == ["A", "B"]
+    assert slept == []
+    with pytest.raises(GeocodeError, match="No place matched"):
+        geocode_for_host("zzz", public=False)
+    with pytest.raises(GeocodeError, match="No place matched"):
+        geocode_for_host("zzz", public=False)
+    assert calls == ["A", "B", "zzz"]
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        geocode_for_host("down", public=False)
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        geocode_for_host("down", public=False)
+    assert calls[-2:] == ["down", "down"]
 
 
 def test_public_geocode_caches_a_miss_and_not_a_network_failure(monkeypatch):

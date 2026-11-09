@@ -31,10 +31,13 @@ class AreaFallback:
 
     ``matched_by`` is None when the caller should search exactly as it does
     today (no ``area``, a task-name hit, or ``area`` beside an explicit
-    footprint). ``"geocode"`` means no task matched and Nominatim resolved a
+    footprint).     ``"geocode"`` means no task matched and Nominatim resolved a
     footprint: search ``bbox`` and do not also filter by the task name.
-    ``hint`` is set when no task matched and the geocoder missed too; the
-    caller returns that instead of an empty result.
+    ``hint`` is set when no task matched and geocoding did not produce a
+    footprint. A name Nominatim does not know is ``no task named X; try
+    place= or bbox=``. A busy gate, a lock that was not free in time, or an
+    unreachable service is ``no task named X; geocoding was unavailable``.
+    The caller returns that with the empty result.
     """
 
     area: str | None
@@ -101,12 +104,13 @@ def resolve_area_fallback(
         box, label = geocode(area)
     except GeocodeError as exc:
         if _place_miss(exc):
-            return AreaFallback(
-                area=None,
-                bbox=None,
-                hint=f"no task named {area}; try place= or bbox=",
-            )
-        raise
+            hint = f"no task named {area}; try place= or bbox="
+        else:
+            # Busy (the waiter cap or the lock timeout) and an unreachable
+            # Nominatim are the same empty result as a place miss. The
+            # fallback does not turn them into an HTTP error.
+            hint = f"no task named {area}; geocoding was unavailable"
+        return AreaFallback(area=None, bbox=None, hint=hint)
     return AreaFallback(area=None, bbox=box, matched_by="geocode", place=str(label))
 
 

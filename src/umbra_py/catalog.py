@@ -374,9 +374,6 @@ class UmbraCatalog:
         #: being streamed. ``_stream_keys`` fills it; ``_walk_task`` reads it
         #: once that prefix's keys are consumed. Replaced on the next stream.
         self._sidecar_last_modified: dict[str, str] = {}
-        #: Task directories listed by :meth:`has_matching_task`. The next
-        #: :meth:`search` reads them once, then drops them.
-        self._prefix_list_cache: dict[str, list[str]] | None = None
 
     # -- HTTP helpers ----------------------------------------------------------
 
@@ -617,21 +614,10 @@ class UmbraCatalog:
             )
             return
 
-        # ``has_matching_task`` listed these prefixes a moment ago, on this
-        # same instance, to decide whether ``area`` names a task. Reuse that
-        # listing for the search that follows, then drop it so a later search
-        # on a long-lived catalog sees newly published tasks.
-        cached = getattr(self, "_prefix_list_cache", None)
-        if cached is not None:
-            self._prefix_list_cache = None
-            task_subdirs = []
-            for data_prefix in _DATA_PREFIXES:
-                task_subdirs.extend(cached.get(data_prefix, []))
-        else:
-            task_subdirs = []
-            for data_prefix in _DATA_PREFIXES:
-                subdirs, _ = self._list_prefix(data_prefix)
-                task_subdirs.extend(subdirs)
+        task_subdirs: list[str] = []
+        for data_prefix in _DATA_PREFIXES:
+            subdirs, _ = self._list_prefix(data_prefix)
+            task_subdirs.extend(subdirs)
         if area:
             task_subdirs = [
                 t for t in task_subdirs if task_matches(area, _task_name(t), fuzzy=fuzzy)
@@ -750,10 +736,9 @@ class UmbraCatalog:
     def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
         """Whether ``area`` matches a task directory (or a Canopy item).
 
-        Directory names only: a hit does not download a sidecar. The prefix
-        listing is kept on this instance for the search that usually follows
-        (:meth:`search` reads ``_prefix_list_cache`` once). A Canopy catalog
-        has no task directories, so it asks :meth:`search` for one item.
+        Directory names only: a hit does not download a sidecar. The search
+        that follows lists the prefixes again. A Canopy catalog has no task
+        directories, so it asks :meth:`search` for one item.
         """
         if self.token:
             stream = self.search(area=area, fuzzy=fuzzy, limit=1)
@@ -763,17 +748,11 @@ class UmbraCatalog:
                 close = getattr(stream, "close", None)
                 if callable(close):
                     close()
-        listed: dict[str, list[str]] = {}
-        matched = False
         for data_prefix in _DATA_PREFIXES:
             subdirs, _files = self._list_prefix(data_prefix)
-            listed[data_prefix] = subdirs
-            if not matched and any(
-                task_matches(area, _task_name(sub), fuzzy=fuzzy) for sub in subdirs
-            ):
-                matched = True
-        self._prefix_list_cache = listed
-        return matched
+            if any(task_matches(area, _task_name(sub), fuzzy=fuzzy) for sub in subdirs):
+                return True
+        return False
 
     def get_item(self, item_id: str) -> UmbraItem | None:
         """Fetch a single acquisition from the Canopy commercial archive by id.
