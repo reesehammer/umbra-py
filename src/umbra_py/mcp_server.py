@@ -2446,7 +2446,8 @@ def build_server() -> MCPServer:
     )
     # Innermost observer. One JSON line per tools/call; dispatch is unchanged.
     # The SDK's own "Tool 'name' failed: <text>" line repeats the exception
-    # message; the structured line keeps the class, so that text is dropped.
+    # message; the structured line keeps the class, and that text is replaced
+    # with "<redacted>".
     quiet_tool_failure_text()
     server.middleware.append(ToolCallLog())
 

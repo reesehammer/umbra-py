@@ -14,9 +14,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   tool, duration, `ok` or the error class, a result count when the reply
   already has one, client name and version, and session id. Arguments are
   key names plus `limit`, a short `collection` token, and whether `bbox` or
-  `place` was set; the client network is a hash of the IPv4 `/24` or IPv6
-  `/64`, and `POST /mcp` and `/search` lines use that hash instead of the
-  address.
+  `place` was set; the client network on that line is a hash of the IPv4
+  `/24` or IPv6 `/64`, while `POST /mcp` and `/search` still log `client_ip`.
+  The SDK `Tool '<name>' failed` line is kept, with the message text replaced
+  by `<redacted>`.
 
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**

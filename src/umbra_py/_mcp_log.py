@@ -14,24 +14,26 @@ JSON-RPC pipe).
   ``mcp_tool``). Server middleware, not an ASGI wrapper, so it sees whether
   the tool succeeded.
 
-What is logged is metadata. None of the lines include a client address. The
-network field is :func:`_client_network_hash`: the first 16 hex characters of
-SHA-256 over ``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An IPv4-mapped IPv6
-address uses the IPv4 ``/24``. The same prefix hashes the same on every
-replica. The peer is whatever the transport already resolved (the ASGI
-scope's client, or the request the MCP SDK attached). This module does not
-read ``X-Forwarded-For`` or ``X-Real-IP``; a middleware that rewrites that
-peer before the log runs is the address the hash is taken from.
+What is logged is metadata. The HTTP lines record ``client_ip``, the peer the
+transport already resolved (the ASGI scope's client). uvicorn rewrites that
+from ``X-Forwarded-For`` when it runs with ``--proxy-headers`` (``umbra serve
+--public``). The tool line does not record the address. Its network field is
+:func:`_client_network_hash`: the first 16 hex characters of SHA-256 over
+``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An IPv4-mapped IPv6 address uses the
+IPv4 ``/24``. The same prefix hashes the same on every replica. The peer is
+the request the MCP SDK attached. This module does not read
+``X-Forwarded-For`` or ``X-Real-IP``; a middleware that rewrites that peer
+before the log runs is the address the hash is taken from.
 
-A search logs that hash, the user agent, HTTP method, path, status and
+A search logs the client IP, the user agent, HTTP method, path, status and
 duration, plus the query parameters ``bbox``, ``datetime``, ``limit``,
 ``collections`` and ``sortby`` when the client sent them. A ``POST`` body
 contributes only its top-level key names (``body_keys``), never the values.
 A tool call logs the tool name, duration, ``ok`` or the error class, a
 result count when the reply already carries one, client name and version,
 session id, argument key names, ``limit`` when it is an integer, a short
-``collection`` token, and whether ``bbox`` or ``place`` was set. Free text
-and URLs are not logged.
+``collection`` token, whether ``bbox`` or ``place`` was set, and the network
+hash. Free text and URLs are not logged.
 
 The HTTP lines are ASGI wrappers rather than ``BaseHTTPMiddleware`` so a POST
 can read at most :data:`MCP_LOG_BODY_LIMIT` bytes and replay exactly those
@@ -104,25 +106,71 @@ class _StatelessSessionFilter(logging.Filter):
 
 
 #: ``mcp.server.mcpserver.server`` logs ``Tool 'name' failed: '<text>'`` at INFO
-#: for an anticipated tool error. The text is the exception message, which is
-#: the caller's place name or URL. The structured ``mcp_tool`` line records the
-#: class instead. ``Tool 'name' rejected arguments`` (field names only) and
-#: unexpected-exception tracebacks are different messages and stay.
-_SDK_TOOL_FAILURE = re.compile(r"^Tool '.+' failed: ")
+#: for an anticipated tool error (``logger.info("Tool %r failed: %r", name,
+#: str(exc))``). The text is the exception message: the caller's place name or
+#: URL. The line stays, with that text replaced by ``<redacted>``. The tool
+#: name stays, as does an exception class when the message includes one
+#: (``ValueError('<redacted>')``). ``Tool 'name' rejected arguments`` (field
+#: names only) and unexpected-exception tracebacks are different messages and
+#: stay as logged.
+_TOOL_REPR = r"(?:'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\")"
+_SDK_TOOL_FAILURE = re.compile(
+    rf"^Tool (?P<name>{_TOOL_REPR}) failed: (?P<detail>.*)\Z",
+    re.DOTALL,
+)
+_EXC_WRAP = re.compile(r"(?P<exc>[A-Za-z_][A-Za-z0-9_]*)\((?P<inner>.*)\)\Z", re.DOTALL)
+_REDACTED = "<redacted>"
 _MCP_SERVER_LOGGER = "mcp.server.mcpserver.server"
 
 
+def _redact_quoted(text: str) -> str:
+    """Replace the body of one quoted string. An unquoted tail becomes ``'<redacted>'``."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return f"{text[0]}{_REDACTED}{text[-1]}"
+    return f"'{_REDACTED}'"
+
+
+def _redact_tool_failure_message(message: str) -> str | None:
+    """The SDK failure line with the user text removed, or ``None`` if it is not one."""
+    match = _SDK_TOOL_FAILURE.match(message)
+    if match is None:
+        return None
+    detail = match.group("detail")
+    wrapped = _EXC_WRAP.match(detail)
+    if wrapped is not None:
+        detail = f"{wrapped.group('exc')}({_redact_quoted(wrapped.group('inner'))})"
+    else:
+        detail = _redact_quoted(detail)
+    return f"Tool {match.group('name')} failed: {detail}"
+
+
 class _ToolFailureTextFilter(logging.Filter):
-    """Drop the SDK line that interpolates an anticipated tool error's text."""
+    """Replace the quoted text in ``Tool '<name>' failed: ...`` with ``<redacted>``.
+
+    The record stays, including the tool name and an exception class when the
+    message has one. Other records are unchanged.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return _SDK_TOOL_FAILURE.match(record.getMessage()) is None
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = _redact_tool_failure_message(message)
+        if redacted is None:
+            return True
+        record.msg = redacted
+        record.args = ()
+        if "message" in record.__dict__:
+            record.message = redacted
+        return True
 
 
 def quiet_tool_failure_text() -> None:
-    """Keep anticipated tool-error text off the MCP server logger.
+    """Redact anticipated tool-error text on the MCP server logger.
 
-    Idempotent. Installed when the server is built, for stdio and HTTP.
+    The SDK line stays, so the tool name is still visible. Idempotent.
+    Installed when the server is built, for stdio and HTTP.
     """
     target = logging.getLogger(_MCP_SERVER_LOGGER)
     if any(isinstance(existing, _ToolFailureTextFilter) for existing in target.filters):
@@ -161,6 +209,11 @@ _LIMIT_MAX = 10_000_000
 _COLLECTION_MAX = 8
 
 
+def _client_ip(scope: Scope) -> str | None:
+    client = scope.get("client")
+    return _clip(client[0]) if client else None
+
+
 def _client_network_hash(host: str | None) -> str | None:
     """Hash of the peer's IPv4 ``/24`` or IPv6 ``/64``, or ``None`` if it is not an IP.
 
@@ -181,18 +234,6 @@ def _client_network_hash(host: str | None) -> str | None:
     network = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
     material = f"{prefix}:{network.network_address}"
     return hashlib.sha256(material.encode("ascii")).hexdigest()[:16]
-
-
-def _scope_client_net(scope: Scope) -> str | None:
-    client = scope.get("client")
-    if not client:
-        return None
-    host = client[0]
-    if isinstance(host, bytes):
-        host = host.decode("latin-1", "replace")
-    if not isinstance(host, str):
-        return None
-    return _client_network_hash(host)
 
 
 def _rpc_fields(message: Any) -> dict[str, Any]:
@@ -357,8 +398,10 @@ class McpRequestLog:
     """ASGI wrapper that logs each ``POST .../mcp`` and passes everything through.
 
     ``GET /mcp`` (the server-to-client SSE stream) and every other method go
-    straight to ``app`` without being read or logged. ``client_net`` hashes
-    the ASGI scope's client; the address is not logged.
+    straight to ``app`` without being read or logged. The client IP is the
+    ASGI scope's client, which uvicorn already rewrites from ``X-Forwarded-For``
+    when it runs with ``--proxy-headers`` (``umbra serve --public``), so this
+    trusts the same proxy the rate limiter does and no other.
     """
 
     def __init__(self, app: ASGIApp, *, body_limit: int = MCP_LOG_BODY_LIMIT) -> None:
@@ -388,7 +431,7 @@ def _mcp_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]:
     record: dict[str, Any] = {
         "level": "info",
         "msg": "mcp_request",
-        "client_net": _scope_client_net(scope),
+        "client_ip": _client_ip(scope),
         "user_agent": _header(scope, b"user-agent"),
         "mcp_protocol_version": _header(scope, b"mcp-protocol-version"),
     }
@@ -406,7 +449,10 @@ class StacSearchLog:
     the body the same way :class:`McpRequestLog` does and replays it, so the
     search handler still sees every byte.
 
-    ``client_net`` hashes the ASGI scope's client; the address is not logged.
+    The client IP is the ASGI scope's client. uvicorn rewrites that from
+    ``X-Forwarded-For`` when it runs with ``--proxy-headers`` (``umbra serve
+    --public``); a plain ``umbra serve`` has no proxy, and the socket peer is
+    the client. This trusts the same address the rate limiter does and no other.
     """
 
     def __init__(self, app: ASGIApp, *, body_limit: int = MCP_LOG_BODY_LIMIT) -> None:
@@ -432,7 +478,7 @@ def _search_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]
     record: dict[str, Any] = {
         "level": "info",
         "msg": "stac_search",
-        "client_net": _scope_client_net(scope),
+        "client_ip": _client_ip(scope),
         "user_agent": _header(scope, b"user-agent"),
         "method": scope.get("method"),
         "path": scope.get("path"),

@@ -126,7 +126,9 @@ through every 0.x minor. See [Stable tools](mcp.md#stable-tools).
 `umbra serve` writes one JSON object per MCP tool call to stdout. The `msg`
 field is `mcp_tool`. Railway's log explorer rewrites `msg` to `message`, so
 filters use `@message`. The same logger writes `mcp_request` (each
-`POST /mcp`) and `stac_search` (each `/search`).
+`POST /mcp`) and `stac_search` (each `/search`). Those two lines still
+record `client_ip`, the peer the server already resolved. `client_net` is
+only on `mcp_tool`.
 
 A tool line has:
 

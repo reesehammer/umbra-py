@@ -228,16 +228,22 @@ def test_other_methods_are_not_tool_lines(caplog):
     assert _records(caplog) == []
 
 
-def test_sdk_failure_text_is_dropped_and_field_names_stay(caplog):
+def test_sdk_failure_line_stays_with_the_message_redacted(caplog):
     from umbra_py._mcp_log import _MCP_SERVER_LOGGER, quiet_tool_failure_text
 
     quiet_tool_failure_text()
     sdk = logging.getLogger(_MCP_SERVER_LOGGER)
     with caplog.at_level(logging.INFO, logger=_MCP_SERVER_LOGGER):
-        sdk.info("Tool 'search_catalog' failed: '%s is not a catalog key'", _SECRET)
+        # The SDK logs ``Tool %r failed: %r`` with the tool name and ``str(exc)``.
+        sdk.info("Tool %r failed: %r", "search_catalog", f"{_SECRET} is not a catalog key")
+        sdk.info("Tool %r failed: %r", "search_catalog", f"{_SECRET}'s pier")
+        sdk.info("Tool %r failed: %r", "get_item", ValueError(_SECRET))
         sdk.info("Tool 'search_catalog' rejected arguments: ['place']")
         sdk.info("Tool 'search_catalog' raised an unexpected exception")
     messages = [r.getMessage() for r in caplog.records if r.name == _MCP_SERVER_LOGGER]
+    assert "Tool 'search_catalog' failed: '<redacted>'" in messages
+    assert "Tool 'search_catalog' failed: \"<redacted>\"" in messages
+    assert "Tool 'get_item' failed: ValueError('<redacted>')" in messages
     assert all(_SECRET not in message for message in messages)
     assert any("rejected arguments" in message for message in messages)
     assert any("unexpected exception" in message for message in messages)
@@ -283,6 +289,7 @@ def test_http_tool_call_logs_outcome_without_arguments(tmp_path, monkeypatch, ca
 
     from umbra_py import mcp_server as ms
     from umbra_py import serve
+    from umbra_py._mcp_log import _MCP_SERVER_LOGGER
 
     state = {"mode": "ok"}
 
@@ -338,6 +345,7 @@ def test_http_tool_call_logs_outcome_without_arguments(tmp_path, monkeypatch, ca
     with (
         TestClient(app, client=("203.0.113.9", 50000)) as client,
         caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER),
+        caplog.at_level(logging.INFO, logger=_MCP_SERVER_LOGGER),
     ):
         ok = client.post("/mcp", json=body, headers=headers)
         assert ok.status_code == 200
@@ -359,14 +367,23 @@ def test_http_tool_call_logs_outcome_without_arguments(tmp_path, monkeypatch, ca
     assert tools[0]["session_id"] == "abcdef0123456789"
     assert tools[0]["client_net"] == _client_network_hash("203.0.113.9")
     assert tools[0]["client_net"] == _client_network_hash("203.0.113.7")
+    assert "203.0.113.9" not in json.dumps(tools[0])
     requests = [r for r in _records(caplog) if r["msg"] == "mcp_request"]
     assert requests
-    assert all(r["client_net"] == tools[0]["client_net"] for r in requests)
+    assert all(record["client_ip"] == "203.0.113.9" for record in requests)
+    assert all("client_net" not in record for record in requests)
     blob = "\n".join(r.getMessage() for r in caplog.records if r.name == MCP_REQUEST_LOGGER)
     assert _SECRET not in blob
     assert "classified site name" not in blob
     assert "12.345678" not in blob
-    assert "203.0.113.9" not in blob
+    tool_blob = "\n".join(
+        r.getMessage()
+        for r in caplog.records
+        if r.name == MCP_REQUEST_LOGGER and '"msg":"mcp_tool"' in r.getMessage()
+    )
+    assert "203.0.113.9" not in tool_blob
+    sdk_lines = [r.getMessage() for r in caplog.records if r.name == _MCP_SERVER_LOGGER]
+    assert "Tool 'search_catalog' failed: '<redacted>'" in sdk_lines
     # The client still receives the result and the error text. The text is
     # JSON-encoded inside the SSE payload, so the count is escaped.
     assert "isError" in ok.text and "false" in ok.text

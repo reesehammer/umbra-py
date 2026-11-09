@@ -19,7 +19,6 @@ from umbra_py._mcp_log import (
     MCP_REQUEST_LOGGER,
     McpRequestLog,
     StacSearchLog,
-    _client_network_hash,
     _StatelessSessionFilter,
     quiet_stateless_session_teardown,
 )
@@ -119,9 +118,7 @@ def test_initialize_logs_client_info_and_protocol(caplog):
     assert len(records) == 1
     record = records[0]
     assert record["msg"] == "mcp_request"
-    assert record["client_net"] == _client_network_hash("203.0.113.7")
-    assert "client_ip" not in record
-    assert "203.0.113.7" not in caplog.records[-1].getMessage()
+    assert record["client_ip"] == "203.0.113.7"
     assert record["user_agent"] == "claude-code/2.1"
     assert record["mcp_protocol_version"] == "2025-06-18"
     assert record["method"] == "initialize"
@@ -368,11 +365,8 @@ def test_get_search_logs_allowlisted_query_params_only(caplog):
     _downstream, sent, records = _search(caplog, scope, [])
     assert sent[0]["status"] == 200
     (record,) = records
-    line = caplog.records[-1].getMessage()
     assert record["msg"] == "stac_search"
-    assert record["client_net"] == _client_network_hash("203.0.113.7")
-    assert "client_ip" not in record
-    assert "203.0.113.7" not in line
+    assert record["client_ip"] == "203.0.113.7"
     assert record["user_agent"] == "stac-client/1.2"
     assert record["method"] == "GET"
     assert record["path"] == "/search"
@@ -384,6 +378,7 @@ def test_get_search_logs_allowlisted_query_params_only(caplog):
     assert record["status"] == 200
     assert isinstance(record["duration_ms"], float)
     assert "body_keys" not in record
+    line = caplog.records[-1].getMessage()
     assert "hidden-polygon" not in line
     assert "Classified Site" not in line
     assert "hidden-token" not in line
