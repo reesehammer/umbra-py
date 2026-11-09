@@ -33,7 +33,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 dependencies = [
-    "requests>=2.28",
+    "requests>=2.33.0",
     "click>=8.1",
     # Pure-Python, zero transitive deps -- hardens the remote S3 bucket-listing
     # XML parse against entity-expansion / XXE (see ``UmbraCatalog._parse_listing``).
@@ -71,7 +71,7 @@ mcp = ["mcp>=2", "umbra-py[viz]"]
 # determinism boundary (AI is opt-in, never implicit); it pulls in nothing
 # beyond the core dependency it relies on. `umbra describe` and `umbra embed`
 # additionally need the `viz` extra to render the quicklook they embed/send.
-ai = ["requests>=2.28"]
+ai = ["requests>=2.33.0"]
 # The catalog tools as native LangChain / LangGraph tools (`umbra_py.langchain`).
 # Only `langchain-core` — the lightweight tool/abstraction package, not the full
 # framework — plus `viz` for the render tools' PNGs. It mirrors the `mcp` extra:

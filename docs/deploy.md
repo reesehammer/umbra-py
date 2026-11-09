@@ -85,12 +85,34 @@ docker build -f deploy/Dockerfile -t umbra-py .
 docker run -p 8000:8000 -v umbra-data:/data umbra-py
 ```
 
-Both Dockerfiles start from official `python:3.12-slim`, pulled from Amazon
-ECR Public (`public.ecr.aws/docker/library/python:3.12-slim`). Docker publishes
-Official Images there, so a build does not depend on an anonymous Docker Hub
-pull. Override the registry with `--build-arg PYTHON_IMAGE=...` and keep the
-`3.12-slim` tag. `deploy/Dockerfile.mcp` uses the same default, so Railway
-needs no build-arg for it.
+Both Dockerfiles start from official `python:3.12-slim` on Amazon ECR Public,
+pinned by digest:
+
+`public.ecr.aws/docker/library/python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159`
+
+Docker publishes Official Images there, so a build does not depend on an
+anonymous Docker Hub pull. The pin is the manifest list (looked up 2026-10-29;
+the same digest is on `mirror.gcr.io`). CI retries ECR Public, then builds
+from `mirror.gcr.io/library/python:3.12-slim` at that digest. Override the base
+with `--build-arg PYTHON_IMAGE=...`. `deploy/Dockerfile.mcp` uses the same
+default, so Railway needs no build-arg for it.
+
+The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
+with `pip install --require-hashes`. Hatchling and its dependencies come
+from `deploy/build-requirements.txt` the same way, and this package is
+installed with `--no-deps --no-build-isolation`. Regenerate each lock from
+the repository root with the `uv pip compile` command in that file's header
+(Python 3.12, linux x86_64, wheels only, hashes on).
+
+The base digest is the `ARG PYTHON_IMAGE` line in both Dockerfiles.
+`.github/scripts/docker-build-ci.sh` reads it from the file being built.
+To bump it, look up the manifest-list digest of
+`public.ecr.aws/docker/library/python:3.12-slim`, confirm the same value on
+`mirror.gcr.io`, and replace it in both files. A Railway service variable
+named `PYTHON_IMAGE` overrides the pin. `deploy/Dockerfile` is the self-host
+image (`docker compose`, and the CI smoke test): extras there are the
+`UMBRA_EXTRAS` build-arg. Railway's `dockerfilePath` is
+`deploy/Dockerfile.mcp`.
 
 ## What the image does
 
@@ -376,9 +398,15 @@ docker run --rm -p 8000:8000 -v umbra-data:/data umbra-py:public
 # MCP:  POST http://127.0.0.1:8000/mcp
 ```
 
-The base image is the same `PYTHON_IMAGE` default as `deploy/Dockerfile`
-(official `python:3.12-slim` from `public.ecr.aws/docker/library/python:3.12-slim`).
-Leave that build-arg unset unless that registry is unreachable.
+The base image is the same digest-pinned `PYTHON_IMAGE` default as
+`deploy/Dockerfile`
+(`public.ecr.aws/docker/library/python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159`).
+Leave that build-arg unset unless that registry is unreachable, and do not
+set a service variable named `PYTHON_IMAGE` (Railway passes it as the
+build-arg and it replaces the pin). Dependencies come from
+`deploy/requirements.txt` and `deploy/build-requirements.txt`
+(`pip install --require-hashes`). The package itself is installed with
+`--no-deps --no-build-isolation`.
 
 Pass `mcp` as the first argument for MCP-only (no STAC).
 
