@@ -511,6 +511,9 @@ def test_from_release_downloads_and_opens(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         with CatalogIndex.from_release(dest, url=url) as idx:
             return {i.id for i in idx.search()}
 
@@ -541,6 +544,9 @@ def test_from_release_overwrites_existing(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         with CatalogIndex.from_release(dest, url=url) as idx:
             return {i.id for i in idx.search()}
 
@@ -618,6 +624,9 @@ def test_cli_index_fetch_then_search_local(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         return runner.invoke(cli_mod.cli, ["index", "fetch", "--db", db, "--url", url])
 
     fetched = run()
@@ -2073,7 +2082,7 @@ def test_cli_index_fetch_thumbnails_downloads_when_no_source_given(tmp_path, mon
     with CatalogIndex(db) as idx:
         idx.add(_A)
 
-    def fake_fetch(dest, *, url=None, progress=None):
+    def fake_fetch(dest, *, url=None, progress=None, insecure=False):
         Path(dest).write_bytes((tmp_path / "release.thumbs.db").read_bytes())
         return Path(dest)
 

@@ -65,6 +65,10 @@ jobs:
       ids: ${{ steps.publish.outputs.ids }}
       published: ${{ steps.publish.outcome }}
       thumbs: ${{ steps.thumbs.outputs.publish }}
+      # catalog.db digest for the attest job. That job is the only one with
+      # id-token / attestations; a failure there does not skip this job.
+      integrity: ${{ steps.integrity.outcome }}
+      catalog_db_sha256: ${{ steps.integrity.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -119,6 +123,17 @@ jobs:
             --parquet umbra-open-data.parquet \
             --json index-validation.json --markdown index-validation.md
 
+      # Hash before any upload. The thumbnail bake later mutates the local
+      # catalog.db, so this digest is the bytes the publish step is about to
+      # release. A sibling change that splits this job should keep this step
+      # with the upload below it.
+      - name: Write the catalog sha256 manifest
+        id: integrity
+        run: |
+          set -euo pipefail
+          digest=$(python -c "import umbra_py.index as i; i.write_release_manifest('catalog.sha256', ['catalog.db', 'umbra-open-data.parquet', 'index-validation.json', 'index-validation.md']); print(i.parse_sha256_manifest(open('catalog.sha256', encoding='utf-8').read())['catalog.db'])")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       # Publish the crawl BEFORE deriving anything further from it. The order
       # matters: the first two runs of this workflow both died in the tiling
       # step below, and because that step ran first, a completed crawl, 2 725
@@ -128,8 +143,13 @@ jobs:
       # basemap is derived from it. A failure deriving the basemap should cost
       # the basemap, not the snapshot, so the upload of each artifact now sits
       # with the step that builds it.
+      #
+      # catalog.sha256 is deleted before catalog.db is uploaded and replaced
+      # immediately after. A missing manifest makes a client warn and continue;
+      # a stale one makes it reject the new snapshot.
       - name: Publish to the rolling catalog-index release
         id: publish
+        if: ${{ !cancelled() && steps.integrity.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -154,9 +174,14 @@ jobs:
             gh release create catalog-index \
               --title "Umbra open-data catalog index" --notes "$notes"
           fi
+          assets="$(gh release view catalog-index --json assets --jq '.assets[].name')"
+          if printf '%s\n' "$assets" | grep -qx 'catalog.sha256'; then
+            gh release delete-asset catalog-index catalog.sha256 --yes
+          fi
           gh release upload catalog-index \
             catalog.db umbra-open-data.parquet \
             index-validation.json index-validation.md --clobber
+          gh release upload catalog-index catalog.sha256 --clobber
           # The released asset's ETag is what the hosted API reports as
           # /healthz `snapshot` once it has swapped this index in; read it with
           # the same HEAD + normalization the entrypoint's --if-changed uses.
@@ -433,7 +458,8 @@ jobs:
     needs: publish
     if: >-
       ${{ !cancelled() && github.repository == 'reesehammer/umbra-py'
-      && needs.publish.outputs.published == 'success' }}
+      && needs.publish.outputs.published == 'success'
+      && needs.publish.outputs.integrity == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -457,7 +483,7 @@ jobs:
       # still redeploys the new index. The confirm step checks /healthz.
       - name: Redeploy the hosted API
         id: redeploy
-        if: ${{ !cancelled() && needs.publish.outputs.published == 'success' }}
+        if: ${{ !cancelled() && needs.publish.outputs.published == 'success' && needs.publish.outputs.integrity == 'success' }}
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -548,3 +574,24 @@ jobs:
       - name: Confirm the hosted MCP lists the stable tools
         if: ${{ !cancelled() && steps.redeploy.outputs.token == 'true' && steps.confirm.outcome == 'success' }}
         run: python -c "import umbra_py.mcp_smoke as s; s.assert_hosted_core_tools()"
+
+  # Attests catalog.db after the publish job has finished baking, tiling, and
+  # deploying. Nothing needs this job, and continue-on-error keeps an attest
+  # failure off that path. id-token and attestations live only here, not on
+  # the job that holds RAILWAY_TOKEN. The client checks catalog.sha256; it
+  # does not verify this signature.
+  attest:
+    needs: publish
+    if: ${{ needs.publish.result == 'success' && needs.publish.outputs.catalog_db_sha256 != '' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - name: Attest the catalog snapshot
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: catalog.db
+          subject-digest: sha256:${{ needs.publish.outputs.catalog_db_sha256 }}
