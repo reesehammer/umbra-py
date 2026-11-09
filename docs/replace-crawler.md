@@ -101,6 +101,13 @@ The parameters are the ones `/search` implements:
   key `gec`.
 - `limit` — page size. Default 10, maximum 10000. The next page is `token`
   (the offset) on the `next` link.
+- `area` — a task-name substring (case-insensitive). A hit is the same
+  search as before. If it matches no Umbra task and `bbox` / `intersects`
+  are omitted, `/search` and `/sites` geocode it as a place and search that
+  footprint. The document then includes `matched_by` (`geocode`),
+  `resolved_place`, and `resolved_bbox`. If geocoding fails too, `hint` is
+  `no task named X; try place= or bbox=` instead of a bare empty result.
+  `GET /collections/.../items` does not do this fallback.
 
 The programs are the files the daily canary runs. They live in
 [`docs/examples/replace_crawler/`](https://github.com/reesehammer/umbra-py/tree/main/docs/examples/replace_crawler).

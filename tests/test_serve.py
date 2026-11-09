@@ -25,6 +25,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from umbra_py import serve  # noqa: E402
+from umbra_py.exceptions import GeocodeError  # noqa: E402
 from umbra_py.index import CatalogIndex  # noqa: E402
 from umbra_py.models import UmbraItem  # noqa: E402
 
@@ -985,12 +986,153 @@ def test_search_rejects_unknown_product_type(client):
     assert "BOGUS" in resp.json()["detail"]
 
 
-def test_search_filters_by_area(client):
-    # The fixture files every item under the "Testville" task.
-    assert client.get("/search?area=Testville").json()["context"]["returned"] == 3
-    assert client.get("/search?area=Nowhere").json()["context"]["returned"] == 0
-    # Fuzzy widens a lowercased token to the same task.
-    assert client.get("/search?area=testville&fuzzy=true").json()["context"]["returned"] == 3
+def test_search_filters_by_area(client, monkeypatch):
+    # The fixture files every item under the "Testville" task. A hit is the
+    # same document as before this fallback existed.
+    hit = client.get("/search?area=Testville").json()
+    assert hit["context"]["returned"] == 3
+    assert "matched_by" not in hit
+    assert "hint" not in hit
+    assert "resolved_place" not in hit
+
+    def _no_geocode(_query: str):
+        raise GeocodeError("No place matched 'Nowhere'.")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _no_geocode)
+    miss = client.get("/search?area=Nowhere")
+    assert miss.status_code == 200
+    body = miss.json()
+    assert body["context"]["returned"] == 0
+    assert body["features"] == []
+    assert body["hint"] == "no task named Nowhere; try place= or bbox="
+    assert "matched_by" not in body
+    # Fuzzy widens a lowercased token to the same task, and still does not geocode.
+    fuzzy = client.get("/search?area=testville&fuzzy=true").json()
+    assert fuzzy["context"]["returned"] == 3
+    assert "matched_by" not in fuzzy
+
+
+_AUSTIN_BBOX = (-69.0, 10.0, -67.0, 11.0)
+
+
+def _geocode_austin(query: str):
+    return (_AUSTIN_BBOX, f"{query}, Texas, United States")
+
+
+def test_search_area_miss_geocodes_the_footprint(client, monkeypatch):
+    """A place name in area= searches the geocoded box and says so."""
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _geocode_austin)
+    resp = client.get("/search?area=Austin")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["matched_by"] == "geocode"
+    assert body["resolved_place"] == "Austin, Texas, United States"
+    assert body["resolved_bbox"] == list(_AUSTIN_BBOX)
+    assert body["context"]["returned"] == 3
+    assert "hint" not in body
+
+    posted = client.post("/search", json={"area": "Austin", "limit": 10})
+    assert posted.status_code == 200
+    posted_body = posted.json()
+    assert posted_body["matched_by"] == "geocode"
+    assert posted_body["context"]["returned"] == 3
+
+
+def test_search_area_geocode_busy_is_503(client, monkeypatch):
+    """A busy or unreachable geocoder is an error, not the empty-result hint."""
+
+    def _busy(_query: str):
+        raise GeocodeError("Geocoding is busy on this host; retry in a few seconds.")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _busy)
+    resp = client.get("/search?area=Austin")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Geocoding is busy on this host; retry in a few seconds."
+
+
+def test_search_area_with_bbox_does_not_geocode(client, monkeypatch):
+    """An explicit footprint keeps area as a task filter."""
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded an area that already had a bbox")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _boom)
+    resp = client.get("/search?area=Nowhere&bbox=0,0,1,1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["context"]["returned"] == 0
+    assert "hint" not in body
+    assert "matched_by" not in body
+
+
+def test_items_area_does_not_geocode(client, monkeypatch):
+    """The collection items route is still a task filter only."""
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded /collections items")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _boom)
+    path = f"/collections/{COLLECTION}/items?area=Nowhere"
+    resp = client.get(path)
+    assert resp.status_code == 200
+    assert resp.json()["context"]["returned"] == 0
+
+
+def test_sites_area_miss_geocodes_and_a_double_miss_hints(sites_client, monkeypatch):
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _geocode_austin)
+    hit = sites_client.get("/sites?area=Austin")
+    assert hit.status_code == 200
+    body = hit.json()
+    assert body["matched_by"] == "geocode"
+    assert body["resolved_place"] == "Austin, Texas, United States"
+    assert body["resolved_bbox"] == list(_AUSTIN_BBOX)
+    assert body["resolved_area"] is None
+    assert [site["task"] for site in body["sites"]] == ["Alpha", "Beta"]
+
+    posted = sites_client.post("/sites", json={"area": "Austin"})
+    assert posted.status_code == 200
+    assert posted.json()["matched_by"] == "geocode"
+
+    def _miss(_query: str):
+        raise GeocodeError("No place matched 'NotAPlace'.")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _miss)
+    missed = sites_client.get("/sites?area=NotAPlace")
+    assert missed.status_code == 200
+    missed_body = missed.json()
+    assert missed_body["sites"] == []
+    assert missed_body["hint"] == "no task named NotAPlace; try place= or bbox="
+    assert missed_body["resolved_area"] == "NotAPlace"
+    assert "matched_by" not in missed_body
+
+
+def test_public_area_geocode_is_cached(index_path, tmp_path, monkeypatch):
+    """The public host remembers a place and does not call Nominatim twice."""
+    pytest.importorskip("mcp")
+    calls: list[str] = []
+
+    def _once(query: str):
+        calls.append(query)
+        return (_AUSTIN_BBOX, "Austin, Texas, United States")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _once)
+    from umbra_py.geocode import _public_geocode
+
+    _public_geocode.clear()
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    try:
+        with TestClient(app) as public:
+            first = public.get("/search?area=Austin")
+            second = public.get("/search?area=Austin")
+    finally:
+        from umbra_py import mcp_server as ms
+
+        ms.configure(cog_streaming=None)
+        _public_geocode.clear()
+    assert first.status_code == 200
+    assert first.json()["matched_by"] == "geocode"
+    assert second.json()["matched_by"] == "geocode"
+    assert calls == ["Austin"]
 
 
 def test_items_endpoint_filters_by_product_types(client):
@@ -1246,6 +1388,8 @@ def test_sites_filters_by_area(sites_client):
     body = sites_client.get("/sites?area=Beta").json()
     assert [s["task"] for s in body["sites"]] == ["Beta"]
     assert body["resolved_area"] == "Beta"
+    assert "matched_by" not in body
+    assert "hint" not in body
 
 
 def test_sites_filters_by_datetime(sites_client):

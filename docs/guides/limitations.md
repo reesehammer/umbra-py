@@ -50,9 +50,12 @@ listings and is slow on an unconstrained query — that is why
 community `umbra serve --public` host exists (see [Deploy](../deploy.md)).
 Prefer `--local` for anything you will run more than once.
 
-`area=` is a task-directory name, not a geocoded place. `--place` (CLI only)
-geocodes via Nominatim to a **rectangle**, so it can include nearby ground
-outside the named place.
+`area=` on the library and the CLI is a task-directory name, not a geocoded
+place. `--place` geocodes via Nominatim to a **rectangle**, so it can include
+nearby ground outside the named place. `GET`/`POST /search` and `/sites` (and
+the MCP tools `search_catalog` and `find_repeat_sites`) fall back to that
+geocoder when `area=` matches no task name and no bbox or polygon was given.
+The response then says `matched_by: geocode`. A task-name hit is unchanged.
 
 The index is what Umbra has published, rebuilt weekly. `umbra index info`
 (and `index_stats`) report `built_at` and `end`, the newest plausible

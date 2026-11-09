@@ -226,6 +226,103 @@ def test_search_catalog_geocodes_place_and_returns_cards(sample_item_dict, monke
     # The geocoded bbox is passed through to the deterministic search layer.
     assert _FakeCatalog.kwargs["bbox"] == (-68.0, 10.0, -67.0, 11.0)
     assert _FakeCatalog.kwargs["limit"] == 5
+    # place= is the geocoder path already. It does not add the area-fallback mark.
+    assert "matched_by" not in out
+    assert "hint" not in out
+
+
+def test_search_catalog_area_hit_adds_nothing(sample_item_dict, monkeypatch):
+    """A task-name area= is the same card as before, with no geocode fields."""
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded a task-name hit")
+
+    monkeypatch.setattr(ms, "_geocode_place", _boom)
+    out = ms.search_catalog(area="anywhere", limit=20, local=False)
+    assert out["count"] == 1
+    assert out["items"][0]["id"] == sample_item_dict["id"]
+    assert "matched_by" not in out
+    assert "hint" not in out
+    assert _FakeCatalog.kwargs["area"] == "anywhere"
+    assert _FakeCatalog.kwargs["limit"] == 20
+
+
+def test_search_catalog_area_miss_geocodes_and_reports_it(sample_item_dict, monkeypatch):
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    monkeypatch.setattr(
+        ms, "_geocode_place", lambda _query: ((-97.9, 30.1, -97.5, 30.5), "Austin, Texas")
+    )
+    out = ms.search_catalog(area="Austin", limit=20, local=False)
+    assert out["matched_by"] == "geocode"
+    assert out["resolved_place"] == "Austin, Texas"
+    assert out["resolved_bbox"] == [-97.9, 30.1, -97.5, 30.5]
+    assert out["count"] == 1
+    assert "hint" not in out
+    assert _FakeCatalog.kwargs["area"] is None
+    assert _FakeCatalog.kwargs["bbox"] == (-97.9, 30.1, -97.5, 30.5)
+
+
+def test_search_catalog_area_and_geocode_miss_returns_a_hint(monkeypatch):
+    from umbra_py.exceptions import GeocodeError
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after both misses")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+
+    def _miss(_query: str):
+        raise GeocodeError("No place matched 'TSMC'.")
+
+    monkeypatch.setattr(ms, "_geocode_place", _miss)
+    out = ms.search_catalog(area="TSMC", local=False)
+    assert out["count"] == 0
+    assert out["items"] == []
+    assert out["hint"] == "no task named TSMC; try place= or bbox="
+    assert "matched_by" not in out
+
+
+def test_find_repeat_sites_area_miss_geocodes(monkeypatch):
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([_site_pass("Centerfield", d) for d in (1, 3)])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    monkeypatch.setattr(
+        ms, "_geocode_place", lambda _query: ((-112.1, 39.0, -111.8, 39.3), "Dubai")
+    )
+    out = ms.find_repeat_sites(area="Dubai", local=False)
+    assert out["matched_by"] == "geocode"
+    assert out["resolved_place"] == "Dubai"
+    assert out["resolved_area"] is None
+    assert out["count"] == 1
+    assert _FakeCatalog.kwargs["area"] is None
+    assert _FakeCatalog.kwargs["bbox"] == (-112.1, 39.0, -111.8, 39.3)
 
 
 def _site_pass(task, day, *, pols=("VV",), assets=("GEC",)):
@@ -621,10 +718,13 @@ def test_find_repeat_sites_local_ranks_whole_index_not_a_capped_pool(tmp_path, m
 def test_find_repeat_sites_local_forwards_filters_to_rank_sites(tmp_path, monkeypatch):
     # The local path threads geography / task-name / product / SAR filters (and
     # top / min_passes) down to CatalogIndex.rank_sites, and never re-lists a
-    # capped pool through search.
+    # capped pool through search. Centerfield is in the index so this stays a
+    # task-name hit (an unmatched area would geocode instead).
     from umbra_py.index import CatalogIndex
 
-    db = _build_sites_index(tmp_path, [_site_pass("Alpha", d) for d in (1, 2)])
+    db = _build_sites_index(
+        tmp_path, [_site_pass("Alpha", d) for d in (1, 2)] + [_site_pass("Centerfield", 3)]
+    )
     monkeypatch.setattr(ms, "default_index_path", lambda: db)
     captured: dict = {}
 

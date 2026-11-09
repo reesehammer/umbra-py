@@ -9,6 +9,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Added
+- **`area` on `GET`/`POST /search` and `/sites` falls back to place geocoding**
+  when it matches no Umbra task name and the request has no bbox or
+  intersects polygon. The response adds `matched_by: geocode` with the
+  resolved place name and bbox; if geocoding fails too, `hint` is
+  `no task named X; try place= or bbox=` instead of a bare empty result.
+  A task-name hit is unchanged. `search_catalog` and `find_repeat_sites`
+  add the same fields without changing tool names, arguments, or defaults.
+  On the public host that geocoding is cached and bounded the same way as
+  `place=` (one in-flight Nominatim call, a one-second gap, at most five
+  waiters, and a ten-minute memory of names that do not resolve).
+
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
   (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,

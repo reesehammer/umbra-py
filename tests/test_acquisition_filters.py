@@ -336,6 +336,9 @@ def test_mcp_search_catalog_forwards_acquisition_filters(monkeypatch):
     mcp = pytest.importorskip("umbra_py.mcp_server")
 
     class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return True
+
         def search(self, **kwargs):
             _FakeCatalog.kwargs = kwargs
             return iter([])

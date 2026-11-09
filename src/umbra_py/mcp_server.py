@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
+from .area_fallback import geocode_note, resolve_area_fallback
 from .catalog import UmbraCatalog
 from .constants import (
     AI_PROVENANCE,
@@ -67,7 +68,8 @@ from .constants import (
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_place as _geocode_place
+from .geocode import geocode_for_host
+from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
     CatalogIndex,
@@ -255,6 +257,25 @@ def _cog_streaming_allowed() -> bool:
         return _cog_streaming_override
     raw = os.environ.get(COG_STREAMING_ENV, "1")
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _geocode_place(query: str) -> tuple[Any, str]:
+    """Nominatim directly off the public host, and the shared gate on it.
+
+    PR #318 defines this same wrapper beside a ``PublicGeocodeGate`` in this
+    file. The gate lives in :mod:`umbra_py.geocode` so ``/search`` and
+    ``/sites`` share one cache and one Nominatim slot with these tools. On
+    merge, delete that copy and keep this call.
+    """
+    if _cog_streaming_allowed():
+        return _nominatim_geocode(query)
+    return geocode_for_host(query, public=True)
+
+
+def _geocode_area(query: str) -> tuple[Any, str]:
+    """One quick public-host permit, then :func:`_geocode_place`."""
+    with _public_net_slot():
+        return _geocode_place(query)
 
 
 def _model_key_configured() -> bool:
@@ -744,7 +765,12 @@ def search_catalog(
     punctuation-independent and typo-tolerant, resolved deterministically with
     no model call, so ``"beet piler"`` still reaches ``"Beet Piler - ND"`` and
     ``"utah centerfield"`` still reaches ``"Centerfield,
-    Utah"``; set ``semantic`` instead to treat ``area`` as a plain-language
+    Utah"``). When ``area`` matches no task and ``bbox``, ``intersects``, and
+    ``place`` are omitted, it is geocoded and that footprint is searched; the
+    result then adds ``matched_by`` (``geocode``), ``resolved_place``, and
+    ``resolved_bbox``. If geocoding fails too, ``hint`` is ``no task named X;
+    try place= or bbox=``. A task-name hit adds nothing. Set ``semantic``
+    instead to treat ``area`` as a plain-language
     *description* of a site whose name you don't know and resolve it to the
     closest task names by *meaning* via the prebuilt embedding index, so
     ``"grain storage north dakota"`` reaches ``"Beet Piler - ND"`` -- a query
@@ -840,7 +866,40 @@ def search_catalog(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
     try:
+        # semantic=True already resolved ``area`` to a task name, or returned
+        # before this. Do not geocode that label. ``intersects`` (the GeoJSON
+        # filter on this same signature) is an explicit footprint: area stays
+        # a task filter when it is set.
+        if not semantic:
+            decision = resolve_area_fallback(
+                source,
+                search_area,
+                fuzzy=search_fuzzy,
+                bbox=resolved_bbox,
+                intersects=geometry,
+                place=place,
+                geocode=_geocode_area,
+            )
+            if decision.hint:
+                return {
+                    "count": 0,
+                    "source": label,
+                    "resolved_place": None,
+                    "resolved_bbox": None,
+                    "resolved_area": resolved_area,
+                    "semantic_matches": semantic_matches,
+                    "items": [],
+                    "hint": decision.hint,
+                    "attribution": ATTRIBUTION,
+                }
+            if decision.matched_by:
+                resolved_bbox = decision.bbox
+                resolved_place = decision.place
+                search_area = None
+                search_fuzzy = False
+                matched_note = geocode_note(decision)
         with _public_net_slot(long=True) if not is_index else nullcontext():
             results = source.search(
                 bbox=resolved_bbox,
@@ -863,7 +922,7 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
+    payload = {
         "count": len(cards),
         "source": label,
         "resolved_place": resolved_place,
@@ -873,6 +932,9 @@ def search_catalog(
         "items": cards,
         "attribution": ATTRIBUTION,
     }
+    if matched_note:
+        payload.update(matched_note)
+    return payload
 
 
 def find_repeat_sites(
@@ -930,6 +992,10 @@ def find_repeat_sites(
     the minimum a change composite can use; raise it to find only deeply-revisited
     series), counted on the depth ``rank_by`` measures -- raw dated passes by
     default, the usable (comparable) series' depth under ``rank_by="comparable"``.
+    An ``area`` that matches no task, with no ``bbox``, ``intersects``, or
+    ``place``, is geocoded. The result then adds ``matched_by`` (``geocode``)
+    plus the resolved place and bbox, or ``hint`` when geocoding fails. A
+    task-name hit adds nothing.
 
     ``rank_by`` chooses the order: ``"passes"`` (the default) ranks by raw pass
     count; ``"comparable"`` ranks by *analysable* depth instead -- the
@@ -1089,7 +1155,51 @@ def find_repeat_sites(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
+    search_area = area
+    search_fuzzy = fuzzy
     try:
+        # Same rule as search_catalog. ``intersects`` is an explicit footprint
+        # (the GeoJSON filter on this signature): area stays a task filter.
+        decision = resolve_area_fallback(
+            source,
+            search_area,
+            fuzzy=search_fuzzy,
+            bbox=resolved_bbox,
+            intersects=geometry,
+            place=place,
+            geocode=_geocode_area,
+        )
+        if decision.hint:
+            return {
+                "count": 0,
+                "source": label,
+                "resolved_place": resolved_place,
+                "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+                "resolved_area": area,
+                "query": site_query_echo(
+                    rank_by=rank_by,
+                    top=top,
+                    min_passes=min_passes,
+                    active_since=active_since,
+                    active_before=active_before,
+                    first_since=first_since,
+                    first_before=first_before,
+                    max_revisit_days=max_revisit_days,
+                    median_revisit_days=median_revisit_days,
+                    min_span_days=min_span_days,
+                    max_span_days=max_span_days,
+                ),
+                "sites": [],
+                "hint": decision.hint,
+                "attribution": ATTRIBUTION,
+            }
+        if decision.matched_by:
+            resolved_bbox = decision.bbox
+            resolved_place = decision.place
+            search_area = None
+            search_fuzzy = False
+            matched_note = geocode_note(decision)
         if isinstance(source, CatalogIndex):
             # The index can answer a site's *whole-archive* depth as a GROUP BY
             # task, so route through rank_sites rather than re-listing a
@@ -1103,8 +1213,8 @@ def find_repeat_sites(
                 start=start,
                 end=end,
                 product_types=list(products) if products else None,
-                area=area,
-                fuzzy=fuzzy,
+                area=search_area,
+                fuzzy=search_fuzzy,
                 polarizations=list(polarizations) if polarizations else None,
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
@@ -1130,8 +1240,8 @@ def find_repeat_sites(
                         start=start,
                         end=end,
                         product_types=list(products) if products else None,
-                        area=area,
-                        fuzzy=fuzzy,
+                        area=search_area,
+                        fuzzy=search_fuzzy,
                         polarizations=list(polarizations) if polarizations else None,
                         min_incidence=min_incidence,
                         max_incidence=max_incidence,
@@ -1157,12 +1267,12 @@ def find_repeat_sites(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
+    payload = {
         "count": len(sites),
         "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": area,
+        "resolved_area": None if matched_note else area,
         # Echo how the answer was ranked and selected (single-sourced with
         # GET/POST /sites), so a chain reads it from the result rather than its
         # own request. Dates are the raw expressions the caller passed.
@@ -1182,6 +1292,9 @@ def find_repeat_sites(
         "sites": [site.to_dict() for site in sites],
         "attribution": ATTRIBUTION,
     }
+    if matched_note:
+        payload.update(matched_note)
+    return payload
 
 
 def get_item(url: str) -> dict[str, Any]:

@@ -2453,6 +2453,21 @@ class CatalogIndex:
 
     # -- querying --------------------------------------------------------------
 
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        """Whether ``area`` would select at least one indexed task.
+
+        The same filter as :meth:`search` (substring, or the fuzzy token
+        match), stopped at the first row. Closing the generator finishes
+        the SQL cursor before the caller's own search runs.
+        """
+        stream = self.search(area=area, fuzzy=fuzzy, limit=1)
+        try:
+            return next(stream, None) is not None
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
     def search(
         self,
         *,

@@ -134,6 +134,17 @@ def fake_bucket(monkeypatch):
     return cat
 
 
+def test_has_matching_task_reuses_the_prefix_listing(fake_bucket):
+    """The area fallback lists task directories once, then the search reuses it."""
+    assert fake_bucket.has_matching_task("AIR") is True
+    listed_once = len(fake_bucket._listed)
+    assert listed_once > 0
+    items = list(fake_bucket.search(area="AIR", start="2024-01-01", end="2024-12-31"))
+    assert len(fake_bucket._listed) == listed_once
+    assert {item.id for item in items} == {"a"}
+    assert fake_bucket.has_matching_task("nowhere-at-all") is False
+
+
 def test_search_walks_named_and_uuid_tasks(fake_bucket):
     items = list(fake_bucket.search(start="2024-01-01", end="2024-12-31"))
     assert sorted(i.id for i in items) == ["a", "b"]
