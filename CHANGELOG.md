@@ -24,8 +24,33 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   and `Referrer-Policy: strict-origin-when-cross-origin` on every response
   (OpenStreetMap refuses a tile request that sends no Referer). A `stac_href`
   that is not http(s) is not turned into a link.
+- **`umbra index fetch` checks the published snapshot.** The weekly workflow
+  uploads `catalog.sha256` and attests the `catalog.db` digest. A fetch verifies
+  `catalog.db` when the manifest is present, and warns and continues when it is
+  missing (HTTP 403, 404, or 410). Index URLs (`--url`, including
+  `UMBRA_INDEX_URL`) must be https unless `--insecure-url` or
+  `UMBRA_INSECURE_INDEX_URL=1`. A downloaded snapshot is opened read-only with
+  SQLite's defensive settings; triggers and unexpected objects are rejected.
+- **Downloads no longer trust the filename in an asset URL.** The basename is
+  percent-decoded once; a leading dot, a control character, or a backslash is
+  refused, and the file must stay inside the destination directory.
+  `umbra download --max-bytes` caps a transfer. Local MCP
+  `download_asset(confirm=true)` keeps `dest_dir`. When
+  `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
+  The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
+  `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a
+  `/64`); each client may hold two catalog reads, and a timed-out read interrupts SQLite.
+  Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
+  (with a `note` when clamped), bodies over 1 MiB are HTTP 413, and a malformed
+  public `POST /search` is HTTP 400.
+  STAC links use optional `UMBRA_PUBLIC_BASE_URL` when it is an `http(s)://host`
+  origin, otherwise the edge's `X-Forwarded-Proto` and host, and `GET /mcp/`
+  keeps that https scheme. Public `geocode_place` caches names and misses,
+  calls Nominatim about once a second, and fails fast when the whole wait
+  would exceed a few seconds. Local `umbra serve` and local MCP are unchanged.
 - **The public host does not write the catalog or reveal its path.**
   `watch_site` on `umbra serve --public` reports the current matches as new,
   stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full

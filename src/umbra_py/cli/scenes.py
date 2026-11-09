@@ -147,6 +147,12 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
     ),
 )
 @click.option("--dest", default=".", show_default=True, help="Output directory.")
+@click.option(
+    "--max-bytes",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Stop if an asset is larger than this many bytes.",
+)
 @click.option("--overwrite", is_flag=True, help="Re-download if the file exists.")
 @click.option(
     "--json",
@@ -156,7 +162,7 @@ def describe(item_url, asset, model, max_size, db, preview, db_path, as_json) ->
     "JSON array on stdout (see docs/schemas/download.schema.json), instead of the "
     "human progress lines. Progress stays on stderr.",
 )
-def download(item_url, assets, dest, overwrite, as_json) -> None:
+def download(item_url, assets, dest, max_bytes, overwrite, as_json) -> None:
     """Download asset(s) given a sidecar URL, a GEC/SICD filename, or an acquisition stem.
 
     ITEM is a ``*.stac.v2.json`` URL or a legacy ``*_METADATA.json`` URL (2023
@@ -186,12 +192,14 @@ def download(item_url, assets, dest, overwrite, as_json) -> None:
     for name in names:
         if not as_json:
             click.echo(f"Downloading {name} of {item.id} ...")
+        extra = {} if max_bytes is None else {"max_bytes": max_bytes}
         path = download_item(
             item,
             dest,
             assets=[name],
             overwrite=overwrite,
             progress=None if as_json else _shared._progress_printer(name),
+            **extra,
         )[0]
         if as_json:
             records.append(

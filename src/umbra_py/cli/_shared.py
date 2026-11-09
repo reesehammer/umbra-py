@@ -24,7 +24,7 @@ from .._http import get_json
 from .._spinner import OrbitSpinner
 from ..catalog import _LEGACY_SIDECAR_SUFFIX, UmbraCatalog
 from ..constants import CANOPY_TOKEN_ENV
-from ..exceptions import CatalogError, GeocodeError
+from ..exceptions import CatalogError, GeocodeError, IndexRefreshError
 from ..geocode import geocode_place
 from ..index import (
     BakedPreview,
@@ -38,6 +38,22 @@ from ..models import UmbraItem
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..showcase import FeaturedSite
+
+
+def _require_release_https(url: str | None, insecure: bool) -> None:
+    """Refuse a non-https release ``--url`` unless the insecure opt-out is set.
+
+    ``UMBRA_INDEX_URL`` is the container's name for the same ``--url``. The
+    opt-out is ``--insecure-url`` or ``UMBRA_INSECURE_INDEX_URL``.
+    """
+    if not url:
+        return
+    from ..index import require_index_https  # noqa: PLC0415
+
+    try:
+        require_index_https(url, insecure=insecure)
+    except IndexRefreshError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
