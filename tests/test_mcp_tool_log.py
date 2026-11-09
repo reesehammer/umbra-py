@@ -80,6 +80,11 @@ def test_network_hash_is_the_prefix_not_the_address():
     assert same_v6 != _client_network_hash("2001:db8:1:3::1")
     assert _client_network_hash("testclient") is None
     assert _client_network_hash(None) is None
+    # The public host stores an IPv6 client as this /64. It hashes as the network.
+    bucket = "2001:db8:1:2::/64"
+    assert _client_network_hash(bucket) == same_v6
+    assert _client_network_hash("203.0.113.0/24") == first
+    assert bucket not in (same_v6 or "")
     for host in ("203.0.113.7", "203.0.113.0", "::ffff:203.0.113.7", "2001:db8:1:2::1"):
         assert host not in (first or "")
         assert host not in (same_v6 or "")
@@ -391,6 +396,87 @@ def test_http_tool_call_logs_outcome_without_arguments(tmp_path, monkeypatch, ca
     everything = "\n".join(r.getMessage() for r in caplog.records)
     assert _SECRET not in everything
     assert "classified site name" not in everything
+
+
+@pytest.mark.skipif(not _HAS_SERVE_MCP, reason="serve + mcp extras")
+def test_public_tool_hash_uses_the_derived_client(tmp_path, monkeypatch, caplog):
+    """The tool hash is the public client_ip, not the socket peer."""
+    from fastapi.testclient import TestClient
+
+    from umbra_py import mcp_server as ms
+    from umbra_py import serve
+
+    def fake_search(
+        bbox: list[float] | None = None,
+        intersects: dict | None = None,
+        place: str | None = None,
+        area: str | None = None,
+        fuzzy: bool = False,
+        semantic: bool = False,
+        min_score: float = 0.0,
+        start: str | None = None,
+        end: str | None = None,
+        products: list[str] | None = None,
+        polarizations: list[str] | None = None,
+        min_incidence: float | None = None,
+        max_incidence: float | None = None,
+        max_resolution: float | None = None,
+        canonical: bool | None = None,
+        limit: int = 20,
+        max_per_task: int | None = None,
+        local: bool | None = None,
+    ) -> dict:
+        return {"count": 1, "items": [{"id": "a"}]}
+
+    fake_search.__name__ = "search_catalog"
+    monkeypatch.setattr(ms, "search_catalog", fake_search)
+    monkeypatch.delenv("UMBRA_TRUSTED_PROXY_HOPS", raising=False)
+    app = serve.build_app(
+        tmp_path / "catalog.db", mcp=True, public=True, artifacts=False, rate_limit=0
+    )
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "search_catalog", "arguments": {"limit": 1}},
+    }
+    base = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+    }
+    with (
+        TestClient(app, client=("10.0.0.8", 443)) as client,
+        caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER),
+    ):
+        real = client.post("/mcp", json=body, headers={**base, "x-real-ip": "203.0.113.9"})
+        assert real.status_code == 200
+        forwarded = client.post(
+            "/mcp",
+            json=body,
+            headers={**base, "x-forwarded-for": "1.1.1.1, 203.0.113.50"},
+        )
+        assert forwarded.status_code == 200
+        v6 = client.post("/mcp", json=body, headers={**base, "x-real-ip": "2001:db8:1:2::abcd"})
+        assert v6.status_code == 200
+
+    tools = [r for r in _records(caplog) if r["msg"] == "mcp_tool"]
+    requests = [r for r in _records(caplog) if r["msg"] == "mcp_request"]
+    assert len(tools) == 3 and len(requests) == 3
+    assert requests[0]["client_ip"] == "203.0.113.9"
+    assert "client_net" not in requests[0]
+    assert tools[0]["client_net"] == _client_network_hash("203.0.113.9")
+    assert tools[0]["client_net"] != _client_network_hash("10.0.0.8")
+    assert "203.0.113.9" not in json.dumps(tools[0])
+    assert requests[1]["client_ip"] == "203.0.113.50"
+    assert tools[1]["client_net"] == _client_network_hash("203.0.113.50")
+    assert tools[1]["client_net"] != _client_network_hash("1.1.1.1")
+    assert requests[2]["client_ip"] == "2001:db8:1:2::/64"
+    assert tools[2]["client_net"] == _client_network_hash("2001:db8:1:2::abcd")
+    assert tools[2]["client_net"] == _client_network_hash(requests[2]["client_ip"])
+    blob = "\n".join(r.getMessage() for r in caplog.records if r.name == MCP_REQUEST_LOGGER)
+    assert "2001:db8:1:2::abcd" not in blob
+    assert "10.0.0.8" not in blob
+    assert "1.1.1.1" not in blob
 
 
 @pytest.mark.skipif(not _HAS_SERVE_MCP, reason="serve + mcp extras")

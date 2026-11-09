@@ -14,16 +14,16 @@ JSON-RPC pipe).
   ``mcp_tool``). Server middleware, not an ASGI wrapper, so it sees whether
   the tool succeeded.
 
-What is logged is metadata. The HTTP lines record ``client_ip``, the peer the
-transport already resolved (the ASGI scope's client). uvicorn rewrites that
-from ``X-Forwarded-For`` when it runs with ``--proxy-headers`` (``umbra serve
---public``). The tool line does not record the address. Its network field is
-:func:`_client_network_hash`: the first 16 hex characters of SHA-256 over
-``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An IPv4-mapped IPv6 address uses the
-IPv4 ``/24``. The same prefix hashes the same on every replica. The peer is
-the request the MCP SDK attached. This module does not read
-``X-Forwarded-For`` or ``X-Real-IP``; a middleware that rewrites that peer
-before the log runs is the address the hash is taken from.
+What is logged is metadata. The HTTP lines record ``client_ip``, the ASGI
+scope's client. ``umbra serve --public`` rewrites that from ``X-Real-IP``
+(or the rightmost trusted ``X-Forwarded-For`` hop) before these lines run;
+an IPv6 client is stored as its ``/64``. A plain ``umbra serve`` logs the
+socket peer. The tool line does not record the address. Its network field
+is :func:`_client_network_hash` of that same client: the first 16 hex
+characters of SHA-256 over ``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An
+IPv4-mapped IPv6 address uses the IPv4 ``/24``. The same prefix hashes the
+same on every replica. This module does not read the forwarding headers
+itself.
 
 A search logs the client IP, the user agent, HTTP method, path, status and
 duration, plus the query parameters ``bbox``, ``datetime``, ``limit``,
@@ -215,24 +215,40 @@ def _client_ip(scope: Scope) -> str | None:
 
 
 def _client_network_hash(host: str | None) -> str | None:
-    """Hash of the peer's IPv4 ``/24`` or IPv6 ``/64``, or ``None`` if it is not an IP.
+    """Hash of an IPv4 ``/24`` or IPv6 ``/64``, or ``None`` if ``host`` is not one.
 
-    The digest is SHA-256 of ``"{prefix}:{network address}"`` truncated to 16
-    hex characters. The address and the prefix text are not returned.
+    ``host`` is the address the HTTP lines record as ``client_ip``. On the
+    public host that is already ``X-Real-IP`` or the trusted
+    ``X-Forwarded-For`` hop, and an IPv6 client is the ``/64`` the rate
+    limiter stored. The digest is SHA-256 of ``"{prefix}:{network address}"``
+    truncated to 16 hex characters. The address is not returned.
     """
     if not isinstance(host, str) or not host:
         return None
-    try:
-        ip = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
+    text = host.split("%", 1)[0].strip()
+    if not text:
         return None
-    if isinstance(ip, ipaddress.IPv6Address):
-        mapped = ip.ipv4_mapped
-        if mapped is not None:
-            ip = mapped
-    prefix = 24 if isinstance(ip, ipaddress.IPv4Address) else 64
-    network = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
-    material = f"{prefix}:{network.network_address}"
+    if "/" in text:
+        try:
+            parsed = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            return None
+        if (parsed.version, parsed.prefixlen) not in {(4, 24), (6, 64)}:
+            return None
+        prefix = parsed.prefixlen
+        address = str(parsed.network_address)
+    else:
+        try:
+            ip = ipaddress.ip_address(text)
+        except ValueError:
+            return None
+        if isinstance(ip, ipaddress.IPv6Address):
+            mapped = ip.ipv4_mapped
+            if mapped is not None:
+                ip = mapped
+        prefix = 24 if isinstance(ip, ipaddress.IPv4Address) else 64
+        address = str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False).network_address)
+    material = f"{prefix}:{address}"
     return hashlib.sha256(material.encode("ascii")).hexdigest()[:16]
 
 
@@ -626,6 +642,11 @@ def _header_value(request: Any, name: str) -> str | None:
 
 
 def _request_host(request: Any) -> str | None:
+    """The request's client host: the same address the HTTP lines log.
+
+    ``umbra serve --public`` has already rewritten it from ``X-Real-IP`` or
+    the trusted ``X-Forwarded-For`` hop. This does not read those headers.
+    """
     client = getattr(request, "client", None)
     if client is None:
         return None

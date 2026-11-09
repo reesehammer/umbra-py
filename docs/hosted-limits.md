@@ -182,9 +182,11 @@ through every 0.x minor. See [Stable tools](mcp.md#stable-tools).
 `umbra serve` writes one JSON object per MCP tool call to stdout. The `msg`
 field is `mcp_tool`. Railway's log explorer rewrites `msg` to `message`, so
 filters use `@message`. The same logger writes `mcp_request` (each
-`POST /mcp`) and `stac_search` (each `/search`). Those two lines still
-record `client_ip`, the peer the server already resolved. `client_net` is
-only on `mcp_tool`.
+`POST /mcp`) and `stac_search` (each `/search`). Those lines record
+`client_ip`. On this host that is `X-Real-IP`, or the trusted
+`X-Forwarded-For` hop (`UMBRA_TRUSTED_PROXY_HOPS`, default 1) when
+`X-Real-IP` is absent. `client_net` is only on `mcp_tool`, and it is the
+hash of that same address.
 
 A tool line has:
 
@@ -200,7 +202,7 @@ A tool line has:
 | `limit` | Present when `limit` is an integer from 0 to 10000000 |
 | `collection` | Present when `collection` or `collections` is a short token such as `umbra-open-data` |
 | `bbox`, `place` | True when that argument was set. The coordinates and the place name are not logged |
-| `client_net` | First 16 hex characters of SHA-256 over `24:<IPv4 /24>` or `64:<IPv6 /64>`. An IPv4-mapped IPv6 address uses the IPv4 `/24`. The address is not logged. The same prefix hashes the same on every replica |
+| `client_net` | First 16 hex characters of SHA-256 over `24:<IPv4 /24>` or `64:<IPv6 /64>` of the same address `client_ip` records. An IPv4-mapped IPv6 address uses the IPv4 `/24`. The public host stores an IPv6 client as its `/64`, and that network hashes the same as any address inside it. The address is not logged. The same prefix hashes the same on every replica |
 
 `level` is `error` when `outcome` is not `ok`, and `info` otherwise.
 `@level:error AND @message:mcp_tool` is the failed tool calls.
