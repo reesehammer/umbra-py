@@ -229,8 +229,8 @@ def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
     """With ``server_url`` set the detail panel leads with the baked-thumbnail
     endpoint (the G6 thumbnail bake): the app JS builds an ``.umbra-thumb`` image from
     ``/artifacts/thumbnail/<id>.png`` off the server base, url-encoding the
-    remote item id. A 404, or a feature whose listed assets are not a preview,
-    becomes a same-size "No preview" tile and does not request a quicklook."""
+    remote item id. A 404 becomes a same-size "No preview" tile and does not
+    request a quicklook."""
     item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
     html = demo.build_demo([item], server_url="http://localhost:8000/")
     archive = demo.build_demo(
@@ -239,13 +239,11 @@ def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
     # The preview reuses the one server base (also used by the analyze panel).
     assert "serverBase" in html
     # It targets the baked-thumbnail endpoint, url-encoding the remote id (the
-    # builder is shared with the whole-archive PMTiles explorer). Both modes
-    # hand the asset list the panel already renders, so a scene with no
-    # preview product is not requested.
+    # builder is shared with the whole-archive PMTiles explorer).
     assert "/artifacts/thumbnail/' + encodeURIComponent(id) + '.png'" in html
-    assert "window.umbraThumb(serverBase, p.id, p.assets)" in html
-    assert "window.umbraThumb(serverBase, p.id, p.assets)" in archive
-    assert "umbraListedPreview(assets) === false" in html
+    assert "window.umbraThumb(serverBase, p.id)" in html
+    assert "window.umbraThumb(serverBase, p.id)" in archive
+    assert "umbraListedPreview" not in html
     # The slot is a fixed square. A failed load clears onerror (no retry) and
     # fills that slot; it does not follow the 404 with a quicklook request.
     assert ".umbra-thumb-slot" in html

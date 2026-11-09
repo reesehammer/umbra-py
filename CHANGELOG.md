@@ -11,9 +11,8 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ### Fixed
 - **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
-  With `umbra demo --server-url` (the hosted map's detail panel), a scene
-  whose listed assets include neither a GEC nor a CSI is not requested.
-  A thumbnail that 404s swaps to the same tile and is not followed by a
+  With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
+  that 404s swaps to a same-size "No preview" tile and is not followed by a
   quicklook request.
 
 ### Security

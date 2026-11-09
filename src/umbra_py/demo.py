@@ -52,12 +52,10 @@ Design, deliberately in the repo's grain:
   set, clicking a scene *leads* its detail panel with a small SAR picture pulled
   from ``GET /artifacts/thumbnail/{id}.png`` — the baked quicklook thumbnail
   ``umbra index bake-thumbnails`` stored in the index, served straight from local
-  bytes with no render. The feature already lists its product assets, so a scene
-  whose list names neither a GEC nor a CSI (the GeoTIFFs a thumbnail is baked
-  from) is not requested at all. Anything else that 404s — most of the archive
-  has no baked preview — swaps in the same neutral "No preview" tile and does
-  not follow on to ``/artifacts/quicklook``. Without ``server_url`` the panel
-  is unchanged.
+  bytes with no render. A thumbnail that 404s — most of the archive has no
+  baked preview — swaps in the same neutral "No preview" tile and does not
+  follow on to ``/artifacts/quicklook``. Without ``server_url`` the panel is
+  unchanged.
 
 * **Whole-archive mode over PMTiles.** The default page embeds the gathered
   slice as JSON, which is the right shape for a search result but caps the
@@ -775,23 +773,6 @@ window.umbraChipRow = function (containerId, values, onToggle) {
   return box;
 };
 
-// Whether `assets` (the product list the detail panel already holds) names a
-// picture this page can fetch. A baked thumbnail and the on-demand quicklook
-// are rendered from a GeoTIFF, so GEC or CSI counts, as does an explicit
-// thumbnail/quicklook/overview token. `null` means the feature did not carry
-// the list (an older tile archive omits it) -- the caller still tries once.
-// An empty list, or only SICD/CPHD/SIDD, is not a preview: do not request.
-window.umbraListedPreview = function (assets) {
-  if (assets == null) return null;
-  var parts = Array.isArray(assets) ? assets : String(assets).split(',');
-  var preview = { gec: 1, csi: 1, thumbnail: 1, quicklook: 1, overview: 1 };
-  for (var i = 0; i < parts.length; i++) {
-    var name = String(parts[i]).replace(/^ +| +$/g, '').toLowerCase();
-    if (preview[name]) return true;
-  }
-  return false;
-};
-
 // The detail-panel preview slot. Same outer size whether it holds a picture
 // or the "No preview" label, so a 404 does not move the metadata under it.
 // The explorer page is light; the tile uses the sidebar's neutral gray.
@@ -814,15 +795,11 @@ window.umbraThumbPlaceholder = function (box) {
 // (umbra index bake-thumbnails) straight from the index -- an offline file
 // read. The id is remote metadata, so it is URL-encoded into the path (the
 // scheme is our own trusted server base, so no javascript:-style breakout is
-// possible). A scene the feature already says has no preview asset is not
-// requested. A 404 swaps the same placeholder in and stops: no second
+// possible). A 404 swaps the same placeholder in and stops: no second
 // request, and no follow-on to /artifacts/quicklook.
-window.umbraThumb = function (base, id, assets) {
+window.umbraThumb = function (base, id) {
   if (!base || !id) return null;
   var box = window.umbraThumbSlot();
-  if (window.umbraListedPreview(assets) === false) {
-    return window.umbraThumbPlaceholder(box);
-  }
   var thumb = document.createElement('img');
   thumb.className = 'umbra-thumb';
   thumb.alt = 'SAR quicklook thumbnail';
@@ -1242,7 +1219,7 @@ _APP_JS = """
     // Lead with an instant SAR picture of the selected scene when the page was
     // built with a server_url; without one the panel stays metadata-only and
     // the page is fully static.
-    var thumb = window.umbraThumb(serverBase, p.id, p.assets);
+    var thumb = window.umbraThumb(serverBase, p.id);
     if (thumb) panel.appendChild(thumb);
 
     var row = window.umbraRow;
@@ -1539,7 +1516,7 @@ _PMTILES_APP_JS = """
     var panel = document.getElementById('umbra-detail');
     panel.innerHTML = '';
 
-    var thumb = window.umbraThumb(serverBase, p.id, p.assets);
+    var thumb = window.umbraThumb(serverBase, p.id);
     if (thumb) panel.appendChild(thumb);
 
     var row = window.umbraRow;
