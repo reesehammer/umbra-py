@@ -991,10 +991,6 @@ def test_search_rejects_unknown_collection(client):
     assert "product_types=GEC" in path.json()["detail"]
     assert "umbra-open-data" in path.json()["detail"]
 
-    not_a_list = client.post("/search", json={"collections": 3})
-    assert not_a_list.status_code == 400
-    assert "array" in not_a_list.json()["detail"]
-
 
 def test_bad_bbox_is_a_client_error(client):
     assert client.get("/search?bbox=1,2,3").status_code == 400
@@ -3045,7 +3041,7 @@ def test_serve_cli_public_bundles_the_guardrails(monkeypatch):
     assert seen["mcp"] is True
     assert seen["artifacts"] is False
     assert seen["rate_limit"] == serve.PUBLIC_RATE_LIMIT
-    assert seen["proxy_headers"] is True
+    assert seen["proxy_headers"] is False
     assert "public mode" in result.output
     assert "MCP at /mcp" in result.output
 

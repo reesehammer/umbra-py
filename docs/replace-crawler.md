@@ -103,8 +103,9 @@ The parameters are the ones `/search` implements:
 - `intersects` — URL-encoded GeoJSON `Point`, `Polygon`, or `MultiPolygon`.
   A point selects footprints that contain it. Malformed JSON or any other
   geometry type is a 400. Mutually exclusive with `bbox`.
-- `limit` — page size. Default 10, maximum 10000. The next page is `token`
-  (the offset) on the `next` link.
+- `limit` — page size. Default 10. This host returns at most 500 items per
+  page (`next` still carries `token`, the offset). A self-hosted server
+  without `--public` accepts up to 10000.
 
 A point over the same Nepal coverage, URL-encoded the way a GET query has to
 send GeoJSON (`urllib.parse.urlencode` turns the JSON into the `intersects`

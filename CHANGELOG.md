@@ -26,6 +26,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
   `umbra-gec` names the only collection, `umbra-open-data`, and the product
   filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
+- **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
+  The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
+  `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a
+  `/64`); each client may hold two catalog reads, and a timed-out read interrupts SQLite.
+  Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
+  (with a `note` when clamped), bodies over 1 MiB are HTTP 413, and a malformed
+  public `POST /search` is HTTP 400.
+  STAC links use optional `UMBRA_PUBLIC_BASE_URL` when it is an `http(s)://host`
+  origin, otherwise the edge's `X-Forwarded-Proto` and host, and `GET /mcp/`
+  keeps that https scheme. Public `geocode_place` caches names and misses,
+  calls Nominatim about once a second, and fails fast when the whole wait
+  would exceed a few seconds. Local `umbra serve` and local MCP are unchanged.
 - **The public host does not write the catalog or reveal its path.**
   `watch_site` on `umbra serve --public` reports the current matches as new,
   stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full
