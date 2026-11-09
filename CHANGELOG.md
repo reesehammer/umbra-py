@@ -20,6 +20,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   that is not http(s) is not turned into a link.
 
 ### Changed
+- **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
+  `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
+  contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
+  Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
+  `umbra-gec` names the only collection, `umbra-open-data`, and the product
+  filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`

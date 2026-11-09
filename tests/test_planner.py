@@ -668,7 +668,7 @@ def test_cli_ask_aoi_refuses_two_areas_with_the_same_name(aoi_plan, delta_file, 
 
 def test_cli_ask_aoi_reports_a_bad_polygon_cleanly(aoi_plan, tmp_path):
     bad = tmp_path / "delta.geojson"
-    bad.write_text('{"type": "Point", "coordinates": [0, 0]}')
+    bad.write_text('{"type": "LineString", "coordinates": [[0, 0], [1, 1]]}')
     result = CliRunner().invoke(cli, ["ask", "q", "--aoi", str(bad)])
     assert result.exit_code != 0
     assert "--aoi delta" in result.output

@@ -72,13 +72,13 @@ def _resolve_search_bbox(
 
 
 def _resolve_intersects(value: str | None, *, label: str = "--intersects"):
-    """Parse ``--intersects`` into a polygon geometry (or None).
+    """Parse ``--intersects`` into a geometry (or None).
 
     The value is a path to a ``.geojson``/``.json`` file or an inline GeoJSON
-    string -- a ``Polygon`` / ``MultiPolygon`` geometry, or a ``Feature`` /
+    string -- a ``Point``, ``Polygon``, or ``MultiPolygon``, or a ``Feature`` /
     ``FeatureCollection`` wrapping one. A path that exists is read; otherwise the
-    value is treated as inline JSON. Returns the exterior-ring form the search
-    functions expect, and raises ``BadParameter`` at the boundary on bad input.
+    value is treated as inline JSON. Returns the ring form the search functions
+    expect, and raises ``BadParameter`` at the boundary on bad input.
     """
     from .._geometry import parse_geometry
 
@@ -435,9 +435,10 @@ def _geometry_option(func):
     return click.option(
         "--intersects",
         default=None,
-        help="Keep only items whose footprint intersects this GeoJSON polygon -- a "
-        "path to a .geojson file or an inline GeoJSON string (Polygon / "
-        "MultiPolygon, or a Feature / FeatureCollection wrapping one). A tighter "
+        help="Keep only items whose footprint intersects this GeoJSON geometry -- a "
+        "path to a .geojson file or an inline GeoJSON string (Point / Polygon / "
+        "MultiPolygon, or a Feature / FeatureCollection wrapping one). A point "
+        "matches footprints that contain it. A tighter "
         "spatial filter than the rectangular --bbox; the two are mutually exclusive.",
     )(func)
 

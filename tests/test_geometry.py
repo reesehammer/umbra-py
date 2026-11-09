@@ -102,25 +102,82 @@ def test_parse_drops_holes():
     assert len(rings) == 1  # only the exterior survives
 
 
+def test_parse_point_and_feature_point():
+    point = parse_geometry({"type": "Point", "coordinates": [1, 2]})
+    assert point == [[(1.0, 2.0)]]
+    wrapped = parse_geometry(
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [1, 2, 9]},
+            "properties": {},
+        }
+    )
+    assert wrapped == point
+    assert to_geojson(point) == {"type": "Point", "coordinates": [1.0, 2.0]}
+
+
+def test_point_intersects_footprint_not_its_bbox():
+    """A point in the bbox corner outside the triangle is not a hit.
+
+    The triangle (0, 0)-(4, 0)-(0, 4) has bbox (0, 0, 4, 4). (3, 3) sits in
+    that box and outside the body. (1, 1) is inside, (2, 2) is on the
+    hypotenuse, and (0, 0) is a vertex. Boundary counts.
+    """
+    tri = _poly((0, 0), (4, 0), (0, 4))
+    item = _item("t", geometry=tri)
+    assert item.intersects_polygon(parse_geometry({"type": "Point", "coordinates": [1, 1]}))
+    assert item.intersects_polygon(parse_geometry({"type": "Point", "coordinates": [2, 2]}))
+    assert item.intersects_polygon(parse_geometry({"type": "Point", "coordinates": [0, 0]}))
+    assert item.intersects_polygon(parse_geometry({"type": "Point", "coordinates": [2, 0]}))
+    assert not item.intersects_polygon(parse_geometry({"type": "Point", "coordinates": [3, 3]}))
+    far = parse_geometry({"type": "Point", "coordinates": [10, 10]})
+    assert not item.intersects_polygon(far)
+
+
+def test_point_in_one_part_of_a_multipolygon():
+    multi = parse_geometry(
+        {
+            "type": "MultiPolygon",
+            "coordinates": [
+                [[[0, 0], [1, 0], [1, 1], [0, 0]]],
+                [[[5, 5], [6, 5], [6, 6], [5, 5]]],
+            ],
+        }
+    )
+    assert geometries_intersect(multi, parse_geometry({"type": "Point", "coordinates": [5.2, 5.2]}))
+    assert not geometries_intersect(multi, parse_geometry({"type": "Point", "coordinates": [3, 3]}))
+
+
 @pytest.mark.parametrize(
     "bad",
     [
-        {"type": "Point", "coordinates": [0, 0]},
         {"type": "LineString", "coordinates": [[0, 0], [1, 1]]},
+        {"type": "MultiPoint", "coordinates": [[0, 0], [1, 1]]},
         {"type": "Polygon", "coordinates": [[[0, 0], [1, 1]]]},  # <3 positions
         {"type": "Polygon", "coordinates": []},
+        {"type": "Point", "coordinates": ["0", "1"]},
+        {"type": "Point", "coordinates": [float("nan"), 0]},
+        {"type": "Point", "coordinates": [float("inf"), 0]},
         "not json at all {",
         {"type": "FeatureCollection", "features": []},
         123,
     ],
 )
-def test_parse_rejects_non_polygon(bad):
+def test_parse_rejects_unsupported_geometry(bad):
     with pytest.raises(ValueError):
         parse_geometry(bad)
 
 
+def test_unsupported_type_names_the_accepted_kinds():
+    with pytest.raises(ValueError, match="LineString") as exc:
+        parse_geometry({"type": "LineString", "coordinates": [[0, 0], [1, 1]]})
+    message = str(exc.value)
+    assert "Point" in message and "Polygon" in message and "MultiPolygon" in message
+
+
 def test_rings_from_geojson_forgiving():
-    assert rings_from_geojson({"type": "Point", "coordinates": [0, 0]}) is None
+    assert rings_from_geojson({"type": "Point", "coordinates": [0, 0]}) == [[(0.0, 0.0)]]
+    assert rings_from_geojson({"type": "LineString", "coordinates": [[0, 0], [1, 1]]}) is None
     assert rings_from_geojson(None) is None
     assert rings_from_geojson(_poly((0, 0), (1, 0), (1, 1), (0, 1))) is not None
 
@@ -478,8 +535,98 @@ def test_serve_intersects_bad_geometry_is_400(built_index):
     from umbra_py import serve
 
     client = TestClient(serve.build_app(built_index))
-    resp = client.post("/search", json={"intersects": {"type": "Point", "coordinates": [0, 0]}})
+    resp = client.post(
+        "/search", json={"intersects": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}
+    )
     assert resp.status_code == 400
+    assert "LineString" in resp.json()["detail"]
+    assert "Point" in resp.json()["detail"]
+
+
+def test_get_search_accepts_url_encoded_intersects(built_index):
+    """GET /search reads percent-encoded GeoJSON, including a second encoding."""
+    pytest.importorskip("fastapi")
+    from urllib.parse import quote, urlencode
+
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+
+    client = TestClient(serve.build_app(built_index))
+    point = {"type": "Point", "coordinates": [0.5, 0.5]}
+    polygon = _poly((0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8))
+    multi = {
+        "type": "MultiPolygon",
+        "coordinates": [
+            [[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.2]]],
+            [[[10.2, 10.2], [10.8, 10.2], [10.8, 10.8], [10.2, 10.2]]],
+        ],
+    }
+
+    inside = client.get("/search?" + urlencode({"intersects": json.dumps(point)}))
+    assert inside.status_code == 200, inside.text
+    assert [f["id"] for f in inside.json()["features"]] == ["a"]
+
+    outside = client.get(
+        "/search?" + urlencode({"intersects": json.dumps({"type": "Point", "coordinates": [5, 5]})})
+    )
+    assert outside.status_code == 200
+    assert outside.json()["features"] == []
+
+    on_corner = client.get(
+        "/search",
+        params={"intersects": json.dumps({"type": "Point", "coordinates": [0, 0]})},
+    )
+    assert [f["id"] for f in on_corner.json()["features"]] == ["a"]
+
+    boxed = client.get("/search?" + urlencode({"intersects": json.dumps(polygon)}))
+    assert [f["id"] for f in boxed.json()["features"]] == ["a"]
+
+    both = client.get("/search?" + urlencode({"intersects": json.dumps(multi)}))
+    assert [f["id"] for f in both.json()["features"]] == ["a", "b"]
+
+    # One encoding is the query string's. A client that encoded the JSON first
+    # leaves ``%7B`` in the value after that decode; accept that once more.
+    twice = quote(quote(json.dumps(point, separators=(",", ":"))))
+    encoded = client.get(f"/search?intersects={twice}")
+    assert encoded.status_code == 200, encoded.text
+    assert [f["id"] for f in encoded.json()["features"]] == ["a"]
+
+
+def test_get_search_intersects_400s_are_explicit(built_index):
+    pytest.importorskip("fastapi")
+    from urllib.parse import urlencode
+
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+
+    client = TestClient(serve.build_app(built_index))
+    bad_json = client.get("/search?" + urlencode({"intersects": "{not json"}))
+    assert bad_json.status_code == 400
+    assert "not valid JSON" in bad_json.json()["detail"]
+
+    line = client.get(
+        "/search?"
+        + urlencode(
+            {"intersects": json.dumps({"type": "LineString", "coordinates": [[0, 0], [1, 1]]})}
+        )
+    )
+    assert line.status_code == 400
+    assert "LineString" in line.json()["detail"]
+
+    # ``1e309`` is JSON that Python parses as infinity. That is a 400, not a match.
+    numbers = client.post(
+        "/search",
+        content=b'{"intersects":{"type":"Point","coordinates":[1e309,0]}}',
+        headers={"content-type": "application/json"},
+    )
+    assert numbers.status_code == 400
+    assert "finite" in numbers.json()["detail"]
+
+    scalar = client.post("/search", json={"intersects": [0, 0]})
+    assert scalar.status_code == 400
+    assert "GeoJSON object" in scalar.json()["detail"]
 
 
 # --------------------------------------------------------------------------- #
@@ -496,6 +643,31 @@ def test_mcp_search_catalog_intersects(built_index, monkeypatch):
     out = ms.search_catalog(intersects=geom, local=True)
     assert out["count"] == 1
     assert out["items"][0]["id"] == "a"
+    point = ms.search_catalog(intersects={"type": "Point", "coordinates": [0.5, 0.5]}, local=True)
+    assert [item["id"] for item in point["items"]] == ["a"]
+    missed = ms.search_catalog(intersects={"type": "Point", "coordinates": [3, 3]}, local=True)
+    assert missed["items"] == []
+
+
+def test_mcp_search_catalog_rejects_a_collection_passed_as_products(built_index, monkeypatch):
+    pytest.importorskip("mcp")
+    from umbra_py import mcp_server as ms
+
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(built_index))
+    with pytest.raises(ValueError, match="umbra-gec") as exc:
+        ms.search_catalog(products=["umbra-gec"], local=True)
+    message = str(exc.value)
+    assert "umbra-open-data" in message
+    assert "products=GEC" in message
+    assert "product filter" in message
+
+    with pytest.raises(ValueError, match="umbra-open-data") as bare:
+        ms.search_catalog(products=["umbra-open-data"], local=True)
+    assert "products" in str(bare.value)
+
+    # A real product filter is unchanged: both fixture collects are GEC.
+    kept = ms.search_catalog(products=["GEC"], local=True)
+    assert [item["id"] for item in kept["items"]] == ["a", "b"]
 
 
 def test_mcp_search_catalog_intersects_conflicts(built_index):

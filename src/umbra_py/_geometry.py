@@ -7,6 +7,8 @@ any drawn area of interest sweeps in a lot of empty ocean or neighbouring land.
 This module adds a true polygon filter -- keep only acquisitions whose footprint
 *intersects* a caller-supplied GeoJSON polygon -- so ``search`` matches the
 standard STAC ``intersects`` parameter every geo tool already speaks.
+A GeoJSON ``Point`` is accepted as well: it matches a footprint when the
+point lies in that footprint or on its boundary.
 
 It is deliberately dependency-free (no shapely): the whole test is a handful of
 closed-form primitives -- a bounding-box reject, segment-crossing, and a
@@ -27,6 +29,7 @@ filter):
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 #: A single ``(lon, lat)`` position.
@@ -45,22 +48,42 @@ BBox = tuple[float, float, float, float]
 # --------------------------------------------------------------------------- #
 
 
+def _position(pos: Any, what: str) -> Position:
+    """One ``[lon, lat]`` pair. A height ordinate, when present, is ignored.
+
+    Non-numeric, boolean, and non-finite values are a :class:`ValueError`.
+    ``True`` is a bool in Python, so it is not a coordinate.
+    """
+    if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        lon, lat = pos[0], pos[1]
+        if (
+            isinstance(lon, (int, float))
+            and isinstance(lat, (int, float))
+            and not isinstance(lon, bool)
+            and not isinstance(lat, bool)
+            and math.isfinite(lon)
+            and math.isfinite(lat)
+        ):
+            return (float(lon), float(lat))
+    raise ValueError(f"{what} must be [lon, lat] finite numbers")
+
+
 def _ring_positions(ring: Any) -> Ring:
     if not isinstance(ring, (list, tuple)):
         raise ValueError("a polygon ring must be a list of positions")
-    out: Ring = []
-    for pos in ring:
-        if (
-            isinstance(pos, (list, tuple))
-            and len(pos) >= 2
-            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pos[:2])
-        ):
-            out.append((float(pos[0]), float(pos[1])))
-        else:
-            raise ValueError("a polygon position must be [lon, lat] numbers")
+    out = [_position(pos, "a polygon position") for pos in ring]
     if len(out) < 3:
         raise ValueError("a polygon ring needs at least 3 positions")
     return out
+
+
+def _point_ring(coords: Any) -> Ring:
+    """A Point as a one-position ring.
+
+    Polygon rings always have at least three positions, so a ring of length
+    one is a point and cannot be mistaken for a polygon downstream.
+    """
+    return [_position(coords, "Point coordinates")]
 
 
 def _polygon_exterior(coords: Any) -> Ring:
@@ -82,16 +105,18 @@ def _geometry_rings(geom: Any) -> Geometry:
         for feat in geom.get("features") or []:
             rings.extend(_geometry_rings((feat or {}).get("geometry")))
         if not rings:
-            raise ValueError("FeatureCollection has no polygon features")
+            raise ValueError("FeatureCollection has no Point, Polygon, or MultiPolygon features")
         return rings
     if gtype == "GeometryCollection":
         rings = []
         for sub in geom.get("geometries") or []:
             rings.extend(_geometry_rings(sub))
         if not rings:
-            raise ValueError("GeometryCollection has no polygon geometries")
+            raise ValueError("GeometryCollection has no Point, Polygon, or MultiPolygon geometries")
         return rings
     coords = geom.get("coordinates")
+    if gtype == "Point":
+        return [_point_ring(coords)]
     if gtype == "Polygon":
         return [_polygon_exterior(coords)]
     if gtype == "MultiPolygon":
@@ -99,19 +124,20 @@ def _geometry_rings(geom: Any) -> Geometry:
             raise ValueError("MultiPolygon coordinates must be a non-empty list of polygons")
         return [_polygon_exterior(poly) for poly in coords]
     raise ValueError(
-        f"unsupported geometry type {gtype!r}; intersects needs a Polygon or "
-        "MultiPolygon (optionally wrapped in a Feature / FeatureCollection)"
+        f"unsupported geometry type {gtype!r}; intersects accepts Point, Polygon, "
+        "or MultiPolygon (optionally wrapped in a Feature or FeatureCollection)"
     )
 
 
 def parse_geometry(value: dict | str) -> Geometry:
     """Parse a GeoJSON geometry into exterior rings for intersection testing.
 
-    ``value`` is a GeoJSON ``dict`` (a ``Polygon`` / ``MultiPolygon`` geometry,
-    or a ``Feature`` / ``FeatureCollection`` / ``GeometryCollection`` wrapping
-    them) or a JSON string of one. Returns the normalised :data:`Geometry` (a
-    list of exterior rings). Raises :class:`ValueError` on anything that isn't a
-    usable polygon, so callers can validate at the boundary.
+    ``value`` is a GeoJSON ``dict`` (a ``Point``, ``Polygon``, or
+    ``MultiPolygon``, or a ``Feature`` / ``FeatureCollection`` /
+    ``GeometryCollection`` wrapping those) or a JSON string of one. Returns the
+    normalised :data:`Geometry`: exterior rings, plus a one-position ring for
+    each point. Raises :class:`ValueError` on anything else (invalid JSON,
+    another geometry type, non-finite coordinates), so callers can answer 400.
     """
     if isinstance(value, str):
         try:
@@ -125,8 +151,9 @@ def rings_from_geojson(geom: Any) -> Geometry | None:
     """Exterior rings of a GeoJSON geometry, or ``None`` if it isn't a polygon.
 
     The forgiving sibling of :func:`parse_geometry` for data already in hand (an
-    item's own footprint): a non-polygon footprint (or a missing one) yields
-    ``None`` so the caller can fall back to the bbox rectangle rather than raise.
+    item's own footprint): a geometry this module does not understand (or a
+    missing one) yields ``None`` so the caller can fall back to the bbox
+    rectangle rather than raise. A ``Point`` footprint is kept.
     """
     try:
         return _geometry_rings(geom)
@@ -146,20 +173,32 @@ def bbox_ring(bbox: BBox) -> Ring:
     ]
 
 
-def to_geojson(geometry: Geometry) -> dict | None:
-    """A GeoJSON ``Polygon`` / ``MultiPolygon`` for the normalised rings.
+def _ring_as_geojson(ring: Ring) -> dict:
+    if len(ring) == 1:
+        lon, lat = ring[0]
+        return {"type": "Point", "coordinates": [lon, lat]}
+    return {"type": "Polygon", "coordinates": [[list(p) for p in ring]]}
 
-    The inverse of :func:`parse_geometry` (holes already dropped), for handing
-    the geometry to a STAC API's ``intersects``. Returns ``None`` if empty.
+
+def to_geojson(geometry: Geometry) -> dict | None:
+    """GeoJSON for the normalised rings (holes already dropped).
+
+    The inverse of :func:`parse_geometry`, for handing the geometry to a STAC
+    API's ``intersects``. A one-position ring is a ``Point``. Returns ``None``
+    if empty.
     """
     if not geometry:
         return None
     if len(geometry) == 1:
-        return {"type": "Polygon", "coordinates": [[list(p) for p in geometry[0]]]}
-    return {
-        "type": "MultiPolygon",
-        "coordinates": [[[list(p) for p in ring]] for ring in geometry],
-    }
+        return _ring_as_geojson(geometry[0])
+    if all(len(ring) == 1 for ring in geometry):
+        return {"type": "MultiPoint", "coordinates": [list(ring[0]) for ring in geometry]}
+    if all(len(ring) >= 3 for ring in geometry):
+        return {
+            "type": "MultiPolygon",
+            "coordinates": [[[list(p) for p in ring]] for ring in geometry],
+        }
+    return {"type": "GeometryCollection", "geometries": [_ring_as_geojson(r) for r in geometry]}
 
 
 def geometry_bbox(geometry: Geometry) -> BBox | None:
@@ -257,10 +296,69 @@ def _rings_intersect(a: Ring, b: Ring) -> bool:
     return False
 
 
+def _as_point(ring: Ring) -> Position | None:
+    """The position of a one-position ring, or ``None`` when ``ring`` is a polygon."""
+    if len(ring) == 1:
+        return ring[0]
+    return None
+
+
+def _point_on_ring_boundary(pt: Position, ring: Ring) -> bool:
+    """Whether ``pt`` lies on a vertex or edge of ``ring`` (inclusive)."""
+    n = len(ring)
+    if n == 0:
+        return False
+    if n == 1:
+        return pt == ring[0]
+    for i in range(n):
+        start = ring[i]
+        end = ring[(i + 1) % n]
+        if start == end:
+            if pt == start:
+                return True
+            continue
+        if _orient(start, end, pt) == 0 and _on_segment(start, end, pt):
+            return True
+    return False
+
+
+def _point_hits_ring(pt: Position, ring: Ring) -> bool:
+    """Whether ``pt`` intersects ``ring``: interior or boundary.
+
+    Boundary is tested first. The ray cast treats the boundary as undefined,
+    and a point on an edge must count (the same inclusive rule as two polygons
+    that share an edge).
+    """
+    if _as_point(ring) is not None:
+        return pt == ring[0]
+    if _point_on_ring_boundary(pt, ring):
+        return True
+    return _point_in_ring(pt, ring)
+
+
 def geometries_intersect(a: Geometry, b: Geometry) -> bool:
-    """Whether any exterior ring of ``a`` intersects any exterior ring of ``b``."""
+    """Whether ``a`` intersects ``b``.
+
+    Exterior rings use the polygon test. A one-position ring is a point: it
+    intersects a polygon when it lies inside or on the boundary, and another
+    point only when the two positions are equal.
+    """
     for ring_a in a:
         for ring_b in b:
+            point_a = _as_point(ring_a)
+            point_b = _as_point(ring_b)
+            if point_a is not None and point_b is not None:
+                if point_a == point_b:
+                    return True
+                continue
+            if point_a is not None:
+                if _point_hits_ring(point_a, ring_b):
+                    return True
+                continue
+            if point_b is not None:
+                if _point_hits_ring(point_b, ring_a):
+                    return True
+                continue
             if _rings_intersect(ring_a, ring_b):
                 return True
     return False

@@ -95,12 +95,40 @@ The parameters are the ones `/search` implements:
 - `bbox` — `minlon,minlat,maxlon,maxlat` (GET) or a four-number array (POST).
 - `datetime` — `2026-09-01/..` is an open interval from that date. A single
   date matches that day. The index filters on the acquisition date.
-- `collections` — `umbra-open-data`. Any other id is a 400.
+- `collections` — `umbra-open-data`. Any other id is a 400 that names
+  `umbra-open-data`. `umbra-gec` is not a collection: GEC is `product_types`.
 - `product_types` — `GEC` (comma-separated on GET). Case-insensitive. This is
   the product type, uppercase, which is a different string from the asset
   key `gec`.
+- `intersects` — URL-encoded GeoJSON `Point`, `Polygon`, or `MultiPolygon`.
+  A point selects footprints that contain it. Malformed JSON or any other
+  geometry type is a 400. Mutually exclusive with `bbox`.
 - `limit` — page size. Default 10, maximum 10000. The next page is `token`
   (the offset) on the `next` link.
+
+A point over the same Nepal coverage, URL-encoded the way a GET query has to
+send GeoJSON (`urllib.parse.urlencode` turns the JSON into the `intersects`
+parameter). `curl --get --data-urlencode` does the same encoding. A polygon
+or multipolygon replaces the `Point` object; the rest of the URL stays.
+
+```python
+import json
+from urllib.parse import urlencode
+import urllib.request
+
+point = {"type": "Point", "coordinates": [85.52, 28.29]}
+url = "https://api.umbra-py.space/search?" + urlencode(
+    {"intersects": json.dumps(point), "product_types": "GEC", "limit": 1}
+)
+print(json.load(urllib.request.urlopen(url))["features"][0]["id"])
+```
+
+```bash
+curl -sG "https://api.umbra-py.space/search" \
+  --data-urlencode 'intersects={"type":"Point","coordinates":[85.52,28.29]}' \
+  --data-urlencode "product_types=GEC" \
+  --data-urlencode "limit=1"
+```
 
 The programs are the files the daily canary runs. They live in
 [`docs/examples/replace_crawler/`](https://github.com/reesehammer/umbra-py/tree/main/docs/examples/replace_crawler).
