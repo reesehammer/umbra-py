@@ -108,6 +108,8 @@ def test_driver_script_verifies_geotiff_with_sri_and_cors():
     # (SRI is ignored by browsers on a no-cors request).
     assert "s.integrity = GEOTIFF_SRI" in js
     assert "s.crossOrigin = 'anonymous'" in js
+    # The digest is not optional: an empty value must not skip the check.
+    assert "if (GEOTIFF_SRI)" not in js
 
 
 def test_driver_script_finds_map_via_dom_and_loads_geotiff():

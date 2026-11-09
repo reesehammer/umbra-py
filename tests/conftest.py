@@ -51,6 +51,7 @@ def _reset_mcp_cog_policy():
         gate = getattr(mod, "_public_geocode", None)
         if gate is not None:
             gate.clear()
+        mod._reset_public_net()
 
 
 @pytest.fixture(autouse=True)

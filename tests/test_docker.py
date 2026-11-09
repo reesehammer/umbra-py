@@ -36,23 +36,45 @@ def _toml_string(text: str, key: str) -> str:
 
 
 def _instruction_body(path: Path) -> list[str]:
-    """Dockerfile instructions, ignoring comments / extras ARG / MCP CMD."""
+    """Dockerfile instructions, ignoring comments / extras ARG / MCP CMD.
+
+    The hosted image's hashed install is a continued ``RUN pip install`` plus
+    a ``COPY`` of the lock. Those lines are the difference from the self-host
+    image, whose extras stay a build-arg. A ``HEALTHCHECK`` command line
+    starts with ``CMD [`` and stays ignored, as before.
+    """
     lines: list[str] = []
+    skipping_pip = False
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
+        continued = line.endswith("\\")
+        if skipping_pip:
+            skipping_pip = continued
+            continue
         if not line or line.startswith("#"):
             continue
         if line.startswith("ARG UMBRA_EXTRAS"):
             continue
         if line.startswith("CMD ["):
             continue
-        # Public image hardcodes extras so a Railway build-arg cannot drop
-        # FastAPI; the generic image keeps the ARG. The install line differs
-        # on purpose.
         if line.startswith("RUN pip install"):
+            skipping_pip = continued
+            continue
+        if line.startswith("COPY deploy/requirements.txt") or line.startswith(
+            "COPY deploy/build-requirements.txt"
+        ):
             continue
         lines.append(line)
     return lines
+
+
+def _python_image_pin(path: Path) -> str:
+    line = next(
+        item
+        for item in path.read_text(encoding="utf-8").splitlines()
+        if item.startswith("ARG PYTHON_IMAGE=")
+    )
+    return line.split("=", 1)[1].strip()
 
 
 def test_railway_points_at_the_mcp_dockerfile():
@@ -87,11 +109,15 @@ def test_mcp_dockerfile_bakes_serve_and_mcp_and_public_cmd():
     """Extras are a literal pip install, not ARG -- a Railway UI build-arg of
     UMBRA_EXTRAS=mcp,viz would otherwise ship without FastAPI."""
     text = DOCKERFILE_MCP.read_text(encoding="utf-8")
-    match = re.search(r'^RUN pip install "\.\[([^\]]+)\]"', text, re.MULTILINE)
-    assert match, "Dockerfile.mcp must pip install extras as a literal list"
+    match = re.search(r'pip install --no-deps --no-build-isolation "\.\[([^\]]+)\]"', text)
+    assert match, "Dockerfile.mcp must install the package without build isolation"
     extras = {part.strip() for part in match.group(1).split(",")}
-    assert "mcp" in extras
-    assert "serve" in extras
+    assert extras == {"mcp", "viz", "serve"}
+    assert "--require-hashes" in text
+    assert "deploy/requirements.txt" in text
+    assert "deploy/build-requirements.txt" in text
+    assert "pip check" not in text
+    assert "PYTHON_IMAGE" in text
     assert "${UMBRA_EXTRAS}" not in text
     assert 'CMD ["serve", "--public"]' in text
     assert "ENTRYPOINT" in text
@@ -103,12 +129,147 @@ def test_dockerfiles_stay_in_lockstep():
 
 def test_dockerfiles_pull_official_python_from_ecr_public():
     """Anonymous Docker Hub pulls 429 and time out. Both images default to the
-    ECR Public copy of official python:3.12-slim, overridable by ARG."""
+    ECR Public copy of official python:3.12-slim, pinned by digest."""
+    pins = []
     for path in (DOCKERFILE, DOCKERFILE_MCP):
         text = path.read_text(encoding="utf-8")
-        assert f"ARG PYTHON_IMAGE={ECR_PYTHON}" in text
+        pin = _python_image_pin(path)
+        assert pin.startswith(f"{ECR_PYTHON}@sha256:")
+        digest = pin.rsplit("@", 1)[1]
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest), pin
+        pins.append(pin)
         assert "FROM ${PYTHON_IMAGE} AS runtime" in text
         assert not re.search(r"^FROM python:", text, re.MULTILINE), path
+    assert pins[0] == pins[1]
+
+
+def test_deploy_docs_quote_the_same_digest():
+    pin = _python_image_pin(DOCKERFILE)
+    text = DEPLOY_DOCS.read_text(encoding="utf-8")
+    assert pin in text
+
+
+def test_hosted_lock_is_hashed_wheels_for_the_deployed_extras():
+    """The lock omits this package (installed with --no-deps) and pins
+    requests at or above the pyproject floor."""
+    text = (DEPLOY / "requirements.txt").read_text(encoding="utf-8")
+    assert "--python-version 3.12" in text
+    assert "--python-platform x86_64-manylinux_2_28" in text
+    assert "--generate-hashes" in text
+    assert "--no-emit-package umbra-py" in text
+    assert "--only-binary :all:" in text
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(" ") or line.startswith("--hash"):
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+        current = [line]
+    if current:
+        blocks.append(current)
+    assert blocks
+    names = set()
+    for block in blocks:
+        blob = "\n".join(block)
+        assert "--hash=sha256:" in blob, block[0]
+        assert ".tar.gz" not in blob
+        name, version = block[0].split("==", 1)
+        version = version.split("\\", 1)[0].strip()
+        names.add(name)
+        if name == "requests":
+            parts = tuple(int(piece) for piece in version.split("."))
+            assert parts >= (2, 33, 0), version
+    for required in ("fastapi", "uvicorn", "mcp", "rasterio", "matplotlib", "folium"):
+        assert required in names
+    assert "umbra-py" not in names
+
+
+def _toml_array(text: str, key: str) -> str:
+    """Body of a top-level ``key = [ ... ]`` array, respecting quoted brackets."""
+    match = re.search(rf"^{re.escape(key)}\s*=\s*\[", text, re.M)
+    assert match, key
+    depth = 1
+    in_str = False
+    out: list[str] = []
+    i = match.end()
+    while i < len(text) and depth:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\":
+                i += 1
+                if i < len(text):
+                    out.append(text[i])
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch == "[":
+            depth += 1
+            out.append(ch)
+        elif ch == "]":
+            depth -= 1
+            if depth:
+                out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    assert depth == 0, key
+    return "".join(out)
+
+
+def _requirement_name(spec: str) -> str:
+    spec = spec.split(";", 1)[0].strip()
+    spec = spec.split("[", 1)[0]
+    name = re.split(r"(>=|<=|==|~=|!=|>|<)", spec, maxsplit=1)[0].strip()
+    return name.replace("_", "-").lower()
+
+
+def _lock_names(path: Path) -> set[str]:
+    names = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line[:1].isspace() or line.startswith("#") or not line.strip():
+            continue
+        name = line.split("==", 1)[0]
+        names.add(name.replace("_", "-").lower())
+    return names
+
+
+def test_hosted_lock_pins_every_direct_hosted_requirement():
+    """Core deps plus the mcp, viz, and serve extras must be in the lock.
+
+    The image installs the package with --no-deps, so a name that is only in
+    pyproject.toml is absent at runtime.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    specs: list[str] = []
+    for key in ("dependencies", "mcp", "viz", "serve"):
+        specs.extend(re.findall(r'"([^"]+)"', _toml_array(text, key)))
+    wanted = {_requirement_name(spec) for spec in specs} - {"umbra-py"}
+    locked = _lock_names(DEPLOY / "requirements.txt")
+    missing = sorted(wanted - locked)
+    assert not missing, missing
+    assert {"requests", "click", "defusedxml", "mcp", "fastapi", "uvicorn"} <= wanted
+
+
+def test_build_lock_pins_hatchling():
+    text = (DEPLOY / "build-requirements.txt").read_text(encoding="utf-8")
+    assert "hatchling==" in text
+    assert "--generate-hashes" in text
+    assert "--only-binary :all:" in text
+    assert ".tar.gz" not in text
+    assert "--hash=sha256:" in text
+
+
+def test_requests_floor_is_the_patched_release():
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    # Core dependency and the ai extra, which repeats the floor.
+    assert text.count('"requests>=2.33.0"') == 2
 
 
 def test_deploy_docs_name_the_ecr_python_image():

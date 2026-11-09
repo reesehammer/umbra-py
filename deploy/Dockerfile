@@ -18,8 +18,10 @@
 #     docker build -f deploy/Dockerfile --build-arg UMBRA_EXTRAS=serve,viz,load,dask -t umbra-py:full .
 # Official CPython (`python:3.12-slim`) from Amazon ECR Public, where Docker
 # publishes Official Images. A build then does not depend on an anonymous
-# Docker Hub pull. Override with --build-arg PYTHON_IMAGE=...
-ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
+# Docker Hub pull. Pinned to the manifest-list digest (looked up 2026-10-29;
+# the same digest is on mirror.gcr.io, which CI uses when ECR returns 429).
+# Override with --build-arg PYTHON_IMAGE=...
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 FROM ${PYTHON_IMAGE} AS runtime
 
 # Which optional extras to install. Default keeps the image small and the STAC
@@ -48,6 +50,10 @@ COPY src ./src
 # needs, not documentation.
 COPY docs/schemas ./docs/schemas
 
+# Self-host image: extras stay a build-arg (compose, and the CI smoke test).
+# The hosted image is deploy/Dockerfile.mcp. It installs .[mcp,viz,serve]
+# from deploy/requirements.txt with --require-hashes. railway.toml sets
+# dockerfilePath to that file.
 RUN pip install ".[${UMBRA_EXTRAS}]"
 
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

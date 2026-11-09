@@ -74,16 +74,20 @@ server.
 
 On this host `confirm=true` returns a **download plan**, not a file and not
 an error. `mode` is `"link"`, `downloaded` is false, and the plan names
-`asset`, `filename` (a basename), the direct public `href`, and `bytes`
-(the STAC asset's `file:size` or `size` when present; otherwise HEAD
-`Content-Length` when the href is `https` on the public open-data bucket;
-otherwise null). The host does not GET the asset and does not follow
-redirects. `how_to_fetch` has two commands:
+`asset`, `filename` (a basename), the direct public `href`, and `bytes`.
+When the href is `https` on the public open-data bucket, `bytes` is the
+STAC asset's `file:size` or `size` when that is recorded, otherwise HEAD
+`Content-Length`. Otherwise the href is not requested and `bytes` is null.
+The host does not GET the asset and does not follow redirects. When the
+href is on that bucket, `how_to_fetch` has two commands:
 
 ```bash
 curl -L -C - -o <filename> <href>
 umbra download <item> --asset <asset> --dest <dir>
 ```
+
+When it is not, `how_to_fetch.curl` and `how_to_fetch.umbra` are null and
+`note` says the commands were omitted.
 
 The hosted server does not transfer files. To save the file on your own
 disk, run a local server and call `download_asset` with `confirm=true` there:
