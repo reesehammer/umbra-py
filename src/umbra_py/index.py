@@ -734,15 +734,6 @@ def _enable_sqlite_defensive(conn: sqlite3.Connection) -> None:
     setconfig(flag, True)
 
 
-def _sqlite_ro_uri(path: Path) -> str:
-    """Read-only SQLite URI for ``path``.
-
-    :meth:`Path.as_uri` percent-encodes ``#`` and ``%``, so they stay in the
-    path instead of ending the URI. ``mode=ro`` is the query string.
-    """
-    return Path(path).resolve().as_uri() + "?mode=ro"
-
-
 def _open_untrusted_snapshot(path: Path) -> sqlite3.Connection:
     """Open a downloaded SQLite file read-only, without trusting its schema."""
     conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
@@ -1807,8 +1798,10 @@ def asset_name_error_text(exc: CatalogError) -> str:
 def _sqlite_ro_uri(path: Path) -> str:
     """SQLite URI that opens ``path`` with ``mode=ro``.
 
-    The connection cannot create the file or write it. A later ``INSERT`` /
-    ``UPDATE`` raises ``sqlite3.OperationalError`` rather than persisting.
+    ``quote`` percent-encodes ``#`` and ``%``, so a snapshot path that contains
+    either still opens. The connection cannot create the file or write it. A
+    later ``INSERT`` / ``UPDATE`` raises ``sqlite3.OperationalError`` rather
+    than persisting.
     """
     return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
 

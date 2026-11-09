@@ -22,6 +22,7 @@ from umbra_py.index import (
     _index_rows,
     _open_untrusted_snapshot,
     _schema_object_names,
+    _sqlite_ro_uri,
     _validate_snapshot,
     parse_sha256_manifest,
     refresh_from_release,
@@ -278,13 +279,26 @@ def test_ro_uri_quotes_hash_and_percent(tmp_path):
     folder = tmp_path / "a#b%c"
     folder.mkdir()
     path = folder / "catalog.db"
-    path.write_bytes(_snapshot(tmp_path / "src"))
+    body = _snapshot(tmp_path / "src")
+    path.write_bytes(body)
+    digest = hashlib.sha256(body).hexdigest()
+    assert parse_sha256_manifest(f"{digest}  catalog.db\n")["catalog.db"] == digest
+    uri = _sqlite_ro_uri(path)
+    assert "#" not in uri.split("?", 1)[0]
+    assert "%23" in uri and "%25" in uri
     conn = _open_untrusted_snapshot(path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 2
+        assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 0
     finally:
         conn.close()
     assert _index_rows(path) == 2
+    rows, built = _validate_snapshot(path)
+    assert rows == 2 and built == "2026-10-27"
+    with CatalogIndex(path, readonly=True) as idx:
+        assert len(idx) == 2
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            idx._conn.execute("CREATE TABLE nope(x)")
 
 
 @pytest.mark.skipif(not PUBLISHED.exists(), reason="published catalog.db was not downloaded")
