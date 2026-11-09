@@ -104,13 +104,27 @@ Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 
 ## Bulk use and outages
 
-For a full catalog scan, or when this API is down, use the weekly release
-instead of paging `/search`. GitHub redirects
-`/releases/download/catalog-index/<file>` at the current asset:
+Do not page `/search` for a full catalog. Take the weekly snapshot instead,
+including when this API is down.
+
+`umbra index fetch` downloads that snapshot. The flags on this version are
+`--db`, `--url`, `--if-changed`, and `--force`. `--db` is the output path
+(default `$UMBRA_INDEX_DB` or `~/.cache/umbra-py/catalog.db`); an existing
+file there is overwritten. `--url` overrides the release asset URL.
+`--if-changed` downloads only when the published ETag or Last-Modified
+differs from the snapshot this index was fetched from, validates the file,
+and swaps it in atomically. Run that refresh while no server holds the
+index open. `--force` applies only with `--if-changed`: it downloads even
+when the snapshot is unchanged, and it accepts a file much smaller than
+the current index. Then `umbra search --local`.
+
+GitHub redirects `/releases/download/catalog-index/<file>` at the current
+asset:
 
 | File | Use |
 | --- | --- |
-| [`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db) | `umbra index fetch`, then `umbra search --local` |
+| [`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db) | The snapshot `umbra index fetch` downloads. `umbra search --local` reads it. |
+| [`catalog.sha256`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.sha256) | GNU `sha256sum` manifest listing `catalog.db`. Not on the release until [PR #315](https://github.com/reesehammer/umbra-py/pull/315) is in the weekly publish. This version of `umbra index fetch` does not check it. A direct download should verify `catalog.db` against that file once the asset exists. |
 | [`umbra-open-data.parquet`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/umbra-open-data.parquet) | DuckDB, geopandas, pyarrow, or rustac. File metadata carries `umbra-py:built_at` and `umbra-py:snapshot`. Those are not columns. |
 | [`coverage.md`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.md) / [`coverage.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.json) | Indexed vs bucket acquisitions by prefix and product, the 99% publication bar, quarantined rows with reasons, the duplicate-id count, and republished-capture groups (linked, not dropped). See [Local index](reference/index.md). |
 | [`index-validation.md`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/index-validation.md) / [`index-validation.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/index-validation.json) | The same quarantine, duplicate-id, and republished-capture rows from the build |

@@ -20,6 +20,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   that is not http(s) is not turned into a link.
 
 ### Changed
+- **The STAC API landing page points a full-catalog scan at the weekly snapshot.**
+  `GET /` names `umbra index fetch` and the published `catalog.db` URL, and
+  links that file with `rel: alternate`. `catalog.sha256` is described as
+  the checksum the weekly release will carry once it is published; the file
+  is not on the release yet, and this version of `umbra index fetch` does
+  not check it.
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`

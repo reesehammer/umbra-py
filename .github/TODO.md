@@ -10,6 +10,21 @@ still open.
 
 ---
 
+## Drop the "catalog.sha256 is not published yet" caveat
+
+- **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/315
+  (the docs that name the missing file are on
+  `cursor/weekly-snapshot-bulk-docs-7d00`)
+- **Code:** `landing_page` in `src/umbra_py/serve.py`;
+  `docs/hosted-limits.md`, `docs/reference/catalog.md`,
+  `docs/reference/index.md`.
+
+Those pages say `catalog.sha256` is absent and that `umbra index fetch`
+does not check it. That is true until #315's publish workflow has run.
+Smallest change: after that asset is on the `catalog-index` release and
+fetch verifies it, delete the "not on the release yet" / "does not check
+it" sentences.
+
 ## Site ranking counts both republished copies
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294

@@ -5,6 +5,23 @@ repeat searches. Build it yourself (`umbra index build`), refresh it
 incrementally (`umbra index update`), or fetch the prebuilt weekly snapshot
 (`umbra index fetch`).
 
+A full catalog scan belongs on that snapshot, not on a paged hosted
+`/search`. `umbra index fetch` downloads it. The flags are `--db`, `--url`,
+`--if-changed`, and `--force`. `--db` defaults to `$UMBRA_INDEX_DB` or
+`~/.cache/umbra-py/catalog.db` and overwrites an existing file. `--url`
+overrides the release asset URL. `--if-changed` skips the body when the
+published ETag or Last-Modified still matches, then validates the file and
+swaps it in atomically; run it while no server holds the index open.
+`--force` applies only with `--if-changed`: download even when unchanged,
+and accept a snapshot much smaller than the current index. The file is
+[`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db).
+[`catalog.sha256`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.sha256)
+is the GNU `sha256sum` manifest that release will carry once
+[PR #315](https://github.com/reesehammer/umbra-py/pull/315) has been
+published by the weekly workflow. It is not on the release yet, and
+`umbra index fetch` does not check it. After the fetch,
+`umbra search --local` reads the file.
+
 The baked SAR previews travel separately, as an opt-in `catalog.thumbs.db`
 sidecar (`umbra index fetch-thumbnails`), so the metadata download stays small.
 The weekly release stores that file as `catalog.thumbs.manifest.json` and
