@@ -854,10 +854,8 @@ def landing_page(
         f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION} "
         "A full-catalog scan should use the weekly snapshot instead of paging "
         f"/search: umbra index fetch, or {CATALOG_INDEX_DB_URL}. "
-        "catalog.sha256, a GNU sha256sum manifest beside that file, is published "
-        "once https://github.com/reesehammer/umbra-py/pull/315 is in the weekly "
-        "workflow. It is not on the release yet, and umbra index fetch does not "
-        "check it."
+        "catalog.sha256, a GNU sha256sum manifest beside that file, is not on "
+        "the release yet, and umbra index fetch does not check it."
     )
     if public:
         description = f"{description} {COMMUNITY_INSTANCE_NOTE}"

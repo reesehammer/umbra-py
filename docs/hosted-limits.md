@@ -105,18 +105,16 @@ Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 ## Bulk use and outages
 
 Do not page `/search` for a full catalog. Take the weekly snapshot instead,
-including when this API is down.
-
-`umbra index fetch` downloads that snapshot. The flags on this version are
-`--db`, `--url`, `--if-changed`, and `--force`. `--db` is the output path
-(default `$UMBRA_INDEX_DB` or `~/.cache/umbra-py/catalog.db`); an existing
-file there is overwritten. `--url` overrides the release asset URL.
-`--if-changed` downloads only when the published ETag or Last-Modified
-differs from the snapshot this index was fetched from, validates the file,
-and swaps it in atomically. Run that refresh while no server holds the
-index open. `--force` applies only with `--if-changed`: it downloads even
-when the snapshot is unchanged, and it accepts a file much smaller than
-the current index. Then `umbra search --local`.
+including when this API is down. Download it with
+`umbra index fetch` (flags `--db`, `--url`, `--if-changed`, and `--force`;
+`--force` only with `--if-changed`) from
+[`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db),
+then search it with `umbra search --local`. The [local index](reference/index.md)
+page says what each flag does.
+[`catalog.sha256`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.sha256)
+is the GNU `sha256sum` manifest the weekly release will carry once
+[PR #315](https://github.com/reesehammer/umbra-py/pull/315) is in the weekly
+publish. It is not on the release yet, and `umbra index fetch` does not check it.
 
 GitHub redirects `/releases/download/catalog-index/<file>` at the current
 asset:
