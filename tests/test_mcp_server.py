@@ -3217,6 +3217,62 @@ def test_public_area_geocode_full_quick_pool_is_a_hint(monkeypatch):
         _drain_public_net(held)
 
 
+def test_public_area_cache_hit_skips_a_full_quick_pool(monkeypatch):
+    """A warm cache answers with every quick permit held. A miss does too."""
+    from umbra_py import geocode
+    from umbra_py.exceptions import GeocodeError
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            return iter(())
+
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs: object):
+        calls.append(query)
+        if query == "Zzz":
+            raise GeocodeError("No place matched 'Zzz'.")
+        return ((0.0, 0.0, 1.0, 1.0), query)
+
+    monkeypatch.setattr(geocode, "geocode_place", fake)
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    ms.configure(cog_streaming=False)
+    geocode._public_geocode.clear()
+    try:
+        first = ms.search_catalog(area="Austin", local=False)
+        assert first["matched_by"] == "geocode"
+        assert calls == ["Austin"]
+        held = _fill_public_net()
+        try:
+            again = ms.search_catalog(area="Austin", local=False)
+            sites = ms.find_repeat_sites(area="Austin", local=False)
+        finally:
+            _drain_public_net(held)
+        assert again["matched_by"] == "geocode"
+        assert again["resolved_place"] == "Austin"
+        assert again["resolved_bbox"] == [0.0, 0.0, 1.0, 1.0]
+        assert "hint" not in again
+        assert sites["matched_by"] == "geocode"
+        assert calls == ["Austin"]
+
+        missed = ms.search_catalog(area="Zzz", local=False)
+        assert missed["hint"] == "no task named Zzz; try place= or bbox="
+        held = _fill_public_net()
+        try:
+            again_miss = ms.search_catalog(area="Zzz", local=False)
+            sites_miss = ms.find_repeat_sites(area="Zzz", local=False)
+        finally:
+            _drain_public_net(held)
+        assert again_miss["hint"] == "no task named Zzz; try place= or bbox="
+        assert sites_miss["hint"] == "no task named Zzz; try place= or bbox="
+        assert calls == ["Austin", "Zzz"]
+    finally:
+        geocode._public_geocode.clear()
+
+
 def test_public_live_area_probe_holds_the_long_slot(monkeypatch):
     """A live catalog's task-name check holds one long permit while it runs."""
     seen: list[int] = []

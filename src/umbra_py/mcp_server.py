@@ -68,7 +68,7 @@ from .constants import (
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
-from .geocode import _GEOCODE_BUSY, geocode_for_host
+from .geocode import _GEOCODE_BUSY, _public_geocode, geocode_for_host
 from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
@@ -302,13 +302,18 @@ def _geocode_place(query: str) -> tuple[Any, str]:
 
 
 def _geocode_area(query: str) -> tuple[Any, str]:
-    """One quick public-host permit, then :func:`_geocode_place`.
+    """Geocode an ``area`` miss, taking a quick permit only for a real fetch.
 
-    A full quick pool is a :class:`PublicHostBusy`, which is a
-    :class:`ValueError`. The area fallback only turns a
-    :class:`~umbra_py.exceptions.GeocodeError` into the empty result and
-    the unavailable hint, so the pool being full is re-raised as that.
+    A warm LRU hit returns the box, and a remembered miss raises that
+    :class:`~umbra_py.exceptions.GeocodeError`, before any permit. A full
+    quick pool is a :class:`PublicHostBusy` (a :class:`ValueError`). The
+    area fallback only turns a geocode error into the empty hint, so a
+    fetch that cannot start is re-raised as that.
     """
+    if not _cog_streaming_allowed():
+        cached = _public_geocode.peek(query)
+        if cached is not None:
+            return cached
     try:
         with _public_net_slot():
             return _geocode_place(query)

@@ -176,14 +176,32 @@ class PublicGeocodeGate:
             self._next_at = 0.0
             self._waiters = 0
 
-    def resolve(self, query: str, *, throttle: bool = True) -> tuple[BBox, str]:
+    def peek(self, query: str) -> tuple[BBox, str] | None:
+        """A remembered box, or None. A remembered miss raises GeocodeError.
+
+        Does not call Nominatim and does not wait on the throttle. The
+        public MCP area fallback checks this before taking a quick
+        outbound permit, so a warm cache still answers when that pool is full.
+        """
+        key = " ".join(query.split()).casefold()
+        return self._cached(key)
+
+    def resolve(
+        self,
+        query: str,
+        *,
+        throttle: bool = True,
+        wait: float | None = None,
+        timeout: float | None = None,
+    ) -> tuple[BBox, str]:
         key = " ".join(query.split()).casefold()
         cached = self._cached(key)
         if cached is not None:
             return cached
         if not throttle:
-            return self._fetch(key, query)
-        deadline = self._time() + _GEOCODE_MAX_WAIT_S
+            return self._fetch(key, query, timeout=timeout)
+        budget = _GEOCODE_MAX_WAIT_S if wait is None else max(0.0, wait)
+        deadline = self._time() + budget
         self._admit()
         acquired = False
         try:
@@ -201,16 +219,19 @@ class PublicGeocodeGate:
             self._next_at = now + wait + self._min_interval
             if wait > 0:
                 self._sleep(wait)
-            return self._fetch(key, query)
+            return self._fetch(key, query, timeout=timeout)
         finally:
             if acquired:
                 self._network.release()
             with self._lock:
                 self._waiters -= 1
 
-    def _fetch(self, key: str, query: str) -> tuple[BBox, str]:
+    def _fetch(self, key: str, query: str, *, timeout: float | None = None) -> tuple[BBox, str]:
         try:
-            result = geocode_place(query)
+            if timeout is None:
+                result = geocode_place(query)
+            else:
+                result = geocode_place(query, timeout=timeout, session=_oneshot_session())
         except GeocodeError as exc:
             if _geocode_not_found(exc):
                 self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
@@ -252,7 +273,31 @@ class PublicGeocodeGate:
 _public_geocode = PublicGeocodeGate()
 
 
-def geocode_for_host(query: str, *, public: bool) -> tuple[BBox, str]:
+def _oneshot_session() -> requests.Session:
+    """One Nominatim GET, with no retry.
+
+    The shared session retries a read timeout. ``/search``'s area fallback
+    has to finish inside the request deadline, so that call does not.
+    """
+    from requests.adapters import HTTPAdapter
+
+    from . import __version__
+
+    session = requests.Session()
+    session.headers["User-Agent"] = f"umbra-py/{__version__}"
+    adapter = HTTPAdapter(max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def geocode_for_host(
+    query: str,
+    *,
+    public: bool,
+    wait: float | None = None,
+    timeout: float | None = None,
+) -> tuple[BBox, str]:
     """Resolve ``query`` through :data:`_public_geocode`.
 
     ``public=False`` is local ``umbra serve``: the LRU and the negative
@@ -261,5 +306,11 @@ def geocode_for_host(query: str, *, public: bool) -> tuple[BBox, str]:
     Those share this cache and the one-request-per-second slot, so
     ``place=`` and the ``area=`` fallback together stay at one Nominatim
     call per second.
+
+    ``wait`` caps how long the public gate waits for its turn.
+    ``timeout`` is the HTTP timeout for the fetch that follows a miss.
+    ``/search`` passes both so a slow Nominatim raises inside the request
+    deadline. A set ``timeout`` is one attempt: the shared session's
+    retries would outlast that deadline.
     """
-    return _public_geocode.resolve(query, throttle=public)
+    return _public_geocode.resolve(query, throttle=public, wait=wait, timeout=timeout)

@@ -15,6 +15,7 @@ import copy
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -995,7 +996,7 @@ def test_search_filters_by_area(client, monkeypatch):
     assert "hint" not in hit
     assert "resolved_place" not in hit
 
-    def _no_geocode(_query: str):
+    def _no_geocode(_query: str, **_kwargs: object):
         raise GeocodeError("No place matched 'Nowhere'.")
 
     monkeypatch.setattr("umbra_py.geocode.geocode_place", _no_geocode)
@@ -1015,7 +1016,7 @@ def test_search_filters_by_area(client, monkeypatch):
 _AUSTIN_BBOX = (-69.0, 10.0, -67.0, 11.0)
 
 
-def _geocode_austin(query: str):
+def _geocode_austin(query: str, **_kwargs: object):
     return (_AUSTIN_BBOX, f"{query}, Texas, United States")
 
 
@@ -1052,7 +1053,7 @@ def test_search_area_miss_geocodes_the_footprint(client, monkeypatch):
 def test_area_geocode_unavailable_is_an_empty_200(client, monkeypatch, method, path, message):
     """A busy or unreachable fallback is HTTP 200 with the empty result and a hint."""
 
-    def _down(_query: str):
+    def _down(_query: str, **_kwargs: object):
         raise GeocodeError(message)
 
     monkeypatch.setattr("umbra_py.geocode.geocode_place", _down)
@@ -1115,7 +1116,7 @@ def test_sites_area_miss_geocodes_and_a_double_miss_hints(sites_client, monkeypa
     assert posted.status_code == 200
     assert posted.json()["matched_by"] == "geocode"
 
-    def _miss(_query: str):
+    def _miss(_query: str, **_kwargs: object):
         raise GeocodeError("No place matched 'NotAPlace'.")
 
     monkeypatch.setattr("umbra_py.geocode.geocode_place", _miss)
@@ -1133,7 +1134,7 @@ def test_public_area_geocode_is_cached(index_path, tmp_path, monkeypatch):
     pytest.importorskip("mcp")
     calls: list[str] = []
 
-    def _once(query: str):
+    def _once(query: str, **_kwargs: object):
         calls.append(query)
         return (_AUSTIN_BBOX, "Austin, Texas, United States")
 
@@ -1161,7 +1162,7 @@ def test_local_area_geocode_is_reused_by_the_next_link(client, monkeypatch):
     """Following next does not call Nominatim again, and the link still says area=."""
     calls: list[str] = []
 
-    def _once(query: str):
+    def _once(query: str, **_kwargs: object):
         calls.append(query)
         return (_AUSTIN_BBOX, "Austin, Texas, United States")
 
@@ -1195,7 +1196,7 @@ def test_local_area_geocode_is_reused_by_the_next_link(client, monkeypatch):
 def test_local_area_geocode_remembers_a_miss(client, monkeypatch):
     calls: list[str] = []
 
-    def _miss(query: str):
+    def _miss(query: str, **_kwargs: object):
         calls.append(query)
         raise GeocodeError(f"No place matched {query!r}.")
 
@@ -1251,6 +1252,45 @@ def test_public_area_gate_busy_is_an_empty_200(index_path, tmp_path, monkeypatch
         from umbra_py import mcp_server as ms
 
         ms.configure(cog_streaming=None)
+
+
+def test_search_slow_area_geocode_is_an_empty_200(index_path, tmp_path, monkeypatch):
+    """A Nominatim call that would outlast /search's deadline is a hint, not a 503."""
+    pytest.importorskip("mcp")
+    from umbra_py.geocode import _public_geocode
+
+    monkeypatch.setenv("UMBRA_REQUEST_TIMEOUT_S", "2")
+    seen: list[float] = []
+
+    def _slow(query: str, **kwargs: object):
+        raw = kwargs.get("timeout", 10.0)
+        timeout = raw if isinstance(raw, (int, float)) else 10.0
+        seen.append(float(timeout))
+        time.sleep(timeout)
+        raise GeocodeError("Could not reach the geocoding service: timed out")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _slow)
+    _public_geocode.clear()
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    try:
+        with TestClient(app) as public:
+            # The uncapped gate would sleep this gap, then spend its 10s HTTP timeout.
+            _public_geocode._next_at = time.monotonic() + 0.2
+            got = public.get("/search?area=Austin")
+            posted = public.post("/search", json={"area": "Lyon"})
+    finally:
+        _public_geocode.clear()
+        from umbra_py import mcp_server as ms
+
+        ms.configure(cog_streaming=None)
+    assert got.status_code == 200
+    assert got.json()["features"] == []
+    assert got.json()["hint"] == "no task named Austin; geocoding was unavailable"
+    assert "deadline" not in got.json().get("message", "")
+    assert posted.status_code == 200
+    assert posted.json()["hint"] == "no task named Lyon; geocoding was unavailable"
+    assert seen
+    assert all(timeout < 1.0 for timeout in seen)
 
 
 def test_items_endpoint_filters_by_product_types(client):

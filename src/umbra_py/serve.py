@@ -311,6 +311,22 @@ RATE_LIMIT_EXEMPT_PATHS = frozenset(
 )
 
 
+def _search_geocode_limits(deadline: float) -> tuple[float, float]:
+    """Gate wait and HTTP timeout for ``/search``'s area fallback.
+
+    Together they take at most half of ``deadline``, and neither grows
+    past the usual 5s wait or 10s HTTP timeout. The search keeps the
+    rest, so a slow Nominatim raises :class:`~umbra_py.exceptions.GeocodeError`
+    before the request deadline instead of becoming a 503.
+    """
+    from .geocode import _GEOCODE_MAX_WAIT_S
+
+    budget = max(deadline, 0.0) / 2
+    wait = min(_GEOCODE_MAX_WAIT_S, budget / 2)
+    http = min(10.0, max(0.0, budget - wait))
+    return wait, http
+
+
 def _request_timeout_s() -> float:
     """Deadline for a catalog read on the request path.
 
@@ -4354,7 +4370,13 @@ def build_app(
         )
 
     def _decide_area(
-        source: Any, area: str | None, fuzzy: bool, bbox: BBox | None, intersects: Any
+        source: Any,
+        area: str | None,
+        fuzzy: bool,
+        bbox: BBox | None,
+        intersects: Any,
+        *,
+        within: float | None = None,
     ):
         """Task-name hit, geocoded footprint, or a miss hint.
 
@@ -4363,9 +4385,19 @@ def build_app(
         that is busy or unreachable, are hints on an empty result, not an
         error. ``intersects`` is an explicit footprint: when it is set,
         ``area`` stays a task filter.
+
+        ``within`` is the request deadline. ``/search`` passes it so the
+        gate wait and the HTTP timeout finish with time left for the
+        search. ``/sites`` leaves it unset.
         """
         from .area_fallback import resolve_area_fallback
         from .geocode import geocode_for_host
+
+        def geocode(query: str):
+            if within is None:
+                return geocode_for_host(query, public=public)
+            wait, timeout = _search_geocode_limits(within)
+            return geocode_for_host(query, public=public, wait=wait, timeout=timeout)
 
         return resolve_area_fallback(
             source,
@@ -4374,7 +4406,7 @@ def build_app(
             bbox=bbox,
             intersects=intersects,
             place=None,
-            geocode=lambda query: geocode_for_host(query, public=public),
+            geocode=geocode,
         )
 
     def _geocode_fields(decision: Any) -> dict[str, Any]:
@@ -4413,7 +4445,9 @@ def build_app(
             # ``fallback`` is GET /search only. /collections/.../items keeps
             # area as a task filter, which is what that route does today.
             if fallback:
-                decision = _decide_area(source, area, fuzzy, bbox, intersects)
+                decision = _decide_area(
+                    source, area, fuzzy, bbox, intersects, within=_request_timeout_s()
+                )
                 if decision.hint:
                     result = search_result(
                         [],
@@ -4616,7 +4650,12 @@ def build_app(
         source = _open()
         try:
             decision = _decide_area(
-                source, parsed.area, parsed.fuzzy, parsed.bbox, parsed.intersects
+                source,
+                parsed.area,
+                parsed.fuzzy,
+                parsed.bbox,
+                parsed.intersects,
+                within=_request_timeout_s(),
             )
             if decision.hint:
                 base = _base(request)

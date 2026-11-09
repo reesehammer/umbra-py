@@ -25,9 +25,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   (an index check does not). A task-name hit is unchanged. The resolved
   box is cached in-process (the same LRU and a ten-minute memory of names
   that do not resolve) on local `umbra serve` and on the public host, so
-  a next link does not call Nominatim again. On the public host that
+  a next link does not call Nominatim again.   On the public host that
   cache is the same gate as `place=` (one in-flight Nominatim call, a
-  one-second gap, at most five waiters).
+  one-second gap, at most five waiters). A cached name does not take a
+  quick outbound permit. `GET`/`POST /search` keeps the fallback's
+  Nominatim wait and HTTP timeout inside half the request deadline, so a
+  slow geocode is the unavailable hint rather than HTTP 503.
 
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
