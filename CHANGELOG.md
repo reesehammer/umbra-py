@@ -19,12 +19,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   HTTP 200 carries `hint` `no task named X; geocoding was unavailable`
   (not HTTP 503). `search_catalog` and `find_repeat_sites` add the same
   fields, and on that miss `resolved_area` is the `area` that was tried,
-  without changing tool names, arguments, or defaults. A task-name hit is
-  unchanged. The resolved box is cached in-process (the same LRU and a
-  ten-minute memory of names that do not resolve) on local `umbra serve`
-  and on the public host, so a next link does not call Nominatim again.
-  On the public host that cache is the same gate as `place=` (one
-  in-flight Nominatim call, a one-second gap, at most five waiters).
+  without changing tool names, arguments, or defaults. On the public host
+  a full quick outbound pool is that same unavailable hint, not a tool
+  error, and a live catalog's task-name check uses the long outbound pool
+  (an index check does not). A task-name hit is unchanged. The resolved
+  box is cached in-process (the same LRU and a ten-minute memory of names
+  that do not resolve) on local `umbra serve` and on the public host, so
+  a next link does not call Nominatim again. On the public host that
+  cache is the same gate as `place=` (one in-flight Nominatim call, a
+  one-second gap, at most five waiters).
 
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**

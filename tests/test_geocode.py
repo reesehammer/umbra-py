@@ -7,6 +7,7 @@ from umbra_py.exceptions import GeocodeError
 from umbra_py.geocode import (
     _GEOCODE_MAX_WAIT_S,
     PublicGeocodeGate,
+    _geocode_not_found,
     _parse_boundingbox,
     geocode_for_host,
     geocode_place,
@@ -313,6 +314,46 @@ def test_public_geocode_caches_a_miss_and_not_a_network_failure(monkeypatch):
     with pytest.raises(GeocodeError, match="Could not reach"):
         gate.resolve("down")
     assert calls[-2:] == ["down", "down"]
+
+
+def test_geocode_not_found_is_shared_with_the_area_fallback():
+    """One classifier: a name miss, including an empty name, is not 'unavailable'."""
+    from umbra_py.area_fallback import resolve_area_fallback
+
+    assert _geocode_not_found(GeocodeError("No place matched 'zzz'."))
+    assert _geocode_not_found(GeocodeError("Empty place name."))
+    assert _geocode_not_found(GeocodeError("Geocoding 'zzz' returned no usable bounding box."))
+    busy = GeocodeError("Geocoding is busy on this host; retry in a few seconds.")
+    unreachable = GeocodeError("Could not reach the geocoding service: timed out")
+    assert not _geocode_not_found(busy)
+    assert not _geocode_not_found(unreachable)
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+    for message, hint in (
+        ("Empty place name.", "no task named Austin; try place= or bbox="),
+        ("No place matched 'Austin'.", "no task named Austin; try place= or bbox="),
+        (
+            "Geocoding is busy on this host; retry in a few seconds.",
+            "no task named Austin; geocoding was unavailable",
+        ),
+    ):
+
+        def _raise(_query: str, message: str = message) -> tuple:
+            raise GeocodeError(message)
+
+        decision = resolve_area_fallback(
+            _Miss(),
+            "Austin",
+            fuzzy=False,
+            bbox=None,
+            intersects=None,
+            place=None,
+            geocode=_raise,
+        )
+        assert decision.hint == hint
 
 
 def test_public_geocode_fails_fast_when_busy(monkeypatch):

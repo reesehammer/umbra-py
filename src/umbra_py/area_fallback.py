@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .exceptions import GeocodeError
-from .geocode import BBox
+from .geocode import BBox, _geocode_not_found
 
 Geocoder = Callable[[str], tuple[BBox, str]]
 
@@ -45,16 +45,6 @@ class AreaFallback:
     matched_by: str | None = None
     place: str | None = None
     hint: str | None = None
-
-
-def _place_miss(exc: GeocodeError) -> bool:
-    """A name Nominatim will not turn into a box, as opposed to a busy host."""
-    text = str(exc)
-    return (
-        text.startswith("No place matched")
-        or text.startswith("Empty place name")
-        or "no usable bounding box" in text
-    )
 
 
 def _area_matches_task(source: Any, area: str, *, fuzzy: bool) -> bool:
@@ -103,12 +93,13 @@ def resolve_area_fallback(
     try:
         box, label = geocode(area)
     except GeocodeError as exc:
-        if _place_miss(exc):
+        if _geocode_not_found(exc):
             hint = f"no task named {area}; try place= or bbox="
         else:
-            # Busy (the waiter cap or the lock timeout) and an unreachable
-            # Nominatim are the same empty result as a place miss. The
-            # fallback does not turn them into an HTTP error.
+            # Busy (the waiter cap, the lock timeout, or a full public-host
+            # quick pool) and an unreachable Nominatim are the same empty
+            # result as a place miss. The fallback does not turn them into
+            # an HTTP error.
             hint = f"no task named {area}; geocoding was unavailable"
         return AreaFallback(area=None, bbox=None, hint=hint)
     return AreaFallback(area=None, bbox=box, matched_by="geocode", place=str(label))

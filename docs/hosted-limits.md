@@ -127,9 +127,11 @@ one LRU cache of 256 names. A repeated name does not call out. A place that
 does not resolve is remembered for about 10 minutes. A miss that would spend
 more than about 5 seconds waiting for the in-flight call and the gap, or
 join more than 5 waiters, fails immediately. `geocode_place` and a `place`
-filter return that as an error. An `area` fallback that is busy or cannot
-reach Nominatim returns the empty result with `hint`
-`no task named X; geocoding was unavailable` instead. Local `umbra serve`
+filter return that as an error. An `area` fallback that is busy, cannot
+reach Nominatim, or finds the quick outbound pool full returns the empty
+result with `hint` `no task named X; geocoding was unavailable` instead.
+A live catalog's task-name check takes a long outbound permit, the same
+pool as the catalog walk; an index check does not. Local `umbra serve`
 uses the same cache, without the throttle, so a next link does not geocode
 again. Local MCP `place=` and the CLI call Nominatim directly.
 

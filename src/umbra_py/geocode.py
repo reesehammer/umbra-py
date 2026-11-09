@@ -120,8 +120,18 @@ _GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
 
 
 def _geocode_not_found(exc: GeocodeError) -> bool:
+    """A name that will not become a box, rather than a busy or unreachable service.
+
+    The public gate remembers these. :mod:`umbra_py.area_fallback` uses the
+    same test: these messages are ``try place= or bbox=``. Anything else,
+    including a full public-host network pool, is ``geocoding was unavailable``.
+    """
     text = str(exc)
-    return text.startswith("No place matched") or "no usable bounding box" in text
+    return (
+        text.startswith("No place matched")
+        or text.startswith("Empty place name")
+        or "no usable bounding box" in text
+    )
 
 
 class PublicGeocodeGate:

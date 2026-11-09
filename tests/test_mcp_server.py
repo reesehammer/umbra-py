@@ -3157,6 +3157,87 @@ def test_full_long_pool_rejects_a_live_search(tmp_path, monkeypatch):
         _drain_long_net(held)
 
 
+def _free_long_permits() -> int:
+    got = 0
+    while ms._PUBLIC_NET_LONG.acquire(blocking=False):
+        got += 1
+    for _ in range(got):
+        ms._PUBLIC_NET_LONG.release()
+    return got
+
+
+def test_public_area_geocode_full_quick_pool_is_a_hint(monkeypatch):
+    """A full quick pool is the unavailable hint, not a tool error."""
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after the quick pool was full")
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("geocoded while the quick pool was full")
+
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    monkeypatch.setattr(ms, "_geocode_place", boom)
+    ms.configure(cog_streaming=False)
+    held = _fill_public_net()
+    try:
+        for call in (
+            lambda: ms.search_catalog(area="Austin", local=False),
+            lambda: ms.find_repeat_sites(area="Austin", local=False),
+        ):
+            out = call()
+            assert out["count"] == 0
+            assert out.get("items", out.get("sites")) == []
+            assert out["hint"] == "no task named Austin; geocoding was unavailable"
+            assert out["resolved_area"] == "Austin"
+            assert "matched_by" not in out
+    finally:
+        _drain_public_net(held)
+
+
+def test_public_live_area_probe_holds_the_long_slot(monkeypatch):
+    """A live catalog's task-name check holds one long permit while it runs."""
+    seen: list[int] = []
+
+    class _Live:
+        def has_matching_task(self, area, *, fuzzy):
+            seen.append(_free_long_permits())
+            return False
+
+        def search(self, **kwargs):
+            return iter(())
+
+    monkeypatch.setattr(ms, "_geocode_place", lambda _query: ((0.0, 0.0, 1.0, 1.0), "Austin"))
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Live(), False))
+    ms.configure(cog_streaming=False)
+    assert ms.search_catalog(area="Austin", local=False)["matched_by"] == "geocode"
+    assert ms.find_repeat_sites(area="Austin", local=False)["matched_by"] == "geocode"
+    assert seen == [ms._PUBLIC_NET_LONG_LIMIT - 1, ms._PUBLIC_NET_LONG_LIMIT - 1]
+
+
+def test_public_index_area_probe_does_not_take_a_long_slot(tmp_path, monkeypatch):
+    """An index task-name check is SQL, so a full long pool does not block it."""
+    from umbra_py.index import CatalogIndex
+
+    db = tmp_path / "catalog.db"
+    CatalogIndex(db).close()
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(db))
+    monkeypatch.delenv(ms.CANOPY_TOKEN_ENV, raising=False)
+    monkeypatch.setattr(ms, "_geocode_place", lambda _query: ((0.0, 0.0, 1.0, 1.0), "Austin"))
+    ms.configure(cog_streaming=False)
+    held = _fill_long_net()
+    try:
+        search = ms.search_catalog(area="Austin", local=True)
+        sites = ms.find_repeat_sites(area="Austin", local=True)
+    finally:
+        _drain_long_net(held)
+    assert search["matched_by"] == "geocode"
+    assert sites["matched_by"] == "geocode"
+
+
 def test_full_quick_pool_does_not_block_a_live_search(tmp_path, monkeypatch):
     class _FakeCatalog:
         def search(self, **kwargs):

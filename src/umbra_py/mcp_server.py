@@ -67,8 +67,8 @@ from .constants import (
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_for_host
+from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
+from .geocode import _GEOCODE_BUSY, geocode_for_host
 from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
@@ -188,8 +188,8 @@ def _public_net_slot(*, long: bool = False):
 
     ``long=False`` is the quick pool (:data:`_PUBLIC_NET_LIMIT`): HEAD,
     geocode, and a single item GET. ``long=True`` is the pool for a live
-    catalog walk or a semantic or embedding model call
-    (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
+    catalog walk, the live catalog's task-name probe, or a semantic or
+    embedding model call (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
     :class:`PublicHostBusy` at once when it is full, with the same message.
     """
     if _cog_streaming_allowed():
@@ -302,9 +302,45 @@ def _geocode_place(query: str) -> tuple[Any, str]:
 
 
 def _geocode_area(query: str) -> tuple[Any, str]:
-    """One quick public-host permit, then :func:`_geocode_place`."""
-    with _public_net_slot():
-        return _geocode_place(query)
+    """One quick public-host permit, then :func:`_geocode_place`.
+
+    A full quick pool is a :class:`PublicHostBusy`, which is a
+    :class:`ValueError`. The area fallback only turns a
+    :class:`~umbra_py.exceptions.GeocodeError` into the empty result and
+    the unavailable hint, so the pool being full is re-raised as that.
+    """
+    try:
+        with _public_net_slot():
+            return _geocode_place(query)
+    except PublicHostBusy as exc:
+        raise GeocodeError(_GEOCODE_BUSY) from exc
+
+
+class _LongSlotTaskProbe:
+    """Hold a long outbound permit around a live catalog's task-name check.
+
+    :meth:`UmbraCatalog.has_matching_task` lists up to three S3 prefixes.
+    That is the same pool as the live walk. An index probe is SQL and is
+    not wrapped. A double with no ``has_matching_task`` is left as it is,
+    so its ``search`` fallback stays the caller's.
+    """
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        with _public_net_slot(long=True):
+            return bool(self._source.has_matching_task(area, fuzzy=fuzzy))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source, name)
+
+
+def _area_probe_source(source: Any, *, is_index: bool) -> Any:
+    """Slot a live catalog's task probe. An index probe stays unslotted."""
+    if is_index or not callable(getattr(source, "has_matching_task", None)):
+        return source
+    return _LongSlotTaskProbe(source)
 
 
 def _public_host() -> bool:
@@ -834,7 +870,8 @@ def search_catalog(
     ``place`` are omitted, it is geocoded and that footprint is searched; the
     result then adds ``matched_by`` (``geocode``), ``resolved_place``, and
     ``resolved_bbox``. A name Nominatim does not know sets ``hint`` to
-    ``no task named X; try place= or bbox=``. When geocoding is busy or
+    ``no task named X; try place= or bbox=``. When geocoding is busy (the
+    Nominatim gate, or the public host's quick outbound pool) or
     unreachable, ``hint`` is ``no task named X; geocoding was unavailable``
     and ``resolved_area`` is the ``area`` that was tried. A task-name hit
     adds nothing. Set ``semantic``
@@ -948,7 +985,7 @@ def search_catalog(
         # a task filter when it is set.
         if not semantic:
             decision = resolve_area_fallback(
-                source,
+                _area_probe_source(source, is_index=is_index),
                 search_area,
                 fuzzy=search_fuzzy,
                 bbox=resolved_bbox,
@@ -1072,7 +1109,8 @@ def find_repeat_sites(
     An ``area`` that matches no task, with no ``bbox``, ``intersects``, or
     ``place``, is geocoded. The result then adds ``matched_by`` (``geocode``)
     plus the resolved place and bbox. A name Nominatim does not know, and a
-    geocoder that is busy or unreachable, set ``hint`` and return no sites
+    geocoder that is busy (the Nominatim gate, or the public host's quick
+    outbound pool) or unreachable, set ``hint`` and return no sites
     (``resolved_area`` is the ``area`` that was tried). A task-name hit adds
     nothing.
 
@@ -1241,7 +1279,7 @@ def find_repeat_sites(
         # Same rule as search_catalog. ``intersects`` is an explicit footprint
         # (the GeoJSON filter on this signature): area stays a task filter.
         decision = resolve_area_fallback(
-            source,
+            _area_probe_source(source, is_index=is_index),
             search_area,
             fuzzy=search_fuzzy,
             bbox=resolved_bbox,
