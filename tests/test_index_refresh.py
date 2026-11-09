@@ -17,6 +17,7 @@ import pytest
 import responses
 
 from umbra_py import index as index_mod
+from umbra_py.constants import CATALOG_SHA256_ASSET
 from umbra_py.exceptions import IndexRefreshError, InsufficientSpaceError
 from umbra_py.index import (
     THUMBS_SNAPSHOT_META_KEY,
@@ -32,6 +33,7 @@ from umbra_py.index import (
 from umbra_py.models import UmbraItem
 
 URL = "https://example.test/releases/download/catalog-index/catalog.db"
+MANIFEST = URL.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET
 
 
 def _db_bytes(tmp_path, name: str, n: int, built_at: str = "2026-10-05") -> bytes:
@@ -63,6 +65,7 @@ def _serve(body: bytes, etag: str) -> None:
         status=200,
         headers={**headers, "Content-Length": str(len(body))},
     )
+    responses.add(responses.GET, MANIFEST, status=404)
 
 
 def _count(path) -> int:
