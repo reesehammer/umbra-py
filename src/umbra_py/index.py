@@ -78,6 +78,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: ``canonical``, so a read of any later column walked every preview's overflow
 #: pages. The bytes move in place; the catalog is not rebuilt. Older databases
 #: are migrated in place by :meth:`CatalogIndex._migrate`.
+#:
+#: The bbox R-tree (``items_rtree``) is not a schema version. A published
+#: snapshot stays v8, and an older umbra-py ignores the extra table. This
+#: build creates it on open when the file is writable and searches without
+#: it when it is not.
 _SCHEMA_VERSION = 8
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
@@ -182,6 +187,53 @@ CREATE INDEX IF NOT EXISTS idx_items_search
     ON items ((task IS NULL), task, acq_date, datetime, id, href);
 """
 
+#: ``meta`` key set once ``items_rtree`` matches ``items``. Absent or not
+#: ``1`` means the next writable open rebuilds the tree.
+_ITEMS_RTREE_META = "items_rtree"
+
+# Overlap, not containment: an item matches when its footprint rectangle
+# intersects the query rectangle, the same test as ``intersects_bbox``.
+# R-tree columns are (min_lon, max_lon, min_lat, max_lat). The arguments are
+# the query's (max_lon, min_lon, max_lat, min_lat) — see ``_rtree_params``.
+_RTREE_OVERLAP = "min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?"
+_RTREE_OVERLAP_ALIASED = "r.min_lon <= ? AND r.max_lon >= ? AND r.min_lat <= ? AND r.max_lat >= ?"
+
+_RTREE_FILL = (
+    "INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat) "
+    "SELECT rowid, min_lon, max_lon, min_lat, max_lat FROM items "
+    "WHERE min_lon IS NOT NULL AND min_lat IS NOT NULL "
+    "AND max_lon IS NOT NULL AND max_lat IS NOT NULL"
+)
+
+_RTREE_TRIGGERS = (
+    """
+    CREATE TRIGGER items_rtree_ai AFTER INSERT ON items
+    WHEN NEW.min_lon IS NOT NULL AND NEW.min_lat IS NOT NULL
+     AND NEW.max_lon IS NOT NULL AND NEW.max_lat IS NOT NULL
+    BEGIN
+      INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat)
+      VALUES (NEW.rowid, NEW.min_lon, NEW.max_lon, NEW.min_lat, NEW.max_lat);
+    END
+    """,
+    """
+    CREATE TRIGGER items_rtree_au
+    AFTER UPDATE OF min_lon, min_lat, max_lon, max_lat ON items
+    BEGIN
+      DELETE FROM items_rtree WHERE id = NEW.rowid;
+      INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat)
+      SELECT NEW.rowid, NEW.min_lon, NEW.max_lon, NEW.min_lat, NEW.max_lat
+      WHERE NEW.min_lon IS NOT NULL AND NEW.min_lat IS NOT NULL
+        AND NEW.max_lon IS NOT NULL AND NEW.max_lat IS NOT NULL;
+    END
+    """,
+    """
+    CREATE TRIGGER items_rtree_ad AFTER DELETE ON items
+    BEGIN
+      DELETE FROM items_rtree WHERE id = OLD.rowid;
+    END
+    """,
+)
+
 
 #: Schema of the *thumbnail sidecar* -- the transportable half of the baked
 #: previews (see :meth:`CatalogIndex.export_thumbnails`). It is a separate file
@@ -219,6 +271,30 @@ _THUMBS_PROVENANCE_COLUMNS = {"asset": "TEXT", "size": "INTEGER"}
 #: ``NULL``, so it does not replace anything -- while ``IS`` compares the assets
 #: without tripping over the same ``NULL``.
 _KEEP_UNLESS_LARGER = " AND (thumbnail IS NULL OR (? > thumbnail_size AND thumbnail_asset IS ?))"
+
+
+def _rtree_params(box: BBox) -> list[object]:
+    """Bind values for :data:`_RTREE_OVERLAP`.
+
+    ``box`` is ``(min_lon, min_lat, max_lon, max_lat)``.
+    """
+    return [box[2], box[0], box[3], box[1]]
+
+
+def _column_overlap(prefix: str = "") -> str:
+    """Bbox overlap against ``items`` columns, for a search that has no R-tree.
+
+    ``prefix`` is ``"i."`` when the statement also names ``items_rtree``,
+    whose columns would otherwise make ``min_lon`` ambiguous.
+    """
+    return (
+        f"{prefix}min_lon IS NOT NULL AND {prefix}max_lon >= ? AND {prefix}min_lon <= ? "
+        f"AND {prefix}max_lat >= ? AND {prefix}min_lat <= ?"
+    )
+
+
+def _column_overlap_params(box: BBox) -> list[object]:
+    return [box[0], box[2], box[1], box[3]]
 
 
 def _preview_replaces(
@@ -1555,8 +1631,14 @@ class CatalogIndex:
         self.path = Path(path) if path is not None else default_index_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
+        self._spatial_ready = False
         self._configure_connection()
         self._init_schema()
+        # A published snapshot has no R-tree. Build it on this open when the
+        # file is writable so a bbox search does not scan every GEC row.
+        # Read-only opens leave ``_spatial_ready`` false and keep the old
+        # predicate, which is slower and still correct.
+        self._ensure_spatial_index()
         # Small indexes move previews before the caller runs a query. A hosted
         # catalog.db (gigabytes of inline PNGs) only records that the move is
         # still owed, so this open does not read the blobs.
@@ -1640,6 +1722,59 @@ class CatalogIndex:
         self._migrate()
         self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _spatial_index_ready(self) -> bool:
+        """Whether ``items_rtree`` is present and filled for this file."""
+        if self.get_meta(_ITEMS_RTREE_META) != "1":
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items_rtree'"
+        ).fetchone()
+        return row is not None
+
+    def _ensure_spatial_index(self) -> None:
+        """Create ``items_rtree`` and keep it aligned with ``items``.
+
+        GEC is on almost every acquisition, so a product filter makes SQLite
+        probe every asset row and sort before ``LIMIT``. The R-tree is the
+        outer loop instead: a bbox search reads the footprints that overlap
+        the box. Triggers cover later inserts, bbox updates, and deletes,
+        including ones this class does not issue itself.
+
+        A read-only file, or one this connection cannot lock, is left alone.
+        """
+        if self._spatial_index_ready():
+            self._spatial_ready = True
+            return
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            return
+        try:
+            if self._spatial_index_ready():
+                self._conn.rollback()
+                self._spatial_ready = True
+                return
+            for name in ("items_rtree_ai", "items_rtree_au", "items_rtree_ad"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self._conn.execute("DROP TABLE IF EXISTS items_rtree")
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE items_rtree USING rtree("
+                "id, min_lon, max_lon, min_lat, max_lat)"
+            )
+            for statement in _RTREE_TRIGGERS:
+                self._conn.execute(statement)
+            self._conn.execute(_RTREE_FILL)
+            count = self._conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()[0]
+            self.set_meta(_ITEMS_RTREE_META, "1")
+            self._conn.commit()
+            self._spatial_ready = True
+            _log.info("Built the search R-tree (%s footprints) in %s", count, self.path)
+        except sqlite3.OperationalError:
+            try:
+                self._conn.rollback()
+            except sqlite3.OperationalError:
+                pass
 
     def _migrate(self) -> None:
         """Apply additive, idempotent migrations to reach the current schema.
@@ -2498,17 +2633,32 @@ class CatalogIndex:
         default, returns every row. The flag is the ``canonical`` column
         written when the index is linked; an unlinked row defaults to
         canonical. See :mod:`umbra_py.duplicates`.
+
+        A bbox (or the bbox of ``intersects``) is answered from ``items_rtree``
+        when that table is present. ``CROSS JOIN`` is not reordered, so the
+        R-tree stays the outer loop even when a product filter matches almost
+        every row. Without the table, the same overlap predicate runs against
+        the ``items`` columns.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
+        # A polygon filter pushes its own bounding box into SQL as a cheap
+        # prefilter (the exact polygon test runs in Python on each candidate
+        # below); combined with an explicit ``bbox`` both boxes must overlap.
+        # One box drives the R-tree. A second box stays a column predicate:
+        # collapsing the two into their intersection would drop a footprint
+        # that overlaps both boxes without overlapping that intersection.
+        boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
+        spatial = bool(boxes) and self._spatial_ready
+        prefix = "i." if spatial else ""
         conditions: list[str] = []
         params: list[object] = []
 
         if start_d is not None:
-            conditions.append("(acq_date IS NULL OR acq_date >= ?)")
+            conditions.append(f"({prefix}acq_date IS NULL OR {prefix}acq_date >= ?)")
             params.append(start_d.isoformat())
         if end_d is not None:
-            conditions.append("(acq_date IS NULL OR acq_date <= ?)")
+            conditions.append(f"({prefix}acq_date IS NULL OR {prefix}acq_date <= ?)")
             params.append(end_d.isoformat())
         if area and fuzzy:
             # SQL LIKE can't express the token-wise fuzzy match, so resolve the
@@ -2524,44 +2674,50 @@ class CatalogIndex:
             if not matched:
                 return
             placeholders = ", ".join("?" * len(matched))
-            conditions.append(f"task IN ({placeholders})")
+            conditions.append(f"{prefix}task IN ({placeholders})")
             params += matched
         elif area:
-            conditions.append("task IS NOT NULL AND LOWER(task) LIKE ? ESCAPE '\\'")
+            conditions.append(
+                f"{prefix}task IS NOT NULL AND LOWER({prefix}task) LIKE ? ESCAPE '\\'"
+            )
             params.append(f"%{_escape_like(area.lower())}%")
-        # A polygon filter pushes its own bounding box into SQL as a cheap
-        # prefilter (the exact polygon test runs in Python on each candidate
-        # below); combined with an explicit ``bbox`` both boxes must overlap.
-        boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
-        for box in boxes:
+        extra_boxes = boxes[1:] if spatial else boxes
+        for box in extra_boxes:
             # Footprint bbox overlaps the query bbox (matches
             # UmbraItem.intersects_bbox); items with no bbox never match.
-            conditions.append(
-                "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
-                "AND max_lat >= ? AND min_lat <= ?"
-            )
-            params += [box[0], box[2], box[1], box[3]]
+            conditions.append(_column_overlap(prefix))
+            params += _column_overlap_params(box)
         if product_types:
             wanted = [p.upper() for p in product_types]
             placeholders = ", ".join("?" * len(wanted))
-            conditions.append(
-                f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
-            )
+            if spatial:
+                # EXISTS probes the assets of the R-tree hits. ``IN (SELECT
+                # href FROM item_assets WHERE asset = 'GEC')`` is the whole
+                # catalog (GEC is on nearly every row), and SQLite then drives
+                # from that list.
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM item_assets AS a "
+                    f"WHERE a.href = i.href AND a.asset IN ({placeholders}))"
+                )
+            else:
+                conditions.append(
+                    f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
+                )
             params += wanted
         if canonical is True:
-            conditions.append("canonical = 1")
+            conditions.append(f"{prefix}canonical = 1")
         elif canonical is False:
-            conditions.append("canonical = 0")
+            conditions.append(f"{prefix}canonical = 0")
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         # Total order. ``id`` breaks a timestamp tie so offset pages cannot
         # repeat or skip a pass that shares a task and a datetime with its
         # neighbor. ``href`` is last so a duplicated id still sorts in one way.
         # The parenthesized ``task IS NULL`` matches ``idx_items_search``, so
-        # SQLite walks that index instead of sorting every row (the sort read
-        # columns stored after the preview blob). ``LIMIT`` is pushed only when
-        # nothing is filtered in Python afterwards: a polygon or polarization
-        # test can reject a row, and a SQL limit would then return a short page.
+        # a search with no bbox walks that index instead of sorting every row
+        # (the sort read columns stored after the preview blob). ``LIMIT`` is
+        # pushed only when nothing is filtered in Python afterwards: a polygon
+        # or polarization test can reject a row, and a SQL limit would then
+        # return a short page.
         post_filter = (
             intersects is not None
             or polarizations
@@ -2570,10 +2726,28 @@ class CatalogIndex:
             or max_resolution is not None
             or max_per_task is not None
         )
-        sql = (
-            "SELECT href, doc, place, datetime_suspect, created, published FROM items"
-            f"{where} ORDER BY (task IS NULL), task, acq_date, datetime, id, href"
+        order = (
+            f" ORDER BY ({prefix}task IS NULL), {prefix}task, {prefix}acq_date, "
+            f"{prefix}datetime, {prefix}id, {prefix}href"
         )
+        if spatial:
+            where = " AND ".join(conditions)
+            sql = (
+                f"SELECT {prefix}href, {prefix}doc, {prefix}place, "
+                f"{prefix}datetime_suspect, {prefix}created, {prefix}published "
+                "FROM items_rtree AS r CROSS JOIN items AS i ON i.rowid = r.id "
+                f"WHERE {_RTREE_OVERLAP_ALIASED}"
+            )
+            if where:
+                sql += " AND " + where
+            sql += order
+            params = _rtree_params(boxes[0]) + params
+        else:
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            sql = (
+                "SELECT href, doc, place, datetime_suspect, created, published FROM items"
+                f"{where}{order}"
+            )
         if limit is not None and not post_filter:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -2811,11 +2985,12 @@ class CatalogIndex:
             conditions.append("LOWER(task) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(area.lower())}%")
         if bbox:
-            conditions.append(
-                "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
-                "AND max_lat >= ? AND min_lat <= ?"
-            )
-            params += [bbox[0], bbox[2], bbox[1], bbox[3]]
+            if self._spatial_ready:
+                conditions.append(f"rowid IN (SELECT id FROM items_rtree WHERE {_RTREE_OVERLAP})")
+                params += _rtree_params(bbox)
+            else:
+                conditions.append(_column_overlap())
+                params += _column_overlap_params(bbox)
         if product_types:
             wanted = [p.upper() for p in product_types]
             placeholders = ", ".join("?" * len(wanted))
@@ -3373,3 +3548,21 @@ class CatalogIndex:
             sql = "SELECT MIN(acq_date), MAX(acq_date) FROM items"
         start, end = self._conn.execute(sql).fetchone()
         return (start, end)
+
+
+def prepare_search_index(path: str | os.PathLike | None = None) -> None:
+    """Build the bbox R-tree and read it once, before a server reports ready.
+
+    ``umbra serve`` calls this from startup, before the socket accepts
+    ``/healthz``. The open creates ``items_rtree`` when the file is writable.
+    The count faults those pages into the cache, so the first bbox search is
+    not the one that pays for a cold tree. A missing file is ignored; the
+    request path already answers 503. A read-only file is left unchanged and
+    search falls back to the column predicate.
+    """
+    db = Path(path) if path is not None else default_index_path()
+    if not db.is_file():
+        return
+    with CatalogIndex(db) as index:
+        if index._spatial_ready:
+            index._conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()

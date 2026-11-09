@@ -114,6 +114,119 @@ def test_search_product_type_filter(tmp_path):
     assert ids == {"a"}
 
 
+def _search_statement(idx, **kwargs):
+    """The SELECT ``search`` runs, and its EXPLAIN QUERY PLAN detail lines."""
+    seen: list[str] = []
+    idx._conn.set_trace_callback(seen.append)
+    list(idx.search(**kwargs))
+    idx._conn.set_trace_callback(None)
+    selects = [
+        sql
+        for sql in seen
+        if "datetime_suspect" in sql and sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert selects, seen
+    sql = selects[-1]
+    plan = [row[3] for row in idx._conn.execute("EXPLAIN QUERY PLAN " + sql)]
+    return sql, plan
+
+
+def test_bbox_product_search_uses_the_rtree(tmp_path):
+    """A GEC bbox search must be driven by the R-tree, not by every GEC href.
+
+    GEC is on nearly every acquisition. The old plan listed those hrefs,
+    probed ``items`` by primary key, and sorted before LIMIT. ``CROSS JOIN``
+    is not reordered, so the plan's outer loop is the R-tree.
+    """
+    plain = _make_item(
+        "SiteB", "2024-03-01-00-00-00_UMBRA-05", "plain", "2024-03-01T00:00:00Z", (0, 0, 1, 1)
+    )
+    with _index(tmp_path, items=(_A, _B, _C, plain)) as idx:
+        assert idx._spatial_ready
+        sql, plan = _search_statement(idx, bbox=(0, 0, 5, 5), product_types=["GEC"], limit=10)
+        assert "items_rtree" in sql
+        assert "CROSS JOIN" in sql
+        text = "\n".join(plan)
+        # The alias hides the table name; the virtual-table index is the driver.
+        assert plan[0].startswith("SCAN r VIRTUAL TABLE INDEX")
+        assert "sqlite_autoindex_items_1" not in text
+        assert "idx_item_assets_asset" not in text
+        # Same rows, same order, as the column predicate.
+        idx._spatial_ready = False
+        slow = [item.id for item in idx.search(bbox=(0, 0, 5, 5), product_types=["GEC"])]
+        idx._spatial_ready = True
+        fast = [item.id for item in idx.search(bbox=(0, 0, 5, 5), product_types=["GEC"])]
+        assert fast == slow == ["c", "a", "plain"]
+        # A footprint with no bbox is not in the tree and does not match.
+        nobox = UmbraItem.from_dict(
+            {"id": "nobox", "properties": {"datetime": "2024-04-01T00:00:00Z"}, "assets": {}},
+            href=f"{_BUCKET}/sar-data/tasks/SiteA/2024-04-01-00-00-00_UMBRA-04/x.stac.v2.json",
+        )
+        idx.add(nobox)
+        idx.commit()
+        assert "nobox" not in {item.id for item in idx.search(bbox=(-180, -90, 180, 90))}
+
+
+def test_two_query_boxes_are_not_collapsed_to_their_intersection(tmp_path):
+    """A footprint may overlap two query boxes that do not overlap each other."""
+    from umbra_py._geometry import parse_geometry
+
+    wide = _make_item(
+        "Wide", "2024-05-01-00-00-00_UMBRA-04", "wide", "2024-05-01T00:00:00Z", (0, 0, 10, 1)
+    )
+    with _index(tmp_path, items=(wide,)) as idx:
+        geom = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [[[9, 0], [10, 0], [10, 1], [9, 1], [9, 0]]],
+            }
+        )
+        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1), intersects=geom)} == {"wide"}
+
+
+def test_bbox_rtree_follows_an_updated_or_deleted_footprint(tmp_path):
+    with _index(tmp_path) as idx:
+        moved = _make_item(
+            "SiteA",
+            "2024-01-15-10-00-00_UMBRA-04",
+            "a",
+            "2024-01-15T10:00:00Z",
+            (10, 10, 11, 11),
+            products=("GEC", "SICD"),
+        )
+        idx.add(moved)
+        idx.commit()
+        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1))} == set()
+        assert {item.id for item in idx.search(bbox=(10, 10, 11, 11))} == {"a", "b"}
+        idx._conn.execute("DELETE FROM items WHERE id = 'a'")
+        idx.commit()
+        assert {item.id for item in idx.search(bbox=(10, 10, 11, 11))} == {"b"}
+
+
+def test_schema8_gains_an_rtree_without_a_version_bump(tmp_path):
+    """A published v8 snapshot grows the R-tree on open and stays v8."""
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION
+
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path) as idx:
+        idx.add(_A)
+        idx.commit()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE items_rtree")
+    for name in ("items_rtree_ai", "items_rtree_au", "items_rtree_ad"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DELETE FROM meta WHERE key = 'items_rtree'")
+    conn.commit()
+    conn.close()
+    with CatalogIndex(path) as idx:
+        version = sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0]
+        assert version == _SCHEMA_VERSION
+        assert idx.get_meta("items_rtree") == "1"
+        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1), product_types=["GEC"])} == {"a"}
+
+
 def test_search_area_filter_is_case_insensitive(tmp_path):
     with _index(tmp_path) as idx:
         ids = {i.id for i in idx.search(area="sitea")}

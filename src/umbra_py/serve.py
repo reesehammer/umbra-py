@@ -201,6 +201,7 @@ from .index import (
     CatalogIndex,
     default_index_path,
     default_thumbs_path,
+    prepare_search_index,
     read_snapshot_state,
     relocate_index_thumbnails,
     snapshot_id,
@@ -3061,6 +3062,15 @@ def build_app(
             else nullcontext()
         )
         beat = asyncio.create_task(heartbeat_forever())
+        # The bbox R-tree is what keeps a product-filtered /search off a
+        # full catalog scan. Build it and fault its pages in before the
+        # socket accepts /healthz, so ready means that search is usable.
+        # Liveness does not wait on this: nothing is listening until yield.
+        if not live:
+            try:
+                prepare_search_index(index_path)
+            except (sqlite3.DatabaseError, UmbraError) as exc:
+                _log.warning("Catalog index was not prepared for search: %s", exc)
         # Preview bytes merged into ``items.thumbnail`` make every later-column
         # read walk overflow pages. A large file is moved after the socket is
         # up so the deploy health check (liveness) is not waiting on that copy.

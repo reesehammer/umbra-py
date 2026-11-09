@@ -295,6 +295,38 @@ def test_healthz_reports_ready_index_with_item_count(client):
     assert body["items"] == 3
 
 
+def test_healthz_is_served_only_after_the_spatial_index_is_built(index_path):
+    """Startup builds the R-tree before the app accepts /healthz.
+
+    A published snapshot has no ``items_rtree``. The lifespan open creates
+    it, and only then does the socket serve readiness.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(index_path)
+    conn.execute("DROP TABLE IF EXISTS items_rtree")
+    for name in ("items_rtree_ai", "items_rtree_au", "items_rtree_ad"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DELETE FROM meta WHERE key = 'items_rtree'")
+    conn.commit()
+    conn.close()
+
+    with TestClient(serve.build_app(index_path)) as client:
+        ready = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        built = ready.execute("SELECT value FROM meta WHERE key = 'items_rtree'").fetchone()
+        ready.close()
+        assert built == ("1",)
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.json()["ready"] is True
+        search = client.get(
+            "/search",
+            params={"bbox": "-180,-90,180,90", "product_types": "GEC", "limit": 10},
+        )
+        assert search.status_code == 200
+        assert search.json()["context"]["returned"] == 3
+
+
 def test_healthz_reports_freshness_fields(index_path, monkeypatch):
     # PRD P1-1/P1-4: distinct ids, build date and the snapshot identity let an
     # outside monitor tell a stale hosted index from a current one. `stale` is

@@ -9,6 +9,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Fixed
+- **A bounding-box search uses an R-tree.** `GET` and `POST /search` with a
+  bbox, including a product filter such as `GEC`, no longer looks up every
+  matching asset and sorts it before `LIMIT`. `umbra serve` builds
+  `items_rtree` and reads it once before `/healthz` reports ready. The same
+  items come back in the same order; the published snapshot stays schema v8.
+
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
   (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
