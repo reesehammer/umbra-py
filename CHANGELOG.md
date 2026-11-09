@@ -26,6 +26,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
   `umbra-gec` names the only collection, `umbra-open-data`, and the product
   filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
+- **The public host does not write the catalog or reveal its path.**
+  `watch_site` on `umbra serve --public` reports the current matches as new,
+  stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full
+  count), and caps the watch name at 128 characters. Request paths open the
+  index read-only. `index_stats` and `umbra://index/stats` set `path` to null,
+  and public-host errors omit filesystem paths. A local server still persists
+  watch state and still reports the path.
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`
