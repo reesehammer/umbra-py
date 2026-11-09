@@ -114,6 +114,57 @@ def test_parse_point_and_feature_point():
     )
     assert wrapped == point
     assert to_geojson(point) == {"type": "Point", "coordinates": [1.0, 2.0]}
+    one = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [1, 2]},
+                "properties": {},
+            }
+        ],
+    }
+    assert parse_geometry(one) == point
+    assert to_geojson(parse_geometry(one)) == {"type": "Point", "coordinates": [1.0, 2.0]}
+
+
+def _several_points(kind: str) -> dict:
+    geoms = [
+        {"type": "Point", "coordinates": [0, 0]},
+        {"type": "Point", "coordinates": [1, 1]},
+    ]
+    if kind == "FeatureCollection":
+        return {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "geometry": geom, "properties": {}} for geom in geoms],
+        }
+    return {"type": "GeometryCollection", "geometries": geoms}
+
+
+@pytest.mark.parametrize("kind", ["FeatureCollection", "GeometryCollection"])
+def test_parse_rejects_several_points(kind):
+    with pytest.raises(ValueError, match="several Points") as exc:
+        parse_geometry(_several_points(kind))
+    message = str(exc.value)
+    assert kind in message
+    assert "one Point" in message
+
+
+def test_parse_rejects_point_mixed_with_polygon():
+    mixed = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [0.5, 0.5]},
+                "properties": {},
+            },
+            {"type": "Feature", "geometry": _poly((0, 0), (1, 0), (1, 1)), "properties": {}},
+        ],
+    }
+    with pytest.raises(ValueError, match="mixing Point") as exc:
+        parse_geometry(mixed)
+    assert "FeatureCollection" in str(exc.value)
 
 
 def test_point_intersects_footprint_not_its_bbox():
@@ -544,9 +595,9 @@ def test_serve_intersects_bad_geometry_is_400(built_index):
 
 
 def test_get_search_accepts_url_encoded_intersects(built_index):
-    """GET /search reads percent-encoded GeoJSON, including a second encoding."""
+    """GET /search reads a once-encoded GeoJSON intersects value."""
     pytest.importorskip("fastapi")
-    from urllib.parse import quote, urlencode
+    from urllib.parse import urlencode
 
     from fastapi.testclient import TestClient
 
@@ -585,17 +636,10 @@ def test_get_search_accepts_url_encoded_intersects(built_index):
     both = client.get("/search?" + urlencode({"intersects": json.dumps(multi)}))
     assert [f["id"] for f in both.json()["features"]] == ["a", "b"]
 
-    # One encoding is the query string's. A client that encoded the JSON first
-    # leaves ``%7B`` in the value after that decode; accept that once more.
-    twice = quote(quote(json.dumps(point, separators=(",", ":"))))
-    encoded = client.get(f"/search?intersects={twice}")
-    assert encoded.status_code == 200, encoded.text
-    assert [f["id"] for f in encoded.json()["features"]] == ["a"]
-
 
 def test_get_search_intersects_400s_are_explicit(built_index):
     pytest.importorskip("fastapi")
-    from urllib.parse import urlencode
+    from urllib.parse import quote, urlencode
 
     from fastapi.testclient import TestClient
 
@@ -605,6 +649,19 @@ def test_get_search_intersects_400s_are_explicit(built_index):
     bad_json = client.get("/search?" + urlencode({"intersects": "{not json"}))
     assert bad_json.status_code == 400
     assert "not valid JSON" in bad_json.json()["detail"]
+
+    # A second encoding survives the query-string decode as ``%7B...``. That is
+    # the same malformed-JSON 400; the server does not unquote again.
+    point = json.dumps({"type": "Point", "coordinates": [0.5, 0.5]}, separators=(",", ":"))
+    twice = client.get(f"/search?intersects={quote(quote(point))}")
+    assert twice.status_code == 400
+    assert "not valid JSON" in twice.json()["detail"]
+
+    several = client.post("/search", json={"intersects": _several_points("FeatureCollection")})
+    assert several.status_code == 400
+    detail = several.json()["detail"]
+    assert "several Points" in detail
+    assert "FeatureCollection" in detail
 
     line = client.get(
         "/search?"

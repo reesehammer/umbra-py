@@ -175,7 +175,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ._geometry import Geometry, parse_geometry
 from .catalog import DateLike, _coerce_date
@@ -403,25 +403,17 @@ def parse_bbox(value: str | list[float] | None) -> BBox | None:
 def parse_intersects(value: dict | str | None) -> Geometry | None:
     """Parse a STAC ``intersects`` geometry.
 
-    A POST body is a GeoJSON object. A GET query is a JSON string, including
-    one that was percent-encoded a second time (``%7B%22type%22...``) after the
-    server decoded the query string. ``Point``, ``Polygon``, and
-    ``MultiPolygon`` are accepted; a point matches footprints that contain it
-    (interior or boundary). Empty input is ``None``. A wrong type, malformed
-    JSON, or a non-finite coordinate is a :class:`ValueError` the route answers
-    as HTTP 400.
+    A POST body is a GeoJSON object. A GET query is a JSON string; the server
+    decodes that query string once. ``Point``, ``Polygon``, and ``MultiPolygon``
+    are accepted; a point matches footprints that contain it (interior or
+    boundary). Empty input is ``None``. A wrong type, malformed JSON, a value
+    that is still percent-encoded, or a non-finite coordinate is a
+    :class:`ValueError` the route answers as HTTP 400.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if isinstance(value, str):
-        text = value.strip()
-        try:
-            json.loads(text)
-        except json.JSONDecodeError:
-            decoded = unquote(text).strip()
-            if decoded != text:
-                text = decoded
-        return parse_geometry(text)
+        return parse_geometry(value.strip())
     if not isinstance(value, dict):
         raise ValueError("intersects must be a GeoJSON object (Point, Polygon, or MultiPolygon)")
     return parse_geometry(value)

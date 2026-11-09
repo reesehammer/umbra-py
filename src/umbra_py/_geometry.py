@@ -106,6 +106,7 @@ def _geometry_rings(geom: Any) -> Geometry:
             rings.extend(_geometry_rings((feat or {}).get("geometry")))
         if not rings:
             raise ValueError("FeatureCollection has no Point, Polygon, or MultiPolygon features")
+        _reject_point_collection(rings, "FeatureCollection")
         return rings
     if gtype == "GeometryCollection":
         rings = []
@@ -113,6 +114,7 @@ def _geometry_rings(geom: Any) -> Geometry:
             rings.extend(_geometry_rings(sub))
         if not rings:
             raise ValueError("GeometryCollection has no Point, Polygon, or MultiPolygon geometries")
+        _reject_point_collection(rings, "GeometryCollection")
         return rings
     coords = geom.get("coordinates")
     if gtype == "Point":
@@ -129,14 +131,38 @@ def _geometry_rings(geom: Any) -> Geometry:
     )
 
 
+def _reject_point_collection(rings: Geometry, kind: str) -> None:
+    """Reject several Points, or a Point mixed with polygons.
+
+    ``to_geojson`` serializes one ring as a ``Point`` or ``Polygon`` and several
+    polygon rings as a ``MultiPolygon``. A collection of several Points would
+    otherwise need a ``MultiPoint``, and a mix a ``GeometryCollection``. Those
+    shapes are a :class:`ValueError` here, so ``/search`` answers 400 the same
+    way it does for any other unsupported geometry. One ``Point`` is kept.
+    """
+    n_points = sum(len(ring) == 1 for ring in rings)
+    if n_points == 0 or len(rings) <= 1:
+        return
+    if n_points == len(rings):
+        raise ValueError(
+            f"{kind} of several Points is not supported; intersects accepts one Point, "
+            "or Polygon / MultiPolygon"
+        )
+    raise ValueError(
+        f"{kind} mixing Point with Polygon or MultiPolygon is not supported; "
+        "intersects accepts one Point, or Polygon / MultiPolygon"
+    )
+
+
 def parse_geometry(value: dict | str) -> Geometry:
     """Parse a GeoJSON geometry into exterior rings for intersection testing.
 
     ``value`` is a GeoJSON ``dict`` (a ``Point``, ``Polygon``, or
     ``MultiPolygon``, or a ``Feature`` / ``FeatureCollection`` /
-    ``GeometryCollection`` wrapping those) or a JSON string of one. Returns the
-    normalised :data:`Geometry`: exterior rings, plus a one-position ring for
-    each point. Raises :class:`ValueError` on anything else (invalid JSON,
+    ``GeometryCollection`` wrapping polygons or one ``Point``) or a JSON string
+    of one. Returns the normalised :data:`Geometry`: exterior rings, or a
+    one-position ring for that point. A collection of several Points is
+    rejected. Raises :class:`ValueError` on anything else (invalid JSON,
     another geometry type, non-finite coordinates), so callers can answer 400.
     """
     if isinstance(value, str):
@@ -184,21 +210,17 @@ def to_geojson(geometry: Geometry) -> dict | None:
     """GeoJSON for the normalised rings (holes already dropped).
 
     The inverse of :func:`parse_geometry`, for handing the geometry to a STAC
-    API's ``intersects``. A one-position ring is a ``Point``. Returns ``None``
-    if empty.
+    API's ``intersects``. One ring is a ``Point`` or a ``Polygon``; several
+    polygon rings are a ``MultiPolygon``. Returns ``None`` if empty.
     """
     if not geometry:
         return None
     if len(geometry) == 1:
         return _ring_as_geojson(geometry[0])
-    if all(len(ring) == 1 for ring in geometry):
-        return {"type": "MultiPoint", "coordinates": [list(ring[0]) for ring in geometry]}
-    if all(len(ring) >= 3 for ring in geometry):
-        return {
-            "type": "MultiPolygon",
-            "coordinates": [[[list(p) for p in ring]] for ring in geometry],
-        }
-    return {"type": "GeometryCollection", "geometries": [_ring_as_geojson(r) for r in geometry]}
+    return {
+        "type": "MultiPolygon",
+        "coordinates": [[[list(p) for p in ring]] for ring in geometry],
+    }
 
 
 def geometry_bbox(geometry: Geometry) -> BBox | None:
