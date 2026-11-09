@@ -19,6 +19,9 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Build on every PR (and on main) so a broken docstring cross-reference or
   # nav entry fails review, not the deploy. `--strict` turns warnings into
@@ -33,15 +36,15 @@ jobs:
       github.event_name != 'workflow_run'
       || github.event.workflow_run.conclusion == 'success'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
@@ -76,32 +79,48 @@ jobs:
       # --featured 6 renders six change composites, streaming only a downsampled
       # overview of each scene (the `viz` extra arrives with `[all]` above); a
       # site whose asset won't render is dropped with a warning, so a bad scene
-      # costs one tile rather than the gallery. That selection *does* read the
-      # index, hence the fetch below.
-      - name: Build catalog showcase
+      # costs one tile rather than the gallery. That selection reads the index,
+      # hence the fetch below. The fetch and the basemap download run with no
+      # model keys. The keys are only on the narrate step.
+      - name: Fetch the catalog index and basemap
+        id: showcase-inputs
         if: github.ref == 'refs/heads/main'
+        run: |
+          set +e
+          umbra index fetch &&
+            umbra tiles --fetch --out site/showcase/catalog.pmtiles
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            rm -rf site/showcase
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build catalog showcase
+        id: showcase-build
+        if: github.ref == 'refs/heads/main' && steps.showcase-inputs.outputs.ok == 'true'
         # Mode A: the model key is held here, at build time, and never reaches
         # the static site (a secret shipped to a browser is a published secret).
         # `umbra showcase --narrate` bakes a cached reading per featured site; it
-        # is gated on a key's presence inside the command, so a fork PR (no
-        # secrets) or an unset secret just skips the narrations and still ships
-        # the gallery. Any one of the three keys works — whichever the maintainer
-        # set as a repo secret.
+        # is gated on a key's presence inside the command, so an unset secret
+        # just skips the narrations and still ships the gallery. Any one of the
+        # three keys works — whichever the maintainer set as a repo secret.
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
-          umbra index fetch &&
-            umbra showcase \
-              --unified \
-              --local \
-              --fetch-pmtiles \
-              --featured 6 \
-              --narrate \
-              --out site/showcase \
-              --updated "$(date -u +%Y-%m-%d)"
+          umbra showcase \
+            --unified \
+            --local \
+            --pmtiles site/showcase/catalog.pmtiles \
+            --featured 6 \
+            --narrate \
+            --out site/showcase \
+            --updated "$(date -u +%Y-%m-%d)"
           status=$?
           set -e
 
@@ -109,9 +128,19 @@ jobs:
           # worse than none: check for the landing page the build promises, not
           # just the exit status.
           if [ "$status" -eq 0 ] && [ -f site/showcase/index.html ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
             echo "Showcase built into site/showcase/."
             exit 0
           fi
+          rm -rf site/showcase
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Note when the showcase was not built
+        if: >-
+          github.ref == 'refs/heads/main' &&
+          (steps.showcase-inputs.outputs.ok != 'true' ||
+          steps.showcase-build.outputs.ok != 'true')
+        run: |
           rm -rf site/showcase
           note="The docs deployed without site/showcase/, so \
           https://umbra-py.space/showcase/ will 404 until a run \
@@ -127,7 +156,7 @@ jobs:
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
@@ -147,4 +176,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

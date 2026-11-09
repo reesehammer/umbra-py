@@ -31,6 +31,10 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
+# contents: write is what pushes healthz.jsonl. GITHUB_TOKEN cannot be
+# limited to the monitoring branch; health_monitor.publish_history pushes
+# HEAD:refs/heads/monitoring and never main. issues: write opens the
+# sustained-failure issue.
 permissions:
   contents: write
   issues: write
@@ -46,7 +50,10 @@ jobs:
     if: github.repository == 'reesehammer/umbra-py'
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      # persist-credentials stays true so the push in publish_history can
+      # authenticate with this checkout's GITHUB_TOKEN. The probe checks out
+      # trusted main and does not pip-install.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: true
           fetch-depth: 1

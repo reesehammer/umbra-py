@@ -475,10 +475,13 @@ _DRIVER_TEMPLATE = """
       // Subresource Integrity: the browser hashes the fetched bytes and
       // refuses to execute them unless they match GEOTIFF_SRI, so a
       // compromised CDN can't run arbitrary script in the map. SRI
-      // requires a CORS fetch, hence crossorigin='anonymous' (unpkg/S3
-      // serve Access-Control-Allow-Origin: *, so this works from file://
+      // requires a CORS fetch, hence crossorigin='anonymous' (unpkg
+      // serves Access-Control-Allow-Origin: *, so this works from file://
       // too). A digest mismatch fires onerror below -> clean 'Fetch failed'.
-      if (GEOTIFF_SRI) {{ s.integrity = GEOTIFF_SRI; s.crossOrigin = 'anonymous'; }}
+      // The digest is always applied: an empty value must fail closed
+      // rather than load the script unverified.
+      s.integrity = GEOTIFF_SRI;
+      s.crossOrigin = 'anonymous';
       s.async = false;
       s.onload = resolve;
       s.onerror = function() {{ reject(new Error('Failed to load ' + GEOTIFF_URL)); }};

@@ -116,6 +116,15 @@ MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
 MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
 PMTILES_JS = "https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"
 
+# Subresource Integrity for the exact bytes at the URLs above. Recompute a
+# digest when its pin changes:
+#
+#   curl -fsSL "$url" | openssl dgst -sha384 -binary | openssl base64 -A
+#
+MAPLIBRE_JS_SRI = "sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+MAPLIBRE_CSS_SRI = "sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+PMTILES_JS_SRI = "sha384-QfbOCebHNw8pQiPAOd2IFee2v2A5VYZxBk0+JGZ5H+3mfzVIp6zsQNkTsfGJot93"
+
 
 # --- varint / zigzag primitives (protobuf + PMTiles directory share these) ---
 def _uvarint(value: int) -> bytes:
@@ -894,6 +903,13 @@ def build_viewer(
     """
     from html import escape
 
+    from .demo import (  # noqa: PLC0415
+        _cdn_script,
+        _cdn_stylesheet,
+        _content_security_policy,
+        _security_meta,
+    )
+
     config = json.dumps(
         {
             "pmtiles": pmtiles_url,
@@ -903,11 +919,21 @@ def build_viewer(
         },
         separators=(",", ":"),
     ).replace("</", "<\\/")
+    csp = _content_security_policy(
+        extra_origins=[pmtiles_url],
+        workers=True,
+        bucket=False,
+    )
     return _VIEWER_TEMPLATE.format(
         title=escape(title),
-        maplibre_css=MAPLIBRE_CSS,
-        maplibre_js=MAPLIBRE_JS,
-        pmtiles_js=PMTILES_JS,
+        security_meta=_security_meta(csp),
+        head_links=_cdn_stylesheet(MAPLIBRE_CSS, MAPLIBRE_CSS_SRI),
+        script_links="\n".join(
+            (
+                _cdn_script(MAPLIBRE_JS, MAPLIBRE_JS_SRI),
+                _cdn_script(PMTILES_JS, PMTILES_JS_SRI),
+            )
+        ),
         config_json=config,
         viewer_js=_VIEWER_JS,
     )
@@ -923,6 +949,14 @@ def save_viewer(pmtiles_url: str, dest: str | os.PathLike, **kwargs: Any) -> Pat
 
 _VIEWER_JS = r"""
 const CFG = window.UMBRA_TILES;
+
+// Only http(s) may be assigned to an anchor href. Tile properties come from
+// the archive, which is remote metadata; a javascript: scheme would be a
+// clickable script link. Schemes are case-insensitive.
+function umbraIsHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value == null ? "" : value));
+}
+
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -1001,7 +1035,7 @@ map.on("click", (e) => {
     row.appendChild(document.createTextNode(String(p[key])));
     div.appendChild(row);
   }
-  if (p.stac_href) {
+  if (umbraIsHttpUrl(p.stac_href)) {
     const a = document.createElement("a");
     a.href = p.stac_href;
     a.target = "_blank";
@@ -1025,8 +1059,9 @@ _VIEWER_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+{security_meta}
 <title>{title}</title>
-<link rel="stylesheet" href="{maplibre_css}"/>
+{head_links}
 <style>
   html, body {{ margin: 0; height: 100%; }}
   #map {{ position: absolute; inset: 0; }}
@@ -1038,8 +1073,7 @@ _VIEWER_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <div id="map"></div>
-<script src="{maplibre_js}"></script>
-<script src="{pmtiles_js}"></script>
+{script_links}
 <script>window.UMBRA_TILES = {config_json};</script>
 <script>{viewer_js}</script>
 </body>

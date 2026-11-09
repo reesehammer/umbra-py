@@ -2,6 +2,8 @@ version: 2
 updates:
   # Keep workflow actions fresh (checkout, setup-python, setup-uv, ...).
   # Grouped so a week's bumps arrive as one PR, not five.
+  # SHA pins (`uses: owner/action@<40-hex> # vX.Y.Z`) are this ecosystem.
+  # Dependabot matches the version comment, so leave it on the uses line.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
