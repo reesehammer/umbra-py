@@ -42,6 +42,8 @@ When geocoding is busy (including a full quick outbound pool) or unreachable,
 (`resolved_area` is the `area` that was tried). A live catalog's task-name
 check uses the long outbound pool; an index check does not. Tool names,
 arguments, and defaults are unchanged, and a task-name hit adds nothing.
+Ranking, recency, cadence, baseline, and the fields each site returns are on
+[Repeat-imaged sites](find-repeat-sites.md).
 
 ### Stable tools
 

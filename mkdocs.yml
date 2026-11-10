@@ -95,6 +95,7 @@ nav:
   - Hosted API limits: hosted-limits.md
   - Deploy / self-host: deploy.md
   - Connect Claude (MCP): mcp.md
+  - Repeat-imaged sites: find-repeat-sites.md
   - CLI reference: cli.md
   - API reference:
       - Catalog search: reference/catalog.md

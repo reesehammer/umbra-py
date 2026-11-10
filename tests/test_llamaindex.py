@@ -89,6 +89,48 @@ def test_tool_descriptions_and_schema_are_inferred():
         assert arg in props
 
 
+def test_default_tool_list_schemas_resolve_types_and_descriptions():
+    """Render tools are in the default list and must resolve like the JSON tools.
+
+    ``FunctionTool`` reads ``inspect.signature`` without evaluating postponed
+    annotations. An unresolved ``Annotated`` string is not a type, so the
+    schema would not carry the argument's JSON type or its description.
+    """
+    tools = li.umbra_tools()
+    assert _RENDER_NAMES <= {t.metadata.name for t in tools}
+    for tool in tools:
+        schema = tool.metadata.get_parameters_dict()
+        assert schema["type"] == "object"
+        for name, prop in schema["properties"].items():
+            assert prop.get("type") or prop.get("anyOf"), f"{tool.metadata.name}.{name}"
+            description = prop.get("description")
+            assert isinstance(description, str) and description.strip(), (
+                f"{tool.metadata.name}.{name}"
+            )
+            assert "\n" not in description
+
+    quicklook = _tool(tools, "quicklook").metadata.get_parameters_dict()
+    assert quicklook["required"] == ["url"]
+    props = quicklook["properties"]
+    assert props["url"]["type"] == "string"
+    assert "STAC JSON URL" in props["url"]["description"]
+    assert props["asset"]["type"] == "string" and props["asset"]["default"] == "GEC"
+    assert props["db"]["type"] == "boolean" and props["db"]["default"] is False
+    assert props["max_size"]["type"] == "integer" and props["max_size"]["default"] == 1024
+    assert props["preview"]["type"] == "string" and props["preview"]["default"] == "auto"
+    assert "baked preview" in props["preview"]["description"]
+
+    change = _tool(tools, "change_composite").metadata.get_parameters_dict()
+    assert change["required"] == ["urls"]
+    urls = change["properties"]["urls"]
+    assert urls["type"] == "array" and urls["items"]["type"] == "string"
+    assert "Mixed polarizations" in urls["description"]
+
+    timescan = _tool(tools, "timescan").metadata.get_parameters_dict()
+    assert timescan["properties"]["urls"]["type"] == "array"
+    assert timescan["properties"]["max_size"]["default"] == 1024
+
+
 def test_json_tools_are_the_same_callables_as_mcp():
     # No drift: the JSON tools reuse the MCP server's deterministic callables
     # verbatim (single source of truth), while the render tools are native

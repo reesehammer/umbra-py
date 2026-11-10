@@ -111,6 +111,25 @@ def test_server_json_has_the_fields_the_registry_requires():
     }
 
 
+def test_server_json_lists_the_project_site_and_a_png_icon():
+    """Listing metadata the registry schema allows beside the required fields.
+
+    ``websiteUrl`` is the published docs site. ``icons`` is the Material
+    favicon that site already serves (48×48 PNG): the repository has no logo
+    of its own. ``src`` is https, which is all the schema accepts.
+    """
+    server = _server()
+    assert server["websiteUrl"] == "https://umbra-py.space"
+    icon = {
+        "src": "https://umbra-py.space/assets/images/favicon.png",
+        "mimeType": "image/png",
+        "sizes": ["48x48"],
+    }
+    assert server["icons"] == [icon]
+    assert icon["src"].startswith("https://")
+    assert len(icon["src"]) <= 255
+
+
 def test_the_server_name_matches_the_repository_that_publishes_it():
     """``io.github.<owner>/…`` is only publishable by ``<owner>``.
 

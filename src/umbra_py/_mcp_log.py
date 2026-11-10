@@ -1,23 +1,42 @@
-"""Structured one-line request logs for ``umbra serve``.
+"""Structured one-line logs for MCP and for ``umbra serve``.
 
-Two lines share one logger (:data:`MCP_REQUEST_LOGGER`), which
-:func:`umbra_py.serve.serve` routes to stdout as bare JSON for every server —
-plain STAC, ``--mcp``, and ``--public``:
+Three lines share one logger (:data:`MCP_REQUEST_LOGGER`), which
+:func:`umbra_py.serve.serve` routes to stdout as bare JSON. ``umbra mcp``
+(stdio or ``--http``) emits the tool line on the same logger; stdio does not
+configure the handler, so it follows the process logger (stderr, not the
+JSON-RPC pipe).
 
 * :class:`McpRequestLog` — one line per ``POST /mcp`` (``msg`` is
   ``mcp_request``), peeking at the JSON-RPC body.
 * :class:`StacSearchLog` — one line per ``GET`` or ``POST /search`` (``msg``
   is ``stac_search``).
+* :class:`ToolCallLog` — one line per MCP ``tools/call`` (``msg`` is
+  ``mcp_tool``). Server middleware, not an ASGI wrapper, so it sees whether
+  the tool succeeded.
 
-What is logged is metadata. A search logs the client IP, user agent, HTTP
-method, path, status and duration, plus the query parameters ``bbox``,
-``datetime``, ``limit``, ``collections`` and ``sortby`` when the client sent
-them. A ``POST`` body contributes only its top-level key names
-(``body_keys``), never the values — a polygon or an id list is the user's
-query. Other query parameters, other headers, and the raw body are not logged.
+What is logged is metadata. The HTTP lines record ``client_ip``, the ASGI
+scope's client. ``umbra serve --public`` rewrites that from ``X-Real-IP``
+(or the rightmost trusted ``X-Forwarded-For`` hop) before these lines run;
+an IPv6 client is stored as its ``/64``. A plain ``umbra serve`` logs the
+socket peer. The tool line does not record the address. Its network field
+is :func:`_client_network_hash` of that same client: the first 16 hex
+characters of SHA-256 over ``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An
+IPv4-mapped IPv6 address uses the IPv4 ``/24``. The same prefix hashes the
+same on every replica. This module does not read the forwarding headers
+itself.
 
-Both are pure ASGI wrappers rather than ``BaseHTTPMiddleware`` so a POST can
-read at most :data:`MCP_LOG_BODY_LIMIT` bytes and replay exactly those
+A search logs the client IP, the user agent, HTTP method, path, status and
+duration, plus the query parameters ``bbox``, ``datetime``, ``limit``,
+``collections`` and ``sortby`` when the client sent them. A ``POST`` body
+contributes only its top-level key names (``body_keys``), never the values.
+A tool call logs the tool name, duration, ``ok`` or the error class, a
+result count when the reply already carries one, client name and version,
+session id, argument key names, ``limit`` when it is an integer, a short
+``collection`` token, whether ``bbox`` or ``place`` was set, and the network
+hash. Free text and URLs are not logged.
+
+The HTTP lines are ASGI wrappers rather than ``BaseHTTPMiddleware`` so a POST
+can read at most :data:`MCP_LOG_BODY_LIMIT` bytes and replay exactly those
 messages, after which the downstream app reads the rest of the body from the
 socket as if nothing had looked. A logging failure is swallowed: it must
 never turn a working request into an error.
@@ -25,8 +44,12 @@ never turn a working request into an error.
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
+import ipaddress
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
@@ -82,6 +105,79 @@ class _StatelessSessionFilter(logging.Filter):
         return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
 
 
+#: ``mcp.server.mcpserver.server`` logs ``Tool 'name' failed: '<text>'`` at INFO
+#: for an anticipated tool error (``logger.info("Tool %r failed: %r", name,
+#: str(exc))``). The text is the exception message: the caller's place name or
+#: URL. The line stays, with that text replaced by ``<redacted>``. The tool
+#: name stays, as does an exception class when the message includes one
+#: (``ValueError('<redacted>')``). ``Tool 'name' rejected arguments`` (field
+#: names only) and unexpected-exception tracebacks are different messages and
+#: stay as logged.
+_TOOL_REPR = r"(?:'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\")"
+_SDK_TOOL_FAILURE = re.compile(
+    rf"^Tool (?P<name>{_TOOL_REPR}) failed: (?P<detail>.*)\Z",
+    re.DOTALL,
+)
+_EXC_WRAP = re.compile(r"(?P<exc>[A-Za-z_][A-Za-z0-9_]*)\((?P<inner>.*)\)\Z", re.DOTALL)
+_REDACTED = "<redacted>"
+_MCP_SERVER_LOGGER = "mcp.server.mcpserver.server"
+
+
+def _redact_quoted(text: str) -> str:
+    """Replace the body of one quoted string. An unquoted tail becomes ``'<redacted>'``."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return f"{text[0]}{_REDACTED}{text[-1]}"
+    return f"'{_REDACTED}'"
+
+
+def _redact_tool_failure_message(message: str) -> str | None:
+    """The SDK failure line with the user text removed, or ``None`` if it is not one."""
+    match = _SDK_TOOL_FAILURE.match(message)
+    if match is None:
+        return None
+    detail = match.group("detail")
+    wrapped = _EXC_WRAP.match(detail)
+    if wrapped is not None:
+        detail = f"{wrapped.group('exc')}({_redact_quoted(wrapped.group('inner'))})"
+    else:
+        detail = _redact_quoted(detail)
+    return f"Tool {match.group('name')} failed: {detail}"
+
+
+class _ToolFailureTextFilter(logging.Filter):
+    """Replace the quoted text in ``Tool '<name>' failed: ...`` with ``<redacted>``.
+
+    The record stays, including the tool name and an exception class when the
+    message has one. Other records are unchanged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = _redact_tool_failure_message(message)
+        if redacted is None:
+            return True
+        record.msg = redacted
+        record.args = ()
+        if "message" in record.__dict__:
+            record.message = redacted
+        return True
+
+
+def quiet_tool_failure_text() -> None:
+    """Redact anticipated tool-error text on the MCP server logger.
+
+    The SDK line stays, so the tool name is still visible. Idempotent.
+    Installed when the server is built, for stdio and HTTP.
+    """
+    target = logging.getLogger(_MCP_SERVER_LOGGER)
+    if any(isinstance(existing, _ToolFailureTextFilter) for existing in target.filters):
+        return
+    target.addFilter(_ToolFailureTextFilter())
+
+
 def quiet_stateless_session_teardown() -> None:
     """Keep a normal stateless MCP teardown off INFO and ERROR handlers.
 
@@ -101,9 +197,59 @@ def _clip(value: Any) -> str | None:
     return text if len(text) <= _MAX_FIELD else text[:_MAX_FIELD] + "..."
 
 
+_ARG_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_COLLECTION = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}\Z")
+_CLIENT_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}\Z")
+_UA_PRODUCT = re.compile(r"([A-Za-z][A-Za-z0-9._+-]{0,63})/([A-Za-z0-9][A-Za-z0-9._+-]{0,31})")
+_ERROR_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_COUNT_LIST_KEYS = ("items", "sites", "matches", "passes", "results", "features")
+_LIMIT_MAX = 10_000_000
+_COLLECTION_MAX = 8
+
+
 def _client_ip(scope: Scope) -> str | None:
     client = scope.get("client")
     return _clip(client[0]) if client else None
+
+
+def _client_network_hash(host: str | None) -> str | None:
+    """Hash of an IPv4 ``/24`` or IPv6 ``/64``, or ``None`` if ``host`` is not one.
+
+    ``host`` is the address the HTTP lines record as ``client_ip``. On the
+    public host that is already ``X-Real-IP`` or the trusted
+    ``X-Forwarded-For`` hop, and an IPv6 client is the ``/64`` the rate
+    limiter stored. The digest is SHA-256 of ``"{prefix}:{network address}"``
+    truncated to 16 hex characters. The address is not returned.
+    """
+    if not isinstance(host, str) or not host:
+        return None
+    text = host.split("%", 1)[0].strip()
+    if not text:
+        return None
+    if "/" in text:
+        try:
+            parsed = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            return None
+        if (parsed.version, parsed.prefixlen) not in {(4, 24), (6, 64)}:
+            return None
+        prefix = parsed.prefixlen
+        address = str(parsed.network_address)
+    else:
+        try:
+            ip = ipaddress.ip_address(text)
+        except ValueError:
+            return None
+        if isinstance(ip, ipaddress.IPv6Address):
+            mapped = ip.ipv4_mapped
+            if mapped is not None:
+                ip = mapped
+        prefix = 24 if isinstance(ip, ipaddress.IPv4Address) else 64
+        address = str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False).network_address)
+    material = f"{prefix}:{address}"
+    return hashlib.sha256(material.encode("ascii")).hexdigest()[:16]
 
 
 def _rpc_fields(message: Any) -> dict[str, Any]:
@@ -360,3 +506,276 @@ def _search_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]
     if scope.get("method") == "POST":
         record.update(_search_body_fields(body, truncated))
     return record
+
+
+class _ToolNote:
+    """Mutable scratch the tool thread shares with the middleware task.
+
+    :mod:`anyio` copies the context into the worker thread, so the thread and
+    the task hold the same object. Assigning attributes is visible across that
+    copy; replacing the context variable is not.
+    """
+
+    __slots__ = ("error_class", "result_count")
+
+    def __init__(self) -> None:
+        self.error_class: str | None = None
+        self.result_count: int | None = None
+
+
+_tool_note: contextvars.ContextVar[_ToolNote | None] = contextvars.ContextVar(
+    "umbra_mcp_tool_note", default=None
+)
+
+
+def note_tool_error(exc: BaseException) -> None:
+    """Remember the exception class for the tool call in progress."""
+    try:
+        note = _tool_note.get()
+        if note is not None and note.error_class is None:
+            note.error_class = _class_name(exc)
+    except Exception:
+        return
+
+
+def note_tool_result(result: Any) -> None:
+    """Remember a cheap result count for the tool call in progress."""
+    try:
+        note = _tool_note.get()
+        if note is not None and note.result_count is None:
+            note.result_count = _cheap_result_count(result)
+    except Exception:
+        return
+
+
+def _class_name(exc: BaseException) -> str:
+    name = type(exc).__name__
+    return name if _ERROR_CLASS.fullmatch(name) else "error"
+
+
+def _cheap_result_count(result: Any) -> int | None:
+    """A count the result already carries. Does not walk the payload."""
+    if not isinstance(result, dict):
+        return None
+    count = result.get("count")
+    if type(count) is int and count >= 0:
+        return count
+    for key in _COUNT_LIST_KEYS:
+        value = result.get(key)
+        if isinstance(value, list):
+            return len(value)
+    return None
+
+
+def _argument_mapping(arguments: Any) -> dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    dump = getattr(arguments, "model_dump", None)
+    if not callable(dump):
+        return {}
+    try:
+        dumped = dump()
+    except Exception:
+        return {}
+    return dumped if isinstance(dumped, dict) else {}
+
+
+def _collection_token(value: Any) -> str | None:
+    if isinstance(value, str) and _COLLECTION.fullmatch(value):
+        return value
+    return None
+
+
+def _collection_value(arguments: dict[str, Any]) -> str | list[str] | None:
+    if "collection" in arguments:
+        token = _collection_token(arguments["collection"])
+        if token is not None:
+            return token
+    value = arguments.get("collections")
+    if not isinstance(value, list) or not value or len(value) > _COLLECTION_MAX:
+        return None
+    tokens: list[str] = []
+    for item in value:
+        token = _collection_token(item)
+        if token is None:
+            return None
+        tokens.append(token)
+    return tokens
+
+
+def _limit_value(value: Any) -> int | None:
+    if type(value) is int and 0 <= value <= _LIMIT_MAX:
+        return value
+    return None
+
+
+def _was_set(value: Any) -> bool:
+    return value not in (None, False, "", [], {})
+
+
+def _label(value: Any, pattern: re.Pattern[str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if pattern.fullmatch(text) else None
+
+
+def _user_agent_product(header: str | None) -> tuple[str | None, str | None]:
+    if not isinstance(header, str) or not header:
+        return None, None
+    match = _UA_PRODUCT.search(header[:200])
+    if match is None:
+        return None, None
+    return match.group(1), match.group(2)
+
+
+def _header_value(request: Any, name: str) -> str | None:
+    headers = getattr(request, "headers", None)
+    getter = getattr(headers, "get", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter(name)
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _request_host(request: Any) -> str | None:
+    """The request's client host: the same address the HTTP lines log.
+
+    ``umbra serve --public`` has already rewritten it from ``X-Real-IP`` or
+    the trusted ``X-Forwarded-For`` hop. This does not read those headers.
+    """
+    client = getattr(request, "client", None)
+    if client is None:
+        return None
+    host = client[0] if isinstance(client, tuple) else getattr(client, "host", None)
+    if isinstance(host, bytes):
+        host = host.decode("latin-1", "replace")
+    return host if isinstance(host, str) else None
+
+
+def _session_id(ctx: Any, request: Any) -> str | None:
+    header = _label(_header_value(request, "mcp-session-id"), _SESSION_ID)
+    if header is not None:
+        return header
+    session = getattr(ctx, "session", None)
+    connection = getattr(session, "_connection", None)
+    if connection is None:
+        connection = getattr(session, "connection", None)
+    return _label(getattr(connection, "session_id", None), _SESSION_ID)
+
+
+def _initialize_client(ctx: Any) -> tuple[str | None, str | None]:
+    session = getattr(ctx, "session", None)
+    params = getattr(session, "client_params", None)
+    info = getattr(params, "client_info", None)
+    if info is None and isinstance(params, dict):
+        info = params.get("clientInfo") or params.get("client_info")
+    if isinstance(info, dict):
+        name, version = info.get("name"), info.get("version")
+    else:
+        name, version = getattr(info, "name", None), getattr(info, "version", None)
+    safe_name = _label(name, _CLIENT_NAME)
+    if safe_name is None:
+        return None, None
+    return safe_name, _label(version, _CLIENT_VERSION)
+
+
+def _client_identity(ctx: Any, request: Any) -> tuple[str | None, str | None]:
+    name, version = _initialize_client(ctx)
+    if name is not None:
+        return name, version
+    return _user_agent_product(_header_value(request, "user-agent"))
+
+
+def _params_name_and_args(ctx: Any) -> tuple[Any, Any]:
+    params = getattr(ctx, "params", None)
+    if isinstance(params, dict):
+        return params.get("name"), params.get("arguments")
+    return getattr(params, "name", None), getattr(params, "arguments", None)
+
+
+def _result_is_error(result: Any) -> bool:
+    if isinstance(result, dict):
+        return bool(result.get("isError") or result.get("is_error"))
+    return bool(getattr(result, "is_error", False))
+
+
+def _outcome(note: _ToolNote, escaped: BaseException | None, result: Any) -> str:
+    if escaped is not None:
+        return note.error_class or _class_name(escaped)
+    if _result_is_error(result):
+        return note.error_class or "ToolError"
+    return "ok"
+
+
+def _emit_tool_line(
+    ctx: Any, note: _ToolNote, escaped: BaseException | None, started: float, result: Any
+) -> None:
+    request = getattr(ctx, "request", None)
+    name, arguments = _params_name_and_args(ctx)
+    mapping = _argument_mapping(arguments)
+    client_name, client_version = _client_identity(ctx, request)
+    outcome = _outcome(note, escaped, result)
+    record: dict[str, Any] = {
+        "level": "error" if outcome != "ok" else "info",
+        "msg": "mcp_tool",
+        "tool": name if isinstance(name, str) and _ARG_KEY.fullmatch(name) else "unknown",
+        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        "outcome": outcome,
+        "result_count": note.result_count if outcome == "ok" else None,
+        "client_name": client_name,
+        "client_version": client_version,
+        "session_id": _session_id(ctx, request),
+        "client_net": _client_network_hash(_request_host(request)),
+        "argument_keys": sorted(
+            key for key in mapping if isinstance(key, str) and _ARG_KEY.fullmatch(key)
+        ),
+        "bbox": _was_set(mapping.get("bbox")),
+        "place": _was_set(mapping.get("place")),
+    }
+    if "limit" in mapping:
+        limit = _limit_value(mapping["limit"])
+        if limit is not None:
+            record["limit"] = limit
+    collection = _collection_value(mapping)
+    if collection is not None:
+        record["collection"] = collection
+    line = json.dumps(record, separators=(",", ":"))
+    if outcome == "ok":
+        logger.info(line)
+    else:
+        logger.error(line)
+
+
+class ToolCallLog:
+    """One JSON line per ``tools/call``. Every other method passes through.
+
+    Installed on the MCP server, so stdio and Streamable HTTP both emit it.
+    The tool wrapper records the original exception class and a cheap result
+    count on :data:`_tool_note`; this middleware writes the line after the
+    call. It does not change the result or the error the client sees.
+    """
+
+    async def __call__(self, ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
+        if getattr(ctx, "method", None) != "tools/call":
+            return await call_next(ctx)
+        note = _ToolNote()
+        token = _tool_note.set(note)
+        started = time.perf_counter()
+        escaped: BaseException | None = None
+        result: Any = None
+        try:
+            result = await call_next(ctx)
+            return result
+        except BaseException as exc:
+            escaped = exc
+            raise
+        finally:
+            try:
+                _emit_tool_line(ctx, note, escaped, started, result)
+            except Exception:
+                pass
+            _tool_note.reset(token)
