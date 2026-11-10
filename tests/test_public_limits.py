@@ -19,6 +19,7 @@ import pytest
 
 from umbra_py import mcp_server as ms
 from umbra_py import serve
+from umbra_py.constants import CATALOG_INDEX_DB_URL
 from umbra_py.exceptions import GeocodeError
 from umbra_py.index import CatalogIndex
 from umbra_py.models import UmbraItem
@@ -564,8 +565,11 @@ def test_stac_links_follow_the_edge_and_ignore_loopback_forwarding(tmp_path, mon
         reflected = client.get("/", headers={"host": "evil.example"}).json()
         assert reflected["links"][0]["href"].startswith("http://evil.example")
         railway = client.get("/", headers=edge).json()
+        # Routes stay on the edge host. The weekly snapshot is a release file.
         assert all(
-            link["href"].startswith("https://api.umbra-py.space") for link in railway["links"]
+            link["href"].startswith("https://api.umbra-py.space")
+            or link["href"] == CATALOG_INDEX_DB_URL
+            for link in railway["links"]
         )
         forwarded_host = client.get(
             "/",

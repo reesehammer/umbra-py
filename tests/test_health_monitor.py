@@ -12,7 +12,7 @@ import yaml
 
 from umbra_py import health_monitor as hm
 from umbra_py import serve
-from umbra_py.constants import STAC_BUILT_AT_FIELD, STAC_SNAPSHOT_FIELD
+from umbra_py.constants import CATALOG_INDEX_DB_URL, STAC_BUILT_AT_FIELD, STAC_SNAPSHOT_FIELD
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -372,6 +372,40 @@ def test_history_is_appended_on_the_monitoring_branch_only(tmp_path):
     assert not (main / hm.HISTORY_FILE).exists()
     main_after = subprocess.check_output(["git", "-C", str(work), "rev-parse", "main"], text=True)
     assert main_after == main_before
+
+
+def test_landing_page_points_bulk_scans_at_the_weekly_snapshot():
+    """Full-catalog clients get the release file, not a new export route."""
+    page = serve.landing_page("http://localhost:8000/")
+    assert "umbra index fetch" in page["description"]
+    assert CATALOG_INDEX_DB_URL in page["description"]
+    assert "catalog.sha256" in page["description"]
+    assert "when the manifest is present" in page["description"]
+    assert "missing manifest warns" in page["description"]
+    assert "does not check it" not in page["description"]
+    assert "pull/315" not in page["description"]
+    link = next(item for item in page["links"] if item["href"] == CATALOG_INDEX_DB_URL)
+    assert link["rel"] == "alternate"
+    assert link["type"] == "application/vnd.sqlite3"
+    assert "paging /search" in link["title"]
+    assert all("catalog.sha256" not in item["href"] for item in page["links"])
+    # The same pointer is on the hosted-API page and the search/index docs.
+    # Flags are the ones `umbra index fetch` actually accepts.
+    for rel in (
+        "docs/hosted-limits.md",
+        "docs/reference/catalog.md",
+        "docs/reference/index.md",
+    ):
+        text = " ".join((REPO / rel).read_text(encoding="utf-8").split())
+        assert "umbra index fetch" in text
+        assert CATALOG_INDEX_DB_URL in text
+        assert "catalog.sha256" in text
+        assert "when the manifest is present" in text
+        assert "warns and continues when the manifest is missing" in text
+        assert "does not check it" not in text
+        assert "pull/315" not in text
+        for flag in ("--db", "--url", "--insecure-url", "--if-changed", "--force"):
+            assert flag in text
 
 
 def test_limits_page_matches_the_server_constants():
