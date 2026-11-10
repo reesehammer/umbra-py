@@ -77,6 +77,15 @@ def test_workflow_is_a_daily_dispatchable_canary():
     assert "gh issue comment" in failure["run"]
 
 
+def test_page_shows_the_encoded_intersects_example():
+    page = PAGE.read_text(encoding="utf-8")
+    assert "umbra-gec" in page
+    assert "product_types=GEC" in page
+    assert "urlencode" in page
+    assert '{"type": "Point", "coordinates": [85.52, 28.29]}' in page
+    assert "--data-urlencode" in page
+
+
 def test_page_names_every_v2_asset_key_and_the_parquet_url():
     page = PAGE.read_text(encoding="utf-8")
     for key in ASSET_KEYS:
