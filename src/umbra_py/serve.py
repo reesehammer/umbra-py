@@ -188,10 +188,12 @@ from .constants import (
     ATTRIBUTION,
     CANOPY_TOKEN_ENV,
     DATA_LICENSE,
+    OPEN_DATA_COLLECTION_ID,
     PRODUCT_ASSETS,
     PRODUCT_TYPE_EXPLANATIONS,
     STAC_BUILT_AT_FIELD,
     STAC_SNAPSHOT_FIELD,
+    unknown_collection_detail,
 )
 from .convert import SPECKLE_FILTERS, SPECKLE_WINDOW_DEFAULT
 from .coverage import site_query_echo
@@ -228,7 +230,7 @@ STAC_VERSION = "1.0.0"
 
 #: The single collection every Umbra open-data acquisition belongs to. Umbra
 #: files all products under one flat archive, so one collection is honest.
-COLLECTION_ID = "umbra-open-data"
+COLLECTION_ID = OPEN_DATA_COLLECTION_ID
 
 #: Conformance classes we implement: STAC API core / collections / item-search
 #: plus the OGC API - Features classes their clients check for.
@@ -445,14 +447,21 @@ def parse_bbox(value: str | list[float] | None, *, finite: bool = False) -> BBox
 
 
 def parse_intersects(value: dict | str | None) -> Geometry | None:
-    """Parse a STAC ``intersects`` GeoJSON geometry into polygon rings.
+    """Parse a STAC ``intersects`` geometry.
 
-    Accepts a GeoJSON ``dict`` (as in a POST body) or a JSON string (as in a GET
-    query). Returns ``None`` for empty input. Raises :class:`ValueError` on a
-    non-polygon geometry so the handler can answer 400.
+    A POST body is a GeoJSON object. A GET query is a JSON string; the server
+    decodes that query string once. ``Point``, ``Polygon``, and ``MultiPolygon``
+    are accepted; a point matches footprints that contain it (interior or
+    boundary). Empty input is ``None``. A wrong type, malformed JSON, a value
+    that is still percent-encoded, or a non-finite coordinate is a
+    :class:`ValueError` the route answers as HTTP 400.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
+    if isinstance(value, str):
+        return parse_geometry(value.strip())
+    if not isinstance(value, dict):
+        raise ValueError("intersects must be a GeoJSON object (Point, Polygon, or MultiPolygon)")
     return parse_geometry(value)
 
 
@@ -4320,7 +4329,12 @@ def build_app(
     @app.get("/collections/{collection_id}", tags=["STAC"])
     def get_collection(collection_id: str, request: Request) -> dict[str, Any]:
         if collection_id != COLLECTION_ID:
-            raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
+            raise HTTPException(
+                status_code=404,
+                detail=unknown_collection_detail(
+                    [collection_id], product_parameter="product_types"
+                ),
+            )
         temporal, built_at, snapshot, n_items, n_captures = _facts()
         return collection(
             _base(request),
@@ -4414,7 +4428,12 @@ def build_app(
         token: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         if collection_id != COLLECTION_ID:
-            raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
+            raise HTTPException(
+                status_code=404,
+                detail=unknown_collection_detail(
+                    [collection_id], product_parameter="product_types"
+                ),
+            )
         try:
             parsed_bbox = parse_bbox(bbox)
             start, end = parse_datetime(datetime)
@@ -4443,7 +4462,12 @@ def build_app(
     @app.get("/collections/{collection_id}/items/{item_id}", tags=["STAC"])
     def get_item(collection_id: str, item_id: str, request: Request) -> JSONResponse:
         if collection_id != COLLECTION_ID:
-            raise HTTPException(status_code=404, detail=f"No collection {collection_id!r}")
+            raise HTTPException(
+                status_code=404,
+                detail=unknown_collection_detail(
+                    [collection_id], product_parameter="product_types"
+                ),
+            )
         source = _open()
         try:
             item = get_one(source, item_id)
@@ -4458,7 +4482,11 @@ def build_app(
         request: Request,
         bbox: str | None = Query(default=None),
         intersects: str | None = Query(
-            default=None, description="GeoJSON polygon geometry as a JSON string"
+            default=None,
+            description=(
+                "URL-encoded GeoJSON Point, Polygon, or MultiPolygon. "
+                "A Point matches footprints that contain it."
+            ),
         ),
         datetime: str | None = Query(default=None),
         ids: str | None = Query(default=None, description="Comma-separated item ids"),
@@ -4490,7 +4518,7 @@ def build_app(
         limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
         token: int = Query(default=0, ge=0),
     ) -> Any:
-        _check_collections(collections.split(",") if collections else None)
+        _check_collections(collections)
         if intersects and bbox:
             raise HTTPException(
                 status_code=400, detail="bbox and intersects are mutually exclusive"
@@ -4656,7 +4684,11 @@ def build_app(
         request: Request,
         bbox: str | None = Query(default=None),
         intersects: str | None = Query(
-            default=None, description="GeoJSON polygon geometry as a JSON string"
+            default=None,
+            description=(
+                "URL-encoded GeoJSON Point, Polygon, or MultiPolygon. "
+                "A Point matches footprints that contain it."
+            ),
         ),
         datetime: str | None = Query(default=None),
         product_types: str | None = Query(
@@ -5069,11 +5101,23 @@ def build_app(
         )
         return JSONResponse(content=result)
 
-    def _check_collections(collections: list[str] | None) -> None:
-        if collections and COLLECTION_ID not in collections:
+    def _check_collections(collections: Any) -> None:
+        if collections is None or collections == "":
+            return
+        if isinstance(collections, str):
+            raw: list[Any] = collections.split(",")
+        elif isinstance(collections, (list, tuple)):
+            raw = list(collections)
+        else:
+            # Local POST leaves a non-array as a type error (HTTP 500). Public
+            # POST rejects it in parse_search_body before this runs.
+            raise TypeError("collections must be an array of collection ids.")
+        names = [str(part).strip() for part in raw if str(part).strip()]
+        unknown = [name for name in names if name != COLLECTION_ID]
+        if unknown:
             raise HTTPException(
                 status_code=400,
-                detail=f"Only the {COLLECTION_ID!r} collection is served.",
+                detail=unknown_collection_detail(unknown, product_parameter="product_types"),
             )
 
     # ----------------------------------------------------------------------

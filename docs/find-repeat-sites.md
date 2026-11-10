@@ -27,7 +27,7 @@ which passes enter the pool at all.
 | Argument | Effect |
 | --- | --- |
 | `bbox` | WGS84 `[min_lon, min_lat, max_lon, max_lat]`. When it is set, `place` is not geocoded. |
-| `intersects` | GeoJSON `Polygon`, `MultiPolygon`, `Feature`, `FeatureCollection`, or `GeometryCollection`. Cannot be combined with `bbox` or `place`. |
+| `intersects` | One GeoJSON `Point`, or a `Polygon` or `MultiPolygon`, optionally wrapped in a `Feature`, `FeatureCollection`, or `GeometryCollection`. A point matches footprints that contain it. Several Points are refused. Cannot be combined with `bbox` or `place`. |
 | `place` | Free-text name, geocoded to a bbox only when `bbox` is omitted. |
 | `area` | Task-name substring. `fuzzy=True` is a deterministic loose match (word order, punctuation, typos). No model. |
 | `start`, `end` | Inclusive bounds on which passes are counted. ISO date, bare year or month, or a relative expression (`6 months ago`). |

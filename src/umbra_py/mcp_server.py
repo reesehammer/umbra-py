@@ -65,6 +65,8 @@ from .constants import (
     POLARIZATION_CAVEAT,
     S3_BUCKET,
     S3_REGION,
+    collection_ids_passed_as_products,
+    unknown_collection_detail,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
@@ -926,8 +928,9 @@ def search_catalog(
     intersects: Annotated[
         dict[str, Any] | None,
         _arg_desc(
-            "GeoJSON Polygon, MultiPolygon, Feature, FeatureCollection, or "
-            "GeometryCollection. Cannot be combined with bbox or place."
+            "One GeoJSON Point, or a Polygon or MultiPolygon, optionally wrapped in a "
+            "Feature, FeatureCollection, or GeometryCollection. A point matches footprints "
+            "that contain it. Cannot be combined with bbox or place."
         ),
     ] = None,
     place: Annotated[
@@ -973,7 +976,7 @@ def search_catalog(
         list[str] | None,
         _arg_desc(
             "Keep items that expose one of these types (GEC, CSI, SIDD, SICD, CPHD). "
-            "Matched case-insensitively."
+            "A collection id such as umbra-gec or umbra-open-data raises; use the product type."
         ),
     ] = None,
     polarizations: Annotated[
@@ -1026,8 +1029,9 @@ def search_catalog(
 
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``intersects`` as
-    a GeoJSON polygon object (a ``Polygon`` / ``MultiPolygon`` geometry, or a
-    ``Feature`` / ``FeatureCollection`` wrapping one) to keep only footprints
+    a GeoJSON object (a ``Point``, ``Polygon``, or ``MultiPolygon``, or a
+    ``Feature`` / ``FeatureCollection`` wrapping one; a point matches footprints
+    that contain it) to keep only footprints
     intersecting it -- a tighter spatial filter than the rectangular ``bbox``,
     and mutually exclusive with ``bbox`` / ``place``; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
@@ -1085,6 +1089,9 @@ def search_catalog(
     """
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
+    mistaken = collection_ids_passed_as_products(products)
+    if mistaken:
+        raise ValueError(unknown_collection_detail(mistaken, product_parameter="products"))
     if semantic and fuzzy:
         raise ValueError(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
@@ -1186,8 +1193,9 @@ def find_repeat_sites(
     intersects: Annotated[
         dict[str, Any] | None,
         _arg_desc(
-            "Pool filter: GeoJSON Polygon, MultiPolygon, Feature, FeatureCollection, "
-            "or GeometryCollection. Cannot be combined with bbox or place."
+            "Pool filter: one GeoJSON Point, or a Polygon or MultiPolygon, optionally wrapped "
+            "in a Feature, FeatureCollection, or GeometryCollection. A point matches footprints "
+            "that contain it. Cannot be combined with bbox or place."
         ),
     ] = None,
     place: Annotated[
@@ -1343,9 +1351,10 @@ def find_repeat_sites(
     https://umbra-py.space/find-repeat-sites/
 
     Filters bound which acquisitions are ranked. ``bbox`` is WGS84
-    ``[min_lon, min_lat, max_lon, max_lat]``. ``intersects`` is a GeoJSON
-    polygon (or a Feature / FeatureCollection / GeometryCollection of one)
-    and cannot be combined with ``bbox`` or ``place``. ``place`` is geocoded
+    ``[min_lon, min_lat, max_lon, max_lat]``. ``intersects`` is one GeoJSON
+    Point, or a Polygon or MultiPolygon (or a Feature, FeatureCollection, or
+    GeometryCollection wrapping those). A point matches footprints that
+    contain it. It cannot be combined with ``bbox`` or ``place``. ``place`` is geocoded
     only when ``bbox`` is omitted. ``area`` is a task-name substring;
     ``fuzzy=True`` is a deterministic loose match. ``start`` / ``end`` bound
     which passes enter the pool (ISO date, bare year or month, or a relative

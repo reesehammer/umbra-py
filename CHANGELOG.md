@@ -9,6 +9,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Fixed
+- **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
+  With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
+  that 404s swaps to a same-size "No preview" tile and is not followed by a
+  quicklook request.
+
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
   (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
@@ -33,6 +39,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
+  `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
+  contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
+  Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
+  `umbra-gec` names the only collection, `umbra-open-data`, and the product
+  filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
 - **MCP listings name the project site, and each tool argument says what it does.**
   `server.json` sets `websiteUrl` to https://umbra-py.space and a 48×48 PNG
   icon (the docs favicon). Argument descriptions are one line.

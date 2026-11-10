@@ -229,20 +229,29 @@ def test_build_demo_server_url_wires_thumbnail_preview(sample_item_dict):
     """With ``server_url`` set the detail panel leads with the baked-thumbnail
     endpoint (the G6 thumbnail bake): the app JS builds an ``.umbra-thumb`` image from
     ``/artifacts/thumbnail/<id>.png`` off the server base, url-encoding the
-    remote item id, and drops it on error so an unbaked scene is never a broken
-    image."""
+    remote item id. A 404 becomes a same-size "No preview" tile and does not
+    request a quicklook."""
     item = UmbraItem.from_dict(sample_item_dict, href=_HREF)
     html = demo.build_demo([item], server_url="http://localhost:8000/")
+    archive = demo.build_demo(
+        [], pmtiles_url="catalog.pmtiles", server_url="http://localhost:8000/"
+    )
     # The preview reuses the one server base (also used by the analyze panel).
     assert "serverBase" in html
     # It targets the baked-thumbnail endpoint, url-encoding the remote id (the
     # builder is shared with the whole-archive PMTiles explorer).
     assert "/artifacts/thumbnail/' + encodeURIComponent(id) + '.png'" in html
     assert "window.umbraThumb(serverBase, p.id)" in html
-    # The image class exists in the stylesheet, and the element is dropped on a
-    # 404 (a scene with no baked thumbnail) rather than shown broken.
-    assert ".umbra-thumb" in html
-    assert "thumb.onerror" in html
+    assert "window.umbraThumb(serverBase, p.id)" in archive
+    assert "umbraListedPreview" not in html
+    # The slot is a fixed square. A failed load clears onerror (no retry) and
+    # fills that slot; it does not follow the 404 with a quicklook request.
+    assert ".umbra-thumb-slot" in html
+    assert "aspect-ratio: 1 / 1" in html
+    assert "thumb.onerror = null" in html
+    assert "aria-label', 'No preview available'" in html
+    assert "box.textContent = 'No preview'" in html
+    assert "/artifacts/quicklook/" not in html
 
 
 def test_build_demo_no_thumbnail_preview_without_server(sample_item_dict):
