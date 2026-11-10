@@ -3093,17 +3093,15 @@ def build_server() -> MCPServer:
     from umbra_py import __version__
 
     read_only = ToolAnnotations(read_only_hint=True)
-    # Both reach the network (S3, and watch_site also Nominatim). Neither is
-    # idempotent: a resumed partial download writes more bytes, and a later
-    # watch with the same arguments stores a larger seen-set when the archive
-    # has grown. destructive_hint is true because each can replace existing
-    # local data: download_asset unlinks or truncates a ``.part`` / ``.etag``,
-    # and watch_site overwrites the stored baseline (reset drops it outright).
+    # destructive_hint is true because each can replace existing local data:
+    # download_asset unlinks or truncates a ``.part`` / ``.etag``, and
+    # watch_site overwrites the stored baseline (reset drops it outright).
     # A finished download is not overwritten (overwrite stays false).
+    # idempotent_hint stays unset: a resumed partial download writes more
+    # bytes, and a later watch stores a larger seen-set when the archive grows.
     writes = ToolAnnotations(
         read_only_hint=False,
         destructive_hint=True,
-        open_world_hint=True,
     )
 
     archive_note = (

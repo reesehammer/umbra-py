@@ -85,9 +85,9 @@ def test_find_repeat_sites_description_stays_short_and_links_the_reference():
 def test_write_tools_advertise_read_only_false_and_destructive():
     """Local ``download_asset`` can delete a partial sidecar.
 
-    Local ``watch_site`` replaces the stored baseline. Both also call out
-    to the network. A repeat call is not a no-op when a partial download
-    can resume or the archive has grown, so ``idempotentHint`` stays unset.
+    Local ``watch_site`` replaces the stored baseline. A repeat call is not a
+    no-op when a partial download can resume or the archive has grown, so
+    ``idempotentHint`` stays unset. ``openWorldHint`` stays unset too.
     """
     server = ms.build_server()
     tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
@@ -96,12 +96,12 @@ def test_write_tools_advertise_read_only_false_and_destructive():
         assert annotations is not None
         assert annotations.read_only_hint is False
         assert annotations.destructive_hint is True
-        assert annotations.open_world_hint is True
+        assert annotations.open_world_hint is None
         assert annotations.idempotent_hint is None
         wire = tools[name].model_dump(by_alias=True, exclude_none=True)
         assert wire["annotations"]["readOnlyHint"] is False
         assert wire["annotations"]["destructiveHint"] is True
-        assert wire["annotations"]["openWorldHint"] is True
+        assert "openWorldHint" not in wire["annotations"]
         assert "idempotentHint" not in wire["annotations"]
 
 

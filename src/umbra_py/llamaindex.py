@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, get_type_hints
 
 from . import mcp_server as _mcp
 from .constants import ATTRIBUTION
@@ -126,11 +126,40 @@ class RenderResult:
 
 
 def quicklook(
-    url: str,
-    asset: str = "GEC",
-    db: bool = False,
-    max_size: int = 1024,
-    preview: str = "auto",
+    url: Annotated[
+        str,
+        _mcp._arg_desc(
+            "STAC JSON URL or index item id. The public host also accepts a "
+            "product filename or acquisition stem that is in the index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _mcp._arg_desc(
+            "Product to show. Default GEC. A baked preview is used only when its "
+            "recorded product matches, or when it recorded none and this is GEC."
+        ),
+    ] = "GEC",
+    db: Annotated[
+        bool,
+        _mcp._arg_desc(
+            "Decibel stretch for a fresh render. Default false. A baked preview is always decibel."
+        ),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _mcp._arg_desc(
+            "Longest side in pixels for a fresh render. Default 1024. Ignored when a smaller baked "
+            "preview is returned."
+        ),
+    ] = 1024,
+    preview: Annotated[
+        str,
+        _mcp._arg_desc(
+            "auto (default) uses a baked preview when present, else renders. "
+            "baked refuses if none. render always streams a COG and is refused on the public host."
+        ),
+    ] = "auto",
 ) -> RenderResult:
     """Render a scene's quicklook PNG and return it as a RenderResult.
 
@@ -146,7 +175,22 @@ def quicklook(
 
 
 def change_composite(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _mcp._arg_desc(
+            "STAC JSON URLs or item ids of 2 or 3 passes, in time order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _mcp._arg_desc("Product to composite. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _mcp._arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _mcp._arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> RenderResult:
     """Composite 2-3 passes of one site into a change image (RenderResult).
 
@@ -173,7 +217,19 @@ def change_composite(
 
 
 def timescan(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _mcp._arg_desc("STAC JSON URLs or item ids of at least two passes of one site."),
+    ],
+    asset: Annotated[str, _mcp._arg_desc("Product to scan. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _mcp._arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _mcp._arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> RenderResult:
     """Summarize a whole time series into one activity image (RenderResult).
 
@@ -322,7 +378,9 @@ def umbra_tools(*, include_render: bool = True) -> list[FunctionTool]:
         for fn in _JSON_TOOLS
     ]
     if include_render:
-        fns += list(_RENDER_TOOLS)
+        # LlamaIndex reads inspect.signature, which leaves these postponed
+        # ``Annotated`` descriptions as strings. Resolve them first.
+        fns += [_visible_to_llamaindex(fn) for fn in _RENDER_TOOLS]
     return [FunctionTool.from_defaults(fn=fn) for fn in fns]
 
 
