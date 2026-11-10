@@ -744,14 +744,23 @@ def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     """
     from mcp.server.mcpserver.exceptions import ToolError
 
+    from ._mcp_log import note_tool_error, note_tool_result
+
     @functools.wraps(fn)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
-        except ToolError:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            # The class is the log line. The message stays on the exception
+            # the client already receives; it is not copied into the log.
+            note_tool_error(exc)
+            if isinstance(exc, ToolError):
+                raise
+            if isinstance(exc, (ValueError, UmbraError)):
+                raise ToolError(str(exc)) from exc
             raise
-        except (ValueError, UmbraError) as exc:
-            raise ToolError(str(exc)) from exc
+        note_tool_result(result)
+        return result
 
     return wrapped
 
@@ -3101,6 +3110,8 @@ def build_server() -> MCPServer:
 
     from umbra_py import __version__
 
+    from ._mcp_log import ToolCallLog, quiet_tool_failure_text
+
     read_only = ToolAnnotations(read_only_hint=True)
     # destructive_hint is true because each can replace existing local data:
     # download_asset unlinks or truncates a ``.part`` / ``.etag``, and
@@ -3159,6 +3170,12 @@ def build_server() -> MCPServer:
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
+    # Innermost observer. One JSON line per tools/call; dispatch is unchanged.
+    # The SDK's own "Tool 'name' failed: <text>" line repeats the exception
+    # message; the structured line keeps the class, and that text is replaced
+    # with "<redacted>".
+    quiet_tool_failure_text()
+    server.middleware.append(ToolCallLog())
 
     @server.custom_route("/healthz", methods=["GET"], name="healthz")
     async def _healthz(request: Any) -> Any:

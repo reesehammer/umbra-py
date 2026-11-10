@@ -9,6 +9,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Added
+- **One JSON line per MCP tool call** (`msg` `mcp_tool`). It records the
+  tool, duration, `ok` or the error class, a result count when the reply
+  already has one, client name and version, and session id. Arguments are
+  key names plus `limit`, a short `collection` token, and whether `bbox` or
+  `place` was set; the client network on that line is a hash of the same
+  `client_ip` the HTTP lines record (on the public host, `X-Real-IP` or the
+  trusted `X-Forwarded-For` hop), at the IPv4 `/24` or IPv6 `/64`.
+  The SDK `Tool '<name>' failed` line is kept, with the message text replaced
+  by `<redacted>`.
+
 ### Fixed
 - **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
   With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
