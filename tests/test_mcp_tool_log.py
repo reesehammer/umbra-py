@@ -480,6 +480,62 @@ def test_public_tool_hash_uses_the_derived_client(tmp_path, monkeypatch, caplog)
 
 
 @pytest.mark.skipif(not _HAS_SERVE_MCP, reason="serve + mcp extras")
+def test_unknown_collection_and_point_intersects_are_logged_without_text(tmp_path, caplog):
+    """A collection id passed as a product is a tool error, not a catalog walk.
+
+    The point coordinates and the error text stay off the log. The tool name
+    and ``ValueError`` stay on it.
+    """
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+    from umbra_py._mcp_log import _MCP_SERVER_LOGGER
+
+    point = [12.345678, -77.654321]
+    collection = "umbra-gec"
+    app = serve.build_app(tmp_path / "catalog.db", mcp=True, artifacts=False)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "search_catalog",
+            "arguments": {
+                "products": [collection],
+                "intersects": {"type": "Point", "coordinates": point},
+                "limit": 20,
+            },
+        },
+    }
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "host": "localhost:8000",
+    }
+    with (
+        TestClient(app) as client,
+        caplog.at_level(logging.INFO, logger=MCP_REQUEST_LOGGER),
+        caplog.at_level(logging.INFO, logger=_MCP_SERVER_LOGGER),
+    ):
+        response = client.post("/mcp", json=body, headers=headers)
+    assert response.status_code == 200
+    assert collection in response.text
+    tools = [r for r in _records(caplog) if r["msg"] == "mcp_tool"]
+    assert len(tools) == 1
+    assert tools[0]["tool"] == "search_catalog"
+    assert tools[0]["outcome"] == "ValueError"
+    assert tools[0]["argument_keys"] == ["intersects", "limit", "products"]
+    assert tools[0]["limit"] == 20
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert collection not in logged
+    assert "12.345678" not in logged
+    assert "-77.654321" not in logged
+    sdk_lines = [r.getMessage() for r in caplog.records if r.name == _MCP_SERVER_LOGGER]
+    # The error text contains a quote, so the SDK's %r uses double quotes.
+    assert "Tool 'search_catalog' failed: \"<redacted>\"" in sdk_lines
+
+
+@pytest.mark.skipif(not _HAS_SERVE_MCP, reason="serve + mcp extras")
 def test_server_installs_the_tool_log_without_changing_the_contract():
     from umbra_py import mcp_server as ms
 
