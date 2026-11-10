@@ -188,3 +188,59 @@ product.
 
 If an application probes `/mcp` as a canary, the core tool names stay stable
 through every 0.x minor. See [Stable tools](mcp.md#stable-tools).
+
+## MCP tool logs
+
+`umbra serve` writes one JSON object per MCP tool call to stdout. The `msg`
+field is `mcp_tool`. Railway's log explorer rewrites `msg` to `message`, so
+filters use `@message`. The same logger writes `mcp_request` (each
+`POST /mcp`) and `stac_search` (each `/search`). Those lines record
+`client_ip`. On this host that is `X-Real-IP`, or the trusted
+`X-Forwarded-For` hop (`UMBRA_TRUSTED_PROXY_HOPS`, default 1) when
+`X-Real-IP` is absent. `client_net` is only on `mcp_tool`, and it is the
+hash of that same address.
+
+A tool line has:
+
+| Field | Meaning |
+| --- | --- |
+| `tool` | Tool name |
+| `duration_ms` | Milliseconds, including argument validation |
+| `outcome` | `ok`, or the exception class (`ValueError`, `ToolError`, …) |
+| `result_count` | The result's `count`, or the length of `items` / `sites` / `matches` / `passes` / `results` / `features` when that is how the reply is shaped. Otherwise null |
+| `client_name`, `client_version` | `initialize` `clientInfo` when that handshake shares the connection. Otherwise the User-Agent product token (`name/version`). Comments in the User-Agent are not logged |
+| `session_id` | `mcp-session-id` when the client sent a token of letters, digits, `_`, and `-`. This host is stateless, so the field is usually null |
+| `argument_keys` | Argument names. Not the values |
+| `limit` | Present when `limit` is an integer from 0 to 10000000 |
+| `collection` | Present when `collection` or `collections` is a short token such as `umbra-open-data` |
+| `bbox`, `place` | True when that argument was set. The coordinates and the place name are not logged |
+| `client_net` | First 16 hex characters of SHA-256 over `24:<IPv4 /24>` or `64:<IPv6 /64>` of the same address `client_ip` records. An IPv4-mapped IPv6 address uses the IPv4 `/24`. The public host stores an IPv6 client as its `/64`, and that network hashes the same as any address inside it. The address is not logged. The same prefix hashes the same on every replica |
+
+`level` is `error` when `outcome` is not `ok`, and `info` otherwise.
+`@level:error AND @message:mcp_tool` is the failed tool calls.
+
+Recompute a prefix hash:
+
+```python
+import hashlib
+import ipaddress
+
+ip = ipaddress.ip_address("203.0.113.7")
+net = ipaddress.ip_network(f"{ip}/24", strict=False)
+print(hashlib.sha256(f"24:{net.network_address}".encode()).hexdigest()[:16])
+```
+
+In the Railway log explorer (Observability) or `railway logs`:
+
+```text
+@message:mcp_tool
+@message:mcp_tool AND @tool:search_catalog
+@message:mcp_tool AND @outcome:ValueError
+@message:mcp_tool -@outcome:ok
+@message:mcp_tool AND @duration_ms:>=1000
+@message:mcp_tool AND @bbox:true
+@message:mcp_tool AND @client_net:<hash>
+```
+
+Railway's HTTP log stream (`@srcIp`, `@path`) is the edge's own record and
+is separate from these lines. The process access log is also separate.
