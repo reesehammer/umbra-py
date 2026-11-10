@@ -715,12 +715,14 @@ class UmbraItem:
     def intersects_polygon(self, geometry: Any) -> bool:
         """Whether this item's footprint intersects the given polygon geometry.
 
-        ``geometry`` is the exterior-ring form returned by
-        :func:`umbra_py._geometry.parse_geometry` (a list of rings). This uses
-        the item's *actual* footprint polygon when it has one -- a tighter test
-        than the bbox rectangle :meth:`intersects_bbox` uses -- and falls back
-        to the footprint bbox when the geometry is missing or not a polygon (and
-        matches nothing when neither is available).
+        ``geometry`` is the form returned by
+        :func:`umbra_py._geometry.parse_geometry` (exterior rings, or a
+        one-position ring for a ``Point``). This uses the item's *actual*
+        footprint polygon when it has one -- a tighter test than the bbox
+        rectangle :meth:`intersects_bbox` uses -- and falls back to the
+        footprint bbox when the geometry is missing or not understood (and
+        matches nothing when neither is available). A query point matches when
+        it lies inside the footprint or on its boundary.
         """
         from ._geometry import bbox_ring, geometries_intersect, rings_from_geojson
 

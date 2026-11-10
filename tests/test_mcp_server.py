@@ -259,6 +259,33 @@ def test_search_catalog_area_hit_adds_nothing(sample_item_dict, monkeypatch):
     assert _FakeCatalog.kwargs["limit"] == 20
 
 
+def test_search_catalog_area_with_point_does_not_geocode(monkeypatch):
+    """A Point intersects is a footprint, so a task miss is not geocoded."""
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _Miss.kwargs = kwargs
+            return iter(())
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded an area that already had intersects")
+
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    monkeypatch.setattr(ms, "_geocode_place", _boom)
+    out = ms.search_catalog(
+        area="Austin",
+        intersects={"type": "Point", "coordinates": [0.0, 0.0]},
+        local=False,
+    )
+    assert "hint" not in out
+    assert "matched_by" not in out
+    assert _Miss.kwargs["area"] == "Austin"
+    assert _Miss.kwargs["intersects"][0] == [(0.0, 0.0)]
+
+
 def test_search_catalog_area_miss_geocodes_and_reports_it(sample_item_dict, monkeypatch):
     item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
 

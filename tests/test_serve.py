@@ -964,6 +964,49 @@ def test_post_search_matches_get_search(client):
 def test_search_rejects_unknown_collection(client):
     resp = client.post("/search", json={"collections": ["sentinel-1"]})
     assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "sentinel-1" in detail
+    assert "umbra-open-data" in detail
+    assert "product_types" in detail
+
+    gec = client.get("/search?collections=umbra-gec")
+    assert gec.status_code == 400
+    text = gec.json()["detail"]
+    assert "umbra-gec" in text
+    assert "umbra-open-data" in text
+    assert "GEC is a product filter; pass product_types=GEC." in text
+
+    # The product type used as a collection id gets the same pointer.
+    bare = client.post("/search", json={"collections": ["GEC"]})
+    assert bare.status_code == 400
+    assert "product_types=GEC" in bare.json()["detail"]
+
+    mixed = client.get("/search?collections=umbra-open-data,umbra-gec")
+    assert mixed.status_code == 400
+    assert "umbra-gec" in mixed.json()["detail"]
+
+    ok = client.get("/search?collections=umbra-open-data&limit=1")
+    assert ok.status_code == 200
+
+
+def test_unknown_collection_with_area_does_not_geocode(client, monkeypatch):
+    """An unknown collection is a 400 before area fallback geocodes."""
+
+    def _boom(_query: str, **_kwargs: object):
+        raise AssertionError("geocoded a request with an unknown collection")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _boom)
+    resp = client.get("/search", params={"collections": "umbra-gec", "area": "Austin"})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "umbra-gec" in detail
+    assert "umbra-open-data" in detail
+    assert "product_types=GEC" in detail
+
+    path = client.get("/collections/umbra-gec")
+    assert path.status_code == 404
+    assert "product_types=GEC" in path.json()["detail"]
+    assert "umbra-open-data" in path.json()["detail"]
 
 
 def test_bad_bbox_is_a_client_error(client):
@@ -1086,6 +1129,31 @@ def test_search_area_with_bbox_does_not_geocode(client, monkeypatch):
     assert body["context"]["returned"] == 0
     assert "hint" not in body
     assert "matched_by" not in body
+
+
+def test_area_with_intersects_does_not_geocode(client, monkeypatch):
+    """A Point intersects is a footprint, so area stays a task filter."""
+
+    def _boom(_query: str, **_kwargs: object):
+        raise AssertionError("geocoded an area that already had intersects")
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", _boom)
+    point = '{"type":"Point","coordinates":[0,0]}'
+    got = client.get("/search", params={"area": "Nowhere", "intersects": point})
+    assert got.status_code == 200
+    assert "hint" not in got.json()
+    assert "matched_by" not in got.json()
+    posted = client.post(
+        "/search",
+        json={"area": "Nowhere", "intersects": {"type": "Point", "coordinates": [0, 0]}},
+    )
+    assert posted.status_code == 200
+    assert "hint" not in posted.json()
+    assert "matched_by" not in posted.json()
+    sites = client.get("/sites", params={"area": "Nowhere", "intersects": point})
+    assert sites.status_code == 200
+    assert "hint" not in sites.json()
+    assert "matched_by" not in sites.json()
 
 
 def test_items_area_does_not_geocode(client, monkeypatch):

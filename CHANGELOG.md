@@ -12,7 +12,7 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ### Added
 - **`area` on `GET`/`POST /search` and `/sites` falls back to place geocoding**
   when it matches no Umbra task name and the request has no bbox or
-  intersects polygon. The response adds `matched_by: geocode` with the
+  intersects geometry. The response adds `matched_by: geocode` with the
   resolved place name and bbox. A name Nominatim does not know is HTTP 200
   with an empty result and `hint` `no task named X; try place= or bbox=`.
   When geocoding is busy or Nominatim is unreachable, that same empty
@@ -25,12 +25,18 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   (an index check does not). A task-name hit is unchanged. The resolved
   box is cached in-process (the same LRU and a ten-minute memory of names
   that do not resolve) on local `umbra serve` and on the public host, so
-  a next link does not call Nominatim again.   On the public host that
+  a next link does not call Nominatim again. On the public host that
   cache is the same gate as `place=` (one in-flight Nominatim call, a
   one-second gap, at most five waiters). A cached name does not take a
   quick outbound permit. `GET`/`POST /search` keeps the fallback's
   Nominatim wait and HTTP timeout inside half the request deadline, so a
   slow geocode is the unavailable hint rather than HTTP 503.
+
+### Fixed
+- **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
+  With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
+  that 404s swaps to a same-size "No preview" tile and is not followed by a
+  quicklook request.
 
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
@@ -56,6 +62,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
+  `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
+  contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
+  Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
+  `umbra-gec` names the only collection, `umbra-open-data`, and the product
+  filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
 - **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
   The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
   `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a

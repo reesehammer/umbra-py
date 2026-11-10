@@ -64,6 +64,8 @@ from .constants import (
     POLARIZATION_CAVEAT,
     S3_BUCKET,
     S3_REGION,
+    collection_ids_passed_as_products,
+    unknown_collection_detail,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
@@ -862,8 +864,9 @@ def search_catalog(
 
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``intersects`` as
-    a GeoJSON polygon object (a ``Polygon`` / ``MultiPolygon`` geometry, or a
-    ``Feature`` / ``FeatureCollection`` wrapping one) to keep only footprints
+    a GeoJSON object (a ``Point``, ``Polygon``, or ``MultiPolygon``, or a
+    ``Feature`` / ``FeatureCollection`` wrapping one; a point matches footprints
+    that contain it) to keep only footprints
     intersecting it -- a tighter spatial filter than the rectangular ``bbox``,
     and mutually exclusive with ``bbox`` / ``place``; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
@@ -930,6 +933,9 @@ def search_catalog(
     """
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
+    mistaken = collection_ids_passed_as_products(products)
+    if mistaken:
+        raise ValueError(unknown_collection_detail(mistaken, product_parameter="products"))
     if semantic and fuzzy:
         raise ValueError(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
@@ -1102,8 +1108,9 @@ def find_repeat_sites(
     The filters scope the *pool* of acquisitions the ranking is computed over,
     and are the same ones ``search_catalog`` takes: ``bbox``
     (``[min_lon, min_lat, max_lon, max_lat]`` WGS84), ``intersects`` (a GeoJSON
-    polygon, mutually exclusive with ``bbox`` / ``place``), ``place`` (free-text,
-    geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
+    Point, Polygon, or MultiPolygon, mutually exclusive with ``bbox`` /
+    ``place``), ``place`` (free-text, geocoded to a bbox), ``area`` (a task-name
+    substring, loosened by ``fuzzy``),
     ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
     the SAR property filters ``polarizations`` / ``min_incidence`` /
     ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
