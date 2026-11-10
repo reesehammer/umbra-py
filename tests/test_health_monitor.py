@@ -380,8 +380,10 @@ def test_landing_page_points_bulk_scans_at_the_weekly_snapshot():
     assert "umbra index fetch" in page["description"]
     assert CATALOG_INDEX_DB_URL in page["description"]
     assert "catalog.sha256" in page["description"]
-    assert "not on the release yet" in page["description"]
-    assert "does not check it" in page["description"]
+    assert "when the manifest is present" in page["description"]
+    assert "missing manifest warns" in page["description"]
+    assert "does not check it" not in page["description"]
+    assert "pull/315" not in page["description"]
     link = next(item for item in page["links"] if item["href"] == CATALOG_INDEX_DB_URL)
     assert link["rel"] == "alternate"
     assert link["type"] == "application/vnd.sqlite3"
@@ -398,9 +400,11 @@ def test_landing_page_points_bulk_scans_at_the_weekly_snapshot():
         assert "umbra index fetch" in text
         assert CATALOG_INDEX_DB_URL in text
         assert "catalog.sha256" in text
-        assert "does not check it" in text
-        assert "https://github.com/reesehammer/umbra-py/pull/315" in text
-        for flag in ("--db", "--url", "--if-changed", "--force"):
+        assert "when the manifest is present" in text
+        assert "warns and continues when the manifest is missing" in text
+        assert "does not check it" not in text
+        assert "pull/315" not in text
+        for flag in ("--db", "--url", "--insecure-url", "--if-changed", "--force"):
             assert flag in text
 
 

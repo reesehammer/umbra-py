@@ -962,6 +962,34 @@ def test_post_search_matches_get_search(client):
 def test_search_rejects_unknown_collection(client):
     resp = client.post("/search", json={"collections": ["sentinel-1"]})
     assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "sentinel-1" in detail
+    assert "umbra-open-data" in detail
+    assert "product_types" in detail
+
+    gec = client.get("/search?collections=umbra-gec")
+    assert gec.status_code == 400
+    text = gec.json()["detail"]
+    assert "umbra-gec" in text
+    assert "umbra-open-data" in text
+    assert "GEC is a product filter; pass product_types=GEC." in text
+
+    # The product type used as a collection id gets the same pointer.
+    bare = client.post("/search", json={"collections": ["GEC"]})
+    assert bare.status_code == 400
+    assert "product_types=GEC" in bare.json()["detail"]
+
+    mixed = client.get("/search?collections=umbra-open-data,umbra-gec")
+    assert mixed.status_code == 400
+    assert "umbra-gec" in mixed.json()["detail"]
+
+    ok = client.get("/search?collections=umbra-open-data&limit=1")
+    assert ok.status_code == 200
+
+    path = client.get("/collections/umbra-gec")
+    assert path.status_code == 404
+    assert "product_types=GEC" in path.json()["detail"]
+    assert "umbra-open-data" in path.json()["detail"]
 
 
 def test_bad_bbox_is_a_client_error(client):
@@ -3013,7 +3041,7 @@ def test_serve_cli_public_bundles_the_guardrails(monkeypatch):
     assert seen["mcp"] is True
     assert seen["artifacts"] is False
     assert seen["rate_limit"] == serve.PUBLIC_RATE_LIMIT
-    assert seen["proxy_headers"] is True
+    assert seen["proxy_headers"] is False
     assert "public mode" in result.output
     assert "MCP at /mcp" in result.output
 

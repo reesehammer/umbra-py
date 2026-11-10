@@ -648,7 +648,12 @@ def test_public_app_installs_search_logging_too(tmp_path):
     from umbra_py import serve
 
     app = serve.build_app(tmp_path / "catalog.db", public=True)
-    assert app.user_middleware[0].cls is StacSearchLog
+    classes = [mw.cls for mw in app.user_middleware]
+    # Outermost first. The client address is rewritten before the search log
+    # reads it, and a huge body is refused before that log peeks it.
+    assert classes[0] is serve.ClientIpMiddleware
+    assert classes.index(serve.ClientIpMiddleware) < classes.index(serve.BodyLimitMiddleware)
+    assert classes.index(serve.BodyLimitMiddleware) < classes.index(StacSearchLog)
     target = logging.getLogger(_STREAMABLE_HTTP_LOGGER)
     assert any(isinstance(item, _StatelessSessionFilter) for item in target.filters)
 

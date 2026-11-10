@@ -7,20 +7,21 @@ incrementally (`umbra index update`), or fetch the prebuilt weekly snapshot
 
 A full catalog scan belongs on that snapshot, not on a paged hosted
 `/search`. `umbra index fetch` downloads it. The flags are `--db`, `--url`,
-`--if-changed`, and `--force`. `--db` defaults to `$UMBRA_INDEX_DB` or
-`~/.cache/umbra-py/catalog.db` and overwrites an existing file. `--url`
-overrides the release asset URL. `--if-changed` skips the body when the
-published ETag or Last-Modified still matches, then validates the file and
-swaps it in atomically; run it while no server holds the index open.
-`--force` applies only with `--if-changed`: download even when unchanged,
-and accept a snapshot much smaller than the current index. The file is
+`--insecure-url`, `--if-changed`, and `--force`. `--db` defaults to
+`$UMBRA_INDEX_DB` or `~/.cache/umbra-py/catalog.db` and overwrites an existing
+file. `--url` overrides the release asset URL and must be https unless
+`--insecure-url` (or `UMBRA_INSECURE_INDEX_URL=1`). `--if-changed` skips the
+body when the published ETag or Last-Modified still matches, then validates
+the file and swaps it in atomically; run it while no server holds the index
+open. `--force` applies only with `--if-changed`: download even when
+unchanged, and accept a snapshot much smaller than the current index. The
+file is
 [`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db).
 [`catalog.sha256`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.sha256)
-is the GNU `sha256sum` manifest that release will carry once
-[PR #315](https://github.com/reesehammer/umbra-py/pull/315) has been
-published by the weekly workflow. It is not on the release yet, and
-`umbra index fetch` does not check it. After the fetch,
-`umbra search --local` reads the file.
+is the GNU `sha256sum` manifest beside that file. `umbra index fetch` checks
+`catalog.db` against it when the manifest is present, and warns and continues
+when the manifest is missing (HTTP 403, 404, or 410). A manifest that does
+not match is refused. After the fetch, `umbra search --local` reads the file.
 
 The baked SAR previews travel separately, as an opt-in `catalog.thumbs.db`
 sidecar (`umbra index fetch-thumbnails`), so the metadata download stays small.

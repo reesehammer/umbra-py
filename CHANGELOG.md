@@ -9,6 +9,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Fixed
+- **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
+  With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
+  that 404s swaps to a same-size "No preview" tile and is not followed by a
+  quicklook request.
+
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
   (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
@@ -18,14 +24,51 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   and `Referrer-Policy: strict-origin-when-cross-origin` on every response
   (OpenStreetMap refuses a tile request that sends no Referer). A `stac_href`
   that is not http(s) is not turned into a link.
+- **`umbra index fetch` checks the published snapshot.** The weekly workflow
+  uploads `catalog.sha256` and attests the `catalog.db` digest. A fetch verifies
+  `catalog.db` when the manifest is present, and warns and continues when it is
+  missing (HTTP 403, 404, or 410). Index URLs (`--url`, including
+  `UMBRA_INDEX_URL`) must be https unless `--insecure-url` or
+  `UMBRA_INSECURE_INDEX_URL=1`. A downloaded snapshot is opened read-only with
+  SQLite's defensive settings; triggers and unexpected objects are rejected.
+- **Downloads no longer trust the filename in an asset URL.** The basename is
+  percent-decoded once; a leading dot, a control character, or a backslash is
+  refused, and the file must stay inside the destination directory.
+  `umbra download --max-bytes` caps a transfer. Local MCP
+  `download_asset(confirm=true)` keeps `dest_dir`. When
+  `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
+  `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
+  contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
+  Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
+  `umbra-gec` names the only collection, `umbra-open-data`, and the product
+  filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
+- **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
+  The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
+  `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a
+  `/64`); each client may hold two catalog reads, and a timed-out read interrupts SQLite.
+  Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
+  (with a `note` when clamped), bodies over 1 MiB are HTTP 413, and a malformed
+  public `POST /search` is HTTP 400.
+  STAC links use optional `UMBRA_PUBLIC_BASE_URL` when it is an `http(s)://host`
+  origin, otherwise the edge's `X-Forwarded-Proto` and host, and `GET /mcp/`
+  keeps that https scheme. Public `geocode_place` caches names and misses,
+  calls Nominatim about once a second, and fails fast when the whole wait
+  would exceed a few seconds. Local `umbra serve` and local MCP are unchanged.
+- **The public host does not write the catalog or reveal its path.**
+  `watch_site` on `umbra serve --public` reports the current matches as new,
+  stores nothing (`note`), caps `new_items` at 50 (`new_total` is the full
+  count), and caps the watch name at 128 characters. Request paths open the
+  index read-only. `index_stats` and `umbra://index/stats` set `path` to null,
+  and public-host errors omit filesystem paths. A local server still persists
+  watch state and still reports the path.
 - **The STAC API landing page points a full-catalog scan at the weekly snapshot.**
   `GET /` names `umbra index fetch` and the published `catalog.db` URL, and
-  links that file with `rel: alternate`. `catalog.sha256` is described as
-  the checksum the weekly release will carry once it is published; the file
-  is not on the release yet, and this version of `umbra index fetch` does
-  not check it.
+  links that file with `rel: alternate`. `catalog.sha256` is the checksum
+  beside that file. `umbra index fetch` checks it when the manifest is
+  present, and warns and continues when the manifest is missing.
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`

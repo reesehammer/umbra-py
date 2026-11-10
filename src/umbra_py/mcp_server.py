@@ -47,6 +47,8 @@ import json
 import os
 import shlex
 import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
@@ -63,11 +65,13 @@ from .constants import (
     POLARIZATION_CAVEAT,
     S3_BUCKET,
     S3_REGION,
+    collection_ids_passed_as_products,
+    unknown_collection_detail,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_place as _geocode_place
+from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
+from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
     CatalogIndex,
@@ -113,7 +117,7 @@ def _item_from_index(url: str) -> UmbraItem | None:
     path = default_index_path()
     if not path.exists():
         return None
-    with CatalogIndex(path) as index:
+    with _open_index(path) as index:
         item = index.get_by_href(url)
         if item is None and "://" not in url:
             item = index.get(url)
@@ -206,7 +210,9 @@ def _fetch_item_public(url: str) -> UmbraItem:
     """Index filename/stem, or one allowlisted JSON GET. No other request."""
     if is_asset_name(url):
         try:
-            return resolve_asset_name(url)
+            # This path runs only on the public host. Open read-only so a
+            # filename lookup cannot write the snapshot or name its path.
+            return resolve_asset_name(url, readonly=True)
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     if not _public_bucket_https(url):
@@ -255,6 +261,189 @@ def _cog_streaming_allowed() -> bool:
         return _cog_streaming_override
     raw = os.environ.get(COG_STREAMING_ENV, "1")
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+#: Public ``search_catalog`` page size. The tool's ``limit`` argument and its
+#: default stay 20; a larger request is clamped and the result says so.
+#: Local MCP (COG streaming allowed) keeps the caller's limit.
+PUBLIC_CATALOG_LIMIT = 100
+
+_PUBLIC_LIMIT_NOTE = (
+    "limit clamped to 100; use the next page (narrow bbox, dates, or area; "
+    "the STAC /search next link pages the rest)."
+)
+
+
+def _clamp_public_catalog_limit(limit: int) -> tuple[int, str | None]:
+    """Cap ``search_catalog`` on the public host. Local calls pass through."""
+    if _cog_streaming_allowed():
+        return limit, None
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return limit, None
+    if limit > PUBLIC_CATALOG_LIMIT:
+        return PUBLIC_CATALOG_LIMIT, _PUBLIC_LIMIT_NOTE
+    return limit, None
+
+
+def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any]:
+    if note:
+        payload["note"] = note
+    return payload
+
+
+#: A miss that would wait longer than this, or join more than this many
+#: callers already waiting on Nominatim, fails immediately.
+_GEOCODE_MAX_WAIT_S = 5.0
+_GEOCODE_MAX_WAITERS = 5
+#: How long a "no such place" answer is remembered. A network failure is not.
+_GEOCODE_NEGATIVE_TTL_S = 600.0
+_GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
+
+
+def _geocode_not_found(exc: GeocodeError) -> bool:
+    text = str(exc)
+    return text.startswith("No place matched") or "no usable bounding box" in text
+
+
+class PublicGeocodeGate:
+    """LRU cache and a global Nominatim throttle for the public MCP host.
+
+    One shared address is what Nominatim bans. Cache hits do not wait and
+    do not call out. A miss waits for the single in-flight call and for the
+    one-second gap, and that whole wait is capped at about five seconds.
+    More than five waiters, or a lock that is not free inside the remaining
+    budget, fails immediately. "No such place" is remembered for about ten
+    minutes. Any other failure is not cached. Local MCP does not use this.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_size: int = 256,
+        min_interval: float = 1.0,
+        time_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._max_size = max_size
+        self._min_interval = min_interval
+        self._time = time_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._network = threading.Lock()
+        self._cache: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
+        self._next_at = 0.0
+        self._waiters = 0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._next_at = 0.0
+            self._waiters = 0
+
+    def resolve(self, query: str) -> tuple[Any, str]:
+        key = " ".join(query.split()).casefold()
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        deadline = self._time() + _GEOCODE_MAX_WAIT_S
+        self._admit()
+        acquired = False
+        try:
+            remaining = deadline - self._time()
+            if remaining <= 0 or not self._network.acquire(timeout=remaining):
+                raise GeocodeError(_GEOCODE_BUSY)
+            acquired = True
+            cached = self._cached(key)
+            if cached is not None:
+                return cached
+            now = self._time()
+            throttle = max(0.0, self._next_at - now)
+            if throttle > deadline - now:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._next_at = now + throttle + self._min_interval
+            if throttle > 0:
+                self._sleep(throttle)
+            try:
+                result = _nominatim_geocode(query)
+            except GeocodeError as exc:
+                if _geocode_not_found(exc):
+                    self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+                raise
+            self._store(key, ("ok", result))
+            return result
+        finally:
+            if acquired:
+                self._network.release()
+            with self._lock:
+                self._waiters -= 1
+
+    def _admit(self) -> None:
+        with self._lock:
+            if self._waiters >= _GEOCODE_MAX_WAITERS:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._waiters += 1
+
+    def _cached(self, key: str) -> tuple[Any, str] | None:
+        with self._lock:
+            return self._cached_locked(key)
+
+    def _cached_locked(self, key: str) -> tuple[Any, str] | None:
+        hit = self._cache.get(key)
+        if hit is None:
+            return None
+        if hit[0] == "neg":
+            if self._time() >= hit[1]:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            raise GeocodeError(hit[2])
+        self._cache.move_to_end(key)
+        return hit[1]
+
+    def _store(self, key: str, entry: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._cache[key] = entry
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+
+
+_public_geocode = PublicGeocodeGate()
+
+
+def _geocode_place(query: str) -> tuple[Any, str]:
+    """Nominatim, directly locally and through :class:`PublicGeocodeGate` on the public host."""
+    if _cog_streaming_allowed():
+        return _nominatim_geocode(query)
+    return _public_geocode.resolve(query)
+
+
+def _public_host() -> bool:
+    """Whether this process is the public host (COG streaming off).
+
+    ``umbra serve --public`` sets that guard. Local stdio and a self-hosted
+    ``umbra serve`` leave streaming on, and those keep the writable index.
+    """
+    return not _cog_streaming_allowed()
+
+
+def _with_optional_path(prefix: str, path: os.PathLike[str] | str, suffix: str) -> str:
+    """``prefix at {path}. suffix`` locally; the same sentence without the path on a public host."""
+    if _public_host():
+        return f"{prefix}. {suffix}"
+    return f"{prefix} at {path}. {suffix}"
+
+
+def _open_index(path: os.PathLike[str] | str | None = None) -> CatalogIndex:
+    """Open the catalog the MCP tools read.
+
+    The public host uses ``mode=ro``, so a tool cannot persist into the
+    shared snapshot. A local server stays read-write.
+    """
+    return CatalogIndex(
+        default_index_path() if path is None else path,
+        readonly=_public_host(),
+    )
 
 
 def _model_key_configured() -> bool:
@@ -617,12 +806,16 @@ def _search_source(
     if local is True:
         if not path.exists():
             raise FileNotFoundError(
-                f"No local index at {path}. Fetch the published snapshot with "
-                "'umbra index fetch', or build one with 'umbra index build'."
+                _with_optional_path(
+                    "No local index",
+                    path,
+                    "Fetch the published snapshot with "
+                    "'umbra index fetch', or build one with 'umbra index build'.",
+                )
             )
-        return CatalogIndex(path), True
+        return _open_index(path), True
     if local is None and path.exists():
-        return CatalogIndex(path), True
+        return _open_index(path), True
     return UmbraCatalog(), False
 
 
@@ -691,12 +884,16 @@ def _resolve_semantic_area(
     path = sem.default_semantic_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No semantic index at {path}. For a site name you roughly know "
-            "(e.g. 'beet piler'), call search_catalog(area=..., fuzzy=True) or "
-            "find_repeat_sites(area=...) instead — those are deterministic and "
-            "need no embedding key. semantic=True is for a description that "
-            "shares no words with the task label (e.g. 'grain storage north "
-            "dakota') and needs 'umbra semantic build' plus an embedding key."
+            _with_optional_path(
+                "No semantic index",
+                path,
+                "For a site name you roughly know "
+                "(e.g. 'beet piler'), call search_catalog(area=..., fuzzy=True) or "
+                "find_repeat_sites(area=...) instead — those are deterministic and "
+                "need no embedding key. semantic=True is for a description that "
+                "shares no words with the task label (e.g. 'grain storage north "
+                "dakota') and needs 'umbra semantic build' plus an embedding key.",
+            )
         )
     embedder = sem.default_embedder(model=model)
     with sem.SemanticTaskIndex(path) as index:
@@ -735,8 +932,9 @@ def search_catalog(
 
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``intersects`` as
-    a GeoJSON polygon object (a ``Polygon`` / ``MultiPolygon`` geometry, or a
-    ``Feature`` / ``FeatureCollection`` wrapping one) to keep only footprints
+    a GeoJSON object (a ``Point``, ``Polygon``, or ``MultiPolygon``, or a
+    ``Feature`` / ``FeatureCollection`` wrapping one; a point matches footprints
+    that contain it) to keep only footprints
     intersecting it -- a tighter spatial filter than the rectangular ``bbox``,
     and mutually exclusive with ``bbox`` / ``place``; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
@@ -769,7 +967,9 @@ def search_catalog(
     the preferred copy of a collect Umbra republished under another prefix
     (``True``), only the other copies (``False``), or every item when omitted;
     ``limit`` to cap
-    results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
+    results (on the public host a value above 100 is clamped to 100 and the
+    result includes ``note``; the argument and its default are unchanged);
+    ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
     overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
@@ -792,11 +992,15 @@ def search_catalog(
     """
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
+    mistaken = collection_ids_passed_as_products(products)
+    if mistaken:
+        raise ValueError(unknown_collection_detail(mistaken, product_parameter="products"))
     if semantic and fuzzy:
         raise ValueError(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
             "site description via embeddings, fuzzy is a deterministic token match"
         )
+    limit, limit_note = _clamp_public_catalog_limit(limit)
 
     resolved_area = None
     semantic_matches = None
@@ -813,16 +1017,19 @@ def search_catalog(
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
-            return {
-                "count": 0,
-                "source": "semantic-index",
-                "resolved_place": None,
-                "resolved_bbox": None,
-                "resolved_area": None,
-                "semantic_matches": [],
-                "items": [],
-                "attribution": ATTRIBUTION,
-            }
+            return _with_limit_note(
+                {
+                    "count": 0,
+                    "source": "semantic-index",
+                    "resolved_place": None,
+                    "resolved_bbox": None,
+                    "resolved_area": None,
+                    "semantic_matches": [],
+                    "items": [],
+                    "attribution": ATTRIBUTION,
+                },
+                limit_note,
+            )
         # Search the resolved exact task name literally (it is a real label, so a
         # substring match hits it; no fuzzy widening on an already-resolved name).
         search_area = resolved_area
@@ -863,16 +1070,19 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
-        "count": len(cards),
-        "source": label,
-        "resolved_place": resolved_place,
-        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": resolved_area,
-        "semantic_matches": semantic_matches,
-        "items": cards,
-        "attribution": ATTRIBUTION,
-    }
+    return _with_limit_note(
+        {
+            "count": len(cards),
+            "source": label,
+            "resolved_place": resolved_place,
+            "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+            "resolved_area": resolved_area,
+            "semantic_matches": semantic_matches,
+            "items": cards,
+            "attribution": ATTRIBUTION,
+        },
+        limit_note,
+    )
 
 
 def find_repeat_sites(
@@ -921,8 +1131,9 @@ def find_repeat_sites(
     The filters scope the *pool* of acquisitions the ranking is computed over,
     and are the same ones ``search_catalog`` takes: ``bbox``
     (``[min_lon, min_lat, max_lon, max_lat]`` WGS84), ``intersects`` (a GeoJSON
-    polygon, mutually exclusive with ``bbox`` / ``place``), ``place`` (free-text,
-    geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
+    Point, Polygon, or MultiPolygon, mutually exclusive with ``bbox`` /
+    ``place``), ``place`` (free-text, geocoded to a bbox), ``area`` (a task-name
+    substring, loosened by ``fuzzy``),
     ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
     the SAR property filters ``polarizations`` / ``min_incidence`` /
     ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
@@ -1220,7 +1431,7 @@ def get_item(url: str) -> dict[str, Any]:
     """
     if is_asset_name(url):
         try:
-            return resolve_asset_name(url).to_llm_context()
+            return resolve_asset_name(url, readonly=_public_host()).to_llm_context()
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
@@ -1255,24 +1466,27 @@ def index_stats() -> dict[str, Any]:
     dropped for a datetime more than a day ahead (they are not in the index).
     ``unique_captures`` is how many rows are the canonical copy of their
     collect; it equals ``items`` until republished copies have been linked.
+    ``path`` is the index file locally and ``null`` on the public host, which
+    does not reveal the server filesystem.
     """
     path = default_index_path()
+    reported = None if _public_host() else str(path)
     if not path.exists():
         return {
             "available": False,
-            "path": str(path),
+            "path": reported,
             "hint": (
                 "No local index. Fetch the published weekly snapshot with "
                 "'umbra index fetch' for instant whole-catalog search."
             ),
         }
-    index = CatalogIndex(path)
+    index = _open_index(path)
     try:
         stats = dict(index.stats())
     finally:
         index.close()
     stats["available"] = True
-    stats["path"] = str(path)
+    stats["path"] = reported
     return stats
 
 
@@ -1758,6 +1972,10 @@ def download_asset(
     or ``size`` when that is a non-negative integer, otherwise null. A local
     server still HEADs the href and follows redirects.
 
+    On a local server, ``dest_dir`` is unchanged unless ``UMBRA_MCP_DOWNLOAD_ROOT``
+    is set. When that variable is set, ``dest_dir`` must resolve inside it.
+    The argument itself is unchanged.
+
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
@@ -1777,6 +1995,8 @@ def download_asset(
     keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
+    from .download import confine_download_dir
+    from .download import download_asset as _download_asset
 
     if not isinstance(url, str) or not url.strip():
         raise ValueError(
@@ -1785,7 +2005,7 @@ def download_asset(
         )
     if is_asset_name(url):
         try:
-            item = resolve_asset_name(url)
+            item = resolve_asset_name(url, readonly=_public_host())
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     else:
@@ -1818,10 +2038,40 @@ def download_asset(
     if not _cog_streaming_allowed():
         return _public_host_confirmed_download(item, asset, url, dest_dir, href)
 
-    from .download import download_asset as _download_asset
-
-    path = _download_asset(item, asset, dest_dir)
+    path = _download_asset(item, asset, confine_download_dir(dest_dir))
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
+
+
+#: How many context cards a public ``watch_site`` returns. The full match
+#: count is ``new_total``. A global bbox is tens of thousands of cards.
+_PUBLIC_WATCH_ITEM_CAP = 50
+#: Caller-controlled watch names become the ``watch`` field (and, locally,
+#: a meta key). The public host refuses to echo an unbounded one.
+_PUBLIC_WATCH_NAME_MAX = 128
+_PUBLIC_WATCH_NOTE = (
+    "This public host does not store watch state. Matches are reported as "
+    "new and nothing is written, so a later call is not a delta. "
+    f"new_items is capped at {_PUBLIC_WATCH_ITEM_CAP}; new_total is the full match count."
+)
+
+
+class _StatelessWatchStore:
+    """Public-host watch store: every load misses, and save writes nothing.
+
+    A process-wide in-memory map would still grow with caller-chosen names.
+    Discarding the seen-set at the end of the call does not.
+    """
+
+    def load(self, name: str) -> set[str] | None:
+        return None
+
+    def save(self, name: str, keys: set[str]) -> None:
+        return None
+
+
+def _bounded_public_watch_name(name: str) -> str:
+    """Cap a public watch name at :data:`_PUBLIC_WATCH_NAME_MAX` characters."""
+    return name[:_PUBLIC_WATCH_NAME_MAX]
 
 
 def watch_site(
@@ -1861,6 +2111,12 @@ def watch_site(
     search — and the returned ``new_items`` are context cards ready to hand
     straight to ``change_composite`` / ``timescan``, closing the standing-analyst
     loop (new pass → composite → describe) without leaving the conversation.
+
+    On the public host (``umbra serve --public``, COG streaming off) nothing
+    is stored. Every call reports the current matches as new, says so in
+    ``note``, and caps ``new_items`` at 50 (``new_total`` is the full count).
+    The watch name is capped at 128 characters. A local server still persists
+    the baseline in the index.
     """
     # bbox is a 4-element [minx, miny, maxx, maxy]; cast the length-erased
     # ``tuple(...)`` back to the fixed-arity bbox type watch_key expects.
@@ -1872,11 +2128,20 @@ def watch_site(
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
-    # Watch state always lives in the local index's meta table (MetaWatchStore),
-    # so a watch persists across MCP sessions. Reuse the index connection when
-    # the search already opened one; otherwise open the index just for the store
-    # (CatalogIndex creates the DB + meta table on first use).
-    store_index = source if isinstance(source, CatalogIndex) else CatalogIndex(default_index_path())
+    public = _public_host()
+    if public:
+        # Do not open a writable index for the store. A live search has no
+        # index connection; a local search's connection is ``mode=ro``.
+        store_index = source if isinstance(source, CatalogIndex) else None
+        store: Any = _StatelessWatchStore()
+    else:
+        # Watch state lives in the local index's meta table. Reuse the index
+        # connection when the search already opened one; otherwise open the
+        # index just for the store (created on first use).
+        store_index = (
+            source if isinstance(source, CatalogIndex) else CatalogIndex(default_index_path())
+        )
+        store = MetaWatchStore(store_index)
 
     resolved_products = list(products) if products else None
     watch_name = name or watch_key(
@@ -1888,6 +2153,8 @@ def watch_site(
         end=end,
         fuzzy=fuzzy,
     )
+    if public:
+        watch_name = _bounded_public_watch_name(watch_name)
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
@@ -1897,7 +2164,7 @@ def watch_site(
             result = watch(
                 cast(SearchSource, source),
                 name=watch_name,
-                store=MetaWatchStore(store_index),
+                store=store,
                 reset=reset,
                 bbox=resolved_bbox,
                 area=area,
@@ -1906,10 +2173,17 @@ def watch_site(
                 start=start,
                 end=end,
             )
+            new_total = len(result.new_items)
+            if public and new_total > _PUBLIC_WATCH_ITEM_CAP:
+                result.new_items = result.new_items[:_PUBLIC_WATCH_ITEM_CAP]
             payload = result.to_dict()
     finally:
-        store_index.close()
+        if store_index is not None:
+            store_index.close()
 
+    if public:
+        payload["new_total"] = new_total
+        payload["note"] = _PUBLIC_WATCH_NOTE
     payload["source"] = _source_label(is_index, bool(token))
     payload["resolved_place"] = resolved_place
     payload["resolved_bbox"] = list(resolved_bbox) if resolved_bbox else None
@@ -1968,8 +2242,12 @@ def find_similar(
     path = emb.default_scene_embed_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No scene-embedding index at {path}. Build one first with "
-            "'umbra embed build' (image-to-image similarity search needs it)."
+            _with_optional_path(
+                "No scene-embedding index",
+                path,
+                "Build one first with "
+                "'umbra embed build' (image-to-image similarity search needs it).",
+            )
         )
     item = _fetch_item(url)
     embedder = emb.default_image_embedder(model=model)
@@ -2011,8 +2289,11 @@ def find_similar_text(
     path = emb.default_scene_embed_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No scene-embedding index at {path}. Build one first with "
-            "'umbra embed build' (text-to-scene search needs it)."
+            _with_optional_path(
+                "No scene-embedding index",
+                path,
+                "Build one first with 'umbra embed build' (text-to-scene search needs it).",
+            )
         )
     with _public_net_slot(long=True):
         text_embedder = emb.default_text_embedder(model=model)
@@ -2038,7 +2319,7 @@ def _baked_previews() -> Callable[[str], BakedPreview | None] | None:
         return None
 
     def lookup(item_id: str) -> BakedPreview | None:
-        with CatalogIndex(path) as index:
+        with _open_index(path) as index:
             return index.get_preview(item_id)
 
     return lookup
@@ -2517,7 +2798,11 @@ def build_server() -> MCPServer:
 
     @server.prompt(
         name="watch-site",
-        description="Standing workflow: report only passes new since last check, then composite.",
+        description=(
+            "Standing workflow: report current matches; this host does not store watch state."
+            if _public_host()
+            else "Standing workflow: report only passes new since last check, then composite."
+        ),
     )
     def watch_site_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
         window = f" between {start} and {end}" if start or end else ""
@@ -2526,11 +2811,21 @@ def build_server() -> MCPServer:
             args += f", start={start!r}"
         if end:
             args += f", end={end!r}"
+        if _public_host():
+            step = (
+                f"1. watch_site({args}) — this public host does not store watch state, "
+                "so the call reports the current matches as new (capped; see note and "
+                "new_total) and writes nothing.\n"
+            )
+        else:
+            step = (
+                f"1. watch_site({args}) — it returns only the acquisitions new since the "
+                "last check (all of them on the first run), persisting state so a later "
+                "re-check reports just the delta.\n"
+            )
         return (
             f"Check '{place}' for newly published passes{window} using the umbra tools:\n"
-            f"1. watch_site({args}) — it returns only the acquisitions new since the "
-            "last check (all of them on the first run), persisting state so a later "
-            "re-check reports just the delta.\n"
+            f"{step}"
             "2. If new_count is 0, report that nothing new has arrived and stop.\n"
             "3. Otherwise pick two or three recent passes of the same polarization "
             "(see each new item's polarization_caveat) and change_composite(urls=[...]) "
