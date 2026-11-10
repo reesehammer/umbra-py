@@ -187,6 +187,7 @@ from .constants import (
     ASSET_SCHEMA_VERSION,
     ATTRIBUTION,
     CANOPY_TOKEN_ENV,
+    CATALOG_INDEX_DB_URL,
     DATA_LICENSE,
     OPEN_DATA_COLLECTION_ID,
     PRODUCT_ASSETS,
@@ -787,6 +788,10 @@ def landing_page(
     when ``narrate_policy`` is given (:func:`narrate_capabilities`) it rides under
     the same :data:`STATS_CAPABILITY_FIELD`, so a client reads an instance's spend
     caps and area bound before a ``403``/``429`` teaches them the hard way.
+
+    The ``alternate`` link is the weekly ``catalog.db`` on the catalog-index
+    release, the same file ``umbra index fetch`` downloads. It is not an export
+    route on this server.
     """
     base = base_url.rstrip("/")
     geojson = "application/geo+json"
@@ -833,6 +838,15 @@ def landing_page(
             "child",
             f"{base}/collections/{COLLECTION_ID}",
             title="Umbra open data",
+        ),
+        _link(
+            "alternate",
+            CATALOG_INDEX_DB_URL,
+            type="application/vnd.sqlite3",
+            title=(
+                "Weekly catalog snapshot (SQLite). Full-catalog scans should "
+                "download this, or run umbra index fetch, instead of paging /search."
+            ),
         ),
     ]
     if artifacts:
@@ -914,7 +928,12 @@ def landing_page(
         "A read-only STAC API over Umbra's open SAR archive, served by "
         "umbra-py from a local catalog index. Umbra publishes a static STAC "
         "catalog and no search API; this façade restores /search for the "
-        f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION}"
+        f"standard STAC tooling. Data is {DATA_LICENSE}: {ATTRIBUTION} "
+        "A full-catalog scan should use the weekly snapshot instead of paging "
+        f"/search: umbra index fetch, or {CATALOG_INDEX_DB_URL}. "
+        "catalog.sha256, a GNU sha256sum manifest beside that file, is checked "
+        "when the manifest is present. A missing manifest warns, and the "
+        "snapshot is still accepted."
     )
     if public:
         description = f"{description} {COMMUNITY_INSTANCE_NOTE}"

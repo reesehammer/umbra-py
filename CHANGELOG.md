@@ -104,6 +104,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   index read-only. `index_stats` and `umbra://index/stats` set `path` to null,
   and public-host errors omit filesystem paths. A local server still persists
   watch state and still reports the path.
+- **The STAC API landing page points a full-catalog scan at the weekly snapshot.**
+  `GET /` names `umbra index fetch` and the published `catalog.db` URL, and
+  links that file with `rel: alternate`. `catalog.sha256` is the checksum
+  beside that file. `umbra index fetch` checks it when the manifest is
+  present, and warns and continues when the manifest is missing.
 - **Container builds pin `python:3.12-slim` by digest** on Amazon ECR Public.
   The hosted image installs `.[mcp,viz,serve]` from `deploy/requirements.txt`
   with hash checking. Hatchling comes from `deploy/build-requirements.txt`
