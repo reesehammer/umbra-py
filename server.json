@@ -4,6 +4,14 @@
   "title": "Umbra open SAR archive",
   "description": "Search, preview, and measure Umbra open SAR from any MCP client. Umbra ships no search API.",
   "version": "0.1.4",
+  "websiteUrl": "https://umbra-py.space",
+  "icons": [
+    {
+      "src": "https://umbra-py.space/assets/images/favicon.png",
+      "mimeType": "image/png",
+      "sizes": ["48x48"]
+    }
+  ],
   "repository": {
     "url": "https://github.com/reesehammer/umbra-py",
     "source": "github"

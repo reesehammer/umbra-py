@@ -45,6 +45,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   Malformed JSON or any other geometry is HTTP 400. An unknown collection such as
   `umbra-gec` names the only collection, `umbra-open-data`, and the product
   filter (`product_types=GEC` on `/search`, `products=GEC` on `search_catalog`).
+- **MCP listings name the project site, and each tool argument says what it does.**
+  `server.json` sets `websiteUrl` to https://umbra-py.space and a 48×48 PNG
+  icon (the docs favicon). Argument descriptions are one line.
+  `find_repeat_sites` points at https://umbra-py.space/find-repeat-sites/ for
+  the long reference. `download_asset` and `watch_site` set `readOnlyHint`
+  false and `destructiveHint` true, because a local call can replace a
+  partial download or a stored watch baseline.
 - **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
   The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
   `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a

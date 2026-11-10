@@ -47,7 +47,7 @@ framework) and the ``viz`` extra the render tools need.
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_type_hints
 
 from . import mcp_server as _mcp
 from .constants import ATTRIBUTION
@@ -190,8 +190,9 @@ def _kit_safe(fn):
 
     The MCP callables may return an image-block list (the no-key kit). This
     wrapper always returns a dict, so the copied signature must not advertise
-    ``list[Any]`` — LangChain evaluates annotations against *this* module's
-    globals when building the tool schema.
+    ``list[Any]``. Annotations are resolved on the source function first:
+    LangChain evaluates a copied string against *this* module's globals, and
+    the ``Annotated`` argument descriptions live in ``mcp_server``.
     """
 
     def wrapped(*args, **kwargs):
@@ -199,11 +200,14 @@ def _kit_safe(fn):
 
     wrapped.__name__ = fn.__name__
     wrapped.__doc__ = fn.__doc__
+    hints = get_type_hints(fn, include_extras=True)
+    hints["return"] = dict[str, Any]
     sig = inspect.signature(fn)
-    wrapped.__signature__ = sig.replace(return_annotation=dict[str, Any])
-    ann = dict(getattr(fn, "__annotations__", {}))
-    ann["return"] = dict[str, Any]
-    wrapped.__annotations__ = ann
+    wrapped.__signature__ = sig.replace(
+        parameters=[p.replace(annotation=hints[p.name]) for p in sig.parameters.values()],
+        return_annotation=dict[str, Any],
+    )
+    wrapped.__annotations__ = hints
     return wrapped
 
 
