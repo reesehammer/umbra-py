@@ -70,6 +70,18 @@ def test_every_tool_argument_has_a_one_line_description():
     assert missing == []
 
 
+def test_area_argument_says_a_task_miss_is_geocoded():
+    """The schema text matches the fallback. Names, types, and defaults stay."""
+    server = ms.build_server()
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    for name in ("search_catalog", "find_repeat_sites"):
+        prop = tools[name].input_schema["properties"]["area"]
+        description = prop["description"]
+        assert "geocoded" in description
+        assert "\n" not in description
+        assert prop.get("default") is None
+
+
 def test_find_repeat_sites_description_stays_short_and_links_the_reference():
     server = ms.build_server()
     tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
@@ -278,6 +290,165 @@ def test_search_catalog_geocodes_place_and_returns_cards(sample_item_dict, monke
     # The geocoded bbox is passed through to the deterministic search layer.
     assert _FakeCatalog.kwargs["bbox"] == (-68.0, 10.0, -67.0, 11.0)
     assert _FakeCatalog.kwargs["limit"] == 5
+    # place= is the geocoder path already. It does not add the area-fallback mark.
+    assert "matched_by" not in out
+    assert "hint" not in out
+
+
+def test_search_catalog_area_hit_adds_nothing(sample_item_dict, monkeypatch):
+    """A task-name area= is the same card as before, with no geocode fields."""
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeCatalog:
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded a task-name hit")
+
+    monkeypatch.setattr(ms, "_geocode_place", _boom)
+    out = ms.search_catalog(area="anywhere", limit=20, local=False)
+    assert out["count"] == 1
+    assert out["items"][0]["id"] == sample_item_dict["id"]
+    assert "matched_by" not in out
+    assert "hint" not in out
+    assert _FakeCatalog.kwargs["area"] == "anywhere"
+    assert _FakeCatalog.kwargs["limit"] == 20
+
+
+def test_search_catalog_area_with_point_does_not_geocode(monkeypatch):
+    """A Point intersects is a footprint, so a task miss is not geocoded."""
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _Miss.kwargs = kwargs
+            return iter(())
+
+    def _boom(_query: str):
+        raise AssertionError("geocoded an area that already had intersects")
+
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    monkeypatch.setattr(ms, "_geocode_place", _boom)
+    out = ms.search_catalog(
+        area="Austin",
+        intersects={"type": "Point", "coordinates": [0.0, 0.0]},
+        local=False,
+    )
+    assert "hint" not in out
+    assert "matched_by" not in out
+    assert _Miss.kwargs["area"] == "Austin"
+    assert _Miss.kwargs["intersects"][0] == [(0.0, 0.0)]
+
+
+def test_search_catalog_area_miss_geocodes_and_reports_it(sample_item_dict, monkeypatch):
+    item = UmbraItem.from_dict(sample_item_dict, href=ITEM_URL)
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([item])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    monkeypatch.setattr(
+        ms, "_geocode_place", lambda _query: ((-97.9, 30.1, -97.5, 30.5), "Austin, Texas")
+    )
+    out = ms.search_catalog(area="Austin", limit=20, local=False)
+    assert out["matched_by"] == "geocode"
+    assert out["resolved_place"] == "Austin, Texas"
+    assert out["resolved_bbox"] == [-97.9, 30.1, -97.5, 30.5]
+    assert out["count"] == 1
+    assert "hint" not in out
+    assert _FakeCatalog.kwargs["area"] is None
+    assert _FakeCatalog.kwargs["bbox"] == (-97.9, 30.1, -97.5, 30.5)
+
+
+def test_search_catalog_area_and_geocode_miss_returns_a_hint(monkeypatch):
+    from umbra_py.exceptions import GeocodeError
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after both misses")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+
+    def _miss(_query: str):
+        raise GeocodeError("No place matched 'TSMC'.")
+
+    monkeypatch.setattr(ms, "_geocode_place", _miss)
+    out = ms.search_catalog(area="TSMC", local=False)
+    assert out["count"] == 0
+    assert out["items"] == []
+    assert out["hint"] == "no task named TSMC; try place= or bbox="
+    assert out["resolved_area"] == "TSMC"
+    assert "matched_by" not in out
+
+
+def test_search_catalog_and_sites_area_geocode_unavailable_is_a_hint(monkeypatch):
+    """A busy or unreachable fallback is an empty result, not a tool error."""
+    from umbra_py.exceptions import GeocodeError
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after geocoding was unavailable")
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    messages = (
+        "Geocoding is busy on this host; retry in a few seconds.",
+        "Could not reach the geocoding service: timed out",
+    )
+    for message in messages:
+
+        def _down(_query: str, message: str = message) -> tuple:
+            raise GeocodeError(message)
+
+        monkeypatch.setattr(ms, "_geocode_place", _down)
+        for call in (
+            lambda: ms.search_catalog(area="Austin", local=False),
+            lambda: ms.find_repeat_sites(area="Austin", local=False),
+        ):
+            out = call()
+            assert out["count"] == 0
+            assert out.get("items", out.get("sites")) == []
+            assert out["hint"] == "no task named Austin; geocoding was unavailable"
+            assert out["resolved_area"] == "Austin"
+            assert "matched_by" not in out
+
+
+def test_find_repeat_sites_area_miss_geocodes(monkeypatch):
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            _FakeCatalog.kwargs = kwargs
+            return iter([_site_pass("Centerfield", d) for d in (1, 3)])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    monkeypatch.setattr(
+        ms, "_geocode_place", lambda _query: ((-112.1, 39.0, -111.8, 39.3), "Dubai")
+    )
+    out = ms.find_repeat_sites(area="Dubai", local=False)
+    assert out["matched_by"] == "geocode"
+    assert out["resolved_place"] == "Dubai"
+    assert out["resolved_area"] is None
+    assert out["count"] == 1
+    assert _FakeCatalog.kwargs["area"] is None
+    assert _FakeCatalog.kwargs["bbox"] == (-112.1, 39.0, -111.8, 39.3)
 
 
 def _site_pass(task, day, *, pols=("VV",), assets=("GEC",)):
@@ -673,10 +844,13 @@ def test_find_repeat_sites_local_ranks_whole_index_not_a_capped_pool(tmp_path, m
 def test_find_repeat_sites_local_forwards_filters_to_rank_sites(tmp_path, monkeypatch):
     # The local path threads geography / task-name / product / SAR filters (and
     # top / min_passes) down to CatalogIndex.rank_sites, and never re-lists a
-    # capped pool through search.
+    # capped pool through search. Centerfield is in the index so this stays a
+    # task-name hit (an unmatched area would geocode instead).
     from umbra_py.index import CatalogIndex
 
-    db = _build_sites_index(tmp_path, [_site_pass("Alpha", d) for d in (1, 2)])
+    db = _build_sites_index(
+        tmp_path, [_site_pass("Alpha", d) for d in (1, 2)] + [_site_pass("Centerfield", 3)]
+    )
     monkeypatch.setattr(ms, "default_index_path", lambda: db)
     captured: dict = {}
 
@@ -3087,6 +3261,143 @@ def test_full_long_pool_rejects_a_live_search(tmp_path, monkeypatch):
             ms.search_catalog(local=False, limit=1)
     finally:
         _drain_long_net(held)
+
+
+def _free_long_permits() -> int:
+    got = 0
+    while ms._PUBLIC_NET_LONG.acquire(blocking=False):
+        got += 1
+    for _ in range(got):
+        ms._PUBLIC_NET_LONG.release()
+    return got
+
+
+def test_public_area_geocode_full_quick_pool_is_a_hint(monkeypatch):
+    """A full quick pool is the unavailable hint, not a tool error."""
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            raise AssertionError("searched after the quick pool was full")
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("geocoded while the quick pool was full")
+
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    monkeypatch.setattr(ms, "_geocode_place", boom)
+    ms.configure(cog_streaming=False)
+    held = _fill_public_net()
+    try:
+        for call in (
+            lambda: ms.search_catalog(area="Austin", local=False),
+            lambda: ms.find_repeat_sites(area="Austin", local=False),
+        ):
+            out = call()
+            assert out["count"] == 0
+            assert out.get("items", out.get("sites")) == []
+            assert out["hint"] == "no task named Austin; geocoding was unavailable"
+            assert out["resolved_area"] == "Austin"
+            assert "matched_by" not in out
+    finally:
+        _drain_public_net(held)
+
+
+def test_public_area_cache_hit_skips_a_full_quick_pool(monkeypatch):
+    """A warm cache answers with every quick permit held. A miss does too."""
+    from umbra_py import geocode
+    from umbra_py.exceptions import GeocodeError
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            return iter(())
+
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs: object):
+        calls.append(query)
+        if query == "Zzz":
+            raise GeocodeError("No place matched 'Zzz'.")
+        return ((0.0, 0.0, 1.0, 1.0), query)
+
+    monkeypatch.setattr(geocode, "geocode_place", fake)
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    ms.configure(cog_streaming=False)
+    geocode._public_geocode.clear()
+    try:
+        first = ms.search_catalog(area="Austin", local=False)
+        assert first["matched_by"] == "geocode"
+        assert calls == ["Austin"]
+        held = _fill_public_net()
+        try:
+            again = ms.search_catalog(area="Austin", local=False)
+            sites = ms.find_repeat_sites(area="Austin", local=False)
+        finally:
+            _drain_public_net(held)
+        assert again["matched_by"] == "geocode"
+        assert again["resolved_place"] == "Austin"
+        assert again["resolved_bbox"] == [0.0, 0.0, 1.0, 1.0]
+        assert "hint" not in again
+        assert sites["matched_by"] == "geocode"
+        assert calls == ["Austin"]
+
+        missed = ms.search_catalog(area="Zzz", local=False)
+        assert missed["hint"] == "no task named Zzz; try place= or bbox="
+        held = _fill_public_net()
+        try:
+            again_miss = ms.search_catalog(area="Zzz", local=False)
+            sites_miss = ms.find_repeat_sites(area="Zzz", local=False)
+        finally:
+            _drain_public_net(held)
+        assert again_miss["hint"] == "no task named Zzz; try place= or bbox="
+        assert sites_miss["hint"] == "no task named Zzz; try place= or bbox="
+        assert calls == ["Austin", "Zzz"]
+    finally:
+        geocode._public_geocode.clear()
+
+
+def test_public_live_area_probe_holds_the_long_slot(monkeypatch):
+    """A live catalog's task-name check holds one long permit while it runs."""
+    seen: list[int] = []
+
+    class _Live:
+        def has_matching_task(self, area, *, fuzzy):
+            seen.append(_free_long_permits())
+            return False
+
+        def search(self, **kwargs):
+            return iter(())
+
+    monkeypatch.setattr(ms, "_geocode_place", lambda _query: ((0.0, 0.0, 1.0, 1.0), "Austin"))
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Live(), False))
+    ms.configure(cog_streaming=False)
+    assert ms.search_catalog(area="Austin", local=False)["matched_by"] == "geocode"
+    assert ms.find_repeat_sites(area="Austin", local=False)["matched_by"] == "geocode"
+    assert seen == [ms._PUBLIC_NET_LONG_LIMIT - 1, ms._PUBLIC_NET_LONG_LIMIT - 1]
+
+
+def test_public_index_area_probe_does_not_take_a_long_slot(tmp_path, monkeypatch):
+    """An index task-name check is SQL, so a full long pool does not block it."""
+    from umbra_py.index import CatalogIndex
+
+    db = tmp_path / "catalog.db"
+    CatalogIndex(db).close()
+    monkeypatch.setenv("UMBRA_INDEX_DB", str(db))
+    monkeypatch.delenv(ms.CANOPY_TOKEN_ENV, raising=False)
+    monkeypatch.setattr(ms, "_geocode_place", lambda _query: ((0.0, 0.0, 1.0, 1.0), "Austin"))
+    ms.configure(cog_streaming=False)
+    held = _fill_long_net()
+    try:
+        search = ms.search_catalog(area="Austin", local=True)
+        sites = ms.find_repeat_sites(area="Austin", local=True)
+    finally:
+        _drain_long_net(held)
+    assert search["matched_by"] == "geocode"
+    assert sites["matched_by"] == "geocode"
 
 
 def test_full_quick_pool_does_not_block_a_live_search(tmp_path, monkeypatch):

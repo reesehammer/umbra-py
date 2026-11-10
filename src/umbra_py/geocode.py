@@ -18,6 +18,10 @@ the rest of the search uses; pass an explicit ``--bbox`` for a tighter window.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -102,3 +106,211 @@ def _parse_boundingbox(raw: Any) -> BBox | None:
     except (TypeError, ValueError):
         return None
     return (west, south, east, north)
+
+
+# A miss that would wait longer than this, or join more than this many
+# callers already waiting on Nominatim, fails immediately. One in-flight
+# call, then the one-second gap, and that whole wait stays under about
+# five seconds.
+_GEOCODE_MAX_WAIT_S = 5.0
+_GEOCODE_MAX_WAITERS = 5
+#: How long a "no such place" answer is remembered. A network failure is not.
+_GEOCODE_NEGATIVE_TTL_S = 600.0
+_GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
+
+
+def _geocode_not_found(exc: GeocodeError) -> bool:
+    """A name that will not become a box, rather than a busy or unreachable service.
+
+    The public gate remembers these. :mod:`umbra_py.area_fallback` uses the
+    same test: these messages are ``try place= or bbox=``. Anything else,
+    including a full public-host network pool, is ``geocoding was unavailable``.
+    """
+    text = str(exc)
+    return (
+        text.startswith("No place matched")
+        or text.startswith("Empty place name")
+        or "no usable bounding box" in text
+    )
+
+
+class PublicGeocodeGate:
+    """LRU cache, negative cache, and the public Nominatim throttle.
+
+    One shared address is what Nominatim bans. Cache hits do not wait and
+    do not call out. On the public host a miss waits for the single
+    in-flight call and for the one-second gap, and that whole wait is
+    capped at about five seconds. More than five waiters, or a lock that
+    is not free inside the remaining budget, fails immediately. "No such
+    place" is remembered for about ten minutes. Any other failure is not
+    cached.
+
+    ``/search``, ``/sites``, and public MCP ``place=`` share this one
+    object, so the host calls Nominatim at most once a second in total.
+    Local ``umbra serve`` uses the same cache with ``throttle=False``, so
+    a page link does not call Nominatim again and a local server is not
+    rate-limited. Local MCP and the CLI call :func:`geocode_place` directly.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_size: int = 256,
+        min_interval: float = 1.0,
+        time_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._max_size = max_size
+        self._min_interval = min_interval
+        self._time = time_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._network = threading.Lock()
+        self._cache: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
+        self._next_at = 0.0
+        self._waiters = 0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._next_at = 0.0
+            self._waiters = 0
+
+    def peek(self, query: str) -> tuple[BBox, str] | None:
+        """A remembered box, or None. A remembered miss raises GeocodeError.
+
+        Does not call Nominatim and does not wait on the throttle. The
+        public MCP area fallback checks this before taking a quick
+        outbound permit, so a warm cache still answers when that pool is full.
+        """
+        key = " ".join(query.split()).casefold()
+        return self._cached(key)
+
+    def resolve(
+        self,
+        query: str,
+        *,
+        throttle: bool = True,
+        wait: float | None = None,
+        timeout: float | None = None,
+    ) -> tuple[BBox, str]:
+        key = " ".join(query.split()).casefold()
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        if not throttle:
+            return self._fetch(key, query, timeout=timeout)
+        budget = _GEOCODE_MAX_WAIT_S if wait is None else max(0.0, wait)
+        deadline = self._time() + budget
+        self._admit()
+        acquired = False
+        try:
+            remaining = deadline - self._time()
+            if remaining <= 0 or not self._network.acquire(timeout=remaining):
+                raise GeocodeError(_GEOCODE_BUSY)
+            acquired = True
+            cached = self._cached(key)
+            if cached is not None:
+                return cached
+            now = self._time()
+            wait = max(0.0, self._next_at - now)
+            if wait > deadline - now:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._next_at = now + wait + self._min_interval
+            if wait > 0:
+                self._sleep(wait)
+            return self._fetch(key, query, timeout=timeout)
+        finally:
+            if acquired:
+                self._network.release()
+            with self._lock:
+                self._waiters -= 1
+
+    def _fetch(self, key: str, query: str, *, timeout: float | None = None) -> tuple[BBox, str]:
+        try:
+            if timeout is None:
+                result = geocode_place(query)
+            else:
+                result = geocode_place(query, timeout=timeout, session=_oneshot_session())
+        except GeocodeError as exc:
+            if _geocode_not_found(exc):
+                self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
+            raise
+        self._store(key, ("ok", result))
+        return result
+
+    def _admit(self) -> None:
+        with self._lock:
+            if self._waiters >= _GEOCODE_MAX_WAITERS:
+                raise GeocodeError(_GEOCODE_BUSY)
+            self._waiters += 1
+
+    def _cached(self, key: str) -> tuple[BBox, str] | None:
+        with self._lock:
+            return self._cached_locked(key)
+
+    def _cached_locked(self, key: str) -> tuple[BBox, str] | None:
+        hit = self._cache.get(key)
+        if hit is None:
+            return None
+        if hit[0] == "neg":
+            if self._time() >= hit[1]:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            raise GeocodeError(hit[2])
+        self._cache.move_to_end(key)
+        return hit[1]
+
+    def _store(self, key: str, entry: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._cache[key] = entry
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+
+
+_public_geocode = PublicGeocodeGate()
+
+
+def _oneshot_session() -> requests.Session:
+    """One Nominatim GET, with no retry.
+
+    The shared session retries a read timeout. ``/search``'s area fallback
+    has to finish inside the request deadline, so that call does not.
+    """
+    from requests.adapters import HTTPAdapter
+
+    from . import __version__
+
+    session = requests.Session()
+    session.headers["User-Agent"] = f"umbra-py/{__version__}"
+    adapter = HTTPAdapter(max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def geocode_for_host(
+    query: str,
+    *,
+    public: bool,
+    wait: float | None = None,
+    timeout: float | None = None,
+) -> tuple[BBox, str]:
+    """Resolve ``query`` through :data:`_public_geocode`.
+
+    ``public=False`` is local ``umbra serve``: the LRU and the negative
+    cache, with no throttle, so a page link reuses the first resolve.
+    ``public=True`` is ``umbra serve --public`` and the public MCP host.
+    Those share this cache and the one-request-per-second slot, so
+    ``place=`` and the ``area=`` fallback together stay at one Nominatim
+    call per second.
+
+    ``wait`` caps how long the public gate waits for its turn.
+    ``timeout`` is the HTTP timeout for the fetch that follows a miss.
+    ``/search`` passes both so a slow Nominatim raises inside the request
+    deadline. A set ``timeout`` is one attempt: the shared session's
+    retries would outlast that deadline.
+    """
+    return _public_geocode.resolve(query, throttle=public, wait=wait, timeout=timeout)

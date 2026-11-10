@@ -47,14 +47,13 @@ import json
 import os
 import shlex
 import threading
-import time
-from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
+from .area_fallback import geocode_note, resolve_area_fallback
 from .catalog import UmbraCatalog
 from .constants import (
     AI_PROVENANCE,
@@ -71,6 +70,7 @@ from .constants import (
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
 from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
+from .geocode import _GEOCODE_BUSY, _public_geocode, geocode_for_host
 from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
@@ -190,8 +190,8 @@ def _public_net_slot(*, long: bool = False):
 
     ``long=False`` is the quick pool (:data:`_PUBLIC_NET_LIMIT`): HEAD,
     geocode, and a single item GET. ``long=True`` is the pool for a live
-    catalog walk or a semantic or embedding model call
-    (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
+    catalog walk, the live catalog's task-name probe, or a semantic or
+    embedding model call (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
     :class:`PublicHostBusy` at once when it is full, with the same message.
     """
     if _cog_streaming_allowed():
@@ -291,131 +291,63 @@ def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any
     return payload
 
 
-#: A miss that would wait longer than this, or join more than this many
-#: callers already waiting on Nominatim, fails immediately.
-_GEOCODE_MAX_WAIT_S = 5.0
-_GEOCODE_MAX_WAITERS = 5
-#: How long a "no such place" answer is remembered. A network failure is not.
-_GEOCODE_NEGATIVE_TTL_S = 600.0
-_GEOCODE_BUSY = "Geocoding is busy on this host; retry in a few seconds."
-
-
-def _geocode_not_found(exc: GeocodeError) -> bool:
-    text = str(exc)
-    return text.startswith("No place matched") or "no usable bounding box" in text
-
-
-class PublicGeocodeGate:
-    """LRU cache and a global Nominatim throttle for the public MCP host.
-
-    One shared address is what Nominatim bans. Cache hits do not wait and
-    do not call out. A miss waits for the single in-flight call and for the
-    one-second gap, and that whole wait is capped at about five seconds.
-    More than five waiters, or a lock that is not free inside the remaining
-    budget, fails immediately. "No such place" is remembered for about ten
-    minutes. Any other failure is not cached. Local MCP does not use this.
-    """
-
-    def __init__(
-        self,
-        *,
-        max_size: int = 256,
-        min_interval: float = 1.0,
-        time_fn: Callable[[], float] = time.monotonic,
-        sleep_fn: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._max_size = max_size
-        self._min_interval = min_interval
-        self._time = time_fn
-        self._sleep = sleep_fn
-        self._lock = threading.Lock()
-        self._network = threading.Lock()
-        self._cache: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
-        self._next_at = 0.0
-        self._waiters = 0
-
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._next_at = 0.0
-            self._waiters = 0
-
-    def resolve(self, query: str) -> tuple[Any, str]:
-        key = " ".join(query.split()).casefold()
-        cached = self._cached(key)
-        if cached is not None:
-            return cached
-        deadline = self._time() + _GEOCODE_MAX_WAIT_S
-        self._admit()
-        acquired = False
-        try:
-            remaining = deadline - self._time()
-            if remaining <= 0 or not self._network.acquire(timeout=remaining):
-                raise GeocodeError(_GEOCODE_BUSY)
-            acquired = True
-            cached = self._cached(key)
-            if cached is not None:
-                return cached
-            now = self._time()
-            throttle = max(0.0, self._next_at - now)
-            if throttle > deadline - now:
-                raise GeocodeError(_GEOCODE_BUSY)
-            self._next_at = now + throttle + self._min_interval
-            if throttle > 0:
-                self._sleep(throttle)
-            try:
-                result = _nominatim_geocode(query)
-            except GeocodeError as exc:
-                if _geocode_not_found(exc):
-                    self._store(key, ("neg", self._time() + _GEOCODE_NEGATIVE_TTL_S, str(exc)))
-                raise
-            self._store(key, ("ok", result))
-            return result
-        finally:
-            if acquired:
-                self._network.release()
-            with self._lock:
-                self._waiters -= 1
-
-    def _admit(self) -> None:
-        with self._lock:
-            if self._waiters >= _GEOCODE_MAX_WAITERS:
-                raise GeocodeError(_GEOCODE_BUSY)
-            self._waiters += 1
-
-    def _cached(self, key: str) -> tuple[Any, str] | None:
-        with self._lock:
-            return self._cached_locked(key)
-
-    def _cached_locked(self, key: str) -> tuple[Any, str] | None:
-        hit = self._cache.get(key)
-        if hit is None:
-            return None
-        if hit[0] == "neg":
-            if self._time() >= hit[1]:
-                del self._cache[key]
-                return None
-            self._cache.move_to_end(key)
-            raise GeocodeError(hit[2])
-        self._cache.move_to_end(key)
-        return hit[1]
-
-    def _store(self, key: str, entry: tuple[Any, ...]) -> None:
-        with self._lock:
-            self._cache[key] = entry
-            self._cache.move_to_end(key)
-            while len(self._cache) > self._max_size:
-                self._cache.popitem(last=False)
-
-
-_public_geocode = PublicGeocodeGate()
-
-
 def _geocode_place(query: str) -> tuple[Any, str]:
-    """Nominatim, directly locally and through :class:`PublicGeocodeGate` on the public host."""
+    """Nominatim directly off the public host, and the shared gate on it.
+
+    The gate lives in :mod:`umbra_py.geocode`. ``place=`` and the ``area=``
+    fallback on this host share that one cache and one Nominatim slot with
+    ``/search`` and ``/sites``.
+    """
     if _cog_streaming_allowed():
         return _nominatim_geocode(query)
-    return _public_geocode.resolve(query)
+    return geocode_for_host(query, public=True)
+
+
+def _geocode_area(query: str) -> tuple[Any, str]:
+    """Geocode an ``area`` miss, taking a quick permit only for a real fetch.
+
+    A warm LRU hit returns the box, and a remembered miss raises that
+    :class:`~umbra_py.exceptions.GeocodeError`, before any permit. A full
+    quick pool is a :class:`PublicHostBusy` (a :class:`ValueError`). The
+    area fallback only turns a geocode error into the empty hint, so a
+    fetch that cannot start is re-raised as that.
+    """
+    if not _cog_streaming_allowed():
+        cached = _public_geocode.peek(query)
+        if cached is not None:
+            return cached
+    try:
+        with _public_net_slot():
+            return _geocode_place(query)
+    except PublicHostBusy as exc:
+        raise GeocodeError(_GEOCODE_BUSY) from exc
+
+
+class _LongSlotTaskProbe:
+    """Hold a long outbound permit around a live catalog's task-name check.
+
+    :meth:`UmbraCatalog.has_matching_task` lists up to three S3 prefixes.
+    That is the same pool as the live walk. An index probe is SQL and is
+    not wrapped. A double with no ``has_matching_task`` is left as it is,
+    so its ``search`` fallback stays the caller's.
+    """
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        with _public_net_slot(long=True):
+            return bool(self._source.has_matching_task(area, fuzzy=fuzzy))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source, name)
+
+
+def _area_probe_source(source: Any, *, is_index: bool) -> Any:
+    """Slot a live catalog's task probe. An index probe stays unslotted."""
+    if is_index or not callable(getattr(source, "has_matching_task", None)):
+        return source
+    return _LongSlotTaskProbe(source)
 
 
 def _public_host() -> bool:
@@ -949,7 +881,8 @@ def search_catalog(
     area: Annotated[
         str | None,
         _arg_desc(
-            "Task-name substring, or a plain-language site description when semantic is true."
+            "Task-name substring. If it matches no task and bbox, intersects, and place "
+            "are omitted, it is geocoded. With semantic, a plain-language description."
         ),
     ] = None,
     fuzzy: Annotated[
@@ -1048,7 +981,16 @@ def search_catalog(
     punctuation-independent and typo-tolerant, resolved deterministically with
     no model call, so ``"beet piler"`` still reaches ``"Beet Piler - ND"`` and
     ``"utah centerfield"`` still reaches ``"Centerfield,
-    Utah"``; set ``semantic`` instead to treat ``area`` as a plain-language
+    Utah"``). When ``area`` matches no task and ``bbox``, ``intersects``, and
+    ``place`` are omitted, it is geocoded and that footprint is searched; the
+    result then adds ``matched_by`` (``geocode``), ``resolved_place``, and
+    ``resolved_bbox``. A name Nominatim does not know sets ``hint`` to
+    ``no task named X; try place= or bbox=``. When geocoding is busy (the
+    Nominatim gate, or the public host's quick outbound pool) or
+    unreachable, ``hint`` is ``no task named X; geocoding was unavailable``
+    and ``resolved_area`` is the ``area`` that was tried. A task-name hit
+    adds nothing. Set ``semantic``
+    instead to treat ``area`` as a plain-language
     *description* of a site whose name you don't know and resolve it to the
     closest task names by *meaning* via the prebuilt embedding index, so
     ``"grain storage north dakota"`` reaches ``"Beet Piler - ND"`` -- a query
@@ -1153,7 +1095,43 @@ def search_catalog(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
     try:
+        # semantic=True already resolved ``area`` to a task name, or returned
+        # before this. Do not geocode that label. ``intersects`` (the GeoJSON
+        # filter on this same signature) is an explicit footprint: area stays
+        # a task filter when it is set.
+        if not semantic:
+            decision = resolve_area_fallback(
+                _area_probe_source(source, is_index=is_index),
+                search_area,
+                fuzzy=search_fuzzy,
+                bbox=resolved_bbox,
+                intersects=geometry,
+                place=place,
+                geocode=_geocode_area,
+            )
+            if decision.hint:
+                return _with_limit_note(
+                    {
+                        "count": 0,
+                        "source": label,
+                        "resolved_place": None,
+                        "resolved_bbox": None,
+                        "resolved_area": area,
+                        "semantic_matches": semantic_matches,
+                        "items": [],
+                        "hint": decision.hint,
+                        "attribution": ATTRIBUTION,
+                    },
+                    limit_note,
+                )
+            if decision.matched_by:
+                resolved_bbox = decision.bbox
+                resolved_place = decision.place
+                search_area = None
+                search_fuzzy = False
+                matched_note = geocode_note(decision)
         with _public_net_slot(long=True) if not is_index else nullcontext():
             results = source.search(
                 bbox=resolved_bbox,
@@ -1176,19 +1154,19 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return _with_limit_note(
-        {
-            "count": len(cards),
-            "source": label,
-            "resolved_place": resolved_place,
-            "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-            "resolved_area": resolved_area,
-            "semantic_matches": semantic_matches,
-            "items": cards,
-            "attribution": ATTRIBUTION,
-        },
-        limit_note,
-    )
+    payload = {
+        "count": len(cards),
+        "source": label,
+        "resolved_place": resolved_place,
+        "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+        "resolved_area": resolved_area,
+        "semantic_matches": semantic_matches,
+        "items": cards,
+        "attribution": ATTRIBUTION,
+    }
+    if matched_note:
+        payload.update(matched_note)
+    return _with_limit_note(payload, limit_note)
 
 
 def find_repeat_sites(
@@ -1213,7 +1191,10 @@ def find_repeat_sites(
     ] = None,
     area: Annotated[
         str | None,
-        _arg_desc("Pool filter: task-name substring. With fuzzy, a loose token match."),
+        _arg_desc(
+            "Pool filter: task-name substring. With fuzzy, a loose token match. "
+            "If it matches no task and bbox, intersects, and place are omitted, it is geocoded."
+        ),
     ] = None,
     fuzzy: Annotated[
         bool,
@@ -1365,7 +1346,13 @@ def find_repeat_sites(
     GeometryCollection wrapping those). A point matches footprints that
     contain it. It cannot be combined with ``bbox`` or ``place``. ``place`` is geocoded
     only when ``bbox`` is omitted. ``area`` is a task-name substring;
-    ``fuzzy=True`` is a deterministic loose match. ``start`` / ``end`` bound
+    ``fuzzy=True`` is a deterministic loose match. When ``area`` matches no
+    task and ``bbox``, ``intersects``, and ``place`` are omitted, it is
+    geocoded. The result then adds ``matched_by`` (``geocode``) plus the
+    resolved place and bbox. A name Nominatim does not know, and a geocoder
+    that is busy or unreachable, set ``hint`` and return no sites
+    (``resolved_area`` is the ``area`` that was tried). A task-name hit adds
+    nothing. ``start`` / ``end`` bound
     which passes enter the pool (ISO date, bare year or month, or a relative
     expression). ``products`` is any of GEC, CSI, SIDD, SICD, CPHD.
     ``polarizations``, ``min_incidence``, ``max_incidence``, and
@@ -1423,7 +1410,51 @@ def find_repeat_sites(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
+    search_area = area
+    search_fuzzy = fuzzy
     try:
+        # Same rule as search_catalog. ``intersects`` is an explicit footprint
+        # (the GeoJSON filter on this signature): area stays a task filter.
+        decision = resolve_area_fallback(
+            _area_probe_source(source, is_index=is_index),
+            search_area,
+            fuzzy=search_fuzzy,
+            bbox=resolved_bbox,
+            intersects=geometry,
+            place=place,
+            geocode=_geocode_area,
+        )
+        if decision.hint:
+            return {
+                "count": 0,
+                "source": label,
+                "resolved_place": resolved_place,
+                "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+                "resolved_area": area,
+                "query": site_query_echo(
+                    rank_by=rank_by,
+                    top=top,
+                    min_passes=min_passes,
+                    active_since=active_since,
+                    active_before=active_before,
+                    first_since=first_since,
+                    first_before=first_before,
+                    max_revisit_days=max_revisit_days,
+                    median_revisit_days=median_revisit_days,
+                    min_span_days=min_span_days,
+                    max_span_days=max_span_days,
+                ),
+                "sites": [],
+                "hint": decision.hint,
+                "attribution": ATTRIBUTION,
+            }
+        if decision.matched_by:
+            resolved_bbox = decision.bbox
+            resolved_place = decision.place
+            search_area = None
+            search_fuzzy = False
+            matched_note = geocode_note(decision)
         if isinstance(source, CatalogIndex):
             # The index can answer a site's *whole-archive* depth as a GROUP BY
             # task, so route through rank_sites rather than re-listing a
@@ -1437,8 +1468,8 @@ def find_repeat_sites(
                 start=start,
                 end=end,
                 product_types=list(products) if products else None,
-                area=area,
-                fuzzy=fuzzy,
+                area=search_area,
+                fuzzy=search_fuzzy,
                 polarizations=list(polarizations) if polarizations else None,
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
@@ -1464,8 +1495,8 @@ def find_repeat_sites(
                         start=start,
                         end=end,
                         product_types=list(products) if products else None,
-                        area=area,
-                        fuzzy=fuzzy,
+                        area=search_area,
+                        fuzzy=search_fuzzy,
                         polarizations=list(polarizations) if polarizations else None,
                         min_incidence=min_incidence,
                         max_incidence=max_incidence,
@@ -1491,12 +1522,12 @@ def find_repeat_sites(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
+    payload = {
         "count": len(sites),
         "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": area,
+        "resolved_area": None if matched_note else area,
         # Echo how the answer was ranked and selected (single-sourced with
         # GET/POST /sites), so a chain reads it from the result rather than its
         # own request. Dates are the raw expressions the caller passed.
@@ -1516,6 +1547,9 @@ def find_repeat_sites(
         "sites": [site.to_dict() for site in sites],
         "attribution": ATTRIBUTION,
     }
+    if matched_note:
+        payload.update(matched_note)
+    return payload
 
 
 def get_item(

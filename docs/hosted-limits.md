@@ -121,13 +121,23 @@ A server without `--public` keeps the previous body handling.
 
 ## Geocoding
 
-Public `geocode_place`, and a `place` filter on the public MCP tools that
-geocode, share one Nominatim throttle of about **1 request per second** and
-an LRU cache of 256 names. A repeated name does not call out. A place that
+Public `geocode_place`, a `place` filter, and an `area` that falls back to
+geocoding share one Nominatim throttle of about **1 request per second** and
+one LRU cache of 256 names. A repeated name does not call out. A place that
 does not resolve is remembered for about 10 minutes. A miss that would spend
 more than about 5 seconds waiting for the in-flight call and the gap, or
-join more than 5 waiters, returns a retryable error instead of holding a
-worker. Local MCP and the CLI call Nominatim directly.
+join more than 5 waiters, fails immediately. `geocode_place` and a `place`
+filter return that as an error. An `area` fallback that is busy, cannot
+reach Nominatim, or finds the quick outbound pool full returns the empty
+result with `hint` `no task named X; geocoding was unavailable` instead.
+A live catalog's task-name check takes a long outbound permit, the same
+pool as the catalog walk; an index check does not. A cached name does not
+take a quick outbound permit. `GET`/`POST /search` keeps that fallback's
+Nominatim wait and HTTP timeout inside half the request deadline, so a
+slow geocode is the unavailable hint rather than HTTP 503. `/sites` is
+not on that deadline. Local `umbra serve`
+uses the same cache, without the throttle, so a next link does not geocode
+again. Local MCP `place=` and the CLI call Nominatim directly.
 
 ## Link origin
 

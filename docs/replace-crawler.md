@@ -106,6 +106,16 @@ The parameters are the ones `/search` implements:
 - `limit` — page size. Default 10. This host returns at most 500 items per
   page (`next` still carries `token`, the offset). A self-hosted server
   without `--public` accepts up to 10000.
+- `area` — a task-name substring (case-insensitive). A hit is the same
+  search as before. If it matches no Umbra task and `bbox` / `intersects`
+  are omitted, `/search` and `/sites` geocode it as a place and search that
+  footprint. The document then includes `matched_by` (`geocode`),
+  `resolved_place`, and `resolved_bbox`. A name Nominatim does not know is
+  HTTP 200 with an empty result and `hint` `no task named X; try place= or bbox=`.
+  When geocoding is busy or Nominatim is unreachable, the same empty HTTP 200
+  carries `hint` `no task named X; geocoding was unavailable`. The next link
+  still carries `area`; the resolved box is reused from the in-process cache.
+  `GET /collections/.../items` does not do this fallback.
 
 A point over the same Nepal coverage, URL-encoded the way a GET query has to
 send GeoJSON (`urllib.parse.urlencode` turns the JSON into the `intersects`

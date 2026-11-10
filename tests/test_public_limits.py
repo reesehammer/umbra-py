@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from umbra_py import geocode, serve
 from umbra_py import mcp_server as ms
-from umbra_py import serve
 from umbra_py.constants import CATALOG_INDEX_DB_URL
 from umbra_py.exceptions import GeocodeError
 from umbra_py.index import CatalogIndex
@@ -681,7 +681,7 @@ def test_public_semantic_miss_still_notes_a_clamped_limit(monkeypatch):
 
 def test_public_geocode_caches_and_throttles(monkeypatch):
     ms.configure(cog_streaming=False)
-    ms._public_geocode.clear()
+    geocode._public_geocode.clear()
     clock = {"now": 50.0}
     slept: list[float] = []
 
@@ -689,15 +689,15 @@ def test_public_geocode_caches_and_throttles(monkeypatch):
         slept.append(seconds)
         clock["now"] += seconds
 
-    monkeypatch.setattr(ms._public_geocode, "_time", lambda: clock["now"])
-    monkeypatch.setattr(ms._public_geocode, "_sleep", sleep)
+    monkeypatch.setattr(geocode._public_geocode, "_time", lambda: clock["now"])
+    monkeypatch.setattr(geocode._public_geocode, "_sleep", sleep)
     calls: list[str] = []
 
-    def fake(query: str):
+    def fake(query: str, **_kwargs):
         calls.append(query)
         return ((0.0, 0.0, 1.0, 1.0), query.strip())
 
-    monkeypatch.setattr(ms, "_nominatim_geocode", fake)
+    monkeypatch.setattr(geocode, "geocode_place", fake)
     assert ms.geocode_place("Paris")["display_name"] == "Paris"
     assert ms.geocode_place(" paris ")["bbox"] == [0.0, 0.0, 1.0, 1.0]
     assert calls == ["Paris"]
@@ -711,6 +711,54 @@ def test_public_geocode_caches_and_throttles(monkeypatch):
     assert calls == ["Paris", "Lyon"]
 
 
+def test_public_place_and_area_share_one_geocode_gate(monkeypatch):
+    """place= and the area= fallback take one Nominatim slot between them."""
+    ms.configure(cog_streaming=False)
+    geocode._public_geocode.clear()
+    clock = {"now": 50.0}
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(geocode._public_geocode, "_time", lambda: clock["now"])
+    monkeypatch.setattr(geocode._public_geocode, "_sleep", sleep)
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs):
+        calls.append(query)
+        return ((0.0, 0.0, 1.0, 1.0), query.strip())
+
+    monkeypatch.setattr(geocode, "geocode_place", fake)
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+        def search(self, **kwargs):
+            return iter(())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ms, "_search_source", lambda *a, **k: (_Miss(), False))
+    assert ms.geocode_place("Paris")["display_name"] == "Paris"
+    area = ms.search_catalog(area="Paris", local=False)
+    assert area["matched_by"] == "geocode"
+    assert area["resolved_place"] == "Paris"
+    assert calls == ["Paris"]
+    lyon = ms.search_catalog(area="Lyon", local=False)
+    assert lyon["matched_by"] == "geocode"
+    assert calls == ["Paris", "Lyon"]
+    assert slept == [1.0]
+    assert ms.geocode_place("Lyon")["bbox"] == [0.0, 0.0, 1.0, 1.0]
+    assert calls == ["Paris", "Lyon"]
+    sites = ms.find_repeat_sites(area="Paris", local=False)
+    assert sites["matched_by"] == "geocode"
+    assert calls == ["Paris", "Lyon"]
+
+
 def test_local_geocode_is_not_throttled(monkeypatch):
     ms.configure(cog_streaming=True)
     calls: list[str] = []
@@ -721,7 +769,7 @@ def test_local_geocode_is_not_throttled(monkeypatch):
         return ((0.0, 1.0, 2.0, 3.0), query)
 
     monkeypatch.setattr(ms, "_nominatim_geocode", fake)
-    monkeypatch.setattr(ms._public_geocode, "_sleep", lambda seconds: slept.append(seconds))
+    monkeypatch.setattr(geocode._public_geocode, "_sleep", lambda seconds: slept.append(seconds))
     ms.geocode_place("A")
     ms.geocode_place("B")
     assert calls == ["A", "B"]
@@ -734,7 +782,7 @@ def test_public_geocode_does_not_cache_a_failure_and_drops_the_oldest(monkeypatc
     def sleep(seconds: float) -> None:
         clock["now"] += seconds
 
-    gate = ms.PublicGeocodeGate(
+    gate = geocode.PublicGeocodeGate(
         max_size=2,
         min_interval=1.0,
         time_fn=lambda: clock["now"],
@@ -742,13 +790,13 @@ def test_public_geocode_does_not_cache_a_failure_and_drops_the_oldest(monkeypatc
     )
     calls: list[str] = []
 
-    def fake(query: str):
+    def fake(query: str, **_kwargs):
         calls.append(query)
         if query == "missing":
             raise GeocodeError("no place")
         return ((0.0, 0.0, 1.0, 1.0), query)
 
-    monkeypatch.setattr(ms, "_nominatim_geocode", fake)
+    monkeypatch.setattr(geocode, "geocode_place", fake)
     with pytest.raises(GeocodeError):
         gate.resolve("missing")
     with pytest.raises(GeocodeError):
@@ -770,7 +818,7 @@ def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
     def sleep(seconds: float) -> None:
         clock["now"] += seconds
 
-    gate = ms.PublicGeocodeGate(
+    gate = geocode.PublicGeocodeGate(
         max_size=8,
         min_interval=1.0,
         time_fn=lambda: clock["now"],
@@ -778,7 +826,7 @@ def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
     )
     calls: list[str] = []
 
-    def fake(query: str):
+    def fake(query: str, **_kwargs):
         calls.append(query)
         if query == "zzz":
             raise GeocodeError("No place matched 'zzz'.")
@@ -786,7 +834,7 @@ def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
             raise GeocodeError("Could not reach the geocoding service: timeout")
         return ((0.0, 0.0, 1.0, 1.0), query)
 
-    monkeypatch.setattr(ms, "_nominatim_geocode", fake)
+    monkeypatch.setattr(geocode, "geocode_place", fake)
     with pytest.raises(GeocodeError, match="No place matched"):
         gate.resolve("zzz")
     with pytest.raises(GeocodeError, match="No place matched"):
@@ -814,7 +862,7 @@ def test_public_geocode_caches_a_miss_and_fails_fast_when_busy(monkeypatch):
 
     class _TimedOut:
         def acquire(self, timeout: float = -1) -> bool:
-            assert 0 < timeout <= ms._GEOCODE_MAX_WAIT_S
+            assert 0 < timeout <= geocode._GEOCODE_MAX_WAIT_S
             return False
 
         def release(self) -> None:

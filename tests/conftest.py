@@ -48,10 +48,10 @@ def _reset_mcp_cog_policy():
     mod = sys.modules.get("umbra_py.mcp_server")
     if mod is not None:
         mod.configure(cog_streaming=None)
-        gate = getattr(mod, "_public_geocode", None)
-        if gate is not None:
-            gate.clear()
         mod._reset_public_net()
+    geo = sys.modules.get("umbra_py.geocode")
+    if geo is not None:
+        geo._public_geocode.clear()
 
 
 @pytest.fixture(autouse=True)

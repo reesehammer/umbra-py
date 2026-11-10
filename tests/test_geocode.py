@@ -4,7 +4,14 @@ import pytest
 import responses
 
 from umbra_py.exceptions import GeocodeError
-from umbra_py.geocode import _parse_boundingbox, geocode_place
+from umbra_py.geocode import (
+    _GEOCODE_MAX_WAIT_S,
+    PublicGeocodeGate,
+    _geocode_not_found,
+    _parse_boundingbox,
+    geocode_for_host,
+    geocode_place,
+)
 from umbra_py.models import UmbraItem
 
 _SEARCH_URL = "https://nominatim.openstreetmap.org/search"
@@ -211,3 +218,179 @@ def test_cli_gallery_place_resolves_and_labels_page(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert captured["bbox"] == _CALIFORNIA_EXPECTED
     assert "California" in out.read_text()  # place surfaces in the page header
+
+
+def test_public_geocode_caches_a_hit_and_spaces_callers(monkeypatch):
+    clock = {"now": 50.0}
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["now"] += seconds
+
+    gate = PublicGeocodeGate(min_interval=1.0, time_fn=lambda: clock["now"], sleep_fn=sleep)
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs):
+        calls.append(query)
+        return ((0.0, 0.0, 1.0, 1.0), query.strip())
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", fake)
+    assert gate.resolve("Paris")[1] == "Paris"
+    assert gate.resolve(" paris ")[1] == "Paris"
+    assert calls == ["Paris"]
+    assert slept == []
+    gate.resolve("Lyon")
+    assert calls == ["Paris", "Lyon"]
+    assert slept == [1.0]
+
+
+def test_local_geocode_for_host_caches_without_throttling(monkeypatch):
+    """Local serve reuses the LRU and the negative cache, and does not wait."""
+    from umbra_py.geocode import _public_geocode
+
+    _public_geocode.clear()
+    calls: list[str] = []
+    slept: list[float] = []
+
+    def fake(query: str, **_kwargs):
+        calls.append(query)
+        if query == "zzz":
+            raise GeocodeError("No place matched 'zzz'.")
+        if query == "down":
+            raise GeocodeError("Could not reach the geocoding service: timeout")
+        return ((0.0, 1.0, 2.0, 3.0), query)
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", fake)
+    monkeypatch.setattr(_public_geocode, "_sleep", lambda seconds: slept.append(seconds))
+    assert geocode_for_host("A", public=False)[1] == "A"
+    assert geocode_for_host("A", public=False)[1] == "A"
+    geocode_for_host("B", public=False)
+    assert calls == ["A", "B"]
+    assert slept == []
+    with pytest.raises(GeocodeError, match="No place matched"):
+        geocode_for_host("zzz", public=False)
+    with pytest.raises(GeocodeError, match="No place matched"):
+        geocode_for_host("zzz", public=False)
+    assert calls == ["A", "B", "zzz"]
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        geocode_for_host("down", public=False)
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        geocode_for_host("down", public=False)
+    assert calls[-2:] == ["down", "down"]
+
+
+def test_public_geocode_caches_a_miss_and_not_a_network_failure(monkeypatch):
+    clock = {"now": 0.0}
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    gate = PublicGeocodeGate(
+        max_size=8, min_interval=1.0, time_fn=lambda: clock["now"], sleep_fn=sleep
+    )
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs):
+        calls.append(query)
+        if query == "zzz":
+            raise GeocodeError("No place matched 'zzz'.")
+        if query == "down":
+            raise GeocodeError("Could not reach the geocoding service: timeout")
+        return ((0.0, 0.0, 1.0, 1.0), query)
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", fake)
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    assert calls == ["zzz"]
+    clock["now"] += 601
+    with pytest.raises(GeocodeError, match="No place matched"):
+        gate.resolve("zzz")
+    assert calls == ["zzz", "zzz"]
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        gate.resolve("down")
+    with pytest.raises(GeocodeError, match="Could not reach"):
+        gate.resolve("down")
+    assert calls[-2:] == ["down", "down"]
+
+
+def test_geocode_not_found_is_shared_with_the_area_fallback():
+    """One classifier: a name miss, including an empty name, is not 'unavailable'."""
+    from umbra_py.area_fallback import resolve_area_fallback
+
+    assert _geocode_not_found(GeocodeError("No place matched 'zzz'."))
+    assert _geocode_not_found(GeocodeError("Empty place name."))
+    assert _geocode_not_found(GeocodeError("Geocoding 'zzz' returned no usable bounding box."))
+    busy = GeocodeError("Geocoding is busy on this host; retry in a few seconds.")
+    unreachable = GeocodeError("Could not reach the geocoding service: timed out")
+    assert not _geocode_not_found(busy)
+    assert not _geocode_not_found(unreachable)
+
+    class _Miss:
+        def has_matching_task(self, area, *, fuzzy):
+            return False
+
+    for message, hint in (
+        ("Empty place name.", "no task named Austin; try place= or bbox="),
+        ("No place matched 'Austin'.", "no task named Austin; try place= or bbox="),
+        (
+            "Geocoding is busy on this host; retry in a few seconds.",
+            "no task named Austin; geocoding was unavailable",
+        ),
+    ):
+
+        def _raise(_query: str, message: str = message) -> tuple:
+            raise GeocodeError(message)
+
+        decision = resolve_area_fallback(
+            _Miss(),
+            "Austin",
+            fuzzy=False,
+            bbox=None,
+            intersects=None,
+            place=None,
+            geocode=_raise,
+        )
+        assert decision.hint == hint
+
+
+def test_public_geocode_fails_fast_when_busy(monkeypatch):
+    clock = {"now": 0.0}
+    gate = PublicGeocodeGate(
+        min_interval=1.0,
+        time_fn=lambda: clock["now"],
+        sleep_fn=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    calls: list[str] = []
+
+    def fake(query: str, **_kwargs):
+        calls.append(query)
+        return ((0.0, 0.0, 1.0, 1.0), query)
+
+    monkeypatch.setattr("umbra_py.geocode.geocode_place", fake)
+    gate._waiters = 5
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert calls == []
+    gate._waiters = 0
+    gate._next_at = clock["now"] + 5.1
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert calls == []
+
+    class _TimedOut:
+        def acquire(self, timeout: float = -1) -> bool:
+            assert 0 < timeout <= _GEOCODE_MAX_WAIT_S
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("the lock was not acquired")
+
+    gate._network = _TimedOut()  # type: ignore[assignment]
+    gate._next_at = 0.0
+    with pytest.raises(GeocodeError, match="retry"):
+        gate.resolve("Paris")
+    assert calls == []
+    assert gate._waiters == 0

@@ -29,7 +29,7 @@ which passes enter the pool at all.
 | `bbox` | WGS84 `[min_lon, min_lat, max_lon, max_lat]`. When it is set, `place` is not geocoded. |
 | `intersects` | One GeoJSON `Point`, or a `Polygon` or `MultiPolygon`, optionally wrapped in a `Feature`, `FeatureCollection`, or `GeometryCollection`. A point matches footprints that contain it. Several Points are refused. Cannot be combined with `bbox` or `place`. |
 | `place` | Free-text name, geocoded to a bbox only when `bbox` is omitted. |
-| `area` | Task-name substring. `fuzzy=True` is a deterministic loose match (word order, punctuation, typos). No model. |
+| `area` | Task-name substring. `fuzzy=True` is a deterministic loose match (word order, punctuation, typos). No model. If it matches no task and `bbox`, `intersects`, and `place` are omitted, it is geocoded. |
 | `start`, `end` | Inclusive bounds on which passes are counted. ISO date, bare year or month, or a relative expression (`6 months ago`). |
 | `products` | Keep passes that expose one of `GEC`, `CSI`, `SIDD`, `SICD`, `CPHD`. Case-insensitive. |
 | `polarizations` | Keep passes exposing any listed polarization. Passes missing it are dropped. |
@@ -127,3 +127,8 @@ Also `count`, the pool `source`, the resolved `place` / `bbox` / `area`, a
 `query` echo of `rank_by`, `top`, `min_passes`, and the recency, onset,
 cadence, and baseline bounds as passed, and the attribution line. The record
 shape is `site-coverage` in the published JSON schemas.
+
+When `area` is geocoded, the result adds `matched_by` (`geocode`),
+`resolved_place`, and `resolved_bbox`. A name Nominatim does not know, or a
+geocoder that is busy or unreachable, sets `hint` and returns no sites.
+`resolved_area` is the `area` that was tried. A task-name hit adds nothing.

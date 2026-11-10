@@ -733,6 +733,27 @@ class UmbraCatalog:
             else:
                 next_body = None
 
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        """Whether ``area`` matches a task directory (or a Canopy item).
+
+        Directory names only: a hit does not download a sidecar. The search
+        that follows lists the prefixes again. A Canopy catalog has no task
+        directories, so it asks :meth:`search` for one item.
+        """
+        if self.token:
+            stream = self.search(area=area, fuzzy=fuzzy, limit=1)
+            try:
+                return next(stream, None) is not None
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+        for data_prefix in _DATA_PREFIXES:
+            subdirs, _files = self._list_prefix(data_prefix)
+            if any(task_matches(area, _task_name(sub), fuzzy=fuzzy) for sub in subdirs):
+                return True
+        return False
+
     def get_item(self, item_id: str) -> UmbraItem | None:
         """Fetch a single acquisition from the Canopy commercial archive by id.
 

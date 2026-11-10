@@ -10,6 +10,28 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **`area` on `GET`/`POST /search` and `/sites` falls back to place geocoding**
+  when it matches no Umbra task name and the request has no bbox or
+  intersects geometry. The response adds `matched_by: geocode` with the
+  resolved place name and bbox. A name Nominatim does not know is HTTP 200
+  with an empty result and `hint` `no task named X; try place= or bbox=`.
+  When geocoding is busy or Nominatim is unreachable, that same empty
+  HTTP 200 carries `hint` `no task named X; geocoding was unavailable`
+  (not HTTP 503). `search_catalog` and `find_repeat_sites` add the same
+  fields, and on that miss `resolved_area` is the `area` that was tried,
+  without changing tool names, arguments, or defaults. Those tools' `area`
+  argument descriptions say a task miss is geocoded. On the public host
+  a full quick outbound pool is that same unavailable hint, not a tool
+  error, and a live catalog's task-name check uses the long outbound pool
+  (an index check does not). A task-name hit is unchanged. The resolved
+  box is cached in-process (the same LRU and a ten-minute memory of names
+  that do not resolve) on local `umbra serve` and on the public host, so
+  a next link does not call Nominatim again. On the public host that
+  cache is the same gate as `place=` (one in-flight Nominatim call, a
+  one-second gap, at most five waiters). A cached name does not take a
+  quick outbound permit. `GET`/`POST /search` keeps the fallback's
+  Nominatim wait and HTTP timeout inside half the request deadline, so a
+  slow geocode is the unavailable hint rather than HTTP 503.
 - **One JSON line per MCP tool call** (`msg` `mcp_tool`). It records the
   tool, duration, `ok` or the error class, a result count when the reply
   already has one, client name and version, and session id. Arguments are

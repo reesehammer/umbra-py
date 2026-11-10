@@ -314,6 +314,22 @@ RATE_LIMIT_EXEMPT_PATHS = frozenset(
 )
 
 
+def _search_geocode_limits(deadline: float) -> tuple[float, float]:
+    """Gate wait and HTTP timeout for ``/search``'s area fallback.
+
+    Together they take at most half of ``deadline``, and neither grows
+    past the usual 5s wait or 10s HTTP timeout. The search keeps the
+    rest, so a slow Nominatim raises :class:`~umbra_py.exceptions.GeocodeError`
+    before the request deadline instead of becoming a 503.
+    """
+    from .geocode import _GEOCODE_MAX_WAIT_S
+
+    budget = max(deadline, 0.0) / 2
+    wait = min(_GEOCODE_MAX_WAIT_S, budget / 2)
+    http = min(10.0, max(0.0, budget - wait))
+    return wait, http
+
+
 def _request_timeout_s() -> float:
     """Deadline for a catalog read on the request path.
 
@@ -3558,6 +3574,28 @@ _SITES_RESPONSE: dict[str, Any] = {
                         "items": {"type": "number"},
                     },
                     "resolved_area": {"type": ["string", "null"]},
+                    "matched_by": {
+                        "type": "string",
+                        "description": (
+                            "Set to `geocode` when `area` matched no task name and "
+                            "the footprint was resolved by the place geocoder. Absent "
+                            "when `area` hit a task name."
+                        ),
+                    },
+                    "resolved_place": {
+                        "type": "string",
+                        "description": "Nominatim label for a geocoded `area`.",
+                    },
+                    "hint": {
+                        "type": "string",
+                        "description": (
+                            "Set when `area` matched no task and geocoding did not "
+                            "produce a footprint. A name Nominatim does not know is "
+                            "`no task named X; try place= or bbox=`. A busy or "
+                            "unreachable geocoder is `no task named X; geocoding was "
+                            "unavailable`. The response stays HTTP 200."
+                        ),
+                    },
                     "query": {
                         "type": "object",
                         "description": (
@@ -4364,6 +4402,51 @@ def build_app(
             unique_captures=n_captures,
         )
 
+    def _decide_area(
+        source: Any,
+        area: str | None,
+        fuzzy: bool,
+        bbox: BBox | None,
+        intersects: Any,
+        *,
+        within: float | None = None,
+    ):
+        """Task-name hit, geocoded footprint, or a miss hint.
+
+        The resolve is cached in-process. On the public host it also takes
+        the shared Nominatim gate. A name that is not a place, and a geocoder
+        that is busy or unreachable, are hints on an empty result, not an
+        error. ``intersects`` is an explicit footprint: when it is set,
+        ``area`` stays a task filter.
+
+        ``within`` is the request deadline. ``/search`` passes it so the
+        gate wait and the HTTP timeout finish with time left for the
+        search. ``/sites`` leaves it unset.
+        """
+        from .area_fallback import resolve_area_fallback
+        from .geocode import geocode_for_host
+
+        def geocode(query: str):
+            if within is None:
+                return geocode_for_host(query, public=public)
+            wait, timeout = _search_geocode_limits(within)
+            return geocode_for_host(query, public=public, wait=wait, timeout=timeout)
+
+        return resolve_area_fallback(
+            source,
+            area,
+            fuzzy=fuzzy,
+            bbox=bbox,
+            intersects=intersects,
+            place=None,
+            geocode=geocode,
+        )
+
+    def _geocode_fields(decision: Any) -> dict[str, Any]:
+        from .area_fallback import geocode_note
+
+        return geocode_note(decision) or {}
+
     def _do_search(
         request: Request,
         *,
@@ -4383,20 +4466,45 @@ def build_app(
         limit: int,
         offset: int,
         self_href: str,
+        fallback: bool = False,
     ) -> JSONResponse:
         limit = _clamp_limit(limit, cap=_search_limit_cap(public=public))
         source = _open()
         try:
+            search_area = area
+            search_bbox = bbox
+            search_fuzzy = fuzzy
+            note = None
+            # ``fallback`` is GET /search only. /collections/.../items keeps
+            # area as a task filter, which is what that route does today.
+            if fallback:
+                decision = _decide_area(
+                    source, area, fuzzy, bbox, intersects, within=_request_timeout_s()
+                )
+                if decision.hint:
+                    result = search_result(
+                        [],
+                        _base(request),
+                        returned=0,
+                        self_href=self_href,
+                    )
+                    result["hint"] = decision.hint
+                    return JSONResponse(content=result, media_type=geojson)
+                if decision.matched_by:
+                    search_area = None
+                    search_bbox = decision.bbox
+                    search_fuzzy = False
+                    note = _geocode_fields(decision)
             page, has_next = run_search(
                 source,
-                bbox=bbox,
+                bbox=search_bbox,
                 intersects=intersects,
                 start=start,
                 end=end,
                 ids=ids,
                 product_types=product_types,
-                area=area,
-                fuzzy=fuzzy,
+                area=search_area,
+                fuzzy=search_fuzzy,
                 polarizations=polarizations,
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
@@ -4418,6 +4526,8 @@ def build_app(
             prev_href=prev_href,
             self_href=self_href,
         )
+        if note:
+            result.update(note)
         return JSONResponse(content=result, media_type=geojson)
 
     @app.get("/collections/{collection_id}/items", tags=["STAC"])
@@ -4513,7 +4623,13 @@ def build_app(
         product_types: str | None = Query(
             default=None, description="Comma-separated product types, e.g. GEC,SICD"
         ),
-        area: str | None = Query(default=None, description="Free-text task/site substring"),
+        area: str | None = Query(
+            default=None,
+            description=(
+                "Task/site substring. If it matches no task and bbox/intersects "
+                "are omitted, geocode it as a place and search that footprint"
+            ),
+        ),
         fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
         polarizations: str | None = Query(
             default=None, description="Comma-separated polarizations, e.g. VV,VH"
@@ -4571,6 +4687,7 @@ def build_app(
                 limit=limit,
                 offset=token,
                 self_href=_self_href(request),
+                fallback=True,
             )
         )
 
@@ -4579,16 +4696,43 @@ def build_app(
     ) -> JSONResponse:
         source = _open()
         try:
+            decision = _decide_area(
+                source,
+                parsed.area,
+                parsed.fuzzy,
+                parsed.bbox,
+                parsed.intersects,
+                within=_request_timeout_s(),
+            )
+            if decision.hint:
+                base = _base(request)
+                result = search_result(
+                    [],
+                    base,
+                    returned=0,
+                    self_href=f"{base}/search",
+                )
+                result["hint"] = decision.hint
+                return JSONResponse(content=result, media_type=geojson)
+            search_area = parsed.area
+            search_bbox = parsed.bbox
+            search_fuzzy = parsed.fuzzy
+            note = None
+            if decision.matched_by:
+                search_area = None
+                search_bbox = decision.bbox
+                search_fuzzy = False
+                note = _geocode_fields(decision)
             page, has_next = run_search(
                 source,
-                bbox=parsed.bbox,
+                bbox=search_bbox,
                 intersects=parsed.intersects,
                 start=parsed.start,
                 end=parsed.end,
                 ids=parsed.ids,
                 product_types=parsed.product_types,
-                area=parsed.area,
-                fuzzy=parsed.fuzzy,
+                area=search_area,
+                fuzzy=search_fuzzy,
                 polarizations=parsed.polarizations,
                 min_incidence=parsed.min_incidence,
                 max_incidence=parsed.max_incidence,
@@ -4602,7 +4746,8 @@ def build_app(
         # STAC API Item Search: a POST page link is POST /search again, and its
         # body is this request's body with ``token`` replaced. A GET of
         # ``/search?token=N`` would drop limit, collections, and every other
-        # filter that lived only in the JSON.
+        # filter that lived only in the JSON. ``area`` stays in that body; the
+        # resolved bbox is reused from the in-process cache.
         base = _base(request)
         search_href = f"{base}/search"
         prev_body = _body_with_token(body, max(0, offset - limit)) if offset > 0 else None
@@ -4617,6 +4762,8 @@ def build_app(
             prev_body=prev_body,
             self_href=search_href,
         )
+        if note:
+            result.update(note)
         return JSONResponse(content=result, media_type=geojson)
 
     if public:
@@ -4713,7 +4860,13 @@ def build_app(
         product_types: str | None = Query(
             default=None, description="Comma-separated product types, e.g. GEC,SICD"
         ),
-        area: str | None = Query(default=None, description="Free-text task/site substring"),
+        area: str | None = Query(
+            default=None,
+            description=(
+                "Task/site substring. If it matches no task and bbox/intersects "
+                "are omitted, geocode it as a place and rank sites in that footprint"
+            ),
+        ),
         fuzzy: bool = Query(default=False, description="Token-wise fuzzy area match"),
         polarizations: str | None = Query(
             default=None, description="Comma-separated polarizations, e.g. VV,VH"
@@ -4907,31 +5060,43 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         source = _open()
         try:
-            sites = run_sites(
-                source,
-                bbox=parsed_bbox,
-                intersects=parsed_geometry,
-                start=start,
-                end=end,
-                product_types=wanted_products,
-                area=area,
-                fuzzy=fuzzy,
-                polarizations=wanted_pols,
-                min_incidence=min_incidence,
-                max_incidence=max_incidence,
-                max_resolution=max_resolution,
-                limit=limit,
-                top=top,
-                min_passes=min_passes,
-                rank_by=rank_by,
-                active_since=resolved_active_since,
-                active_before=resolved_active_before,
-                first_since=resolved_first_since,
-                first_before=resolved_first_before,
-                max_revisit_days=max_revisit,
-                median_revisit_days=median_revisit,
-                min_span_days=min_span,
-                max_span_days=max_span,
+            decision = _decide_area(source, area, fuzzy, parsed_bbox, parsed_geometry)
+            search_area = area
+            search_bbox = parsed_bbox
+            search_fuzzy = fuzzy
+            if decision.matched_by:
+                search_area = None
+                search_bbox = decision.bbox
+                search_fuzzy = False
+            sites = (
+                []
+                if decision.hint
+                else run_sites(
+                    source,
+                    bbox=search_bbox,
+                    intersects=parsed_geometry,
+                    start=start,
+                    end=end,
+                    product_types=wanted_products,
+                    area=search_area,
+                    fuzzy=search_fuzzy,
+                    polarizations=wanted_pols,
+                    min_incidence=min_incidence,
+                    max_incidence=max_incidence,
+                    max_resolution=max_resolution,
+                    limit=limit,
+                    top=top,
+                    min_passes=min_passes,
+                    rank_by=rank_by,
+                    active_since=resolved_active_since,
+                    active_before=resolved_active_before,
+                    first_since=resolved_first_since,
+                    first_before=resolved_first_before,
+                    max_revisit_days=max_revisit,
+                    median_revisit_days=median_revisit,
+                    min_span_days=min_span,
+                    max_span_days=max_span,
+                )
             )
         finally:
             _close(source)
@@ -4955,11 +5120,15 @@ def build_app(
         result = sites_result(
             sites,
             _base(request),
-            resolved_bbox=parsed_bbox,
-            resolved_area=area,
+            resolved_bbox=search_bbox if decision.matched_by else parsed_bbox,
+            resolved_area=None if decision.matched_by else area,
             query=query,
             self_href=f"{base}/sites",
         )
+        if decision.hint:
+            result["hint"] = decision.hint
+        elif decision.matched_by:
+            result.update(_geocode_fields(decision))
         return JSONResponse(content=result)
 
     @app.post(
@@ -5065,31 +5234,43 @@ def build_app(
         eff_min_passes = min_passes if min_passes is not None else SITES_MIN_PASSES
         source = _open()
         try:
-            sites = run_sites(
-                source,
-                bbox=parsed_bbox,
-                intersects=parsed_geometry,
-                start=start,
-                end=end,
-                product_types=wanted_products,
-                area=area,
-                fuzzy=fuzzy,
-                polarizations=polarizations,
-                min_incidence=min_incidence,
-                max_incidence=max_incidence,
-                max_resolution=max_resolution,
-                limit=limit if limit is not None else SITES_POOL_LIMIT,
-                top=eff_top,
-                min_passes=eff_min_passes,
-                rank_by=rank_by,
-                active_since=resolved_active_since,
-                active_before=resolved_active_before,
-                first_since=resolved_first_since,
-                first_before=resolved_first_before,
-                max_revisit_days=max_revisit,
-                median_revisit_days=median_revisit,
-                min_span_days=min_span,
-                max_span_days=max_span,
+            decision = _decide_area(source, area, fuzzy, parsed_bbox, parsed_geometry)
+            search_area = area
+            search_bbox = parsed_bbox
+            search_fuzzy = fuzzy
+            if decision.matched_by:
+                search_area = None
+                search_bbox = decision.bbox
+                search_fuzzy = False
+            sites = (
+                []
+                if decision.hint
+                else run_sites(
+                    source,
+                    bbox=search_bbox,
+                    intersects=parsed_geometry,
+                    start=start,
+                    end=end,
+                    product_types=wanted_products,
+                    area=search_area,
+                    fuzzy=search_fuzzy,
+                    polarizations=polarizations,
+                    min_incidence=min_incidence,
+                    max_incidence=max_incidence,
+                    max_resolution=max_resolution,
+                    limit=limit if limit is not None else SITES_POOL_LIMIT,
+                    top=eff_top,
+                    min_passes=eff_min_passes,
+                    rank_by=rank_by,
+                    active_since=resolved_active_since,
+                    active_before=resolved_active_before,
+                    first_since=resolved_first_since,
+                    first_before=resolved_first_before,
+                    max_revisit_days=max_revisit,
+                    median_revisit_days=median_revisit,
+                    min_span_days=min_span,
+                    max_span_days=max_span,
+                )
             )
         finally:
             _close(source)
@@ -5113,11 +5294,15 @@ def build_app(
         result = sites_result(
             sites,
             _base(request),
-            resolved_bbox=parsed_bbox,
-            resolved_area=area,
+            resolved_bbox=search_bbox if decision.matched_by else parsed_bbox,
+            resolved_area=None if decision.matched_by else area,
             query=query,
             self_href=f"{base}/sites",
         )
+        if decision.hint:
+            result["hint"] = decision.hint
+        elif decision.matched_by:
+            result.update(_geocode_fields(decision))
         return JSONResponse(content=result)
 
     def _check_collections(collections: Any) -> None:
