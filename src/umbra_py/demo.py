@@ -52,13 +52,10 @@ Design, deliberately in the repo's grain:
   set, clicking a scene *leads* its detail panel with a small SAR picture pulled
   from ``GET /artifacts/thumbnail/{id}.png`` — the baked quicklook thumbnail
   ``umbra index bake-thumbnails`` stored in the index, served straight from local
-  bytes with no render (falling back to a live quicklook render for a scene not
-  yet baked). This is the client wiring the G6 thumbnail bake left
-  open: the primitive and the server endpoint shipped, so the detail panel now
-  opens with a radar picture, not just metadata, and the heavier on-click
-  "Get SAR image" COG overlay stays the deeper look. A scene with no baked
-  thumbnail 404s and the element is dropped, so a metadata-only scene is never a
-  broken image; without ``server_url`` the panel is unchanged.
+  bytes with no render. A thumbnail that 404s — most of the archive has no
+  baked preview — swaps in the same neutral "No preview" tile and does not
+  follow on to ``/artifacts/quicklook``. Without ``server_url`` the panel is
+  unchanged.
 
 * **Whole-archive mode over PMTiles.** The default page embeds the gathered
   slice as JSON, which is the right shape for a search result but caps the
@@ -682,9 +679,16 @@ html, body { margin: 0; height: 100%; }
   margin-top: 16px; padding-top: 12px; border-top: 1px solid #ddd; font-size: 12px;
 }
 #umbra-detail .empty { color: #999; }
+.umbra-thumb-slot {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; margin-bottom: 8px;
+  border: 1px solid #ddd; border-radius: 3px; background: #f2f2f2; overflow: hidden;
+}
 .umbra-thumb {
-  display: block; width: 100%; margin-bottom: 8px; border: 1px solid #ddd;
-  border-radius: 3px; background: #f2f2f2;
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+}
+.umbra-thumb-missing {
+  display: flex; align-items: center; justify-content: center;
+  color: #555; font-size: 13px; font-weight: 600;
 }
 #umbra-detail table { border-collapse: collapse; width: 100%; }
 #umbra-detail th { text-align: left; padding: 2px 8px 2px 0; color: #555; vertical-align: top; }
@@ -769,24 +773,44 @@ window.umbraChipRow = function (containerId, values, onToggle) {
   return box;
 };
 
+// The detail-panel preview slot. Same outer size whether it holds a picture
+// or the "No preview" label, so a 404 does not move the metadata under it.
+// The explorer page is light; the tile uses the sidebar's neutral gray.
+window.umbraThumbSlot = function () {
+  var box = document.createElement('div');
+  box.className = 'umbra-thumb-slot';
+  return box;
+};
+
+window.umbraThumbPlaceholder = function (box) {
+  box.classList.add('umbra-thumb-missing');
+  box.setAttribute('role', 'img');
+  box.setAttribute('aria-label', 'No preview available');
+  box.textContent = 'No preview';
+  return box;
+};
+
 // An instant SAR picture of the selected scene, or null when the page was
 // built without a server. `umbra serve` serves the baked quicklook thumbnail
-// (umbra index bake-thumbnails) straight from the index -- an offline file read
-// -- and falls back to a quicklook render for a scene not yet baked. The id is
-// remote metadata, so it is URL-encoded into the path (the scheme is our own
-// trusted server base, so no javascript:-style breakout is possible); an
-// unbaked/unrenderable scene 404s and the onerror handler drops the element
-// rather than showing a broken image.
+// (umbra index bake-thumbnails) straight from the index -- an offline file
+// read. The id is remote metadata, so it is URL-encoded into the path (the
+// scheme is our own trusted server base, so no javascript:-style breakout is
+// possible). A 404 swaps the same placeholder in and stops: no second
+// request, and no follow-on to /artifacts/quicklook.
 window.umbraThumb = function (base, id) {
   if (!base || !id) return null;
+  var box = window.umbraThumbSlot();
   var thumb = document.createElement('img');
   thumb.className = 'umbra-thumb';
   thumb.alt = 'SAR quicklook thumbnail';
   thumb.onerror = function () {
+    thumb.onerror = null;
     if (thumb.parentNode) thumb.parentNode.removeChild(thumb);
+    window.umbraThumbPlaceholder(box);
   };
+  box.appendChild(thumb);
   thumb.src = base + '/artifacts/thumbnail/' + encodeURIComponent(id) + '.png';
-  return thumb;
+  return box;
 };
 
 // The on-click "Get SAR image" button, or null when the page is metadata-only

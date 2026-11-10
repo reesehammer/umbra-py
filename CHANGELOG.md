@@ -9,6 +9,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Fixed
+- **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
+  With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
+  that 404s swaps to a same-size "No preview" tile and is not followed by a
+  quicklook request.
+
 ### Security
 - **Map pages pin CDN scripts and stylesheets with Subresource Integrity**
   (`leaflet@1.9.4`, `leaflet.markercluster@1.5.3`, `maplibre-gl@4.7.1`,
