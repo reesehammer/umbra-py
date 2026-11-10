@@ -51,7 +51,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
@@ -901,30 +901,126 @@ def _resolve_semantic_area(
     return best, ranked
 
 
+def _arg_desc(text: str) -> Any:
+    """One-line description for an MCP argument, applied when a schema is built.
+
+    Pydantic arrives with the ``mcp`` and ``langchain`` extras, not the core
+    install. ``from __future__ import annotations`` stores this call as text,
+    so the import happens only when a tool schema is evaluated.
+    """
+    from pydantic import Field
+
+    return Field(description=text)
+
+
 # --------------------------------------------------------------------------
 # Tool implementations (plain functions; registered on the server below).
 # --------------------------------------------------------------------------
 
 
 def search_catalog(
-    bbox: list[float] | None = None,
-    intersects: dict[str, Any] | None = None,
-    place: str | None = None,
-    area: str | None = None,
-    fuzzy: bool = False,
-    semantic: bool = False,
-    min_score: float = 0.0,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    polarizations: list[str] | None = None,
-    min_incidence: float | None = None,
-    max_incidence: float | None = None,
-    max_resolution: float | None = None,
-    canonical: bool | None = None,
-    limit: int = 20,
-    max_per_task: int | None = None,
-    local: bool | None = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not geocoded."),
+    ] = None,
+    intersects: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "GeoJSON Polygon, MultiPolygon, Feature, FeatureCollection, or "
+            "GeometryCollection. Cannot be combined with bbox or place."
+        ),
+    ] = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Free-text place name. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc(
+            "Task-name substring, or a plain-language site description when semantic is true."
+        ),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc(
+            "Loose task-name match for area (word order, punctuation, typos). "
+            "No model. Cannot be combined with semantic."
+        ),
+    ] = False,
+    semantic: Annotated[
+        bool,
+        _arg_desc(
+            "Resolve area by embedding similarity. Needs a semantic index and an "
+            "embedding key. Cannot be combined with fuzzy."
+        ),
+    ] = False,
+    min_score: Annotated[
+        float,
+        _arg_desc("Cosine cutoff in [0, 1] for semantic matches. Scores below it are dropped."),
+    ] = 0.0,
+    start: Annotated[
+        str | None,
+        _arg_desc(
+            "Inclusive acquisition-date lower bound: ISO date, bare year or month, "
+            "or a relative expression such as 3 months ago."
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date upper bound. Same grammar as start."),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Keep items that expose one of these types (GEC, CSI, SIDD, SICD, CPHD). "
+            "Matched case-insensitively."
+        ),
+    ] = None,
+    polarizations: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Keep items exposing any listed polarization, such as VV. Missing values are dropped."
+        ),
+    ] = None,
+    min_incidence: Annotated[
+        float | None,
+        _arg_desc("Minimum incidence angle in degrees. Items missing incidence are dropped."),
+    ] = None,
+    max_incidence: Annotated[
+        float | None,
+        _arg_desc("Maximum incidence angle in degrees. Items missing incidence are dropped."),
+    ] = None,
+    max_resolution: Annotated[
+        float | None,
+        _arg_desc(
+            "Keep items this fine or finer, in metres. Items missing resolution are dropped."
+        ),
+    ] = None,
+    canonical: Annotated[
+        bool | None,
+        _arg_desc(
+            "True keeps the preferred copy of a republished collect; False keeps "
+            "only the other copies. Omit to keep every item."
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        _arg_desc(
+            "Maximum cards. Default 20. The public host clamps a value above 100 "
+            "to 100 and adds note."
+        ),
+    ] = 20,
+    max_per_task: Annotated[
+        int | None,
+        _arg_desc("Maximum items per task (site). 1 is one pin per site."),
+    ] = None,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Search Umbra's catalog and return compact context cards.
 
@@ -1080,190 +1176,206 @@ def search_catalog(
 
 
 def find_repeat_sites(
-    bbox: list[float] | None = None,
-    intersects: dict[str, Any] | None = None,
-    place: str | None = None,
-    area: str | None = None,
-    fuzzy: bool = False,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    polarizations: list[str] | None = None,
-    min_incidence: float | None = None,
-    max_incidence: float | None = None,
-    max_resolution: float | None = None,
-    limit: int = 500,
-    top: int = 20,
-    min_passes: int = 2,
-    rank_by: str = "passes",
-    active_since: str | None = None,
-    active_before: str | None = None,
-    first_since: str | None = None,
-    first_before: str | None = None,
-    max_revisit_days: float | None = None,
-    median_revisit_days: float | None = None,
-    min_span_days: float | None = None,
-    max_span_days: float | None = None,
-    local: bool | None = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc(
+            "Pool filter: WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not "
+            "geocoded."
+        ),
+    ] = None,
+    intersects: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Pool filter: GeoJSON Polygon, MultiPolygon, Feature, FeatureCollection, "
+            "or GeometryCollection. Cannot be combined with bbox or place."
+        ),
+    ] = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Pool filter: free-text place. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc("Pool filter: task-name substring. With fuzzy, a loose token match."),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc("Loose task-name match for area. No model call."),
+    ] = False,
+    start: Annotated[
+        str | None,
+        _arg_desc(
+            "Pool filter: inclusive lower bound on which passes are counted. "
+            "ISO date, bare year or month, or a relative expression."
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc(
+            "Pool filter: inclusive upper bound on which passes are counted. Same grammar as start."
+        ),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Pool filter: keep passes that expose one of these types "
+            "(GEC, CSI, SIDD, SICD, CPHD). Case-insensitive."
+        ),
+    ] = None,
+    polarizations: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Pool filter: keep passes exposing any listed polarization. Missing values are dropped."
+        ),
+    ] = None,
+    min_incidence: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: minimum incidence angle in degrees. Passes missing it are dropped."
+        ),
+    ] = None,
+    max_incidence: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: maximum incidence angle in degrees. Passes missing it are dropped."
+        ),
+    ] = None,
+    max_resolution: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: keep passes this fine or finer, in metres. Missing resolution is dropped."
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        _arg_desc(
+            "How many acquisitions to pull for a live or Canopy ranking. Default 500. "
+            "Ignored on a local index, which groups the whole index."
+        ),
+    ] = 500,
+    top: Annotated[
+        int,
+        _arg_desc("Maximum sites to return, best first. Default 20."),
+    ] = 20,
+    min_passes: Annotated[
+        int,
+        _arg_desc(
+            "Minimum series depth. Default 2. Counts comparable passes when "
+            "rank_by is comparable, otherwise raw dated passes."
+        ),
+    ] = 2,
+    rank_by: Annotated[
+        str,
+        _arg_desc(
+            "passes (default), comparable, recency, span, or cadence. "
+            "Unknown values raise ValueError."
+        ),
+    ] = "passes",
+    active_since: Annotated[
+        str | None,
+        _arg_desc("Keep sites whose newest pass is on or after this date. Same grammar as start."),
+    ] = None,
+    active_before: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose newest pass is on or before this date. "
+            "A bare year or month includes that whole period."
+        ),
+    ] = None,
+    first_since: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose earliest pass is on or after this date. Same grammar as start."
+        ),
+    ] = None,
+    first_before: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose earliest pass is on or before this date. "
+            "A bare year or month includes that whole period."
+        ),
+    ] = None,
+    max_revisit_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose worst revisit gap exceeds this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    median_revisit_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose median revisit gap exceeds this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    min_span_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose first-to-last span is shorter than this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    max_span_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose first-to-last span is longer than this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
-    """Rank the archive's most repeat-imaged sites — where change detection has
-    something to measure.
+    """Rank sites imaged more than once, before a change tool is pointed at one.
 
-    The discovery step *before* every analysis verb. ``change`` / ``timescan`` /
-    ``stack`` / ``pick_change_interval`` / ``narrate_change`` all answer *what*
-    changed at a site, but each assumes the caller already knows *which* site to
-    point them at. Umbra files every pass of an area under one task (site), so a
-    site's coverage is just how many dated passes share its task; the sites with
-    the most are exactly the ones where a time series exists to analyse. This
-    tool ranks them, so ``find_repeat_sites → pick_change_interval →
-    narrate_change`` is a complete chain a model can drive with no site known in
-    advance — the deterministic answer to "where is there something to look at?"
-    (the discovery moat; no model is called). Reach for this
-    (or ``search_catalog(area=..., fuzzy=True)``) before ``semantic=True`` when
-    the site name is roughly known.
+    Use this when the site is not already known. Each site's ``hrefs`` are that
+    site's STAC URLs, oldest first, ready for ``pick_change_interval``,
+    ``change_composite``, or ``stack_stats``. Prefer this, or
+    ``search_catalog(area=..., fuzzy=True)``, over ``semantic=True`` when the
+    name shares words with a task. No model is called.
 
-    The filters scope the *pool* of acquisitions the ranking is computed over,
-    and are the same ones ``search_catalog`` takes: ``bbox``
-    (``[min_lon, min_lat, max_lon, max_lat]`` WGS84), ``intersects`` (a GeoJSON
-    polygon, mutually exclusive with ``bbox`` / ``place``), ``place`` (free-text,
-    geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
-    ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
-    the SAR property filters ``polarizations`` / ``min_incidence`` /
-    ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
-    returned, and ``min_passes`` is how many passes a site needs to qualify (2 is
-    the minimum a change composite can use; raise it to find only deeply-revisited
-    series), counted on the depth ``rank_by`` measures -- raw dated passes by
-    default, the usable (comparable) series' depth under ``rank_by="comparable"``.
+    Argument reference (ranking, recency, cadence, baseline, return fields):
+    https://umbra-py.space/find-repeat-sites/
 
-    ``rank_by`` chooses the order: ``"passes"`` (the default) ranks by raw pass
-    count; ``"comparable"`` ranks by *analysable* depth instead -- the
-    ``comparable_passes`` largest same-polarization dated subset a change verb can
-    actually difference -- so a deep single-polarization series is not outranked by
-    a broader mixed-polarization site whose passes no analysis verb can compare, and
-    ``min_passes`` then floors that same usable depth, so ``rank_by="comparable",
-    min_passes=3`` returns only sites whose differenceable series is at least three
-    passes deep. The two agree when every dated pass of every site shares one
-    polarization; prefer ``"comparable"`` when the next step is
-    ``pick_change_interval`` / ``stack_stats``, which consume exactly that
-    differenceable subset. Three *temporal* orders rank on the axes the filters below
-    select on: ``"recency"`` orders by each site's newest dated pass (the
-    still-active site to monitor or task, which a depth order buries under a deeper
-    but dormant series), ``"span"`` by each site's observation baseline (the site
-    watched long enough for slow change to show), and ``"cadence"`` by each site's
-    *typical* revisit gap, tightest first (the most-frequently-imaged site -- the
-    median gap, not the worst one, so a single outage does not bury an otherwise
-    reliably-imaged series; the worst-case reading stays the ``max_revisit_days``
-    filter). ``min_passes`` still qualifies a site on raw depth under any of the
-    three, so a temporal order returns only sites with a series worth ordering.
+    Filters bound which acquisitions are ranked. ``bbox`` is WGS84
+    ``[min_lon, min_lat, max_lon, max_lat]``. ``intersects`` is a GeoJSON
+    polygon (or a Feature / FeatureCollection / GeometryCollection of one)
+    and cannot be combined with ``bbox`` or ``place``. ``place`` is geocoded
+    only when ``bbox`` is omitted. ``area`` is a task-name substring;
+    ``fuzzy=True`` is a deterministic loose match. ``start`` / ``end`` bound
+    which passes enter the pool (ISO date, bare year or month, or a relative
+    expression). ``products`` is any of GEC, CSI, SIDD, SICD, CPHD.
+    ``polarizations``, ``min_incidence``, ``max_incidence``, and
+    ``max_resolution`` (metres) drop passes missing that field.
 
-    ``active_since`` keeps only sites still imaged *on or after* that date -- a
-    recency filter on each site's newest pass, so a deep series that stopped long
-    ago is dropped and an actively-revisited one is kept. Use it to find live
-    monitoring targets ("repeat-imaged sites still being collected"). It accepts an
-    ISO date (``"2024-06-01"``), a bare year/month, or a relative expression
-    (``"6 months ago"``), is orthogonal to ``rank_by`` / ``min_passes`` (it gates on
-    the site's latest pass, whatever depth the ranking measures), and differs from
-    ``start`` / ``end``: those bound which *passes* enter the pool (truncating every
-    series to a window), whereas this selects whole sites by recency and keeps each
-    survivor's full history.
+    ``top`` (default 20) is how many sites to return. ``min_passes`` (default
+    2) is the minimum depth: comparable passes when ``rank_by`` is
+    ``comparable``, otherwise raw dated passes. ``rank_by`` is ``passes``
+    (default), ``comparable`` (largest same-polarization subset), ``recency``
+    (newest pass), ``span`` (first to last), or ``cadence`` (tightest median
+    gap). For the three temporal orders, ``min_passes`` still counts raw
+    passes.
 
-    ``active_before`` is the complement -- keep only sites whose newest pass is *on
-    or before* that date (a dormant series that stopped imaging). Pass both to select
-    sites whose latest pass falls *within* a window (``active_since <= last <=
-    active_before``). Same grammar as ``active_since``, but a bare year/month covers
-    the whole named period (``active_before="2024"`` is "last imaged on or before
-    2024-12-31"), symmetric with ``end``.
+    ``active_since`` / ``active_before`` select sites by newest pass;
+    ``first_since`` / ``first_before`` select by earliest pass. Those keep
+    each survivor's full history, unlike ``start`` / ``end``, which truncate
+    the pool. ``max_revisit_days`` caps the worst gap and
+    ``median_revisit_days`` caps the median gap. ``min_span_days`` /
+    ``max_span_days`` bound the first-to-last span. A non-positive cadence or
+    span raises ``ValueError``. With ``rank_by="comparable"`` the cadence and
+    span filters use that subset. A bare year or month on a ``*_before``
+    bound includes the whole period.
 
-    ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
-    ``active_*`` pair -- they gate each site's *earliest* pass rather than its newest.
-    ``first_since`` keeps **newly-appeared** series (first imaged on or after the date --
-    ones that entered the archive recently) and ``first_before`` keeps
-    **long-established** ones (first imaged on or before it -- watched since before
-    then); pass both to bound the onset to a window
-    (``first_since <= first <= first_before``), exactly as the ``active_*`` pair bounds
-    the newest pass. Same grammar as ``active_since``, ``first_before`` snapping a bare
-    year/month to its last day. Orthogonal to the ``active_*`` recency filters, since
-    when a site started and whether it is still going are independent axes -- so
-    ``first_since=X, active_before=Y`` finds series that appeared after X and have
-    already gone dormant by Y. ``None`` (the default) applies no onset filter.
-
-    ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
-    filter on each site's **worst-case** revisit gap (in days), so a series with any
-    stretch longer than that between consecutive passes is dropped and a reliably
-    imaged one kept. Use it to find monitorable targets ("repeat-imaged sites with no
-    blind spot longer than N days"). It gates the cadence ``rank_by`` measures -- the
-    whole dated series by default, the usable (comparable) series' worst gap under
-    ``rank_by="comparable"`` -- is orthogonal to ``active_since`` / ``active_before``,
-    and drops a site with fewer than two passes in the gated series. A non-positive
-    value is a ``ValueError``.
-
-    ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
-    keep only sites whose **median** revisit gap (in days) is at most that, so a site
-    *usually* imaged often is kept even if a single stretch runs long, where
-    ``max_revisit_days`` drops it the moment any gap exceeds the bound. Use it for
-    "usually imaged frequently" rather than "never blind for longer than N days"; set
-    both to combine the two. It gates the cadence ``rank_by`` measures (the usable
-    series' typical gap under ``rank_by="comparable"``), is orthogonal to
-    ``max_revisit_days`` and the recency filters, and drops a site with fewer than two
-    passes in the gated series. A non-positive value is a ``ValueError``.
-
-    ``min_span_days`` keeps only sites imaged over *at least this long* -- a baseline
-    filter on each site's observation **span** (in days, first pass to last), so a
-    series confined to a short window is dropped and a long-baseline one kept. Use it
-    to find targets for *slow* change (subsidence, construction, deforestation) that
-    needs a long observation window to be visible. It is a different axis from
-    ``max_revisit_days``: cadence is the worst *gap* (how reliably a site is watched),
-    span is the total *baseline* (how long it has been watched at all). It gates the
-    span ``rank_by`` measures -- the whole dated series by default, the usable
-    (comparable) series' span under ``rank_by="comparable"`` -- is orthogonal to
-    ``active_since`` / ``active_before`` / ``max_revisit_days``, and drops a site with
-    fewer than two passes in the gated series. A non-positive value is a ``ValueError``.
-
-    ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites imaged
-    over *at most this long* (a short-lived series, a burst of imaging now over), the
-    complement of the floor. Set with ``min_span_days`` the two bound each site's
-    baseline to a window (``min_span_days <= span <= max_span_days``), exactly as
-    ``active_since`` / ``active_before`` bound the newest pass to one. It gates the same
-    span ``rank_by`` measures (the usable series under ``rank_by="comparable"``) and,
-    like the floor, drops a site with no measurable span so the window admits only a
-    confirmed baseline. A non-positive value is a ``ValueError``.
-
-    ``limit`` sizes the *live/token* pool only. On the local index a site's depth
-    is measured **whole-archive** — one ``GROUP BY task`` over the entire index
-    (:meth:`CatalogIndex.rank_sites`), so a deeply-imaged site is ranked by all
-    its passes rather than by whatever the first ``limit`` rows admitted, and
-    ``limit`` does not apply. On the live open bucket or the Canopy archive there
-    is no index to group over, so ``limit`` sizes the single re-listed pool the
-    ranking is computed from (bigger finds more sites and deeper series but scans
-    more of the archive; ``area`` narrows it instead).
-
-    Returns ``sites``, best-covered first: each a ``SiteCoverage`` with the site's
-    ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
-    ``last`` dates and ``span_days``, ``min_revisit_days`` / ``median_revisit_days``
-    / ``max_revisit_days`` cadence (the last being the longest gap, i.e. the site's
-    worst-case temporal resolution) with ``comparable_min_revisit_days`` /
-    ``comparable_median_revisit_days`` / ``comparable_max_revisit_days`` the same
-    shortest / typical / worst triple over just the differenceable subset (each can
-    diverge from its raw twin when a cross-polarization pass fills a gap the
-    analysis verbs cannot use), union ``bbox`` footprint, ``products`` and
-    ``polarizations`` — with ``comparable_polarizations`` naming *which* single
-    polarization the usable series is (the signature the ``comparable_*`` figures
-    are all measured over, a strict subset of ``polarizations`` when the site is
-    mixed) — and the
-    ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
-    to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
-    ``count`` (sites returned), the pool ``source``, the resolved
-    ``place`` / ``bbox`` / ``area``, a ``query`` echo of the ranking-and-selection
-    inputs (``rank_by``, ``top``, ``min_passes`` and the recency / onset / cadence /
-    baseline bounds, as you passed them) so the answer records how it was ranked and
-    filtered, and the attribution line.
-
-    ``local`` selects the backend exactly as ``search_catalog`` does — unset uses
-    the on-disk index when present (instant) and a live S3 walk otherwise. With a
-    Canopy token configured (``$UMBRA_CANOPY_TOKEN``) the pool is drawn from the
-    commercial archive instead. The ranking is single-sourced with the static
-    showcase's featured-gallery selector, so this and ``umbra sites`` cannot
-    disagree about what "most repeat-imaged" means.
+    ``limit`` (default 500) sizes only a live or Canopy pool. A local index
+    ranks each task over the whole index and ignores ``limit``. ``local``
+    matches ``search_catalog``: unset uses the index when present. A Canopy
+    token (``$UMBRA_CANOPY_TOKEN``) draws the pool from the commercial
+    archive, and ``local=True`` cannot be combined with it.
     """
     from .coverage import (
         _check_max_revisit,
@@ -1388,7 +1500,15 @@ def find_repeat_sites(
     }
 
 
-def get_item(url: str) -> dict[str, Any]:
+def get_item(
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL, product filename, acquisition stem, or — when a "
+            "Canopy token is set — a bare commercial-archive id."
+        ),
+    ],
+) -> dict[str, Any]:
     """Return the full context card for one item.
 
     ``url`` is the JSON URL of an open-data STAC sidecar, a GEC/SICD (or other
@@ -1436,7 +1556,9 @@ def get_item(url: str) -> dict[str, Any]:
     return _fetch_item(url).to_llm_context()
 
 
-def geocode_place(query: str) -> dict[str, Any]:
+def geocode_place(
+    query: Annotated[str, _arg_desc("Free-text place name to resolve with Nominatim.")],
+) -> dict[str, Any]:
     """Resolve a free-text place name to a bounding box via Nominatim.
 
     Returns ``{"bbox": [min_lon, min_lat, max_lon, max_lat], "display_name":
@@ -1621,11 +1743,40 @@ def _quicklook_png(
 
 
 def quicklook(
-    url: str,
-    asset: str = "GEC",
-    db: bool = False,
-    max_size: int = 1024,
-    preview: str = "auto",
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id. The public host also accepts a "
+            "product filename or acquisition stem that is in the index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "Product to show. Default GEC. A baked preview is used only when its "
+            "recorded product matches, or when it recorded none and this is GEC."
+        ),
+    ] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc(
+            "Decibel stretch for a fresh render. Default false. A baked preview is always decibel."
+        ),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc(
+            "Longest side in pixels for a fresh render. Default 1024. Ignored when a smaller baked "
+            "preview is returned."
+        ),
+    ] = 1024,
+    preview: Annotated[
+        str,
+        _arg_desc(
+            "auto (default) uses a baked preview when present, else renders. "
+            "baked refuses if none. render always streams a COG and is refused on the public host."
+        ),
+    ] = "auto",
 ) -> list[Any]:
     """Return a scene's quicklook PNG as an image block.
 
@@ -1649,7 +1800,22 @@ def quicklook(
 
 
 def change_composite(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of 2 or 3 passes, in time order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to composite. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> list[Any]:
     """Composite 2-3 passes of one site into a change image.
 
@@ -1683,7 +1849,19 @@ def change_composite(
 
 
 def timescan(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _arg_desc("STAC JSON URLs or item ids of at least two passes of one site."),
+    ],
+    asset: Annotated[str, _arg_desc("Product to scan. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> list[Any]:
     """Summarize a whole time series into one activity image.
 
@@ -1712,17 +1890,65 @@ _IMAGE_TOOLS = (quicklook, change_composite, timescan)
 
 
 def stack_stats(
-    urls: list[str],
-    asset: str = "GEC",
-    bbox: list[float] | None = None,
-    max_size: int = 512,
-    extent: str = "intersection",
-    crs: str = "utm",
-    change_threshold_db: float = 3.0,
-    blocks: int = 0,
-    block_series: bool = False,
-    speckle_filter: str | None = None,
-    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes. Any order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to measure. Default GEC.")] = "GEC",
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("Optional WGS84 [min_lon, min_lat, max_lon, max_lat] sub-area inside the scene."),
+    ] = None,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the co-registered grid. Default 512."),
+    ] = 512,
+    extent: Annotated[
+        str,
+        _arg_desc(
+            "intersection (default) keeps ground every pass covers. union keeps the full footprint."
+        ),
+    ] = "intersection",
+    crs: Annotated[
+        str,
+        _arg_desc(
+            "utm (default) grids in the site UTM zone so areas are km². EPSG:4326 returns areas as "
+            "null."
+        ),
+    ] = "utm",
+    change_threshold_db: Annotated[
+        float,
+        _arg_desc("Absolute decibel change that counts as moved ground. Default 3."),
+    ] = 3.0,
+    blocks: Annotated[
+        int,
+        _arg_desc(
+            "N cuts the scene into an N by N grid of where change sits. 0 (default) skips it."
+        ),
+    ] = 0,
+    block_series: Annotated[
+        bool,
+        _arg_desc(
+            "With blocks, return every pass-to-pass record per block, not only the peak. Default "
+            "false."
+        ),
+    ] = False,
+    speckle_filter: Annotated[
+        str | None,
+        _arg_desc(
+            "boxcar or lee, to average speckle before measuring. Omit to leave pixels unfiltered."
+        ),
+    ] = None,
+    speckle_window: Annotated[
+        int,
+        _arg_desc(
+            "Cell window for speckle_filter. Default 5. When a filter is set, "
+            "an even value or one below 3 raises."
+        ),
+    ] = SPECKLE_WINDOW_DEFAULT,
 ) -> dict[str, Any]:
     """Measure how much a site changed across its passes, as numbers.
 
@@ -1811,7 +2037,15 @@ def stack_stats(
     )
 
 
-def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
+def stack_provenance(
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes whose raster headers are compared."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product whose raster header is read. Default GEC.")] = "GEC",
+) -> dict[str, Any]:
     """Check whether a site's passes are one measurement, before measuring them.
 
     ``stack_stats`` refuses a selection whose rasters were made by *different*
@@ -1854,12 +2088,34 @@ def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
 
 
 def pick_change_interval(
-    urls: list[str],
-    asset: str = "GEC",
-    max_size: int = 512,
-    change_threshold_db: float = 3.0,
-    extent: str = "intersection",
-    crs: str = "utm",
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes. Any order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to measure. Default GEC.")] = "GEC",
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the co-registered grid. Default 512."),
+    ] = 512,
+    change_threshold_db: Annotated[
+        float,
+        _arg_desc("Absolute decibel change that counts as moved ground. Default 3."),
+    ] = 3.0,
+    extent: Annotated[
+        str,
+        _arg_desc(
+            "intersection (default) keeps ground every pass covers. union keeps the full footprint."
+        ),
+    ] = "intersection",
+    crs: Annotated[
+        str,
+        _arg_desc(
+            "utm (default) grids in the site UTM zone so change fractions weigh equal ground."
+        ),
+    ] = "utm",
 ) -> dict[str, Any]:
     """Scan a site's whole series and name the two passes worth narrating.
 
@@ -1930,7 +2186,35 @@ def pick_change_interval(
 
 
 def download_asset(
-    url: str, asset: str = "GEC", dest_dir: str = ".", confirm: bool = False
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL, product filename, or acquisition stem. A filename or stem is resolved "
+            "through the catalog index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "File to fetch: a product type (GEC), a schema v2 key (gec, gec_2), "
+            "or the original filename. Default GEC."
+        ),
+    ] = "GEC",
+    dest_dir: Annotated[
+        str,
+        _arg_desc(
+            "Local download directory. Default '.'. Must stay inside "
+            "UMBRA_MCP_DOWNLOAD_ROOT when that is set. On the public host it is only named in the "
+            "link plan."
+        ),
+    ] = ".",
+    confirm: Annotated[
+        bool,
+        _arg_desc(
+            "False (default) returns the byte size and writes nothing. True downloads "
+            "on a local server, or returns a link plan on the public host."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Download one asset of an item to local disk, gated by a size check.
 
@@ -2068,16 +2352,55 @@ def _bounded_public_watch_name(name: str) -> str:
 
 
 def watch_site(
-    place: str | None = None,
-    area: str | None = None,
-    bbox: list[float] | None = None,
-    fuzzy: bool = False,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    name: str | None = None,
-    reset: bool = False,
-    local: bool | None = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Free-text place. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc("Task-name substring. With fuzzy, a loose token match."),
+    ] = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not geocoded."),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc("Loose task-name match for area. No model call."),
+    ] = False,
+    start: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date lower bound. Same grammar as search_catalog start."),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date upper bound. Same grammar as search_catalog end."),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc("Keep items that expose one of these types (GEC, CSI, SIDD, SICD, CPHD)."),
+    ] = None,
+    name: Annotated[
+        str | None,
+        _arg_desc(
+            "Stable watch id. Omit to derive one from the filters. The public host keeps at most "
+            "128 characters."
+        ),
+    ] = None,
+    reset: Annotated[
+        bool,
+        _arg_desc(
+            "True discards the stored baseline and reports every current match as new. Default "
+            "false."
+        ),
+    ] = False,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Report only the acquisitions **new** since the last check of this site.
 
@@ -2204,11 +2527,28 @@ def _scene_matches_payload(
 
 
 def find_similar(
-    url: str,
-    asset: str = "GEC",
-    top_k: int = 10,
-    min_score: float = 0.0,
-    model: str | None = None,
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id of the scene to match. The public host also accepts a "
+            "filename or stem in the index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "Product whose quicklook is embedded. Default GEC. Match how the scene index was built."
+        ),
+    ] = "GEC",
+    top_k: Annotated[int, _arg_desc("Maximum matches to return. Default 10.")] = 10,
+    min_score: Annotated[
+        float,
+        _arg_desc("Minimum cosine similarity. Default 0. Matches below it are dropped."),
+    ] = 0.0,
+    model: Annotated[
+        str | None,
+        _arg_desc("Embedding model id. Must match the scene index. Omit for the server default."),
+    ] = None,
 ) -> dict[str, Any]:
     """Find archived scenes that **look like** the acquisition at ``url``.
 
@@ -2259,10 +2599,25 @@ def find_similar(
 
 
 def find_similar_text(
-    query: str,
-    top_k: int = 10,
-    min_score: float = 0.0,
-    model: str | None = None,
+    query: Annotated[
+        str,
+        _arg_desc(
+            "Plain-language description of the imagery to find, embedded in the same space as the "
+            "scene index."
+        ),
+    ],
+    top_k: Annotated[int, _arg_desc("Maximum matches to return. Default 10.")] = 10,
+    min_score: Annotated[
+        float,
+        _arg_desc("Minimum cosine similarity. Default 0. Matches below it are dropped."),
+    ] = 0.0,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Joint text-and-image model id. Must match the scene index. A dimension mismatch is an "
+            "error."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Find archived scenes matching a plain-language ``query`` over their imagery.
 
@@ -2387,12 +2742,41 @@ def _narrate_kit_text(items: list[UmbraItem], stats: Any, asset: str) -> str:
 
 
 def describe_scene(
-    url: str,
-    asset: str = "GEC",
-    db: bool = True,
-    max_size: int = 1024,
-    model: str | None = None,
-    preview: str = "auto",
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id. The public host also accepts a "
+            "product filename or acquisition stem that is in the index."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to picture. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc(
+            "Decibel stretch for a fresh render. Default true. A baked preview is always decibel."
+        ),
+    ] = True,
+    max_size: Annotated[
+        int,
+        _arg_desc(
+            "Longest side in pixels for a fresh render. Default 1024. A baked preview may be "
+            "smaller; the kit says when this was ignored."
+        ),
+    ] = 1024,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Vision model id when this server holds an API key. Omit for the default. Unused on "
+            "the no-key kit path."
+        ),
+    ] = None,
+    preview: Annotated[
+        str,
+        _arg_desc(
+            "auto (default) uses a baked preview when present, else renders. "
+            "baked refuses if none. render always streams a COG and is refused on the public host."
+        ),
+    ] = "auto",
 ) -> dict[str, Any] | list[Any]:
     """Return a SAR-literate reading of the scene at ``url``.
 
@@ -2469,11 +2853,29 @@ def describe_scene(
 
 
 def narrate_change(
-    urls: list[str],
-    asset: str = "GEC",
-    db: bool = False,
-    max_size: int = 1024,
-    model: str | None = None,
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes, in time order. "
+            "Mixed polarizations are refused. The public host refuses this tool."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to composite and measure. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch for the change picture. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the composite. Default 1024."),
+    ] = 1024,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Vision model id when this server holds an API key. Omit for the default. Unused on "
+            "the no-key kit path."
+        ),
+    ] = None,
 ) -> dict[str, Any] | list[Any]:
     """Return a grounded reading of *what changed* between passes.
 
@@ -2519,11 +2921,25 @@ def narrate_change(
 
 
 def stamp_description(
-    reading: dict[str, Any],
-    item_id: str | None = None,
-    asset: str = "GEC",
-    model: str | None = None,
-    image: dict[str, Any] | None = None,
+    reading: Annotated[
+        dict[str, Any],
+        _arg_desc("Client JSON with summary, observed_features, confidence, and caveats."),
+    ],
+    item_id: Annotated[
+        str | None,
+        _arg_desc("Acquisition id to record on the stamped reading. Omit to leave it unset."),
+    ] = None,
+    asset: Annotated[str, _arg_desc("Product the reading describes. Default GEC.")] = "GEC",
+    model: Annotated[
+        str | None,
+        _arg_desc("Model name to record. Default client-kit when omitted."),
+    ] = None,
+    image: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Image record from the describe_scene kit. A smaller baked preview appends a caveat."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Validate a client-produced scene reading and stamp provenance.
 
@@ -2562,11 +2978,25 @@ def stamp_description(
 
 
 def stamp_narration(
-    reading: dict[str, Any],
-    item_ids: list[str] | None = None,
-    asset: str = "GEC",
-    model: str | None = None,
-    change_stats: dict[str, Any] | None = None,
+    reading: Annotated[
+        dict[str, Any],
+        _arg_desc("Client JSON with summary, changes, confidence, and caveats."),
+    ],
+    item_ids: Annotated[
+        list[str] | None,
+        _arg_desc("Acquisition ids the narration covers."),
+    ] = None,
+    asset: Annotated[str, _arg_desc("Product the narration describes. Default GEC.")] = "GEC",
+    model: Annotated[
+        str | None,
+        _arg_desc("Model name to record. Default client-kit when omitted."),
+    ] = None,
+    change_stats: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Per-block decibel grid from the narrate_change kit, stored on the stamped object."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Validate a client-produced change narration and stamp provenance.
 
@@ -2622,8 +3052,11 @@ def main() -> None:
 
 
 #: Tools that only read. Clients use ``readOnlyHint`` to skip an approval
-#: prompt. ``download_asset`` writes a file when ``confirm`` is true.
-#: ``watch_site`` persists a baseline in the catalog index meta table.
+#: prompt. ``download_asset`` writes a file when ``confirm`` is true on a
+#: local server, and can truncate or delete its own ``.part`` / ``.etag``
+#: sidecar. ``watch_site`` replaces the ``watch:<name>`` document in the
+#: catalog index meta table; ``reset=True`` discards the previous baseline.
+#: The public host writes neither, but the hints describe the tool.
 _READ_ONLY_TOOLS = frozenset(
     {
         "search_catalog",
@@ -2660,6 +3093,18 @@ def build_server() -> MCPServer:
     from umbra_py import __version__
 
     read_only = ToolAnnotations(read_only_hint=True)
+    # Both reach the network (S3, and watch_site also Nominatim). Neither is
+    # idempotent: a resumed partial download writes more bytes, and a later
+    # watch with the same arguments stores a larger seen-set when the archive
+    # has grown. destructive_hint is true because each can replace existing
+    # local data: download_asset unlinks or truncates a ``.part`` / ``.etag``,
+    # and watch_site overwrites the stored baseline (reset drops it outright).
+    # A finished download is not overwritten (overwrite stays false).
+    writes = ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=True,
+        open_world_hint=True,
+    )
 
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
@@ -2748,7 +3193,7 @@ def build_server() -> MCPServer:
         server.add_tool(
             _as_mcp_tool(fn),
             structured_output=False if image_tool else None,
-            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else None,
+            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else writes,
         )
 
     @server.resource(

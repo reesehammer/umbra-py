@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_type_hints
 
 from . import mcp_server as _mcp
 from .constants import ATTRIBUTION
@@ -213,7 +213,10 @@ def _kit_safe(fn):
     """Adapter so ``describe_scene`` / ``narrate_change`` stay JSON tools here.
 
     The wrapper always returns a dict, so the copied signature must not
-    advertise the MCP kit's image-block list.
+    advertise the MCP kit's image-block list. Annotations are resolved on
+    the source function first: a copied string would be evaluated against
+    this module, and the ``Annotated`` argument descriptions live in
+    ``mcp_server``.
     """
 
     def wrapped(*args, **kwargs):
@@ -221,11 +224,46 @@ def _kit_safe(fn):
 
     wrapped.__name__ = fn.__name__
     wrapped.__doc__ = fn.__doc__
+    hints = get_type_hints(fn, include_extras=True)
+    hints["return"] = dict[str, Any]
     sig = inspect.signature(fn)
-    wrapped.__signature__ = sig.replace(return_annotation=dict[str, Any])
-    ann = dict(getattr(fn, "__annotations__", {}))
-    ann["return"] = dict[str, Any]
-    wrapped.__annotations__ = ann
+    wrapped.__signature__ = sig.replace(
+        parameters=[p.replace(annotation=hints[p.name]) for p in sig.parameters.values()],
+        return_annotation=dict[str, Any],
+    )
+    wrapped.__annotations__ = hints
+    return wrapped
+
+
+def _visible_to_llamaindex(fn):
+    """Give LlamaIndex evaluated annotations.
+
+    ``FunctionTool`` reads ``inspect.signature`` and, with postponed
+    annotations, receives the source string. A string ``Annotated[...]`` is
+    then a forward reference on a model that does not import ``Annotated``.
+    Resolving against the function's own globals first keeps the types, the
+    defaults, and the argument descriptions.
+    """
+    annotations = getattr(fn, "__annotations__", {})
+    if not any(isinstance(value, str) and "Annotated" in value for value in annotations.values()):
+        return fn
+    hints = get_type_hints(fn, include_extras=True)
+
+    def wrapped(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    wrapped.__name__ = fn.__name__
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__module__ = fn.__module__
+    wrapped.__annotations__ = hints
+    signature = inspect.signature(fn)
+    wrapped.__signature__ = signature.replace(
+        parameters=[
+            parameter.replace(annotation=hints[name])
+            for name, parameter in signature.parameters.items()
+        ],
+        return_annotation=hints.get("return", signature.return_annotation),
+    )
     return wrapped
 
 
@@ -279,7 +317,10 @@ def umbra_tools(*, include_render: bool = True) -> list[FunctionTool]:
     """
     FunctionTool = _require_llamaindex()
 
-    fns = [_kit_safe(fn) if fn in (describe_scene, narrate_change) else fn for fn in _JSON_TOOLS]
+    fns = [
+        _visible_to_llamaindex(_kit_safe(fn) if fn in (describe_scene, narrate_change) else fn)
+        for fn in _JSON_TOOLS
+    ]
     if include_render:
         fns += list(_RENDER_TOOLS)
     return [FunctionTool.from_defaults(fn=fn) for fn in fns]

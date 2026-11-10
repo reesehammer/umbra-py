@@ -57,6 +57,54 @@ def _with_polarization(base: dict, pol: str) -> dict:
 # --------------------------------------------------------------------------
 
 
+def test_every_tool_argument_has_a_one_line_description():
+    """Callers pick arguments from the schema, not from a wall of prose."""
+    server = ms.build_server()
+    missing: list[str] = []
+    for tool in asyncio.run(server.list_tools()):
+        props = tool.input_schema.get("properties") or {}
+        for name, prop in props.items():
+            description = prop.get("description")
+            if not isinstance(description, str) or not description.strip() or "\n" in description:
+                missing.append(f"{tool.name}.{name}")
+    assert missing == []
+
+
+def test_find_repeat_sites_description_stays_short_and_links_the_reference():
+    server = ms.build_server()
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    text = tools["find_repeat_sites"].description or ""
+    assert len(text) < 4000
+    assert "https://umbra-py.space/find-repeat-sites/" in text
+    page = Path(__file__).resolve().parents[1] / "docs" / "find-repeat-sites.md"
+    nav = (Path(__file__).resolve().parents[1] / "mkdocs.yml").read_text(encoding="utf-8")
+    assert page.is_file()
+    assert "find-repeat-sites.md" in nav
+
+
+def test_write_tools_advertise_read_only_false_and_destructive():
+    """Local ``download_asset`` can delete a partial sidecar.
+
+    Local ``watch_site`` replaces the stored baseline. Both also call out
+    to the network. A repeat call is not a no-op when a partial download
+    can resume or the archive has grown, so ``idempotentHint`` stays unset.
+    """
+    server = ms.build_server()
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    for name in ("download_asset", "watch_site"):
+        annotations = tools[name].annotations
+        assert annotations is not None
+        assert annotations.read_only_hint is False
+        assert annotations.destructive_hint is True
+        assert annotations.open_world_hint is True
+        assert annotations.idempotent_hint is None
+        wire = tools[name].model_dump(by_alias=True, exclude_none=True)
+        assert wire["annotations"]["readOnlyHint"] is False
+        assert wire["annotations"]["destructiveHint"] is True
+        assert wire["annotations"]["openWorldHint"] is True
+        assert "idempotentHint" not in wire["annotations"]
+
+
 def test_build_server_registers_expected_surface():
     server = ms.build_server()
     tools = {t.name for t in asyncio.run(server.list_tools())}
