@@ -9,7 +9,7 @@ from umbra_py.exceptions import DownloadError
 
 def test_filename_from_url():
     assert _filename_from_url("http://x/a/b_GEC.tif?foo=1") == "b_GEC.tif"
-    assert _filename_from_url("http://x/") == "x"
+    assert _filename_from_url("http://x/") == "download"
 
 
 def test_single_part_md5_recognizes_only_plain_md5_etags():

@@ -131,40 +131,68 @@ def _search_statement(idx, **kwargs):
     return sql, plan
 
 
+def _prepare(idx):
+    """Build the sidecar for ``idx`` and attach it on this connection."""
+    from umbra_py.index import prepare_search_index
+
+    assert prepare_search_index(idx.path) is True
+    idx._attach_spatial_index()
+    assert idx._spatial_ready
+    return idx
+
+
+def _ids(idx, **kwargs):
+    return [item.id for item in idx.search(**kwargs)]
+
+
+def _same_either_way(idx, **kwargs):
+    """Sidecar results equal the column predicate, including order."""
+    assert idx._spatial_ready
+    fast = _ids(idx, **kwargs)
+    idx._spatial_ready = False
+    slow = _ids(idx, **kwargs)
+    idx._spatial_ready = True
+    assert fast == slow
+    return fast
+
+
 def test_bbox_product_search_uses_the_rtree(tmp_path):
-    """A GEC bbox search must be driven by the R-tree, not by every GEC href.
+    """A GEC bbox search must be driven by the sidecar R-tree, not by every GEC href.
 
     GEC is on nearly every acquisition. The old plan listed those hrefs,
     probed ``items`` by primary key, and sorted before LIMIT. ``CROSS JOIN``
-    is not reordered, so the plan's outer loop is the R-tree.
+    is not reordered, so the plan's outer loop is the R-tree. The catalog
+    file itself gains no table.
     """
+    import hashlib
+    import sqlite3
+
     plain = _make_item(
         "SiteB", "2024-03-01-00-00-00_UMBRA-05", "plain", "2024-03-01T00:00:00Z", (0, 0, 1, 1)
     )
     with _index(tmp_path, items=(_A, _B, _C, plain)) as idx:
-        assert idx._spatial_ready
+        before = hashlib.sha256(idx.path.read_bytes()).hexdigest()
+        _prepare(idx)
+        assert hashlib.sha256(idx.path.read_bytes()).hexdigest() == before
+        ro = sqlite3.connect(f"file:{idx.path}?mode=ro", uri=True)
+        try:
+            names = {row[0] for row in ro.execute("SELECT name FROM sqlite_master")}
+        finally:
+            ro.close()
+        assert "items_rtree" not in names
+        assert not any("rtree" in name for name in names)
         sql, plan = _search_statement(idx, bbox=(0, 0, 5, 5), product_types=["GEC"], limit=10)
-        assert "items_rtree" in sql
+        assert "spatial.items_rtree" in sql
         assert "CROSS JOIN" in sql
         text = "\n".join(plan)
-        # The alias hides the table name; the virtual-table index is the driver.
         assert plan[0].startswith("SCAN r VIRTUAL TABLE INDEX")
         assert "sqlite_autoindex_items_1" not in text
         assert "idx_item_assets_asset" not in text
-        # Same rows, same order, as the column predicate.
-        idx._spatial_ready = False
-        slow = [item.id for item in idx.search(bbox=(0, 0, 5, 5), product_types=["GEC"])]
-        idx._spatial_ready = True
-        fast = [item.id for item in idx.search(bbox=(0, 0, 5, 5), product_types=["GEC"])]
-        assert fast == slow == ["c", "a", "plain"]
-        # A footprint with no bbox is not in the tree and does not match.
-        nobox = UmbraItem.from_dict(
-            {"id": "nobox", "properties": {"datetime": "2024-04-01T00:00:00Z"}, "assets": {}},
-            href=f"{_BUCKET}/sar-data/tasks/SiteA/2024-04-01-00-00-00_UMBRA-04/x.stac.v2.json",
-        )
-        idx.add(nobox)
-        idx.commit()
-        assert "nobox" not in {item.id for item in idx.search(bbox=(-180, -90, 180, 90))}
+        assert _same_either_way(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == [
+            "c",
+            "a",
+            "plain",
+        ]
 
 
 def test_two_query_boxes_are_not_collapsed_to_their_intersection(tmp_path):
@@ -175,17 +203,87 @@ def test_two_query_boxes_are_not_collapsed_to_their_intersection(tmp_path):
         "Wide", "2024-05-01-00-00-00_UMBRA-04", "wide", "2024-05-01T00:00:00Z", (0, 0, 10, 1)
     )
     with _index(tmp_path, items=(wide,)) as idx:
+        _prepare(idx)
         geom = parse_geometry(
             {
                 "type": "Polygon",
                 "coordinates": [[[9, 0], [10, 0], [10, 1], [9, 1], [9, 0]]],
             }
         )
-        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1), intersects=geom)} == {"wide"}
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), intersects=geom) == ["wide"]
 
 
-def test_bbox_rtree_follows_an_updated_or_deleted_footprint(tmp_path):
+def test_rtree_matches_column_predicate_on_point_polygon_and_antimeridian(tmp_path):
+    """The sidecar and the column predicate return the same hrefs in the same order.
+
+    A point matches footprints that contain it. A polygon is prefiltered by its
+    bbox and then tested exactly. Boxes and footprints that touch ±180 agree
+    too, including a query box whose min longitude is greater than its max
+    (the antimeridian is not split; both paths use that same overlap test).
+    """
+    from umbra_py._geometry import parse_geometry
+
+    east = _make_item(
+        "East",
+        "2024-07-01-00-00-00_UMBRA-04",
+        "east",
+        "2024-07-01T00:00:00Z",
+        (179.0, -1, 179.8, 1),
+    )
+    west = _make_item(
+        "West",
+        "2024-07-02-00-00-00_UMBRA-05",
+        "west",
+        "2024-07-02T00:00:00Z",
+        (-179.8, -1, -179.0, 1),
+    )
+    with _index(tmp_path, items=(_A, _B, east, west)) as idx:
+        _prepare(idx)
+        point_in = parse_geometry({"type": "Point", "coordinates": [0.5, 0.5]})
+        point_out = parse_geometry({"type": "Point", "coordinates": [3, 3]})
+        polygon = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8], [0.2, 0.2]]],
+            }
+        )
+        edge = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [
+                    [[179.2, -0.2], [179.6, -0.2], [179.6, 0.2], [179.2, 0.2], [179.2, -0.2]]
+                ],
+            }
+        )
+        queries = [
+            {"bbox": (0, 0, 1, 1)},
+            {"bbox": (179.2, -0.5, 180, 0.5)},
+            {"bbox": (-180, -0.5, -179.2, 0.5)},
+            {"bbox": (170, -5, -170, 5)},
+            {"intersects": point_in},
+            {"intersects": point_out},
+            {"intersects": polygon},
+            {"intersects": edge},
+            {"bbox": (0, 0, 1, 1), "intersects": polygon, "product_types": ["GEC"], "limit": 10},
+        ]
+        for query in queries:
+            _same_either_way(idx, **query)
+        assert _same_either_way(idx, intersects=point_in) == ["a"]
+        assert _same_either_way(idx, intersects=edge) == ["east"]
+        assert _same_either_way(idx, bbox=(170, -5, -170, 5)) == []
+
+
+def test_stale_rtree_is_not_used_after_a_footprint_edit(tmp_path):
+    """A write-ahead bbox edit does not change the catalog file's size or mtime.
+
+    The sidecar must not answer from the old tree. Rebuilding picks the move up.
+    """
+    from umbra_py.index import prepare_search_index
+
+    path = tmp_path / "catalog.db"
     with _index(tmp_path) as idx:
+        _prepare(idx)
+        assert _ids(idx, bbox=(0, 0, 1, 1)) == ["a"]
         moved = _make_item(
             "SiteA",
             "2024-01-15-10-00-00_UMBRA-04",
@@ -196,35 +294,147 @@ def test_bbox_rtree_follows_an_updated_or_deleted_footprint(tmp_path):
         )
         idx.add(moved)
         idx.commit()
-        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1))} == set()
-        assert {item.id for item in idx.search(bbox=(10, 10, 11, 11))} == {"a", "b"}
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        assert _ids(idx, bbox=(0, 0, 1, 1)) == []
+        assert set(_ids(idx, bbox=(10, 10, 11, 11))) == {"a", "b"}
         idx._conn.execute("DELETE FROM items WHERE id = 'a'")
         idx.commit()
-        assert {item.id for item in idx.search(bbox=(10, 10, 11, 11))} == {"b"}
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        assert _ids(idx, bbox=(10, 10, 11, 11)) == ["b"]
+        assert prepare_search_index(path) is True
+    with CatalogIndex(path) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(10, 10, 11, 11)) == ["b"]
 
 
-def test_schema8_gains_an_rtree_without_a_version_bump(tmp_path):
-    """A published v8 snapshot grows the R-tree on open and stays v8."""
+def test_snapshot_etag_keeps_the_rtree_when_only_file_stat_changes(tmp_path):
+    """Thumbnail relocation rewrites the file. The snapshot id does not change."""
+    import json
+
+    from umbra_py.index import prepare_search_index, snapshot_state_path
+
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        snapshot_state_path(path).write_text(json.dumps({"etag": '"weekly"'}))
+        assert prepare_search_index(path) is True
+        idx.set_meta("note", "previews moved")
+        idx.commit()
+        idx._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), product_types=["GEC"]) == ["a"]
+
+
+def test_rtree_build_failure_leaves_no_half_written_sidecar(tmp_path, monkeypatch):
+    import os
+
+    from umbra_py.index import default_rtree_path, prepare_search_index
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+    dest = default_rtree_path(path)
+
+    def fail_replace(src, dst):
+        raise OSError("disk full")
+
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert prepare_search_index(path) is False
+    assert not dest.exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert prepare_search_index(path) is True
+    good = dest.read_bytes()
+    with CatalogIndex(path) as idx:
+        idx.add(
+            _make_item(
+                "SiteC",
+                "2024-08-01-00-00-00_UMBRA-04",
+                "extra",
+                "2024-08-01T00:00:00Z",
+                (2, 2, 3, 3),
+            )
+        )
+        idx.commit()
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert prepare_search_index(path) is False
+    assert dest.read_bytes() == good
+    assert list(path.parent.glob("*.tmp")) == []
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        assert "extra" in _ids(idx, bbox=(0, 0, 5, 5))
+
+
+def test_rtree_falls_back_when_no_directory_is_writable(tmp_path, monkeypatch, caplog):
+    import logging
+    from pathlib import Path
+
+    from umbra_py import index as index_mod
+
+    # Root can still write a mode-555 directory. ``/proc`` cannot be created in.
+    assert index_mod._directory_writable(Path("/proc/umbra-rtree-not-a-directory")) is False
+    with _index(tmp_path) as idx:
+        path = idx.path
+        expected = _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"])
+    monkeypatch.setattr(index_mod, "_directory_writable", lambda directory: False)
+    with caplog.at_level(logging.WARNING):
+        assert index_mod.prepare_search_index(path) is False
+    assert "no writable directory" in caplog.text
+    with CatalogIndex(path, readonly=True) as idx:
+        assert not idx._spatial_ready
+        assert _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == expected
+
+
+def test_rtree_uses_the_cache_dir_when_the_catalog_dir_is_not_writable(tmp_path, monkeypatch):
+    from umbra_py import index as index_mod
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    with _index(tmp_path) as idx:
+        path = idx.path
+    monkeypatch.setenv("UMBRA_RTREE_CACHE", str(cache))
+
+    def writable(directory):
+        return directory == cache
+
+    monkeypatch.setattr(index_mod, "_directory_writable", writable)
+    assert index_mod.prepare_search_index(path) is True
+    assert not index_mod.default_rtree_path(path).exists()
+    written = list(cache.glob("*.rtree.db"))
+    assert len(written) == 1
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1)) == ["a"]
+
+
+def test_schema_stays_v8_when_the_sidecar_is_built(tmp_path):
+    """The sidecar is not a schema version and not a table inside the catalog."""
     import sqlite3
 
-    from umbra_py.index import _SCHEMA_VERSION
+    from umbra_py.index import _SCHEMA_VERSION, default_rtree_path, prepare_search_index
 
     path = tmp_path / "catalog.db"
     with CatalogIndex(path) as idx:
         idx.add(_A)
         idx.commit()
-    conn = sqlite3.connect(path)
-    conn.execute("DROP TABLE items_rtree")
-    for name in ("items_rtree_ai", "items_rtree_au", "items_rtree_ad"):
-        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-    conn.execute("DELETE FROM meta WHERE key = 'items_rtree'")
-    conn.commit()
-    conn.close()
-    with CatalogIndex(path) as idx:
-        version = sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0]
-        assert version == _SCHEMA_VERSION
-        assert idx.get_meta("items_rtree") == "1"
-        assert {item.id for item in idx.search(bbox=(0, 0, 1, 1), product_types=["GEC"])} == {"a"}
+    assert prepare_search_index(path) is True
+    assert default_rtree_path(path).is_file()
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        meta = conn.execute("SELECT value FROM meta WHERE key = 'items_rtree'").fetchone()
+    finally:
+        conn.close()
+    assert version == _SCHEMA_VERSION
+    assert "items_rtree" not in names
+    assert meta is None
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), product_types=["GEC"]) == ["a"]
 
 
 def test_search_area_filter_is_case_insensitive(tmp_path):
@@ -624,6 +834,9 @@ def test_from_release_downloads_and_opens(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         with CatalogIndex.from_release(dest, url=url) as idx:
             return {i.id for i in idx.search()}
 
@@ -654,6 +867,9 @@ def test_from_release_overwrites_existing(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         with CatalogIndex.from_release(dest, url=url) as idx:
             return {i.id for i in idx.search()}
 
@@ -731,6 +947,9 @@ def test_cli_index_fetch_then_search_local(tmp_path):
             status=200,
             headers={"Content-Length": str(len(payload))},
         )
+        from umbra_py.constants import CATALOG_SHA256_ASSET
+
+        responses.add(responses.GET, url.rsplit("/", 1)[0] + "/" + CATALOG_SHA256_ASSET, status=404)
         return runner.invoke(cli_mod.cli, ["index", "fetch", "--db", db, "--url", url])
 
     fetched = run()
@@ -2186,7 +2405,7 @@ def test_cli_index_fetch_thumbnails_downloads_when_no_source_given(tmp_path, mon
     with CatalogIndex(db) as idx:
         idx.add(_A)
 
-    def fake_fetch(dest, *, url=None, progress=None):
+    def fake_fetch(dest, *, url=None, progress=None, insecure=False):
         Path(dest).write_bytes((tmp_path / "release.thumbs.db").read_bytes())
         return Path(dest)
 

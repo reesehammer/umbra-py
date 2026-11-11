@@ -62,6 +62,83 @@ OPENROUTER_HEADERS = {
 #: - ``CPHD`` : Compensated Phase History Data, the raw signal phase history.
 PRODUCT_ASSETS = ("GEC", "CSI", "SIDD", "SICD", "CPHD")
 
+#: The only STAC collection this API serves. Umbra files every open-data
+#: product in one archive; ``GEC`` and the other names above are product
+#: filters, not collection ids. ``serve.COLLECTION_ID`` is this same string.
+OPEN_DATA_COLLECTION_ID = "umbra-open-data"
+
+
+def _collection_token(name: str) -> str:
+    return name.strip().lower().replace("_", "-")
+
+
+def product_in_collection_name(name: str) -> str | None:
+    """The product type a collection id is standing in for, if it names one.
+
+    ``GEC`` and ``umbra-gec`` (any case, hyphen or underscore) are the product
+    ``GEC``. The real collection id and any other string are ``None``.
+    """
+    token = _collection_token(name)
+    if token == OPEN_DATA_COLLECTION_ID:
+        return None
+    if token.startswith("umbra-"):
+        token = token[len("umbra-") :]
+    upper = token.upper()
+    if upper in PRODUCT_ASSETS:
+        return upper
+    return None
+
+
+def is_collection_id_as_product(name: str) -> bool:
+    """Whether a product-filter value is actually a collection id.
+
+    ``umbra-gec`` and ``umbra-open-data`` are. A bare product type (``GEC``)
+    is not: that value belongs in the product filter.
+    """
+    if not isinstance(name, str):
+        return False
+    token = _collection_token(name)
+    if token == OPEN_DATA_COLLECTION_ID:
+        return True
+    if not token.startswith("umbra-"):
+        return False
+    return token[len("umbra-") :].upper() in PRODUCT_ASSETS
+
+
+def collection_ids_passed_as_products(products: list[str] | None) -> list[str]:
+    """Product-filter values that are collection ids, in the caller's order."""
+    if not products:
+        return []
+    return [item.strip() for item in products if is_collection_id_as_product(item)]
+
+
+def unknown_collection_detail(names: list[str], *, product_parameter: str) -> str:
+    """Error text for a collection id this API does not serve.
+
+    ``product_parameter`` is the filter on the surface that raised: ``product_types``
+    for ``/search``, ``products`` for ``search_catalog``. The text names
+    :data:`OPEN_DATA_COLLECTION_ID` and that parameter. When the id is a product
+    type with an ``umbra-`` prefix (or is the product type used as a collection),
+    it names that product.
+    """
+    cleaned = [name.strip() for name in names if name.strip()]
+    shown = ", ".join(repr(name) for name in cleaned)
+    noun = "collection" if len(cleaned) == 1 else "collections"
+    products: list[str] = []
+    for name in cleaned:
+        product = product_in_collection_name(name)
+        if product and product not in products:
+            products.append(product)
+    if products:
+        hint = " ".join(
+            f"{product} is a product filter; pass {product_parameter}={product}."
+            for product in products
+        )
+    else:
+        hint = f"Pass {product_parameter} to filter by product ({', '.join(PRODUCT_ASSETS)})."
+    return f"Unknown {noun} {shown}. The only collection is {OPEN_DATA_COLLECTION_ID!r}. {hint}"
+
+
 #: One-line, plain-language explanation of each product type. The docstring on
 #: :data:`PRODUCT_ASSETS` above documents these for humans reading the source;
 #: this table is the machine-readable version a language model (or an
@@ -166,6 +243,20 @@ CATALOG_THUMBS_MANIFEST_ASSET = "catalog.thumbs.manifest.json"
 #: artifact is model-derived and model-specific, so the embedding model is
 #: recorded prominently on the release (see ``.github/workflows/publish-index.yml``).
 CATALOG_EMBED_ASSET = "catalog.embed.db"
+
+#: GNU sha256sum manifest of the snapshot assets on the same release
+#: (``catalog.db`` and the files uploaded with it). ``umbra index fetch``
+#: checks ``catalog.db`` against it. A release published before this file
+#: existed has no manifest; the fetch warns and still accepts the snapshot.
+CATALOG_SHA256_ASSET = "catalog.sha256"
+
+#: Set to ``1`` / ``true`` / ``yes`` / ``on`` to let ``--url`` and
+#: ``UMBRA_INDEX_URL`` use a non-https URL. The CLI flag is ``--insecure-url``.
+INSECURE_INDEX_URL_ENV = "UMBRA_INSECURE_INDEX_URL"
+
+#: When set, local MCP ``download_asset(confirm=true)`` may write only under
+#: this directory. Unset leaves ``dest_dir`` unchanged, including an absolute path.
+MCP_DOWNLOAD_ROOT_ENV = "UMBRA_MCP_DOWNLOAD_ROOT"
 
 #: Stable download URL for the prebuilt SQLite index. GitHub redirects this
 #: ``/releases/download/<tag>/<asset>`` path to the current asset, so it always

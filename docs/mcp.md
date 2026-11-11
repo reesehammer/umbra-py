@@ -33,7 +33,17 @@ Tools that would stream Umbra GeoTIFFs through the host
 and tell you to run a local server or open the asset `href` from `get_item`.
 For a site name you roughly know (`beet piler`), use `search_catalog(area=…,
 fuzzy=True)` or `find_repeat_sites` — not `semantic=True` (that needs an
-embedding key this host does not hold).
+embedding key this host does not hold). An `area` that matches no task name,
+with no `bbox`, `intersects`, or `place`, is geocoded. The result adds
+`matched_by` (`geocode`), `resolved_place`, and `resolved_bbox`. A name
+Nominatim does not know sets `hint` to `no task named X; try place= or bbox=`.
+When geocoding is busy (including a full quick outbound pool) or unreachable,
+`hint` is `no task named X; geocoding was unavailable` and the result is empty
+(`resolved_area` is the `area` that was tried). A live catalog's task-name
+check uses the long outbound pool; an index check does not. Tool names,
+arguments, and defaults are unchanged, and a task-name hit adds nothing.
+Ranking, recency, cadence, baseline, and the fields each site returns are on
+[Repeat-imaged sites](find-repeat-sites.md).
 
 ### Stable tools
 

@@ -49,10 +49,11 @@ import shlex
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from urllib.parse import unquote, urlsplit
 
 from ._geometry import parse_geometry as _parse_geometry
+from .area_fallback import geocode_note, resolve_area_fallback
 from .catalog import UmbraCatalog
 from .constants import (
     AI_PROVENANCE,
@@ -63,11 +64,14 @@ from .constants import (
     POLARIZATION_CAVEAT,
     S3_BUCKET,
     S3_REGION,
+    collection_ids_passed_as_products,
+    unknown_collection_detail,
 )
 from .context import llm_context
 from .convert import SPECKLE_WINDOW_DEFAULT
-from .exceptions import CatalogError, MissingDependencyError, UmbraError
-from .geocode import geocode_place as _geocode_place
+from .exceptions import CatalogError, GeocodeError, MissingDependencyError, UmbraError
+from .geocode import _GEOCODE_BUSY, _public_geocode, geocode_for_host
+from .geocode import geocode_place as _nominatim_geocode
 from .index import (
     BakedPreview,
     CatalogIndex,
@@ -113,7 +117,7 @@ def _item_from_index(url: str) -> UmbraItem | None:
     path = default_index_path()
     if not path.exists():
         return None
-    with CatalogIndex(path) as index:
+    with _open_index(path) as index:
         item = index.get_by_href(url)
         if item is None and "://" not in url:
             item = index.get(url)
@@ -186,8 +190,8 @@ def _public_net_slot(*, long: bool = False):
 
     ``long=False`` is the quick pool (:data:`_PUBLIC_NET_LIMIT`): HEAD,
     geocode, and a single item GET. ``long=True`` is the pool for a live
-    catalog walk or a semantic or embedding model call
-    (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
+    catalog walk, the live catalog's task-name probe, or a semantic or
+    embedding model call (:data:`_PUBLIC_NET_LONG_LIMIT`). Either pool raises
     :class:`PublicHostBusy` at once when it is full, with the same message.
     """
     if _cog_streaming_allowed():
@@ -206,7 +210,9 @@ def _fetch_item_public(url: str) -> UmbraItem:
     """Index filename/stem, or one allowlisted JSON GET. No other request."""
     if is_asset_name(url):
         try:
-            return resolve_asset_name(url)
+            # This path runs only on the public host. Open read-only so a
+            # filename lookup cannot write the snapshot or name its path.
+            return resolve_asset_name(url, readonly=True)
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     if not _public_bucket_https(url):
@@ -255,6 +261,121 @@ def _cog_streaming_allowed() -> bool:
         return _cog_streaming_override
     raw = os.environ.get(COG_STREAMING_ENV, "1")
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+#: Public ``search_catalog`` page size. The tool's ``limit`` argument and its
+#: default stay 20; a larger request is clamped and the result says so.
+#: Local MCP (COG streaming allowed) keeps the caller's limit.
+PUBLIC_CATALOG_LIMIT = 100
+
+_PUBLIC_LIMIT_NOTE = (
+    "limit clamped to 100; use the next page (narrow bbox, dates, or area; "
+    "the STAC /search next link pages the rest)."
+)
+
+
+def _clamp_public_catalog_limit(limit: int) -> tuple[int, str | None]:
+    """Cap ``search_catalog`` on the public host. Local calls pass through."""
+    if _cog_streaming_allowed():
+        return limit, None
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return limit, None
+    if limit > PUBLIC_CATALOG_LIMIT:
+        return PUBLIC_CATALOG_LIMIT, _PUBLIC_LIMIT_NOTE
+    return limit, None
+
+
+def _with_limit_note(payload: dict[str, Any], note: str | None) -> dict[str, Any]:
+    if note:
+        payload["note"] = note
+    return payload
+
+
+def _geocode_place(query: str) -> tuple[Any, str]:
+    """Nominatim directly off the public host, and the shared gate on it.
+
+    The gate lives in :mod:`umbra_py.geocode`. ``place=`` and the ``area=``
+    fallback on this host share that one cache and one Nominatim slot with
+    ``/search`` and ``/sites``.
+    """
+    if _cog_streaming_allowed():
+        return _nominatim_geocode(query)
+    return geocode_for_host(query, public=True)
+
+
+def _geocode_area(query: str) -> tuple[Any, str]:
+    """Geocode an ``area`` miss, taking a quick permit only for a real fetch.
+
+    A warm LRU hit returns the box, and a remembered miss raises that
+    :class:`~umbra_py.exceptions.GeocodeError`, before any permit. A full
+    quick pool is a :class:`PublicHostBusy` (a :class:`ValueError`). The
+    area fallback only turns a geocode error into the empty hint, so a
+    fetch that cannot start is re-raised as that.
+    """
+    if not _cog_streaming_allowed():
+        cached = _public_geocode.peek(query)
+        if cached is not None:
+            return cached
+    try:
+        with _public_net_slot():
+            return _geocode_place(query)
+    except PublicHostBusy as exc:
+        raise GeocodeError(_GEOCODE_BUSY) from exc
+
+
+class _LongSlotTaskProbe:
+    """Hold a long outbound permit around a live catalog's task-name check.
+
+    :meth:`UmbraCatalog.has_matching_task` lists up to three S3 prefixes.
+    That is the same pool as the live walk. An index probe is SQL and is
+    not wrapped. A double with no ``has_matching_task`` is left as it is,
+    so its ``search`` fallback stays the caller's.
+    """
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        with _public_net_slot(long=True):
+            return bool(self._source.has_matching_task(area, fuzzy=fuzzy))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._source, name)
+
+
+def _area_probe_source(source: Any, *, is_index: bool) -> Any:
+    """Slot a live catalog's task probe. An index probe stays unslotted."""
+    if is_index or not callable(getattr(source, "has_matching_task", None)):
+        return source
+    return _LongSlotTaskProbe(source)
+
+
+def _public_host() -> bool:
+    """Whether this process is the public host (COG streaming off).
+
+    ``umbra serve --public`` sets that guard. Local stdio and a self-hosted
+    ``umbra serve`` leave streaming on, and those keep the writable index.
+    """
+    return not _cog_streaming_allowed()
+
+
+def _with_optional_path(prefix: str, path: os.PathLike[str] | str, suffix: str) -> str:
+    """``prefix at {path}. suffix`` locally; the same sentence without the path on a public host."""
+    if _public_host():
+        return f"{prefix}. {suffix}"
+    return f"{prefix} at {path}. {suffix}"
+
+
+def _open_index(path: os.PathLike[str] | str | None = None) -> CatalogIndex:
+    """Open the catalog the MCP tools read.
+
+    The public host uses ``mode=ro``, so a tool cannot persist into the
+    shared snapshot. A local server stays read-write.
+    """
+    return CatalogIndex(
+        default_index_path() if path is None else path,
+        readonly=_public_host(),
+    )
 
 
 def _model_key_configured() -> bool:
@@ -555,14 +676,23 @@ def _as_mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     """
     from mcp.server.mcpserver.exceptions import ToolError
 
+    from ._mcp_log import note_tool_error, note_tool_result
+
     @functools.wraps(fn)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
-        except ToolError:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            # The class is the log line. The message stays on the exception
+            # the client already receives; it is not copied into the log.
+            note_tool_error(exc)
+            if isinstance(exc, ToolError):
+                raise
+            if isinstance(exc, (ValueError, UmbraError)):
+                raise ToolError(str(exc)) from exc
             raise
-        except (ValueError, UmbraError) as exc:
-            raise ToolError(str(exc)) from exc
+        note_tool_result(result)
+        return result
 
     return wrapped
 
@@ -617,12 +747,16 @@ def _search_source(
     if local is True:
         if not path.exists():
             raise FileNotFoundError(
-                f"No local index at {path}. Fetch the published snapshot with "
-                "'umbra index fetch', or build one with 'umbra index build'."
+                _with_optional_path(
+                    "No local index",
+                    path,
+                    "Fetch the published snapshot with "
+                    "'umbra index fetch', or build one with 'umbra index build'.",
+                )
             )
-        return CatalogIndex(path), True
+        return _open_index(path), True
     if local is None and path.exists():
-        return CatalogIndex(path), True
+        return _open_index(path), True
     return UmbraCatalog(), False
 
 
@@ -691,12 +825,16 @@ def _resolve_semantic_area(
     path = sem.default_semantic_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No semantic index at {path}. For a site name you roughly know "
-            "(e.g. 'beet piler'), call search_catalog(area=..., fuzzy=True) or "
-            "find_repeat_sites(area=...) instead — those are deterministic and "
-            "need no embedding key. semantic=True is for a description that "
-            "shares no words with the task label (e.g. 'grain storage north "
-            "dakota') and needs 'umbra semantic build' plus an embedding key."
+            _with_optional_path(
+                "No semantic index",
+                path,
+                "For a site name you roughly know "
+                "(e.g. 'beet piler'), call search_catalog(area=..., fuzzy=True) or "
+                "find_repeat_sites(area=...) instead — those are deterministic and "
+                "need no embedding key. semantic=True is for a description that "
+                "shares no words with the task label (e.g. 'grain storage north "
+                "dakota') and needs 'umbra semantic build' plus an embedding key.",
+            )
         )
     embedder = sem.default_embedder(model=model)
     with sem.SemanticTaskIndex(path) as index:
@@ -706,37 +844,136 @@ def _resolve_semantic_area(
     return best, ranked
 
 
+def _arg_desc(text: str) -> Any:
+    """One-line description for an MCP argument, applied when a schema is built.
+
+    Pydantic arrives with the ``mcp`` and ``langchain`` extras, not the core
+    install. ``from __future__ import annotations`` stores this call as text,
+    so the import happens only when a tool schema is evaluated.
+    """
+    from pydantic import Field
+
+    return Field(description=text)
+
+
 # --------------------------------------------------------------------------
 # Tool implementations (plain functions; registered on the server below).
 # --------------------------------------------------------------------------
 
 
 def search_catalog(
-    bbox: list[float] | None = None,
-    intersects: dict[str, Any] | None = None,
-    place: str | None = None,
-    area: str | None = None,
-    fuzzy: bool = False,
-    semantic: bool = False,
-    min_score: float = 0.0,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    polarizations: list[str] | None = None,
-    min_incidence: float | None = None,
-    max_incidence: float | None = None,
-    max_resolution: float | None = None,
-    canonical: bool | None = None,
-    limit: int = 20,
-    max_per_task: int | None = None,
-    local: bool | None = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not geocoded."),
+    ] = None,
+    intersects: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "One GeoJSON Point, or a Polygon or MultiPolygon, optionally wrapped in a "
+            "Feature, FeatureCollection, or GeometryCollection. A point matches footprints "
+            "that contain it. Cannot be combined with bbox or place."
+        ),
+    ] = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Free-text place name. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc(
+            "Task-name substring. If it matches no task and bbox, intersects, and place "
+            "are omitted, it is geocoded. With semantic, a plain-language description."
+        ),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc(
+            "Loose task-name match for area (word order, punctuation, typos). "
+            "No model. Cannot be combined with semantic."
+        ),
+    ] = False,
+    semantic: Annotated[
+        bool,
+        _arg_desc(
+            "Resolve area by embedding similarity. Needs a semantic index and an "
+            "embedding key. Cannot be combined with fuzzy."
+        ),
+    ] = False,
+    min_score: Annotated[
+        float,
+        _arg_desc("Cosine cutoff in [0, 1] for semantic matches. Scores below it are dropped."),
+    ] = 0.0,
+    start: Annotated[
+        str | None,
+        _arg_desc(
+            "Inclusive acquisition-date lower bound: ISO date, bare year or month, "
+            "or a relative expression such as 3 months ago."
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date upper bound. Same grammar as start."),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Keep items that expose one of these types (GEC, CSI, SIDD, SICD, CPHD). "
+            "A collection id such as umbra-gec or umbra-open-data raises; use the product type."
+        ),
+    ] = None,
+    polarizations: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Keep items exposing any listed polarization, such as VV. Missing values are dropped."
+        ),
+    ] = None,
+    min_incidence: Annotated[
+        float | None,
+        _arg_desc("Minimum incidence angle in degrees. Items missing incidence are dropped."),
+    ] = None,
+    max_incidence: Annotated[
+        float | None,
+        _arg_desc("Maximum incidence angle in degrees. Items missing incidence are dropped."),
+    ] = None,
+    max_resolution: Annotated[
+        float | None,
+        _arg_desc(
+            "Keep items this fine or finer, in metres. Items missing resolution are dropped."
+        ),
+    ] = None,
+    canonical: Annotated[
+        bool | None,
+        _arg_desc(
+            "True keeps the preferred copy of a republished collect; False keeps "
+            "only the other copies. Omit to keep every item."
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        _arg_desc(
+            "Maximum cards. Default 20. The public host clamps a value above 100 "
+            "to 100 and adds note."
+        ),
+    ] = 20,
+    max_per_task: Annotated[
+        int | None,
+        _arg_desc("Maximum items per task (site). 1 is one pin per site."),
+    ] = None,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Search Umbra's catalog and return compact context cards.
 
     Filters (all optional, combine freely): ``bbox`` as
     ``[min_lon, min_lat, max_lon, max_lat]`` in WGS84 degrees; ``intersects`` as
-    a GeoJSON polygon object (a ``Polygon`` / ``MultiPolygon`` geometry, or a
-    ``Feature`` / ``FeatureCollection`` wrapping one) to keep only footprints
+    a GeoJSON object (a ``Point``, ``Polygon``, or ``MultiPolygon``, or a
+    ``Feature`` / ``FeatureCollection`` wrapping one; a point matches footprints
+    that contain it) to keep only footprints
     intersecting it -- a tighter spatial filter than the rectangular ``bbox``,
     and mutually exclusive with ``bbox`` / ``place``; ``place`` as a
     free-text name geocoded to a bbox; ``area`` as a substring of the Umbra
@@ -744,7 +981,16 @@ def search_catalog(
     punctuation-independent and typo-tolerant, resolved deterministically with
     no model call, so ``"beet piler"`` still reaches ``"Beet Piler - ND"`` and
     ``"utah centerfield"`` still reaches ``"Centerfield,
-    Utah"``; set ``semantic`` instead to treat ``area`` as a plain-language
+    Utah"``). When ``area`` matches no task and ``bbox``, ``intersects``, and
+    ``place`` are omitted, it is geocoded and that footprint is searched; the
+    result then adds ``matched_by`` (``geocode``), ``resolved_place``, and
+    ``resolved_bbox``. A name Nominatim does not know sets ``hint`` to
+    ``no task named X; try place= or bbox=``. When geocoding is busy (the
+    Nominatim gate, or the public host's quick outbound pool) or
+    unreachable, ``hint`` is ``no task named X; geocoding was unavailable``
+    and ``resolved_area`` is the ``area`` that was tried. A task-name hit
+    adds nothing. Set ``semantic``
+    instead to treat ``area`` as a plain-language
     *description* of a site whose name you don't know and resolve it to the
     closest task names by *meaning* via the prebuilt embedding index, so
     ``"grain storage north dakota"`` reaches ``"Beet Piler - ND"`` -- a query
@@ -769,7 +1015,9 @@ def search_catalog(
     the preferred copy of a collect Umbra republished under another prefix
     (``True``), only the other copies (``False``), or every item when omitted;
     ``limit`` to cap
-    results; ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
+    results (on the public host a value above 100 is clamped to 100 and the
+    result includes ``note``; the argument and its default are unchanged);
+    ``max_per_task`` to cap items per site (use 1 for a one-pin-per-site
     overview).
 
     ``local`` selects the backend: leave it unset to use the on-disk index when
@@ -792,11 +1040,15 @@ def search_catalog(
     """
     if intersects is not None and (bbox or place):
         raise ValueError("pass intersects or bbox/place, not both")
+    mistaken = collection_ids_passed_as_products(products)
+    if mistaken:
+        raise ValueError(unknown_collection_detail(mistaken, product_parameter="products"))
     if semantic and fuzzy:
         raise ValueError(
             "pass semantic or fuzzy, not both: semantic resolves a plain-language "
             "site description via embeddings, fuzzy is a deterministic token match"
         )
+    limit, limit_note = _clamp_public_catalog_limit(limit)
 
     resolved_area = None
     semantic_matches = None
@@ -813,16 +1065,19 @@ def search_catalog(
         if resolved_area is None:
             # Nothing cleared the similarity threshold: report the (empty) audit
             # trail rather than silently running an unfiltered catalog search.
-            return {
-                "count": 0,
-                "source": "semantic-index",
-                "resolved_place": None,
-                "resolved_bbox": None,
-                "resolved_area": None,
-                "semantic_matches": [],
-                "items": [],
-                "attribution": ATTRIBUTION,
-            }
+            return _with_limit_note(
+                {
+                    "count": 0,
+                    "source": "semantic-index",
+                    "resolved_place": None,
+                    "resolved_bbox": None,
+                    "resolved_area": None,
+                    "semantic_matches": [],
+                    "items": [],
+                    "attribution": ATTRIBUTION,
+                },
+                limit_note,
+            )
         # Search the resolved exact task name literally (it is a real label, so a
         # substring match hits it; no fuzzy widening on an already-resolved name).
         search_area = resolved_area
@@ -840,7 +1095,43 @@ def search_catalog(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
     try:
+        # semantic=True already resolved ``area`` to a task name, or returned
+        # before this. Do not geocode that label. ``intersects`` (the GeoJSON
+        # filter on this same signature) is an explicit footprint: area stays
+        # a task filter when it is set.
+        if not semantic:
+            decision = resolve_area_fallback(
+                _area_probe_source(source, is_index=is_index),
+                search_area,
+                fuzzy=search_fuzzy,
+                bbox=resolved_bbox,
+                intersects=geometry,
+                place=place,
+                geocode=_geocode_area,
+            )
+            if decision.hint:
+                return _with_limit_note(
+                    {
+                        "count": 0,
+                        "source": label,
+                        "resolved_place": None,
+                        "resolved_bbox": None,
+                        "resolved_area": area,
+                        "semantic_matches": semantic_matches,
+                        "items": [],
+                        "hint": decision.hint,
+                        "attribution": ATTRIBUTION,
+                    },
+                    limit_note,
+                )
+            if decision.matched_by:
+                resolved_bbox = decision.bbox
+                resolved_place = decision.place
+                search_area = None
+                search_fuzzy = False
+                matched_note = geocode_note(decision)
         with _public_net_slot(long=True) if not is_index else nullcontext():
             results = source.search(
                 bbox=resolved_bbox,
@@ -863,7 +1154,7 @@ def search_catalog(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
+    payload = {
         "count": len(cards),
         "source": label,
         "resolved_place": resolved_place,
@@ -873,193 +1164,223 @@ def search_catalog(
         "items": cards,
         "attribution": ATTRIBUTION,
     }
+    if matched_note:
+        payload.update(matched_note)
+    return _with_limit_note(payload, limit_note)
 
 
 def find_repeat_sites(
-    bbox: list[float] | None = None,
-    intersects: dict[str, Any] | None = None,
-    place: str | None = None,
-    area: str | None = None,
-    fuzzy: bool = False,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    polarizations: list[str] | None = None,
-    min_incidence: float | None = None,
-    max_incidence: float | None = None,
-    max_resolution: float | None = None,
-    limit: int = 500,
-    top: int = 20,
-    min_passes: int = 2,
-    rank_by: str = "passes",
-    active_since: str | None = None,
-    active_before: str | None = None,
-    first_since: str | None = None,
-    first_before: str | None = None,
-    max_revisit_days: float | None = None,
-    median_revisit_days: float | None = None,
-    min_span_days: float | None = None,
-    max_span_days: float | None = None,
-    local: bool | None = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc(
+            "Pool filter: WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not "
+            "geocoded."
+        ),
+    ] = None,
+    intersects: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Pool filter: one GeoJSON Point, or a Polygon or MultiPolygon, optionally wrapped "
+            "in a Feature, FeatureCollection, or GeometryCollection. A point matches footprints "
+            "that contain it. Cannot be combined with bbox or place."
+        ),
+    ] = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Pool filter: free-text place. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc(
+            "Pool filter: task-name substring. With fuzzy, a loose token match. "
+            "If it matches no task and bbox, intersects, and place are omitted, it is geocoded."
+        ),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc("Loose task-name match for area. No model call."),
+    ] = False,
+    start: Annotated[
+        str | None,
+        _arg_desc(
+            "Pool filter: inclusive lower bound on which passes are counted. "
+            "ISO date, bare year or month, or a relative expression."
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc(
+            "Pool filter: inclusive upper bound on which passes are counted. Same grammar as start."
+        ),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Pool filter: keep passes that expose one of these types "
+            "(GEC, CSI, SIDD, SICD, CPHD). Case-insensitive."
+        ),
+    ] = None,
+    polarizations: Annotated[
+        list[str] | None,
+        _arg_desc(
+            "Pool filter: keep passes exposing any listed polarization. Missing values are dropped."
+        ),
+    ] = None,
+    min_incidence: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: minimum incidence angle in degrees. Passes missing it are dropped."
+        ),
+    ] = None,
+    max_incidence: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: maximum incidence angle in degrees. Passes missing it are dropped."
+        ),
+    ] = None,
+    max_resolution: Annotated[
+        float | None,
+        _arg_desc(
+            "Pool filter: keep passes this fine or finer, in metres. Missing resolution is dropped."
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        _arg_desc(
+            "How many acquisitions to pull for a live or Canopy ranking. Default 500. "
+            "Ignored on a local index, which groups the whole index."
+        ),
+    ] = 500,
+    top: Annotated[
+        int,
+        _arg_desc("Maximum sites to return, best first. Default 20."),
+    ] = 20,
+    min_passes: Annotated[
+        int,
+        _arg_desc(
+            "Minimum series depth. Default 2. Counts comparable passes when "
+            "rank_by is comparable, otherwise raw dated passes."
+        ),
+    ] = 2,
+    rank_by: Annotated[
+        str,
+        _arg_desc(
+            "passes (default), comparable, recency, span, or cadence. "
+            "Unknown values raise ValueError."
+        ),
+    ] = "passes",
+    active_since: Annotated[
+        str | None,
+        _arg_desc("Keep sites whose newest pass is on or after this date. Same grammar as start."),
+    ] = None,
+    active_before: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose newest pass is on or before this date. "
+            "A bare year or month includes that whole period."
+        ),
+    ] = None,
+    first_since: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose earliest pass is on or after this date. Same grammar as start."
+        ),
+    ] = None,
+    first_before: Annotated[
+        str | None,
+        _arg_desc(
+            "Keep sites whose earliest pass is on or before this date. "
+            "A bare year or month includes that whole period."
+        ),
+    ] = None,
+    max_revisit_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose worst revisit gap exceeds this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    median_revisit_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose median revisit gap exceeds this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    min_span_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose first-to-last span is shorter than this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    max_span_days: Annotated[
+        float | None,
+        _arg_desc(
+            "Drop sites whose first-to-last span is longer than this many days. "
+            "Non-positive raises. Uses the comparable series when rank_by is comparable."
+        ),
+    ] = None,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
-    """Rank the archive's most repeat-imaged sites — where change detection has
-    something to measure.
+    """Rank sites imaged more than once, before a change tool is pointed at one.
 
-    The discovery step *before* every analysis verb. ``change`` / ``timescan`` /
-    ``stack`` / ``pick_change_interval`` / ``narrate_change`` all answer *what*
-    changed at a site, but each assumes the caller already knows *which* site to
-    point them at. Umbra files every pass of an area under one task (site), so a
-    site's coverage is just how many dated passes share its task; the sites with
-    the most are exactly the ones where a time series exists to analyse. This
-    tool ranks them, so ``find_repeat_sites → pick_change_interval →
-    narrate_change`` is a complete chain a model can drive with no site known in
-    advance — the deterministic answer to "where is there something to look at?"
-    (the discovery moat; no model is called). Reach for this
-    (or ``search_catalog(area=..., fuzzy=True)``) before ``semantic=True`` when
-    the site name is roughly known.
+    Use this when the site is not already known. Each site's ``hrefs`` are that
+    site's STAC URLs, oldest first, ready for ``pick_change_interval``,
+    ``change_composite``, or ``stack_stats``. Prefer this, or
+    ``search_catalog(area=..., fuzzy=True)``, over ``semantic=True`` when the
+    name shares words with a task. No model is called.
 
-    The filters scope the *pool* of acquisitions the ranking is computed over,
-    and are the same ones ``search_catalog`` takes: ``bbox``
-    (``[min_lon, min_lat, max_lon, max_lat]`` WGS84), ``intersects`` (a GeoJSON
-    polygon, mutually exclusive with ``bbox`` / ``place``), ``place`` (free-text,
-    geocoded to a bbox), ``area`` (a task-name substring, loosened by ``fuzzy``),
-    ``start`` / ``end`` date bounds, ``products`` (GEC / SICD / SIDD / CPHD), and
-    the SAR property filters ``polarizations`` / ``min_incidence`` /
-    ``max_incidence`` / ``max_resolution``. ``top`` caps how many sites are
-    returned, and ``min_passes`` is how many passes a site needs to qualify (2 is
-    the minimum a change composite can use; raise it to find only deeply-revisited
-    series), counted on the depth ``rank_by`` measures -- raw dated passes by
-    default, the usable (comparable) series' depth under ``rank_by="comparable"``.
+    Argument reference (ranking, recency, cadence, baseline, return fields):
+    https://umbra-py.space/find-repeat-sites/
 
-    ``rank_by`` chooses the order: ``"passes"`` (the default) ranks by raw pass
-    count; ``"comparable"`` ranks by *analysable* depth instead -- the
-    ``comparable_passes`` largest same-polarization dated subset a change verb can
-    actually difference -- so a deep single-polarization series is not outranked by
-    a broader mixed-polarization site whose passes no analysis verb can compare, and
-    ``min_passes`` then floors that same usable depth, so ``rank_by="comparable",
-    min_passes=3`` returns only sites whose differenceable series is at least three
-    passes deep. The two agree when every dated pass of every site shares one
-    polarization; prefer ``"comparable"`` when the next step is
-    ``pick_change_interval`` / ``stack_stats``, which consume exactly that
-    differenceable subset. Three *temporal* orders rank on the axes the filters below
-    select on: ``"recency"`` orders by each site's newest dated pass (the
-    still-active site to monitor or task, which a depth order buries under a deeper
-    but dormant series), ``"span"`` by each site's observation baseline (the site
-    watched long enough for slow change to show), and ``"cadence"`` by each site's
-    *typical* revisit gap, tightest first (the most-frequently-imaged site -- the
-    median gap, not the worst one, so a single outage does not bury an otherwise
-    reliably-imaged series; the worst-case reading stays the ``max_revisit_days``
-    filter). ``min_passes`` still qualifies a site on raw depth under any of the
-    three, so a temporal order returns only sites with a series worth ordering.
+    Filters bound which acquisitions are ranked. ``bbox`` is WGS84
+    ``[min_lon, min_lat, max_lon, max_lat]``. ``intersects`` is one GeoJSON
+    Point, or a Polygon or MultiPolygon (or a Feature, FeatureCollection, or
+    GeometryCollection wrapping those). A point matches footprints that
+    contain it. It cannot be combined with ``bbox`` or ``place``. ``place`` is geocoded
+    only when ``bbox`` is omitted. ``area`` is a task-name substring;
+    ``fuzzy=True`` is a deterministic loose match. When ``area`` matches no
+    task and ``bbox``, ``intersects``, and ``place`` are omitted, it is
+    geocoded. The result then adds ``matched_by`` (``geocode``) plus the
+    resolved place and bbox. A name Nominatim does not know, and a geocoder
+    that is busy or unreachable, set ``hint`` and return no sites
+    (``resolved_area`` is the ``area`` that was tried). A task-name hit adds
+    nothing. ``start`` / ``end`` bound
+    which passes enter the pool (ISO date, bare year or month, or a relative
+    expression). ``products`` is any of GEC, CSI, SIDD, SICD, CPHD.
+    ``polarizations``, ``min_incidence``, ``max_incidence``, and
+    ``max_resolution`` (metres) drop passes missing that field.
 
-    ``active_since`` keeps only sites still imaged *on or after* that date -- a
-    recency filter on each site's newest pass, so a deep series that stopped long
-    ago is dropped and an actively-revisited one is kept. Use it to find live
-    monitoring targets ("repeat-imaged sites still being collected"). It accepts an
-    ISO date (``"2024-06-01"``), a bare year/month, or a relative expression
-    (``"6 months ago"``), is orthogonal to ``rank_by`` / ``min_passes`` (it gates on
-    the site's latest pass, whatever depth the ranking measures), and differs from
-    ``start`` / ``end``: those bound which *passes* enter the pool (truncating every
-    series to a window), whereas this selects whole sites by recency and keeps each
-    survivor's full history.
+    ``top`` (default 20) is how many sites to return. ``min_passes`` (default
+    2) is the minimum depth: comparable passes when ``rank_by`` is
+    ``comparable``, otherwise raw dated passes. ``rank_by`` is ``passes``
+    (default), ``comparable`` (largest same-polarization subset), ``recency``
+    (newest pass), ``span`` (first to last), or ``cadence`` (tightest median
+    gap). For the three temporal orders, ``min_passes`` still counts raw
+    passes.
 
-    ``active_before`` is the complement -- keep only sites whose newest pass is *on
-    or before* that date (a dormant series that stopped imaging). Pass both to select
-    sites whose latest pass falls *within* a window (``active_since <= last <=
-    active_before``). Same grammar as ``active_since``, but a bare year/month covers
-    the whole named period (``active_before="2024"`` is "last imaged on or before
-    2024-12-31"), symmetric with ``end``.
+    ``active_since`` / ``active_before`` select sites by newest pass;
+    ``first_since`` / ``first_before`` select by earliest pass. Those keep
+    each survivor's full history, unlike ``start`` / ``end``, which truncate
+    the pool. ``max_revisit_days`` caps the worst gap and
+    ``median_revisit_days`` caps the median gap. ``min_span_days`` /
+    ``max_span_days`` bound the first-to-last span. A non-positive cadence or
+    span raises ``ValueError``. With ``rank_by="comparable"`` the cadence and
+    span filters use that subset. A bare year or month on a ``*_before``
+    bound includes the whole period.
 
-    ``first_since`` / ``first_before`` are the onset (first-seen) twins of the
-    ``active_*`` pair -- they gate each site's *earliest* pass rather than its newest.
-    ``first_since`` keeps **newly-appeared** series (first imaged on or after the date --
-    ones that entered the archive recently) and ``first_before`` keeps
-    **long-established** ones (first imaged on or before it -- watched since before
-    then); pass both to bound the onset to a window
-    (``first_since <= first <= first_before``), exactly as the ``active_*`` pair bounds
-    the newest pass. Same grammar as ``active_since``, ``first_before`` snapping a bare
-    year/month to its last day. Orthogonal to the ``active_*`` recency filters, since
-    when a site started and whether it is still going are independent axes -- so
-    ``first_since=X, active_before=Y`` finds series that appeared after X and have
-    already gone dormant by Y. ``None`` (the default) applies no onset filter.
-
-    ``max_revisit_days`` keeps only sites revisited *at least this often* -- a cadence
-    filter on each site's **worst-case** revisit gap (in days), so a series with any
-    stretch longer than that between consecutive passes is dropped and a reliably
-    imaged one kept. Use it to find monitorable targets ("repeat-imaged sites with no
-    blind spot longer than N days"). It gates the cadence ``rank_by`` measures -- the
-    whole dated series by default, the usable (comparable) series' worst gap under
-    ``rank_by="comparable"`` -- is orthogonal to ``active_since`` / ``active_before``,
-    and drops a site with fewer than two passes in the gated series. A non-positive
-    value is a ``ValueError``.
-
-    ``median_revisit_days`` is the *typical*-cadence twin of ``max_revisit_days`` --
-    keep only sites whose **median** revisit gap (in days) is at most that, so a site
-    *usually* imaged often is kept even if a single stretch runs long, where
-    ``max_revisit_days`` drops it the moment any gap exceeds the bound. Use it for
-    "usually imaged frequently" rather than "never blind for longer than N days"; set
-    both to combine the two. It gates the cadence ``rank_by`` measures (the usable
-    series' typical gap under ``rank_by="comparable"``), is orthogonal to
-    ``max_revisit_days`` and the recency filters, and drops a site with fewer than two
-    passes in the gated series. A non-positive value is a ``ValueError``.
-
-    ``min_span_days`` keeps only sites imaged over *at least this long* -- a baseline
-    filter on each site's observation **span** (in days, first pass to last), so a
-    series confined to a short window is dropped and a long-baseline one kept. Use it
-    to find targets for *slow* change (subsidence, construction, deforestation) that
-    needs a long observation window to be visible. It is a different axis from
-    ``max_revisit_days``: cadence is the worst *gap* (how reliably a site is watched),
-    span is the total *baseline* (how long it has been watched at all). It gates the
-    span ``rank_by`` measures -- the whole dated series by default, the usable
-    (comparable) series' span under ``rank_by="comparable"`` -- is orthogonal to
-    ``active_since`` / ``active_before`` / ``max_revisit_days``, and drops a site with
-    fewer than two passes in the gated series. A non-positive value is a ``ValueError``.
-
-    ``max_span_days`` is the upper twin of ``min_span_days`` -- keep only sites imaged
-    over *at most this long* (a short-lived series, a burst of imaging now over), the
-    complement of the floor. Set with ``min_span_days`` the two bound each site's
-    baseline to a window (``min_span_days <= span <= max_span_days``), exactly as
-    ``active_since`` / ``active_before`` bound the newest pass to one. It gates the same
-    span ``rank_by`` measures (the usable series under ``rank_by="comparable"``) and,
-    like the floor, drops a site with no measurable span so the window admits only a
-    confirmed baseline. A non-positive value is a ``ValueError``.
-
-    ``limit`` sizes the *live/token* pool only. On the local index a site's depth
-    is measured **whole-archive** — one ``GROUP BY task`` over the entire index
-    (:meth:`CatalogIndex.rank_sites`), so a deeply-imaged site is ranked by all
-    its passes rather than by whatever the first ``limit`` rows admitted, and
-    ``limit`` does not apply. On the live open bucket or the Canopy archive there
-    is no index to group over, so ``limit`` sizes the single re-listed pool the
-    ranking is computed from (bigger finds more sites and deeper series but scans
-    more of the archive; ``area`` narrows it instead).
-
-    Returns ``sites``, best-covered first: each a ``SiteCoverage`` with the site's
-    ``task`` codename and place ``label``, its ``passes`` count, ``first`` /
-    ``last`` dates and ``span_days``, ``min_revisit_days`` / ``median_revisit_days``
-    / ``max_revisit_days`` cadence (the last being the longest gap, i.e. the site's
-    worst-case temporal resolution) with ``comparable_min_revisit_days`` /
-    ``comparable_median_revisit_days`` / ``comparable_max_revisit_days`` the same
-    shortest / typical / worst triple over just the differenceable subset (each can
-    diverge from its raw twin when a cross-polarization pass fills a gap the
-    analysis verbs cannot use), union ``bbox`` footprint, ``products`` and
-    ``polarizations`` — with ``comparable_polarizations`` naming *which* single
-    polarization the usable series is (the signature the ``comparable_*`` figures
-    are all measured over, a strict subset of ``polarizations`` when the site is
-    mixed) — and the
-    ``hrefs`` — the site's pass STAC URLs, **oldest-first**, ready to hand straight
-    to ``pick_change_interval`` (or ``change_composite`` / ``stack_stats``). Also
-    ``count`` (sites returned), the pool ``source``, the resolved
-    ``place`` / ``bbox`` / ``area``, a ``query`` echo of the ranking-and-selection
-    inputs (``rank_by``, ``top``, ``min_passes`` and the recency / onset / cadence /
-    baseline bounds, as you passed them) so the answer records how it was ranked and
-    filtered, and the attribution line.
-
-    ``local`` selects the backend exactly as ``search_catalog`` does — unset uses
-    the on-disk index when present (instant) and a live S3 walk otherwise. With a
-    Canopy token configured (``$UMBRA_CANOPY_TOKEN``) the pool is drawn from the
-    commercial archive instead. The ranking is single-sourced with the static
-    showcase's featured-gallery selector, so this and ``umbra sites`` cannot
-    disagree about what "most repeat-imaged" means.
+    ``limit`` (default 500) sizes only a live or Canopy pool. A local index
+    ranks each task over the whole index and ignores ``limit``. ``local``
+    matches ``search_catalog``: unset uses the index when present. A Canopy
+    token (``$UMBRA_CANOPY_TOKEN``) draws the pool from the commercial
+    archive, and ``local=True`` cannot be combined with it.
     """
     from .coverage import (
         _check_max_revisit,
@@ -1089,7 +1410,51 @@ def find_repeat_sites(
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
     label = _source_label(is_index, bool(token))
+    matched_note = None
+    search_area = area
+    search_fuzzy = fuzzy
     try:
+        # Same rule as search_catalog. ``intersects`` is an explicit footprint
+        # (the GeoJSON filter on this signature): area stays a task filter.
+        decision = resolve_area_fallback(
+            _area_probe_source(source, is_index=is_index),
+            search_area,
+            fuzzy=search_fuzzy,
+            bbox=resolved_bbox,
+            intersects=geometry,
+            place=place,
+            geocode=_geocode_area,
+        )
+        if decision.hint:
+            return {
+                "count": 0,
+                "source": label,
+                "resolved_place": resolved_place,
+                "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
+                "resolved_area": area,
+                "query": site_query_echo(
+                    rank_by=rank_by,
+                    top=top,
+                    min_passes=min_passes,
+                    active_since=active_since,
+                    active_before=active_before,
+                    first_since=first_since,
+                    first_before=first_before,
+                    max_revisit_days=max_revisit_days,
+                    median_revisit_days=median_revisit_days,
+                    min_span_days=min_span_days,
+                    max_span_days=max_span_days,
+                ),
+                "sites": [],
+                "hint": decision.hint,
+                "attribution": ATTRIBUTION,
+            }
+        if decision.matched_by:
+            resolved_bbox = decision.bbox
+            resolved_place = decision.place
+            search_area = None
+            search_fuzzy = False
+            matched_note = geocode_note(decision)
         if isinstance(source, CatalogIndex):
             # The index can answer a site's *whole-archive* depth as a GROUP BY
             # task, so route through rank_sites rather than re-listing a
@@ -1103,8 +1468,8 @@ def find_repeat_sites(
                 start=start,
                 end=end,
                 product_types=list(products) if products else None,
-                area=area,
-                fuzzy=fuzzy,
+                area=search_area,
+                fuzzy=search_fuzzy,
                 polarizations=list(polarizations) if polarizations else None,
                 min_incidence=min_incidence,
                 max_incidence=max_incidence,
@@ -1130,8 +1495,8 @@ def find_repeat_sites(
                         start=start,
                         end=end,
                         product_types=list(products) if products else None,
-                        area=area,
-                        fuzzy=fuzzy,
+                        area=search_area,
+                        fuzzy=search_fuzzy,
                         polarizations=list(polarizations) if polarizations else None,
                         min_incidence=min_incidence,
                         max_incidence=max_incidence,
@@ -1157,12 +1522,12 @@ def find_repeat_sites(
         if isinstance(source, CatalogIndex):
             source.close()
 
-    return {
+    payload = {
         "count": len(sites),
         "source": label,
         "resolved_place": resolved_place,
         "resolved_bbox": list(resolved_bbox) if resolved_bbox else None,
-        "resolved_area": area,
+        "resolved_area": None if matched_note else area,
         # Echo how the answer was ranked and selected (single-sourced with
         # GET/POST /sites), so a chain reads it from the result rather than its
         # own request. Dates are the raw expressions the caller passed.
@@ -1182,9 +1547,20 @@ def find_repeat_sites(
         "sites": [site.to_dict() for site in sites],
         "attribution": ATTRIBUTION,
     }
+    if matched_note:
+        payload.update(matched_note)
+    return payload
 
 
-def get_item(url: str) -> dict[str, Any]:
+def get_item(
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL, product filename, acquisition stem, or — when a "
+            "Canopy token is set — a bare commercial-archive id."
+        ),
+    ],
+) -> dict[str, Any]:
     """Return the full context card for one item.
 
     ``url`` is the JSON URL of an open-data STAC sidecar, a GEC/SICD (or other
@@ -1220,7 +1596,7 @@ def get_item(url: str) -> dict[str, Any]:
     """
     if is_asset_name(url):
         try:
-            return resolve_asset_name(url).to_llm_context()
+            return resolve_asset_name(url, readonly=_public_host()).to_llm_context()
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     token = _canopy_token()
@@ -1232,7 +1608,9 @@ def get_item(url: str) -> dict[str, Any]:
     return _fetch_item(url).to_llm_context()
 
 
-def geocode_place(query: str) -> dict[str, Any]:
+def geocode_place(
+    query: Annotated[str, _arg_desc("Free-text place name to resolve with Nominatim.")],
+) -> dict[str, Any]:
     """Resolve a free-text place name to a bounding box via Nominatim.
 
     Returns ``{"bbox": [min_lon, min_lat, max_lon, max_lat], "display_name":
@@ -1255,24 +1633,27 @@ def index_stats() -> dict[str, Any]:
     dropped for a datetime more than a day ahead (they are not in the index).
     ``unique_captures`` is how many rows are the canonical copy of their
     collect; it equals ``items`` until republished copies have been linked.
+    ``path`` is the index file locally and ``null`` on the public host, which
+    does not reveal the server filesystem.
     """
     path = default_index_path()
+    reported = None if _public_host() else str(path)
     if not path.exists():
         return {
             "available": False,
-            "path": str(path),
+            "path": reported,
             "hint": (
                 "No local index. Fetch the published weekly snapshot with "
                 "'umbra index fetch' for instant whole-catalog search."
             ),
         }
-    index = CatalogIndex(path)
+    index = _open_index(path)
     try:
         stats = dict(index.stats())
     finally:
         index.close()
     stats["available"] = True
-    stats["path"] = str(path)
+    stats["path"] = reported
     return stats
 
 
@@ -1414,11 +1795,40 @@ def _quicklook_png(
 
 
 def quicklook(
-    url: str,
-    asset: str = "GEC",
-    db: bool = False,
-    max_size: int = 1024,
-    preview: str = "auto",
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id. The public host also accepts a "
+            "product filename or acquisition stem that is in the index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "Product to show. Default GEC. A baked preview is used only when its "
+            "recorded product matches, or when it recorded none and this is GEC."
+        ),
+    ] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc(
+            "Decibel stretch for a fresh render. Default false. A baked preview is always decibel."
+        ),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc(
+            "Longest side in pixels for a fresh render. Default 1024. Ignored when a smaller baked "
+            "preview is returned."
+        ),
+    ] = 1024,
+    preview: Annotated[
+        str,
+        _arg_desc(
+            "auto (default) uses a baked preview when present, else renders. "
+            "baked refuses if none. render always streams a COG and is refused on the public host."
+        ),
+    ] = "auto",
 ) -> list[Any]:
     """Return a scene's quicklook PNG as an image block.
 
@@ -1442,7 +1852,22 @@ def quicklook(
 
 
 def change_composite(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of 2 or 3 passes, in time order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to composite. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> list[Any]:
     """Composite 2-3 passes of one site into a change image.
 
@@ -1476,7 +1901,19 @@ def change_composite(
 
 
 def timescan(
-    urls: list[str], asset: str = "GEC", db: bool = False, max_size: int = 1024
+    urls: Annotated[
+        list[str],
+        _arg_desc("STAC JSON URLs or item ids of at least two passes of one site."),
+    ],
+    asset: Annotated[str, _arg_desc("Product to scan. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch instead of a linear percentile stretch. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for each pass. Default 1024."),
+    ] = 1024,
 ) -> list[Any]:
     """Summarize a whole time series into one activity image.
 
@@ -1505,17 +1942,65 @@ _IMAGE_TOOLS = (quicklook, change_composite, timescan)
 
 
 def stack_stats(
-    urls: list[str],
-    asset: str = "GEC",
-    bbox: list[float] | None = None,
-    max_size: int = 512,
-    extent: str = "intersection",
-    crs: str = "utm",
-    change_threshold_db: float = 3.0,
-    blocks: int = 0,
-    block_series: bool = False,
-    speckle_filter: str | None = None,
-    speckle_window: int = SPECKLE_WINDOW_DEFAULT,
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes. Any order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to measure. Default GEC.")] = "GEC",
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("Optional WGS84 [min_lon, min_lat, max_lon, max_lat] sub-area inside the scene."),
+    ] = None,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the co-registered grid. Default 512."),
+    ] = 512,
+    extent: Annotated[
+        str,
+        _arg_desc(
+            "intersection (default) keeps ground every pass covers. union keeps the full footprint."
+        ),
+    ] = "intersection",
+    crs: Annotated[
+        str,
+        _arg_desc(
+            "utm (default) grids in the site UTM zone so areas are km². EPSG:4326 returns areas as "
+            "null."
+        ),
+    ] = "utm",
+    change_threshold_db: Annotated[
+        float,
+        _arg_desc("Absolute decibel change that counts as moved ground. Default 3."),
+    ] = 3.0,
+    blocks: Annotated[
+        int,
+        _arg_desc(
+            "N cuts the scene into an N by N grid of where change sits. 0 (default) skips it."
+        ),
+    ] = 0,
+    block_series: Annotated[
+        bool,
+        _arg_desc(
+            "With blocks, return every pass-to-pass record per block, not only the peak. Default "
+            "false."
+        ),
+    ] = False,
+    speckle_filter: Annotated[
+        str | None,
+        _arg_desc(
+            "boxcar or lee, to average speckle before measuring. Omit to leave pixels unfiltered."
+        ),
+    ] = None,
+    speckle_window: Annotated[
+        int,
+        _arg_desc(
+            "Cell window for speckle_filter. Default 5. When a filter is set, "
+            "an even value or one below 3 raises."
+        ),
+    ] = SPECKLE_WINDOW_DEFAULT,
 ) -> dict[str, Any]:
     """Measure how much a site changed across its passes, as numbers.
 
@@ -1604,7 +2089,15 @@ def stack_stats(
     )
 
 
-def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
+def stack_provenance(
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes whose raster headers are compared."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product whose raster header is read. Default GEC.")] = "GEC",
+) -> dict[str, Any]:
     """Check whether a site's passes are one measurement, before measuring them.
 
     ``stack_stats`` refuses a selection whose rasters were made by *different*
@@ -1647,12 +2140,34 @@ def stack_provenance(urls: list[str], asset: str = "GEC") -> dict[str, Any]:
 
 
 def pick_change_interval(
-    urls: list[str],
-    asset: str = "GEC",
-    max_size: int = 512,
-    change_threshold_db: float = 3.0,
-    extent: str = "intersection",
-    crs: str = "utm",
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes. Any order. Mixed polarizations are "
+            "refused."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to measure. Default GEC.")] = "GEC",
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the co-registered grid. Default 512."),
+    ] = 512,
+    change_threshold_db: Annotated[
+        float,
+        _arg_desc("Absolute decibel change that counts as moved ground. Default 3."),
+    ] = 3.0,
+    extent: Annotated[
+        str,
+        _arg_desc(
+            "intersection (default) keeps ground every pass covers. union keeps the full footprint."
+        ),
+    ] = "intersection",
+    crs: Annotated[
+        str,
+        _arg_desc(
+            "utm (default) grids in the site UTM zone so change fractions weigh equal ground."
+        ),
+    ] = "utm",
 ) -> dict[str, Any]:
     """Scan a site's whole series and name the two passes worth narrating.
 
@@ -1723,7 +2238,35 @@ def pick_change_interval(
 
 
 def download_asset(
-    url: str, asset: str = "GEC", dest_dir: str = ".", confirm: bool = False
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL, product filename, or acquisition stem. A filename or stem is resolved "
+            "through the catalog index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "File to fetch: a product type (GEC), a schema v2 key (gec, gec_2), "
+            "or the original filename. Default GEC."
+        ),
+    ] = "GEC",
+    dest_dir: Annotated[
+        str,
+        _arg_desc(
+            "Local download directory. Default '.'. Must stay inside "
+            "UMBRA_MCP_DOWNLOAD_ROOT when that is set. On the public host it is only named in the "
+            "link plan."
+        ),
+    ] = ".",
+    confirm: Annotated[
+        bool,
+        _arg_desc(
+            "False (default) returns the byte size and writes nothing. True downloads "
+            "on a local server, or returns a link plan on the public host."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Download one asset of an item to local disk, gated by a size check.
 
@@ -1758,6 +2301,10 @@ def download_asset(
     or ``size`` when that is a non-negative integer, otherwise null. A local
     server still HEADs the href and follows redirects.
 
+    On a local server, ``dest_dir`` is unchanged unless ``UMBRA_MCP_DOWNLOAD_ROOT``
+    is set. When that variable is set, ``dest_dir`` must resolve inside it.
+    The argument itself is unchanged.
+
     ``url`` is a STAC JSON URL, or a product filename
     (``2025-05-17-17-43-46_UMBRA-08_GEC.tif``) or acquisition stem
     (``2025-05-17-17-43-46_UMBRA-08``). A filename or stem is resolved through
@@ -1777,6 +2324,8 @@ def download_asset(
     keys listed (``gec, sicd, cphd``, …), not the uppercase product types.
     """
     from ._http import DEFAULT_TIMEOUT, default_session
+    from .download import confine_download_dir
+    from .download import download_asset as _download_asset
 
     if not isinstance(url, str) or not url.strip():
         raise ValueError(
@@ -1785,7 +2334,7 @@ def download_asset(
         )
     if is_asset_name(url):
         try:
-            item = resolve_asset_name(url)
+            item = resolve_asset_name(url, readonly=_public_host())
         except CatalogError as exc:
             raise ValueError(asset_name_error_text(exc)) from exc
     else:
@@ -1818,23 +2367,92 @@ def download_asset(
     if not _cog_streaming_allowed():
         return _public_host_confirmed_download(item, asset, url, dest_dir, href)
 
-    from .download import download_asset as _download_asset
-
-    path = _download_asset(item, asset, dest_dir)
+    path = _download_asset(item, asset, confine_download_dir(dest_dir))
     return {"asset": asset, "path": str(path), "bytes": path.stat().st_size}
 
 
+#: How many context cards a public ``watch_site`` returns. The full match
+#: count is ``new_total``. A global bbox is tens of thousands of cards.
+_PUBLIC_WATCH_ITEM_CAP = 50
+#: Caller-controlled watch names become the ``watch`` field (and, locally,
+#: a meta key). The public host refuses to echo an unbounded one.
+_PUBLIC_WATCH_NAME_MAX = 128
+_PUBLIC_WATCH_NOTE = (
+    "This public host does not store watch state. Matches are reported as "
+    "new and nothing is written, so a later call is not a delta. "
+    f"new_items is capped at {_PUBLIC_WATCH_ITEM_CAP}; new_total is the full match count."
+)
+
+
+class _StatelessWatchStore:
+    """Public-host watch store: every load misses, and save writes nothing.
+
+    A process-wide in-memory map would still grow with caller-chosen names.
+    Discarding the seen-set at the end of the call does not.
+    """
+
+    def load(self, name: str) -> set[str] | None:
+        return None
+
+    def save(self, name: str, keys: set[str]) -> None:
+        return None
+
+
+def _bounded_public_watch_name(name: str) -> str:
+    """Cap a public watch name at :data:`_PUBLIC_WATCH_NAME_MAX` characters."""
+    return name[:_PUBLIC_WATCH_NAME_MAX]
+
+
 def watch_site(
-    place: str | None = None,
-    area: str | None = None,
-    bbox: list[float] | None = None,
-    fuzzy: bool = False,
-    start: str | None = None,
-    end: str | None = None,
-    products: list[str] | None = None,
-    name: str | None = None,
-    reset: bool = False,
-    local: bool | None = None,
+    place: Annotated[
+        str | None,
+        _arg_desc("Free-text place. Geocoded to a bbox only when bbox is omitted."),
+    ] = None,
+    area: Annotated[
+        str | None,
+        _arg_desc("Task-name substring. With fuzzy, a loose token match."),
+    ] = None,
+    bbox: Annotated[
+        list[float] | None,
+        _arg_desc("WGS84 [min_lon, min_lat, max_lon, max_lat]. When set, place is not geocoded."),
+    ] = None,
+    fuzzy: Annotated[
+        bool,
+        _arg_desc("Loose task-name match for area. No model call."),
+    ] = False,
+    start: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date lower bound. Same grammar as search_catalog start."),
+    ] = None,
+    end: Annotated[
+        str | None,
+        _arg_desc("Inclusive acquisition-date upper bound. Same grammar as search_catalog end."),
+    ] = None,
+    products: Annotated[
+        list[str] | None,
+        _arg_desc("Keep items that expose one of these types (GEC, CSI, SIDD, SICD, CPHD)."),
+    ] = None,
+    name: Annotated[
+        str | None,
+        _arg_desc(
+            "Stable watch id. Omit to derive one from the filters. The public host keeps at most "
+            "128 characters."
+        ),
+    ] = None,
+    reset: Annotated[
+        bool,
+        _arg_desc(
+            "True discards the stored baseline and reports every current match as new. Default "
+            "false."
+        ),
+    ] = False,
+    local: Annotated[
+        bool | None,
+        _arg_desc(
+            "True uses only the local index; False forces a live walk. Omit to "
+            "use the index when present. True cannot be combined with a Canopy token."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Report only the acquisitions **new** since the last check of this site.
 
@@ -1861,6 +2479,12 @@ def watch_site(
     search — and the returned ``new_items`` are context cards ready to hand
     straight to ``change_composite`` / ``timescan``, closing the standing-analyst
     loop (new pass → composite → describe) without leaving the conversation.
+
+    On the public host (``umbra serve --public``, COG streaming off) nothing
+    is stored. Every call reports the current matches as new, says so in
+    ``note``, and caps ``new_items`` at 50 (``new_total`` is the full count).
+    The watch name is capped at 128 characters. A local server still persists
+    the baseline in the index.
     """
     # bbox is a 4-element [minx, miny, maxx, maxy]; cast the length-erased
     # ``tuple(...)`` back to the fixed-arity bbox type watch_key expects.
@@ -1872,11 +2496,20 @@ def watch_site(
 
     token = _canopy_token()
     source, is_index = _search_source(local, token=token)
-    # Watch state always lives in the local index's meta table (MetaWatchStore),
-    # so a watch persists across MCP sessions. Reuse the index connection when
-    # the search already opened one; otherwise open the index just for the store
-    # (CatalogIndex creates the DB + meta table on first use).
-    store_index = source if isinstance(source, CatalogIndex) else CatalogIndex(default_index_path())
+    public = _public_host()
+    if public:
+        # Do not open a writable index for the store. A live search has no
+        # index connection; a local search's connection is ``mode=ro``.
+        store_index = source if isinstance(source, CatalogIndex) else None
+        store: Any = _StatelessWatchStore()
+    else:
+        # Watch state lives in the local index's meta table. Reuse the index
+        # connection when the search already opened one; otherwise open the
+        # index just for the store (created on first use).
+        store_index = (
+            source if isinstance(source, CatalogIndex) else CatalogIndex(default_index_path())
+        )
+        store = MetaWatchStore(store_index)
 
     resolved_products = list(products) if products else None
     watch_name = name or watch_key(
@@ -1888,6 +2521,8 @@ def watch_site(
         end=end,
         fuzzy=fuzzy,
     )
+    if public:
+        watch_name = _bounded_public_watch_name(watch_name)
     try:
         # Both backends satisfy SearchSource at runtime (runtime_checkable); the
         # cast bridges mypy's stricter view of the loose ``**kwargs`` protocol.
@@ -1897,7 +2532,7 @@ def watch_site(
             result = watch(
                 cast(SearchSource, source),
                 name=watch_name,
-                store=MetaWatchStore(store_index),
+                store=store,
                 reset=reset,
                 bbox=resolved_bbox,
                 area=area,
@@ -1906,10 +2541,17 @@ def watch_site(
                 start=start,
                 end=end,
             )
+            new_total = len(result.new_items)
+            if public and new_total > _PUBLIC_WATCH_ITEM_CAP:
+                result.new_items = result.new_items[:_PUBLIC_WATCH_ITEM_CAP]
             payload = result.to_dict()
     finally:
-        store_index.close()
+        if store_index is not None:
+            store_index.close()
 
+    if public:
+        payload["new_total"] = new_total
+        payload["note"] = _PUBLIC_WATCH_NOTE
     payload["source"] = _source_label(is_index, bool(token))
     payload["resolved_place"] = resolved_place
     payload["resolved_bbox"] = list(resolved_bbox) if resolved_bbox else None
@@ -1937,11 +2579,28 @@ def _scene_matches_payload(
 
 
 def find_similar(
-    url: str,
-    asset: str = "GEC",
-    top_k: int = 10,
-    min_score: float = 0.0,
-    model: str | None = None,
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id of the scene to match. The public host also accepts a "
+            "filename or stem in the index."
+        ),
+    ],
+    asset: Annotated[
+        str,
+        _arg_desc(
+            "Product whose quicklook is embedded. Default GEC. Match how the scene index was built."
+        ),
+    ] = "GEC",
+    top_k: Annotated[int, _arg_desc("Maximum matches to return. Default 10.")] = 10,
+    min_score: Annotated[
+        float,
+        _arg_desc("Minimum cosine similarity. Default 0. Matches below it are dropped."),
+    ] = 0.0,
+    model: Annotated[
+        str | None,
+        _arg_desc("Embedding model id. Must match the scene index. Omit for the server default."),
+    ] = None,
 ) -> dict[str, Any]:
     """Find archived scenes that **look like** the acquisition at ``url``.
 
@@ -1968,8 +2627,12 @@ def find_similar(
     path = emb.default_scene_embed_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No scene-embedding index at {path}. Build one first with "
-            "'umbra embed build' (image-to-image similarity search needs it)."
+            _with_optional_path(
+                "No scene-embedding index",
+                path,
+                "Build one first with "
+                "'umbra embed build' (image-to-image similarity search needs it).",
+            )
         )
     item = _fetch_item(url)
     embedder = emb.default_image_embedder(model=model)
@@ -1988,10 +2651,25 @@ def find_similar(
 
 
 def find_similar_text(
-    query: str,
-    top_k: int = 10,
-    min_score: float = 0.0,
-    model: str | None = None,
+    query: Annotated[
+        str,
+        _arg_desc(
+            "Plain-language description of the imagery to find, embedded in the same space as the "
+            "scene index."
+        ),
+    ],
+    top_k: Annotated[int, _arg_desc("Maximum matches to return. Default 10.")] = 10,
+    min_score: Annotated[
+        float,
+        _arg_desc("Minimum cosine similarity. Default 0. Matches below it are dropped."),
+    ] = 0.0,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Joint text-and-image model id. Must match the scene index. A dimension mismatch is an "
+            "error."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Find archived scenes matching a plain-language ``query`` over their imagery.
 
@@ -2011,8 +2689,11 @@ def find_similar_text(
     path = emb.default_scene_embed_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"No scene-embedding index at {path}. Build one first with "
-            "'umbra embed build' (text-to-scene search needs it)."
+            _with_optional_path(
+                "No scene-embedding index",
+                path,
+                "Build one first with 'umbra embed build' (text-to-scene search needs it).",
+            )
         )
     with _public_net_slot(long=True):
         text_embedder = emb.default_text_embedder(model=model)
@@ -2038,7 +2719,7 @@ def _baked_previews() -> Callable[[str], BakedPreview | None] | None:
         return None
 
     def lookup(item_id: str) -> BakedPreview | None:
-        with CatalogIndex(path) as index:
+        with _open_index(path) as index:
             return index.get_preview(item_id)
 
     return lookup
@@ -2113,12 +2794,41 @@ def _narrate_kit_text(items: list[UmbraItem], stats: Any, asset: str) -> str:
 
 
 def describe_scene(
-    url: str,
-    asset: str = "GEC",
-    db: bool = True,
-    max_size: int = 1024,
-    model: str | None = None,
-    preview: str = "auto",
+    url: Annotated[
+        str,
+        _arg_desc(
+            "STAC JSON URL or index item id. The public host also accepts a "
+            "product filename or acquisition stem that is in the index."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to picture. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc(
+            "Decibel stretch for a fresh render. Default true. A baked preview is always decibel."
+        ),
+    ] = True,
+    max_size: Annotated[
+        int,
+        _arg_desc(
+            "Longest side in pixels for a fresh render. Default 1024. A baked preview may be "
+            "smaller; the kit says when this was ignored."
+        ),
+    ] = 1024,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Vision model id when this server holds an API key. Omit for the default. Unused on "
+            "the no-key kit path."
+        ),
+    ] = None,
+    preview: Annotated[
+        str,
+        _arg_desc(
+            "auto (default) uses a baked preview when present, else renders. "
+            "baked refuses if none. render always streams a COG and is refused on the public host."
+        ),
+    ] = "auto",
 ) -> dict[str, Any] | list[Any]:
     """Return a SAR-literate reading of the scene at ``url``.
 
@@ -2195,11 +2905,29 @@ def describe_scene(
 
 
 def narrate_change(
-    urls: list[str],
-    asset: str = "GEC",
-    db: bool = False,
-    max_size: int = 1024,
-    model: str | None = None,
+    urls: Annotated[
+        list[str],
+        _arg_desc(
+            "STAC JSON URLs or item ids of at least two passes, in time order. "
+            "Mixed polarizations are refused. The public host refuses this tool."
+        ),
+    ],
+    asset: Annotated[str, _arg_desc("Product to composite and measure. Default GEC.")] = "GEC",
+    db: Annotated[
+        bool,
+        _arg_desc("Decibel stretch for the change picture. Default false."),
+    ] = False,
+    max_size: Annotated[
+        int,
+        _arg_desc("Overview size cap in pixels for the composite. Default 1024."),
+    ] = 1024,
+    model: Annotated[
+        str | None,
+        _arg_desc(
+            "Vision model id when this server holds an API key. Omit for the default. Unused on "
+            "the no-key kit path."
+        ),
+    ] = None,
 ) -> dict[str, Any] | list[Any]:
     """Return a grounded reading of *what changed* between passes.
 
@@ -2245,11 +2973,25 @@ def narrate_change(
 
 
 def stamp_description(
-    reading: dict[str, Any],
-    item_id: str | None = None,
-    asset: str = "GEC",
-    model: str | None = None,
-    image: dict[str, Any] | None = None,
+    reading: Annotated[
+        dict[str, Any],
+        _arg_desc("Client JSON with summary, observed_features, confidence, and caveats."),
+    ],
+    item_id: Annotated[
+        str | None,
+        _arg_desc("Acquisition id to record on the stamped reading. Omit to leave it unset."),
+    ] = None,
+    asset: Annotated[str, _arg_desc("Product the reading describes. Default GEC.")] = "GEC",
+    model: Annotated[
+        str | None,
+        _arg_desc("Model name to record. Default client-kit when omitted."),
+    ] = None,
+    image: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Image record from the describe_scene kit. A smaller baked preview appends a caveat."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Validate a client-produced scene reading and stamp provenance.
 
@@ -2288,11 +3030,25 @@ def stamp_description(
 
 
 def stamp_narration(
-    reading: dict[str, Any],
-    item_ids: list[str] | None = None,
-    asset: str = "GEC",
-    model: str | None = None,
-    change_stats: dict[str, Any] | None = None,
+    reading: Annotated[
+        dict[str, Any],
+        _arg_desc("Client JSON with summary, changes, confidence, and caveats."),
+    ],
+    item_ids: Annotated[
+        list[str] | None,
+        _arg_desc("Acquisition ids the narration covers."),
+    ] = None,
+    asset: Annotated[str, _arg_desc("Product the narration describes. Default GEC.")] = "GEC",
+    model: Annotated[
+        str | None,
+        _arg_desc("Model name to record. Default client-kit when omitted."),
+    ] = None,
+    change_stats: Annotated[
+        dict[str, Any] | None,
+        _arg_desc(
+            "Per-block decibel grid from the narrate_change kit, stored on the stamped object."
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Validate a client-produced change narration and stamp provenance.
 
@@ -2348,8 +3104,11 @@ def main() -> None:
 
 
 #: Tools that only read. Clients use ``readOnlyHint`` to skip an approval
-#: prompt. ``download_asset`` writes a file when ``confirm`` is true.
-#: ``watch_site`` persists a baseline in the catalog index meta table.
+#: prompt. ``download_asset`` writes a file when ``confirm`` is true on a
+#: local server, and can truncate or delete its own ``.part`` / ``.etag``
+#: sidecar. ``watch_site`` replaces the ``watch:<name>`` document in the
+#: catalog index meta table; ``reset=True`` discards the previous baseline.
+#: The public host writes neither, but the hints describe the tool.
 _READ_ONLY_TOOLS = frozenset(
     {
         "search_catalog",
@@ -2385,7 +3144,19 @@ def build_server() -> MCPServer:
 
     from umbra_py import __version__
 
+    from ._mcp_log import ToolCallLog, quiet_tool_failure_text
+
     read_only = ToolAnnotations(read_only_hint=True)
+    # destructive_hint is true because each can replace existing local data:
+    # download_asset unlinks or truncates a ``.part`` / ``.etag``, and
+    # watch_site overwrites the stored baseline (reset drops it outright).
+    # A finished download is not overwritten (overwrite stays false).
+    # idempotent_hint stays unset: a resumed partial download writes more
+    # bytes, and a later watch stores a larger seen-set when the archive grows.
+    writes = ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=True,
+    )
 
     archive_note = (
         " This server is configured with a Canopy token, so search_catalog and "
@@ -2433,6 +3204,12 @@ def build_server() -> MCPServer:
             f"is {DATA_LICENSE}; keep the attribution line with any derived product." + archive_note
         ),
     )
+    # Innermost observer. One JSON line per tools/call; dispatch is unchanged.
+    # The SDK's own "Tool 'name' failed: <text>" line repeats the exception
+    # message; the structured line keeps the class, and that text is replaced
+    # with "<redacted>".
+    quiet_tool_failure_text()
+    server.middleware.append(ToolCallLog())
 
     @server.custom_route("/healthz", methods=["GET"], name="healthz")
     async def _healthz(request: Any) -> Any:
@@ -2474,7 +3251,7 @@ def build_server() -> MCPServer:
         server.add_tool(
             _as_mcp_tool(fn),
             structured_output=False if image_tool else None,
-            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else None,
+            annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else writes,
         )
 
     @server.resource(
@@ -2517,7 +3294,11 @@ def build_server() -> MCPServer:
 
     @server.prompt(
         name="watch-site",
-        description="Standing workflow: report only passes new since last check, then composite.",
+        description=(
+            "Standing workflow: report current matches; this host does not store watch state."
+            if _public_host()
+            else "Standing workflow: report only passes new since last check, then composite."
+        ),
     )
     def watch_site_prompt(place: str, start: str | None = None, end: str | None = None) -> str:
         window = f" between {start} and {end}" if start or end else ""
@@ -2526,11 +3307,21 @@ def build_server() -> MCPServer:
             args += f", start={start!r}"
         if end:
             args += f", end={end!r}"
+        if _public_host():
+            step = (
+                f"1. watch_site({args}) — this public host does not store watch state, "
+                "so the call reports the current matches as new (capped; see note and "
+                "new_total) and writes nothing.\n"
+            )
+        else:
+            step = (
+                f"1. watch_site({args}) — it returns only the acquisitions new since the "
+                "last check (all of them on the first run), persisting state so a later "
+                "re-check reports just the delta.\n"
+            )
         return (
             f"Check '{place}' for newly published passes{window} using the umbra tools:\n"
-            f"1. watch_site({args}) — it returns only the acquisitions new since the "
-            "last check (all of them on the first run), persisting state so a later "
-            "re-check reports just the delta.\n"
+            f"{step}"
             "2. If new_count is 0, report that nothing new has arrived and stop.\n"
             "3. Otherwise pick two or three recent passes of the same polarization "
             "(see each new item's polarization_caveat) and change_composite(urls=[...]) "

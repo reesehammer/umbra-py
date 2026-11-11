@@ -26,25 +26,29 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import hmac
 import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
+import warnings
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from ._geometry import Geometry, geometry_bbox
 from ._http import default_session
 from .catalog import DateLike, UmbraCatalog, _acq_date, _coerce_date
-from .constants import CATALOG_INDEX_DB_URL
+from .constants import CATALOG_INDEX_DB_URL, CATALOG_SHA256_ASSET, INSECURE_INDEX_URL_ENV
 from .exceptions import CatalogError, IndexRefreshError, IndexSchemaError, InsufficientSpaceError
 from .fuzzy import matching_tasks
 from .models import BBox, UmbraItem, _iso_utc, _parse_datetime
@@ -79,10 +83,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: pages. The bytes move in place; the catalog is not rebuilt. Older databases
 #: are migrated in place by :meth:`CatalogIndex._migrate`.
 #:
-#: The bbox R-tree (``items_rtree``) is not a schema version. A published
-#: snapshot stays v8, and an older umbra-py ignores the extra table. This
-#: build creates it on open when the file is writable and searches without
-#: it when it is not.
+#: The bbox R-tree is not part of this schema and is not written into
+#: ``catalog.db``. It lives in a sidecar (``catalog.rtree.db``) built at
+#: ``umbra serve`` startup. A published snapshot stays v8.
 _SCHEMA_VERSION = 8
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
@@ -187,9 +190,19 @@ CREATE INDEX IF NOT EXISTS idx_items_search
     ON items ((task IS NULL), task, acq_date, datetime, id, href);
 """
 
-#: ``meta`` key set once ``items_rtree`` matches ``items``. Absent or not
-#: ``1`` means the next writable open rebuilds the tree.
-_ITEMS_RTREE_META = "items_rtree"
+#: Sidecar layout. Bump when the file's columns change so an older sidecar is
+#: rebuilt instead of queried.
+_RTREE_FORMAT = "1"
+#: Schema name of the ATTACH. Not ``rtree``: that is the virtual-table module.
+_RTREE_SCHEMA = "spatial"
+#: ``UMBRA_RTREE_DB`` is the sidecar file. ``UMBRA_RTREE_CACHE`` is a directory
+#: used when the catalog's own directory cannot be written.
+_RTREE_DB_ENV = "UMBRA_RTREE_DB"
+_RTREE_CACHE_ENV = "UMBRA_RTREE_CACHE"
+#: Rows with a bbox, so a NULL footprint does not enter the coordinate sums.
+_BBOX_PRESENT = (
+    "min_lon IS NOT NULL AND min_lat IS NOT NULL AND max_lon IS NOT NULL AND max_lat IS NOT NULL"
+)
 
 # Overlap, not containment: an item matches when its footprint rectangle
 # intersects the query rectangle, the same test as ``intersects_bbox``.
@@ -198,41 +211,9 @@ _ITEMS_RTREE_META = "items_rtree"
 _RTREE_OVERLAP = "min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?"
 _RTREE_OVERLAP_ALIASED = "r.min_lon <= ? AND r.max_lon >= ? AND r.min_lat <= ? AND r.max_lat >= ?"
 
-_RTREE_FILL = (
-    "INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat) "
-    "SELECT rowid, min_lon, max_lon, min_lat, max_lat FROM items "
-    "WHERE min_lon IS NOT NULL AND min_lat IS NOT NULL "
-    "AND max_lon IS NOT NULL AND max_lat IS NOT NULL"
-)
-
-_RTREE_TRIGGERS = (
-    """
-    CREATE TRIGGER items_rtree_ai AFTER INSERT ON items
-    WHEN NEW.min_lon IS NOT NULL AND NEW.min_lat IS NOT NULL
-     AND NEW.max_lon IS NOT NULL AND NEW.max_lat IS NOT NULL
-    BEGIN
-      INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat)
-      VALUES (NEW.rowid, NEW.min_lon, NEW.max_lon, NEW.min_lat, NEW.max_lat);
-    END
-    """,
-    """
-    CREATE TRIGGER items_rtree_au
-    AFTER UPDATE OF min_lon, min_lat, max_lon, max_lat ON items
-    BEGIN
-      DELETE FROM items_rtree WHERE id = NEW.rowid;
-      INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat)
-      SELECT NEW.rowid, NEW.min_lon, NEW.max_lon, NEW.min_lat, NEW.max_lat
-      WHERE NEW.min_lon IS NOT NULL AND NEW.min_lat IS NOT NULL
-        AND NEW.max_lon IS NOT NULL AND NEW.max_lat IS NOT NULL;
-    END
-    """,
-    """
-    CREATE TRIGGER items_rtree_ad AFTER DELETE ON items
-    BEGIN
-      DELETE FROM items_rtree WHERE id = OLD.rowid;
-    END
-    """,
-)
+#: (sidecar path, catalog size, catalog mtime_ns) already shown to describe the
+#: same footprints. A serving connection can then skip the bbox scan.
+_RTREE_STAT_OK: set[tuple[str, int, int]] = set()
 
 
 #: Schema of the *thumbnail sidecar* -- the transportable half of the baked
@@ -284,7 +265,7 @@ def _rtree_params(box: BBox) -> list[object]:
 def _column_overlap(prefix: str = "") -> str:
     """Bbox overlap against ``items`` columns, for a search that has no R-tree.
 
-    ``prefix`` is ``"i."`` when the statement also names ``items_rtree``,
+    ``prefix`` is ``"i."`` when the statement also names the attached R-tree,
     whose columns would otherwise make ``min_lon`` ambiguous.
     """
     return (
@@ -483,11 +464,23 @@ def default_thumbs_path(index_path: str | os.PathLike | None = None) -> Path:
     return base.with_name(f"{base.stem}.thumbs.db")
 
 
+def default_rtree_path(index_path: str | os.PathLike | None = None) -> Path:
+    """Where the bbox R-tree sidecar lives beside the index.
+
+    ``catalog.db`` -> ``catalog.rtree.db``, the same split as
+    :func:`default_thumbs_path`. The file is built locally. It is not part of
+    the published snapshot and ``catalog.sha256`` does not list it.
+    """
+    base = Path(index_path) if index_path is not None else default_index_path()
+    return base.with_name(f"{base.stem}.rtree.db")
+
+
 def fetch_prebuilt_thumbnails(
     dest: str | os.PathLike | None = None,
     *,
     url: str | None = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> Path:
     """Download the published baked-thumbnail sidecar.
 
@@ -507,6 +500,8 @@ def fetch_prebuilt_thumbnails(
     existing file. ``url`` overrides the release asset location (a sidecar, or
     a ``catalog.thumbs.manifest.json``).
     """
+    if url is not None:
+        url = require_index_https(url, insecure=insecure)
     sess = default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -628,19 +623,252 @@ class RefreshResult:
     #: Stale scratch files an earlier refresh left behind and this one removed
     #: before downloading (file name -> bytes freed).
     cleaned: dict[str, int] = field(default_factory=dict)
+    #: ``verified`` when ``catalog.sha256`` matched the download, ``unverified``
+    #: when that release has no manifest, ``None`` when nothing was downloaded.
+    integrity: str | None = None
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+#: A sha256 manifest is a short text file. Anything larger is not one.
+_MANIFEST_MAX_BYTES = 1 << 20
+
+
+def require_index_https(url: str, *, insecure: bool = False) -> str:
+    """Return ``url`` when it is https, or when the insecure opt-out is set.
+
+    The opt-out is ``insecure=True`` (the ``--insecure-url`` flag) or the
+    environment variable :data:`~umbra_py.constants.INSECURE_INDEX_URL_ENV`.
+    ``UMBRA_INDEX_URL`` reaches this check because the container passes it as
+    ``--url``.
+    """
+    cleaned = url.strip()
+    scheme = urlsplit(cleaned).scheme.lower()
+    opted_out = insecure or os.environ.get(INSECURE_INDEX_URL_ENV, "").strip().lower() in _TRUTHY
+    if scheme == "https" or (opted_out and scheme):
+        return cleaned
+    raise IndexRefreshError(
+        f"Refusing index URL {cleaned!r}: catalog snapshots must be fetched over https. "
+        "Pass --insecure-url or set UMBRA_INSECURE_INDEX_URL=1 to override."
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_manifest_url(asset_url: str) -> str:
+    """Sibling ``catalog.sha256`` URL for a release asset URL.
+
+    The query string is kept, so a presigned ``catalog.db`` URL still carries
+    its parameters on the sibling. The fragment is dropped.
+    """
+    parts = urlsplit(asset_url.strip())
+    base, sep, _name = parts.path.rpartition("/")
+    if not sep or not parts.scheme:
+        raise IndexRefreshError(f"Index URL {asset_url!r} has no asset name to check.")
+    return urlunsplit(
+        (parts.scheme, parts.netloc, f"{base}/{CATALOG_SHA256_ASSET}", parts.query, "")
+    )
+
+
+def _asset_name_from_url(asset_url: str) -> str:
+    name = urlsplit(asset_url.strip()).path.rstrip("/").rsplit("/", 1)[-1]
+    if not name:
+        raise IndexRefreshError(f"Index URL {asset_url!r} has no asset name to check.")
+    return name
+
+
+def parse_sha256_manifest(text: str) -> dict[str, str]:
+    """Parse a GNU ``sha256sum`` manifest into ``{filename: hex}``.
+
+    Names are basenames. A slash, a backslash, or a leading dot is rejected.
+    """
+    found: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        digest, sep, rest = line.partition(" ")
+        if not sep or not rest:
+            raise IndexRefreshError(f"sha256 manifest line is not 'digest filename': {raw!r}")
+        name = rest.lstrip(" ")
+        if name.startswith("*"):
+            name = name[1:]
+        name = name.strip()
+        if len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest):
+            raise IndexRefreshError(f"sha256 manifest digest is not 64 hex digits: {raw!r}")
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            raise IndexRefreshError(f"sha256 manifest filename is not a basename: {name!r}")
+        found[name] = digest.lower()
+    if not found:
+        raise IndexRefreshError("sha256 manifest is empty.")
+    return found
+
+
+def write_release_manifest(dest: str | os.PathLike, paths: Iterable[str | os.PathLike]) -> None:
+    """Write a GNU sha256sum file of ``paths`` (basenames) for the catalog release.
+
+    The publish workflow uploads this as ``catalog.sha256`` before clients can
+    see the new ``catalog.db``. The catalog.db digest is what the attest job
+    publishes; this client checks the manifest, not that signature.
+    """
+    lines: list[str] = []
+    for raw in paths:
+        path = Path(raw)
+        lines.append(f"{_sha256_file(path)}  {path.name}\n")
+    if not lines:
+        raise IndexRefreshError("No files to hash for the release manifest.")
+    Path(dest).write_text("".join(lines), encoding="utf-8")
+
+
+def _read_capped(resp: Any, limit: int) -> bytes:
+    buf = bytearray()
+    for chunk in resp.iter_content(65536):
+        if not chunk:
+            continue
+        buf += chunk
+        if len(buf) > limit:
+            raise IndexRefreshError(f"sha256 manifest exceeds {limit} bytes.")
+    return bytes(buf)
+
+
+def _verify_release_sha256(sess: Any, asset_url: str, path: Path) -> str:
+    """Check ``path`` against the release sha256 manifest.
+
+    Returns ``verified`` or ``unverified``. HTTP 403, 404, and 410 mean the
+    manifest is missing: a warning is issued and the snapshot is still
+    accepted. Any other failure raises :class:`IndexRefreshError`. A manifest
+    that is present but does not match raises too.
+    """
+    manifest_url = sha256_manifest_url(asset_url)
+    try:
+        resp = sess.get(manifest_url, timeout=60, stream=True)
+    except Exception as exc:
+        raise IndexRefreshError(
+            f"Could not fetch the sha256 manifest {manifest_url!r}: {exc}"
+        ) from exc
+    try:
+        if resp.status_code in (403, 404, 410):
+            warnings.warn(
+                f"No sha256 manifest at {manifest_url} (HTTP {resp.status_code}); "
+                f"{path.name} was not integrity-checked. A missing catalog.sha256 "
+                "is accepted.",
+                stacklevel=3,
+            )
+            return "unverified"
+        try:
+            resp.raise_for_status()
+        except Exception as exc:
+            raise IndexRefreshError(
+                f"Could not fetch the sha256 manifest {manifest_url!r}: {exc}"
+            ) from exc
+        body = _read_capped(resp, _MANIFEST_MAX_BYTES)
+    finally:
+        resp.close()
+    try:
+        listing = parse_sha256_manifest(body.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise IndexRefreshError(f"sha256 manifest {manifest_url!r} is not utf-8 text.") from exc
+    name = _asset_name_from_url(asset_url)
+    expected = listing.get(name)
+    if expected is None:
+        raise IndexRefreshError(f"sha256 manifest {manifest_url!r} does not list {name}.")
+    actual = _sha256_file(path)
+    if not hmac.compare_digest(actual, expected):
+        raise IndexRefreshError(
+            f"sha256 mismatch for {name}: manifest {expected}, downloaded file {actual}."
+        )
+    return "verified"
+
+
+def _enable_sqlite_defensive(conn: sqlite3.Connection) -> None:
+    """Turn on ``SQLITE_DBCONFIG_DEFENSIVE`` when this Python provides it.
+
+    The flag and :meth:`sqlite3.Connection.setconfig` arrived in Python 3.12.
+    On 3.10 and 3.11 the call is skipped; ``PRAGMA trusted_schema=OFF`` and
+    ``mode=ro`` still apply.
+    """
+    flag = getattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", None)
+    setconfig = getattr(conn, "setconfig", None)
+    if flag is None or not callable(setconfig):
+        return
+    setconfig(flag, True)
+
+
+def _open_untrusted_snapshot(path: Path) -> sqlite3.Connection:
+    """Open a downloaded SQLite file read-only, without trusting its schema."""
+    conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
+    _enable_sqlite_defensive(conn)
+    conn.execute("PRAGMA trusted_schema = OFF")
+    return conn
+
+
+@lru_cache(maxsize=2)
+def _schema_object_names(schema_sql: str) -> frozenset[tuple[str, str]]:
+    """``(type, name)`` rows SQLite records for a database built from ``schema_sql``.
+
+    Running the schema is what names ``sqlite_autoindex_*`` the same way a real
+    file does, so the allowlist cannot drift from :data:`_SCHEMA`.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(schema_sql)
+        rows = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
+    finally:
+        conn.close()
+    return frozenset((str(typ), str(name)) for typ, name in rows)
+
+
+def _reject_unexpected_objects(conn: sqlite3.Connection, schema_sql: str, path: Path) -> None:
+    """Refuse triggers, views, and any object the schema does not create.
+
+    Missing objects are allowed (an older snapshot this build can still open).
+    Anything else is not.
+    """
+    allowed = _schema_object_names(schema_sql)
+    unexpected = [
+        f"{typ} {name}"
+        for typ, name in conn.execute("SELECT type, name FROM sqlite_master")
+        if (str(typ), str(name)) not in allowed
+    ]
+    if not unexpected:
+        return
+    shown = sorted(unexpected)[:20]
+    detail = ", ".join(shown)
+    extra = len(unexpected) - len(shown)
+    if extra:
+        detail += f" (+{extra} more)"
+    raise IndexRefreshError(f"Downloaded snapshot {path} has unexpected sqlite objects ({detail}).")
 
 
 def _validate_snapshot(path: Path) -> tuple[int, str | None]:
     """Open a downloaded snapshot and prove it is a usable index.
 
+    The file is opened ``mode=ro`` with ``trusted_schema`` off and, on Python
+    3.12+, SQLite's defensive flag. Triggers, views, and any other object
+    outside :data:`_SCHEMA` are rejected.
+
     Raises :class:`IndexRefreshError` on a corrupt file, a schema this build
-    cannot read, or an empty items table. Returns ``(rows, built_at)``.
+    cannot read, an unexpected object, or an empty items table. Returns
+    ``(rows, built_at)``.
     """
     try:
-        conn = sqlite3.connect(str(path))
+        conn = _open_untrusted_snapshot(path)
         try:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if check != "ok":
+                raise IndexRefreshError(f"Downloaded snapshot {path} failed quick_check: {check}")
+            if version > _SCHEMA_VERSION:
+                raise IndexRefreshError(
+                    f"Downloaded snapshot has schema version {version}; this umbra-py reads "
+                    f"up to {_SCHEMA_VERSION}. Upgrade umbra-py before refreshing."
+                )
+            _reject_unexpected_objects(conn, _SCHEMA, path)
             rows = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
             row = conn.execute("SELECT value FROM meta WHERE key = 'built_at'").fetchone()
         finally:
@@ -649,13 +877,6 @@ def _validate_snapshot(path: Path) -> tuple[int, str | None]:
         raise IndexRefreshError(
             f"Downloaded snapshot {path} is not a readable index: {exc}"
         ) from exc
-    if check != "ok":
-        raise IndexRefreshError(f"Downloaded snapshot {path} failed quick_check: {check}")
-    if version > _SCHEMA_VERSION:
-        raise IndexRefreshError(
-            f"Downloaded snapshot has schema version {version}; this umbra-py reads "
-            f"up to {_SCHEMA_VERSION}. Upgrade umbra-py before refreshing."
-        )
     if rows <= 0:
         raise IndexRefreshError(f"Downloaded snapshot {path} has no items.")
     return rows, (row[0] if row else None)
@@ -797,7 +1018,7 @@ def _clean_leftovers(path: Path) -> dict[str, int]:
 def _index_rows(path: Path) -> int | None:
     """``COUNT(*)`` of an index's items, or ``None`` when it cannot be read at all."""
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
         try:
             return conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         finally:
@@ -814,6 +1035,7 @@ def refresh_from_release(
     min_ratio: float = 0.5,
     session: Any = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> RefreshResult:
     """Replace the index with the published snapshot only when it changed.
 
@@ -825,6 +1047,15 @@ def refresh_from_release(
     it if it has fewer than ``min_ratio`` of the current index's rows (a
     truncated or broken rebuild should not silently shrink a serving index),
     then swap it in with an atomic ``os.replace`` and record the new identity.
+
+    After the download, the sibling ``catalog.sha256`` manifest is fetched.
+    A matching digest is ``integrity="verified"``. HTTP 403, 404, and 410 (no
+    manifest) warn and still accept the file (``integrity="unverified"``), so
+    a boot ``umbra index fetch --if-changed`` keeps working against a release
+    that has not published one. A manifest that is present but does not match
+    raises, and the previous index stays. ``url`` must be https unless
+    ``insecure`` or ``UMBRA_INSECURE_INDEX_URL`` is set. The manifest URL keeps
+    the asset URL's query string.
 
     An unchanged snapshot is still re-downloaded when the current file cannot
     be read at all (reason ``"unreadable"``), so a volume that once filled up
@@ -847,7 +1078,7 @@ def refresh_from_release(
     sess = session or default_session()
     dest = Path(path) if path is not None else default_index_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src = url or CATALOG_INDEX_DB_URL
+    src = require_index_https(url or CATALOG_INDEX_DB_URL, insecure=insecure)
     with _refresh_lock(dest):
         cleaned = _clean_leftovers(dest)
         etag, last_modified, length = _head_snapshot(sess, src)
@@ -864,6 +1095,7 @@ def refresh_from_release(
         staging = dest.with_name(dest.name + ".next")
         try:
             download_url(src, staging, overwrite=True, session=sess, progress=progress)
+            integrity = _verify_release_sha256(sess, src, staging)
             rows, built_at = _validate_snapshot(staging)
             if current and not force and rows < current * min_ratio:
                 raise IndexRefreshError(
@@ -893,7 +1125,9 @@ def refresh_from_release(
         reason = "unreadable"
     else:
         reason = "changed"
-    return RefreshResult(dest, True, etag, last_modified, rows, built_at, reason, cleaned)
+    return RefreshResult(
+        dest, True, etag, last_modified, rows, built_at, reason, cleaned, integrity
+    )
 
 
 #: Index ``meta`` key naming the sidecar snapshot last merged into it, so
@@ -903,11 +1137,16 @@ THUMBS_SNAPSHOT_META_KEY = "thumbs_snapshot"
 
 
 def _validate_thumbs_sidecar(path: Path) -> int:
-    """Prove a downloaded ``catalog.thumbs.db`` is a readable, non-empty sidecar."""
+    """Prove a downloaded ``catalog.thumbs.db`` is a readable, non-empty sidecar.
+
+    Same read-only, untrusted open as :func:`_validate_snapshot`, allowlisted
+    to :data:`_THUMBS_SCHEMA`.
+    """
     try:
-        conn = sqlite3.connect(str(path))
+        conn = _open_untrusted_snapshot(path)
         try:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
+            _reject_unexpected_objects(conn, _THUMBS_SCHEMA, path)
             rows = conn.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0]
         finally:
             conn.close()
@@ -1090,6 +1329,7 @@ def refresh_thumbnails_from_release(
     force: bool = False,
     session: Any = None,
     progress: Callable[[int, int | None], None] | None = None,
+    insecure: bool = False,
 ) -> RefreshResult:
     """Replace the thumbnail sidecar with the published one only when it changed.
 
@@ -1118,6 +1358,8 @@ def refresh_thumbnails_from_release(
     This only refreshes the file; :func:`merge_thumbnails_atomically` merges
     it into an index.
     """
+    if url is not None:
+        url = require_index_https(url, insecure=insecure)
     sess = session or default_session()
     target = Path(dest) if dest is not None else default_thumbs_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1559,7 +1801,9 @@ def _asset_name_strings(item: UmbraItem) -> list[str]:
     return found
 
 
-def resolve_asset_name(name: str, *, path: str | os.PathLike | None = None) -> UmbraItem:
+def resolve_asset_name(
+    name: str, *, path: str | os.PathLike | None = None, readonly: bool = False
+) -> UmbraItem:
     """Resolve one product filename or acquisition stem via the local index.
 
     ``name`` is a GEC/SICD (or other product) filename such as
@@ -1582,11 +1826,13 @@ def resolve_asset_name(name: str, *, path: str | os.PathLike | None = None) -> U
         )
     db = Path(path) if path is not None else default_index_path()
     if not db.is_file():
+        # A public host passes ``readonly`` and must not echo the server path.
+        where = "" if readonly else f" at {db}"
         raise CatalogError(
-            f"No local catalog index at {db}.",
+            f"No local catalog index{where}.",
             hint="Fetch the weekly snapshot with 'umbra index fetch', then retry.",
         )
-    with CatalogIndex(db) as index:
+    with CatalogIndex(db, readonly=readonly) as index:
         matches = index.find_by_asset_name(name)
     if not matches:
         raise CatalogError(
@@ -1614,6 +1860,17 @@ def asset_name_error_text(exc: CatalogError) -> str:
     return str(exc)
 
 
+def _sqlite_ro_uri(path: Path) -> str:
+    """SQLite URI that opens ``path`` with ``mode=ro``.
+
+    ``quote`` percent-encodes ``#`` and ``%``, so a snapshot path that contains
+    either still opens. The connection cannot create the file or write it. A
+    later ``INSERT`` / ``UPDATE`` raises ``sqlite3.OperationalError`` rather
+    than persisting.
+    """
+    return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
+
+
 class CatalogIndex:
     """A local SQLite index of Umbra acquisitions.
 
@@ -1625,20 +1882,36 @@ class CatalogIndex:
             index.build(area="centerfield")          # walk S3 once, persist
             for item in index.search(area="centerfield"):  # local, instant
                 print(item.summary())
+
+    ``readonly=True`` opens an existing file with ``mode=ro`` and does not
+    migrate, relocate previews, or create the file. That is the public host's
+    serving connection: a write through it fails instead of changing the
+    shared snapshot. ``umbra index fetch`` and other maintenance opens stay
+    writable (the default).
     """
 
-    def __init__(self, path: str | os.PathLike | None = None) -> None:
+    def __init__(self, path: str | os.PathLike | None = None, *, readonly: bool = False) -> None:
         self.path = Path(path) if path is not None else default_index_path()
+        self.readonly = readonly
+        self._spatial_ready = False
+        if readonly:
+            if not self.path.is_file():
+                raise FileNotFoundError(
+                    "No local catalog index is available. Fetch the published snapshot with "
+                    "'umbra index fetch', or build one with 'umbra index build'."
+                )
+            self._conn = sqlite3.connect(_sqlite_ro_uri(self.path), uri=True)
+            self._configure_connection()
+            self._require_readable_schema()
+            # A sidecar built at startup. This open does not create it and
+            # does not write ``catalog.db``.
+            self._attach_spatial_index()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
-        self._spatial_ready = False
         self._configure_connection()
         self._init_schema()
-        # A published snapshot has no R-tree. Build it on this open when the
-        # file is writable so a bbox search does not scan every GEC row.
-        # Read-only opens leave ``_spatial_ready`` false and keep the old
-        # predicate, which is slower and still correct.
-        self._ensure_spatial_index()
+        self._attach_spatial_index()
         # Small indexes move previews before the caller runs a query. A hosted
         # catalog.db (gigabytes of inline PNGs) only records that the move is
         # still owed, so this open does not read the blobs.
@@ -1723,58 +1996,64 @@ class CatalogIndex:
         self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self._conn.commit()
 
-    def _spatial_index_ready(self) -> bool:
-        """Whether ``items_rtree`` is present and filled for this file."""
-        if self.get_meta(_ITEMS_RTREE_META) != "1":
-            return False
-        row = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items_rtree'"
-        ).fetchone()
-        return row is not None
+    def _require_readable_schema(self) -> None:
+        """Refuse a read-only open that would need a migration or a repair.
 
-    def _ensure_spatial_index(self) -> None:
-        """Create ``items_rtree`` and keep it aligned with ``items``.
-
-        GEC is on almost every acquisition, so a product filter makes SQLite
-        probe every asset row and sort before ``LIMIT``. The R-tree is the
-        outer loop instead: a bbox search reads the footprints that overlap
-        the box. Triggers cover later inserts, bbox updates, and deletes,
-        including ones this class does not issue itself.
-
-        A read-only file, or one this connection cannot lock, is left alone.
+        The writable open migrates in place. A serving connection must not:
+        the public snapshot is already at :data:`_SCHEMA_VERSION`, and a
+        write here would change the file every request shares. The error
+        names the version and not the filesystem path.
         """
-        if self._spatial_index_ready():
-            self._spatial_ready = True
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        names = {row[0] for row in self._conn.execute("SELECT name FROM sqlite_master")}
+        if (
+            version == _SCHEMA_VERSION
+            and "item_thumbnails" in names
+            and "idx_items_search" in names
+        ):
             return
+        self._conn.close()
+        raise IndexSchemaError(
+            f"Catalog index has schema version {version}, but this umbra-py "
+            f"supports version {_SCHEMA_VERSION} and cannot migrate a read-only "
+            "index. Rebuild it with 'umbra index build' or refetch with "
+            "'umbra index fetch' before serving it."
+        )
+
+    def _attach_spatial_index(self) -> None:
+        """ATTACH a matching R-tree sidecar read-only, or leave search on the columns.
+
+        Does not create the sidecar and does not write this database. A missing,
+        stale, or unreadable file is a warning at the caller's layer only when
+        building; here a miss is the normal case for an index nobody has
+        prepared, so it stays quiet.
+        """
+        self._spatial_ready = False
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError:
-            return
-        try:
-            if self._spatial_index_ready():
-                self._conn.rollback()
-                self._spatial_ready = True
+            names = {row[1] for row in self._conn.execute("PRAGMA database_list")}
+            if _RTREE_SCHEMA in names:
+                self._conn.execute(f"DETACH DATABASE {_RTREE_SCHEMA}")
+            path = _matching_sidecar(self.path, self._conn, trust_stat=self.readonly)
+            if path is None:
                 return
-            for name in ("items_rtree_ai", "items_rtree_au", "items_rtree_ad"):
-                self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-            self._conn.execute("DROP TABLE IF EXISTS items_rtree")
             self._conn.execute(
-                "CREATE VIRTUAL TABLE items_rtree USING rtree("
-                "id, min_lon, max_lon, min_lat, max_lat)"
+                f"ATTACH DATABASE ? AS {_RTREE_SCHEMA}",
+                (_sqlite_ro_uri(path),),
             )
-            for statement in _RTREE_TRIGGERS:
-                self._conn.execute(statement)
-            self._conn.execute(_RTREE_FILL)
-            count = self._conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()[0]
-            self.set_meta(_ITEMS_RTREE_META, "1")
-            self._conn.commit()
-            self._spatial_ready = True
-            _log.info("Built the search R-tree (%s footprints) in %s", count, self.path)
-        except sqlite3.OperationalError:
+            self._conn.execute(f"SELECT 1 FROM {_RTREE_SCHEMA}.items_rtree LIMIT 1").fetchone()
+        except sqlite3.Error as exc:
+            _log.warning(
+                "Search R-tree was not attached for %s (%s). Bbox search will "
+                "scan the catalog columns.",
+                self.path,
+                exc,
+            )
             try:
-                self._conn.rollback()
-            except sqlite3.OperationalError:
+                self._conn.execute(f"DETACH DATABASE {_RTREE_SCHEMA}")
+            except sqlite3.Error:
                 pass
+            return
+        self._spatial_ready = True
 
     def _migrate(self) -> None:
         """Apply additive, idempotent migrations to reach the current schema.
@@ -1929,6 +2208,7 @@ class CatalogIndex:
         *,
         url: str | None = None,
         progress: Callable[[int, int | None], None] | None = None,
+        insecure: bool = False,
     ) -> CatalogIndex:
         """Download the published prebuilt index and open it.
 
@@ -1946,7 +2226,15 @@ class CatalogIndex:
 
         dest = Path(path) if path is not None else default_index_path()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        download_url(url or CATALOG_INDEX_DB_URL, dest, overwrite=True, progress=progress)
+        src = require_index_https(url or CATALOG_INDEX_DB_URL, insecure=insecure)
+        sess = default_session()
+        download_url(src, dest, overwrite=True, session=sess, progress=progress)
+        try:
+            _verify_release_sha256(sess, src, dest)
+            _validate_snapshot(dest)
+        except IndexRefreshError:
+            dest.unlink(missing_ok=True)
+            raise
         return cls(dest)
 
     # -- lifecycle -------------------------------------------------------------
@@ -1957,6 +2245,32 @@ class CatalogIndex:
     def close(self) -> None:
         self._conn.commit()
         self._conn.close()
+
+    def arm_query_cancel(self, cancelled: threading.Event) -> None:
+        """Abort the running statement once ``cancelled`` is set.
+
+        ``interrupt`` is forgotten when no statement is running, so a deadline
+        that fires before the query starts would not stick. The progress
+        handler re-checks the flag. The server arms this on the worker that
+        owns the connection and calls :meth:`interrupt_query` from the event
+        loop when the request deadline passes.
+        """
+        conn = self._conn
+
+        def _progress() -> int:
+            return 1 if cancelled.is_set() else 0
+
+        conn.set_progress_handler(_progress, 1000)
+        if cancelled.is_set():
+            conn.interrupt()
+
+    def disarm_query_cancel(self) -> None:
+        """Remove the progress handler so commit is not aborted with the query."""
+        self._conn.set_progress_handler(None, 0)
+
+    def interrupt_query(self) -> None:
+        """Abort the statement on this connection. Safe to call from another thread."""
+        self._conn.interrupt()
 
     def __enter__(self) -> CatalogIndex:
         return self
@@ -2588,6 +2902,21 @@ class CatalogIndex:
 
     # -- querying --------------------------------------------------------------
 
+    def has_matching_task(self, area: str, *, fuzzy: bool = False) -> bool:
+        """Whether ``area`` would select at least one indexed task.
+
+        The same filter as :meth:`search` (substring, or the fuzzy token
+        match), stopped at the first row. Closing the generator finishes
+        the SQL cursor before the caller's own search runs.
+        """
+        stream = self.search(area=area, fuzzy=fuzzy, limit=1)
+        try:
+            return next(stream, None) is not None
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
     def search(
         self,
         *,
@@ -2634,11 +2963,11 @@ class CatalogIndex:
         written when the index is linked; an unlinked row defaults to
         canonical. See :mod:`umbra_py.duplicates`.
 
-        A bbox (or the bbox of ``intersects``) is answered from ``items_rtree``
-        when that table is present. ``CROSS JOIN`` is not reordered, so the
-        R-tree stays the outer loop even when a product filter matches almost
-        every row. Without the table, the same overlap predicate runs against
-        the ``items`` columns.
+        A bbox (or the bbox of ``intersects``) is answered from the attached
+        ``catalog.rtree.db`` sidecar when that file matches this catalog.
+        ``CROSS JOIN`` is not reordered, so the R-tree stays the outer loop
+        even when a product filter matches almost every row. Without the
+        sidecar, the same overlap predicate runs against the ``items`` columns.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -2735,7 +3064,7 @@ class CatalogIndex:
             sql = (
                 f"SELECT {prefix}href, {prefix}doc, {prefix}place, "
                 f"{prefix}datetime_suspect, {prefix}created, {prefix}published "
-                "FROM items_rtree AS r CROSS JOIN items AS i ON i.rowid = r.id "
+                f"FROM {_RTREE_SCHEMA}.items_rtree AS r CROSS JOIN items AS i ON i.rowid = r.id "
                 f"WHERE {_RTREE_OVERLAP_ALIASED}"
             )
             if where:
@@ -2986,7 +3315,9 @@ class CatalogIndex:
             params.append(f"%{_escape_like(area.lower())}%")
         if bbox:
             if self._spatial_ready:
-                conditions.append(f"rowid IN (SELECT id FROM items_rtree WHERE {_RTREE_OVERLAP})")
+                conditions.append(
+                    f"rowid IN (SELECT id FROM {_RTREE_SCHEMA}.items_rtree WHERE {_RTREE_OVERLAP})"
+                )
                 params += _rtree_params(bbox)
             else:
                 conditions.append(_column_overlap())
@@ -3550,19 +3881,383 @@ class CatalogIndex:
         return (start, end)
 
 
-def prepare_search_index(path: str | os.PathLike | None = None) -> None:
-    """Build the bbox R-tree and read it once, before a server reports ready.
+def _catalog_snapshot_key(catalog: Path) -> str:
+    """The snapshot id ``/healthz`` reports, or ``""`` when none is recorded."""
+    return snapshot_id(read_snapshot_state(catalog)) or ""
+
+
+def _meta_int(meta: dict[str, str], key: str) -> int | None:
+    raw = meta.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _bbox_fingerprint(conn: sqlite3.Connection, schema: str = "") -> tuple[int, int, int, int, int]:
+    """Rowid sum and microdegree sums of every footprint.
+
+    Columns sit before the preview blob, so this does not read PNG overflow.
+    A write-ahead edit that leaves ``catalog.db``'s size and mtime alone still
+    changes the sums.
+    """
+    table = f"{schema}.items" if schema else "items"
+    scaled = ", ".join(
+        f"COALESCE(SUM(CASE WHEN {_BBOX_PRESENT} "
+        f"THEN CAST(ROUND({column} * 1000000) AS INTEGER) ELSE 0 END), 0)"
+        for column in ("min_lon", "min_lat", "max_lon", "max_lat")
+    )
+    row = conn.execute(f"SELECT COALESCE(SUM(rowid), 0), {scaled} FROM {table}").fetchone()
+    assert row is not None
+    rowid_sum, min_lon_u, min_lat_u, max_lon_u, max_lat_u = (int(value) for value in row)
+    return (rowid_sum, min_lon_u, min_lat_u, max_lon_u, max_lat_u)
+
+
+@dataclass(frozen=True)
+class _RtreeIdentity:
+    """What a sidecar claims it was built from."""
+
+    snapshot: str
+    item_count: int
+    catalog_size: int
+    catalog_mtime_ns: int
+    rowid_sum: int
+    min_lon_u: int
+    min_lat_u: int
+    max_lon_u: int
+    max_lat_u: int
+
+    def as_meta(self) -> dict[str, str]:
+        raw: dict[str, object] = {
+            "format": _RTREE_FORMAT,
+            "snapshot": self.snapshot,
+            "item_count": self.item_count,
+            "catalog_size": self.catalog_size,
+            "catalog_mtime_ns": self.catalog_mtime_ns,
+            "rowid_sum": self.rowid_sum,
+            "min_lon_u": self.min_lon_u,
+            "min_lat_u": self.min_lat_u,
+            "max_lon_u": self.max_lon_u,
+            "max_lat_u": self.max_lat_u,
+        }
+        return {key: str(value) for key, value in raw.items()}
+
+
+def _read_identity(conn: sqlite3.Connection, catalog: Path, schema: str = "") -> _RtreeIdentity:
+    table = f"{schema}.items" if schema else "items"
+    count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    rowid_sum, min_lon_u, min_lat_u, max_lon_u, max_lat_u = _bbox_fingerprint(conn, schema)
+    st = catalog.stat()
+    return _RtreeIdentity(
+        snapshot=_catalog_snapshot_key(catalog),
+        item_count=count,
+        catalog_size=int(st.st_size),
+        catalog_mtime_ns=int(st.st_mtime_ns),
+        rowid_sum=rowid_sum,
+        min_lon_u=min_lon_u,
+        min_lat_u=min_lat_u,
+        max_lon_u=max_lon_u,
+        max_lat_u=max_lat_u,
+    )
+
+
+def _read_sidecar_meta(path: Path) -> dict[str, str] | None:
+    try:
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            rows = conn.execute("SELECT key, value FROM meta").fetchall()
+        except sqlite3.Error:
+            return None
+    finally:
+        conn.close()
+    return {str(key): str(value) for key, value in rows}
+
+
+def _fingerprint_matches(meta: dict[str, str], conn: sqlite3.Connection) -> bool:
+    current = _bbox_fingerprint(conn)
+    stored = (
+        _meta_int(meta, "rowid_sum"),
+        _meta_int(meta, "min_lon_u"),
+        _meta_int(meta, "min_lat_u"),
+        _meta_int(meta, "max_lon_u"),
+        _meta_int(meta, "max_lat_u"),
+    )
+    return stored == current
+
+
+def _refresh_sidecar_stat(sidecar: Path, size: int, mtime_ns: int) -> None:
+    """Record a new size and mtime on a sidecar whose footprints did not change.
+
+    Thumbnail relocation rewrites ``catalog.db`` without moving a footprint.
+    The next open can then trust the stat again. Failure leaves search correct;
+    it only repeats the footprint check.
+    """
+    uri = f"file:{quote(sidecar.as_posix(), safe='/')}?mode=rw"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        _log.warning("Search R-tree %s kept its previous file stat (%s).", sidecar, exc)
+        return
+    try:
+        conn.execute("UPDATE meta SET value = ? WHERE key = 'catalog_size'", (str(size),))
+        conn.execute("UPDATE meta SET value = ? WHERE key = 'catalog_mtime_ns'", (str(mtime_ns),))
+        conn.commit()
+    except sqlite3.Error as exc:
+        _log.warning("Search R-tree %s kept its previous file stat (%s).", sidecar, exc)
+    finally:
+        conn.close()
+
+
+def _sidecar_matches(
+    sidecar: Path,
+    catalog: Path,
+    conn: sqlite3.Connection,
+    *,
+    trust_stat: bool,
+) -> bool:
+    """Whether ``sidecar`` describes ``catalog`` as ``conn`` currently sees it.
+
+    The key is the snapshot id ``/healthz`` reports, plus the item count. With
+    no recorded snapshot the catalog file's size and mtime are the identity,
+    and the footprint fingerprint catches a write-ahead edit those two miss.
+    A recorded snapshot whose file stat changed (thumbnail relocation) stays
+    valid when the fingerprint still matches. ``trust_stat`` is for a read-only
+    serving connection whose catalog file has not been rewritten: the stat
+    check then skips the fingerprint scan.
+    """
+    if not sidecar.is_file():
+        return False
+    meta = _read_sidecar_meta(sidecar)
+    if meta is None or meta.get("format") != _RTREE_FORMAT:
+        return False
+    snapshot = _catalog_snapshot_key(catalog)
+    if meta.get("snapshot") != snapshot:
+        return False
+    count = int(conn.execute("SELECT COUNT(*) FROM items").fetchone()[0])
+    if _meta_int(meta, "item_count") != count:
+        return False
+    st = catalog.stat()
+    size = int(st.st_size)
+    mtime_ns = int(st.st_mtime_ns)
+    stat_same = (
+        _meta_int(meta, "catalog_size") == size and _meta_int(meta, "catalog_mtime_ns") == mtime_ns
+    )
+    if snapshot and stat_same and trust_stat:
+        return True
+    remembered = (str(sidecar.resolve()), size, mtime_ns)
+    if snapshot and remembered in _RTREE_STAT_OK:
+        return True
+    if not _fingerprint_matches(meta, conn):
+        return False
+    if not snapshot:
+        return stat_same
+    if not stat_same:
+        _RTREE_STAT_OK.add(remembered)
+        _refresh_sidecar_stat(sidecar, size, mtime_ns)
+    return True
+
+
+def _keyed_rtree_path(catalog: Path, directory: Path) -> Path:
+    digest = hashlib.sha256(os.fsencode(catalog.resolve())).hexdigest()[:16]
+    return directory / f"{catalog.stem}-{digest}.rtree.db"
+
+
+def _rtree_candidates(catalog: Path) -> list[Path]:
+    """Sidecar locations a reader checks, without creating any of them."""
+    found: list[Path] = []
+    override = os.environ.get(_RTREE_DB_ENV, "").strip()
+    if override:
+        found.append(Path(override))
+    sibling = default_rtree_path(catalog)
+    if sibling not in found:
+        found.append(sibling)
+    cache = os.environ.get(_RTREE_CACHE_ENV, "").strip()
+    if cache:
+        found.append(_keyed_rtree_path(catalog, Path(cache)))
+    temp = _keyed_rtree_path(catalog, Path(tempfile.gettempdir()) / "umbra-py")
+    if temp not in found:
+        found.append(temp)
+    return found
+
+
+def _matching_sidecar(catalog: Path, conn: sqlite3.Connection, *, trust_stat: bool) -> Path | None:
+    for path in _rtree_candidates(catalog):
+        try:
+            if _sidecar_matches(path, catalog, conn, trust_stat=trust_stat):
+                return path
+        except (OSError, sqlite3.Error) as exc:
+            _log.warning("Search R-tree %s could not be read (%s).", path, exc)
+    return None
+
+
+def _directory_writable(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".umbra-rtree-probe-{os.getpid()}"
+        with probe.open("xb") as handle:
+            handle.write(b"")
+        probe.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def rtree_sidecar_destination(catalog: Path) -> Path | None:
+    """Where to write the sidecar: beside the catalog, else a cache, else temp.
+
+    ``UMBRA_RTREE_DB`` is used when its directory can be created. A directory
+    that cannot be written is skipped; ``None`` means search keeps the column
+    predicate.
+    """
+    override = os.environ.get(_RTREE_DB_ENV, "").strip()
+    if override:
+        dest = Path(override)
+        if _directory_writable(dest.parent):
+            return dest
+        _log.warning(
+            "%s=%s is not writable; looking for another directory for the search R-tree.",
+            _RTREE_DB_ENV,
+            override,
+        )
+    if _directory_writable(default_rtree_path(catalog).parent):
+        return default_rtree_path(catalog)
+    cache = os.environ.get(_RTREE_CACHE_ENV, "").strip()
+    if cache and _directory_writable(Path(cache)):
+        return _keyed_rtree_path(catalog, Path(cache))
+    temp = Path(tempfile.gettempdir()) / "umbra-py"
+    if _directory_writable(temp):
+        return _keyed_rtree_path(catalog, temp)
+    return None
+
+
+def _fsync_path(path: Path, *, directory: bool = False) -> None:
+    flags = os.O_RDONLY | (os.O_DIRECTORY if directory else 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_rtree_file(catalog: Path, dest: Path) -> int:
+    """Build ``dest`` from ``catalog`` by renaming a finished temp file onto it.
+
+    A crash leaves the temp file, never a half-written ``dest``. ``catalog`` is
+    attached read-only. Returns the number of footprints inserted.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for stale in dest.parent.glob(f"{dest.name}.*.tmp"):
+        _remove_sqlite_sidecars(stale)
+        stale.unlink(missing_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{dest.name}.", suffix=".tmp", dir=dest.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        conn = sqlite3.connect(tmp)
+        try:
+            conn.execute("PRAGMA journal_mode = OFF")
+            conn.execute("PRAGMA synchronous = OFF")
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute(
+                "CREATE VIRTUAL TABLE items_rtree USING rtree("
+                "id, min_lon, max_lon, min_lat, max_lat)"
+            )
+            conn.execute("ATTACH DATABASE ? AS cat", (_sqlite_ro_uri(catalog),))
+            conn.execute("BEGIN")
+            ident = _read_identity(conn, catalog, schema="cat")
+            conn.execute(
+                "INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat) "
+                "SELECT rowid, min_lon, max_lon, min_lat, max_lat FROM cat.items "
+                f"WHERE {_BBOX_PRESENT}"
+            )
+            conn.executemany(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                list(ident.as_meta().items()),
+            )
+            count = int(conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+        _remove_sqlite_sidecars(tmp)
+        _fsync_path(tmp)
+        os.replace(tmp, dest)
+        try:
+            _fsync_path(dest.parent, directory=True)
+        except OSError:
+            pass
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        _remove_sqlite_sidecars(tmp)
+        raise
+    return count
+
+
+def _warm_rtree(path: Path) -> None:
+    """Read the sidecar so the first bbox search is not the cold one."""
+    with path.open("rb") as handle:
+        while handle.read(1 << 20):
+            pass
+    conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
+    try:
+        conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()
+    finally:
+        conn.close()
+
+
+def _prepare_search_index(db: Path) -> bool:
+    conn = sqlite3.connect(_sqlite_ro_uri(db), uri=True)
+    try:
+        existing = _matching_sidecar(db, conn, trust_stat=False)
+    finally:
+        conn.close()
+    if existing is not None:
+        _warm_rtree(existing)
+        _log.info("Search R-tree %s matches %s", existing, db)
+        return True
+    dest = rtree_sidecar_destination(db)
+    if dest is None:
+        _log.warning(
+            "Search R-tree was not built for %s: no writable directory "
+            "(set %s or %s). Bbox search will scan the catalog columns.",
+            db,
+            _RTREE_CACHE_ENV,
+            _RTREE_DB_ENV,
+        )
+        return False
+    count = _write_rtree_file(db, dest)
+    _warm_rtree(dest)
+    _log.info("Built the search R-tree (%s footprints) at %s", count, dest)
+    return True
+
+
+def prepare_search_index(path: str | os.PathLike | None = None) -> bool:
+    """Build the bbox R-tree sidecar and read it once, before a server is ready.
 
     ``umbra serve`` calls this from startup, before the socket accepts
-    ``/healthz``. The open creates ``items_rtree`` when the file is writable.
-    The count faults those pages into the cache, so the first bbox search is
-    not the one that pays for a cold tree. A missing file is ignored; the
-    request path already answers 503. A read-only file is left unchanged and
-    search falls back to the column predicate.
+    ``/healthz``. The tree is a separate file, ``catalog.rtree.db`` beside the
+    index when that directory is writable, otherwise ``UMBRA_RTREE_DB`` or
+    ``UMBRA_RTREE_CACHE`` or a directory under the system temp dir. ``catalog.db``
+    is only read. The sidecar is rebuilt when its snapshot id (the value
+    ``/healthz`` reports) or its item count does not match; with no snapshot
+    file, the catalog's size, mtime, and footprint fingerprint are the key.
+    A failure is logged and search keeps the column predicate. Returns whether
+    a usable sidecar is in place. A missing catalog is ignored; the request
+    path already answers 503.
     """
     db = Path(path) if path is not None else default_index_path()
     if not db.is_file():
-        return
-    with CatalogIndex(db) as index:
-        if index._spatial_ready:
-            index._conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()
+        return False
+    try:
+        return _prepare_search_index(db)
+    except (OSError, sqlite3.Error) as exc:
+        _log.warning(
+            "Search R-tree was not built for %s (%s). Bbox search will scan the catalog columns.",
+            db,
+            exc,
+        )
+        return False
