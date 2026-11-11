@@ -2841,6 +2841,42 @@ class CatalogIndex:
             return None
         return bytes(row[0])
 
+    def thumbnail_ids(self, ids: Iterable[str]) -> set[str]:
+        """Which of ``ids`` have a baked PNG, without reading the bytes.
+
+        One indexed lookup against ``item_thumbnails`` for the page, then a
+        second only for ids that are still missing, against the legacy inline
+        ``items.thumbnail`` column. Both select ``id`` and test the blob for
+        ``NOT NULL``, so a search page can decide ``assets.thumbnail`` without
+        a per-item :meth:`get_thumbnail` (that method loads the PNG). An empty
+        input does not query. Duplicate ids are looked up once.
+        """
+        wanted = [item_id for item_id in dict.fromkeys(ids) if item_id]
+        if not wanted:
+            return set()
+        found: set[str] = set()
+        # Older SQLite builds cap bound variables at 999. A public page is at
+        # most 500; a local page can be 10,000, so the lookup is chunked.
+        chunk = 500
+        for start in range(0, len(wanted), chunk):
+            part = wanted[start : start + chunk]
+            marks = ",".join("?" * len(part))
+            rows = self._conn.execute(
+                f"SELECT id FROM item_thumbnails WHERE thumbnail IS NOT NULL AND id IN ({marks})",
+                part,
+            )
+            found.update(row[0] for row in rows)
+            missing = [item_id for item_id in part if item_id not in found]
+            if not missing:
+                continue
+            marks = ",".join("?" * len(missing))
+            rows = self._conn.execute(
+                f"SELECT id FROM items WHERE thumbnail IS NOT NULL AND id IN ({marks})",
+                missing,
+            )
+            found.update(row[0] for row in rows)
+        return found
+
     def get_preview(self, item_id: str) -> BakedPreview | None:
         """Return the baked quicklook *and what it is a picture of*, or ``None``.
 

@@ -168,6 +168,25 @@ static `umbra demo` page, can call it:
 Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 `Link: rel="license"`.
 
+## Baked thumbnails
+
+`GET /artifacts/thumbnail/{item_id}.png` returns a PNG already stored in the
+local thumbnail sidecar. It does not read Umbra's bucket, render a quicklook,
+or fall back to another picture. A missing bake is HTTP 404 (`No baked
+thumbnail`). An id that is not a single token (a slash, `..`, or anything
+outside letters, digits, `.`, `_`, and `-`) is HTTP 400. The response sends
+`Cache-Control: public, max-age=86400`. The URL is the item id, not a content
+hash, so the PNG is not marked `immutable`: a later sidecar can replace the
+bytes for that id. The same CORS headers as the rest of this API apply. Each
+GET counts toward the 120/min limit. It does not take one of the two
+concurrent catalog-read slots (a browser fetches several images at once).
+
+`/search`, `/collections/umbra-open-data/items`, and
+`/collections/umbra-open-data/items/{item_id}` add `assets.thumbnail` (`href`
+on this host, `type: image/png`, `roles: ["thumbnail"]`) only when that item
+has a bake. An item without one has no thumbnail asset; show a placeholder.
+On-demand `/artifacts/quicklook` and the other `/artifacts/*` routes stay off.
+
 ## Bulk use and outages
 
 Do not page `/search` for a full catalog. Take the weekly snapshot instead,

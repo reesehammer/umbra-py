@@ -1869,6 +1869,24 @@ def test_bake_thumbnails_stores_and_returns_png(tmp_path):
         assert idx.get_thumbnail("nope") is None
 
 
+def test_thumbnail_ids_is_one_existence_check(tmp_path):
+    """A page of ids is answered without loading PNG bytes, and only for bakes."""
+
+    def render(item):
+        if item.id == "b":
+            return None
+        return b"png-" + item.id.encode()
+
+    with _index(tmp_path) as idx:
+        assert idx.thumbnail_ids([]) == set()
+        assert idx.thumbnail_ids(["a", "nope"]) == set()
+        assert idx.bake_thumbnails(render) == 2
+        assert idx.thumbnail_ids(["b", "a", "nope", "a", "c"]) == {"a", "c"}
+        # The bytes-only reader is unchanged.
+        assert idx.get_thumbnail("a") == b"png-a"
+        assert idx.get_thumbnail("b") is None
+
+
 def test_bake_thumbnails_records_what_it_rendered(tmp_path):
     """The index used to store a preview's bytes and nothing about how they were
     made, so every consumer had to assume the default bake."""

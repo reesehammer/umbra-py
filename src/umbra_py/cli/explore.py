@@ -92,7 +92,8 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     default=None,
     help="Mount the on-demand artifact endpoints (/artifacts/quicklook, /change, "
     "/timescan, /swipe, /stats). Default: on. Off under --public, so this host "
-    "does not proxy Umbra COGs -- clients stream asset hrefs from S3 themselves.",
+    "does not proxy Umbra COGs -- clients stream asset hrefs from S3 themselves. "
+    "Baked GET /artifacts/thumbnail/{id}.png stays on under --public.",
 )
 @click.option(
     "--mcp",
@@ -103,10 +104,10 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
 @click.option(
     "--public",
     is_flag=True,
-    help="Hosted community instance: STAC search + MCP on one URL, artifacts "
-    "off, per-client rate limit keyed on the edge's client IP, CC-BY license "
-    "headers, and a refuse of --live and of Canopy / model API keys. "
-    "Railway's start command.",
+    help="Hosted community instance: STAC search + MCP on one URL, on-demand "
+    "artifacts off (baked thumbnails stay on), per-client rate limit keyed on "
+    "the edge's client IP, CC-BY license headers, and a refuse of --live and "
+    "of Canopy / model API keys. Railway's start command.",
 )
 @click.option(
     "--rate-limit",
@@ -326,7 +327,10 @@ def serve(
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if public:
         cap = f"{rate_limit}/min" if rate_limit else "off"
-        click.echo(f"  public mode: artifacts off, MCP at /mcp, rate limit {cap}, CC-BY headers on")
+        click.echo(
+            "  public mode: on-demand artifacts off, baked thumbnails on, "
+            f"MCP at /mcp, rate limit {cap}, CC-BY headers on"
+        )
     elif mcp:
         click.echo("  MCP: POST /mcp (Streamable HTTP)")
     if artifacts:

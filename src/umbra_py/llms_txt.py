@@ -226,7 +226,8 @@ def llms_txt() -> str:
         "analysis) -- with an OpenAPI doc at `/docs`. Speaks the protocol `pystac-client`, "
         "the QGIS STAC plugin, `stac-browser`, leafmap and OpenAPI-driven agents "
         "already understand. `umbra serve --public` is the hosted community "
-        "instance: STAC + MCP on one URL, artifacts off, rate-limited."
+        "instance: STAC + MCP on one URL, on-demand artifacts off "
+        "(baked thumbnails on), rate-limited."
     )
     lines.append("")
 
@@ -374,7 +375,7 @@ def llms_full_txt() -> str:
         "pagination), and `GET`/`POST /sites` to rank the most repeat-imaged sites "
         "(the discovery step before the analysis routes), with an OpenAPI doc at "
         "`/docs`. `umbra serve --public` hosts this next to MCP at `/mcp` "
-        "(artifacts off, rate-limited, CC-BY headers)."
+        "(on-demand artifacts off, baked thumbnails on, rate-limited, CC-BY headers)."
     )
     lines.append("")
 
