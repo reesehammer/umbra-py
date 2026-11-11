@@ -338,6 +338,15 @@ def test_healthz_is_served_only_after_the_spatial_index_is_built(index_path):
         assert any("spatial.items_rtree" in sql for sql in seen)
 
 
+def test_local_serve_does_not_build_the_rtree(index_path):
+    """A non-public server never attaches the sidecar, so it does not build one."""
+    from umbra_py.index import default_rtree_path
+
+    with TestClient(serve.build_app(index_path)) as client:
+        assert client.get("/healthz").status_code == 200
+    assert not default_rtree_path(index_path).exists()
+
+
 def test_healthz_reports_freshness_fields(index_path, monkeypatch):
     # PRD P1-1/P1-4: distinct ids, build date and the snapshot identity let an
     # outside monitor tell a stale hosted index from a current one. `stale` is

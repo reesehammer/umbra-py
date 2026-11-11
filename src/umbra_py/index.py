@@ -210,6 +210,19 @@ _RTREE_TMP_MAX_AGE_S = 3600
 # the query's (max_lon, min_lon, max_lat, min_lat) — see ``_rtree_params``.
 _RTREE_OVERLAP = "min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?"
 _RTREE_OVERLAP_ALIASED = "r.min_lon <= ? AND r.max_lon >= ? AND r.min_lat <= ? AND r.max_lat >= ?"
+# Warm limit-10 timings on the 17,205-item snapshot. The column plan walks
+# ``idx_items_search`` and stops after the page. The R-tree sorts every hit.
+# 149 hits: R-tree 0.59 ms, column 0.69 ms. 200 hits: 0.67 ms vs 0.47 ms.
+_RTREE_MAX_CANDIDATES = 150
+# A product filter makes the column plan sort the whole asset list before
+# LIMIT (~27–31 ms, flat). The R-tree is still faster at 8,000 hits (21 ms vs
+# 30 ms), ties near 12,000, and is slower at 15,000 (38 ms vs 31 ms).
+_RTREE_MAX_CANDIDATES_PRODUCT = 10_000
+# A search that cannot stop at LIMIT, and ``rank_sites``, read every match.
+# The R-tree is faster at 2,500 hits (38 ms vs 44 ms) and slower once the box
+# is a large fraction of the catalog (4,000: 57 ms vs 55 ms; 6,106 USA hits:
+# 150 ms vs 91 ms).
+_RTREE_MAX_CANDIDATES_FULL = 2_500
 
 
 #: Schema of the *thumbnail sidecar* -- the transportable half of the baked
@@ -272,6 +285,32 @@ def _column_overlap(prefix: str = "") -> str:
 
 def _column_overlap_params(box: BBox) -> list[object]:
     return [box[0], box[2], box[1], box[3]]
+
+
+def _rtree_hit_count(conn: sqlite3.Connection, box: BBox) -> int:
+    """How many R-tree cells overlap ``box``.
+
+    A warm count is under a millisecond even for the whole catalog. The cells
+    are float32, so this can be a few higher than the exact column overlap.
+    """
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM {_RTREE_SCHEMA}.items_rtree WHERE {_RTREE_OVERLAP}",
+        _rtree_params(box),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _rtree_selective(count: int, *, stops_early: bool, product_filter: bool) -> bool:
+    """Whether ``count`` R-tree hits are cheaper than the column plan.
+
+    See :data:`_RTREE_MAX_CANDIDATES`, :data:`_RTREE_MAX_CANDIDATES_PRODUCT`,
+    and :data:`_RTREE_MAX_CANDIDATES_FULL`.
+    """
+    if product_filter:
+        return count <= _RTREE_MAX_CANDIDATES_PRODUCT
+    if stops_early:
+        return count <= _RTREE_MAX_CANDIDATES
+    return count <= _RTREE_MAX_CANDIDATES_FULL
 
 
 def _preview_replaces(
@@ -2029,9 +2068,6 @@ class CatalogIndex:
         if not self.readonly:
             return
         try:
-            names = {row[1] for row in self._conn.execute("PRAGMA database_list")}
-            if _RTREE_SCHEMA in names:
-                self._conn.execute(f"DETACH DATABASE {_RTREE_SCHEMA}")
             path = default_rtree_path(self.path)
             if not _sidecar_matches(path, self.path, self._conn):
                 return
@@ -2962,13 +2998,15 @@ class CatalogIndex:
         written when the index is linked; an unlinked row defaults to
         canonical. See :mod:`umbra_py.duplicates`.
 
-        A bbox (or the bbox of ``intersects``) on a read-only open is narrowed
-        by the attached ``catalog.rtree.db`` sidecar when that file matches
-        this catalog. ``CROSS JOIN`` is not reordered, so the R-tree stays the
-        outer loop even when a product filter matches almost every row. The
-        R-tree stores coordinates as float32 rounded outward, so every
-        candidate still has to pass the same column overlap the scan uses.
-        A writable open always uses that column predicate.
+        A bbox (or the bbox of ``intersects``) on a read-only open can be
+        narrowed by the attached ``catalog.rtree.db`` sidecar when that file
+        matches this catalog and the box is selective
+        (:func:`_rtree_selective`). ``CROSS JOIN`` is not reordered, so the
+        R-tree stays the outer loop even when a product filter matches almost
+        every row. The R-tree stores coordinates as float32 rounded outward,
+        so every candidate still has to pass the same column overlap the scan
+        uses. A wide box, and every writable open, uses that column predicate
+        directly. The ordered index can then stop after ``limit``.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -2979,7 +3017,26 @@ class CatalogIndex:
         # collapsing the two into their intersection would drop a footprint
         # that overlaps both boxes without overlapping that intersection.
         boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
-        spatial = bool(boxes) and self._spatial_ready
+        # A polygon or acquisition-property test can reject a row after SQL.
+        # A SQL ``LIMIT`` would then return a short page, so it is pushed only
+        # when nothing remains to filter in Python.
+        post_filter = (
+            intersects is not None
+            or polarizations
+            or min_incidence is not None
+            or max_incidence is not None
+            or max_resolution is not None
+            or max_per_task is not None
+        )
+        spatial = (
+            bool(boxes)
+            and self._spatial_ready
+            and _rtree_selective(
+                _rtree_hit_count(self._conn, boxes[0]),
+                stops_early=limit is not None and not post_filter,
+                product_filter=bool(product_types),
+            )
+        )
         prefix = "i." if spatial else ""
         conditions: list[str] = []
         params: list[object] = []
@@ -3048,14 +3105,6 @@ class CatalogIndex:
         # pushed only when nothing is filtered in Python afterwards: a polygon
         # or polarization test can reject a row, and a SQL limit would then
         # return a short page.
-        post_filter = (
-            intersects is not None
-            or polarizations
-            or min_incidence is not None
-            or max_incidence is not None
-            or max_resolution is not None
-            or max_per_task is not None
-        )
         order = (
             f" ORDER BY ({prefix}task IS NULL), {prefix}task, {prefix}acq_date, "
             f"{prefix}datetime, {prefix}id, {prefix}href"
@@ -3315,9 +3364,13 @@ class CatalogIndex:
             conditions.append("LOWER(task) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(area.lower())}%")
         if bbox:
-            if self._spatial_ready:
-                # Candidates from the tree, then the exact column overlap.
-                # The tree's float32 cells are rounded outward.
+            # Same selectivity rule as ``search``. A wide box is a full group
+            # of the catalog; the tree's id list makes that slower.
+            if self._spatial_ready and _rtree_selective(
+                _rtree_hit_count(self._conn, bbox),
+                stops_early=False,
+                product_filter=bool(product_types),
+            ):
                 conditions.append(
                     f"rowid IN (SELECT id FROM {_RTREE_SCHEMA}.items_rtree WHERE {_RTREE_OVERLAP})"
                 )
@@ -3972,18 +4025,6 @@ def _sidecar_matches(sidecar: Path, catalog: Path, conn: sqlite3.Connection) -> 
     ) == int(st.st_mtime_ns)
 
 
-def _directory_writable(directory: Path) -> bool:
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        probe = directory / f".umbra-rtree-probe-{os.getpid()}"
-        with probe.open("xb") as handle:
-            handle.write(b"")
-        probe.unlink()
-    except OSError:
-        return False
-    return True
-
-
 def _sweep_old_rtree_temps(dest: Path) -> None:
     """Remove this sidecar's temp files that are older than an hour.
 
@@ -4084,14 +4125,6 @@ def _prepare_search_index(db: Path) -> bool:
         _warm_rtree(dest)
         _log.info("Search R-tree %s matches %s", dest, db)
         return True
-    if not _directory_writable(dest.parent):
-        _log.warning(
-            "Search R-tree was not built for %s: %s is not writable. "
-            "Bbox search will scan the catalog columns.",
-            db,
-            dest.parent,
-        )
-        return False
     count = _write_rtree_file(db, dest)
     _warm_rtree(dest)
     _log.info("Built the search R-tree (%s footprints) at %s", count, dest)

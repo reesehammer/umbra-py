@@ -416,24 +416,64 @@ def test_rtree_build_failure_leaves_no_half_written_sidecar(tmp_path, monkeypatc
         assert "extra" in _ids(idx, bbox=(0, 0, 5, 5))
 
 
-def test_rtree_falls_back_when_no_directory_is_writable(tmp_path, monkeypatch, caplog):
+def test_rtree_build_failure_uses_the_column_predicate(tmp_path, monkeypatch, caplog):
+    """A build that cannot create its temp file leaves search on the columns."""
     import logging
-    from pathlib import Path
 
     from umbra_py import index as index_mod
 
-    # Root can still write a mode-555 directory. ``/proc`` cannot be created in.
-    assert index_mod._directory_writable(Path("/proc/umbra-rtree-not-a-directory")) is False
+    def fail_mkstemp(*args, **kwargs):
+        raise OSError("read-only file system")
+
     with _index(tmp_path) as idx:
         path = idx.path
         expected = _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"])
-    monkeypatch.setattr(index_mod, "_directory_writable", lambda directory: False)
+    monkeypatch.setattr(index_mod.tempfile, "mkstemp", fail_mkstemp)
     with caplog.at_level(logging.WARNING):
         assert index_mod.prepare_search_index(path) is False
-    assert "is not writable" in caplog.text
+    assert "read-only file system" in caplog.text
+    assert "scan the catalog columns" in caplog.text
     with CatalogIndex(path, readonly=True) as idx:
         assert not idx._spatial_ready
         assert _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == expected
+
+
+def test_rtree_and_column_plans_agree_around_the_candidate_threshold(tmp_path, monkeypatch):
+    """The page just under the cutoff is the same page as the one just over it."""
+    from umbra_py import index as index_mod
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+    _prepare(path)
+    box = (0, 0, 5, 5)
+    with CatalogIndex(path, readonly=True) as idx:
+        count = index_mod._rtree_hit_count(idx._conn, box)
+        assert count >= 2
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count)
+        under = _ids(idx, bbox=box, limit=10)
+        sql_under, _ = _search_statement(idx, bbox=box, limit=10)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count - 1)
+        over = _ids(idx, bbox=box, limit=10)
+        sql_over, _ = _search_statement(idx, bbox=box, limit=10)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over == ["c", "a"]
+
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count)
+        gec_under = _ids(idx, bbox=box, product_types=["GEC"], limit=10)
+        sql_gec, _ = _search_statement(idx, bbox=box, product_types=["GEC"], limit=10)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count - 1)
+        gec_over = _ids(idx, bbox=box, product_types=["GEC"], limit=10)
+        sql_gec_over, _ = _search_statement(idx, bbox=box, product_types=["GEC"], limit=10)
+        assert "spatial.items_rtree" in sql_gec
+        assert "spatial.items_rtree" not in sql_gec_over
+        assert gec_under == gec_over
+
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_FULL", count)
+        sites_under = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_FULL", count - 1)
+        sites_over = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
+        assert sites_under == sites_over == ["SiteA"]
 
 
 def test_rtree_build_keeps_a_fresh_temp_from_another_process(tmp_path):

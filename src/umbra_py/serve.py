@@ -3864,11 +3864,12 @@ def build_app(
             else nullcontext()
         )
         beat = asyncio.create_task(heartbeat_forever())
-        # The bbox R-tree is what keeps a product-filtered /search off a
-        # full catalog scan. Build the sidecar and fault its pages in before
-        # the socket accepts /healthz, so ready means that search is usable.
-        # catalog.db is not written. Nothing is listening until yield.
-        if not live:
+        # The bbox R-tree is what keeps a selective product-filtered /search
+        # off a full catalog scan. Only the public read-only host attaches it,
+        # so only that host builds it. Build and fault the pages in before the
+        # socket accepts /healthz. catalog.db is not written. Nothing is
+        # listening until yield.
+        if public and not live:
             try:
                 prepare_search_index(index_path)
             except (sqlite3.DatabaseError, UmbraError) as exc:

@@ -43,14 +43,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   by `<redacted>`.
 
 ### Fixed
-- **A bounding-box search uses an R-tree sidecar.** `GET` and `POST /search`
-  with a bbox, including a product filter such as `GEC`, reads `catalog.rtree.db`
-  built beside the index before `/healthz` reports ready. The tree narrows
-  candidates and the exact footprint overlap still decides the hit, so a box
-  that starts just past an item is empty. The sidecar is rebuilt when the
-  catalog snapshot (`/healthz`'s `snapshot`, or the file's size and mtime when
-  none is recorded) or its item count changes. `catalog.db` is not modified;
-  if that directory is not writable, search returns the same items without it.
+- **A bounding-box search uses an R-tree sidecar.** `umbra serve --public`
+  builds `catalog.rtree.db` beside the index before `/healthz` reports ready,
+  and a tight box (including a product filter such as `GEC`) is answered from
+  it; a wide box keeps the ordered index scan that stops at the page limit, and
+  the exact footprint overlap still decides the hit. The sidecar is rebuilt
+  when the catalog snapshot (`/healthz`'s `snapshot`, or the file's size and
+  mtime when none is recorded) or its item count changes. `catalog.db` is not
+  modified; if the sidecar cannot be built, search returns the same items
+  without it.
 - **The map explorer shows a "No preview" tile when a scene has no thumbnail.**
   With `umbra demo --server-url` (the hosted map's detail panel), a thumbnail
   that 404s swaps to a same-size "No preview" tile and is not followed by a
