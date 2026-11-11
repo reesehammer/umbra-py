@@ -131,14 +131,11 @@ def _search_statement(idx, **kwargs):
     return sql, plan
 
 
-def _prepare(idx):
-    """Build the sidecar for ``idx`` and attach it on this connection."""
+def _prepare(path):
+    """Build the sidecar beside ``path``. A read-only open is what attaches it."""
     from umbra_py.index import prepare_search_index
 
-    assert prepare_search_index(idx.path) is True
-    idx._attach_spatial_index()
-    assert idx._spatial_ready
-    return idx
+    assert prepare_search_index(path) is True
 
 
 def _ids(idx, **kwargs):
@@ -171,19 +168,22 @@ def test_bbox_product_search_uses_the_rtree(tmp_path):
         "SiteB", "2024-03-01-00-00-00_UMBRA-05", "plain", "2024-03-01T00:00:00Z", (0, 0, 1, 1)
     )
     with _index(tmp_path, items=(_A, _B, _C, plain)) as idx:
-        before = hashlib.sha256(idx.path.read_bytes()).hexdigest()
-        _prepare(idx)
-        assert hashlib.sha256(idx.path.read_bytes()).hexdigest() == before
-        ro = sqlite3.connect(f"file:{idx.path}?mode=ro", uri=True)
-        try:
-            names = {row[0] for row in ro.execute("SELECT name FROM sqlite_master")}
-        finally:
-            ro.close()
-        assert "items_rtree" not in names
-        assert not any("rtree" in name for name in names)
+        path = idx.path
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    _prepare(path)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        names = {row[0] for row in ro.execute("SELECT name FROM sqlite_master")}
+    finally:
+        ro.close()
+    assert "items_rtree" not in names
+    assert not any("rtree" in name for name in names)
+    with CatalogIndex(path, readonly=True) as idx:
         sql, plan = _search_statement(idx, bbox=(0, 0, 5, 5), product_types=["GEC"], limit=10)
         assert "spatial.items_rtree" in sql
         assert "CROSS JOIN" in sql
+        assert "i.max_lon >= " in sql
         text = "\n".join(plan)
         assert plan[0].startswith("SCAN r VIRTUAL TABLE INDEX")
         assert "sqlite_autoindex_items_1" not in text
@@ -203,7 +203,9 @@ def test_two_query_boxes_are_not_collapsed_to_their_intersection(tmp_path):
         "Wide", "2024-05-01-00-00-00_UMBRA-04", "wide", "2024-05-01T00:00:00Z", (0, 0, 10, 1)
     )
     with _index(tmp_path, items=(wide,)) as idx:
-        _prepare(idx)
+        path = idx.path
+    _prepare(path)
+    with CatalogIndex(path, readonly=True) as idx:
         geom = parse_geometry(
             {
                 "type": "Polygon",
@@ -238,7 +240,9 @@ def test_rtree_matches_column_predicate_on_point_polygon_and_antimeridian(tmp_pa
         (-179.8, -1, -179.0, 1),
     )
     with _index(tmp_path, items=(_A, _B, east, west)) as idx:
-        _prepare(idx)
+        path = idx.path
+    _prepare(path)
+    with CatalogIndex(path, readonly=True) as idx:
         point_in = parse_geometry({"type": "Point", "coordinates": [0.5, 0.5]})
         point_out = parse_geometry({"type": "Point", "coordinates": [3, 3]})
         polygon = parse_geometry(
@@ -273,40 +277,84 @@ def test_rtree_matches_column_predicate_on_point_polygon_and_antimeridian(tmp_pa
         assert _same_either_way(idx, bbox=(170, -5, -170, 5)) == []
 
 
-def test_stale_rtree_is_not_used_after_a_footprint_edit(tmp_path):
-    """A write-ahead bbox edit does not change the catalog file's size or mtime.
+def test_writable_search_sees_an_item_added_after_the_sidecar(tmp_path):
+    """A writable open does not query the sidecar, which has no row for the add."""
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        _prepare(idx.path)
+    added = _make_item(
+        "SiteD",
+        "2024-09-01-00-00-00_UMBRA-04",
+        "added",
+        "2024-09-01T00:00:00Z",
+        (20, 20, 21, 21),
+    )
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        idx.add(added)
+        idx.commit()
+        assert _ids(idx, bbox=(20, 20, 21, 21)) == ["added"]
 
-    The sidecar must not answer from the old tree. Rebuilding picks the move up.
+
+def test_rtree_rejects_a_box_one_microdegree_past_the_edge(tmp_path):
+    """Float32 R-tree cells are rounded outward. The column overlap is exact.
+
+    179.8 is not a float32 value, so the stored cell reaches a query that
+    starts 1e-6 degrees past the real max longitude. Both search and sites
+    must still agree with the column predicate.
     """
+    edge = _make_item(
+        "Edge",
+        "2024-06-01-00-00-00_UMBRA-04",
+        "edge",
+        "2024-06-01T00:00:00Z",
+        (179.0, 0.0, 179.8, 1.0),
+    )
+    with _index(tmp_path, items=(edge,)) as idx:
+        path = idx.path
+    _prepare(path)
+    past = (179.8 + 1e-6, 0.0, 180.0, 1.0)
+    overlap = (179.8 - 1e-6, 0.0, 180.0, 1.0)
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=past) == []
+        assert _same_either_way(idx, bbox=overlap) == ["edge"]
+        assert [site.task for site in idx.rank_sites(bbox=past, min_passes=1)] == []
+        idx._spatial_ready = False
+        assert [site.task for site in idx.rank_sites(bbox=past, min_passes=1)] == []
+        idx._spatial_ready = True
+        assert [site.task for site in idx.rank_sites(bbox=overlap, min_passes=1)] == ["Edge"]
+
+
+def test_readonly_sidecar_follows_count_and_file_stat_without_a_snapshot(tmp_path):
+    """With no snapshot id, a new mtime or item count is not the old tree."""
+    import os
+
     from umbra_py.index import prepare_search_index
 
     path = tmp_path / "catalog.db"
     with _index(tmp_path) as idx:
-        _prepare(idx)
-        assert _ids(idx, bbox=(0, 0, 1, 1)) == ["a"]
-        moved = _make_item(
-            "SiteA",
-            "2024-01-15-10-00-00_UMBRA-04",
-            "a",
-            "2024-01-15T10:00:00Z",
-            (10, 10, 11, 11),
-            products=("GEC", "SICD"),
-        )
-        idx.add(moved)
-        idx.commit()
-    with CatalogIndex(path) as idx:
+        _prepare(idx.path)
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+    with CatalogIndex(path, readonly=True) as idx:
         assert not idx._spatial_ready
-        assert _ids(idx, bbox=(0, 0, 1, 1)) == []
-        assert set(_ids(idx, bbox=(10, 10, 11, 11))) == {"a", "b"}
-        idx._conn.execute("DELETE FROM items WHERE id = 'a'")
-        idx.commit()
-    with CatalogIndex(path) as idx:
-        assert not idx._spatial_ready
-        assert _ids(idx, bbox=(10, 10, 11, 11)) == ["b"]
-        assert prepare_search_index(path) is True
-    with CatalogIndex(path) as idx:
+    assert prepare_search_index(path) is True
+    with CatalogIndex(path, readonly=True) as idx:
         assert idx._spatial_ready
-        assert _same_either_way(idx, bbox=(10, 10, 11, 11)) == ["b"]
+    with CatalogIndex(path) as idx:
+        idx.add(
+            _make_item(
+                "SiteC",
+                "2024-08-01-00-00-00_UMBRA-04",
+                "extra",
+                "2024-08-01T00:00:00Z",
+                (2, 2, 3, 3),
+            )
+        )
+        idx.commit()
+    with CatalogIndex(path, readonly=True) as idx:
+        assert not idx._spatial_ready
+        assert "extra" in _ids(idx, bbox=(0, 0, 5, 5))
 
 
 def test_snapshot_etag_keeps_the_rtree_when_only_file_stat_changes(tmp_path):
@@ -382,32 +430,32 @@ def test_rtree_falls_back_when_no_directory_is_writable(tmp_path, monkeypatch, c
     monkeypatch.setattr(index_mod, "_directory_writable", lambda directory: False)
     with caplog.at_level(logging.WARNING):
         assert index_mod.prepare_search_index(path) is False
-    assert "no writable directory" in caplog.text
+    assert "is not writable" in caplog.text
     with CatalogIndex(path, readonly=True) as idx:
         assert not idx._spatial_ready
         assert _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == expected
 
 
-def test_rtree_uses_the_cache_dir_when_the_catalog_dir_is_not_writable(tmp_path, monkeypatch):
-    from umbra_py import index as index_mod
+def test_rtree_build_keeps_a_fresh_temp_from_another_process(tmp_path):
+    """A temp younger than an hour belongs to a build that is still writing it."""
+    import os
+    import time
 
-    cache = tmp_path / "cache"
-    cache.mkdir()
+    from umbra_py.index import default_rtree_path
+
     with _index(tmp_path) as idx:
         path = idx.path
-    monkeypatch.setenv("UMBRA_RTREE_CACHE", str(cache))
-
-    def writable(directory):
-        return directory == cache
-
-    monkeypatch.setattr(index_mod, "_directory_writable", writable)
-    assert index_mod.prepare_search_index(path) is True
-    assert not index_mod.default_rtree_path(path).exists()
-    written = list(cache.glob("*.rtree.db"))
-    assert len(written) == 1
-    with CatalogIndex(path, readonly=True) as idx:
-        assert idx._spatial_ready
-        assert _same_either_way(idx, bbox=(0, 0, 1, 1)) == ["a"]
+    dest = default_rtree_path(path)
+    fresh = dest.parent / f"{dest.name}.inflight.tmp"
+    old = dest.parent / f"{dest.name}.abandoned.tmp"
+    fresh.write_bytes(b"in-flight")
+    old.write_bytes(b"abandoned")
+    ago = time.time() - 7200
+    os.utime(old, (ago, ago))
+    _prepare(path)
+    assert fresh.read_bytes() == b"in-flight"
+    assert not old.exists()
+    assert dest.is_file()
 
 
 def test_schema_stays_v8_when_the_sidecar_is_built(tmp_path):

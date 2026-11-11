@@ -185,10 +185,8 @@ when the manifest is missing. `umbra serve` writes `catalog.rtree.db` next to
 That file is local: fetch does not download it, and `catalog.sha256` does not
 list it. It is rebuilt when the snapshot id in `/healthz` (or, with no
 recorded snapshot, the catalog file's size and mtime) or the item count
-changes. If the index directory is not writable, set `UMBRA_RTREE_DB` to a
-file path or `UMBRA_RTREE_CACHE` to a directory; otherwise the file is written
-under the system temp dir. A sidecar that cannot be built is logged and search
-uses the same results without it.
+changes. If that directory is not writable, or the build fails, search uses
+the same results without it.
 
 GitHub redirects `/releases/download/catalog-index/<file>` at the current
 asset:
