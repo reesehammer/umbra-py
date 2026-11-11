@@ -195,6 +195,26 @@ def test_cli_if_changed_warns_when_the_manifest_is_missing(tmp_path):
     assert "Refreshed index" in result.output
 
 
+def test_fetch_ignores_the_rtree_sidecar(tmp_path):
+    """The spatial sidecar is not part of the snapshot manifest or the fetch cleanup."""
+    from umbra_py.index import _clean_leftovers, _leftover_paths
+
+    path = tmp_path / "catalog.db"
+    path.write_bytes(_snapshot(tmp_path / "src"))
+    sidecar = tmp_path / "catalog.rtree.db"
+    sidecar.write_bytes(b"not the catalog")
+    assert all(item.name != "catalog.rtree.db" for item in _leftover_paths(path))
+    assert _clean_leftovers(path) == {}
+    assert sidecar.read_bytes() == b"not the catalog"
+    rows, built = _validate_snapshot(path)
+    assert rows == 2 and built == "2026-10-27"
+    manifest = tmp_path / "catalog.sha256"
+    write_release_manifest(manifest, [path])
+    text = manifest.read_text(encoding="utf-8")
+    assert "catalog.db" in text
+    assert "rtree" not in text
+
+
 def test_fresh_index_matches_the_schema_allowlist(tmp_path):
     path = tmp_path / "catalog.db"
     path.write_bytes(_snapshot(tmp_path / "src"))

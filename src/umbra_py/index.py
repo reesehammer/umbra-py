@@ -33,7 +33,9 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
+import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -81,6 +83,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: ``canonical``, so a read of any later column walked every preview's overflow
 #: pages. The bytes move in place; the catalog is not rebuilt. Older databases
 #: are migrated in place by :meth:`CatalogIndex._migrate`.
+#:
+#: The bbox R-tree is not part of this schema and is not written into
+#: ``catalog.db``. It lives in a sidecar (``catalog.rtree.db``) built at
+#: ``umbra serve`` startup. A published snapshot stays v8.
 _SCHEMA_VERSION = 8
 
 #: Longest edge of the published weekly ``catalog.thumbs.db`` bake, and the
@@ -185,6 +191,47 @@ CREATE INDEX IF NOT EXISTS idx_items_search
     ON items ((task IS NULL), task, acq_date, datetime, id, href);
 """
 
+#: Sidecar layout. Bump when the file's columns change so an older sidecar is
+#: rebuilt instead of queried.
+_RTREE_FORMAT = "1"
+#: Schema name of the ATTACH. Not ``rtree``: that is the virtual-table module.
+_RTREE_SCHEMA = "spatial"
+#: Rows with a bbox. A NULL footprint is not inserted into the R-tree.
+_BBOX_PRESENT = (
+    "min_lon IS NOT NULL AND min_lat IS NOT NULL AND max_lon IS NOT NULL AND max_lat IS NOT NULL"
+)
+#: Abandoned ``catalog.rtree.db.*.tmp`` files older than this are removed at the
+#: next build. A newer temp belongs to a build still running.
+_RTREE_TMP_MAX_AGE_S = 3600
+
+# Overlap, not containment: an item matches when its footprint rectangle
+# intersects the query rectangle, the same test as ``intersects_bbox``.
+# R-tree columns are (min_lon, max_lon, min_lat, max_lat). The arguments are
+# the query's (max_lon, min_lon, max_lat, min_lat) — see ``_rtree_params``.
+_RTREE_OVERLAP = "min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?"
+_RTREE_OVERLAP_ALIASED = "r.min_lon <= ? AND r.max_lon >= ? AND r.min_lat <= ? AND r.max_lat >= ?"
+# Cold timings on the 17,205-item snapshot: ``posix_fadvise`` on the catalog
+# and the sidecar, then one search in a fresh process. ``serve`` asks for
+# ``offset + limit + 1`` rows, so a first page is 11 and offset 500 is 511.
+# A first page of a box that already has an early-sorting hit stops in the
+# task index (423 hits: column 4.5 ms, tree 8.5 ms). The same page of a late
+# ~200-hit site walks a long prefix first (202 hits: column 25 ms, tree 5 ms).
+_RTREE_PAGE_LIMIT = 32
+_RTREE_MAX_PAGE = 300
+# A deeper page the box can still fill keeps walking. 1,007 hits at cap 511:
+# column 106 ms, tree 57 ms. 2,500 hits: column 50 ms, tree 83 ms.
+_RTREE_MAX_DEEP = 1_500
+# No SQL limit, or a limit the box cannot fill, or ``/sites``: the column plan
+# reads every candidate, and a late site's last candidate is the end of the
+# table (202 hits, cap 511: column 211 ms, tree 17 ms). ``/sites`` at 2,500
+# hits is 181 ms vs 133 ms; the USA's 6,106 is 262 ms vs 275 ms.
+_RTREE_MAX_CANDIDATES = 2_500
+# A product filter sorts the asset list before LIMIT, about 210–250 ms cold
+# at every width. The tree is faster through 8,000 hits (179 ms vs 245 ms).
+# The whole catalog ties on a first page (231 ms vs 238 ms) and loses on a
+# deep page (318 ms vs 236 ms).
+_RTREE_MAX_CANDIDATES_PRODUCT = 10_000
+
 
 #: Schema of the *thumbnail sidecar* -- the transportable half of the baked
 #: previews (see :meth:`CatalogIndex.export_thumbnails`). It is a separate file
@@ -222,6 +269,60 @@ _THUMBS_PROVENANCE_COLUMNS = {"asset": "TEXT", "size": "INTEGER"}
 #: ``NULL``, so it does not replace anything -- while ``IS`` compares the assets
 #: without tripping over the same ``NULL``.
 _KEEP_UNLESS_LARGER = " AND (thumbnail IS NULL OR (? > thumbnail_size AND thumbnail_asset IS ?))"
+
+
+def _rtree_params(box: BBox) -> list[object]:
+    """Bind values for :data:`_RTREE_OVERLAP`.
+
+    ``box`` is ``(min_lon, min_lat, max_lon, max_lat)``.
+    """
+    return [box[2], box[0], box[3], box[1]]
+
+
+def _column_overlap(prefix: str = "") -> str:
+    """Bbox overlap against ``items`` columns, for a search that has no R-tree.
+
+    ``prefix`` is ``"i."`` when the statement also names the attached R-tree,
+    whose columns would otherwise make ``min_lon`` ambiguous.
+    """
+    return (
+        f"{prefix}min_lon IS NOT NULL AND {prefix}max_lon >= ? AND {prefix}min_lon <= ? "
+        f"AND {prefix}max_lat >= ? AND {prefix}min_lat <= ?"
+    )
+
+
+def _column_overlap_params(box: BBox) -> list[object]:
+    return [box[0], box[2], box[1], box[3]]
+
+
+def _rtree_hit_count(conn: sqlite3.Connection, box: BBox) -> int:
+    """How many R-tree cells overlap ``box``.
+
+    A warm count is under a millisecond even for the whole catalog. The cells
+    are float32, so this can be a few higher than the exact column overlap.
+    """
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM {_RTREE_SCHEMA}.items_rtree WHERE {_RTREE_OVERLAP}",
+        _rtree_params(box),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _rtree_selective(count: int, *, limit: int | None, product_filter: bool) -> bool:
+    """Whether ``count`` R-tree hits are cheaper cold than the column plan.
+
+    ``limit`` is the SQL ``LIMIT`` actually pushed. ``None`` means the
+    statement reads every candidate: no limit, a Python post-filter, or
+    ``rank_sites``. A limit the box cannot fill does the same walk, because
+    the task index never gets to stop. See the ``_RTREE_MAX_*`` constants.
+    """
+    if product_filter:
+        return count <= _RTREE_MAX_CANDIDATES_PRODUCT
+    if limit is not None and count > limit and limit <= _RTREE_PAGE_LIMIT:
+        return count <= _RTREE_MAX_PAGE
+    if limit is not None and count > limit:
+        return count <= _RTREE_MAX_DEEP
+    return count <= _RTREE_MAX_CANDIDATES
 
 
 def _preview_replaces(
@@ -408,6 +509,17 @@ def default_thumbs_path(index_path: str | os.PathLike | None = None) -> Path:
     """
     base = Path(index_path) if index_path is not None else default_index_path()
     return base.with_name(f"{base.stem}.thumbs.db")
+
+
+def default_rtree_path(index_path: str | os.PathLike | None = None) -> Path:
+    """Where the bbox R-tree sidecar lives beside the index.
+
+    ``catalog.db`` -> ``catalog.rtree.db``, the same split as
+    :func:`default_thumbs_path`. The file is built locally. It is not part of
+    the published snapshot and ``catalog.sha256`` does not list it.
+    """
+    base = Path(index_path) if index_path is not None else default_index_path()
+    return base.with_name(f"{base.stem}.rtree.db")
 
 
 def fetch_prebuilt_thumbnails(
@@ -1828,6 +1940,7 @@ class CatalogIndex:
     def __init__(self, path: str | os.PathLike | None = None, *, readonly: bool = False) -> None:
         self.path = Path(path) if path is not None else default_index_path()
         self.readonly = readonly
+        self._spatial_ready = False
         if readonly:
             if not self.path.is_file():
                 raise FileNotFoundError(
@@ -1837,11 +1950,16 @@ class CatalogIndex:
             self._conn = sqlite3.connect(_sqlite_ro_uri(self.path), uri=True)
             self._configure_connection()
             self._require_readable_schema()
+            # A sidecar built at startup. This open does not create it and
+            # does not write ``catalog.db``.
+            self._attach_spatial_index()
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path))
         self._configure_connection()
         self._init_schema()
+        # A writable session inserts rows the sidecar does not know about.
+        # Searching that tree would miss them until the next boot rebuild.
         # Small indexes move previews before the caller runs a query. A hosted
         # catalog.db (gigabytes of inline PNGs) only records that the move is
         # still owed, so this open does not read the blobs.
@@ -1949,6 +2067,40 @@ class CatalogIndex:
             "index. Rebuild it with 'umbra index build' or refetch with "
             "'umbra index fetch' before serving it."
         )
+
+    def _attach_spatial_index(self) -> None:
+        """ATTACH a matching R-tree sidecar read-only, or leave search on the columns.
+
+        Only a read-only open attaches. A writable open keeps the column
+        predicate so rows added in this session are visible. Does not create
+        the sidecar and does not write this database. A missing or stale file
+        is quiet: the next boot rebuilds it, and this request scans columns.
+        """
+        self._spatial_ready = False
+        if not self.readonly:
+            return
+        try:
+            path = default_rtree_path(self.path)
+            if not _sidecar_matches(path, self.path, self._conn):
+                return
+            self._conn.execute(
+                f"ATTACH DATABASE ? AS {_RTREE_SCHEMA}",
+                (_sqlite_ro_uri(path),),
+            )
+            self._conn.execute(f"SELECT 1 FROM {_RTREE_SCHEMA}.items_rtree LIMIT 1").fetchone()
+        except sqlite3.Error as exc:
+            _log.warning(
+                "Search R-tree was not attached for %s (%s). Bbox search will "
+                "scan the catalog columns.",
+                self.path,
+                exc,
+            )
+            try:
+                self._conn.execute(f"DETACH DATABASE {_RTREE_SCHEMA}")
+            except sqlite3.Error:
+                pass
+            return
+        self._spatial_ready = True
 
     def _migrate(self) -> None:
         """Apply additive, idempotent migrations to reach the current schema.
@@ -2857,17 +3009,60 @@ class CatalogIndex:
         default, returns every row. The flag is the ``canonical`` column
         written when the index is linked; an unlinked row defaults to
         canonical. See :mod:`umbra_py.duplicates`.
+
+        A bbox (or the bbox of ``intersects``) on a read-only open can be
+        narrowed by the attached ``catalog.rtree.db`` sidecar when that file
+        matches this catalog and the box is selective
+        (:func:`_rtree_selective`). ``CROSS JOIN`` is not reordered, so the
+        R-tree stays the outer loop even when a product filter matches almost
+        every row. The R-tree stores coordinates as float32 rounded outward,
+        so every candidate still has to pass the same column overlap the scan
+        uses. A wide first page, and every writable open, uses that column
+        predicate directly. The ordered index can then stop after ``limit``.
+        A deep page, or a limit the box cannot fill, uses the tree so that
+        walk does not run to the last late-sorting hit.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
+        # A polygon filter pushes its own bounding box into SQL as a cheap
+        # prefilter (the exact polygon test runs in Python on each candidate
+        # below); combined with an explicit ``bbox`` both boxes must overlap.
+        # One box drives the R-tree. Both boxes keep their own column overlap:
+        # collapsing the two into their intersection would drop a footprint
+        # that overlaps both boxes without overlapping that intersection.
+        boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
+        # A polygon or acquisition-property test can reject a row after SQL.
+        # A SQL ``LIMIT`` would then return a short page, so it is pushed only
+        # when nothing remains to filter in Python.
+        post_filter = (
+            intersects is not None
+            or polarizations
+            or min_incidence is not None
+            or max_incidence is not None
+            or max_resolution is not None
+            or max_per_task is not None
+        )
+        # A polygon or acquisition-property test drops the SQL limit, so the
+        # column plan would read every candidate. Treat that as no limit.
+        sql_limit = None if post_filter else limit
+        spatial = (
+            bool(boxes)
+            and self._spatial_ready
+            and _rtree_selective(
+                _rtree_hit_count(self._conn, boxes[0]),
+                limit=sql_limit,
+                product_filter=bool(product_types),
+            )
+        )
+        prefix = "i." if spatial else ""
         conditions: list[str] = []
         params: list[object] = []
 
         if start_d is not None:
-            conditions.append("(acq_date IS NULL OR acq_date >= ?)")
+            conditions.append(f"({prefix}acq_date IS NULL OR {prefix}acq_date >= ?)")
             params.append(start_d.isoformat())
         if end_d is not None:
-            conditions.append("(acq_date IS NULL OR acq_date <= ?)")
+            conditions.append(f"({prefix}acq_date IS NULL OR {prefix}acq_date <= ?)")
             params.append(end_d.isoformat())
         if area and fuzzy:
             # SQL LIKE can't express the token-wise fuzzy match, so resolve the
@@ -2883,56 +3078,72 @@ class CatalogIndex:
             if not matched:
                 return
             placeholders = ", ".join("?" * len(matched))
-            conditions.append(f"task IN ({placeholders})")
+            conditions.append(f"{prefix}task IN ({placeholders})")
             params += matched
         elif area:
-            conditions.append("task IS NOT NULL AND LOWER(task) LIKE ? ESCAPE '\\'")
-            params.append(f"%{_escape_like(area.lower())}%")
-        # A polygon filter pushes its own bounding box into SQL as a cheap
-        # prefilter (the exact polygon test runs in Python on each candidate
-        # below); combined with an explicit ``bbox`` both boxes must overlap.
-        boxes = [b for b in (bbox, geometry_bbox(intersects) if intersects else None) if b]
-        for box in boxes:
-            # Footprint bbox overlaps the query bbox (matches
-            # UmbraItem.intersects_bbox); items with no bbox never match.
             conditions.append(
-                "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
-                "AND max_lat >= ? AND min_lat <= ?"
+                f"{prefix}task IS NOT NULL AND LOWER({prefix}task) LIKE ? ESCAPE '\\'"
             )
-            params += [box[0], box[2], box[1], box[3]]
+            params.append(f"%{_escape_like(area.lower())}%")
+        # The R-tree is a candidate filter. The column overlap is the match,
+        # including for the box that drove the tree: float32 rounding admits
+        # an item that sits just outside the query.
+        for box in boxes:
+            conditions.append(_column_overlap(prefix))
+            params += _column_overlap_params(box)
         if product_types:
             wanted = [p.upper() for p in product_types]
             placeholders = ", ".join("?" * len(wanted))
-            conditions.append(
-                f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
-            )
+            if spatial:
+                # EXISTS probes the assets of the R-tree hits. ``IN (SELECT
+                # href FROM item_assets WHERE asset = 'GEC')`` is the whole
+                # catalog (GEC is on nearly every row), and SQLite then drives
+                # from that list.
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM item_assets AS a "
+                    f"WHERE a.href = i.href AND a.asset IN ({placeholders}))"
+                )
+            else:
+                conditions.append(
+                    f"href IN (SELECT href FROM item_assets WHERE asset IN ({placeholders}))"
+                )
             params += wanted
         if canonical is True:
-            conditions.append("canonical = 1")
+            conditions.append(f"{prefix}canonical = 1")
         elif canonical is False:
-            conditions.append("canonical = 0")
+            conditions.append(f"{prefix}canonical = 0")
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         # Total order. ``id`` breaks a timestamp tie so offset pages cannot
         # repeat or skip a pass that shares a task and a datetime with its
         # neighbor. ``href`` is last so a duplicated id still sorts in one way.
         # The parenthesized ``task IS NULL`` matches ``idx_items_search``, so
-        # SQLite walks that index instead of sorting every row (the sort read
-        # columns stored after the preview blob). ``LIMIT`` is pushed only when
-        # nothing is filtered in Python afterwards: a polygon or polarization
-        # test can reject a row, and a SQL limit would then return a short page.
-        post_filter = (
-            intersects is not None
-            or polarizations
-            or min_incidence is not None
-            or max_incidence is not None
-            or max_resolution is not None
-            or max_per_task is not None
+        # a search with no bbox walks that index instead of sorting every row
+        # (the sort read columns stored after the preview blob). ``LIMIT`` is
+        # pushed only when nothing is filtered in Python afterwards: a polygon
+        # or polarization test can reject a row, and a SQL limit would then
+        # return a short page.
+        order = (
+            f" ORDER BY ({prefix}task IS NULL), {prefix}task, {prefix}acq_date, "
+            f"{prefix}datetime, {prefix}id, {prefix}href"
         )
-        sql = (
-            "SELECT href, doc, place, datetime_suspect, created, published FROM items"
-            f"{where} ORDER BY (task IS NULL), task, acq_date, datetime, id, href"
-        )
+        if spatial:
+            where = " AND ".join(conditions)
+            sql = (
+                f"SELECT {prefix}href, {prefix}doc, {prefix}place, "
+                f"{prefix}datetime_suspect, {prefix}created, {prefix}published "
+                f"FROM {_RTREE_SCHEMA}.items_rtree AS r CROSS JOIN items AS i ON i.rowid = r.id "
+                f"WHERE {_RTREE_OVERLAP_ALIASED}"
+            )
+            if where:
+                sql += " AND " + where
+            sql += order
+            params = _rtree_params(boxes[0]) + params
+        else:
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            sql = (
+                "SELECT href, doc, place, datetime_suspect, created, published FROM items"
+                f"{where}{order}"
+            )
         if limit is not None and not post_filter:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -3170,11 +3381,19 @@ class CatalogIndex:
             conditions.append("LOWER(task) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(area.lower())}%")
         if bbox:
-            conditions.append(
-                "min_lon IS NOT NULL AND max_lon >= ? AND min_lon <= ? "
-                "AND max_lat >= ? AND min_lat <= ?"
-            )
-            params += [bbox[0], bbox[2], bbox[1], bbox[3]]
+            # Same selectivity rule as ``search``. A wide box is a full group
+            # of the catalog; the tree's id list makes that slower.
+            if self._spatial_ready and _rtree_selective(
+                _rtree_hit_count(self._conn, bbox),
+                limit=None,
+                product_filter=bool(product_types),
+            ):
+                conditions.append(
+                    f"rowid IN (SELECT id FROM {_RTREE_SCHEMA}.items_rtree WHERE {_RTREE_OVERLAP})"
+                )
+                params += _rtree_params(bbox)
+            conditions.append(_column_overlap())
+            params += _column_overlap_params(bbox)
         if product_types:
             wanted = [p.upper() for p in product_types]
             placeholders = ", ".join("?" * len(wanted))
@@ -3732,3 +3951,224 @@ class CatalogIndex:
             sql = "SELECT MIN(acq_date), MAX(acq_date) FROM items"
         start, end = self._conn.execute(sql).fetchone()
         return (start, end)
+
+
+def _catalog_snapshot_key(catalog: Path) -> str:
+    """The snapshot id ``/healthz`` reports, or ``""`` when none is recorded."""
+    return snapshot_id(read_snapshot_state(catalog)) or ""
+
+
+def _meta_int(meta: dict[str, str], key: str) -> int | None:
+    raw = meta.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class _RtreeIdentity:
+    """What a sidecar claims it was built from."""
+
+    snapshot: str
+    item_count: int
+    catalog_size: int
+    catalog_mtime_ns: int
+
+    def as_meta(self) -> dict[str, str]:
+        raw: dict[str, object] = {
+            "format": _RTREE_FORMAT,
+            "snapshot": self.snapshot,
+            "item_count": self.item_count,
+            "catalog_size": self.catalog_size,
+            "catalog_mtime_ns": self.catalog_mtime_ns,
+        }
+        return {key: str(value) for key, value in raw.items()}
+
+
+def _read_identity(conn: sqlite3.Connection, catalog: Path, schema: str = "") -> _RtreeIdentity:
+    table = f"{schema}.items" if schema else "items"
+    count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    st = catalog.stat()
+    return _RtreeIdentity(
+        snapshot=_catalog_snapshot_key(catalog),
+        item_count=count,
+        catalog_size=int(st.st_size),
+        catalog_mtime_ns=int(st.st_mtime_ns),
+    )
+
+
+def _read_sidecar_meta(path: Path) -> dict[str, str] | None:
+    try:
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            rows = conn.execute("SELECT key, value FROM meta").fetchall()
+        except sqlite3.Error:
+            return None
+    finally:
+        conn.close()
+    return {str(key): str(value) for key, value in rows}
+
+
+def _sidecar_matches(sidecar: Path, catalog: Path, conn: sqlite3.Connection) -> bool:
+    """Whether ``sidecar`` describes ``catalog`` as ``conn`` currently sees it.
+
+    The key is the format, the snapshot id ``/healthz`` reports, and the item
+    count. With no recorded snapshot the catalog file's size and mtime are
+    the identity instead. A mismatch is not repaired here: boot rebuilds, and
+    a read-only request scans the columns.
+    """
+    if not sidecar.is_file():
+        return False
+    meta = _read_sidecar_meta(sidecar)
+    if meta is None or meta.get("format") != _RTREE_FORMAT:
+        return False
+    snapshot = _catalog_snapshot_key(catalog)
+    if meta.get("snapshot") != snapshot:
+        return False
+    count = int(conn.execute("SELECT COUNT(*) FROM items").fetchone()[0])
+    if _meta_int(meta, "item_count") != count:
+        return False
+    if snapshot:
+        return True
+    st = catalog.stat()
+    return _meta_int(meta, "catalog_size") == int(st.st_size) and _meta_int(
+        meta, "catalog_mtime_ns"
+    ) == int(st.st_mtime_ns)
+
+
+def _sweep_old_rtree_temps(dest: Path) -> None:
+    """Remove this sidecar's temp files that are older than an hour.
+
+    A build still running owns a fresh ``mkstemp`` name. Deleting that file
+    out from under it would fail its rename or remove a tree it is writing.
+    """
+    cutoff = time.time() - _RTREE_TMP_MAX_AGE_S
+    for stale in dest.parent.glob(f"{dest.name}.*.tmp"):
+        try:
+            if stale.stat().st_mtime >= cutoff:
+                continue
+            _remove_sqlite_sidecars(stale)
+            stale.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _fsync_path(path: Path, *, directory: bool = False) -> None:
+    flags = os.O_RDONLY | (os.O_DIRECTORY if directory else 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_rtree_file(catalog: Path, dest: Path) -> int:
+    """Build ``dest`` from ``catalog`` by renaming a finished temp file onto it.
+
+    A crash leaves the temp file, never a half-written ``dest``. ``catalog`` is
+    attached read-only. Returns the number of footprints inserted.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_old_rtree_temps(dest)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{dest.name}.", suffix=".tmp", dir=dest.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        conn = sqlite3.connect(tmp)
+        try:
+            conn.execute("PRAGMA journal_mode = OFF")
+            conn.execute("PRAGMA synchronous = OFF")
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute(
+                "CREATE VIRTUAL TABLE items_rtree USING rtree("
+                "id, min_lon, max_lon, min_lat, max_lat)"
+            )
+            conn.execute("ATTACH DATABASE ? AS cat", (_sqlite_ro_uri(catalog),))
+            conn.execute("BEGIN")
+            ident = _read_identity(conn, catalog, schema="cat")
+            conn.execute(
+                "INSERT INTO items_rtree (id, min_lon, max_lon, min_lat, max_lat) "
+                "SELECT rowid, min_lon, max_lon, min_lat, max_lat FROM cat.items "
+                f"WHERE {_BBOX_PRESENT}"
+            )
+            conn.executemany(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                list(ident.as_meta().items()),
+            )
+            count = int(conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+        _remove_sqlite_sidecars(tmp)
+        _fsync_path(tmp)
+        os.replace(tmp, dest)
+        try:
+            _fsync_path(dest.parent, directory=True)
+        except OSError:
+            pass
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        _remove_sqlite_sidecars(tmp)
+        raise
+    return count
+
+
+def _warm_rtree(path: Path) -> None:
+    """Read the sidecar so the first bbox search is not the cold one."""
+    with path.open("rb") as handle:
+        while handle.read(1 << 20):
+            pass
+    conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
+    try:
+        conn.execute("SELECT COUNT(*) FROM items_rtree").fetchone()
+    finally:
+        conn.close()
+
+
+def _prepare_search_index(db: Path) -> bool:
+    dest = default_rtree_path(db)
+    conn = sqlite3.connect(_sqlite_ro_uri(db), uri=True)
+    try:
+        matches = _sidecar_matches(dest, db, conn)
+    finally:
+        conn.close()
+    if matches:
+        _warm_rtree(dest)
+        _log.info("Search R-tree %s matches %s", dest, db)
+        return True
+    count = _write_rtree_file(db, dest)
+    _warm_rtree(dest)
+    _log.info("Built the search R-tree (%s footprints) at %s", count, dest)
+    return True
+
+
+def prepare_search_index(path: str | os.PathLike | None = None) -> bool:
+    """Build the bbox R-tree sidecar and read it once, before a server is ready.
+
+    ``umbra serve`` calls this from startup, before the socket accepts
+    ``/healthz``. The tree is ``catalog.rtree.db`` beside the index.
+    ``catalog.db`` is only read. The sidecar is rebuilt when its format, its
+    snapshot id (the value ``/healthz`` reports) or its item count does not
+    match; with no snapshot file, the catalog's size and mtime are the key.
+    A failure is logged and search keeps the column predicate. Returns whether
+    a usable sidecar is in place. A missing catalog is ignored; the request
+    path already answers 503.
+    """
+    db = Path(path) if path is not None else default_index_path()
+    if not db.is_file():
+        return False
+    try:
+        return _prepare_search_index(db)
+    except (OSError, sqlite3.Error) as exc:
+        _log.warning(
+            "Search R-tree was not built for %s (%s). Bbox search will scan the catalog columns.",
+            db,
+            exc,
+        )
+        return False

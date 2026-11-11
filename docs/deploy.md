@@ -468,6 +468,7 @@ Everything the boot refresh writes lives in one directory on the volume
 | File                     | Size                     | Notes                                                       |
 | ------------------------ | ------------------------ | ----------------------------------------------------------- |
 | `catalog.db` (published) | ~126 MB (17,960 items)   | What `umbra index fetch` downloads.                         |
+| `catalog.rtree.db`       | ~1 MB                    | Built at `umbra serve --public` startup from `catalog.db`. Not downloaded and not listed in `catalog.sha256`. |
 | `catalog.thumbs.db`      | ~1.2 GB at 4,050 previews; past 2 GiB by 5,550 | Reassembled locally. The release stores it as parts under 1.5 GiB (GitHub rejects an asset of 2 GiB or more). About 300 KB per 512 px preview. |
 | `catalog.db` (merged)    | ~1.33 GB                 | The published index plus the sidecar's PNGs.                |
 

@@ -114,6 +114,442 @@ def test_search_product_type_filter(tmp_path):
     assert ids == {"a"}
 
 
+def _search_statement(idx, **kwargs):
+    """The SELECT ``search`` runs, and its EXPLAIN QUERY PLAN detail lines."""
+    seen: list[str] = []
+    idx._conn.set_trace_callback(seen.append)
+    list(idx.search(**kwargs))
+    idx._conn.set_trace_callback(None)
+    selects = [
+        sql
+        for sql in seen
+        if "datetime_suspect" in sql and sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert selects, seen
+    sql = selects[-1]
+    plan = [row[3] for row in idx._conn.execute("EXPLAIN QUERY PLAN " + sql)]
+    return sql, plan
+
+
+def _prepare(path):
+    """Build the sidecar beside ``path``. A read-only open is what attaches it."""
+    from umbra_py.index import prepare_search_index
+
+    assert prepare_search_index(path) is True
+
+
+def _ids(idx, **kwargs):
+    return [item.id for item in idx.search(**kwargs)]
+
+
+def _same_either_way(idx, **kwargs):
+    """Sidecar results equal the column predicate, including order."""
+    assert idx._spatial_ready
+    fast = _ids(idx, **kwargs)
+    idx._spatial_ready = False
+    slow = _ids(idx, **kwargs)
+    idx._spatial_ready = True
+    assert fast == slow
+    return fast
+
+
+def test_bbox_product_search_uses_the_rtree(tmp_path):
+    """A GEC bbox search must be driven by the sidecar R-tree, not by every GEC href.
+
+    GEC is on nearly every acquisition. The old plan listed those hrefs,
+    probed ``items`` by primary key, and sorted before LIMIT. ``CROSS JOIN``
+    is not reordered, so the plan's outer loop is the R-tree. The catalog
+    file itself gains no table.
+    """
+    import hashlib
+    import sqlite3
+
+    plain = _make_item(
+        "SiteB", "2024-03-01-00-00-00_UMBRA-05", "plain", "2024-03-01T00:00:00Z", (0, 0, 1, 1)
+    )
+    with _index(tmp_path, items=(_A, _B, _C, plain)) as idx:
+        path = idx.path
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    _prepare(path)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        names = {row[0] for row in ro.execute("SELECT name FROM sqlite_master")}
+    finally:
+        ro.close()
+    assert "items_rtree" not in names
+    assert not any("rtree" in name for name in names)
+    with CatalogIndex(path, readonly=True) as idx:
+        sql, plan = _search_statement(idx, bbox=(0, 0, 5, 5), product_types=["GEC"], limit=10)
+        assert "spatial.items_rtree" in sql
+        assert "CROSS JOIN" in sql
+        assert "i.max_lon >= " in sql
+        text = "\n".join(plan)
+        assert plan[0].startswith("SCAN r VIRTUAL TABLE INDEX")
+        assert "sqlite_autoindex_items_1" not in text
+        assert "idx_item_assets_asset" not in text
+        assert _same_either_way(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == [
+            "c",
+            "a",
+            "plain",
+        ]
+
+
+def test_two_query_boxes_are_not_collapsed_to_their_intersection(tmp_path):
+    """A footprint may overlap two query boxes that do not overlap each other."""
+    from umbra_py._geometry import parse_geometry
+
+    wide = _make_item(
+        "Wide", "2024-05-01-00-00-00_UMBRA-04", "wide", "2024-05-01T00:00:00Z", (0, 0, 10, 1)
+    )
+    with _index(tmp_path, items=(wide,)) as idx:
+        path = idx.path
+    _prepare(path)
+    with CatalogIndex(path, readonly=True) as idx:
+        geom = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [[[9, 0], [10, 0], [10, 1], [9, 1], [9, 0]]],
+            }
+        )
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), intersects=geom) == ["wide"]
+
+
+def test_rtree_matches_column_predicate_on_point_polygon_and_antimeridian(tmp_path):
+    """The sidecar and the column predicate return the same hrefs in the same order.
+
+    A point matches footprints that contain it. A polygon is prefiltered by its
+    bbox and then tested exactly. Boxes and footprints that touch ±180 agree
+    too, including a query box whose min longitude is greater than its max
+    (the antimeridian is not split; both paths use that same overlap test).
+    """
+    from umbra_py._geometry import parse_geometry
+
+    east = _make_item(
+        "East",
+        "2024-07-01-00-00-00_UMBRA-04",
+        "east",
+        "2024-07-01T00:00:00Z",
+        (179.0, -1, 179.8, 1),
+    )
+    west = _make_item(
+        "West",
+        "2024-07-02-00-00-00_UMBRA-05",
+        "west",
+        "2024-07-02T00:00:00Z",
+        (-179.8, -1, -179.0, 1),
+    )
+    with _index(tmp_path, items=(_A, _B, east, west)) as idx:
+        path = idx.path
+    _prepare(path)
+    with CatalogIndex(path, readonly=True) as idx:
+        point_in = parse_geometry({"type": "Point", "coordinates": [0.5, 0.5]})
+        point_out = parse_geometry({"type": "Point", "coordinates": [3, 3]})
+        polygon = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8], [0.2, 0.2]]],
+            }
+        )
+        edge = parse_geometry(
+            {
+                "type": "Polygon",
+                "coordinates": [
+                    [[179.2, -0.2], [179.6, -0.2], [179.6, 0.2], [179.2, 0.2], [179.2, -0.2]]
+                ],
+            }
+        )
+        queries = [
+            {"bbox": (0, 0, 1, 1)},
+            {"bbox": (179.2, -0.5, 180, 0.5)},
+            {"bbox": (-180, -0.5, -179.2, 0.5)},
+            {"bbox": (170, -5, -170, 5)},
+            {"intersects": point_in},
+            {"intersects": point_out},
+            {"intersects": polygon},
+            {"intersects": edge},
+            {"bbox": (0, 0, 1, 1), "intersects": polygon, "product_types": ["GEC"], "limit": 10},
+        ]
+        for query in queries:
+            _same_either_way(idx, **query)
+        assert _same_either_way(idx, intersects=point_in) == ["a"]
+        assert _same_either_way(idx, intersects=edge) == ["east"]
+        assert _same_either_way(idx, bbox=(170, -5, -170, 5)) == []
+
+
+def test_writable_search_sees_an_item_added_after_the_sidecar(tmp_path):
+    """A writable open does not query the sidecar, which has no row for the add."""
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        _prepare(idx.path)
+    added = _make_item(
+        "SiteD",
+        "2024-09-01-00-00-00_UMBRA-04",
+        "added",
+        "2024-09-01T00:00:00Z",
+        (20, 20, 21, 21),
+    )
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        idx.add(added)
+        idx.commit()
+        assert _ids(idx, bbox=(20, 20, 21, 21)) == ["added"]
+
+
+def test_rtree_rejects_a_box_one_microdegree_past_the_edge(tmp_path):
+    """Float32 R-tree cells are rounded outward. The column overlap is exact.
+
+    179.8 is not a float32 value, so the stored cell reaches a query that
+    starts 1e-6 degrees past the real max longitude. Both search and sites
+    must still agree with the column predicate.
+    """
+    edge = _make_item(
+        "Edge",
+        "2024-06-01-00-00-00_UMBRA-04",
+        "edge",
+        "2024-06-01T00:00:00Z",
+        (179.0, 0.0, 179.8, 1.0),
+    )
+    with _index(tmp_path, items=(edge,)) as idx:
+        path = idx.path
+    _prepare(path)
+    past = (179.8 + 1e-6, 0.0, 180.0, 1.0)
+    overlap = (179.8 - 1e-6, 0.0, 180.0, 1.0)
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=past) == []
+        assert _same_either_way(idx, bbox=overlap) == ["edge"]
+        assert [site.task for site in idx.rank_sites(bbox=past, min_passes=1)] == []
+        idx._spatial_ready = False
+        assert [site.task for site in idx.rank_sites(bbox=past, min_passes=1)] == []
+        idx._spatial_ready = True
+        assert [site.task for site in idx.rank_sites(bbox=overlap, min_passes=1)] == ["Edge"]
+
+
+def test_readonly_sidecar_follows_count_and_file_stat_without_a_snapshot(tmp_path):
+    """With no snapshot id, a new mtime or item count is not the old tree."""
+    import os
+
+    from umbra_py.index import prepare_search_index
+
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        _prepare(idx.path)
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+    with CatalogIndex(path, readonly=True) as idx:
+        assert not idx._spatial_ready
+    assert prepare_search_index(path) is True
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+    with CatalogIndex(path) as idx:
+        idx.add(
+            _make_item(
+                "SiteC",
+                "2024-08-01-00-00-00_UMBRA-04",
+                "extra",
+                "2024-08-01T00:00:00Z",
+                (2, 2, 3, 3),
+            )
+        )
+        idx.commit()
+    with CatalogIndex(path, readonly=True) as idx:
+        assert not idx._spatial_ready
+        assert "extra" in _ids(idx, bbox=(0, 0, 5, 5))
+
+
+def test_snapshot_etag_keeps_the_rtree_when_only_file_stat_changes(tmp_path):
+    """Thumbnail relocation rewrites the file. The snapshot id does not change."""
+    import json
+
+    from umbra_py.index import prepare_search_index, snapshot_state_path
+
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        snapshot_state_path(path).write_text(json.dumps({"etag": '"weekly"'}))
+        assert prepare_search_index(path) is True
+        idx.set_meta("note", "previews moved")
+        idx.commit()
+        idx._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), product_types=["GEC"]) == ["a"]
+
+
+def test_rtree_build_failure_leaves_no_half_written_sidecar(tmp_path, monkeypatch):
+    import os
+
+    from umbra_py.index import default_rtree_path, prepare_search_index
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+    dest = default_rtree_path(path)
+
+    def fail_replace(src, dst):
+        raise OSError("disk full")
+
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert prepare_search_index(path) is False
+    assert not dest.exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert prepare_search_index(path) is True
+    good = dest.read_bytes()
+    with CatalogIndex(path) as idx:
+        idx.add(
+            _make_item(
+                "SiteC",
+                "2024-08-01-00-00-00_UMBRA-04",
+                "extra",
+                "2024-08-01T00:00:00Z",
+                (2, 2, 3, 3),
+            )
+        )
+        idx.commit()
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert prepare_search_index(path) is False
+    assert dest.read_bytes() == good
+    assert list(path.parent.glob("*.tmp")) == []
+    with CatalogIndex(path) as idx:
+        assert not idx._spatial_ready
+        assert "extra" in _ids(idx, bbox=(0, 0, 5, 5))
+
+
+def test_rtree_build_failure_uses_the_column_predicate(tmp_path, monkeypatch, caplog):
+    """A build that cannot create its temp file leaves search on the columns."""
+    import logging
+
+    from umbra_py import index as index_mod
+
+    def fail_mkstemp(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+        expected = _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"])
+    monkeypatch.setattr(index_mod.tempfile, "mkstemp", fail_mkstemp)
+    with caplog.at_level(logging.WARNING):
+        assert index_mod.prepare_search_index(path) is False
+    assert "read-only file system" in caplog.text
+    assert "scan the catalog columns" in caplog.text
+    with CatalogIndex(path, readonly=True) as idx:
+        assert not idx._spatial_ready
+        assert _ids(idx, bbox=(0, 0, 5, 5), product_types=["GEC"]) == expected
+
+
+def test_rtree_and_column_plans_agree_around_the_candidate_threshold(tmp_path, monkeypatch):
+    """Each cutoff's two plans return the same hrefs in the same order."""
+    from umbra_py import index as index_mod
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+    _prepare(path)
+    box = (0, 0, 5, 5)
+    with CatalogIndex(path, readonly=True) as idx:
+        count = index_mod._rtree_hit_count(idx._conn, box)
+        assert count >= 2
+
+        def page(limit, **kwargs):
+            ids = _ids(idx, bbox=box, limit=limit, **kwargs)
+            sql, _ = _search_statement(idx, bbox=box, limit=limit, **kwargs)
+            return ids, sql
+
+        # A first page the box can fill uses the page cutoff.
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", count)
+        under, sql_under = page(1)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", count - 1)
+        over, sql_over = page(1)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
+
+        # A deeper page that still fills uses the deep cutoff.
+        monkeypatch.setattr(index_mod, "_RTREE_PAGE_LIMIT", 0)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_DEEP", count)
+        under, sql_under = page(1)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_DEEP", count - 1)
+        over, sql_over = page(1)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
+
+        # A limit the box cannot fill reads every candidate.
+        monkeypatch.setattr(index_mod, "_RTREE_PAGE_LIMIT", 32)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count)
+        under, sql_under = page(10)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count - 1)
+        over, sql_over = page(10)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over == ["c", "a"]
+
+        # A product filter keeps its own cutoff on a first page.
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", 0)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count)
+        under, sql_under = page(1, product_types=["GEC"])
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count - 1)
+        over, sql_over = page(1, product_types=["GEC"])
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
+
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count)
+        sites_under = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count - 1)
+        sites_over = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
+        assert sites_under == sites_over == ["SiteA"]
+
+
+def test_rtree_build_keeps_a_fresh_temp_from_another_process(tmp_path):
+    """A temp younger than an hour belongs to a build that is still writing it."""
+    import os
+    import time
+
+    from umbra_py.index import default_rtree_path
+
+    with _index(tmp_path) as idx:
+        path = idx.path
+    dest = default_rtree_path(path)
+    fresh = dest.parent / f"{dest.name}.inflight.tmp"
+    old = dest.parent / f"{dest.name}.abandoned.tmp"
+    fresh.write_bytes(b"in-flight")
+    old.write_bytes(b"abandoned")
+    ago = time.time() - 7200
+    os.utime(old, (ago, ago))
+    _prepare(path)
+    assert fresh.read_bytes() == b"in-flight"
+    assert not old.exists()
+    assert dest.is_file()
+
+
+def test_schema_stays_v8_when_the_sidecar_is_built(tmp_path):
+    """The sidecar is not a schema version and not a table inside the catalog."""
+    import sqlite3
+
+    from umbra_py.index import _SCHEMA_VERSION, default_rtree_path, prepare_search_index
+
+    path = tmp_path / "catalog.db"
+    with CatalogIndex(path) as idx:
+        idx.add(_A)
+        idx.commit()
+    assert prepare_search_index(path) is True
+    assert default_rtree_path(path).is_file()
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        meta = conn.execute("SELECT value FROM meta WHERE key = 'items_rtree'").fetchone()
+    finally:
+        conn.close()
+    assert version == _SCHEMA_VERSION
+    assert "items_rtree" not in names
+    assert meta is None
+    with CatalogIndex(path, readonly=True) as idx:
+        assert idx._spatial_ready
+        assert _same_either_way(idx, bbox=(0, 0, 1, 1), product_types=["GEC"]) == ["a"]
+
+
 def test_search_area_filter_is_case_insensitive(tmp_path):
     with _index(tmp_path) as idx:
         ids = {i.id for i in idx.search(area="sitea")}

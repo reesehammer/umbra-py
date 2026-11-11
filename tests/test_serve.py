@@ -297,6 +297,56 @@ def test_healthz_reports_ready_index_with_item_count(client):
     assert body["items"] == 3
 
 
+def test_healthz_is_served_only_after_the_spatial_index_is_built(index_path):
+    """Startup builds the R-tree sidecar before the app accepts /healthz.
+
+    A published snapshot has no tree inside it. The lifespan writes
+    ``catalog.rtree.db`` and only then does the socket serve readiness.
+    ``catalog.db`` is unchanged, including on the public read-only path.
+    """
+    import hashlib
+    import sqlite3
+
+    from umbra_py.index import CatalogIndex, default_rtree_path
+
+    before = hashlib.sha256(Path(index_path).read_bytes()).hexdigest()
+    with TestClient(serve.build_app(index_path, public=True)) as client:
+        assert hashlib.sha256(Path(index_path).read_bytes()).hexdigest() == before
+        sidecar = default_rtree_path(index_path)
+        assert sidecar.is_file()
+        ready = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        try:
+            names = {row[0] for row in ready.execute("SELECT name FROM sqlite_master")}
+        finally:
+            ready.close()
+        assert "items_rtree" not in names
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.json()["ready"] is True
+        search = client.get(
+            "/search",
+            params={"bbox": "-180,-90,180,90", "product_types": "GEC", "limit": 10},
+        )
+        assert search.status_code == 200
+        assert search.json()["context"]["returned"] == 3
+        with CatalogIndex(index_path, readonly=True) as idx:
+            assert idx._spatial_ready
+            seen: list[str] = []
+            idx._conn.set_trace_callback(seen.append)
+            list(idx.search(bbox=(-180, -90, 180, 90), product_types=["GEC"], limit=10))
+            idx._conn.set_trace_callback(None)
+        assert any("spatial.items_rtree" in sql for sql in seen)
+
+
+def test_local_serve_does_not_build_the_rtree(index_path):
+    """A non-public server never attaches the sidecar, so it does not build one."""
+    from umbra_py.index import default_rtree_path
+
+    with TestClient(serve.build_app(index_path)) as client:
+        assert client.get("/healthz").status_code == 200
+    assert not default_rtree_path(index_path).exists()
+
+
 def test_healthz_reports_freshness_fields(index_path, monkeypatch):
     # PRD P1-1/P1-4: distinct ids, build date and the snapshot identity let an
     # outside monitor tell a stale hosted index from a current one. `stale` is
