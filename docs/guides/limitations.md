@@ -120,6 +120,9 @@ is an unofficial community instance: STAC search + MCP on one URL,
 artifacts off so this host does not proxy rasters, a per-client rate
 limit, and CC-BY license headers.
 Asset `href`s point at Umbra's public bucket — stream them yourself.
+A browser `fetch()` of `GET /search` is
+[From a browser](../replace-crawler.md#from-a-browser); open data is published
+in batches, so a last-7-days or last-30-days query is usually empty.
 Do not set a Canopy token or a model key on that instance. See
 [Deploy](../deploy.md).
 
