@@ -210,6 +210,7 @@ from .index import (
     default_index_path,
     default_thumbs_path,
     prepare_search_index,
+    read_baked_thumbnail,
     read_snapshot_state,
     relocate_index_thumbnails,
     snapshot_id,
@@ -949,18 +950,6 @@ def landing_page(
                     **narrate_extra,
                 )
             )
-    elif public:
-        # On-demand renders stay off. The baked PNG is a local file read, so
-        # the landing page still names that one route.
-        links.append(
-            _link(
-                "thumbnail",
-                f"{base}/artifacts/thumbnail/{{item_id}}.png",
-                type="image/png",
-                title="Baked SAR quicklook thumbnail (templated by item id)",
-                templated=True,
-            )
-        )
     description = (
         "A read-only STAC API over Umbra's open SAR archive, served by "
         "umbra-py from a local catalog index. Umbra publishes a static STAC "
@@ -3856,9 +3845,10 @@ def build_app(
         if rate_limit is None:
             rate_limit = PUBLIC_RATE_LIMIT
 
-    # Baked PNGs are a local read. Public mode keeps that one route after it
-    # turns the on-demand renderers off. ``--no-artifacts`` on a local server
-    # still mounts neither.
+    # Local ``umbra serve`` keeps the PNG route it already had when artifacts
+    # are on, and does not add ``assets.thumbnail``. The public host mounts
+    # that route with artifacts off, and is the only server that stamps the
+    # asset. ``--no-artifacts`` on a local server still mounts neither.
     serve_thumbnails = bool(artifacts or public)
 
     # This module uses ``from __future__ import annotations``, so the route
@@ -4536,10 +4526,11 @@ def build_app(
 
         Duck-typed on ``thumbnail_ids`` rather than ``isinstance`` of
         :class:`CatalogIndex`: a test replaces that name with a constructor
-        spy, and a live catalog simply has no such method.
+        spy, and a live catalog simply has no such method. Only the public
+        host stamps ``assets.thumbnail``; a local server leaves items alone.
         """
         lookup = getattr(source, "thumbnail_ids", None)
-        if serve_thumbnails and page and callable(lookup):
+        if public and page and callable(lookup):
             return lookup(item.id for item in page)
         return set()
 
@@ -4701,10 +4692,7 @@ def build_app(
             item = get_one(source, item_id)
             lookup = getattr(source, "thumbnail_ids", None)
             baked = (
-                item is not None
-                and serve_thumbnails
-                and callable(lookup)
-                and item.id in lookup([item.id])
+                item is not None and public and callable(lookup) and item.id in lookup([item.id])
             )
         finally:
             _close(source)
@@ -5595,23 +5583,20 @@ def build_app(
             if public and not _valid_thumbnail_item_id(item_id):
                 raise HTTPException(status_code=400, detail="Invalid item id.")
             if public:
+                # Not a CatalogIndex: that open checks the schema, reads the
+                # snapshot, counts rows, and attaches the R-tree. This is one
+                # read-only point lookup, and it does not write catalog.db.
+                db = Path(index_path) if index_path is not None else default_index_path()
                 try:
-                    source = open_source(index_path, live=False, readonly=True)
+                    png = read_baked_thumbnail(db, item_id)
                 except FileNotFoundError as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
             else:
                 source = _open()
-            try:
-                # Same duck-type as the page stamp: the constructor name is
-                # spy-able, and a live catalog has no baked PNG to return.
-                getter = getattr(source, "get_thumbnail", None)
-                png = getter(item_id) if callable(getter) else None
-            finally:
-                if public:
-                    close = getattr(source, "close", None)
-                    if callable(close):
-                        close()
-                else:
+                try:
+                    getter = getattr(source, "get_thumbnail", None)
+                    png = getter(item_id) if callable(getter) else None
+                finally:
                     _close(source)
             if png is None:
                 detail = f"No baked thumbnail for {item_id!r}."

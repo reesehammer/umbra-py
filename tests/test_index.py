@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from umbra_py.index import BakedPreview, CatalogIndex, default_index_path
+from umbra_py.index import BakedPreview, CatalogIndex, default_index_path, read_baked_thumbnail
 from umbra_py.models import UmbraItem
 
 _BUCKET = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog"
@@ -1885,6 +1885,49 @@ def test_thumbnail_ids_is_one_existence_check(tmp_path):
         # The bytes-only reader is unchanged.
         assert idx.get_thumbnail("a") == b"png-a"
         assert idx.get_thumbnail("b") is None
+
+
+def test_thumbnail_ids_counts_a_legacy_inline_blob(tmp_path):
+    """The items fallback uses length(thumbnail), the same test as get_thumbnail."""
+    path = tmp_path / "catalog.db"
+    with _index(tmp_path) as idx:
+        idx._conn.execute(
+            "UPDATE items SET thumbnail = ? WHERE id = ?",
+            (b"inline-c", "c"),
+        )
+        idx.commit()
+        assert idx.thumbnail_ids(["a", "c"]) == {"c"}
+        assert idx.get_thumbnail("c") == b"inline-c"
+    assert read_baked_thumbnail(path, "c") == b"inline-c"
+
+
+def test_read_baked_thumbnail_skips_the_search_index(tmp_path, monkeypatch):
+    """The public PNG read does not open CatalogIndex or write catalog.db."""
+    import pytest
+
+    path = tmp_path / "catalog.db"
+
+    def render(item):
+        return b"png-a" if item.id == "a" else None
+
+    with _index(tmp_path) as idx:
+        assert idx.bake_thumbnails(render) == 1
+    before = path.stat()
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("full CatalogIndex open")
+
+    monkeypatch.setattr(CatalogIndex, "__init__", refuse)
+    monkeypatch.setattr(CatalogIndex, "_attach_spatial_index", refuse)
+    monkeypatch.setattr(CatalogIndex, "_require_readable_schema", refuse)
+    monkeypatch.setattr("umbra_py.index._sidecar_matches", refuse)
+    assert read_baked_thumbnail(path, "a") == b"png-a"
+    assert read_baked_thumbnail(path, "b") is None
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    with pytest.raises(FileNotFoundError):
+        read_baked_thumbnail(tmp_path / "missing.db", "a")
 
 
 def test_bake_thumbnails_records_what_it_rendered(tmp_path):

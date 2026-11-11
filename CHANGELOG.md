@@ -10,12 +10,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
-- **`umbra serve --public` serves baked thumbnails.**
+- **The hosted API (`umbra serve --public`) serves baked thumbnails.**
   `GET /artifacts/thumbnail/{item_id}.png` reads the PNG already in the local
   sidecar (no bucket fetch, no on-demand render). Search and item responses
-  add `assets.thumbnail` when that bake exists. An item with no bake has no
-  thumbnail asset. On-demand `/artifacts/quicklook` and the other artifact
-  routes stay off.
+  on that host add `assets.thumbnail` when a bake exists. An item with no
+  bake has no thumbnail asset. On-demand `/artifacts/quicklook` and the other
+  artifact routes stay off. A local `umbra serve` does not add the asset.
 - **`area` on `GET`/`POST /search` and `/sites` falls back to place geocoding**
   when it matches no Umbra task name and the request has no bbox or
   intersects geometry. The response adds `matched_by: geocode` with the

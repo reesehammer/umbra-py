@@ -87,9 +87,9 @@ def test_landing_page_public_advertises_mcp_and_community_note():
     mcp_link = next(link for link in page["links"] if link["rel"] == "mcp")
     assert mcp_link["href"] == "http://localhost:8000/mcp"
     assert mcp_link["method"] == "POST"
-    thumb = next(link for link in page["links"] if link["rel"] == "thumbnail")
-    assert thumb["href"] == "http://localhost:8000/artifacts/thumbnail/{item_id}.png"
-    assert "quicklook" not in {link["rel"] for link in page["links"]}
+    rels = {link["rel"] for link in page["links"]}
+    assert "thumbnail" not in rels
+    assert "quicklook" not in rels
 
 
 def test_collection_carries_license_and_temporal_extent():
@@ -2377,20 +2377,8 @@ def _bake_ids(index_path: Path, ids: set[str]) -> None:
         idx.bake_thumbnails(render)
 
 
-def _thumbnail_asset(feature: dict, item_id: str) -> dict:
-    asset = feature["assets"]["thumbnail"]
-    assert asset["type"] == "image/png"
-    assert asset["roles"] == ["thumbnail"]
-    assert asset["href"].endswith(f"/artifacts/thumbnail/{item_id}.png")
-    assert asset["href"].startswith("http")
-    return asset
-
-
-def test_local_search_advertises_a_thumbnail_only_when_a_bake_exists(client, index_path):
-    """Local serve already mounts the route. The asset appears iff a bake does."""
-    bare = {f["id"]: f for f in client.get("/search?limit=10").json()["features"]}
-    assert all("thumbnail" not in feature["assets"] for feature in bare.values())
-
+def test_local_serve_keeps_the_png_route_and_does_not_stamp_assets(client, index_path):
+    """A local server still serves the baked PNG. Item documents stay as they were."""
     _bake_ids(index_path, {"item-1"})
     png = client.get("/artifacts/thumbnail/item-1.png")
     assert png.status_code == 200
@@ -2403,22 +2391,13 @@ def test_local_search_advertises_a_thumbnail_only_when_a_bake_exists(client, ind
     assert "quicklook" in missing.json()["detail"]
 
     features = {f["id"]: f for f in client.get("/search?limit=10").json()["features"]}
-    _thumbnail_asset(features["item-1"], "item-1")
-    assert "thumbnail" not in features["item-0"]["assets"]
-    assert "thumbnail" not in features["item-2"]["assets"]
-
-    listed = {
-        f["id"]: f
-        for f in client.get(f"/collections/{COLLECTION}/items?limit=10").json()["features"]
-    }
-    assert "thumbnail" in listed["item-1"]["assets"]
-    assert "thumbnail" not in listed["item-0"]["assets"]
+    assert all("thumbnail" not in feature["assets"] for feature in features.values())
+    listed = client.get(f"/collections/{COLLECTION}/items?limit=10").json()["features"]
+    assert all("thumbnail" not in feature["assets"] for feature in listed)
     one = client.get(f"/collections/{COLLECTION}/items/item-1").json()
-    self_href = next(link["href"] for link in one["links"] if link["rel"] == "self")
-    origin = self_href.split("/collections/")[0]
-    assert one["assets"]["thumbnail"]["href"] == f"{origin}/artifacts/thumbnail/item-1.png"
-    other = client.get(f"/collections/{COLLECTION}/items/item-0").json()
-    assert "thumbnail" not in other["assets"]
+    assert "thumbnail" not in one["assets"]
+    posted = client.post("/search", json={"limit": 10}).json()["features"]
+    assert all("thumbnail" not in feature["assets"] for feature in posted)
     assert "/artifacts/quicklook/{item_id}.png" in client.get("/openapi.json").json()["paths"]
 
 
@@ -3760,7 +3739,7 @@ def test_public_serves_baked_thumbnails_and_advertises_them(index_path, tmp_path
         assert "/artifacts/change" not in paths
 
         rels = {link["rel"] for link in client.get("/").json()["links"]}
-        assert "thumbnail" in rels
+        assert "thumbnail" not in rels
         assert "quicklook" not in rels
 
         one = client.get(f"/collections/{COLLECTION}/items/item-1").json()
@@ -3788,6 +3767,31 @@ def test_public_serves_baked_thumbnails_and_advertises_them(index_path, tmp_path
         blocked = client.get("/artifacts/thumbnail/item-1.png")
         assert blocked.status_code == 429
         assert blocked.json()["error"] == "RateLimited"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_thumbnail_does_not_open_catalog_index(index_path, tmp_path, monkeypatch):
+    """The PNG route is a point lookup. It does not construct a CatalogIndex."""
+    _bake_ids(index_path, {"item-0"})
+    opened: list[str] = []
+    real_init = CatalogIndex.__init__
+
+    def spy(self, *args, **kwargs):
+        opened.append("open")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(serve.CatalogIndex, "__init__", spy)
+    before_stat = index_path.stat()
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        before = len(opened)
+        resp = client.get("/artifacts/thumbnail/item-0.png")
+        assert resp.status_code == 200
+        assert resp.content == b"PNG-item-0"
+        assert opened[before:] == []
+    after_stat = index_path.stat()
+    assert after_stat.st_size == before_stat.st_size
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
 
 
 def test_rate_limit_does_not_count_healthz(index_path, tmp_path):

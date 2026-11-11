@@ -178,8 +178,9 @@ outside letters, digits, `.`, `_`, and `-`) is HTTP 400. The response sends
 `Cache-Control: public, max-age=86400`. The URL is the item id, not a content
 hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each
-GET counts toward the 120/min limit. It does not take one of the two
-concurrent catalog-read slots (a browser fetches several images at once).
+GET counts toward the 120/min limit: a grid of N thumbnails costs N requests,
+so page modestly and rely on the one-day cache. It does not take one of the
+two concurrent catalog-read slots (a browser fetches several images at once).
 
 `/search`, `/collections/umbra-open-data/items`, and
 `/collections/umbra-open-data/items/{item_id}` add `assets.thumbnail` (`href`
