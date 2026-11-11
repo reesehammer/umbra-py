@@ -439,7 +439,7 @@ def test_rtree_build_failure_uses_the_column_predicate(tmp_path, monkeypatch, ca
 
 
 def test_rtree_and_column_plans_agree_around_the_candidate_threshold(tmp_path, monkeypatch):
-    """The page just under the cutoff is the same page as the one just over it."""
+    """Each cutoff's two plans return the same hrefs in the same order."""
     from umbra_py import index as index_mod
 
     with _index(tmp_path) as idx:
@@ -449,29 +449,54 @@ def test_rtree_and_column_plans_agree_around_the_candidate_threshold(tmp_path, m
     with CatalogIndex(path, readonly=True) as idx:
         count = index_mod._rtree_hit_count(idx._conn, box)
         assert count >= 2
+
+        def page(limit, **kwargs):
+            ids = _ids(idx, bbox=box, limit=limit, **kwargs)
+            sql, _ = _search_statement(idx, bbox=box, limit=limit, **kwargs)
+            return ids, sql
+
+        # A first page the box can fill uses the page cutoff.
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", count)
+        under, sql_under = page(1)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", count - 1)
+        over, sql_over = page(1)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
+
+        # A deeper page that still fills uses the deep cutoff.
+        monkeypatch.setattr(index_mod, "_RTREE_PAGE_LIMIT", 0)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_DEEP", count)
+        under, sql_under = page(1)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_DEEP", count - 1)
+        over, sql_over = page(1)
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
+
+        # A limit the box cannot fill reads every candidate.
+        monkeypatch.setattr(index_mod, "_RTREE_PAGE_LIMIT", 32)
         monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count)
-        under = _ids(idx, bbox=box, limit=10)
-        sql_under, _ = _search_statement(idx, bbox=box, limit=10)
+        under, sql_under = page(10)
         monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count - 1)
-        over = _ids(idx, bbox=box, limit=10)
-        sql_over, _ = _search_statement(idx, bbox=box, limit=10)
+        over, sql_over = page(10)
         assert "spatial.items_rtree" in sql_under
         assert "spatial.items_rtree" not in sql_over
         assert under == over == ["c", "a"]
 
+        # A product filter keeps its own cutoff on a first page.
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_PAGE", 0)
         monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count)
-        gec_under = _ids(idx, bbox=box, product_types=["GEC"], limit=10)
-        sql_gec, _ = _search_statement(idx, bbox=box, product_types=["GEC"], limit=10)
+        under, sql_under = page(1, product_types=["GEC"])
         monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_PRODUCT", count - 1)
-        gec_over = _ids(idx, bbox=box, product_types=["GEC"], limit=10)
-        sql_gec_over, _ = _search_statement(idx, bbox=box, product_types=["GEC"], limit=10)
-        assert "spatial.items_rtree" in sql_gec
-        assert "spatial.items_rtree" not in sql_gec_over
-        assert gec_under == gec_over
+        over, sql_over = page(1, product_types=["GEC"])
+        assert "spatial.items_rtree" in sql_under
+        assert "spatial.items_rtree" not in sql_over
+        assert under == over
 
-        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_FULL", count)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count)
         sites_under = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
-        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES_FULL", count - 1)
+        monkeypatch.setattr(index_mod, "_RTREE_MAX_CANDIDATES", count - 1)
         sites_over = [site.task for site in idx.rank_sites(bbox=box, min_passes=1)]
         assert sites_under == sites_over == ["SiteA"]
 

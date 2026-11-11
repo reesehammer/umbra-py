@@ -210,19 +210,27 @@ _RTREE_TMP_MAX_AGE_S = 3600
 # the query's (max_lon, min_lon, max_lat, min_lat) — see ``_rtree_params``.
 _RTREE_OVERLAP = "min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?"
 _RTREE_OVERLAP_ALIASED = "r.min_lon <= ? AND r.max_lon >= ? AND r.min_lat <= ? AND r.max_lat >= ?"
-# Warm limit-10 timings on the 17,205-item snapshot. The column plan walks
-# ``idx_items_search`` and stops after the page. The R-tree sorts every hit.
-# 149 hits: R-tree 0.59 ms, column 0.69 ms. 200 hits: 0.67 ms vs 0.47 ms.
-_RTREE_MAX_CANDIDATES = 150
-# A product filter makes the column plan sort the whole asset list before
-# LIMIT (~27–31 ms, flat). The R-tree is still faster at 8,000 hits (21 ms vs
-# 30 ms), ties near 12,000, and is slower at 15,000 (38 ms vs 31 ms).
+# Cold timings on the 17,205-item snapshot: ``posix_fadvise`` on the catalog
+# and the sidecar, then one search in a fresh process. ``serve`` asks for
+# ``offset + limit + 1`` rows, so a first page is 11 and offset 500 is 511.
+# A first page of a box that already has an early-sorting hit stops in the
+# task index (423 hits: column 4.5 ms, tree 8.5 ms). The same page of a late
+# ~200-hit site walks a long prefix first (202 hits: column 25 ms, tree 5 ms).
+_RTREE_PAGE_LIMIT = 32
+_RTREE_MAX_PAGE = 300
+# A deeper page the box can still fill keeps walking. 1,007 hits at cap 511:
+# column 106 ms, tree 57 ms. 2,500 hits: column 50 ms, tree 83 ms.
+_RTREE_MAX_DEEP = 1_500
+# No SQL limit, or a limit the box cannot fill, or ``/sites``: the column plan
+# reads every candidate, and a late site's last candidate is the end of the
+# table (202 hits, cap 511: column 211 ms, tree 17 ms). ``/sites`` at 2,500
+# hits is 181 ms vs 133 ms; the USA's 6,106 is 262 ms vs 275 ms.
+_RTREE_MAX_CANDIDATES = 2_500
+# A product filter sorts the asset list before LIMIT, about 210–250 ms cold
+# at every width. The tree is faster through 8,000 hits (179 ms vs 245 ms).
+# The whole catalog ties on a first page (231 ms vs 238 ms) and loses on a
+# deep page (318 ms vs 236 ms).
 _RTREE_MAX_CANDIDATES_PRODUCT = 10_000
-# A search that cannot stop at LIMIT, and ``rank_sites``, read every match.
-# The R-tree is faster at 2,500 hits (38 ms vs 44 ms) and slower once the box
-# is a large fraction of the catalog (4,000: 57 ms vs 55 ms; 6,106 USA hits:
-# 150 ms vs 91 ms).
-_RTREE_MAX_CANDIDATES_FULL = 2_500
 
 
 #: Schema of the *thumbnail sidecar* -- the transportable half of the baked
@@ -300,17 +308,21 @@ def _rtree_hit_count(conn: sqlite3.Connection, box: BBox) -> int:
     return int(row[0]) if row is not None else 0
 
 
-def _rtree_selective(count: int, *, stops_early: bool, product_filter: bool) -> bool:
-    """Whether ``count`` R-tree hits are cheaper than the column plan.
+def _rtree_selective(count: int, *, limit: int | None, product_filter: bool) -> bool:
+    """Whether ``count`` R-tree hits are cheaper cold than the column plan.
 
-    See :data:`_RTREE_MAX_CANDIDATES`, :data:`_RTREE_MAX_CANDIDATES_PRODUCT`,
-    and :data:`_RTREE_MAX_CANDIDATES_FULL`.
+    ``limit`` is the SQL ``LIMIT`` actually pushed. ``None`` means the
+    statement reads every candidate: no limit, a Python post-filter, or
+    ``rank_sites``. A limit the box cannot fill does the same walk, because
+    the task index never gets to stop. See the ``_RTREE_MAX_*`` constants.
     """
     if product_filter:
         return count <= _RTREE_MAX_CANDIDATES_PRODUCT
-    if stops_early:
-        return count <= _RTREE_MAX_CANDIDATES
-    return count <= _RTREE_MAX_CANDIDATES_FULL
+    if limit is not None and count > limit and limit <= _RTREE_PAGE_LIMIT:
+        return count <= _RTREE_MAX_PAGE
+    if limit is not None and count > limit:
+        return count <= _RTREE_MAX_DEEP
+    return count <= _RTREE_MAX_CANDIDATES
 
 
 def _preview_replaces(
@@ -3005,8 +3017,10 @@ class CatalogIndex:
         R-tree stays the outer loop even when a product filter matches almost
         every row. The R-tree stores coordinates as float32 rounded outward,
         so every candidate still has to pass the same column overlap the scan
-        uses. A wide box, and every writable open, uses that column predicate
-        directly. The ordered index can then stop after ``limit``.
+        uses. A wide first page, and every writable open, uses that column
+        predicate directly. The ordered index can then stop after ``limit``.
+        A deep page, or a limit the box cannot fill, uses the tree so that
+        walk does not run to the last late-sorting hit.
         """
         start_d = _coerce_date(start)
         end_d = _coerce_date(end, is_end=True)
@@ -3028,12 +3042,15 @@ class CatalogIndex:
             or max_resolution is not None
             or max_per_task is not None
         )
+        # A polygon or acquisition-property test drops the SQL limit, so the
+        # column plan would read every candidate. Treat that as no limit.
+        sql_limit = None if post_filter else limit
         spatial = (
             bool(boxes)
             and self._spatial_ready
             and _rtree_selective(
                 _rtree_hit_count(self._conn, boxes[0]),
-                stops_early=limit is not None and not post_filter,
+                limit=sql_limit,
                 product_filter=bool(product_types),
             )
         )
@@ -3368,7 +3385,7 @@ class CatalogIndex:
             # of the catalog; the tree's id list makes that slower.
             if self._spatial_ready and _rtree_selective(
                 _rtree_hit_count(self._conn, bbox),
-                stops_early=False,
+                limit=None,
                 product_filter=bool(product_types),
             ):
                 conditions.append(

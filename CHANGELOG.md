@@ -45,9 +45,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ### Fixed
 - **A bounding-box search uses an R-tree sidecar.** `umbra serve --public`
   builds `catalog.rtree.db` beside the index before `/healthz` reports ready,
-  and a tight box (including a product filter such as `GEC`) is answered from
-  it; a wide box keeps the ordered index scan that stops at the page limit, and
-  the exact footprint overlap still decides the hit. The sidecar is rebuilt
+  and a tight box, a deep page, or a product filter such as `GEC` is answered
+  from it; a wide first page keeps the ordered index scan that stops after
+  that page, and the exact footprint overlap still decides the hit. The sidecar is rebuilt
   when the catalog snapshot (`/healthz`'s `snapshot`, or the file's size and
   mtime when none is recorded) or its item count changes. `catalog.db` is not
   modified; if the sidecar cannot be built, search returns the same items

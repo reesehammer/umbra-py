@@ -181,8 +181,9 @@ page says what each flag does.
 is the GNU `sha256sum` manifest beside that file. `umbra index fetch` checks
 `catalog.db` against it when the manifest is present, and warns and continues
 when the manifest is missing. `umbra serve --public` writes `catalog.rtree.db`
-next to `catalog.db` at startup. A tight bbox search reads it; a wide box
-keeps the ordered index scan. The file is local: fetch does not download it,
+next to `catalog.db` at startup. A tight bbox search reads it, and so does a
+deep page of a smaller box; a wide first page keeps the ordered index scan.
+The file is local: fetch does not download it,
 and `catalog.sha256` does not list it. It is rebuilt when the snapshot id in
 `/healthz` (or, with no recorded snapshot, the catalog file's size and mtime)
 or the item count changes. If the build fails, search uses the same results
