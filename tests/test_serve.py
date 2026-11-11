@@ -3714,11 +3714,11 @@ def test_public_serves_baked_thumbnails_and_advertises_them(index_path, tmp_path
         assert missing.headers["access-control-allow-origin"] == "*"
 
         for bad in ("..", "a" * 200, "has space", ".hidden"):
-            refused = client.get(f"/artifacts/thumbnail/{bad}.png")
-            assert refused.status_code == 400, bad
-            assert refused.json()["detail"] == "Invalid item id."
+            missing_id = client.get(f"/artifacts/thumbnail/{bad}.png")
+            assert missing_id.status_code == 404, bad
+            assert "No baked thumbnail" in missing_id.json()["detail"]
         slash = client.get("/artifacts/thumbnail/foo%2Fbar.png")
-        assert slash.status_code in (400, 404)
+        assert slash.status_code == 404
 
         for path in (
             "/artifacts/quicklook/item-1.png",

@@ -172,9 +172,8 @@ Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 
 `GET /artifacts/thumbnail/{item_id}.png` returns a PNG already stored in the
 local thumbnail sidecar. It does not read Umbra's bucket, render a quicklook,
-or fall back to another picture. A missing bake is HTTP 404 (`No baked
-thumbnail`). An id that is not a single token (a slash, `..`, or anything
-outside letters, digits, `.`, `_`, and `-`) is HTTP 400. The response sends
+or fall back to another picture. A missing bake, including an unknown or
+odd id, is HTTP 404 (`No baked thumbnail`). The response sends
 `Cache-Control: public, max-age=86400`. The URL is the item id, not a content
 hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each

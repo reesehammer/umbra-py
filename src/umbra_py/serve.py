@@ -168,7 +168,6 @@ import json
 import logging
 import math
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -308,21 +307,6 @@ PUBLIC_RATE_WINDOW_S = 60.0
 #: session and a same-day revisit without a second hit on the rate limit; a
 #: Monday republish is visible the next day.
 PUBLIC_THUMBNAIL_CACHE_CONTROL = "public, max-age=86400"
-
-#: One STAC id in a URL path segment. Umbra ids are UUIDs; tests use ``item-0``.
-#: ``..``, a slash, and anything else that is not this token are rejected
-#: before a lookup. The id is a SQL key, not a filename.
-_THUMBNAIL_ITEM_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}\Z")
-
-
-def _valid_thumbnail_item_id(item_id: str) -> bool:
-    """Whether ``item_id`` is a single safe path segment.
-
-    Rejects ``..`` even though the regex allows dots, so a segment cannot
-    climb. A slash never matches the token.
-    """
-    return ".." not in item_id and _THUMBNAIL_ITEM_ID.fullmatch(item_id) is not None
-
 
 #: Paths a probe or a human hits before any query; never count them against
 #: the cap (a health check that 429s is worse than a scraper).
@@ -1242,17 +1226,10 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
 def _attach_thumbnail_asset(feature: dict[str, Any], base_url: str, item_id: str) -> None:
     """Point ``assets.thumbnail`` at this server's baked PNG.
 
-    Skipped when the item already published a ``thumbnail`` asset. The href
-    uses the same absolute base as the item's ``self`` link.
+    The href uses the same absolute base as the item's ``self`` link.
     """
-    assets = feature.get("assets")
-    if not isinstance(assets, dict):
-        assets = {}
-        feature["assets"] = assets
-    if "thumbnail" in assets:
-        return
     base = base_url.rstrip("/")
-    assets["thumbnail"] = {
+    feature["assets"]["thumbnail"] = {
         "href": f"{base}/artifacts/thumbnail/{item_id}.png",
         "type": "image/png",
         "roles": ["thumbnail"],
@@ -4690,10 +4667,7 @@ def build_app(
         source = _open()
         try:
             item = get_one(source, item_id)
-            lookup = getattr(source, "thumbnail_ids", None)
-            baked = (
-                item is not None and public and callable(lookup) and item.id in lookup([item.id])
-            )
+            baked = item is not None and item.id in _page_baked_ids(source, [item])
         finally:
             _close(source)
         if item is None:
@@ -5574,14 +5548,12 @@ def build_app(
             index bake-thumbnails`` stored. A ``404`` means the id is unknown
             or its thumbnail has not been baked. On a local server that also
             mounts quicklook, the message names that route. On ``--public``
-            the message does not: quicklook is not mounted, the id is checked
-            before the lookup, and the PNG is cached for a day. The request
-            still counts against the public rate limit. It does not take a
-            catalog-read slot: browsers fetch several of these at once, and
-            the slot cap is 2.
+            the message does not: quicklook is not mounted, and the PNG is
+            cached for a day. The id is a SQL bind parameter, so an unknown
+            or odd id is the same 404. The request still counts against the
+            public rate limit. It does not take a catalog-read slot: browsers
+            fetch several of these at once, and the slot cap is 2.
             """
-            if public and not _valid_thumbnail_item_id(item_id):
-                raise HTTPException(status_code=400, detail="Invalid item id.")
             if public:
                 # Not a CatalogIndex: that open checks the schema, reads the
                 # snapshot, counts rows, and attaches the R-tree. This is one

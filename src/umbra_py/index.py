@@ -1918,15 +1918,37 @@ def _sqlite_ro_uri(path: Path) -> str:
     return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
 
 
+def _baked_thumbnail_row(conn: sqlite3.Connection, item_id: str) -> tuple[Any, ...] | None:
+    """Preview bytes for ``item_id``: side table first, then a legacy inline blob.
+
+    Both statements select ``thumbnail, thumbnail_asset, thumbnail_size``.
+    The side table tests ``thumbnail IS NOT NULL``; the ``items`` fallback
+    tests ``length(thumbnail) IS NOT NULL``. ``None`` when neither row has a bake.
+    """
+    row = conn.execute(
+        "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM item_thumbnails "
+        "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    if row is not None:
+        return row
+    return conn.execute(
+        "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
+        "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
+        (item_id,),
+    ).fetchone()
+
+
 def read_baked_thumbnail(path: str | os.PathLike, item_id: str) -> bytes | None:
     """Return one baked PNG, or ``None`` when that id has no bake.
 
     A read-only point lookup for ``GET /artifacts/thumbnail`` on the public
     host. It does not construct a :class:`CatalogIndex`: no schema check, no
     snapshot read, no ``COUNT(*)``, and no R-tree attach. ``mode=ro`` plus
-    ``PRAGMA query_only`` so ``catalog.db`` is not written. The two statements
-    match :meth:`CatalogIndex._thumbnail_row` (side table, then a legacy
-    inline blob). A missing file raises :class:`FileNotFoundError`.
+    ``PRAGMA query_only`` so ``catalog.db`` is not written. The bytes come
+    from :func:`_baked_thumbnail_row`, the same lookup as
+    :meth:`CatalogIndex._thumbnail_row`. A missing file raises
+    :class:`FileNotFoundError`.
     """
     db = Path(path)
     if not db.is_file():
@@ -1938,17 +1960,7 @@ def read_baked_thumbnail(path: str | os.PathLike, item_id: str) -> bytes | None:
     try:
         conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA query_only = ON")
-        row = conn.execute(
-            "SELECT thumbnail FROM item_thumbnails "
-            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if row is None or row[0] is None:
-            row = conn.execute(
-                "SELECT thumbnail FROM items "
-                "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
-                (item_id,),
-            ).fetchone()
+        row = _baked_thumbnail_row(conn, item_id)
         if row is None or row[0] is None:
             return None
         return bytes(row[0])
@@ -2850,18 +2862,7 @@ class CatalogIndex:
 
     def _thumbnail_row(self, item_id: str) -> tuple[Any, ...] | None:
         """Preview bytes for ``item_id``, side table first, then a legacy inline blob."""
-        row = self._conn.execute(
-            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM item_thumbnails "
-            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if row is not None:
-            return row
-        return self._conn.execute(
-            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
-            "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
+        return _baked_thumbnail_row(self._conn, item_id)
 
     def get_thumbnail(self, item_id: str) -> bytes | None:
         """Return the baked quicklook PNG for this STAC id, or ``None``.
