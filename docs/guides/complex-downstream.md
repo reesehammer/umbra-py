@@ -33,6 +33,156 @@ processor that will use it.
 classifies and downloads both. It does not form an image from CPHD, and
 `umbra convert` does not read CPHD.
 
+SICD and CPHD carry the sensor trajectory. See
+[State vectors](#state-vectors).
+
+## State vectors
+
+SICD and CPHD carry an ECEF trajectory. The GEC `*.stac.v2.json` sidecar
+carries scene-centre angles. `read_sicd_xml` reads a SICD's XML over HTTP
+range requests and returns the document. umbra-py does not parse a CPHD,
+and reading either product's metadata does not form an image.
+
+Checked on 2026-11-12 against five public collects (the stems in the table
+below) and the CPHDs of two of them. All five SICDs are SICD 1.3.0
+(`urn:SICD:1.3.0`). Both CPHDs start `CPHD/1.1.0`.
+
+### SICD
+
+The trajectory is inside the NITF.
+
+- `Position/ARPPoly` is an X, Y, Z polynomial in time. On these five files
+  each axis is degree 5 (`order1="5"`, `Coef` with `exponent1` 0 through
+  5). At `SCPCOA/SCPTime`, the polynomial and its first two derivatives
+  reproduce `ARPPos`, `ARPVel`, and `ARPAcc` (residuals under
+  3×10⁻⁸ m and 5×10⁻⁶ m/s).
+- `SCPCOA` is the aperture-centre state: `ARPPos`, `ARPVel`, `ARPAcc`,
+  plus `DopplerConeAng`, `GrazeAng`, `IncidenceAng`, `AzimAng`, and
+  `SlantRange`.
+- The same `Position` block also has `GRPPoly`, `TxAPCPoly`, and
+  `RcvAPC/RcvAPCPoly`.
+- `CollectionInfo` parameter `collect_id` equals the sidecar property
+  `umbra:collect_id`. On these five, `ephemeris_source` is
+  `POST_PASS_SMOOTHED`.
+
+### CPHD
+
+On `2025-07-15-06-10-12_UMBRA-08` and `2024-09-07-17-26-59_UMBRA-08`:
+
+- The XML `PVP` block declares per-vector `TxPos`, `TxVel`, `RcvPos`,
+  `RcvVel`, and `SRPPos`, each `X=F8;Y=F8;Z=F8`. The samples are in the
+  binary PVP block.
+- `ReferenceGeometry/Monostatic` has one `ARPPos` and one `ARPVel`. On the
+  2025-07-15 collect those values match the SICD `SCPCOA` vectors.
+
+`download_item(item, dest_dir="./cphd", assets=["CPHD"])` and
+`umbra download <sidecar-url> --asset CPHD --dest ./cphd` fetch the file.
+Nothing in umbra-py reads the PVP block.
+
+### GEC sidecar
+
+On these five collects the JSON next to the GeoTIFF is the
+`*.stac.v2.json` sidecar. `view:azimuth`, `view:incidence_angle`,
+`umbra:grazing_angle_degrees`, and `umbra:slant_range_meters` equal
+`SCPCOA` `AzimAng`, `IncidenceAng`, `GrazeAng`, and `SlantRange`.
+`sat:orbit_state` is `ascending` or `descending`. A walk of every key
+found no position polynomial and no velocity vector. A sibling
+`*_METADATA.json` and `*_STAC-METADATA.json` returned HTTP 404.
+
+The three squint properties are a separate field, covered below.
+
+### Reading the SICD XML
+
+`read_sicd_xml(src)` takes the NITF URL or a local path. It returns
+`(xml, bytes_read, product_bytes)`. `session` is optional and
+keyword-only. No `umbra` command prints this XML.
+
+`item.asset_href("SICD")` is the public NITF. The sidecar may also list a
+`*_SICD_MM.xml`, which becomes asset `sicd_2`. On the 2025-07-15 collect
+that href stayed on `s3://prod-prod-processed-sar-data/...`, and the open
+bucket returned 404 for the filename and for `<stem>_SICD.xml`. Pass the
+NITF to `read_sicd_xml`.
+
+`CatalogIndex.search` and `UmbraCatalog.search` take `product_types=`
+(the CLI flag is `--product`), `area=` (`--area`, the task-directory
+name; for a `task-data` collect that is `umbra:task_id`), and `limit=`.
+They have no `collect_id` argument, and `umbra search` has no
+`--collect-id` flag. The id is `properties["umbra:collect_id"]`.
+`canonical=True` is a keyword of those two `search` methods.
+`umbra search` has no `--canonical` flag. `place=` is not a `search`
+argument; `--place` is CLI-only, as in the recipe below.
+
+```python
+from xml.etree import ElementTree
+
+from umbra_py import CatalogIndex, read_sicd_xml
+
+with CatalogIndex.from_release() as index:
+    hits = [
+        item
+        for item in index.search(area=task_id, product_types=["SICD"], limit=20)
+        if item.properties.get("umbra:collect_id") == collect_id
+    ]
+
+xml, nbytes, product_bytes = read_sicd_xml(hits[0].asset_href("SICD"))
+root = ElementTree.fromstring(xml)
+ns = {"s": "urn:SICD:1.3.0"}
+arp_x = root.findtext("s:SCPCOA/s:ARPPos/s:X", namespaces=ns)
+```
+
+On these five NITFs the call transferred 34,589–35,955 bytes. The
+products are 1.02–11.34 GB. `umbra download --asset SICD` and
+`download_item(..., assets=["SICD"])` fetch the whole NITF.
+`download_url(..., max_bytes=)` and `umbra download --max-bytes` cap a
+transfer that starts at byte 0. `read_sicd_xml` is the call that locates
+the XML from the NITF header. `umbra preflight` reads the same XML and
+reports calibration, noise level, and SCPCOA look geometry. It does not
+return `ARPPoly`.
+
+### Sidecar squint
+
+Each sidecar has:
+
+- `umbra:squint_angle_exploitation_degrees`, signed
+- `umbra:squint_angle_degrees_off_broadside`, its absolute value
+- `umbra:squint_angle_engineering_degrees`
+
+On these five sidecars, and on 400 SICD items from five date windows of
+the community search API the same day, the off-broadside value is the
+absolute value of the exploitation angle, with no exception. The
+engineering angle is `90 + exploitation` when `sar:observation_direction`
+is `right`, and `exploitation - 90` when it is `left`. On right-looking
+`2023-11-09-05-12-02_UMBRA-05`, exploitation is -57.465° and engineering
+is 32.535°. On left-looking `2024-09-07-17-26-59_UMBRA-08`, exploitation
+is +57.512° and engineering is -32.488°.
+
+Two angles computed from the matching SICD:
+
+- **Slant plane.** `|DopplerConeAng - 90°|`. On these files
+  `DopplerConeAng` equals the angle between `ARPVel` and the vector from
+  `ARPPos` to `GeoData/SCP/ECF`.
+- **Ground plane.** In the WGS 84 geodetic east-north plane at that
+  scene-centre point, the clockwise angle from the horizontal part of
+  `ARPVel` to the horizontal part of `(scene-centre ECF - ARPPos)`,
+  wrapped to ±180°. The table is the absolute difference between that
+  angle and the nearer of +90° and -90°.
+
+| Collect | Look | Slant ° | Ground ° | Sidecar off-broadside ° |
+| --- | --- | ---: | ---: | ---: |
+| `2024-02-09-05-34-49_UMBRA-07` | left | 0.000017 | 0.037 | 0.063 |
+| `2024-12-27-16-42-10_UMBRA-09` | right | 0.000005 | 0.010 | 0.105 |
+| `2025-07-15-06-10-12_UMBRA-08` | right | 1.630 | 3.509 | 3.867 |
+| `2024-09-07-17-26-59_UMBRA-08` | left | 15.185 | 57.333 | 57.512 |
+| `2023-11-09-05-12-02_UMBRA-05` | right | 23.936 | 57.549 | 57.465 |
+
+The sidecar value and the slant-plane angle differ on every row. On the
+two largest squints the slant-plane angle is 15.185° and 23.936° where
+the sidecar says 57.512° and 57.465°. The ground-plane angle is 0.179°
+and 0.084° from the sidecar on those two rows, and 0.358° from it on the
+3.867° row. On the two near-broadside rows both computed angles are under
+0.04° and the sidecar value is 0.063° and 0.105°. These five collects do
+not identify the sidecar field with either angle.
+
 ## Recipe: index → search → size → download → stop
 
 Do not crawl S3 for a repeat search. Do not convert.
