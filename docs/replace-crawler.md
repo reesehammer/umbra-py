@@ -197,6 +197,68 @@ absent and this query errors. The daily canary reads the file metadata
 first and skips this program until `umbra-py:asset_schema` is 2, or a field
 named `gec` exists. The HTTP and `pystac-client` programs run either way.
 
+## From a browser
+
+Open data is published in batches. As of the snapshot built 2026-11-09, the
+newest acquisition is 2026-09-13, so a search for the last 7 days or the last
+30 days is usually empty. Read the collection `extent.temporal` (on
+[`umbra-open-data`](https://api.umbra-py.space/collections/umbra-open-data))
+for the acquisition window, or [`/healthz`](https://api.umbra-py.space/healthz)
+`built_at` for when that snapshot was built, instead of assuming the archive
+runs up to today.
+
+The same Nepal search is a `GET` of
+`https://api.umbra-py.space/search`. A `GET` with no custom headers does not
+preflight. Send `collections=umbra-open-data` and either `bbox`
+(`minlon,minlat,maxlon,maxlat`) or `intersects` (a URL-encoded GeoJSON
+`Point`, `Polygon`, or `MultiPolygon`). The two are mutually exclusive: sending both is a 400. `datetime` is an interval (`2026-09-01/..` is open at
+the end; a single date matches that day). The index filters on the
+acquisition date. `product_types=GEC` is the product type, case-insensitive.
+The feature's asset key is `gec`. `canonical=true` keeps the canonical copy,
+including items that are not a republished pair. `limit`
+is the page size (default 10; this host returns at most 500). Results stay
+in the index order above, so the first page of one window is the earliest
+passes in it.
+
+`URLSearchParams` encodes `intersects` the way the `urlencode` example above
+does. For the box instead of the point, drop `intersects` and set
+`bbox` to `85.49,28.26,85.56,28.32`.
+
+```js
+const params = new URLSearchParams({
+  collections: "umbra-open-data",
+  intersects: JSON.stringify({ type: "Point", coordinates: [85.52, 28.29] }),
+  datetime: "2026-09-01/..",
+  product_types: "GEC",
+  canonical: "true",
+  limit: "5",
+});
+const page = await fetch(`https://api.umbra-py.space/search?${params}`).then(
+  (response) => response.json(),
+);
+for (const item of page.features) {
+  // Footprint positions are often [lon, lat, height]. Use the first two.
+  const [lon, lat] = item.geometry.coordinates[0][0];
+  console.log(item.properties.datetime, lon, lat, item.assets.gec?.href);
+}
+const next = page.links.find((link) => link.rel === "next");
+if (next) {
+  // next.method is "GET". next.href already includes token= (the offset).
+  const more = await fetch(next.href).then((response) => response.json());
+  console.log(more.features.length);
+}
+```
+
+A `links` entry with `rel` `next` and `method` `GET` is the next page. Follow
+its `href`; that URL already carries `token`. Footprint positions are often
+`[lon, lat, height]`; use the first two. `features[].assets.gec.href` is a
+public COG on Umbra's bucket. Attribute Umbra, CC BY 4.0
+(`X-Umbra-Attribution`, and `Link: rel="license"`). The rate limit is 120
+requests per minute per client. Do not page the whole catalog this way. For
+a bulk copy, `umbra index fetch` downloads the weekly
+[`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db)
+([Bulk use and outages](hosted-limits.md#bulk-use-and-outages)).
+
 ## One copy of a republished collect
 
 The same collect is often published twice: once under `sar-data/task-data/`
