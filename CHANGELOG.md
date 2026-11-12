@@ -10,6 +10,16 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **Where open-data state vectors live is documented for downstream
+  processors.** The complex-products guide names the SICD fields
+  (`Position/ARPPoly`, `SCPCOA` `ARPPos` / `ARPVel`) and the CPHD fields
+  (per-vector `PVP` `TxPos` / `RcvPos` / `SRPPos`, and
+  `ReferenceGeometry/Monostatic` `ARPPos` / `ARPVel`), notes that the GEC
+  `*.stac.v2.json` sidecar has scene-centre angles and no trajectory, and
+  shows a metadata-only read with `read_sicd_xml`. On five public collects
+  the sidecar's squint properties are one signed angle written three ways,
+  and that angle is not equal to the slant-plane or the ground-plane angle
+  computed from the matching SICD.
 - **The hosted API (`umbra serve --public`) serves baked thumbnails.**
   `GET /artifacts/thumbnail/{item_id}.png` reads the PNG already in the local
   sidecar (no bucket fetch, no on-demand render). Search and item responses
