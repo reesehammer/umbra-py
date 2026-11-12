@@ -124,6 +124,9 @@ Baked thumbnails are the exception: `GET /artifacts/thumbnail/{item_id}.png`
 serves a PNG already on the host, and an item with a bake advertises it as
 `assets.thumbnail`. An item with no bake has no thumbnail; show a
 placeholder. See [Hosted API limits](../hosted-limits.md).
+A browser `fetch()` of `GET /search` is
+[From a browser](../replace-crawler.md#from-a-browser); open data is published
+in batches, so a last-7-days or last-30-days query is usually empty.
 Do not set a Canopy token or a model key on that instance. See
 [Deploy](../deploy.md).
 

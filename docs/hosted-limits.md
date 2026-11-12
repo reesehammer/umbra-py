@@ -155,7 +155,8 @@ without `--public` does not read `UMBRA_PUBLIC_BASE_URL`.
 ## CORS
 
 The server is read-only. Browser clients on another origin, including a
-static `umbra demo` page, can call it:
+static `umbra demo` page, can call it. A `fetch()` of `GET /search` is in
+[From a browser](replace-crawler.md#from-a-browser).
 
 | Setting | Value |
 | --- | --- |
@@ -163,10 +164,14 @@ static `umbra demo` page, can call it:
 | `allow_methods` | `GET`, `POST`, `OPTIONS` |
 | `allow_headers` | `*` |
 | `expose_headers` | `Link`, `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-Umbra-Attribution`, `X-Umbra-License` |
+| preflight `Access-Control-Max-Age` | `600` (seconds) |
 | credentials | not allowed (`*` origins cannot be credentialed) |
 
 Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
-`Link: rel="license"`.
+`Link: rel="license"`. An `OPTIONS` preflight sends
+`Access-Control-Max-Age: 600`, so a browser may reuse that answer for 600
+seconds. The server does not pass `max_age`; 600 is the CORS middleware
+default. `GET /search` with no custom headers does not send a preflight.
 
 ## Baked thumbnails
 

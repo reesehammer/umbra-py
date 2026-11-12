@@ -164,6 +164,16 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   retrying HTTP session, so a transient S3 failure is retried, and that
   walk does not take a permit a geocode or a single item read needs.
 
+### Docs
+- **Browser `GET /search`.** [Replace your crawler](docs/replace-crawler.md#from-a-browser)
+  shows a `fetch()` of `https://api.umbra-py.space/search`
+  (`collections=umbra-open-data`, `bbox` or a URL-encoded `intersects` point,
+  `datetime`, `product_types=GEC`, `canonical=true`). Open data is published
+  in batches: as of the 2026-11-09 snapshot the newest acquisition is
+  2026-09-13, so a last-7-days or last-30-days query is usually empty. The
+  preflight cache is `Access-Control-Max-Age: 600`
+  ([Hosted API limits](docs/hosted-limits.md#cors)).
+
 ## [0.1.4] — 2026-10-26
 
 Hosted MCP is in the registry, and the six core tools keep their names
