@@ -5532,28 +5532,15 @@ def build_app(
             _close(source)
 
     if serve_thumbnails:
+        # FastAPI gives every method on one route the same operation id, so
+        # HEAD is its own registration of this lookup. It is public-only:
+        # link checkers hit the hosted API, and a local server stays GET-only.
+        thumbnail_path = "/artifacts/thumbnail/{item_id}.png"
+        thumbnail_responses = {
+            200: _binary_response("image/png", "The baked quicklook thumbnail, unrendered.")
+        }
 
-        @app.get(
-            "/artifacts/thumbnail/{item_id}.png",
-            tags=["Artifacts"],
-            response_class=Response,
-            responses={
-                200: _binary_response("image/png", "The baked quicklook thumbnail, unrendered.")
-            },
-        )
-        def get_thumbnail(item_id: str) -> Response:
-            """Serve a baked quicklook thumbnail straight from the local index.
-
-            Renders nothing and fetches nothing: the PNG is the one ``umbra
-            index bake-thumbnails`` stored. A ``404`` means the id is unknown
-            or its thumbnail has not been baked. On a local server that also
-            mounts quicklook, the message names that route. On ``--public``
-            the message does not: quicklook is not mounted, and the PNG is
-            cached for a day. The id is a SQL bind parameter, so an unknown
-            or odd id is the same 404. The request still counts against the
-            public rate limit. It does not take a catalog-read slot: browsers
-            fetch several of these at once, and the slot cap is 2.
-            """
+        def _thumbnail(item_id: str, *, head: bool) -> Response:
             if public:
                 # Not a CatalogIndex: that open checks the schema, reads the
                 # snapshot, counts rows, and attaches the R-tree. This is one
@@ -5579,7 +5566,53 @@ def build_app(
                     )
                 raise HTTPException(status_code=404, detail=detail)
             headers = {"Cache-Control": PUBLIC_THUMBNAIL_CACHE_CONTROL} if public else None
-            return Response(content=png, media_type="image/png", headers=headers)
+            body = png
+            if head:
+                # ``Response`` would send the PNG. HEAD must keep the length
+                # and send no bytes, or a link checker downloads the image.
+                headers = {
+                    "Cache-Control": PUBLIC_THUMBNAIL_CACHE_CONTROL,
+                    "Content-Length": str(len(png)),
+                }
+                body = b""
+            return Response(content=body, media_type="image/png", headers=headers)
+
+        @app.get(
+            thumbnail_path,
+            tags=["Artifacts"],
+            response_class=Response,
+            responses=thumbnail_responses,
+        )
+        def get_thumbnail(item_id: str) -> Response:
+            """Serve a baked quicklook thumbnail straight from the local index.
+
+            Renders nothing and fetches nothing: the PNG is the one ``umbra
+            index bake-thumbnails`` stored. A ``404`` means the id is unknown
+            or its thumbnail has not been baked. On a local server that also
+            mounts quicklook, the message names that route. On ``--public``
+            the message does not: quicklook is not mounted, and the PNG is
+            cached for a day. ``HEAD`` on ``--public`` is this same lookup:
+            the status, media type, ``Content-Length`` and ``Cache-Control``
+            match ``GET``, and the body is empty. The id is a SQL bind
+            parameter, so an unknown or odd id is the same 404. The request,
+            including ``HEAD``, still counts once against the public rate
+            limit. It does not take a catalog-read slot: browsers fetch
+            several of these at once, and the slot cap is 2.
+            """
+            return _thumbnail(item_id, head=False)
+
+        if public:
+
+            @app.api_route(
+                thumbnail_path,
+                methods=["HEAD"],
+                tags=["Artifacts"],
+                response_class=Response,
+                responses=thumbnail_responses,
+            )
+            def head_thumbnail(item_id: str) -> Response:
+                """``GET`` thumbnail headers and status, with an empty body."""
+                return _thumbnail(item_id, head=True)
 
     if artifacts:
 

@@ -179,7 +179,9 @@ default. `GET /search` with no custom headers does not send a preflight.
 local thumbnail sidecar. It does not read Umbra's bucket, render a quicklook,
 or fall back to another picture. A missing bake, including an unknown or
 odd id, is HTTP 404 (`No baked thumbnail`). The response sends
-`Cache-Control: public, max-age=86400`. The URL is the item id, not a content
+`Cache-Control: public, max-age=86400`. `HEAD` on the same path returns that
+status and those headers with an empty body (`Content-Length` is the PNG size
+on 200) and counts toward the same limit. The URL is the item id, not a content
 hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each
 GET counts toward the 120/min limit: a grid of N thumbnails costs N requests,
