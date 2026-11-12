@@ -150,7 +150,8 @@ Two design commitments carry over from the rest of the package:
 Run it with ``umbra serve`` (needs the ``serve`` extra:
 ``pip install 'umbra-py[serve]'``). ``umbra serve --public`` is the hosted
 community instance: STAC search and Streamable HTTP MCP on one process
-(``POST /mcp``), artifacts off so this host does not proxy Umbra COGs, a
+(``POST /mcp``), on-demand artifacts off so this host does not proxy Umbra
+COGs, the baked-thumbnail route left on (a local PNG, not a render), a
 per-client request cap, CC-BY license headers, and a refuse of Canopy / model
 keys and of a live S3 walk. Railway's start command is that flag.
 """
@@ -172,7 +173,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -208,6 +209,7 @@ from .index import (
     default_index_path,
     default_thumbs_path,
     prepare_search_index,
+    read_baked_thumbnail,
     read_snapshot_state,
     relocate_index_thumbnails,
     snapshot_id,
@@ -298,6 +300,13 @@ _inflight_client: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 #: bound. ``0`` disables it. Overridable with ``--rate-limit``.
 PUBLIC_RATE_LIMIT = 120
 PUBLIC_RATE_WINDOW_S = 60.0
+
+#: ``Cache-Control`` for a public baked thumbnail. The URL is the item id, not
+#: a content hash, so ``immutable`` would keep a PNG a later sidecar replaces
+#: (a larger bake of the same product wins on merge). One day covers a browser
+#: session and a same-day revisit without a second hit on the rate limit; a
+#: Monday republish is visible the next day.
+PUBLIC_THUMBNAIL_CACHE_CONTROL = "public, max-age=86400"
 
 #: Paths a probe or a human hits before any query; never count them against
 #: the cap (a health check that 429s is worse than a scraper).
@@ -1214,6 +1223,20 @@ def item_to_stac(item: UmbraItem, base_url: str) -> dict[str, Any]:
     return feature
 
 
+def _attach_thumbnail_asset(feature: dict[str, Any], base_url: str, item_id: str) -> None:
+    """Point ``assets.thumbnail`` at this server's baked PNG.
+
+    The href uses the same absolute base as the item's ``self`` link.
+    """
+    base = base_url.rstrip("/")
+    feature["assets"]["thumbnail"] = {
+        "href": f"{base}/artifacts/thumbnail/{item_id}.png",
+        "type": "image/png",
+        "roles": ["thumbnail"],
+        "title": "Baked SAR quicklook thumbnail",
+    }
+
+
 def _href_with_token(href: str, token: int) -> str:
     """Return ``href`` with a single ``token`` query parameter set to ``token``.
 
@@ -1277,6 +1300,7 @@ def search_result(
     next_body: Mapping[str, Any] | None = None,
     prev_body: Mapping[str, Any] | None = None,
     self_href: str | None = None,
+    baked_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Wrap items in a STAC ``FeatureCollection`` (the ``/search`` response).
 
@@ -1285,9 +1309,18 @@ def search_result(
     page is not the first. A body on either link makes that link ``POST``
     (the STAC shape for paging a POST ``/search``); without one the link is
     a ``GET`` of ``href``.
+
+    ``baked_ids`` stamps ``assets.thumbnail`` on features whose id is in the
+    set. Pass it only when ``GET /artifacts/thumbnail/{id}.png`` is mounted
+    and the id has a local bake. Omit it and the assets are unchanged.
     """
     base = base_url.rstrip("/")
     features = [item_to_stac(it, base_url) for it in items]
+    if baked_ids:
+        baked = set(baked_ids)
+        for feature, item in zip(features, items, strict=True):
+            if item.id in baked:
+                _attach_thumbnail_asset(feature, base, item.id)
     links = [_link("root", f"{base}/")]
     if self_href:
         links.append(_link("self", self_href, type="application/geo+json"))
@@ -3766,11 +3799,12 @@ def build_app(
 
     ``mcp=True`` mounts Streamable HTTP MCP at ``/mcp`` on this same app (needs
     the ``mcp`` extra) so one process is both front doors. ``public=True`` is
-    the hosted-community bundle: artifacts off, MCP on, a per-client rate
-    limit (:data:`PUBLIC_RATE_LIMIT` unless ``rate_limit`` is set; ``0``
-    disables it), CC-BY license headers, and a refuse of ``live=True``. Secret
-    env vars are checked in :func:`serve`, not here, so tests can build a
-    public app on a machine that happens to have a model key.
+    the hosted-community bundle: on-demand artifacts off, the baked-thumbnail
+    route on, MCP on, a per-client rate limit (:data:`PUBLIC_RATE_LIMIT`
+    unless ``rate_limit`` is set; ``0`` disables it), CC-BY license headers,
+    and a refuse of ``live=True``. Secret env vars are checked in
+    :func:`serve`, not here, so tests can build a public app on a machine
+    that happens to have a model key.
     """
     fastapi = _require_serve()
     from fastapi import Body, HTTPException, Query, Request, Response
@@ -3787,6 +3821,12 @@ def build_app(
         mcp = True
         if rate_limit is None:
             rate_limit = PUBLIC_RATE_LIMIT
+
+    # Local ``umbra serve`` keeps the PNG route it already had when artifacts
+    # are on, and does not add ``assets.thumbnail``. The public host mounts
+    # that route with artifacts off, and is the only server that stamps the
+    # asset. ``--no-artifacts`` on a local server still mounts neither.
+    serve_thumbnails = bool(artifacts or public)
 
     # This module uses ``from __future__ import annotations``, so the route
     # handlers' annotations are strings that FastAPI resolves against the
@@ -4458,6 +4498,19 @@ def build_app(
 
         return geocode_note(decision) or {}
 
+    def _page_baked_ids(source: Any, page: Sequence[UmbraItem]) -> set[str]:
+        """Ids on this page that have a local PNG, while ``source`` is open.
+
+        Duck-typed on ``thumbnail_ids`` rather than ``isinstance`` of
+        :class:`CatalogIndex`: a test replaces that name with a constructor
+        spy, and a live catalog simply has no such method. Only the public
+        host stamps ``assets.thumbnail``; a local server leaves items alone.
+        """
+        lookup = getattr(source, "thumbnail_ids", None)
+        if public and page and callable(lookup):
+            return lookup(item.id for item in page)
+        return set()
+
     def _do_search(
         request: Request,
         *,
@@ -4486,6 +4539,7 @@ def build_app(
             search_bbox = bbox
             search_fuzzy = fuzzy
             note = None
+            baked_ids: set[str] = set()
             # ``fallback`` is GET /search only. /collections/.../items keeps
             # area as a task filter, which is what that route does today.
             if fallback:
@@ -4524,6 +4578,7 @@ def build_app(
                 limit=limit,
                 offset=offset,
             )
+            baked_ids = _page_baked_ids(source, page)
         finally:
             _close(source)
         prev_href, next_href = _pagination_hrefs(
@@ -4536,6 +4591,7 @@ def build_app(
             next_href=next_href,
             prev_href=prev_href,
             self_href=self_href,
+            baked_ids=baked_ids,
         )
         if note:
             result.update(note)
@@ -4611,11 +4667,15 @@ def build_app(
         source = _open()
         try:
             item = get_one(source, item_id)
+            baked = item is not None and item.id in _page_baked_ids(source, [item])
         finally:
             _close(source)
         if item is None:
             raise HTTPException(status_code=404, detail=f"No item {item_id!r}")
-        return JSONResponse(content=item_to_stac(item, _base(request)), media_type=geojson)
+        feature = item_to_stac(item, _base(request))
+        if baked:
+            _attach_thumbnail_asset(feature, _base(request), item.id)
+        return JSONResponse(content=feature, media_type=geojson)
 
     @app.get("/search", tags=["STAC"])
     async def get_search(
@@ -4729,6 +4789,7 @@ def build_app(
             search_bbox = parsed.bbox
             search_fuzzy = parsed.fuzzy
             note = None
+            baked_ids: set[str] = set()
             if decision.matched_by:
                 search_area = None
                 search_bbox = decision.bbox
@@ -4752,6 +4813,7 @@ def build_app(
                 limit=limit,
                 offset=offset,
             )
+            baked_ids = _page_baked_ids(source, page)
         finally:
             _close(source)
         # STAC API Item Search: a POST page link is POST /search again, and its
@@ -4772,6 +4834,7 @@ def build_app(
             next_body=next_body,
             prev_body=prev_body,
             self_href=search_href,
+            baked_ids=baked_ids,
         )
         if note:
             result.update(note)
@@ -5468,6 +5531,56 @@ def build_app(
         finally:
             _close(source)
 
+    if serve_thumbnails:
+
+        @app.get(
+            "/artifacts/thumbnail/{item_id}.png",
+            tags=["Artifacts"],
+            response_class=Response,
+            responses={
+                200: _binary_response("image/png", "The baked quicklook thumbnail, unrendered.")
+            },
+        )
+        def get_thumbnail(item_id: str) -> Response:
+            """Serve a baked quicklook thumbnail straight from the local index.
+
+            Renders nothing and fetches nothing: the PNG is the one ``umbra
+            index bake-thumbnails`` stored. A ``404`` means the id is unknown
+            or its thumbnail has not been baked. On a local server that also
+            mounts quicklook, the message names that route. On ``--public``
+            the message does not: quicklook is not mounted, and the PNG is
+            cached for a day. The id is a SQL bind parameter, so an unknown
+            or odd id is the same 404. The request still counts against the
+            public rate limit. It does not take a catalog-read slot: browsers
+            fetch several of these at once, and the slot cap is 2.
+            """
+            if public:
+                # Not a CatalogIndex: that open checks the schema, reads the
+                # snapshot, counts rows, and attaches the R-tree. This is one
+                # read-only point lookup, and it does not write catalog.db.
+                db = Path(index_path) if index_path is not None else default_index_path()
+                try:
+                    png = read_baked_thumbnail(db, item_id)
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+            else:
+                source = _open()
+                try:
+                    getter = getattr(source, "get_thumbnail", None)
+                    png = getter(item_id) if callable(getter) else None
+                finally:
+                    _close(source)
+            if png is None:
+                detail = f"No baked thumbnail for {item_id!r}."
+                if not public:
+                    detail += (
+                        " Bake the index with 'umbra index bake-thumbnails', or use "
+                        f"/artifacts/quicklook/{item_id}.png to render on demand."
+                    )
+                raise HTTPException(status_code=404, detail=detail)
+            headers = {"Cache-Control": PUBLIC_THUMBNAIL_CACHE_CONTROL} if public else None
+            return Response(content=png, media_type="image/png", headers=headers)
+
     if artifacts:
 
         @app.get(
@@ -5494,39 +5607,6 @@ def build_app(
             return _serve_artifact(
                 "quicklook", [item], options, lambda: renderers.quicklook(item, options)
             )
-
-        @app.get(
-            "/artifacts/thumbnail/{item_id}.png",
-            tags=["Artifacts"],
-            response_class=Response,
-            responses={
-                200: _binary_response("image/png", "The baked quicklook thumbnail, unrendered.")
-            },
-        )
-        def get_thumbnail(item_id: str) -> Response:
-            """Serve a baked quicklook thumbnail straight from the index.
-
-            Unlike ``/artifacts/quicklook`` this renders nothing: it returns the
-            small PNG ``umbra index bake-thumbnails`` stored in the index, so a
-            demo grid or map preview is an instant, offline file read instead of
-            an S3 COG stream. A ``404`` means the acquisition is unknown *or* its
-            thumbnail has not been baked -- fall back to ``/artifacts/quicklook``.
-            """
-            source = _open()
-            try:
-                png = source.get_thumbnail(item_id) if isinstance(source, CatalogIndex) else None
-            finally:
-                _close(source)
-            if png is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"No baked thumbnail for {item_id!r}. Bake the index with "
-                        "'umbra index bake-thumbnails', or use "
-                        f"/artifacts/quicklook/{item_id}.png to render on demand."
-                    ),
-                )
-            return Response(content=png, media_type="image/png")
 
         def _composite(
             request: Request,

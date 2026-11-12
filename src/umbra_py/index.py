@@ -1918,6 +1918,56 @@ def _sqlite_ro_uri(path: Path) -> str:
     return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
 
 
+def _baked_thumbnail_row(conn: sqlite3.Connection, item_id: str) -> tuple[Any, ...] | None:
+    """Preview bytes for ``item_id``: side table first, then a legacy inline blob.
+
+    Both statements select ``thumbnail, thumbnail_asset, thumbnail_size``.
+    The side table tests ``thumbnail IS NOT NULL``; the ``items`` fallback
+    tests ``length(thumbnail) IS NOT NULL``. ``None`` when neither row has a bake.
+    """
+    row = conn.execute(
+        "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM item_thumbnails "
+        "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    if row is not None:
+        return row
+    return conn.execute(
+        "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
+        "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
+        (item_id,),
+    ).fetchone()
+
+
+def read_baked_thumbnail(path: str | os.PathLike, item_id: str) -> bytes | None:
+    """Return one baked PNG, or ``None`` when that id has no bake.
+
+    A read-only point lookup for ``GET /artifacts/thumbnail`` on the public
+    host. It does not construct a :class:`CatalogIndex`: no schema check, no
+    snapshot read, no ``COUNT(*)``, and no R-tree attach. ``mode=ro`` plus
+    ``PRAGMA query_only`` so ``catalog.db`` is not written. The bytes come
+    from :func:`_baked_thumbnail_row`, the same lookup as
+    :meth:`CatalogIndex._thumbnail_row`. A missing file raises
+    :class:`FileNotFoundError`.
+    """
+    db = Path(path)
+    if not db.is_file():
+        raise FileNotFoundError(
+            "No local catalog index is available. Fetch the published snapshot with "
+            "'umbra index fetch', or build one with 'umbra index build'."
+        )
+    conn = sqlite3.connect(_sqlite_ro_uri(db), uri=True)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA query_only = ON")
+        row = _baked_thumbnail_row(conn, item_id)
+        if row is None or row[0] is None:
+            return None
+        return bytes(row[0])
+    finally:
+        conn.close()
+
+
 class CatalogIndex:
     """A local SQLite index of Umbra acquisitions.
 
@@ -2812,18 +2862,7 @@ class CatalogIndex:
 
     def _thumbnail_row(self, item_id: str) -> tuple[Any, ...] | None:
         """Preview bytes for ``item_id``, side table first, then a legacy inline blob."""
-        row = self._conn.execute(
-            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM item_thumbnails "
-            "WHERE id = ? AND thumbnail IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if row is not None:
-            return row
-        return self._conn.execute(
-            "SELECT thumbnail, thumbnail_asset, thumbnail_size FROM items "
-            "WHERE id = ? AND length(thumbnail) IS NOT NULL ORDER BY href LIMIT 1",
-            (item_id,),
-        ).fetchone()
+        return _baked_thumbnail_row(self._conn, item_id)
 
     def get_thumbnail(self, item_id: str) -> bytes | None:
         """Return the baked quicklook PNG for this STAC id, or ``None``.
@@ -2840,6 +2879,38 @@ class CatalogIndex:
         if row is None or row[0] is None:
             return None
         return bytes(row[0])
+
+    def thumbnail_ids(self, ids: Iterable[str]) -> set[str]:
+        """Which of ``ids`` have a baked PNG, without reading the bytes.
+
+        One indexed lookup against ``item_thumbnails`` for the page, then a
+        second only for ids that are still missing, against the legacy inline
+        ``items.thumbnail`` column (``length(thumbnail) IS NOT NULL``, the
+        same test as :meth:`_thumbnail_row`). Neither statement reads the
+        PNG. An empty input does not query. Duplicate ids are looked up once.
+
+        The caller is a public search page, at most 500 ids, under SQLite's
+        older 999-variable cap, so this is one statement rather than a loop.
+        """
+        wanted = [item_id for item_id in dict.fromkeys(ids) if item_id]
+        if not wanted:
+            return set()
+        marks = ",".join("?" * len(wanted))
+        rows = self._conn.execute(
+            f"SELECT id FROM item_thumbnails WHERE thumbnail IS NOT NULL AND id IN ({marks})",
+            wanted,
+        )
+        found = {row[0] for row in rows}
+        missing = [item_id for item_id in wanted if item_id not in found]
+        if not missing:
+            return found
+        marks = ",".join("?" * len(missing))
+        rows = self._conn.execute(
+            f"SELECT id FROM items WHERE length(thumbnail) IS NOT NULL AND id IN ({marks})",
+            missing,
+        )
+        found.update(row[0] for row in rows)
+        return found
 
     def get_preview(self, item_id: str) -> BakedPreview | None:
         """Return the baked quicklook *and what it is a picture of*, or ``None``.

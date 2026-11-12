@@ -87,6 +87,9 @@ def test_landing_page_public_advertises_mcp_and_community_note():
     mcp_link = next(link for link in page["links"] if link["rel"] == "mcp")
     assert mcp_link["href"] == "http://localhost:8000/mcp"
     assert mcp_link["method"] == "POST"
+    rels = {link["rel"] for link in page["links"]}
+    assert "thumbnail" not in rels
+    assert "quicklook" not in rels
 
 
 def test_collection_carries_license_and_temporal_extent():
@@ -2364,6 +2367,52 @@ def test_thumbnail_endpoint_unknown_item_is_404(client):
     assert client.get("/artifacts/thumbnail/nope.png").status_code == 404
 
 
+def _bake_ids(index_path: Path, ids: set[str]) -> None:
+    def render(item: UmbraItem) -> bytes | None:
+        if item.id not in ids:
+            return None
+        return b"PNG-" + item.id.encode()
+
+    with CatalogIndex(index_path) as idx:
+        idx.bake_thumbnails(render)
+
+
+def test_local_serve_keeps_the_png_route_and_does_not_stamp_assets(client, index_path):
+    """A local server still serves the baked PNG. Item documents stay as they were."""
+    _bake_ids(index_path, {"item-1"})
+    png = client.get("/artifacts/thumbnail/item-1.png")
+    assert png.status_code == 200
+    assert png.content == b"PNG-item-1"
+    assert png.headers.get("cache-control") is None
+
+    missing = client.get("/artifacts/thumbnail/item-0.png")
+    assert missing.status_code == 404
+    assert "bake-thumbnails" in missing.json()["detail"]
+    assert "quicklook" in missing.json()["detail"]
+
+    features = {f["id"]: f for f in client.get("/search?limit=10").json()["features"]}
+    assert all("thumbnail" not in feature["assets"] for feature in features.values())
+    listed = client.get(f"/collections/{COLLECTION}/items?limit=10").json()["features"]
+    assert all("thumbnail" not in feature["assets"] for feature in listed)
+    one = client.get(f"/collections/{COLLECTION}/items/item-1").json()
+    assert "thumbnail" not in one["assets"]
+    posted = client.post("/search", json={"limit": 10}).json()["features"]
+    assert all("thumbnail" not in feature["assets"] for feature in posted)
+    assert "/artifacts/quicklook/{item_id}.png" in client.get("/openapi.json").json()["paths"]
+
+
+def test_local_without_artifacts_has_no_thumbnail_route_or_asset(index_path, tmp_path):
+    _bake_ids(index_path, {"item-0", "item-1", "item-2"})
+    app = serve.build_app(index_path, artifacts=False, cache_dir=tmp_path / "art")
+    quiet = TestClient(app)
+    assert quiet.get("/artifacts/thumbnail/item-0.png").status_code == 404
+    assert quiet.get("/artifacts/quicklook/item-0.png").status_code == 404
+    body = quiet.get("/search?limit=10").json()
+    assert all("thumbnail" not in feature["assets"] for feature in body["features"])
+    paths = quiet.get("/openapi.json").json()["paths"]
+    assert "/artifacts/thumbnail/{item_id}.png" not in paths
+
+
 def test_thumbnail_endpoint_advertised_in_landing_when_artifacts_enabled():
     page = serve.landing_page("http://localhost:8000/", artifacts=True)
     rels = {link["rel"] for link in page["links"]}
@@ -3627,6 +3676,124 @@ def test_local_mcp_mount_rejects_a_non_localhost_host(index_path, tmp_path):
         assert allowed.status_code != 421
 
 
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_serves_baked_thumbnails_and_advertises_them(index_path, tmp_path, monkeypatch):
+    """Public mode mounts only the baked PNG. Quicklook and the other renders stay off."""
+    _bake_ids(index_path, {"item-1"})
+    monkeypatch.setenv(serve.PUBLIC_BASE_URL_ENV, "https://api.umbra-py.space")
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        origin = {"Origin": "https://www.watched.earth"}
+        png = client.get("/artifacts/thumbnail/item-1.png", headers=origin)
+        assert png.status_code == 200
+        assert png.headers["content-type"].startswith("image/png")
+        assert png.content == b"PNG-item-1"
+        assert png.headers["cache-control"] == serve.PUBLIC_THUMBNAIL_CACHE_CONTROL
+        assert png.headers["access-control-allow-origin"] == "*"
+        exposed = png.headers["access-control-expose-headers"]
+        for name in serve.CORS_EXPOSE_HEADERS:
+            assert name in exposed
+        assert "x-ratelimit-limit" not in png.headers
+
+        preflight = client.options(
+            "/artifacts/thumbnail/item-1.png",
+            headers={
+                **origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == "*"
+        assert "GET" in preflight.headers["access-control-allow-methods"]
+
+        missing = client.get("/artifacts/thumbnail/item-0.png", headers=origin)
+        assert missing.status_code == 404
+        assert "No baked thumbnail" in missing.json()["detail"]
+        assert "quicklook" not in missing.json()["detail"]
+        assert missing.headers["access-control-allow-origin"] == "*"
+
+        for bad in ("..", "a" * 200, "has space", ".hidden"):
+            missing_id = client.get(f"/artifacts/thumbnail/{bad}.png")
+            assert missing_id.status_code == 404, bad
+            assert "No baked thumbnail" in missing_id.json()["detail"]
+        slash = client.get("/artifacts/thumbnail/foo%2Fbar.png")
+        assert slash.status_code == 404
+
+        for path in (
+            "/artifacts/quicklook/item-1.png",
+            "/artifacts/change",
+            "/artifacts/timescan",
+            "/artifacts/swipe",
+            "/artifacts/stats",
+            "/artifacts/provenance",
+            "/artifacts/narrate",
+        ):
+            assert client.get(path).status_code == 404, path
+        change = client.post("/artifacts/change", json={"ids": ["item-0", "item-1"]})
+        assert change.status_code == 404
+
+        paths = client.get("/openapi.json").json()["paths"]
+        assert "/artifacts/thumbnail/{item_id}.png" in paths
+        assert "/artifacts/quicklook/{item_id}.png" not in paths
+        assert "/artifacts/change" not in paths
+
+        rels = {link["rel"] for link in client.get("/").json()["links"]}
+        assert "thumbnail" not in rels
+        assert "quicklook" not in rels
+
+        one = client.get(f"/collections/{COLLECTION}/items/item-1").json()
+        assert (
+            one["assets"]["thumbnail"]["href"]
+            == "https://api.umbra-py.space/artifacts/thumbnail/item-1.png"
+        )
+        assert one["assets"]["thumbnail"]["roles"] == ["thumbnail"]
+        plain = client.get(f"/collections/{COLLECTION}/items/item-0").json()
+        assert "thumbnail" not in plain["assets"]
+        features = {f["id"]: f for f in client.get("/search?limit=10").json()["features"]}
+        assert "thumbnail" in features["item-1"]["assets"]
+        assert "thumbnail" not in features["item-0"]["assets"]
+        posted = client.post("/search", json={"limit": 10}).json()
+        posted_ids = {f["id"]: f for f in posted["features"]}
+        assert "thumbnail" in posted_ids["item-1"]["assets"]
+        assert "thumbnail" not in posted_ids["item-2"]["assets"]
+
+    limited = serve.build_app(index_path, public=True, rate_limit=2, cache_dir=tmp_path / "art2")
+    with TestClient(limited) as client:
+        first = client.get("/artifacts/thumbnail/item-1.png")
+        assert first.status_code == 200
+        assert first.headers["x-ratelimit-limit"] == "2"
+        assert client.get("/search?limit=1").status_code == 200
+        blocked = client.get("/artifacts/thumbnail/item-1.png")
+        assert blocked.status_code == 429
+        assert blocked.json()["error"] == "RateLimited"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_thumbnail_does_not_open_catalog_index(index_path, tmp_path, monkeypatch):
+    """The PNG route is a point lookup. It does not construct a CatalogIndex."""
+    _bake_ids(index_path, {"item-0"})
+    opened: list[str] = []
+    real_init = CatalogIndex.__init__
+
+    def spy(self, *args, **kwargs):
+        opened.append("open")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(serve.CatalogIndex, "__init__", spy)
+    before_stat = index_path.stat()
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        before = len(opened)
+        resp = client.get("/artifacts/thumbnail/item-0.png")
+        assert resp.status_code == 200
+        assert resp.content == b"PNG-item-0"
+        assert opened[before:] == []
+    after_stat = index_path.stat()
+    assert after_stat.st_size == before_stat.st_size
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+
+
 def test_rate_limit_does_not_count_healthz(index_path, tmp_path):
     app = serve.build_app(index_path, artifacts=False, rate_limit=1, cache_dir=tmp_path / "art")
     client = TestClient(app)
@@ -4009,6 +4176,7 @@ def test_the_json_routes_reference_a_contract(art_client, path, status, media_ty
         ("/artifacts/timescan", "post", "image/png"),
         ("/artifacts/swipe", "post", "text/html"),
         ("/artifacts/quicklook/{item_id}.png", "get", "image/png"),
+        ("/artifacts/thumbnail/{item_id}.png", "get", "image/png"),
     ],
 )
 def test_the_byte_routes_declare_what_they_return(art_client, path, method, media_type):

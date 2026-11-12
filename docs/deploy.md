@@ -372,7 +372,8 @@ stdlib-only.
 ## Remote STAC + MCP (Railway)
 
 `umbra serve --public` is the hosted community bundle: STAC search at `/` and
-Streamable HTTP MCP at `/mcp`, artifacts off, a per-client rate limit, CC-BY
+Streamable HTTP MCP at `/mcp`, on-demand artifacts off (baked thumbnails at
+`GET /artifacts/thumbnail/{id}.png` stay on), a per-client rate limit, CC-BY
 license headers, and a refuse of `--live` and of Canopy / model API keys.
 
 `umbra mcp` is still stdio by default (Claude Desktop / `uvx --from 'umbra-py[mcp]' umbra-mcp`).

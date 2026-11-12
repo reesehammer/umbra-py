@@ -117,9 +117,13 @@ when you need a survey-grade RTC product, compare before you publish numbers.
 Umbra's open catalog is still a static tree with no official search API.
 `umbra serve --public` ([https://api.umbra-py.space/](https://api.umbra-py.space/))
 is an unofficial community instance: STAC search + MCP on one URL,
-artifacts off so this host does not proxy rasters, a per-client rate
-limit, and CC-BY license headers.
-Asset `href`s point at Umbra's public bucket — stream them yourself.
+on-demand artifact routes off so this host does not proxy rasters, a
+per-client rate limit, and CC-BY license headers.
+Product `href`s point at Umbra's public bucket — stream them yourself.
+Baked thumbnails are the exception: `GET /artifacts/thumbnail/{item_id}.png`
+serves a PNG already on the host, and an item with a bake advertises it as
+`assets.thumbnail`. An item with no bake has no thumbnail; show a
+placeholder. See [Hosted API limits](../hosted-limits.md).
 A browser `fetch()` of `GET /search` is
 [From a browser](../replace-crawler.md#from-a-browser); open data is published
 in batches, so a last-7-days or last-30-days query is usually empty.
