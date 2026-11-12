@@ -49,6 +49,12 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   by `<redacted>`.
 
 ### Fixed
+- **`HEAD /artifacts/thumbnail/{item_id}.png` on the hosted API matches GET.**
+  A link checker gets 200 with `Content-Type: image/png`, the PNG's
+  `Content-Length`, `Cache-Control: public, max-age=86400`, and the same CORS
+  headers, and no body. An unknown or unbaked id is 404 with no
+  `Cache-Control`, and a missing catalog is 503. The request counts once
+  toward the same rate limit as GET.
 - **A bounding-box search uses an R-tree sidecar.** `umbra serve --public`
   builds `catalog.rtree.db` beside the index before `/healthz` reports ready,
   and a tight box, a deep page, or a product filter such as `GEC` is answered

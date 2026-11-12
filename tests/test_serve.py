@@ -2384,6 +2384,8 @@ def test_local_serve_keeps_the_png_route_and_does_not_stamp_assets(client, index
     assert png.status_code == 200
     assert png.content == b"PNG-item-1"
     assert png.headers.get("cache-control") is None
+    # HEAD stays unregistered locally. The public host is the one link checkers hit.
+    assert client.head("/artifacts/thumbnail/item-1.png").status_code == 405
 
     missing = client.get("/artifacts/thumbnail/item-0.png")
     assert missing.status_code == 404
@@ -3767,6 +3769,117 @@ def test_public_serves_baked_thumbnails_and_advertises_them(index_path, tmp_path
         blocked = client.get("/artifacts/thumbnail/item-1.png")
         assert blocked.status_code == 429
         assert blocked.json()["error"] == "RateLimited"
+
+
+class _BodySpy:
+    """Record the response body each HTTP method actually sent.
+
+    ``TestClient`` drops a HEAD body before the test can see it, so an
+    assertion on ``resp.content`` cannot tell an empty HEAD from a PNG the
+    client discarded.
+    """
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+        self.sent: dict[tuple[str, str], bytes] = {}
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+
+        async def send_spy(message: dict) -> None:
+            if message["type"] == "http.response.body":
+                chunks.append(message.get("body") or b"")
+            await send(message)
+
+        await self.app(scope, receive, send_spy)
+        self.sent[(scope["method"], scope["path"])] = b"".join(chunks)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_thumbnail_head_matches_get_without_a_body(index_path, tmp_path):
+    """HEAD is the GET response with an empty body. GET itself is unchanged."""
+    _bake_ids(index_path, {"item-1"})
+    before = index_path.stat()
+    app = serve.build_app(index_path, public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    spy = _BodySpy(app)
+    with TestClient(spy) as client:
+        origin = {"Origin": "https://www.watched.earth"}
+        path = "/artifacts/thumbnail/item-1.png"
+        got = client.get(path, headers=origin)
+        head = client.head(path, headers=origin)
+        assert got.status_code == 200
+        assert got.content == b"PNG-item-1"
+        assert got.headers["content-type"].startswith("image/png")
+        assert got.headers["cache-control"] == serve.PUBLIC_THUMBNAIL_CACHE_CONTROL
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["content-type"].startswith("image/png")
+        assert head.headers["content-length"] == got.headers["content-length"]
+        assert int(head.headers["content-length"]) == len(got.content)
+        assert head.headers["cache-control"] == serve.PUBLIC_THUMBNAIL_CACHE_CONTROL
+        assert head.headers["access-control-allow-origin"] == "*"
+        exposed = head.headers["access-control-expose-headers"]
+        for name in serve.CORS_EXPOSE_HEADERS:
+            assert name in exposed
+        assert spy.sent[("GET", path)] == b"PNG-item-1"
+        assert spy.sent[("HEAD", path)] == b""
+
+        missing = client.head("/artifacts/thumbnail/nope.png", headers=origin)
+        missing_get = client.get("/artifacts/thumbnail/nope.png", headers=origin)
+        assert missing.status_code == 404
+        assert missing_get.status_code == 404
+        assert "No baked thumbnail" in missing_get.json()["detail"]
+        assert "cache-control" not in missing.headers
+        assert "cache-control" not in missing_get.headers
+        assert missing.headers["access-control-allow-origin"] == "*"
+        assert missing.headers["content-length"] == missing_get.headers["content-length"]
+
+        unbaked = client.head("/artifacts/thumbnail/item-0.png")
+        assert unbaked.status_code == 404
+        assert "cache-control" not in unbaked.headers
+    after = index_path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_thumbnail_head_counts_once_with_get(index_path, tmp_path):
+    """HEAD shares the rate limit with GET and consumes one hit, not two."""
+    _bake_ids(index_path, {"item-1"})
+    app = serve.build_app(index_path, public=True, rate_limit=2, cache_dir=tmp_path / "art")
+    with TestClient(app) as client:
+        path = "/artifacts/thumbnail/item-1.png"
+        head = client.head(path)
+        assert head.status_code == 200
+        assert head.headers["x-ratelimit-limit"] == "2"
+        assert head.headers["x-ratelimit-remaining"] == "1"
+        got = client.get(path)
+        assert got.status_code == 200
+        assert got.content == b"PNG-item-1"
+        assert got.headers["x-ratelimit-remaining"] == "0"
+        blocked = client.head(path)
+        assert blocked.status_code == 429
+        assert blocked.headers["x-ratelimit-remaining"] == "0"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
+def test_public_thumbnail_head_missing_catalog_is_503(tmp_path):
+    """A missing catalog is 503 for HEAD, the same as GET, with no cache header."""
+    app = serve.build_app(
+        tmp_path / "absent.db", public=True, rate_limit=0, cache_dir=tmp_path / "art"
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        path = "/artifacts/thumbnail/item-1.png"
+        head = client.head(path)
+        got = client.get(path)
+        assert head.status_code == 503
+        assert got.status_code == 503
+        assert "cache-control" not in head.headers
+        assert "cache-control" not in got.headers
+        assert head.headers["content-length"] == got.headers["content-length"]
 
 
 @pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")
