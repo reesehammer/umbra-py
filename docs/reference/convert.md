@@ -5,6 +5,9 @@ using SICD's own image-projection model. Both converters detect **amplitude**
 and **discard phase** — this is not an InSAR or coherence path. If you need
 the complex pixels, download the SICD and stop; see
 [Complex products (SICD/CPHD)](../guides/complex-downstream.md).
+`umbra convert` does not read CPHD and does not form an image. A SICD that
+[FastSAR 0.2.0](https://github.com/saulpingerman/FastSAR) `process_cphd`
+writes from an Umbra CPHD is a normal input to the default command below.
 
 Optional DEM terrain orthorectification, geoid correction, and radiometric
 terrain flattening are documented in [Terrain](terrain.md). Requires the

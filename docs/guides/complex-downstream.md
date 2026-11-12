@@ -329,7 +329,8 @@ Some formers need both files from **one** collect: the CPHD phase history
 and the vendor SICD grid.
 [FastSAR](https://github.com/saulpingerman/FastSAR) reads that pair with
 `fastsar.io.read_cphd(..., sicd=)`. umbra-py searches the catalog and
-downloads the two assets. FastSAR forms the image.
+downloads the two assets. FastSAR forms the image. FastSAR 0.2.0 can also
+form from the CPHD alone — see the next section.
 
 Search by place or by bbox, then check sizes. Open CPHD is large (often
 multi-GiB, sometimes tens of GiB), and the SICD next to it is large too.
@@ -364,6 +365,99 @@ col = fastsar.io.read_cphd("pair/..._CPHD.cphd", sicd="pair/..._SICD.nitf")
 The library call for the same pair is
 `download_item(item, dest_dir="./pair", assets=["CPHD", "SICD"])`.
 
+## CPHD to a north-up COG (FastSAR 0.2.0, then umbra convert)
+
+[FastSAR 0.2.0](https://pypi.org/project/fastsar/0.2.0/)
+([source](https://github.com/saulpingerman/FastSAR)) forms an image from a
+frequency-domain CPHD and writes a SICD or a SIDD. `process_cphd` is that
+one call. It does not need sarpy. Umbra spotlight CPHD is one of the
+collections it is checked against. umbra-py does not form the image, run
+backprojection, or preserve phase through the step below.
+
+```python
+import fastsar
+
+fastsar.process_cphd("scene_CPHD.cphd", "scene_SICD.nitf")
+```
+
+The default product is a complex **slant-plane** SICD (`Grid.Type` PLANE,
+`ImagePlane` SLANT), not Umbra's published RGAZIM / PFA SICD. Options
+(area, plane, autofocus, weighting) are FastSAR's; see its
+[product options](https://github.com/saulpingerman/FastSAR/blob/v0.2.0/docs/product-options.md).
+Install FastSAR beside umbra-py (`pip install fastsar`). It is not an
+umbra-py extra.
+
+`umbra convert` does not read the CPHD. It reads the SICD FastSAR just
+wrote. The default command calls `sicd_to_geocoded_cog`: amplitude only,
+phase discarded, north-up EPSG:4326 cloud-optimized GeoTIFF, flat-earth HAE.
+That is not an interferogram. `--calibrate` and `--noise-model measured`
+still need a `Radiometric` block; `sicd_calibration_types()` says whether
+the file has one (the SICD formed in the check below had none).
+
+```bash
+umbra convert scene_SICD.nitf scene_geocoded.tif
+```
+
+Checked with FastSAR 0.2.0 on one public Umbra spotlight CPHD (the search
+below). `process_cphd` wrote a slant-plane SICD, and the default
+`umbra convert` wrote an EPSG:4326 COG whose footprint covers that collect.
+Pixels outside the slant image are nodata. The GeoTIFF carries
+`Contains Umbra open data, licensed under CC BY 4.0.` A figure made from it
+still needs the year notice in [Citing](../citing.md)
+(`SAR-derived data © [YEAR] Umbra Lab, Inc.`).
+
+Open CPHD ranges from about a tenth of a gigabyte to tens of gigabytes.
+`--place` is a Nominatim rectangle and cannot be combined with `--bbox`.
+`--start` / `--end` prune by acquisition date. Size-check the CPHD href
+before downloading; there is no `umbra head` verb.
+
+```bash
+umbra index fetch
+
+# Illustration only. This day returned two CPHDs (about 140 MB and 540 MB).
+umbra search --local --product CPHD \
+  --place "Tanna Island, Vanuatu" --start 2023-09-11 --end 2023-09-11 --limit 5
+
+# HEAD the CPHD url from `umbra info <item-url> --json` (Content-Length).
+
+# A missing ./cphd is written as a file. Create the directory first.
+mkdir -p ./cphd
+umbra download <item-url> --asset CPHD --dest ./cphd
+
+# FastSAR forms the image. umbra-py does not.
+python -c 'import fastsar; from pathlib import Path; fastsar.process_cphd(next(Path("./cphd").glob("*.cphd")), "scene_SICD.nitf")'
+
+# Amplitude COG. Phase is discarded.
+umbra convert scene_SICD.nitf scene_geocoded.tif
+```
+
+```python
+import fastsar
+from pathlib import Path
+
+from umbra_py import CatalogIndex, download_item, geocode_place, sicd_to_geocoded_cog
+
+bbox, name = geocode_place("Tanna Island, Vanuatu")
+print(name, bbox)
+
+with CatalogIndex.from_release() as index:
+    items = list(
+        index.search(
+            bbox=bbox,
+            product_types=["CPHD"],
+            start="2023-09-11",
+            end="2023-09-11",
+            limit=5,
+        )
+    )
+
+assert items, "no CPHD in this box — widen the date or the place"
+Path("./cphd").mkdir(parents=True, exist_ok=True)
+downloaded = download_item(items[0], dest_dir="./cphd", assets=["CPHD"])
+fastsar.process_cphd(downloaded[0], "scene_SICD.nitf")  # FastSAR writes the SICD
+sicd_to_geocoded_cog("scene_SICD.nitf", "scene_geocoded.tif")  # amplitude only
+```
+
 ## After download
 
 - **[sarpy](https://github.com/ngageoint/sarpy)** — reference SICD / CPHD
@@ -376,7 +470,9 @@ The library call for the same pair is
 - **CPHD + SICD pair (not in umbra-py).**
   [FastSAR](https://github.com/saulpingerman/FastSAR)
   `read_cphd(..., sicd=)` reads both files from one collect. umbra-py
-  downloads that pair; FastSAR forms the image.
+  downloads that pair; FastSAR forms the image. FastSAR 0.2.0
+  `process_cphd` forms from the CPHD alone and writes a SICD;
+  `umbra convert` can then geocode amplitude (phase discarded).
 - **PFA → range-Doppler (not in umbra-py).** Piyush S. Agram, [*Modifying
   Range-Doppler geometry frameworks to process Spotlight SAR imagery in
   Polar Format*](https://arxiv.org/abs/2503.07889) (2025), with public

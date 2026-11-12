@@ -10,6 +10,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **FastSAR 0.2.0 CPHD can feed `umbra convert`.** The complex-products
+  guide shows finding a public Umbra CPHD, letting FastSAR `process_cphd`
+  form it into a slant-plane SICD, and geocoding that file with
+  `umbra convert` / `sicd_to_geocoded_cog` to a north-up amplitude COG.
+  FastSAR forms the image. umbra-py does not, and the COG discards phase.
 - **Where open-data state vectors live is documented for downstream
   processors.** The complex-products guide names the SICD fields
   (`Position/ARPPoly`, `SCPCOA` `ARPPos` / `ARPVel`) and the CPHD fields
