@@ -10,6 +10,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **FastSAR 0.2.0 CPHD can feed `umbra convert`.** The complex-products
+  guide shows finding a public Umbra CPHD, letting FastSAR `process_cphd`
+  form it into a slant-plane SICD, and geocoding that file with
+  `umbra convert` / `sicd_to_geocoded_cog` to a north-up amplitude COG.
+  FastSAR forms the image. umbra-py does not, and the COG discards phase.
 - **The hosted API (`umbra serve --public`) serves baked thumbnails.**
   `GET /artifacts/thumbnail/{item_id}.png` reads the PNG already in the local
   sidecar (no bucket fetch, no on-demand render). Search and item responses

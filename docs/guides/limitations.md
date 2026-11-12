@@ -12,7 +12,11 @@ phase-preserving path in umbra-py: **search, size-check, download, stop.**
 `CPHD` is compensated phase history for **formation elsewhere** (a GPU
 backprojector, a custom former, sarpy). umbra-py does not form an image
 from it and does not run backprojection. `umbra convert` does not read
-CPHD.
+CPHD. A former that writes a SICD can be geocoded afterwards; that step
+still detects amplitude and drops phase.
+[FastSAR 0.2.0](https://github.com/saulpingerman/FastSAR) `process_cphd` is
+one such former — see
+[Complex products (SICD/CPHD)](complex-downstream.md).
 
 `umbra convert` detects **amplitude** from SICD and writes a geocoded
 GeoTIFF — the phase is discarded. There is no interferogram, no
