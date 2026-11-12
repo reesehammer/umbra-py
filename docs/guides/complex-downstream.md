@@ -270,6 +270,8 @@ umbra search --local --product CPHD \
 
 # HEAD the CPHD url from `umbra info <item-url> --json` (Content-Length).
 
+# A missing ./cphd is written as a file. Create the directory first.
+mkdir -p ./cphd
 umbra download <item-url> --asset CPHD --dest ./cphd
 
 # FastSAR forms the image. umbra-py does not.
@@ -300,10 +302,9 @@ with CatalogIndex.from_release() as index:
     )
 
 assert items, "no CPHD in this box — widen the date or the place"
-download_item(items[0], dest_dir="./cphd", assets=["CPHD"])
-
-cphd = next(Path("./cphd").glob("*.cphd"))
-fastsar.process_cphd(cphd, "scene_SICD.nitf")  # FastSAR writes the SICD
+Path("./cphd").mkdir(parents=True, exist_ok=True)
+downloaded = download_item(items[0], dest_dir="./cphd", assets=["CPHD"])
+fastsar.process_cphd(downloaded[0], "scene_SICD.nitf")  # FastSAR writes the SICD
 sicd_to_geocoded_cog("scene_SICD.nitf", "scene_geocoded.tif")  # amplitude only
 ```
 
