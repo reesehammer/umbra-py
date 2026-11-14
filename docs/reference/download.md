@@ -45,6 +45,19 @@ product types.
 The MCP `download_asset` tool uses the same `asset` names. Its `url` is a
 STAC JSON URL, or the filename or stem above.
 
+## An area and a date range
+
+`umbra download` takes one acquisition. To list the GEC scenes in a bounding
+box and a date range, then save those cloud-optimized GeoTIFFs, fetch the
+weekly index and search it locally. The CLI (`umbra index fetch`,
+`umbra search --local`, `umbra download --asset GEC`), the
+`CatalogIndex.search` / `download_item` loop, and a stdlib `GET /search`
+that follows `next` and fetches `assets.gec.href` from the public bucket
+are in
+[Download the GEC GeoTIFFs](../replace-crawler.md#download-the-gec-geotiffs).
+That page also has the hosted API's 120 requests/minute cap and the
+CC BY 4.0 line to keep with the files.
+
 ```python
 item.asset_href("gec")
 item.asset_href("gec_2")

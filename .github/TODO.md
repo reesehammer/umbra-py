@@ -10,6 +10,21 @@ still open.
 
 ---
 
+## `download_asset` drops a trailing separator on `dest_dir`
+
+- **Surfaced in:** bulk GEC download docs, branch
+  `cursor/bulk-gec-download-recipe-975c`
+- **Code:** `src/umbra_py/download.py` (`download_asset` passes
+  `Path(dest_dir)` into `download_url`). `download_item` and
+  `umbra download --dest` go through that call.
+
+`download_url` treats a trailing path separator as a directory even when
+that directory does not exist yet. `Path` drops the separator first, so
+`--dest ./gec/` writes a file named `gec` when `gec/` is missing. The
+directory has to exist before the call. Smallest change: pass the original
+string through to `download_url`, or create the directory when the caller
+passed a trailing separator.
+
 ## Site ranking counts both republished copies
 
 - **Surfaced in:** https://github.com/reesehammer/umbra-py/pull/294

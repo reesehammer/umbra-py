@@ -292,3 +292,142 @@ parquet is rebuilt from an index that has been linked.
 
 Imagery `href`s point at Umbra's public bucket. Attribute Umbra under
 CC BY 4.0. The API rate limit is 120 requests per minute per client.
+
+## Download the GEC GeoTIFFs
+
+The searches above name scenes. The file is the `gec` asset: the geocoded
+cloud-optimized GeoTIFF Umbra publishes. Fetch `assets.gec.href` from the
+public bucket (`umbra-open-data-catalog`). `/search` returns that href. The
+bytes are the bucket object.
+
+The product filter is `GEC`. The asset key is `gec`. A second GEC on the
+same item is `gec_2`; the commands below take the primary file.
+
+The box in the programs above (longitude 85.49–85.56, latitude 28.26–28.32,
+acquisition dates 2026-09-01 through 2026-09-30) is the worked example.
+
+### CLI and Python
+
+`umbra index fetch` downloads the weekly
+[`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db)
+to `$UMBRA_INDEX_DB` or `~/.cache/umbra-py/catalog.db`. `umbra search --local`
+reads that file, so listing an area does not call the hosted API and does
+not walk the bucket. `umbra download` then takes one sidecar URL (the `url`
+line of the search output), a GEC filename, or an acquisition stem.
+`--asset GEC` is the product type, any case, and selects the primary GEC.
+`--dest` is the output directory, which has to exist already.
+
+```bash
+mkdir -p gec
+umbra index fetch
+umbra search --local \
+  --bbox 85.49,28.26,85.56,28.32 \
+  --start 2026-09-01 --end 2026-09-30 \
+  --product GEC --limit 1
+umbra download "<url>" --asset GEC --dest gec
+```
+
+`--bbox` is `min_lon,min_lat,max_lon,max_lat`. `--start` and `--end` are
+inclusive acquisition dates (`YYYY-MM-DD`, or the relative forms
+`umbra search --help` lists). `--product` is repeatable. `--limit` defaults
+to 20. Pass each `url` line to `umbra download`.
+
+The same filters are keyword arguments of `CatalogIndex.search` (the same
+parameters as `UmbraCatalog.search`). `bbox` is four numbers. `start` and
+`end` are dates. `product_types` is a list, `["GEC"]`. `canonical=True`
+keeps one copy of a republished collect, the same filter as
+`canonical=true` on `/search`. `download_item` writes the file;
+`assets=["GEC"]` is that product type.
+
+```python
+from pathlib import Path
+
+from umbra_py import CatalogIndex, download_item
+
+Path("gec").mkdir(exist_ok=True)
+with CatalogIndex.from_release() as index:
+    for item in index.search(
+        bbox=(85.49, 28.26, 85.56, 28.32),
+        start="2026-09-01",
+        end="2026-09-30",
+        product_types=["GEC"],
+        canonical=True,
+        limit=1,
+    ):
+        path = download_item(item, dest_dir="gec", assets=["GEC"])[0]
+        print(item.id, path)
+```
+
+`limit=1` stops after one scene. Omit `limit` to take every match in the
+index. `CatalogIndex.from_release()` downloads the same `catalog.db` as
+`umbra index fetch`. `UmbraCatalog().search` accepts those same arguments
+and lists the live bucket; the snapshot is the bulk path.
+
+`umbra search` prints every indexed copy. The `url` line is the sidecar to
+pass to `umbra download`.
+
+### Plain HTTP
+
+`GET /search` is STAC API Item Search. Follow the `links` entry whose `rel`
+is `next`: `method` is `GET`, and `href` already includes `token`. Then GET
+`features[].assets.gec.href`.
+
+The hosted API allows **120 requests per 60-second sliding window**, per
+client (`PUBLIC_RATE_LIMIT` and `PUBLIC_RATE_WINDOW_S` on
+`umbra serve --public`). The contract, including HTTP 429 and
+`Retry-After`, is [Rate limit](hosted-limits.md#rate-limit). Each `/search`
+page counts. A GET of the GeoTIFF is a request to the bucket. This host
+returns at most 500 items per page, so a long list stays a small number of
+`/search` calls. Stay under 120 requests per minute. A pull the size of the
+catalog belongs on `umbra index fetch` and `umbra search --local`.
+
+```python
+import json
+from pathlib import Path
+from urllib.request import urlopen
+
+url = (
+    "https://api.umbra-py.space/search"
+    "?bbox=85.49,28.26,85.56,28.32"
+    "&datetime=2026-09-01/2026-09-30"
+    "&collections=umbra-open-data"
+    "&product_types=GEC"
+    "&canonical=true"
+    "&limit=2"
+)
+hrefs = []
+while url:
+    with urlopen(url) as resp:
+        page = json.load(resp)
+    for feature in page["features"]:
+        hrefs.append(feature["assets"]["gec"]["href"])
+    url = next(
+        (link["href"] for link in page["links"] if link.get("rel") == "next"),
+        None,
+    )
+
+# Writes the first COG. Iterate hrefs to fetch every scene in the window.
+href = hrefs[0]
+dest = Path("gec") / href.rsplit("/", 1)[-1]
+dest.parent.mkdir(exist_ok=True)
+with urlopen(href) as remote, dest.open("wb") as out:
+    while True:
+        chunk = remote.read(1024 * 1024)
+        if not chunk:
+            break
+        out.write(chunk)
+print(f"{len(hrefs)} GEC scene(s); wrote {dest.name} ({dest.stat().st_size} bytes)")
+```
+
+`datetime=2026-09-01/2026-09-30` is a closed interval. The index filters on
+the acquisition date, which is what `--start` and `--end` filter on.
+`product_types=GEC` is the product type. `canonical=true` keeps one copy of
+a republished collect. `limit=2` is the page size, so this box's `next` link
+is followed until the window is listed. The snippet then writes the first
+COG.
+
+Imagery is Umbra open data, licensed CC BY 4.0. Keep the line the library
+stamps on its outputs: *Contains Umbra open data, licensed under CC BY 4.0.*
+The copyright notice for adapted materials is on [Citing](citing.md). Every
+API response also sends that line as `X-Umbra-Attribution`, with
+`Link: rel="license"`.
