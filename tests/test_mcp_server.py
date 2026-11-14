@@ -1056,12 +1056,11 @@ def test_public_host_refuses_cog_tools():
         ms.narrate_change(["http://example/a", "http://example/b"])
 
 
-def test_search_catalog_unknown_argument_lists_accepted_arguments():
-    """An argument the schema does not define is refused with the real names.
+def test_search_catalog_invalid_limit_lists_accepted_arguments():
+    """A value the schema already rejects names every argument, including ``limit``.
 
     ``limit`` is the page size. The input schema (names, types, defaults) stays
-    the one ``tests/mcp_contract.json`` pins. A value that fails that schema,
-    such as a non-integer ``limit``, is the same kind of refusal.
+    the one ``tests/mcp_contract.json`` pins.
     """
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     from pydantic import ValidationError
@@ -1075,18 +1074,6 @@ def test_search_catalog_unknown_argument_lists_accepted_arguments():
     assert "max_results" not in schema["properties"]
     assert schema.get("additionalProperties") is None
 
-    with pytest.raises(ToolError, match="does not accept 'max_results'") as unknown:
-        asyncio.run(server.call_tool("search_catalog", {"max_results": 5}))
-    assert not isinstance(unknown.value, UnexpectedToolError)
-    assert isinstance(unknown.value.__cause__, ValidationError)
-    assert any(err["loc"] == ("max_results",) for err in unknown.value.__cause__.errors())
-    text = str(unknown.value)
-    assert "Accepted arguments:" in text
-    for name in schema["properties"]:
-        assert name in text.split("Accepted arguments:", 1)[1]
-    assert "The maximum number of cards is limit (integer, default 20)." in text
-    assert "Traceback" not in text
-
     with pytest.raises(ToolError, match="rejected limit") as bad_limit:
         asyncio.run(server.call_tool("search_catalog", {"limit": "nope"}))
     assert not isinstance(bad_limit.value, UnexpectedToolError)
@@ -1095,13 +1082,42 @@ def test_search_catalog_unknown_argument_lists_accepted_arguments():
     limit_text = str(bad_limit.value)
     assert "integer" in limit_text
     assert "Accepted arguments:" in limit_text
+    for name in schema["properties"]:
+        assert name in limit_text.split("Accepted arguments:", 1)[1]
     assert "The maximum number of cards is limit (integer, default 20)." in limit_text
+    assert "Traceback" not in limit_text
 
     # A schema-valid call still reaches the tool. semantic=True with no area
-    # is refused by the function, not by argument-name validation.
+    # is refused by the function, not by argument validation.
     with pytest.raises(ToolError, match="needs `area`") as semantic:
         asyncio.run(server.call_tool("search_catalog", {"semantic": True}))
     assert "Accepted arguments:" not in str(semantic.value)
+
+
+def test_search_catalog_ignores_an_unknown_extra_key(monkeypatch):
+    """An extra key is dropped. The search runs at the default page size."""
+    captured: dict = {}
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return True
+
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    server = ms.build_server()
+    result = asyncio.run(
+        server.call_tool(
+            "search_catalog",
+            {"area": "anywhere", "max_results": 10, "local": False},
+        )
+    )
+    assert not result.is_error
+    assert captured["area"] == "anywhere"
+    assert captured["limit"] == 20
+    assert "max_results" not in captured
 
 
 def test_public_host_cog_refusals_reach_the_client():

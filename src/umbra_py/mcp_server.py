@@ -3152,11 +3152,10 @@ _READ_ONLY_TOOLS = frozenset(
 
 
 def _search_catalog_argument_text(detail: str, names: list[str], limit_default: Any) -> str:
-    """One refusal: what was wrong, every accepted name, and the real page size.
+    """One refusal for a value the schema already rejects, plus the real page size.
 
-    ``limit`` is the page-size argument. Callers sometimes send another name
-    (``max_results``, ``page_size``); the sentence names ``limit`` rather than
-    inventing an alias.
+    ``limit`` is the page-size argument. The sentence names it so a bad value
+    points at that argument.
     """
     accepted = ", ".join(names)
     return (
@@ -3166,14 +3165,12 @@ def _search_catalog_argument_text(detail: str, names: list[str], limit_default: 
 
 
 def _install_search_catalog_argument_errors(server: Any) -> None:
-    """Tell a rejected ``search_catalog`` call which arguments the tool accepts.
+    """Reword a ``search_catalog`` schema failure so it names the arguments.
 
-    The published input schema is the one the SDK built from the function
-    (names, types, defaults). Pydantic ignores unknown keys, so a call that
-    sends one would otherwise run at the default page size. This wrapper
-    refuses that call, and rewrites a schema validation failure (a ``limit``
-    that is not an integer, for example) so the client sees the accepted
-    names. ``tools/list`` is unchanged.
+    Unknown keys stay ignored: pydantic drops them and the search runs at the
+    default page size. A value the schema already rejects (a ``limit`` that is
+    not an integer, for example) is reworded to list the accepted names.
+    ``tools/list`` is unchanged.
     """
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     from pydantic import ValidationError
@@ -3182,8 +3179,6 @@ def _install_search_catalog_argument_errors(server: Any) -> None:
     if tool is None:  # pragma: no cover - the tool is registered just above
         return
     fields = tool.fn_metadata.arg_model.model_fields
-    known = set(fields)
-    known.update(field.alias for field in fields.values() if field.alias)
     names = sorted(fields)
     limit_default = fields["limit"].default
     manager = server._tool_manager
@@ -3198,24 +3193,6 @@ def _install_search_catalog_argument_errors(server: Any) -> None:
         context: Any,
         convert_result: bool = False,
     ) -> Any:
-        if name == "search_catalog" and isinstance(arguments, dict):
-            unknown = [key for key in arguments if key not in known]
-            if unknown:
-                shown = ", ".join(repr(key) for key in sorted(unknown, key=str))
-                try:
-                    raise ValidationError.from_exception_data(
-                        "search_catalogArguments",
-                        [
-                            {
-                                "type": "extra_forbidden",
-                                "loc": (key,),
-                                "input": arguments[key],
-                            }
-                            for key in sorted(unknown, key=str)
-                        ],
-                    )
-                except ValidationError as exc:
-                    _refuse(f"search_catalog does not accept {shown}.", exc)
         try:
             return await original(name, arguments, context, convert_result=convert_result)
         except ToolError as exc:
