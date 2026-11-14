@@ -45,6 +45,18 @@ product types.
 The MCP `download_asset` tool uses the same `asset` names. Its `url` is a
 STAC JSON URL, or the filename or stem above.
 
+```python
+item.asset_href("gec")
+item.asset_href("gec_2")
+item.asset_href("2025-05-17-17-43-46_UMBRA-08_GEC.tif")
+```
+
+::: umbra_py.download_item
+
+::: umbra_py.download_asset
+
+::: umbra_py.download_url
+
 ## An area and a date range
 
 `umbra download` takes one acquisition. To list the GEC scenes in a bounding
@@ -57,15 +69,3 @@ are in
 [Download the GEC GeoTIFFs](../replace-crawler.md#download-the-gec-geotiffs).
 That page also has the hosted API's 120 requests/minute cap and the
 CC BY 4.0 line to keep with the files.
-
-```python
-item.asset_href("gec")
-item.asset_href("gec_2")
-item.asset_href("2025-05-17-17-43-46_UMBRA-08_GEC.tif")
-```
-
-::: umbra_py.download_item
-
-::: umbra_py.download_asset
-
-::: umbra_py.download_url
