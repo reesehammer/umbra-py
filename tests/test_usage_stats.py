@@ -97,21 +97,16 @@ def _stats(tmp_path: Path, clock: Clock | None = None) -> UsageStats:
     ],
 )
 def test_request_counts_keeps_real_searches_only(method, path, status, headers, counted):
-    assert request_counts(method, path, status, headers) is counted
+    assert request_counts(method, path, status, headers, first_page=True) is counted
 
 
 def test_only_the_first_page_counts():
-    assert request_counts("GET", "/search", 200, UA) is True
-    assert request_counts("GET", "/search", 200, UA, query={"token": "0"}) is True
-    assert request_counts("GET", "/search", 200, UA, query={"offset": "0"}) is True
-    assert request_counts("GET", "/search", 200, UA, query={"token": ""}) is True
+    assert request_counts("GET", "/search", 200, UA, first_page=True) is True
     assert request_counts("POST", "/search", 200, UA, first_page=True) is True
-    assert request_counts("GET", "/search", 200, UA, query={"token": "10"}) is False
-    assert request_counts("GET", "/search", 200, UA, query={"offset": ["0", "5"]}) is False
-    assert request_counts("GET", "/search", 200, UA, query={"next": "abc"}) is False
-    assert request_counts("POST", "/search", 200, UA, first_page=False) is False
     # An empty 200 is still a search. The status is what counts, not the features.
-    assert request_counts("GET", "/search", 200, UA, query={"limit": "1"}) is True
+    assert request_counts("GET", "/search", 200, UA, first_page=True) is True
+    assert request_counts("GET", "/search", 200, UA) is False
+    assert request_counts("POST", "/search", 200, UA, first_page=False) is False
 
 
 def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
@@ -122,6 +117,7 @@ def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
         "path": "/search",
         "headers": [(b"user-agent", b"Mozilla/5.0")],
         "client": (SECRET_IP, 443),
+        USAGE_FIRST_PAGE: True,
     }
     stats.observe_http(scope, 200)
     stats.observe_http({**scope, "path": "/livez"}, 200)
@@ -131,11 +127,11 @@ def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
         200,
     )
     stats.observe_http(scope, 429)
-    stats.observe_http({**scope, "query_string": b"token=10&bbox=1,2,3,4"}, 200)
-    stats.observe_http({**scope, "query_string": b"token=0"}, 200)
     stats.observe_http({**scope, USAGE_FIRST_PAGE: False}, 200)
-    stats.observe_http({**scope, USAGE_FIRST_PAGE: True, "query_string": b"token=40"}, 200)
-    assert stats.searches_served == 3
+    unmarked = {key: value for key, value in scope.items() if key != USAGE_FIRST_PAGE}
+    stats.observe_http(unmarked, 200)
+    stats.observe_http({**unmarked, "query_string": b"token=0"}, 200)
+    assert stats.searches_served == 1
 
 
 def test_a_stats_error_does_not_fail_the_response():
@@ -522,6 +518,7 @@ def test_no_ip_user_agent_or_raw_query_is_stored(tmp_path):
         "headers": [(b"user-agent", SECRET_UA.encode())],
         "client": (SECRET_IP, 443),
         "query_string": f"area={RAW_PLACE}&lon={SECRET_COORD}".encode(),
+        USAGE_FIRST_PAGE: True,
     }
     remember_search_place(
         scope,

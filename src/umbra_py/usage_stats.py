@@ -46,7 +46,6 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl
 
 from ._mcp_log import (
     _argument_mapping,
@@ -87,12 +86,8 @@ FLUSH_INTERVAL_S = 30.0
 #: Scope key holding the already-coarsened place for this one request.
 USAGE_PLACE_KEY = "umbra.usage_place"
 #: Scope key the search handler sets once it knows the page offset.
-#: True is the first page. Absent, the query string is what decides.
+#: True is the first page. Absent or anything else, the request is not counted.
 USAGE_FIRST_PAGE = "umbra.usage_first_page"
-_UNMARKED = object()
-
-#: Query keys that mean "another page of the same search".
-_PAGE_KEYS = frozenset({"token", "offset", "page", "next"})
 
 #: Nominatim ``addresstype`` / ``type`` / ``category`` values whose own name
 #: is a settlement or an admin area. Anything else is a venue: the label's
@@ -452,21 +447,16 @@ def request_counts(
     status: int,
     headers: Mapping[str, str] | None = None,
     *,
-    query: Mapping[str, Any] | None = None,
-    first_page: bool | None = None,
+    first_page: bool = False,
 ) -> bool:
     """Whether this HTTP response is a real search.
 
     ``GET`` and ``POST /search`` with a 2xx status, a user agent that is not a
-    bot or an uptime probe, and no ``X-Umbra-Smoke`` opt-out. Only the first
-    page counts: no paging token, or a token of zero. A 200 with an empty
-    page is still a search. Everything else — health checks, unknown paths,
-    exploit probes, ``HEAD``, ``OPTIONS``, 429s, errors, and a later page —
-    is false.
-
-    ``first_page`` is the offset the handler already parsed (a POST body
-    token lives there, not in the query). When it is omitted, ``query`` is
-    what decides.
+    bot or an uptime probe, and no ``X-Umbra-Smoke`` opt-out. Only a request
+    the handler marked as the first page counts. An unmarked ``/search`` does
+    not. A 200 with an empty page is still a search when it is that first
+    page. Everything else — health checks, unknown paths, exploit probes,
+    ``HEAD``, ``OPTIONS``, 429s, errors, and a later page — is false.
     """
     if method.upper() not in {"GET", "POST"}:
         return False
@@ -474,9 +464,7 @@ def request_counts(
         return False
     if not _is_search_path(path):
         return False
-    if first_page is False:
-        return False
-    if first_page is None and not _query_is_first_page(query):
+    if first_page is not True:
         return False
     found = headers or {}
     if _is_smoke(_header_ci(found, "x-umbra-smoke")):
@@ -484,43 +472,6 @@ def request_counts(
     if _identity_excluded(_header_ci(found, "user-agent")):
         return False
     return True
-
-
-def _query_is_first_page(query: Mapping[str, Any] | None) -> bool:
-    if not query:
-        return True
-    for key, value in query.items():
-        if str(key).lower() not in _PAGE_KEYS:
-            continue
-        if isinstance(value, (list, tuple)) and not isinstance(value, str):
-            values = value
-        else:
-            values = (value,)
-        if any(_later_page(one) for one in values):
-            return False
-    return True
-
-
-def _later_page(value: Any) -> bool:
-    """True when this token is a page after the first."""
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return True
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip() not in ("", "0")
-    return True
-
-
-def _query_from_scope(scope: Mapping[str, Any]) -> dict[str, list[str]]:
-    raw = scope.get("query_string") or b""
-    text = raw.decode("latin-1") if isinstance(raw, (bytes, bytearray)) else str(raw)
-    found: dict[str, list[str]] = {}
-    for key, value in parse_qsl(text, keep_blank_values=True):
-        found.setdefault(key, []).append(value)
-    return found
 
 
 def _is_search_path(path: str) -> bool:
@@ -814,15 +765,12 @@ class UsageStats:
             method = scope.get("method")
             if not isinstance(method, str) or not isinstance(path, str):
                 return
-            marked = scope.get(USAGE_FIRST_PAGE, _UNMARKED)
-            if marked is _UNMARKED:
-                query: Mapping[str, Any] | None = _query_from_scope(scope)
-                first_page = None
-            else:
-                query = None
-                first_page = marked is True
             if not request_counts(
-                method, path, status, headers, query=query, first_page=first_page
+                method,
+                path,
+                status,
+                headers,
+                first_page=scope.get(USAGE_FIRST_PAGE) is True,
             ):
                 return
             place = scope.get(USAGE_PLACE_KEY)

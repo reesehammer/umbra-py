@@ -213,39 +213,65 @@ def test_run_snippet_puts_the_smoke_hook_on_pythonpath(monkeypatch, tmp_path):
     assert first == str(ROOT / "scripts" / "canary_sitecustomize")
 
 
-def test_smoke_hook_tags_urllib_requests():
+def test_smoke_hook_tags_urllib_and_session_send():
+    """The hook tags urllib and ``requests.Session.send``.
+
+    pystac-client is not installed here. It calls ``session.send()`` with a
+    prepared request, so this drives that method and stops inside the adapter.
+    """
+    requests = pytest.importorskip("requests")
     path = ROOT / "scripts" / "canary_sitecustomize" / "sitecustomize.py"
     spec = importlib.util.spec_from_file_location("canary_sitecustomize_hook", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     saved_open = urllib.request.OpenerDirector.open
-    try:
-        import requests
-
-        saved_request = requests.sessions.Session.request
-    except ImportError:
-        requests = None
-        saved_request = None
+    saved_send = requests.sessions.Session.send
     try:
         import httpx
 
-        saved_send = httpx.Client.send
+        saved_httpx = httpx.Client.send
     except ImportError:
         httpx = None
-        saved_send = None
+        saved_httpx = None
     spec.loader.exec_module(module)
+    seen: dict[str, str | None] = {}
+
+    def adapter_send(self, request, **kwargs):
+        seen["header"] = request.headers.get("X-Umbra-Smoke")
+        response = requests.Response()
+        response.status_code = 200
+        response.url = request.url
+        response.request = request
+        return response
+
+    from requests.adapters import HTTPAdapter
+
+    saved_adapter = HTTPAdapter.send
+    HTTPAdapter.send = adapter_send
     try:
         request, data = module.tag_urllib("https://api.umbra-py.space/search")
         assert data is None
         assert request.get_header("X-umbra-smoke") == "1"
         assert module.tag_headers({"Accept": "application/json"})["X-Umbra-Smoke"] == "1"
         assert urllib.request.OpenerDirector.open is not saved_open
+        assert requests.sessions.Session.send is not saved_send
+
+        session = requests.Session()
+        prepared = requests.Request("GET", "https://example.test/search").prepare()
+        session.send(prepared, stream=True, allow_redirects=False)
+        assert seen["header"] == "1"
+
+        seen.clear()
+        kept = requests.Request("GET", "https://example.test/search").prepare()
+        kept.headers["X-Umbra-Smoke"] = "already"
+        session.send(kept, stream=True, allow_redirects=False)
+        assert seen["header"] == "already"
     finally:
         urllib.request.OpenerDirector.open = saved_open
-        if requests is not None:
-            requests.sessions.Session.request = saved_request
+        requests.sessions.Session.send = saved_send
+        HTTPAdapter.send = saved_adapter
         if httpx is not None:
-            httpx.Client.send = saved_send
+            httpx.Client.send = saved_httpx
 
 
 def test_duckdb_gate_waits_for_schema_v2():

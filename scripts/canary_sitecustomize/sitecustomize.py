@@ -48,20 +48,28 @@ def _install_urllib() -> None:
 
 
 def _install_requests() -> None:
+    """Tag the prepared request inside ``Session.send``.
+
+    ``pystac-client`` calls ``session.send()`` with a ``PreparedRequest`` and
+    never goes through ``Session.request``, so the header has to be on the
+    request object that ``send`` already holds.
+    """
     try:
         import requests
     except ImportError:
         return
-    current = requests.sessions.Session.request
+    current = requests.sessions.Session.send
     if getattr(current, "_umbra_smoke", False):
         return
 
-    def request(self, method, url, **kwargs):
-        kwargs["headers"] = tag_headers(kwargs.get("headers"))
-        return current(self, method, url, **kwargs)
+    def send(self, request, **kwargs):
+        headers = getattr(request, "headers", None)
+        if headers is not None and HEADER not in headers:
+            headers[HEADER] = VALUE
+        return current(self, request, **kwargs)
 
-    request._umbra_smoke = True  # type: ignore[attr-defined]
-    requests.sessions.Session.request = request  # type: ignore[method-assign]
+    send._umbra_smoke = True  # type: ignore[attr-defined]
+    requests.sessions.Session.send = send  # type: ignore[method-assign]
 
 
 def _install_httpx() -> None:
