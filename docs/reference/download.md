@@ -56,3 +56,16 @@ item.asset_href("2025-05-17-17-43-46_UMBRA-08_GEC.tif")
 ::: umbra_py.download_asset
 
 ::: umbra_py.download_url
+
+## An area and a date range
+
+`umbra download` takes one acquisition. To list the GEC scenes in a bounding
+box and a date range, then save those cloud-optimized GeoTIFFs, fetch the
+weekly index and search it locally. The CLI (`umbra index fetch`,
+`umbra search --local`, `umbra download --asset GEC`), the
+`CatalogIndex.search` / `download_item` loop, and a stdlib `GET /search`
+that follows `next` and fetches `assets.gec.href` from the public bucket
+are in
+[Download the GEC GeoTIFFs](../replace-crawler.md#download-the-gec-geotiffs).
+That page also has the hosted API's 120 requests/minute cap and the
+CC BY 4.0 line to keep with the files.

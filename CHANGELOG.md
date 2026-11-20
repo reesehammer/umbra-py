@@ -10,6 +10,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **A bulk GEC download for an area and a date range.** The
+  replace-your-crawler page shows `umbra index fetch`,
+  `umbra search --local` (`--bbox`, `--start`, `--end`, `--product GEC`),
+  and `umbra download --asset GEC`, the same filters on
+  `CatalogIndex.search` and `download_item`, and a stdlib loop over the
+  hosted `GET /search` that follows `next` and fetches `assets.gec.href`
+  from the public bucket. The hosted cap is 120 requests per minute; a
+  catalog-sized pull belongs on the local index. The download reference
+  links there.
 - **FastSAR 0.2.0 CPHD can feed `umbra convert`.** The complex-products
   guide shows finding a public Umbra CPHD, letting FastSAR `process_cphd`
   form it into a slant-plane SICD, and geocoding that file with
