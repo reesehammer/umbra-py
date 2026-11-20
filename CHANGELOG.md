@@ -73,6 +73,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   by `<redacted>`.
 
 ### Fixed
+- **`find_similar_text` refuses a missing scene-embedding index.** The call
+  returns a tool error that the index is not available on this server. On
+  the public host it says to run a local
+  `uvx --from 'umbra-py[mcp]' umbra-mcp` beside an index from
+  `umbra embed build`, or to use `search_catalog`. It no longer surfaces
+  as an unexpected exception.
+- **`search_catalog` names the arguments it accepts when a value fails validation.**
+  A `limit` that is not an integer comes back as a tool error listing the
+  accepted names. The page size argument is `limit` (integer, default 20).
+  An unknown key is still ignored, and the search runs at that default.
+  Tool names, argument names, defaults, and the input schema are unchanged.
 - **`HEAD /artifacts/thumbnail/{item_id}.png` on the hosted API matches GET.**
   A link checker gets 200 with `Content-Type: image/png`, the PNG's
   `Content-Length`, `Cache-Control: public, max-age=86400`, and the same CORS

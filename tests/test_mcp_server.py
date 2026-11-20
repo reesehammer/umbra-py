@@ -1056,6 +1056,70 @@ def test_public_host_refuses_cog_tools():
         ms.narrate_change(["http://example/a", "http://example/b"])
 
 
+def test_search_catalog_invalid_limit_lists_accepted_arguments():
+    """A value the schema already rejects names every argument, including ``limit``.
+
+    ``limit`` is the page size. The input schema (names, types, defaults) stays
+    the one ``tests/mcp_contract.json`` pins.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+    from pydantic import ValidationError
+
+    contract = json.loads((Path(__file__).parent / "mcp_contract.json").read_text())
+    server = ms.build_server()
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    schema = tools["search_catalog"].input_schema
+    assert set(schema["properties"]) == set(contract["search_catalog"]["args"])
+    assert schema["properties"]["limit"]["default"] == 20
+    assert "max_results" not in schema["properties"]
+    assert schema.get("additionalProperties") is None
+
+    with pytest.raises(ToolError, match="rejected limit") as bad_limit:
+        asyncio.run(server.call_tool("search_catalog", {"limit": "nope"}))
+    assert not isinstance(bad_limit.value, UnexpectedToolError)
+    assert isinstance(bad_limit.value.__cause__, ValidationError)
+    assert any(err["loc"] == ("limit",) for err in bad_limit.value.__cause__.errors())
+    limit_text = str(bad_limit.value)
+    assert "integer" in limit_text
+    assert "Accepted arguments:" in limit_text
+    for name in schema["properties"]:
+        assert name in limit_text.split("Accepted arguments:", 1)[1]
+    assert "The maximum number of cards is limit (integer, default 20)." in limit_text
+    assert "Traceback" not in limit_text
+
+    # A schema-valid call still reaches the tool. semantic=True with no area
+    # is refused by the function, not by argument validation.
+    with pytest.raises(ToolError, match="needs `area`") as semantic:
+        asyncio.run(server.call_tool("search_catalog", {"semantic": True}))
+    assert "Accepted arguments:" not in str(semantic.value)
+
+
+def test_search_catalog_ignores_an_unknown_extra_key(monkeypatch):
+    """An extra key is dropped. The search runs at the default page size."""
+    captured: dict = {}
+
+    class _FakeCatalog:
+        def has_matching_task(self, area, *, fuzzy):
+            return True
+
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+    monkeypatch.setattr(ms, "UmbraCatalog", lambda *a, **k: _FakeCatalog())
+    server = ms.build_server()
+    result = asyncio.run(
+        server.call_tool(
+            "search_catalog",
+            {"area": "anywhere", "max_results": 10, "local": False},
+        )
+    )
+    assert not result.is_error
+    assert captured["area"] == "anywhere"
+    assert captured["limit"] == 20
+    assert "max_results" not in captured
+
+
 def test_public_host_cog_refusals_reach_the_client():
     """Regression: MCP SDK 2 strips anything but ToolError to
     ``Error executing tool <name>`` with the original on ``__cause__`` only.
@@ -2584,8 +2648,37 @@ def test_find_similar_text_without_index_errors(monkeypatch, tmp_path):
 
     missing = tmp_path / "missing.embed.db"
     monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
-    with pytest.raises(FileNotFoundError, match="umbra embed build"):
+    with pytest.raises(ValueError, match="umbra embed build") as excinfo:
         ms.find_similar_text("a flooded field")
+    message = str(excinfo.value)
+    assert "not available" in message
+    assert str(missing) in message
+
+
+def test_find_similar_text_without_index_reaches_the_client(monkeypatch, tmp_path):
+    """A missing scene index is a tool error, not an unexpected exception.
+
+    MCP SDK 2 keeps the text of a ``ToolError`` and drops anything else to
+    ``Error executing tool find_similar_text``. The public host has no
+    embedding index and must say so, without the filesystem path.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+    from umbra_py import embed as emb
+
+    missing = tmp_path / "missing.embed.db"
+    monkeypatch.setattr(emb, "default_scene_embed_path", lambda *a, **k: missing)
+    ms.configure(cog_streaming=False)
+    server = ms.build_server()
+    with pytest.raises(ToolError, match="not available on this server") as excinfo:
+        asyncio.run(server.call_tool("find_similar_text", {"query": "a flooded field"}))
+    assert not isinstance(excinfo.value, UnexpectedToolError)
+    message = str(excinfo.value)
+    assert "umbra embed build" in message
+    assert "uvx --from 'umbra-py[mcp]' umbra-mcp" in message
+    assert "search_catalog" in message
+    assert str(missing) not in message
+    assert "Traceback" not in message
 
 
 # --------------------------------------------------------------------------

@@ -366,6 +366,27 @@ def _with_optional_path(prefix: str, path: os.PathLike[str] | str, suffix: str) 
     return f"{prefix} at {path}. {suffix}"
 
 
+def _missing_scene_embed_index(path: os.PathLike[str] | str) -> str:
+    """Refusal when ``find_similar_text`` has no scene-embedding index.
+
+    The public host cannot build that sidecar for the caller. A local server
+    can, so the two sentences say different next steps and the public one
+    does not include the filesystem path.
+    """
+    if _public_host():
+        return (
+            "find_similar_text needs a scene-embedding index, which is not "
+            "available on this server. Run a local "
+            "`uvx --from 'umbra-py[mcp]' umbra-mcp` "
+            "server beside an index built with 'umbra embed build', or "
+            "search by task name with search_catalog(area=..., fuzzy=True)."
+        )
+    return (
+        f"No scene-embedding index at {path}. It is not available on this "
+        "server. Build one with 'umbra embed build' (text-to-scene search needs it)."
+    )
+
+
 def _open_index(path: os.PathLike[str] | str | None = None) -> CatalogIndex:
     """Open the catalog the MCP tools read.
 
@@ -2688,13 +2709,11 @@ def find_similar_text(
 
     path = emb.default_scene_embed_path()
     if not path.exists():
-        raise FileNotFoundError(
-            _with_optional_path(
-                "No scene-embedding index",
-                path,
-                "Build one first with 'umbra embed build' (text-to-scene search needs it).",
-            )
-        )
+        # FileNotFoundError is an unexpected MCP failure: the SDK logs a
+        # traceback and the client only sees "Error executing tool
+        # find_similar_text". ValueError is the same refusal shape as a
+        # public-host COG tool; _as_mcp_tool turns it into ToolError.
+        raise ValueError(_missing_scene_embed_index(path))
     with _public_net_slot(long=True):
         text_embedder = emb.default_text_embedder(model=model)
         with emb.SceneEmbeddingIndex(path) as index:
@@ -3132,6 +3151,67 @@ _READ_ONLY_TOOLS = frozenset(
 )
 
 
+def _search_catalog_argument_text(detail: str, names: list[str], limit_default: Any) -> str:
+    """One refusal for a value the schema already rejects, plus the real page size.
+
+    ``limit`` is the page-size argument. The sentence names it so a bad value
+    points at that argument.
+    """
+    accepted = ", ".join(names)
+    return (
+        f"{detail} Accepted arguments: {accepted}. "
+        f"The maximum number of cards is limit (integer, default {limit_default})."
+    )
+
+
+def _install_search_catalog_argument_errors(server: Any) -> None:
+    """Reword a ``search_catalog`` schema failure so it names the arguments.
+
+    Unknown keys stay ignored: pydantic drops them and the search runs at the
+    default page size. A value the schema already rejects (a ``limit`` that is
+    not an integer, for example) is reworded to list the accepted names.
+    ``tools/list`` is unchanged.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+    from pydantic import ValidationError
+
+    tool = server._tool_manager.get_tool("search_catalog")
+    if tool is None:  # pragma: no cover - the tool is registered just above
+        return
+    fields = tool.fn_metadata.arg_model.model_fields
+    names = sorted(fields)
+    limit_default = fields["limit"].default
+    manager = server._tool_manager
+    original = manager.call_tool
+
+    def _refuse(detail: str, cause: BaseException) -> None:
+        raise ToolError(_search_catalog_argument_text(detail, names, limit_default)) from cause
+
+    async def call_tool(
+        name: str,
+        arguments: dict[str, Any],
+        context: Any,
+        convert_result: bool = False,
+    ) -> Any:
+        try:
+            return await original(name, arguments, context, convert_result=convert_result)
+        except ToolError as exc:
+            cause = exc.__cause__
+            if (
+                name == "search_catalog"
+                and not isinstance(exc, UnexpectedToolError)
+                and isinstance(cause, ValidationError)
+            ):
+                parts: list[str] = []
+                for err in cause.errors():
+                    loc = ".".join(str(part) for part in err["loc"]) or "arguments"
+                    parts.append(f"{loc} ({err['msg']})")
+                _refuse("search_catalog rejected " + "; ".join(parts) + ".", cause)
+            raise
+
+    manager.call_tool = call_tool
+
+
 def build_server() -> MCPServer:
     """Construct and return the configured ``MCPServer``.
 
@@ -3253,6 +3333,8 @@ def build_server() -> MCPServer:
             structured_output=False if image_tool else None,
             annotations=read_only if fn.__name__ in _READ_ONLY_TOOLS else writes,
         )
+
+    _install_search_catalog_argument_errors(server)
 
     @server.resource(
         "umbra://context",
