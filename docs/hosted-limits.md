@@ -69,12 +69,11 @@ that is still fetching).
 **120 requests per minute**, sustained, per client IP, with a **burst of 16**.
 That is a token bucket. `PUBLIC_RATE_LIMIT` tokens refill across the
 60-second window (`PUBLIC_RATE_WINDOW_S`); the bucket holds
-`PUBLIC_RATE_BURST` tokens (`--rate-burst` on `umbra serve`). A client may
+`PUBLIC_RATE_BURST` tokens. A client may
 spend the burst at once, including several `/search` calls in parallel, and
 then continues at about 2 requests per second. The average stays 120
-requests per minute. A `--rate-limit` lower than the burst, with no
-`--rate-burst`, uses that lower number as the burst. `--rate-limit 0`
-disables the limit.
+requests per minute. A `--rate-limit` lower than the burst uses that lower
+number as the burst. `--rate-limit 0` disables the limit.
 
 A client is the address Railway's edge accepted. `--public` reads
 `X-Real-IP` and ignores `Authorization`. A bearer token is not a separate
@@ -99,21 +98,22 @@ or 429 when that hit crosses the cap).
 
 ## Concurrent catalog reads
 
-One client may hold **8** catalog reads at once
-(`PUBLIC_CLIENT_CONCURRENCY`, `--client-concurrency` on `umbra serve`).
+One client may hold **8** catalog reads at once (`PUBLIC_CLIENT_CONCURRENCY`).
 A further read is HTTP 429, body `RateLimited`, before it takes a database
 slot. `message` states that cap (and, when the token bucket is on, the
 sustained rate and burst). `hint` is the rate-limit hint: call serially or
 back off and honor `Retry-After` (1 second), or run `umbra index fetch` and
 search locally. The process still runs `UMBRA_DB_CONCURRENCY` catalog reads
 at once (default 4). A read that finds every slot taken waits for one to
-free, up to `UMBRA_DB_ACQUIRE_TIMEOUT` (default 10 seconds). That wait holds
-the caller's in-flight slot, so one IP cannot queue more than its cap. If no
-slot frees in time the response is HTTP 503, body `Busy`, with `Retry-After`.
-`message` states the process cap and how long the call waited. `hint` is the
-same pacing hint. A read that passes
-`UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 and the SQLite statement
-is interrupted so the slot is released.
+free, up to `UMBRA_DB_ACQUIRE_TIMEOUT` (default 3 seconds). At most twice
+`UMBRA_DB_CONCURRENCY` reads may be waiting; a further read is HTTP 503 at
+once. That wait holds the caller's in-flight slot, so one IP cannot queue
+more than its cap. If no slot frees in time the response is HTTP 503, body
+`Busy`, with `Retry-After`. `message` states the process cap and how long
+the call waited. `hint` is the same pacing hint. A read that passes
+`UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 with `Retry-After` and
+that same hint, and the SQLite statement is interrupted so the slot is
+released.
 
 ## Page size
 

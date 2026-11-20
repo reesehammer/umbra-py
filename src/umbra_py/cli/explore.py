@@ -120,24 +120,8 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     type=int,
     default=None,
     help="Sustained per-client requests per minute (token bucket). 0 disables. "
-    f"Default off; {PUBLIC_RATE_LIMIT} under --public.",
-)
-@click.option(
-    "--rate-burst",
-    type=int,
-    default=None,
-    help="How many requests one client may send at once before the sustained "
-    "--rate-limit applies. "
-    f"Default min({PUBLIC_RATE_BURST}, that limit). "
-    "Ignored when the rate limit is off.",
-)
-@click.option(
-    "--client-concurrency",
-    type=int,
-    default=None,
-    help="Catalog reads one --public client may hold at once. "
-    f"Default {PUBLIC_CLIENT_CONCURRENCY}. A further read is HTTP 429. "
-    "The process-wide cap stays UMBRA_DB_CONCURRENCY.",
+    f"Default off; {PUBLIC_RATE_LIMIT} under --public. "
+    f"The burst is min({PUBLIC_RATE_BURST}, that limit).",
 )
 @click.option(
     "--proxy-headers",
@@ -226,8 +210,6 @@ def serve(
     mcp,
     public,
     rate_limit,
-    rate_burst,
-    client_concurrency,
     proxy_headers,
     stack_lazy,
     stack_chunk_size,
@@ -352,14 +334,14 @@ def serve(
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if public:
         if rate_limit:
-            burst = rate_burst if rate_burst is not None else min(PUBLIC_RATE_BURST, rate_limit)
+            burst = min(PUBLIC_RATE_BURST, rate_limit)
             cap = f"{rate_limit}/min, burst {burst}"
         else:
             cap = "off"
-        reads = client_concurrency if client_concurrency is not None else PUBLIC_CLIENT_CONCURRENCY
         click.echo(
             "  public mode: on-demand artifacts off, baked thumbnails on, "
-            f"MCP at /mcp, rate limit {cap}, {reads} catalog reads in flight, "
+            f"MCP at /mcp, rate limit {cap}, "
+            f"{PUBLIC_CLIENT_CONCURRENCY} catalog reads in flight, "
             "CC-BY headers on"
         )
     elif mcp:
@@ -400,8 +382,6 @@ def serve(
             mcp=mcp,
             public=public,
             rate_limit=rate_limit,
-            rate_burst=rate_burst,
-            client_concurrency=client_concurrency,
             proxy_headers=proxy_headers,
         )
     except (MissingDependencyError, ValueError) as exc:

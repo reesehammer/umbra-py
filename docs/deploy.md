@@ -153,9 +153,11 @@ image (`docker compose`, and the CI smoke test): extras there are the
   `degraded: true`. `built_at`, `snapshot`, and `stale` (`true` when the build
   date is more than 9 days old) say which snapshot is loaded. The document is
   cached until the index file or its snapshot sidecar changes. A catalog read
-  that exceeds `UMBRA_REQUEST_TIMEOUT_S` (default 15s) is a `503`. A read that
-  cannot get a slot within `UMBRA_DB_ACQUIRE_TIMEOUT` (default 10s) is a `503`
-  with `Retry-After`. Only an index that exists but cannot be opened is a
+  that exceeds `UMBRA_REQUEST_TIMEOUT_S` (default 15s) is a `503` with
+  `Retry-After`. A read that cannot get a slot within `UMBRA_DB_ACQUIRE_TIMEOUT`
+  (default 3s) is a `503` with `Retry-After`. At most twice
+  `UMBRA_DB_CONCURRENCY` reads may be waiting; a further read is that `503`
+  at once. Only an index that exists but cannot be opened is a
   `503` with `status: "error"`.
 - **Runs unprivileged.** The entrypoint starts as root only long enough to
   `chown` a mounted `/data` (Railway Volumes are root-owned and hide the
@@ -180,7 +182,7 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_SERVE_ARGS`  | unset     | Extra flags forwarded to `umbra serve` (e.g. `--no-artifacts`).        |
 | `UMBRA_REQUEST_TIMEOUT_S` | `15` | Catalog-read deadline. Past it, `/healthz` and `/search` return 503. |
 | `UMBRA_DB_CONCURRENCY` | `4` | Catalog reads in flight at once. A further read waits for a slot. |
-| `UMBRA_DB_ACQUIRE_TIMEOUT` | `10` | Seconds to wait for a catalog slot. Past it, HTTP 503 with `Retry-After`. |
+| `UMBRA_DB_ACQUIRE_TIMEOUT` | `3` | Seconds to wait for a catalog slot. Past it, HTTP 503 with `Retry-After`. At most twice `UMBRA_DB_CONCURRENCY` reads wait. |
 | `UMBRA_WATCHDOG` | `1` | `0` disables the event-loop stall exit. |
 | `UMBRA_WATCHDOG_STALL_S` | `90` | Loop silence before the process exits. |
 | `UMBRA_WATCHDOG_GRACE_S` | `120` | Startup window during which silence is ignored. |

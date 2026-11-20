@@ -140,6 +140,75 @@ def test_a_saturated_catalog_returns_503_after_the_acquire_timeout(index_path, m
     assert held.status_code == 200
 
 
+def test_waiters_past_twice_concurrency_fail_fast(index_path, monkeypatch):
+    """Past 2x UMBRA_DB_CONCURRENCY waiters, the next read is 503 at once."""
+    monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "1")
+    monkeypatch.setenv("UMBRA_DB_ACQUIRE_TIMEOUT", "5")
+    started = threading.Event()
+    release = threading.Event()
+    both_waiting = threading.Event()
+    lock = threading.Lock()
+    inside = {"n": 0}
+
+    class _TrackingSemaphore(threading.BoundedSemaphore):
+        def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+            with lock:
+                inside["n"] += 1
+                if started.is_set() and inside["n"] >= 2:
+                    both_waiting.set()
+            try:
+                return super().acquire(blocking=blocking, timeout=timeout)
+            finally:
+                with lock:
+                    inside["n"] -= 1
+
+    monkeypatch.setattr(threading, "BoundedSemaphore", _TrackingSemaphore)
+
+    def block(*_args, **_kwargs):
+        started.set()
+        assert release.wait(5)
+        return [], False
+
+    monkeypatch.setattr(serve, "run_search", block)
+    app = serve.build_app(index_path)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _run():
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            holder = asyncio.create_task(client.get("/search", params={"limit": 1}))
+            for _ in range(50):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            assert started.is_set()
+            waiting = [
+                asyncio.create_task(client.get("/search", params={"limit": 1})) for _ in range(2)
+            ]
+            for _ in range(50):
+                if both_waiting.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            assert both_waiting.is_set()
+            began = time.perf_counter()
+            fast = await client.get("/search", params={"limit": 1})
+            elapsed = time.perf_counter() - began
+            release.set()
+            held = await holder
+            queued = [await task for task in waiting]
+            return held, queued, fast, elapsed
+
+    held, queued, fast, elapsed = asyncio.run(_run())
+    assert held.status_code == 200
+    assert [response.status_code for response in queued] == [200, 200]
+    assert elapsed < 0.4
+    assert fast.status_code == 503
+    assert fast.headers["retry-after"] == "1"
+    body = fast.json()
+    assert body["error"] == "Busy"
+    assert "within 0 seconds" in body["message"]
+    assert "umbra index fetch" in body["hint"]
+
+
 def test_health_cache_drops_stale_snapshots():
     cache: dict[tuple[object, ...], dict] = {}
     serve._cache_health_document(cache, ("/idx", 1), {"ready": True, "items": 1})
@@ -180,5 +249,9 @@ def test_asyncio_timeout_error_is_a_503(index_path, monkeypatch):
     assert health.json()["ready"] is False
     assert "Timeout" in health.json()["error"]
     assert search.status_code == 503
-    assert search.json()["error"] == "Timeout"
-    assert "deadline" in search.json()["message"]
+    assert search.headers["retry-after"] == "1"
+    body = search.json()
+    assert body["error"] == "Timeout"
+    assert "deadline" in body["message"]
+    assert "Retry-After" in body["hint"]
+    assert "umbra index fetch" in body["hint"]

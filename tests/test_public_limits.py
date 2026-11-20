@@ -383,12 +383,12 @@ def test_public_client_concurrency_rejects_a_third_read(tmp_path, monkeypatch):
         assert release.wait(5)
         return [], False
 
+    monkeypatch.setattr(serve, "PUBLIC_CLIENT_CONCURRENCY", 2)
     monkeypatch.setattr(serve, "run_search", block)
     app = serve.build_app(
         _index(tmp_path),
         public=True,
         rate_limit=0,
-        client_concurrency=2,
         cache_dir=tmp_path / "art",
     )
 
@@ -604,7 +604,9 @@ def test_public_timeout_interrupts_the_query_and_releases_the_slot(tmp_path, mon
 
     first, second = asyncio.run(_run())
     assert first.status_code == 503
+    assert first.headers["retry-after"] == "1"
     assert first.json()["error"] == "Timeout"
+    assert "umbra index fetch" in first.json()["hint"]
     assert second is not None
     assert second.status_code == 503
     assert second.json().get("error") == "Timeout"

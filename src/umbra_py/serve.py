@@ -263,10 +263,9 @@ PUBLIC_SEARCH_LIMIT = 500
 
 #: How many catalog reads one public client may hold at once. A burst of
 #: parallel ``/search`` calls needs several slots, so the default is 8.
-#: ``--client-concurrency`` overrides it. The process-wide pool stays
-#: :func:`_db_concurrency` (``UMBRA_DB_CONCURRENCY``, default 4) and is
-#: not changed by this cap. Over the cap the response is the same 429 body
-#: as the token bucket, with ``Retry-After``.
+#: The process-wide pool stays :func:`_db_concurrency`
+#: (``UMBRA_DB_CONCURRENCY``, default 4). Over the cap the response is the
+#: same 429 body as the token bucket, with ``Retry-After``.
 PUBLIC_CLIENT_CONCURRENCY = 8
 #: Seconds a client should wait before retrying a catalog read the in-flight
 #: cap refused. The read itself is what frees the slot; one second is the
@@ -308,10 +307,9 @@ _inflight_client: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 #: The limiter is a token bucket. :data:`PUBLIC_RATE_LIMIT` tokens refill across
 #: :data:`PUBLIC_RATE_WINDOW_S` (120/minute, about 2/second). The bucket holds
 #: :data:`PUBLIC_RATE_BURST` tokens, so a handful of parallel calls land
-#: together and a sustained scrape still stops. ``--rate-burst`` overrides the
-#: bucket. When the sustained limit is lower than that burst and no burst is
-#: set, the bucket is the sustained limit, so ``--rate-limit 2`` is still two
-#: requests before a 429.
+#: together and a sustained scrape still stops. When the sustained limit is
+#: lower than that burst, the bucket is the sustained limit, so
+#: ``--rate-limit 2`` is still two requests before a 429.
 PUBLIC_RATE_LIMIT = 120
 PUBLIC_RATE_WINDOW_S = 60.0
 PUBLIC_RATE_BURST = 16
@@ -388,7 +386,8 @@ def _db_concurrency() -> int:
 
 
 #: How long a catalog read waits for a process-wide slot. ``0`` fails at once.
-DEFAULT_DB_ACQUIRE_TIMEOUT_S = 10.0
+#: Short on purpose: each waiter occupies a worker thread.
+DEFAULT_DB_ACQUIRE_TIMEOUT_S = 3.0
 #: Pause a timed-out waiter should take before trying again. The slot may
 #: already be free; this is not a measurement of the read that held it.
 DB_BUSY_RETRY_AFTER_S = 1
@@ -399,8 +398,9 @@ def _db_acquire_timeout_s() -> float:
 
     Default :data:`DEFAULT_DB_ACQUIRE_TIMEOUT_S`. ``0`` does not wait. A
     non-numeric or negative value uses the default. The wait runs on the
-    request's worker thread, so the event loop stays free. The per-IP cap is
-    taken first, which bounds how many reads from one client can be waiting.
+    request's worker thread, so the event loop stays free. At most twice
+    :func:`_db_concurrency` reads may be waiting; a further read is a 503
+    without waiting. The per-IP cap is taken first.
     """
     raw = os.environ.get("UMBRA_DB_ACQUIRE_TIMEOUT", "")
     if not raw:
@@ -3957,8 +3957,6 @@ def build_app(
     mcp: bool = False,
     public: bool = False,
     rate_limit: int | None = None,
-    rate_burst: int | None = None,
-    client_concurrency: int | None = None,
 ) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
@@ -3996,11 +3994,10 @@ def build_app(
     the ``mcp`` extra) so one process is both front doors. ``public=True`` is
     the hosted-community bundle: on-demand artifacts off, the baked-thumbnail
     route on, MCP on, a per-client token bucket (:data:`PUBLIC_RATE_LIMIT`
-    per :data:`PUBLIC_RATE_WINDOW_S`, burst :data:`PUBLIC_RATE_BURST`,
-    unless ``rate_limit`` / ``rate_burst`` is set; ``rate_limit`` of ``0``
-    disables it), at most :data:`PUBLIC_CLIENT_CONCURRENCY` catalog reads
-    in flight per client (``client_concurrency`` overrides it), CC-BY license
-    headers,
+    per :data:`PUBLIC_RATE_WINDOW_S`, burst :data:`PUBLIC_RATE_BURST`;
+    ``rate_limit`` of ``0`` disables it, and a lower ``rate_limit`` shrinks
+    the burst to match), at most :data:`PUBLIC_CLIENT_CONCURRENCY` catalog
+    reads in flight per client, CC-BY license headers,
     and a refuse of ``live=True``. Secret env vars are checked in
     :func:`serve`, not here, so tests can build a public app on a machine
     that happens to have a model key.
@@ -4169,7 +4166,7 @@ def build_app(
         expose_headers=list(CORS_EXPOSE_HEADERS),
     )
 
-    limiter = RateLimiter(rate_limit, burst=rate_burst) if rate_limit else None
+    limiter = RateLimiter(rate_limit) if rate_limit else None
 
     class _GuardMiddleware(BaseHTTPMiddleware):
         """CC-BY headers on every response; optional per-client request cap."""
@@ -4242,18 +4239,27 @@ def build_app(
     # until the scan finishes on its own.
     _slot_limit = _db_concurrency()
     _slots = threading.BoundedSemaphore(_slot_limit)
+    # Threads blocked in ``acquire``. Twice the running cap: one IP's burst of
+    # 8 can wait behind the default of 4, and a wider pile returns 503 at once.
+    _waiter_limit = _slot_limit * 2
+    _waiting = {"n": 0}
+    _wait_lock = threading.Lock()
 
     def _acquire_slot() -> None:
         waited = _db_acquire_timeout_s()
-        if _slots.acquire(timeout=waited):
-            return
-        raise _CatalogBusy(catalog_busy_body(_slot_limit, waited))
+        with _wait_lock:
+            if _waiting["n"] >= _waiter_limit:
+                raise _CatalogBusy(catalog_busy_body(_slot_limit, 0))
+            _waiting["n"] += 1
+        try:
+            if _slots.acquire(timeout=waited):
+                return
+            raise _CatalogBusy(catalog_busy_body(_slot_limit, waited))
+        finally:
+            with _wait_lock:
+                _waiting["n"] -= 1
 
-    reads_per_client = (
-        PUBLIC_CLIENT_CONCURRENCY if client_concurrency is None else client_concurrency
-    )
-    if public and reads_per_client < 1:
-        raise ValueError("client concurrency must be >= 1")
+    reads_per_client = PUBLIC_CLIENT_CONCURRENCY
     client_gate = ClientInFlight(reads_per_client) if public else None
 
     @app.exception_handler(_CatalogBusy)
@@ -4344,7 +4350,9 @@ def build_app(
             content={
                 "error": "Timeout",
                 "message": "Catalog index read exceeded the request deadline.",
+                "hint": _pace_hint(DB_BUSY_RETRY_AFTER_S),
             },
+            headers={"Retry-After": str(DB_BUSY_RETRY_AFTER_S)},
         )
 
     async def _bounded(fn: Callable[[], Any]) -> Any:
@@ -6314,8 +6322,6 @@ def serve(
     mcp: bool = False,
     public: bool = False,
     rate_limit: int | None = None,
-    rate_burst: int | None = None,
-    client_concurrency: int | None = None,
     proxy_headers: bool = False,
 ) -> None:
     """Build the app and run it with uvicorn (blocking). Requires ``serve``."""
@@ -6357,8 +6363,6 @@ def serve(
         mcp=mcp,
         public=public,
         rate_limit=rate_limit,
-        rate_burst=rate_burst,
-        client_concurrency=client_concurrency,
     )
     from .watchdog import start_watchdog
 
