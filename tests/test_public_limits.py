@@ -428,29 +428,39 @@ def test_public_client_concurrency_rejects_a_third_read(tmp_path, monkeypatch):
 def test_eight_overlapping_searches_succeed_and_the_ninth_is_429(tmp_path, monkeypatch):
     """Eight overlapping GET /search from one IP return 200. The ninth is 429.
 
-    The search is held inside the handler so the eight calls really overlap.
-    ``UMBRA_DB_CONCURRENCY`` is raised only here: the process default stays 4,
-    and this test is the per-IP cap, which is checked before that semaphore.
-    The loop's default executor is ``min(32, cpu + 4)`` (8 on a 4-core
-    machine), which would leave the ninth call queued behind the eight
-    blocked searches. A wider pool lets that call reach the cap.
+    The process cap stays at its default of 4. Four calls run and four wait
+    for a slot; the search is held so those eight really overlap. The ninth
+    is refused by the per-IP cap while the eight still hold it. The loop's
+    default executor is ``min(32, cpu + 4)`` (8 on a 4-core machine), which
+    would leave the ninth call queued behind the blocked searches. A wider
+    pool lets that call reach the cap.
     """
     import httpx
 
-    monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "8")
+    monkeypatch.delenv("UMBRA_DB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("UMBRA_DB_ACQUIRE_TIMEOUT", raising=False)
+    assert serve._db_concurrency() == 4
+    assert serve._db_acquire_timeout_s() == serve.DEFAULT_DB_ACQUIRE_TIMEOUT_S
     started = threading.Event()
     release = threading.Event()
     lock = threading.Lock()
-    holding = {"n": 0}
+    admitted = {"n": 0}
+
+    class _Counting(serve.ClientInFlight):
+        def acquire(self, client: str) -> bool:
+            ok = super().acquire(client)
+            if ok:
+                with lock:
+                    admitted["n"] += 1
+                    if admitted["n"] >= serve.PUBLIC_CLIENT_CONCURRENCY:
+                        started.set()
+            return ok
 
     def block(source, **kwargs):
-        with lock:
-            holding["n"] += 1
-            if holding["n"] >= serve.PUBLIC_CLIENT_CONCURRENCY:
-                started.set()
         assert release.wait(5)
         return [], False
 
+    monkeypatch.setattr(serve, "ClientInFlight", _Counting)
     monkeypatch.setattr(serve, "run_search", block)
     app = serve.build_app(_index(tmp_path), public=True, cache_dir=tmp_path / "art")
     assert serve.PUBLIC_CLIENT_CONCURRENCY == 8
@@ -486,6 +496,74 @@ def test_eight_overlapping_searches_succeed_and_the_ninth_is_429(tmp_path, monke
     assert body["error"] == "RateLimited"
     assert "8 catalog reads in flight per IP" in body["message"]
     assert "sustained 120 requests/min per IP, burst 16" in body["message"]
+    assert "Pace calls serially" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert "(1 seconds)" in body["hint"]
+    assert "umbra index fetch" in body["hint"]
+    assert "no rate limit" in body["hint"]
+
+
+@pytestmark_public_app
+@pytest.mark.skipif(not _HAS_HTTPX, reason="httpx")
+def test_a_timed_out_slot_wait_is_503_with_retry_after(tmp_path, monkeypatch):
+    """A catalog read that waits out UMBRA_DB_ACQUIRE_TIMEOUT is HTTP 503.
+
+    The wait is on the worker thread: ``/livez`` still answers while the
+    second ``/search`` is blocked on the process semaphore.
+    """
+    import httpx
+
+    monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "1")
+    monkeypatch.setenv("UMBRA_DB_ACQUIRE_TIMEOUT", "0.6")
+    started = threading.Event()
+    release = threading.Event()
+
+    def block(source, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return [], False
+
+    monkeypatch.setattr(serve, "run_search", block)
+    app = serve.build_app(_index(tmp_path), public=True, rate_limit=0, cache_dir=tmp_path / "art")
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(pool)
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                first = asyncio.create_task(client.get("/search", params={"limit": 1}))
+                for _ in range(50):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.02)
+                assert started.is_set()
+                began = time.perf_counter()
+                second_task = asyncio.create_task(client.get("/search", params={"limit": 1}))
+                await asyncio.sleep(0.05)
+                live_began = time.perf_counter()
+                live = await client.get("/livez")
+                live_elapsed = time.perf_counter() - live_began
+                second = await second_task
+                waited = time.perf_counter() - began
+                release.set()
+                held = await first
+                return held, second, live, live_elapsed, waited
+        finally:
+            pool.shutdown(wait=True)
+
+    held, second, live, live_elapsed, waited = asyncio.run(_run())
+    assert held.status_code == 200
+    assert live.status_code == 200
+    assert live_elapsed < 0.3
+    assert waited >= 0.5
+    assert second.status_code == 503
+    assert second.headers["retry-after"] == "1"
+    body = second.json()
+    assert body["error"] == "Busy"
+    assert "1 catalog read in flight" in body["message"]
+    assert "No slot became free within 0.6 seconds" in body["message"]
     assert "Pace calls serially" in body["hint"]
     assert "Retry-After" in body["hint"]
     assert "(1 seconds)" in body["hint"]

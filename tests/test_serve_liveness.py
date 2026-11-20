@@ -101,8 +101,9 @@ def test_livez_stays_up_when_readiness_hits_its_deadline(index_path, monkeypatch
     assert elapsed < 1.5
 
 
-def test_a_saturated_catalog_returns_503_without_waiting(index_path, monkeypatch):
+def test_a_saturated_catalog_returns_503_after_the_acquire_timeout(index_path, monkeypatch):
     monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "1")
+    monkeypatch.setenv("UMBRA_DB_ACQUIRE_TIMEOUT", "0.3")
     started = threading.Event()
     release = threading.Event()
 
@@ -130,7 +131,12 @@ def test_a_saturated_catalog_returns_503_without_waiting(index_path, monkeypatch
 
     held, busy = asyncio.run(_run())
     assert busy.status_code == 503
-    assert "busy" in busy.json()["detail"].lower()
+    assert busy.headers["retry-after"] == "1"
+    body = busy.json()
+    assert body["error"] == "Busy"
+    assert "1 catalog read in flight" in body["message"]
+    assert "within 0.3 seconds" in body["message"]
+    assert "umbra index fetch" in body["hint"]
     assert held.status_code == 200
 
 

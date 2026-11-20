@@ -138,7 +138,10 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   One client may hold 8 catalog reads at once (`--client-concurrency`,
   default `PUBLIC_CLIENT_CONCURRENCY`). The read past that cap is the same
   429, including `Retry-After`. The process-wide cap stays
-  `UMBRA_DB_CONCURRENCY` (default 4).
+  `UMBRA_DB_CONCURRENCY` (default 4). A read that finds every slot taken
+  waits up to `UMBRA_DB_ACQUIRE_TIMEOUT` (default 10 seconds) for one to
+  free. Only that wait timing out is HTTP 503, with `Retry-After` and the
+  same pacing hint.
 - **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
   `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
   contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.

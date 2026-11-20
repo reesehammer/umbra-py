@@ -376,7 +376,8 @@ def _db_concurrency() -> int:
 
     A client that gives up does not cancel the thread already inside SQLite.
     Capping the reads keeps an abandoned probe from filling the ASGI thread
-    pool; the next request gets ``503`` instead of queueing behind the scan.
+    pool. A further read waits for a slot (:func:`_db_acquire_timeout_s`)
+    instead of failing at once.
     """
     raw = os.environ.get("UMBRA_DB_CONCURRENCY", "4")
     try:
@@ -384,6 +385,33 @@ def _db_concurrency() -> int:
     except ValueError:
         return 4
     return value if value > 0 else 4
+
+
+#: How long a catalog read waits for a process-wide slot. ``0`` fails at once.
+DEFAULT_DB_ACQUIRE_TIMEOUT_S = 10.0
+#: Pause a timed-out waiter should take before trying again. The slot may
+#: already be free; this is not a measurement of the read that held it.
+DB_BUSY_RETRY_AFTER_S = 1
+
+
+def _db_acquire_timeout_s() -> float:
+    """Seconds to wait for a process-wide catalog slot (``UMBRA_DB_ACQUIRE_TIMEOUT``).
+
+    Default :data:`DEFAULT_DB_ACQUIRE_TIMEOUT_S`. ``0`` does not wait. A
+    non-numeric or negative value uses the default. The wait runs on the
+    request's worker thread, so the event loop stays free. The per-IP cap is
+    taken first, which bounds how many reads from one client can be waiting.
+    """
+    raw = os.environ.get("UMBRA_DB_ACQUIRE_TIMEOUT", "")
+    if not raw:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    if value < 0:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    return value
 
 
 _log = logging.getLogger(__name__)
@@ -2775,6 +2803,37 @@ def in_flight_limited_body(
     }
 
 
+def catalog_busy_body(limit: int, waited_s: float) -> dict[str, str]:
+    """JSON body when a catalog read waited and no process-wide slot freed.
+
+    Same pacing hint as a 429 (serial calls, ``Retry-After``,
+    ``umbra index fetch``). ``error`` is ``Busy`` and the status is 503:
+    the process cap is a server limit, not the caller's token bucket.
+    """
+    reads = "catalog read" if limit == 1 else "catalog reads"
+    if float(waited_s).is_integer():
+        n = int(waited_s)
+        waited = f"{n} second" if n == 1 else f"{n} seconds"
+    else:
+        waited = f"{waited_s:g} seconds"
+    return {
+        "error": "Busy",
+        "message": (
+            f"Catalog index is busy ({limit} {reads} in flight). "
+            f"No slot became free within {waited}."
+        ),
+        "hint": _pace_hint(DB_BUSY_RETRY_AFTER_S),
+    }
+
+
+class _CatalogBusy(Exception):
+    """A catalog read waited for a process-wide slot and none freed."""
+
+    def __init__(self, body: dict[str, str]) -> None:
+        super().__init__(body["message"])
+        self.body = body
+
+
 class _InFlightLimited(Exception):
     """One client is already holding every catalog-read slot it may hold."""
 
@@ -4175,17 +4234,35 @@ def build_app(
 
     # One abandoned probe used to leave its scan running, and the next probe
     # started another. A handful of slots keeps that from filling the thread
-    # pool; past the cap the request is a fast 503. Public mode also caps how
-    # many of those slots one client may hold, and a deadline interrupts the
-    # SQLite statement so the slot is released instead of staying busy until
-    # the scan finishes on its own.
-    _slots = threading.BoundedSemaphore(_db_concurrency())
+    # pool. A read that finds them all taken waits on this thread (the route
+    # already ran ``to_thread``) until one frees or ``UMBRA_DB_ACQUIRE_TIMEOUT``
+    # elapses; only the timeout is a 503. Public mode also caps how many reads
+    # one client may hold, including those waiting, and a deadline interrupts
+    # the SQLite statement so the slot is released instead of staying busy
+    # until the scan finishes on its own.
+    _slot_limit = _db_concurrency()
+    _slots = threading.BoundedSemaphore(_slot_limit)
+
+    def _acquire_slot() -> None:
+        waited = _db_acquire_timeout_s()
+        if _slots.acquire(timeout=waited):
+            return
+        raise _CatalogBusy(catalog_busy_body(_slot_limit, waited))
+
     reads_per_client = (
         PUBLIC_CLIENT_CONCURRENCY if client_concurrency is None else client_concurrency
     )
     if public and reads_per_client < 1:
         raise ValueError("client concurrency must be >= 1")
     client_gate = ClientInFlight(reads_per_client) if public else None
+
+    @app.exception_handler(_CatalogBusy)
+    async def _catalog_busy(_request: Request, exc: _CatalogBusy) -> JSONResponse:
+        return JSONResponse(
+            exc.body,
+            status_code=503,
+            headers={"Retry-After": str(DB_BUSY_RETRY_AFTER_S)},
+        )
 
     @app.exception_handler(_InFlightLimited)
     async def _in_flight_limited(_request: Request, exc: _InFlightLimited) -> JSONResponse:
@@ -4217,13 +4294,12 @@ def build_app(
                     in_flight_limited_body(reads_per_client, scope="IP", limiter=limiter)
                 )
             acquired_client = True
-        if not _slots.acquire(blocking=False):
+        try:
+            _acquire_slot()
+        except BaseException:
             if acquired_client and client:
                 client_gate.release(client)
-            raise HTTPException(
-                status_code=503,
-                detail="Catalog index is busy; retry shortly.",
-            )
+            raise
         try:
             try:
                 source = open_source(index_path, live=live, readonly=public)
@@ -4431,11 +4507,7 @@ def build_app(
         # at ``_request_timeout_s``.
         if live:
             return health_document(backend="live", ready=True)
-        if not _slots.acquire(blocking=False):
-            raise HTTPException(
-                status_code=503,
-                detail="Catalog index is busy; retry shortly.",
-            )
+        _acquire_slot()
         try:
             return _health_cached()
         finally:
