@@ -27,6 +27,7 @@ arguments are a separate promise: [Stable tools](../mcp.md#stable-tools).
 | [`task-matches.schema.json`](task-matches.schema.json) | Umbra task/site names ranked against a plain-language query. | `umbra semantic search --json`. |
 | [`scene-matches.schema.json`](scene-matches.schema.json) | Acquisitions ranked by visual similarity to a scene or to a text query. | `umbra embed similar --json` / `umbra embed search --json`. |
 | [`site-coverage.schema.json`](site-coverage.schema.json) | One repeat-imaged site's coverage — passes, date span, revisit cadence, footprint, and the pass URLs oldest-first. | `umbra sites --json` (one object per line); the `find_repeat_sites` agent tool (in a list under `sites`). |
+| [`usage-stats.schema.json`](usage-stats.schema.json) | The hosted usage counter: searches served, index size, and coarse places reached by at least three clients. | `GET /stats` (`umbra serve`). |
 
 ## Structured success output
 

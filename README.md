@@ -5,6 +5,7 @@
 [![CI](https://github.com/reesehammer/umbra-py/actions/workflows/ci.yml/badge.svg)](https://github.com/reesehammer/umbra-py/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/reesehammer/umbra-py/branch/main/graph/badge.svg)](https://codecov.io/gh/reesehammer/umbra-py)
 [![Docs](https://img.shields.io/badge/docs-umbra--py.space-informational.svg)](https://umbra-py.space/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/umbra-py)](https://pypi.org/project/umbra-py/)
 
 **Search, preview, load, and convert [Umbra](https://umbra.space/open-data/) open SAR data.**
 

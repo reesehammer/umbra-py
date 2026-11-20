@@ -10,6 +10,15 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **`GET /stats` is a cached public usage counter.** It counts successful
+  `GET`/`POST /search` requests and successful MCP tool calls since
+  `counting_since` (zero when the counter first starts; probes, health
+  checks, errors, and smoke traffic are left out) and reports the loaded
+  index size plus a top-places list. The docs home page reads
+  `https://api.umbra-py.space/stats`, and the README carries a PyPI
+  downloads badge. The totals are written beside the catalog index so a
+  redeploy keeps them. Uptime and a 30-day 5xx count are not in this
+  document: the process does not store them.
 - **A bulk GEC download for an area and a date range.** The
   replace-your-crawler page shows `umbra index fetch`,
   `umbra search --local` (`--bbox`, `--start`, `--end`, `--product GEC`),

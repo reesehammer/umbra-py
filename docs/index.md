@@ -3,6 +3,8 @@
 **Search, preview, load, and convert [Umbra](https://umbra.space/open-data/)
 open SAR data.**
 
+[![PyPI downloads](https://img.shields.io/pypi/dm/umbra-py)](https://pypi.org/project/umbra-py/)
+
 Umbra publishes 16–25 cm SAR as **CC BY 4.0** open data, but **no search
 API** — only a static STAC tree on S3. `umbra-py` is that layer, so the
 archive feels as approachable as Sentinel-1 or Landsat. A community STAC
@@ -24,6 +26,8 @@ API (`umbra serve`) and MCP server sit on the same host.
     The weekly index reflects what Umbra has published: as of 2026-10-14,
     `built_at` 2026-10-08, newest plausible acquisition 2026-09-13.
     Not affiliated with Umbra Lab, Inc.
+
+<div id="umbra-usage" hidden></div>
 
 ## What it gives you
 

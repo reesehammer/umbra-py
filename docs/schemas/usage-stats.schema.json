@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/usage-stats.schema.json",
+  "title": "Hosted usage stats",
+  "description": "The JSON object GET /stats returns. searches_served counts successful GET and POST /search responses and successful MCP tool calls since counting_since, which is when this counter file was first created. Probes, health checks, errors, and smoke traffic are not included, and the total is not backfilled. scenes_indexed, thumbnails, and index_built_at come from the catalog index and thumbnail sidecar loaded in the process; they are null when that index cannot be read. top_places lists at most ten coarse place names, and only those reached by at least three distinct clients on one UTC day. The document is recomputed at most once an hour. It does not include an uptime percentage or a 5xx count: the process does not record those. Stable within a minor version.",
+  "type": "object",
+  "required": [
+    "searches_served",
+    "counting_since",
+    "scenes_indexed",
+    "thumbnails",
+    "index_built_at",
+    "top_places",
+    "generated_at"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "searches_served": 1280,
+      "counting_since": "2026-11-20T22:15:00Z",
+      "scenes_indexed": 14000,
+      "thumbnails": 9000,
+      "index_built_at": "2026-11-17",
+      "top_places": [
+        {"place": "Reykjavík, Iceland", "clients": 6},
+        {"place": "Austin, United States", "clients": 3}
+      ],
+      "generated_at": "2026-11-21T18:00:00Z"
+    }
+  ],
+  "properties": {
+    "searches_served": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Successful /search requests plus successful MCP tool calls since counting_since. Health checks, unknown paths, exploit probes, HEAD and OPTIONS, HTTP 429 and other errors, the X-Umbra-Smoke opt-out, and known bot or uptime user agents are not included."
+    },
+    "counting_since": {
+      "type": "string",
+      "description": "UTC timestamp when this counter started. The total is zero at that moment; nothing earlier is estimated."
+    },
+    "scenes_indexed": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Acquisitions in the loaded catalog index, or null when the process has no readable index."
+    },
+    "thumbnails": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Baked preview count from the thumbnail sidecar, or null when it cannot be read."
+    },
+    "index_built_at": {
+      "type": ["string", "null"],
+      "description": "Index build date (YYYY-MM-DD), or null when the index has no build stamp."
+    },
+    "top_places": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "Coarse place names reached by at least three distinct clients, most clients first. Places below that threshold are omitted. A name is a city and country, or a country, never a street address, a raw query, an IP, or a user agent.",
+      "items": {
+        "type": "object",
+        "required": ["place", "clients"],
+        "additionalProperties": false,
+        "properties": {
+          "place": {
+            "type": "string",
+            "minLength": 2,
+            "description": "Coarse place name."
+          },
+          "clients": {
+            "type": "integer",
+            "minimum": 3,
+            "description": "Distinct clients that reached this place on one UTC day (the high-water mark). A client is a salted hash that is not stored."
+          }
+        }
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "UTC timestamp when this document was computed. The process reuses it until an hour has passed."
+    }
+  }
+}

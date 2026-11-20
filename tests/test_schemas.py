@@ -1394,6 +1394,28 @@ def test_the_packaged_copy_wins_over_the_checkout(tmp_path, monkeypatch):
     assert schemas.schema_dir() == SCHEMA_DIR
 
 
+def test_usage_stats_payload_matches_the_contract(tmp_path):
+    from umbra_py.usage_stats import UsageStats
+
+    empty = UsageStats(None, clock=lambda: 1_700_000_000.0)
+    _check("usage-stats.schema.json", empty.public_payload())
+
+    def facts():
+        return {"scenes_indexed": 3, "thumbnails": 1, "index_built_at": "2026-11-17"}
+
+    stats = UsageStats(tmp_path / "usage-stats.json", clock=lambda: 1_700_000_000.0, facts=facts)
+    for host in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
+        stats.record_search(client=host, place="Reykjavík, Iceland")
+    payload = stats.public_payload()
+    _check("usage-stats.schema.json", payload)
+    assert payload["top_places"] == [{"place": "Reykjavík, Iceland", "clients": 3}]
+    assert payload["scenes_indexed"] == 3
+    assert payload["searches_served"] == 3
+    below = dict(payload)
+    below["top_places"] = [{"place": "Tokyo", "clients": 2}]
+    assert list(_validator("usage-stats.schema.json").iter_errors(below))
+
+
 def test_a_missing_install_says_where_it_looked(tmp_path, monkeypatch):
     from umbra_py import schemas
 

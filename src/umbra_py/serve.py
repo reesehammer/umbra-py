@@ -218,6 +218,16 @@ from .index import (
 from .load import STACK_AUTO_CRS, STACK_EXTENTS, stack_provenance
 from .models import BBox, UmbraItem, _iso_utc, _normalize_assets
 from .schemas import load_schema
+from .usage_stats import (
+    STATS_CACHE_CONTROL,
+    SearchUsageMiddleware,
+    UsageStats,
+    current_recorder,
+    index_facts,
+    install_recorder,
+    remember_search_place,
+    stats_path_for,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
@@ -3681,6 +3691,7 @@ OPENAPI_SCHEMAS: dict[str, str] = {
 #: the ``/artifacts/*`` routes and appear only when those are mounted.
 CORE_OPENAPI_SCHEMAS: dict[str, str] = {
     "SiteCoverage": "site-coverage",
+    "UsageStats": "usage-stats",
 }
 
 
@@ -3781,6 +3792,12 @@ def _binary_response(media_type: str, description: str) -> dict[str, Any]:
 #: The job document every async artifact request answers with while it renders.
 _JOB_RESPONSE = _json_response(
     "RenderJob", "Render queued; poll the `self` link until `status` leaves `queued`/`running`."
+)
+
+#: ``GET /stats``. The same committed contract the docs site reads.
+_STATS_RESPONSE = _json_response(
+    "UsageStats",
+    "Usage totals, recomputed at most once an hour. Cache-Control matches that window.",
 )
 
 #: The ``GET /sites`` response: the ranked wrapper over ``SiteCoverage`` records
@@ -4087,6 +4104,38 @@ def build_app(
         # "Terminating session: None" once per request; keep that at DEBUG.
         quiet_stateless_session_teardown()
 
+    def _usage_facts() -> dict[str, Any]:
+        if live:
+            return {"scenes_indexed": None, "thumbnails": None, "index_built_at": None}
+        path = Path(index_path) if index_path is not None else default_index_path()
+        return index_facts(path)
+
+    usage = UsageStats(stats_path_for(index_path), facts=_usage_facts)
+    install_recorder(usage)
+    if live:
+        usage_index = None
+    elif index_path is not None:
+        usage_index = Path(index_path)
+    else:
+        usage_index = default_index_path()
+
+    def _note_usage(
+        request: Request,
+        *,
+        bbox: BBox | None,
+        intersects: Any,
+        resolved_place: str | None,
+    ) -> None:
+        # The coarse name only. The raw place string and the geometry stay
+        # on the request, which is not what the counter writes down.
+        remember_search_place(
+            request.scope,
+            resolved_place=resolved_place,
+            bbox=bbox,
+            intersects=intersects,
+            anchors=usage.anchors,
+        )
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         # MCP's session manager (even in stateless HTTP) starts in its lifespan;
@@ -4126,6 +4175,7 @@ def build_app(
                     name="umbra-thumb-relocate",
                     daemon=True,
                 ).start()
+        usage.open(usage_index)
         async with mcp_life:
             try:
                 yield
@@ -4135,6 +4185,9 @@ def build_app(
                 # server does not hang on (or leak) in-flight renders.
                 if job_executor is not None:
                     job_executor.shutdown(wait=False)
+                usage.close()
+                if current_recorder() is usage:
+                    install_recorder(None)
 
     app = fastapi.FastAPI(
         title="Umbra Open Data STAC API",
@@ -4145,6 +4198,7 @@ def build_app(
         version=STAC_VERSION,
         lifespan=_lifespan,
     )
+    app.state.usage = usage
 
     # The server is read-only, so a permissive CORS policy is safe and is what
     # browser STAC clients (leafmap, stac-browser) and the static ``umbra demo``
@@ -4219,6 +4273,12 @@ def build_app(
     # --public — because /search exists on all three.
     from ._mcp_log import StacSearchLog
 
+    # Just inside the search log, and outside the rate-limit guard, so a 429
+    # is visible and is not counted. The log is added next and stays outside
+    # this counter. On a public app the client-IP rewrite is added after the
+    # log, so it runs first and the address hashed for a place is the one the
+    # limiter used. The counter never raises.
+    app.add_middleware(SearchUsageMiddleware, recorder=usage)
     app.add_middleware(StacSearchLog)
 
     # Outside the search log so a multi-megabyte body is refused before that
@@ -4630,6 +4690,30 @@ def build_app(
         except (TimeoutError, asyncio.TimeoutError):
             return _health_deadline()
 
+    @app.get("/stats", tags=["Ops"], responses={200: _STATS_RESPONSE})
+    async def get_usage_stats() -> JSONResponse:
+        """Usage totals for the docs site. Cached for an hour; rate-limited like /search.
+
+        The body is the committed ``usage-stats`` contract. ``Cache-Control``
+        is the same window the process keeps. Catalog facts come from the
+        loaded index; a read failure leaves those fields null and still
+        returns 200. This path is not exempt from the token bucket.
+        """
+        try:
+            payload = await asyncio.to_thread(usage.public_payload)
+        except Exception:
+            _log.warning("usage stats payload failed", exc_info=True)
+            payload = {
+                "searches_served": usage.searches_served,
+                "counting_since": usage.counting_since,
+                "scenes_indexed": None,
+                "thumbnails": None,
+                "index_built_at": None,
+                "top_places": [],
+                "generated_at": usage.counting_since,
+            }
+        return JSONResponse(payload, headers={"Cache-Control": STATS_CACHE_CONTROL})
+
     def _unhealthy(exc: Exception) -> Any:
         doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
         return JSONResponse(status_code=503, content=doc)
@@ -4767,6 +4851,7 @@ def build_app(
             search_fuzzy = fuzzy
             note = None
             baked_ids: set[str] = set()
+            resolved_place: str | None = None
             # ``fallback`` is GET /search only. /collections/.../items keeps
             # area as a task filter, which is what that route does today.
             if fallback:
@@ -4787,6 +4872,7 @@ def build_app(
                     search_bbox = decision.bbox
                     search_fuzzy = False
                     note = _geocode_fields(decision)
+                    resolved_place = decision.place
             page, has_next = run_search(
                 source,
                 bbox=search_bbox,
@@ -4822,6 +4908,7 @@ def build_app(
         )
         if note:
             result.update(note)
+        _note_usage(request, bbox=bbox, intersects=intersects, resolved_place=resolved_place)
         return JSONResponse(content=result, media_type=geojson)
 
     @app.get("/collections/{collection_id}/items", tags=["STAC"])
@@ -5017,11 +5104,13 @@ def build_app(
             search_fuzzy = parsed.fuzzy
             note = None
             baked_ids: set[str] = set()
+            resolved_place: str | None = None
             if decision.matched_by:
                 search_area = None
                 search_bbox = decision.bbox
                 search_fuzzy = False
                 note = _geocode_fields(decision)
+                resolved_place = decision.place
             page, has_next = run_search(
                 source,
                 bbox=search_bbox,
@@ -5065,6 +5154,12 @@ def build_app(
         )
         if note:
             result.update(note)
+        _note_usage(
+            request,
+            bbox=parsed.bbox,
+            intersects=parsed.intersects,
+            resolved_place=resolved_place,
+        )
         return JSONResponse(content=result, media_type=geojson)
 
     if public:

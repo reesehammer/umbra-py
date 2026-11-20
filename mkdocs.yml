@@ -66,6 +66,9 @@ plugins:
               - "!^_"
             members_order: source
 
+extra_javascript:
+  - assets/usage-stats.js
+
 markdown_extensions:
   - admonition
   - attr_list

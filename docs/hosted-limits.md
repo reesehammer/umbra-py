@@ -192,6 +192,62 @@ Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 `Access-Control-Max-Age: 600`, so a browser may reuse that answer for 600
 seconds. The server does not pass `max_age`; 600 is the CORS middleware
 default. `GET /search` with no custom headers does not send a preflight.
+`GET /stats` is the same kind of request: the docs site fetches it with
+`fetch()` and no custom headers.
+
+## Usage stats
+
+`GET /stats` returns a small JSON document. The docs home page reads
+`https://api.umbra-py.space/stats` and, if that fetch fails or takes longer
+than a few seconds, shows a quiet "stats unavailable" line. The same token
+bucket as every other route applies. `/stats` is not a health check.
+
+The process recomputes the document at most once an hour and sends
+`Cache-Control: public, max-age=3600`. Until that hour is up it serves the
+copy it already computed.
+
+`searches_served` counts successful `GET` and `POST /search` responses and
+successful MCP tool calls since `counting_since`. That timestamp is when the
+counter file was first created. The total starts at zero then. It is not
+backfilled and it is not an estimate. These do not count: `/livez`,
+`/healthz`, and the other probe paths; unknown paths and exploit probes;
+`HEAD` and `OPTIONS`; HTTP 429 and any error status; a request carrying
+`X-Umbra-Smoke: 1` (or `true` / `yes` / `on`); user agents that look like
+uptime monitors or bots, including this project's own
+`umbra-py-healthz-monitor` and `umbra-py-mcp-smoke`. `UMBRA_STATS_IGNORE_UA`
+is a comma-separated list of extra substrings, matched without regard to
+case. A request that does not clearly qualify is not counted.
+
+`scenes_indexed`, `thumbnails`, and `index_built_at` are read from the
+catalog index and the thumbnail sidecar this process loaded. They are null
+when that read fails. `generated_at` is when the cached document was built.
+
+`top_places` is at most ten coarse names. A name is included only when at
+least three distinct clients reached it on the same UTC day. The published
+figure is the high-water mark of that daily count. A client is a salted
+hash of the address the rate limiter already uses. The salt is random, kept
+in memory, and replaced each UTC day. It is not written. The file stores the
+coarse name and the count. It does not store the hash, the address, the user
+agent, or the query.
+
+A `place=` string is reduced to a city and a country. A segment that looks
+like a street (a digit, or a word such as "street" or "road") is dropped. A
+bbox or an `intersects` geometry is named only when its centre is within one
+degree of a place label already baked into the index, and only when the box
+is at most five degrees on a side. A geocoded `area` contributes that
+resolved label, reduced the same way. A task name that was not geocoded is
+not a place.
+
+The counters are kept in `usage-stats.json` beside `catalog.db` on the
+`/data` volume (`XDG_CACHE_HOME`, or `UMBRA_INDEX_DB` when that is set).
+In-memory updates are flushed in batches and again at shutdown, so one
+search does not wait on a write. If the file cannot be written, `/stats`
+still answers from memory and the next restart starts from zero.
+
+This document does not include an uptime percentage or a count of 5xx
+responses over 30 days. The process does not record either. Uptime is the
+external probe history on the `monitoring` branch, described above. 5xx
+responses are only in the log stream.
 
 ## Baked thumbnails
 
