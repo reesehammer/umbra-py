@@ -191,6 +191,111 @@ def test_loopback_public_ignores_forwarded_headers(tmp_path):
 
 
 @pytestmark_serve
+@pytest.mark.skipif(not _HAS_HTTPX, reason="httpx")
+def test_search_burst_of_eight_parallel_calls_succeeds(tmp_path, monkeypatch):
+    """Eight overlapping /search calls fit in the public burst. No sleep.
+
+    Not ``--public``: that host also refuses a third overlapping catalog read.
+    This is the rate limiter, with the same 120/minute bucket the public host
+    uses, and enough database slots that the burst is what would refuse them.
+    """
+    import httpx
+
+    monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "8")
+
+    def fast(source, **kwargs):
+        return [], False
+
+    monkeypatch.setattr(serve, "run_search", fast)
+    app = serve.build_app(
+        _index(tmp_path),
+        artifacts=False,
+        rate_limit=serve.PUBLIC_RATE_LIMIT,
+        cache_dir=tmp_path / "art",
+    )
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            calls = [client.get("/search", params={"limit": 1}) for _ in range(8)]
+            return await asyncio.gather(*calls)
+
+    responses = asyncio.run(_run())
+    assert [response.status_code for response in responses] == [200] * 8
+
+
+@pytestmark_public_app
+@pytest.mark.skipif(not _HAS_HTTPX, reason="httpx")
+def test_public_host_allows_eight_parallel_calls(tmp_path):
+    """The public middleware's bucket allows eight calls at once.
+
+    Thumbnails do not take a catalog-read slot, so this is the rate limiter
+    on ``--public`` and not the in-flight cap. A missing bake is 404.
+    """
+    import httpx
+
+    app = serve.build_app(
+        _index(tmp_path),
+        public=True,
+        rate_limit=serve.PUBLIC_RATE_LIMIT,
+        cache_dir=tmp_path / "art",
+    )
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            calls = [client.get("/artifacts/thumbnail/missing.png") for _ in range(8)]
+            return await asyncio.gather(*calls)
+
+    responses = asyncio.run(_run())
+    assert len(responses) == 8
+    assert all(response.status_code == 404 for response in responses)
+    assert all("No baked thumbnail" in response.json()["detail"] for response in responses)
+
+
+@pytestmark_public_app
+def test_public_rate_limit_429_names_the_limit_and_retry_after(tmp_path):
+    app = serve.build_app(_index(tmp_path), public=True, rate_limit=2, cache_dir=tmp_path / "art")
+    with _client(app) as client:
+        assert client.get("/search", params={"limit": 1}).status_code == 200
+        assert client.get("/search", params={"limit": 1}).status_code == 200
+        blocked = client.get("/search", params={"limit": 1})
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"].isdigit()
+    retry = int(blocked.headers["retry-after"])
+    # One token at 2/minute is 30s away. A few milliseconds of refill only
+    # shortens that. It never asks the client to wait the whole minute.
+    assert 1 <= retry <= 30
+    body = blocked.json()
+    assert body["error"] == "RateLimited"
+    assert "sustained 2 requests/min per IP, burst 2" in body["message"]
+    assert "Pace calls serially" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert f"({retry} seconds)" in body["hint"]
+    assert "umbra index fetch" in body["hint"]
+    assert "no rate limit" in body["hint"]
+    assert blocked.headers["x-ratelimit-remaining"] == "0"
+    assert blocked.headers["x-ratelimit-limit"] == "2"
+
+
+@pytestmark_public_app
+def test_public_mcp_rate_limit_carries_the_same_429(tmp_path):
+    app = serve.build_app(_index(tmp_path), public=True, rate_limit=1, cache_dir=tmp_path / "art")
+    with _client(app) as client:
+        headers = {"content-type": "application/json", "host": "api.umbra-py.space"}
+        first = client.post("/mcp", headers=headers, content=b"{}")
+        assert first.status_code != 429
+        blocked = client.post("/mcp", headers=headers, content=b"{}")
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"].isdigit()
+    assert int(blocked.headers["retry-after"]) >= 1
+    body = blocked.json()
+    assert "sustained 1 request/min per IP, burst 1" in body["message"]
+    assert "umbra index fetch" in body["hint"]
+    assert "Retry-After" in body["hint"]
+
+
+@pytestmark_serve
 def test_local_rate_limit_still_separates_bearer_tokens(tmp_path):
     index_path = _index(tmp_path)
     app = serve.build_app(index_path, artifacts=False, rate_limit=1, cache_dir=tmp_path / "art")
@@ -409,6 +514,13 @@ def test_public_body_over_one_mib_is_413_and_counts(tmp_path):
         assert ok.status_code == 200
         second = client.post("/search", content=big, headers={"content-type": "application/json"})
         assert second.status_code == 429
+        assert second.headers["retry-after"].isdigit()
+        assert int(second.headers["retry-after"]) >= 1
+        body = second.json()
+        assert "per IP" in body["message"]
+        assert "burst" in body["message"]
+        assert "umbra index fetch" in body["hint"]
+        assert "Retry-After" in body["hint"]
 
 
 def test_chunked_body_over_the_cap_is_413():

@@ -67,5 +67,6 @@ weekly index and search it locally. The CLI (`umbra index fetch`,
 that follows `next` and fetches `assets.gec.href` from the public bucket
 are in
 [Download the GEC GeoTIFFs](../replace-crawler.md#download-the-gec-geotiffs).
-That page also has the hosted API's 120 requests/minute cap and the
+That page also has the hosted API's 120 requests/minute cap (a short burst,
+then back off on HTTP 429 and honor `Retry-After`) and the
 CC BY 4.0 line to keep with the files.

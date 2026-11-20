@@ -66,8 +66,15 @@ that is still fetching).
 
 ## Rate limit
 
-**120 requests per 60-second sliding window**, per client. That is
-`PUBLIC_RATE_LIMIT` and `PUBLIC_RATE_WINDOW_S` on `umbra serve --public`.
+**120 requests per minute**, sustained, per client IP, with a **burst of 16**.
+That is a token bucket. `PUBLIC_RATE_LIMIT` tokens refill across the
+60-second window (`PUBLIC_RATE_WINDOW_S`); the bucket holds
+`PUBLIC_RATE_BURST` tokens (`--rate-burst` on `umbra serve`). A client may
+spend the burst at once, including several `/search` calls in parallel, and
+then continues at about 2 requests per second. The average stays 120
+requests per minute. A `--rate-limit` lower than the burst, with no
+`--rate-burst`, uses that lower number as the burst. `--rate-limit 0`
+disables the limit.
 
 A client is the address Railway's edge accepted. `--public` reads
 `X-Real-IP` and ignores `Authorization`. A bearer token is not a separate
@@ -81,10 +88,14 @@ those headers and is keyed on the socket address.
 These paths do not count: `/healthz`, `/healthz/live`, `/healthz/ready`,
 `/livez`, `/readyz`, `/docs`, `/openapi.json`, `/redoc`.
 
-Over the cap the response is HTTP 429, body `RateLimited`, with `Retry-After`
-(seconds), `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The window is
-per process. A request body over 1 MiB counts as well (HTTP 413, or 429 when
-that hit crosses the cap).
+Over the cap the response is HTTP 429, body `RateLimited`. `message` states
+the sustained rate and the burst (`sustained 120 requests/min per IP, burst
+16`). `hint` says to call serially or back off and honor `Retry-After`
+(integer seconds until one token is free), or to run `umbra index fetch` and
+search locally, which has no rate limit. `X-RateLimit-Limit` is the sustained
+allowance. `X-RateLimit-Remaining` is whole tokens left in the bucket. The
+bucket is per process. A request body over 1 MiB counts as well (HTTP 413,
+or 429 when that hit crosses the cap).
 
 ## Concurrent catalog reads
 

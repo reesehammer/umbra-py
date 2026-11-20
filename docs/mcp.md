@@ -14,7 +14,8 @@ Do not point a STAC client at `/mcp`, and do not point Claude at the STAC
 root. Same host, different paths.
 
 This is an unofficial community host of Umbra's *open* data (CC BY 4.0), not
-an Umbra product. No account. 120 requests/minute (`429` + `Retry-After`).
+an Umbra product. No account. 120 requests/minute sustained, short burst
+(`429` + `Retry-After`).
 Limits, uptime, CORS, and the release fallback: [Hosted API limits](hosted-limits.md).
 Do not send `UMBRA_CANOPY_TOKEN` or model API keys at this URL.
 

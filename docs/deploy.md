@@ -56,7 +56,8 @@ This is an unofficial community host of Umbra's *open* data, not an Umbra
 product. Search is served from the weekly catalog snapshot. Asset `href`s
 point at Umbra's public S3 bucket — the API does not proxy rasters (that is
 the COG-streaming guardrail). Attribute [CC BY 4.0](https://umbra.space/open-data/).
-A per-client rate limit (120 requests/minute) returns `429` with `Retry-After`.
+A per-client rate limit (120 requests/minute sustained, with a short burst)
+returns `429` with `Retry-After`.
 The operational contract (uptime, the 500 page size, CORS, and the release
 fallback) is [Hosted API limits](hosted-limits.md).
 Do not set `UMBRA_CANOPY_TOKEN` or model API keys on this instance.

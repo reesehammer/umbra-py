@@ -254,7 +254,9 @@ its `href`; that URL already carries `token`. Footprint positions are often
 `[lon, lat, height]`; use the first two. `features[].assets.gec.href` is a
 public COG on Umbra's bucket. Attribute Umbra, CC BY 4.0
 (`X-Umbra-Attribution`, and `Link: rel="license"`). The rate limit is 120
-requests per minute per client. Do not page the whole catalog this way. For
+requests per minute per client, with a short burst so a handful of parallel
+calls can land together. Call `/search` one at a time, or on HTTP 429 wait
+out `Retry-After` before retrying. Do not page the whole catalog this way. For
 a bulk copy, `umbra index fetch` downloads the weekly
 [`catalog.db`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/catalog.db)
 ([Bulk use and outages](hosted-limits.md#bulk-use-and-outages)).
@@ -291,7 +293,9 @@ parquet is rebuilt from an index that has been linked.
 ```
 
 Imagery `href`s point at Umbra's public bucket. Attribute Umbra under
-CC BY 4.0. The API rate limit is 120 requests per minute per client.
+CC BY 4.0. The API rate limit is 120 requests per minute per client, with a
+short burst. On HTTP 429, back off and honor `Retry-After`, or run
+`umbra index fetch` and search locally.
 
 ## Download the GEC GeoTIFFs
 
@@ -372,14 +376,16 @@ pass to `umbra download`.
 is `next`: `method` is `GET`, and `href` already includes `token`. Then GET
 `features[].assets.gec.href`.
 
-The hosted API allows **120 requests per 60-second sliding window**, per
-client (`PUBLIC_RATE_LIMIT` and `PUBLIC_RATE_WINDOW_S` on
-`umbra serve --public`). The contract, including HTTP 429 and
-`Retry-After`, is [Rate limit](hosted-limits.md#rate-limit). Each `/search`
-page counts. A GET of the GeoTIFF is a request to the bucket. This host
-returns at most 500 items per page, so a long list stays a small number of
-`/search` calls. Stay under 120 requests per minute. A pull the size of the
-catalog belongs on `umbra index fetch` and `umbra search --local`.
+The hosted API allows **120 requests per minute**, sustained, per client,
+with a short burst (a token bucket: `PUBLIC_RATE_LIMIT` refilled across the
+60-second window, `PUBLIC_RATE_BURST` tokens at once, on
+`umbra serve --public`). Send `/search` one at a time, or on HTTP 429 back
+off and honor `Retry-After`. The contract is
+[Rate limit](hosted-limits.md#rate-limit). Each `/search` page counts. A GET
+of the GeoTIFF is a request to the bucket. This host returns at most 500
+items per page, so a long list stays a small number of `/search` calls. Stay
+under 120 requests per minute. A pull the size of the catalog belongs on
+`umbra index fetch` and `umbra search --local`.
 
 ```python
 import json

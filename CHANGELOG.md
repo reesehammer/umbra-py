@@ -128,6 +128,13 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **The hosted API rate limit allows a short burst and says when to retry.**
+  `umbra serve --public` counts with a per-IP token bucket: sustained 120
+  requests/min, burst 16 (`--rate-burst`, default `PUBLIC_RATE_BURST`). A
+  handful of parallel calls is allowed while the bucket has tokens; traffic
+  that stays above 120/min still gets HTTP 429. The 429 carries `Retry-After`
+  (seconds until a token is free) and a JSON body that states the sustained
+  rate and the burst, and points a bulk caller at `umbra index fetch`.
 - **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
   `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
   contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
