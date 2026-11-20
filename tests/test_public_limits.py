@@ -7,6 +7,7 @@ the previous limits. These tests never call the live host.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import importlib.util
 import json
@@ -383,7 +384,13 @@ def test_public_client_concurrency_rejects_a_third_read(tmp_path, monkeypatch):
         return [], False
 
     monkeypatch.setattr(serve, "run_search", block)
-    app = serve.build_app(_index(tmp_path), public=True, rate_limit=0, cache_dir=tmp_path / "art")
+    app = serve.build_app(
+        _index(tmp_path),
+        public=True,
+        rate_limit=0,
+        client_concurrency=2,
+        cache_dir=tmp_path / "art",
+    )
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -406,8 +413,84 @@ def test_public_client_concurrency_rejects_a_third_read(tmp_path, monkeypatch):
     assert first.status_code == 200
     assert second.status_code == 200
     assert third.status_code == 429
-    assert "in flight" in third.json()["detail"]
+    assert third.headers["retry-after"] == "1"
+    body = third.json()
+    assert body["error"] == "RateLimited"
+    assert "2 catalog reads in flight per IP" in body["message"]
+    assert "Pace calls serially" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert "umbra index fetch" in body["hint"]
     assert fourth.status_code == 200
+
+
+@pytestmark_public_app
+@pytest.mark.skipif(not _HAS_HTTPX, reason="httpx")
+def test_eight_overlapping_searches_succeed_and_the_ninth_is_429(tmp_path, monkeypatch):
+    """Eight overlapping GET /search from one IP return 200. The ninth is 429.
+
+    The search is held inside the handler so the eight calls really overlap.
+    ``UMBRA_DB_CONCURRENCY`` is raised only here: the process default stays 4,
+    and this test is the per-IP cap, which is checked before that semaphore.
+    The loop's default executor is ``min(32, cpu + 4)`` (8 on a 4-core
+    machine), which would leave the ninth call queued behind the eight
+    blocked searches. A wider pool lets that call reach the cap.
+    """
+    import httpx
+
+    monkeypatch.setenv("UMBRA_DB_CONCURRENCY", "8")
+    started = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    holding = {"n": 0}
+
+    def block(source, **kwargs):
+        with lock:
+            holding["n"] += 1
+            if holding["n"] >= serve.PUBLIC_CLIENT_CONCURRENCY:
+                started.set()
+        assert release.wait(5)
+        return [], False
+
+    monkeypatch.setattr(serve, "run_search", block)
+    app = serve.build_app(_index(tmp_path), public=True, cache_dir=tmp_path / "art")
+    assert serve.PUBLIC_CLIENT_CONCURRENCY == 8
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=16)
+        loop.set_default_executor(pool)
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                tasks = [
+                    asyncio.create_task(client.get("/search", params={"limit": 1}))
+                    for _ in range(serve.PUBLIC_CLIENT_CONCURRENCY)
+                ]
+                for _ in range(100):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.02)
+                assert started.is_set()
+                ninth = await client.get("/search", params={"limit": 1})
+                release.set()
+                done = [await task for task in tasks]
+                return done, ninth
+        finally:
+            pool.shutdown(wait=True)
+
+    done, ninth = asyncio.run(_run())
+    assert [response.status_code for response in done] == [200] * 8
+    assert ninth.status_code == 429
+    assert ninth.headers["retry-after"] == "1"
+    body = ninth.json()
+    assert body["error"] == "RateLimited"
+    assert "8 catalog reads in flight per IP" in body["message"]
+    assert "sustained 120 requests/min per IP, burst 16" in body["message"]
+    assert "Pace calls serially" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert "(1 seconds)" in body["hint"]
+    assert "umbra index fetch" in body["hint"]
+    assert "no rate limit" in body["hint"]
 
 
 @pytestmark_public_app

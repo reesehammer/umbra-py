@@ -261,10 +261,17 @@ MAX_LIMIT = 10_000
 #: the rest, so a public client does not need a 10,000-item response.
 PUBLIC_SEARCH_LIMIT = 500
 
-#: How many catalog reads one public client may hold at once. The process-wide
-#: pool stays :func:`_db_concurrency`; this stops one caller from taking all
-#: of those slots.
-PUBLIC_CLIENT_CONCURRENCY = 2
+#: How many catalog reads one public client may hold at once. A burst of
+#: parallel ``/search`` calls needs several slots, so the default is 8.
+#: ``--client-concurrency`` overrides it. The process-wide pool stays
+#: :func:`_db_concurrency` (``UMBRA_DB_CONCURRENCY``, default 4) and is
+#: not changed by this cap. Over the cap the response is the same 429 body
+#: as the token bucket, with ``Retry-After``.
+PUBLIC_CLIENT_CONCURRENCY = 8
+#: Seconds a client should wait before retrying a catalog read the in-flight
+#: cap refused. The read itself is what frees the slot; one second is the
+#: pause, not a measurement of that read.
+IN_FLIGHT_RETRY_AFTER_S = 1
 
 #: Request body cap for ``--public``. Larger bodies are HTTP 413 and are not
 #: parsed. About 1 MiB: a STAC search body is a small JSON document.
@@ -2679,6 +2686,17 @@ class RateLimiter:
             self._evict(now, client)
             return allowed, remaining, retry
 
+    def limit_phrase(self, scope: str) -> str:
+        """Sustained rate and burst, the way a 429 states them."""
+        if self.window_s == 60:
+            unit = "request" if self.limit == 1 else "requests"
+            rate = f"{self.limit} {unit}/min"
+        else:
+            window = int(self.window_s) if self.window_s == int(self.window_s) else self.window_s
+            unit = "request" if self.limit == 1 else "requests"
+            rate = f"{self.limit} {unit} per {window}s"
+        return f"sustained {rate} per {scope}, burst {self.capacity}"
+
     def rejection(self, retry_after: int, *, scope: str) -> dict[str, str]:
         """JSON body for an HTTP 429 from this bucket.
 
@@ -2688,23 +2706,10 @@ class RateLimiter:
         serially or honor ``Retry-After``, and names ``umbra index fetch`` for
         a bulk catalog (local search has no rate limit).
         """
-        if self.window_s == 60:
-            unit = "request" if self.limit == 1 else "requests"
-            rate = f"{self.limit} {unit}/min"
-        else:
-            window = int(self.window_s) if self.window_s == int(self.window_s) else self.window_s
-            unit = "request" if self.limit == 1 else "requests"
-            rate = f"{self.limit} {unit} per {window}s"
         return {
             "error": "RateLimited",
-            "message": (
-                f"Rate limit exceeded (sustained {rate} per {scope}, burst {self.capacity})."
-            ),
-            "hint": (
-                "Pace calls serially, or back off and honor Retry-After "
-                f"({retry_after} seconds). For bulk use, run `umbra index fetch` "
-                "and search locally (no rate limit)."
-            ),
+            "message": f"Rate limit exceeded ({self.limit_phrase(scope)}).",
+            "hint": _pace_hint(retry_after),
         }
 
     def _refill(self, bucket: _TokenBucket, now: float) -> None:
@@ -2739,6 +2744,43 @@ class RateLimiter:
             if oldest is None:
                 return
             del self._buckets[oldest]
+
+
+def _pace_hint(retry_after: int) -> str:
+    """What a 429 tells the caller to do. Shared by the bucket and the in-flight cap."""
+    return (
+        "Pace calls serially, or back off and honor Retry-After "
+        f"({retry_after} seconds). For bulk use, run `umbra index fetch` "
+        "and search locally (no rate limit)."
+    )
+
+
+def in_flight_limited_body(
+    limit: int, *, scope: str, limiter: RateLimiter | None = None
+) -> dict[str, str]:
+    """JSON body when one client already holds ``limit`` catalog reads.
+
+    Same shape as :meth:`RateLimiter.rejection`: the limit that was hit, then
+    the pacing hint (serial calls, ``Retry-After``, ``umbra index fetch``).
+    When a token bucket is installed, its sustained rate and burst are in the
+    message too.
+    """
+    parts = [f"{limit} catalog reads in flight per {scope}"]
+    if limiter is not None:
+        parts.append(limiter.limit_phrase(scope))
+    return {
+        "error": "RateLimited",
+        "message": "Rate limit exceeded (" + "; ".join(parts) + ").",
+        "hint": _pace_hint(IN_FLIGHT_RETRY_AFTER_S),
+    }
+
+
+class _InFlightLimited(Exception):
+    """One client is already holding every catalog-read slot it may hold."""
+
+    def __init__(self, body: dict[str, str]) -> None:
+        super().__init__(body["message"])
+        self.body = body
 
 
 class ClientInFlight:
@@ -3857,6 +3899,7 @@ def build_app(
     public: bool = False,
     rate_limit: int | None = None,
     rate_burst: int | None = None,
+    client_concurrency: int | None = None,
 ) -> FastAPI:
     """Construct the FastAPI STAC API application.
 
@@ -3896,7 +3939,9 @@ def build_app(
     route on, MCP on, a per-client token bucket (:data:`PUBLIC_RATE_LIMIT`
     per :data:`PUBLIC_RATE_WINDOW_S`, burst :data:`PUBLIC_RATE_BURST`,
     unless ``rate_limit`` / ``rate_burst`` is set; ``rate_limit`` of ``0``
-    disables it), CC-BY license headers,
+    disables it), at most :data:`PUBLIC_CLIENT_CONCURRENCY` catalog reads
+    in flight per client (``client_concurrency`` overrides it), CC-BY license
+    headers,
     and a refuse of ``live=True``. Secret env vars are checked in
     :func:`serve`, not here, so tests can build a public app on a machine
     that happens to have a model key.
@@ -4135,7 +4180,23 @@ def build_app(
     # SQLite statement so the slot is released instead of staying busy until
     # the scan finishes on its own.
     _slots = threading.BoundedSemaphore(_db_concurrency())
-    client_gate = ClientInFlight(PUBLIC_CLIENT_CONCURRENCY) if public else None
+    reads_per_client = (
+        PUBLIC_CLIENT_CONCURRENCY if client_concurrency is None else client_concurrency
+    )
+    if public and reads_per_client < 1:
+        raise ValueError("client concurrency must be >= 1")
+    client_gate = ClientInFlight(reads_per_client) if public else None
+
+    @app.exception_handler(_InFlightLimited)
+    async def _in_flight_limited(_request: Request, exc: _InFlightLimited) -> JSONResponse:
+        # Same document the token bucket returns, plus Retry-After. License
+        # headers are stamped by the guard outside this handler.
+        return JSONResponse(
+            exc.body,
+            status_code=429,
+            headers={"Retry-After": str(IN_FLIGHT_RETRY_AFTER_S)},
+        )
+
     _holders: dict[int, str] = {}
     _armed: list[tuple[Any, threading.Event]] = []
     _armed_lock = threading.Lock()
@@ -4152,10 +4213,8 @@ def build_app(
         acquired_client = False
         if client_gate is not None and client:
             if not client_gate.acquire(client):
-                raise HTTPException(
-                    status_code=429,
-                    detail="Too many catalog reads already in flight for this client.",
-                    headers={"Retry-After": "1"},
+                raise _InFlightLimited(
+                    in_flight_limited_body(reads_per_client, scope="IP", limiter=limiter)
                 )
             acquired_client = True
         if not _slots.acquire(blocking=False):
@@ -5685,7 +5744,8 @@ def build_app(
             parameter, so an unknown or odd id is the same 404. The request,
             including ``HEAD``, still counts once against the public rate
             limit. It does not take a catalog-read slot: browsers fetch
-            several of these at once, and the slot cap is 2.
+            several of these at once, and the per-client slot cap is
+            :data:`PUBLIC_CLIENT_CONCURRENCY`.
             """
             return _thumbnail(item_id, head=False)
 
@@ -6183,6 +6243,7 @@ def serve(
     public: bool = False,
     rate_limit: int | None = None,
     rate_burst: int | None = None,
+    client_concurrency: int | None = None,
     proxy_headers: bool = False,
 ) -> None:
     """Build the app and run it with uvicorn (blocking). Requires ``serve``."""
@@ -6225,6 +6286,7 @@ def serve(
         public=public,
         rate_limit=rate_limit,
         rate_burst=rate_burst,
+        client_concurrency=client_concurrency,
     )
     from .watchdog import start_watchdog
 

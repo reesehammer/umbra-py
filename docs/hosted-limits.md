@@ -99,9 +99,13 @@ or 429 when that hit crosses the cap).
 
 ## Concurrent catalog reads
 
-One client may hold **2** catalog reads at once. A third is HTTP 429 with
-`Retry-After: 1`, before it takes a database slot. The process still allows
-`UMBRA_DB_CONCURRENCY` reads in
+One client may hold **8** catalog reads at once
+(`PUBLIC_CLIENT_CONCURRENCY`, `--client-concurrency` on `umbra serve`).
+A further read is HTTP 429, body `RateLimited`, before it takes a database
+slot. `message` states that cap (and, when the token bucket is on, the
+sustained rate and burst). `hint` is the rate-limit hint: call serially or
+back off and honor `Retry-After` (1 second), or run `umbra index fetch` and
+search locally. The process still allows `UMBRA_DB_CONCURRENCY` reads in
 total (default 4); past that the response is HTTP 503. A read that passes
 `UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 and the SQLite statement
 is interrupted so the slot is released.
@@ -197,7 +201,7 @@ hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each
 GET counts toward the 120/min limit: a grid of N thumbnails costs N requests,
 so page modestly and rely on the one-day cache. It does not take one of the
-two concurrent catalog-read slots (a browser fetches several images at once).
+eight concurrent catalog-read slots (a browser fetches several images at once).
 
 `/search`, `/collections/umbra-open-data/items`, and
 `/collections/umbra-open-data/items/{item_id}` add `assets.thumbnail` (`href`

@@ -18,7 +18,13 @@ from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
 from ..models import UmbraItem
 from ..pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
-from ..serve import PUBLIC_RATE_BURST, PUBLIC_RATE_LIMIT, STACK_SCHEDULERS, public_secret_names
+from ..serve import (
+    PUBLIC_CLIENT_CONCURRENCY,
+    PUBLIC_RATE_BURST,
+    PUBLIC_RATE_LIMIT,
+    STACK_SCHEDULERS,
+    public_secret_names,
+)
 from ..showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
 from . import _shared
 from ._root import cli
@@ -126,6 +132,14 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     "Ignored when the rate limit is off.",
 )
 @click.option(
+    "--client-concurrency",
+    type=int,
+    default=None,
+    help="Catalog reads one --public client may hold at once. "
+    f"Default {PUBLIC_CLIENT_CONCURRENCY}. A further read is HTTP 429. "
+    "The process-wide cap stays UMBRA_DB_CONCURRENCY.",
+)
+@click.option(
     "--proxy-headers",
     is_flag=True,
     help="Trust X-Forwarded-For from the reverse proxy (uvicorn, leftmost hop). "
@@ -213,6 +227,7 @@ def serve(
     public,
     rate_limit,
     rate_burst,
+    client_concurrency,
     proxy_headers,
     stack_lazy,
     stack_chunk_size,
@@ -341,9 +356,11 @@ def serve(
             cap = f"{rate_limit}/min, burst {burst}"
         else:
             cap = "off"
+        reads = client_concurrency if client_concurrency is not None else PUBLIC_CLIENT_CONCURRENCY
         click.echo(
             "  public mode: on-demand artifacts off, baked thumbnails on, "
-            f"MCP at /mcp, rate limit {cap}, CC-BY headers on"
+            f"MCP at /mcp, rate limit {cap}, {reads} catalog reads in flight, "
+            "CC-BY headers on"
         )
     elif mcp:
         click.echo("  MCP: POST /mcp (Streamable HTTP)")
@@ -384,6 +401,7 @@ def serve(
             public=public,
             rate_limit=rate_limit,
             rate_burst=rate_burst,
+            client_concurrency=client_concurrency,
             proxy_headers=proxy_headers,
         )
     except (MissingDependencyError, ValueError) as exc:
