@@ -172,7 +172,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -262,10 +261,16 @@ MAX_LIMIT = 10_000
 #: the rest, so a public client does not need a 10,000-item response.
 PUBLIC_SEARCH_LIMIT = 500
 
-#: How many catalog reads one public client may hold at once. The process-wide
-#: pool stays :func:`_db_concurrency`; this stops one caller from taking all
-#: of those slots.
-PUBLIC_CLIENT_CONCURRENCY = 2
+#: How many catalog reads one public client may hold at once. A burst of
+#: parallel ``/search`` calls needs several slots, so the default is 8.
+#: The process-wide pool stays :func:`_db_concurrency`
+#: (``UMBRA_DB_CONCURRENCY``, default 4). Over the cap the response is the
+#: same 429 body as the token bucket, with ``Retry-After``.
+PUBLIC_CLIENT_CONCURRENCY = 8
+#: Seconds a client should wait before retrying a catalog read the in-flight
+#: cap refused. The read itself is what frees the slot; one second is the
+#: pause, not a measurement of that read.
+IN_FLIGHT_RETRY_AFTER_S = 1
 
 #: Request body cap for ``--public``. Larger bodies are HTTP 413 and are not
 #: parsed. About 1 MiB: a STAC search body is a small JSON document.
@@ -298,8 +303,16 @@ _inflight_client: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 #: read; the cap exists so a tiny shared host cannot be scraped into a DoS, and
 #: so MCP render tools that *do* stream Umbra COGs cannot be burst without
 #: bound. ``0`` disables it. Overridable with ``--rate-limit``.
+#:
+#: The limiter is a token bucket. :data:`PUBLIC_RATE_LIMIT` tokens refill across
+#: :data:`PUBLIC_RATE_WINDOW_S` (120/minute, about 2/second). The bucket holds
+#: :data:`PUBLIC_RATE_BURST` tokens, so a handful of parallel calls land
+#: together and a sustained scrape still stops. When the sustained limit is
+#: lower than that burst, the bucket is the sustained limit, so
+#: ``--rate-limit 2`` is still two requests before a 429.
 PUBLIC_RATE_LIMIT = 120
 PUBLIC_RATE_WINDOW_S = 60.0
+PUBLIC_RATE_BURST = 16
 
 #: ``Cache-Control`` for a public baked thumbnail. The URL is the item id, not
 #: a content hash, so ``immutable`` would keep a PNG a later sidecar replaces
@@ -361,7 +374,8 @@ def _db_concurrency() -> int:
 
     A client that gives up does not cancel the thread already inside SQLite.
     Capping the reads keeps an abandoned probe from filling the ASGI thread
-    pool; the next request gets ``503`` instead of queueing behind the scan.
+    pool. A further read waits for a slot (:func:`_db_acquire_timeout_s`)
+    instead of failing at once.
     """
     raw = os.environ.get("UMBRA_DB_CONCURRENCY", "4")
     try:
@@ -369,6 +383,35 @@ def _db_concurrency() -> int:
     except ValueError:
         return 4
     return value if value > 0 else 4
+
+
+#: How long a catalog read waits for a process-wide slot. ``0`` fails at once.
+#: Short on purpose: each waiter occupies a worker thread.
+DEFAULT_DB_ACQUIRE_TIMEOUT_S = 3.0
+#: Pause a timed-out waiter should take before trying again. The slot may
+#: already be free; this is not a measurement of the read that held it.
+DB_BUSY_RETRY_AFTER_S = 1
+
+
+def _db_acquire_timeout_s() -> float:
+    """Seconds to wait for a process-wide catalog slot (``UMBRA_DB_ACQUIRE_TIMEOUT``).
+
+    Default :data:`DEFAULT_DB_ACQUIRE_TIMEOUT_S`. ``0`` does not wait. A
+    non-numeric or negative value uses the default. The wait runs on the
+    request's worker thread, so the event loop stays free. At most twice
+    :func:`_db_concurrency` reads may be waiting; a further read is a 503
+    without waiting. The per-IP cap is taken first.
+    """
+    raw = os.environ.get("UMBRA_DB_ACQUIRE_TIMEOUT", "")
+    if not raw:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    if value < 0:
+        return DEFAULT_DB_ACQUIRE_TIMEOUT_S
+    return value
 
 
 _log = logging.getLogger(__name__)
@@ -2585,14 +2628,32 @@ def public_secret_names() -> list[str]:
     return [name for name in PUBLIC_SECRET_ENV if os.environ.get(name)]
 
 
+@dataclass
+class _TokenBucket:
+    """One client's tokens and the monotonic time they were last touched."""
+
+    tokens: float
+    updated: float
+
+
 class RateLimiter:
-    """Sliding-window per-client request cap (stdlib, no extra).
+    """Per-client token bucket (stdlib, no extra).
 
     A public unauthenticated instance is a shared SQLite reader plus, when MCP
-    is mounted, the render tools that stream Umbra COGs. ``limit`` requests per
-    ``window_s`` seconds per :func:`client_identity` is the cheap abuse brake.
-    ``max_clients`` bounds the tracking dict so a rotating-identity adversary
-    cannot grow it without bound (evict the least-recently-seen).
+    is mounted, the render tools that stream Umbra COGs. ``limit`` tokens refill
+    across ``window_s`` seconds (the sustained rate). The bucket holds
+    ``burst`` tokens, so a short parallel burst is allowed and a scrape that
+    stays over the sustained rate is not. ``burst=None`` uses
+    :data:`PUBLIC_RATE_BURST`, and never more than ``limit``, so a tight
+    ``--rate-limit`` stays a tight cap.
+
+    ``hit`` is synchronous and holds a :class:`threading.Lock` only around the
+    bucket update, so it is safe from the ASGI thread and from worker threads.
+    It does not await. ``max_clients`` bounds the tracking dict: idle buckets
+    (untouched long enough to be full again, which is the same as an unknown
+    client) go first, then the least-recently-seen. Identity, the trusted-proxy
+    hop, and ``X-Forwarded-For`` are decided before ``hit`` and are not this
+    class's concern.
     """
 
     def __init__(
@@ -2600,46 +2661,185 @@ class RateLimiter:
         limit: int,
         window_s: float = PUBLIC_RATE_WINDOW_S,
         *,
+        burst: int | None = None,
         max_clients: int = 10_000,
         time_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         if limit < 1:
             raise ValueError("rate limit must be >= 1 (pass None/0 to disable)")
+        if window_s <= 0:
+            raise ValueError("rate window must be > 0")
+        if burst is None:
+            burst = min(PUBLIC_RATE_BURST, limit)
+        if burst < 1:
+            raise ValueError("rate burst must be >= 1")
         self.limit = limit
         self.window_s = window_s
+        self.capacity = burst
+        self.refill_per_s = limit / window_s
+        # A bucket idle this long has refilled from empty to full, so dropping
+        # it grants nothing a brand-new client would not already get.
+        self.idle_after = self.capacity / self.refill_per_s
         self.max_clients = max_clients
         self._time = time_fn
         self._lock = threading.Lock()
-        self._hits: dict[str, deque[float]] = {}
+        self._buckets: dict[str, _TokenBucket] = {}
 
     def hit(self, client: str) -> tuple[bool, int, int]:
         """Record one request.
 
-        Returns ``(allowed, remaining, retry_after_s)``. ``retry_after_s`` is
-        ``0`` when the request is allowed.
+        Returns ``(allowed, remaining, retry_after_s)``. ``remaining`` is whole
+        tokens left after an allowed call. ``retry_after_s`` is ``0`` when the
+        request is allowed, and otherwise the whole seconds until one token
+        has refilled (at least 1).
         """
-        now = self._time()
-        cutoff = now - self.window_s
         with self._lock:
-            q = self._hits.get(client)
-            if q is None:
-                q = deque()
-                self._hits[client] = q
-            while q and q[0] <= cutoff:
-                q.popleft()
-            if len(q) >= self.limit:
-                retry = max(1, int(q[0] + self.window_s - now + 0.999))
-                return False, 0, retry
-            q.append(now)
-            if len(self._hits) > self.max_clients:
-                oldest = min(
-                    (k for k in self._hits if k != client),
-                    key=lambda k: self._hits[k][-1] if self._hits[k] else 0,
-                    default=None,
-                )
-                if oldest is not None:
-                    del self._hits[oldest]
-            return True, self.limit - len(q), 0
+            now = self._time()
+            bucket = self._buckets.get(client)
+            if bucket is None:
+                bucket = _TokenBucket(tokens=float(self.capacity), updated=now)
+                self._buckets[client] = bucket
+            else:
+                self._refill(bucket, now)
+            if bucket.tokens + 1e-9 >= 1.0:
+                bucket.tokens = max(0.0, bucket.tokens - 1.0)
+                allowed, remaining, retry = True, int(bucket.tokens), 0
+            else:
+                allowed, remaining, retry = False, 0, self._seconds_until_token(bucket.tokens)
+            # A denied call still touched the bucket. Leaving ``updated`` stale
+            # would let a client who is over the limit look idle, get evicted,
+            # and come back with a full burst.
+            if now >= bucket.updated:
+                bucket.updated = now
+            self._evict(now, client)
+            return allowed, remaining, retry
+
+    def limit_phrase(self, scope: str) -> str:
+        """Sustained rate and burst, the way a 429 states them."""
+        if self.window_s == 60:
+            unit = "request" if self.limit == 1 else "requests"
+            rate = f"{self.limit} {unit}/min"
+        else:
+            window = int(self.window_s) if self.window_s == int(self.window_s) else self.window_s
+            unit = "request" if self.limit == 1 else "requests"
+            rate = f"{self.limit} {unit} per {window}s"
+        return f"sustained {rate} per {scope}, burst {self.capacity}"
+
+    def rejection(self, retry_after: int, *, scope: str) -> dict[str, str]:
+        """JSON body for an HTTP 429 from this bucket.
+
+        ``scope`` is ``IP`` on the public host and ``client`` where a local
+        ``--rate-limit`` also separates bearer tokens. The sustained rate and
+        the burst are both in ``message``. ``hint`` tells the caller to pace
+        serially or honor ``Retry-After``, and names ``umbra index fetch`` for
+        a bulk catalog (local search has no rate limit).
+        """
+        return {
+            "error": "RateLimited",
+            "message": f"Rate limit exceeded ({self.limit_phrase(scope)}).",
+            "hint": _pace_hint(retry_after),
+        }
+
+    def _refill(self, bucket: _TokenBucket, now: float) -> None:
+        elapsed = now - bucket.updated
+        if elapsed > 0:
+            bucket.tokens = min(float(self.capacity), bucket.tokens + elapsed * self.refill_per_s)
+
+    def _seconds_until_token(self, tokens: float) -> int:
+        deficit = 1.0 - tokens
+        if deficit <= 0:
+            return 0
+        seconds = deficit / self.refill_per_s
+        # ``ceil`` of a value that landed a hair over an integer (binary
+        # division) would ask the client to wait one second too long.
+        return max(1, math.ceil(seconds - 1e-9))
+
+    def _evict(self, now: float, keep: str) -> None:
+        if len(self._buckets) <= self.max_clients:
+            return
+        idle_before = now - self.idle_after
+        for key, bucket in list(self._buckets.items()):
+            if key != keep and bucket.updated <= idle_before:
+                del self._buckets[key]
+                if len(self._buckets) <= self.max_clients:
+                    return
+        while len(self._buckets) > self.max_clients:
+            oldest = min(
+                (key for key in self._buckets if key != keep),
+                key=lambda key: self._buckets[key].updated,
+                default=None,
+            )
+            if oldest is None:
+                return
+            del self._buckets[oldest]
+
+
+def _pace_hint(retry_after: int) -> str:
+    """What a 429 tells the caller to do. Shared by the bucket and the in-flight cap."""
+    return (
+        "Pace calls serially, or back off and honor Retry-After "
+        f"({retry_after} seconds). For bulk use, run `umbra index fetch` "
+        "and search locally (no rate limit)."
+    )
+
+
+def in_flight_limited_body(
+    limit: int, *, scope: str, limiter: RateLimiter | None = None
+) -> dict[str, str]:
+    """JSON body when one client already holds ``limit`` catalog reads.
+
+    Same shape as :meth:`RateLimiter.rejection`: the limit that was hit, then
+    the pacing hint (serial calls, ``Retry-After``, ``umbra index fetch``).
+    When a token bucket is installed, its sustained rate and burst are in the
+    message too.
+    """
+    parts = [f"{limit} catalog reads in flight per {scope}"]
+    if limiter is not None:
+        parts.append(limiter.limit_phrase(scope))
+    return {
+        "error": "RateLimited",
+        "message": "Rate limit exceeded (" + "; ".join(parts) + ").",
+        "hint": _pace_hint(IN_FLIGHT_RETRY_AFTER_S),
+    }
+
+
+def catalog_busy_body(limit: int, waited_s: float) -> dict[str, str]:
+    """JSON body when a catalog read waited and no process-wide slot freed.
+
+    Same pacing hint as a 429 (serial calls, ``Retry-After``,
+    ``umbra index fetch``). ``error`` is ``Busy`` and the status is 503:
+    the process cap is a server limit, not the caller's token bucket.
+    """
+    reads = "catalog read" if limit == 1 else "catalog reads"
+    if float(waited_s).is_integer():
+        n = int(waited_s)
+        waited = f"{n} second" if n == 1 else f"{n} seconds"
+    else:
+        waited = f"{waited_s:g} seconds"
+    return {
+        "error": "Busy",
+        "message": (
+            f"Catalog index is busy ({limit} {reads} in flight). "
+            f"No slot became free within {waited}."
+        ),
+        "hint": _pace_hint(DB_BUSY_RETRY_AFTER_S),
+    }
+
+
+class _CatalogBusy(Exception):
+    """A catalog read waited for a process-wide slot and none freed."""
+
+    def __init__(self, body: dict[str, str]) -> None:
+        super().__init__(body["message"])
+        self.body = body
+
+
+class _InFlightLimited(Exception):
+    """One client is already holding every catalog-read slot it may hold."""
+
+    def __init__(self, body: dict[str, str]) -> None:
+        super().__init__(body["message"])
+        self.body = body
 
 
 class ClientInFlight:
@@ -3025,16 +3225,9 @@ class BodyLimitMiddleware:
             host = client[0] if client else None
             allowed, _remaining, retry_after = self.limiter.hit(f"ip:{host or 'unknown'}")
             if not allowed:
-                payload = json.dumps(
-                    {
-                        "error": "RateLimited",
-                        "message": (
-                            f"Rate limit exceeded ({self.limiter.limit} requests "
-                            f"per {int(self.limiter.window_s)}s)."
-                        ),
-                        "hint": f"Retry after {retry_after} seconds.",
-                    }
-                ).encode("utf-8")
+                payload = json.dumps(self.limiter.rejection(retry_after, scope="IP")).encode(
+                    "utf-8"
+                )
                 await _send_json(
                     send,
                     429,
@@ -3800,8 +3993,11 @@ def build_app(
     ``mcp=True`` mounts Streamable HTTP MCP at ``/mcp`` on this same app (needs
     the ``mcp`` extra) so one process is both front doors. ``public=True`` is
     the hosted-community bundle: on-demand artifacts off, the baked-thumbnail
-    route on, MCP on, a per-client rate limit (:data:`PUBLIC_RATE_LIMIT`
-    unless ``rate_limit`` is set; ``0`` disables it), CC-BY license headers,
+    route on, MCP on, a per-client token bucket (:data:`PUBLIC_RATE_LIMIT`
+    per :data:`PUBLIC_RATE_WINDOW_S`, burst :data:`PUBLIC_RATE_BURST`;
+    ``rate_limit`` of ``0`` disables it, and a lower ``rate_limit`` shrinks
+    the burst to match), at most :data:`PUBLIC_CLIENT_CONCURRENCY` catalog
+    reads in flight per client, CC-BY license headers,
     and a refuse of ``live=True``. Secret env vars are checked in
     :func:`serve`, not here, so tests can build a public app on a machine
     that happens to have a model key.
@@ -3988,14 +4184,7 @@ def build_app(
                 )
                 if not allowed:
                     return JSONResponse(
-                        {
-                            "error": "RateLimited",
-                            "message": (
-                                f"Rate limit exceeded ({limiter.limit} requests "
-                                f"per {int(limiter.window_s)}s)."
-                            ),
-                            "hint": f"Retry after {retry_after} seconds.",
-                        },
+                        limiter.rejection(retry_after, scope="IP" if public else "client"),
                         status_code=429,
                         headers={
                             "Retry-After": str(retry_after),
@@ -4042,12 +4231,55 @@ def build_app(
 
     # One abandoned probe used to leave its scan running, and the next probe
     # started another. A handful of slots keeps that from filling the thread
-    # pool; past the cap the request is a fast 503. Public mode also caps how
-    # many of those slots one client may hold, and a deadline interrupts the
-    # SQLite statement so the slot is released instead of staying busy until
-    # the scan finishes on its own.
-    _slots = threading.BoundedSemaphore(_db_concurrency())
-    client_gate = ClientInFlight(PUBLIC_CLIENT_CONCURRENCY) if public else None
+    # pool. A read that finds them all taken waits on this thread (the route
+    # already ran ``to_thread``) until one frees or ``UMBRA_DB_ACQUIRE_TIMEOUT``
+    # elapses; only the timeout is a 503. Public mode also caps how many reads
+    # one client may hold, including those waiting, and a deadline interrupts
+    # the SQLite statement so the slot is released instead of staying busy
+    # until the scan finishes on its own.
+    _slot_limit = _db_concurrency()
+    _slots = threading.BoundedSemaphore(_slot_limit)
+    # Threads blocked in ``acquire``. Twice the running cap: one IP's burst of
+    # 8 can wait behind the default of 4, and a wider pile returns 503 at once.
+    _waiter_limit = _slot_limit * 2
+    _waiting = {"n": 0}
+    _wait_lock = threading.Lock()
+
+    def _acquire_slot() -> None:
+        waited = _db_acquire_timeout_s()
+        with _wait_lock:
+            if _waiting["n"] >= _waiter_limit:
+                raise _CatalogBusy(catalog_busy_body(_slot_limit, 0))
+            _waiting["n"] += 1
+        try:
+            if _slots.acquire(timeout=waited):
+                return
+            raise _CatalogBusy(catalog_busy_body(_slot_limit, waited))
+        finally:
+            with _wait_lock:
+                _waiting["n"] -= 1
+
+    reads_per_client = PUBLIC_CLIENT_CONCURRENCY
+    client_gate = ClientInFlight(reads_per_client) if public else None
+
+    @app.exception_handler(_CatalogBusy)
+    async def _catalog_busy(_request: Request, exc: _CatalogBusy) -> JSONResponse:
+        return JSONResponse(
+            exc.body,
+            status_code=503,
+            headers={"Retry-After": str(DB_BUSY_RETRY_AFTER_S)},
+        )
+
+    @app.exception_handler(_InFlightLimited)
+    async def _in_flight_limited(_request: Request, exc: _InFlightLimited) -> JSONResponse:
+        # Same document the token bucket returns, plus Retry-After. License
+        # headers are stamped by the guard outside this handler.
+        return JSONResponse(
+            exc.body,
+            status_code=429,
+            headers={"Retry-After": str(IN_FLIGHT_RETRY_AFTER_S)},
+        )
+
     _holders: dict[int, str] = {}
     _armed: list[tuple[Any, threading.Event]] = []
     _armed_lock = threading.Lock()
@@ -4064,19 +4296,16 @@ def build_app(
         acquired_client = False
         if client_gate is not None and client:
             if not client_gate.acquire(client):
-                raise HTTPException(
-                    status_code=429,
-                    detail="Too many catalog reads already in flight for this client.",
-                    headers={"Retry-After": "1"},
+                raise _InFlightLimited(
+                    in_flight_limited_body(reads_per_client, scope="IP", limiter=limiter)
                 )
             acquired_client = True
-        if not _slots.acquire(blocking=False):
+        try:
+            _acquire_slot()
+        except BaseException:
             if acquired_client and client:
                 client_gate.release(client)
-            raise HTTPException(
-                status_code=503,
-                detail="Catalog index is busy; retry shortly.",
-            )
+            raise
         try:
             try:
                 source = open_source(index_path, live=live, readonly=public)
@@ -4121,7 +4350,9 @@ def build_app(
             content={
                 "error": "Timeout",
                 "message": "Catalog index read exceeded the request deadline.",
+                "hint": _pace_hint(DB_BUSY_RETRY_AFTER_S),
             },
+            headers={"Retry-After": str(DB_BUSY_RETRY_AFTER_S)},
         )
 
     async def _bounded(fn: Callable[[], Any]) -> Any:
@@ -4284,11 +4515,7 @@ def build_app(
         # at ``_request_timeout_s``.
         if live:
             return health_document(backend="live", ready=True)
-        if not _slots.acquire(blocking=False):
-            raise HTTPException(
-                status_code=503,
-                detail="Catalog index is busy; retry shortly.",
-            )
+        _acquire_slot()
         try:
             return _health_cached()
         finally:
@@ -5597,7 +5824,8 @@ def build_app(
             parameter, so an unknown or odd id is the same 404. The request,
             including ``HEAD``, still counts once against the public rate
             limit. It does not take a catalog-read slot: browsers fetch
-            several of these at once, and the slot cap is 2.
+            several of these at once, and the per-client slot cap is
+            :data:`PUBLIC_CLIENT_CONCURRENCY`.
             """
             return _thumbnail(item_id, head=False)
 

@@ -18,7 +18,13 @@ from .._spinner import OrbitSpinner
 from ..constants import PRODUCT_ASSETS
 from ..models import UmbraItem
 from ..pmtiles import DEFAULT_COG_ASSET, FOOTPRINT_MIN_ZOOM
-from ..serve import PUBLIC_RATE_LIMIT, STACK_SCHEDULERS, public_secret_names
+from ..serve import (
+    PUBLIC_CLIENT_CONCURRENCY,
+    PUBLIC_RATE_BURST,
+    PUBLIC_RATE_LIMIT,
+    STACK_SCHEDULERS,
+    public_secret_names,
+)
 from ..showcase import DEFAULT_FEATURED_VIEW, FEATURED_VIEW_NAMES, FEATURED_VIEWS
 from . import _shared
 from ._root import cli
@@ -113,8 +119,9 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     "--rate-limit",
     type=int,
     default=None,
-    help="Per-client requests per minute (sliding window). 0 disables. "
-    f"Default off; {PUBLIC_RATE_LIMIT} under --public.",
+    help="Sustained per-client requests per minute (token bucket). 0 disables. "
+    f"Default off; {PUBLIC_RATE_LIMIT} under --public. "
+    f"The burst is min({PUBLIC_RATE_BURST}, that limit).",
 )
 @click.option(
     "--proxy-headers",
@@ -326,10 +333,16 @@ def serve(
 
     click.echo(f"Serving Umbra STAC API on http://{host}:{port}  (docs at /docs)")
     if public:
-        cap = f"{rate_limit}/min" if rate_limit else "off"
+        if rate_limit:
+            burst = min(PUBLIC_RATE_BURST, rate_limit)
+            cap = f"{rate_limit}/min, burst {burst}"
+        else:
+            cap = "off"
         click.echo(
             "  public mode: on-demand artifacts off, baked thumbnails on, "
-            f"MCP at /mcp, rate limit {cap}, CC-BY headers on"
+            f"MCP at /mcp, rate limit {cap}, "
+            f"{PUBLIC_CLIENT_CONCURRENCY} catalog reads in flight, "
+            "CC-BY headers on"
         )
     elif mcp:
         click.echo("  MCP: POST /mcp (Streamable HTTP)")

@@ -412,12 +412,18 @@ def test_limits_page_matches_the_server_constants():
     page = (REPO / "docs" / "hosted-limits.md").read_text(encoding="utf-8")
     assert serve.PUBLIC_RATE_LIMIT == 120
     assert int(serve.PUBLIC_RATE_WINDOW_S) == 60
+    assert 15 <= serve.PUBLIC_RATE_BURST <= 20
     assert serve.MAX_LIMIT == 10_000
     assert hm.INDEX_STALE_AFTER_DAYS == 9
     assert hm.SUSTAINED_FAILURES == 3
     assert hm.HISTORY_MIN_DAYS == 7
     assert f"{serve.PUBLIC_RATE_LIMIT} requests" in page
     assert f"{int(serve.PUBLIC_RATE_WINDOW_S)}-second" in page
+    assert str(serve.PUBLIC_RATE_BURST) in page
+    assert "token bucket" in page
+    assert serve.DEFAULT_DB_ACQUIRE_TIMEOUT_S == 3
+    assert "UMBRA_DB_ACQUIRE_TIMEOUT" in page
+    assert "default 3 seconds" in page
     assert f"{serve.MAX_LIMIT:,}" in page
     assert f"{hm.INDEX_STALE_AFTER_DAYS} days" in page
     assert "Three consecutive" in page

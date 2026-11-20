@@ -128,6 +128,20 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   `UMBRA_MCP_DOWNLOAD_ROOT` is set, a path outside that directory is refused.
 
 ### Changed
+- **The hosted API rate limit allows a short burst and says when to retry.**
+  `umbra serve --public` counts with a per-IP token bucket: sustained 120
+  requests/min, burst 16 (`PUBLIC_RATE_BURST`). A handful of parallel calls
+  is allowed while the bucket has tokens; traffic that stays above 120/min
+  still gets HTTP 429. The 429 carries `Retry-After` (seconds until a token
+  is free) and a JSON body that states the sustained rate and the burst, and
+  points a bulk caller at `umbra index fetch`. One client may hold 8 catalog
+  reads at once (`PUBLIC_CLIENT_CONCURRENCY`). The read past that cap is the
+  same 429, including `Retry-After`. The process-wide cap stays
+  `UMBRA_DB_CONCURRENCY` (default 4). A read that finds every slot taken
+  waits up to `UMBRA_DB_ACQUIRE_TIMEOUT` (default 3 seconds) for one to free,
+  and at most twice that concurrency may be waiting; a further read is HTTP
+  503 at once. A wait that times out is the same 503, with `Retry-After` and
+  the pacing hint. A catalog read that hits its deadline is that 503 as well.
 - **`GET /search` accepts a URL-encoded GeoJSON `intersects`.** `Point`,
   `Polygon`, and `MultiPolygon` are accepted; a point matches footprints that
   contain it, on `/search`, `/sites`, `--intersects`, and `search_catalog`.
@@ -144,7 +158,7 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 - **`umbra serve --public` rate-limits the client IP and caps how hard one caller can search.**
   The limiter ignores `Authorization` and reads `X-Real-IP` (the rightmost
   `UMBRA_TRUSTED_PROXY_HOPS` of `X-Forwarded-For` is the fallback; IPv6 keys are a
-  `/64`); each client may hold two catalog reads, and a timed-out read interrupts SQLite.
+  `/64`); each client may hold eight catalog reads, and a timed-out read interrupts SQLite.
   Public `/search` pages are at most 500 items, MCP `search_catalog` at most 100
   (with a `note` when clamped), bodies over 1 MiB are HTTP 413, and a malformed
   public `POST /search` is HTTP 400.

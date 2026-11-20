@@ -15,6 +15,7 @@ import copy
 import importlib.util
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -3529,6 +3530,7 @@ def test_public_secret_names_lists_configured_keys(monkeypatch):
 def test_rate_limiter_allows_then_blocks():
     clock = {"now": 0.0}
     limiter = serve.RateLimiter(limit=2, window_s=10, time_fn=lambda: clock["now"])
+    assert limiter.capacity == 2
     assert limiter.hit("ip:1")[0] is True
     assert limiter.hit("ip:1")[0] is True
     allowed, remaining, retry = limiter.hit("ip:1")
@@ -3537,9 +3539,129 @@ def test_rate_limiter_allows_then_blocks():
     assert retry >= 1
     # A different client is unaffected.
     assert limiter.hit("ip:2")[0] is True
-    # After the window rolls, the first client is allowed again.
+    # After a full refill, the first client is allowed again.
     clock["now"] = 10.1
     assert limiter.hit("ip:1")[0] is True
+
+
+def test_token_bucket_default_burst_fits_a_parallel_handful():
+    """The public cap bursts in the teens and refills at 120/minute."""
+    limiter = serve.RateLimiter(serve.PUBLIC_RATE_LIMIT, window_s=serve.PUBLIC_RATE_WINDOW_S)
+    assert limiter.capacity == serve.PUBLIC_RATE_BURST
+    assert 15 <= limiter.capacity <= 20
+    assert limiter.refill_per_s == 2
+    tight = serve.RateLimiter(2)
+    assert tight.capacity == 2
+    explicit = serve.RateLimiter(120, burst=20)
+    assert explicit.capacity == 20
+
+
+def test_token_bucket_eight_parallel_calls_all_succeed():
+    """Eight concurrent hits at one instant all take a token. No sleep."""
+    clock = {"now": 0.0}
+    limiter = serve.RateLimiter(
+        serve.PUBLIC_RATE_LIMIT,
+        burst=serve.PUBLIC_RATE_BURST,
+        time_fn=lambda: clock["now"],
+    )
+    barrier = threading.Barrier(8)
+    outcomes: list[bool] = []
+    guard = threading.Lock()
+
+    def once() -> None:
+        barrier.wait()
+        allowed, _, _ = limiter.hit("ip:203.0.113.9")
+        with guard:
+            outcomes.append(allowed)
+
+    threads = [threading.Thread(target=once) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes == [True] * 8
+    # The threads spent 8 of the burst and did not mint extra tokens.
+    assert sum(limiter.hit("ip:203.0.113.9")[0] for _ in range(limiter.capacity - 8)) == (
+        limiter.capacity - 8
+    )
+    assert limiter.hit("ip:203.0.113.9")[0] is False
+
+
+def test_token_bucket_sustained_abuse_is_still_limited():
+    """Well over 120/minute is refused. The clock jumps; the test does not sleep."""
+    clock = {"now": 0.0}
+    limiter = serve.RateLimiter(
+        serve.PUBLIC_RATE_LIMIT,
+        window_s=serve.PUBLIC_RATE_WINDOW_S,
+        time_fn=lambda: clock["now"],
+    )
+    for _ in range(limiter.capacity):
+        assert limiter.hit("ip:1")[0] is True
+    allowed, remaining, retry = limiter.hit("ip:1")
+    assert allowed is False
+    assert remaining == 0
+    # 2 tokens/second, so one token is half a second away. Integer seconds: 1.
+    assert retry == 1
+    allowed_n = 0
+    for _ in range(120):
+        clock["now"] += 0.5
+        ok, _, waited = limiter.hit("ip:1")
+        assert ok is True
+        assert waited == 0
+        ok, _, waited = limiter.hit("ip:1")
+        assert ok is False
+        assert waited == 1
+        allowed_n += 1
+    assert allowed_n == 120
+
+
+def test_retry_after_is_the_wait_until_one_token():
+    clock = {"now": 0.0}
+    # 30/minute is half a token per second, so an empty bucket needs 2 seconds.
+    limiter = serve.RateLimiter(30, window_s=60, burst=1, time_fn=lambda: clock["now"])
+    assert limiter.hit("c") == (True, 0, 0)
+    assert limiter.hit("c") == (False, 0, 2)
+    clock["now"] = 1
+    allowed, _, retry = limiter.hit("c")
+    assert allowed is False
+    assert retry == 1
+    clock["now"] = 2
+    assert limiter.hit("c")[0] is True
+
+
+def test_rate_limit_rejection_names_the_bucket_and_the_local_index():
+    limiter = serve.RateLimiter(serve.PUBLIC_RATE_LIMIT, burst=serve.PUBLIC_RATE_BURST)
+    body = limiter.rejection(1, scope="IP")
+    assert body["error"] == "RateLimited"
+    assert f"sustained {serve.PUBLIC_RATE_LIMIT} requests/min per IP" in body["message"]
+    assert f"burst {serve.PUBLIC_RATE_BURST}" in body["message"]
+    assert "Pace calls serially" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert "umbra index fetch" in body["hint"]
+    assert "no rate limit" in body["hint"]
+    local = serve.RateLimiter(2).rejection(30, scope="client")
+    assert "sustained 2 requests/min per client, burst 2" in local["message"]
+    assert "30 seconds" in local["hint"]
+
+
+def test_rate_limiter_evicts_idle_clients_and_stays_bounded():
+    clock = {"now": 0.0}
+    limiter = serve.RateLimiter(
+        60, window_s=60, burst=2, max_clients=2, time_fn=lambda: clock["now"]
+    )
+    assert limiter.hit("a")[0] is True
+    clock["now"] = 10
+    assert limiter.hit("b")[0] is True
+    clock["now"] = 10.1
+    assert limiter.hit("c")[0] is True
+    # ``a`` had been idle long enough to be full again, so it is the one dropped.
+    assert "a" not in limiter._buckets
+    assert len(limiter._buckets) <= 2
+    # Nobody is idle: the least-recently-seen client is still the one evicted.
+    clock["now"] = 10.2
+    assert limiter.hit("d")[0] is True
+    assert len(limiter._buckets) <= 2
+    assert "b" not in limiter._buckets
 
 
 def test_license_headers_are_on_every_response(client):
@@ -3622,8 +3744,13 @@ def test_public_policy_disables_artifacts_and_rate_limits(index_path, tmp_path):
     assert searcher.get("/search?limit=1").status_code == 200
     blocked = searcher.get("/search?limit=1")
     assert blocked.status_code == 429
-    assert blocked.json()["error"] == "RateLimited"
-    assert blocked.headers.get("Retry-After")
+    body = blocked.json()
+    assert body["error"] == "RateLimited"
+    assert "sustained 2 requests/min per client, burst 2" in body["message"]
+    assert "umbra index fetch" in body["hint"]
+    assert "Retry-After" in body["hint"]
+    assert blocked.headers["retry-after"].isdigit()
+    assert int(blocked.headers["retry-after"]) >= 1
 
 
 @pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="mcp extra")

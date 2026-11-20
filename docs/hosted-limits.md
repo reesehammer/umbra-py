@@ -66,8 +66,14 @@ that is still fetching).
 
 ## Rate limit
 
-**120 requests per 60-second sliding window**, per client. That is
-`PUBLIC_RATE_LIMIT` and `PUBLIC_RATE_WINDOW_S` on `umbra serve --public`.
+**120 requests per minute**, sustained, per client IP, with a **burst of 16**.
+That is a token bucket. `PUBLIC_RATE_LIMIT` tokens refill across the
+60-second window (`PUBLIC_RATE_WINDOW_S`); the bucket holds
+`PUBLIC_RATE_BURST` tokens. A client may
+spend the burst at once, including several `/search` calls in parallel, and
+then continues at about 2 requests per second. The average stays 120
+requests per minute. A `--rate-limit` lower than the burst uses that lower
+number as the burst. `--rate-limit 0` disables the limit.
 
 A client is the address Railway's edge accepted. `--public` reads
 `X-Real-IP` and ignores `Authorization`. A bearer token is not a separate
@@ -81,19 +87,33 @@ those headers and is keyed on the socket address.
 These paths do not count: `/healthz`, `/healthz/live`, `/healthz/ready`,
 `/livez`, `/readyz`, `/docs`, `/openapi.json`, `/redoc`.
 
-Over the cap the response is HTTP 429, body `RateLimited`, with `Retry-After`
-(seconds), `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The window is
-per process. A request body over 1 MiB counts as well (HTTP 413, or 429 when
-that hit crosses the cap).
+Over the cap the response is HTTP 429, body `RateLimited`. `message` states
+the sustained rate and the burst (`sustained 120 requests/min per IP, burst
+16`). `hint` says to call serially or back off and honor `Retry-After`
+(integer seconds until one token is free), or to run `umbra index fetch` and
+search locally, which has no rate limit. `X-RateLimit-Limit` is the sustained
+allowance. `X-RateLimit-Remaining` is whole tokens left in the bucket. The
+bucket is per process. A request body over 1 MiB counts as well (HTTP 413,
+or 429 when that hit crosses the cap).
 
 ## Concurrent catalog reads
 
-One client may hold **2** catalog reads at once. A third is HTTP 429 with
-`Retry-After: 1`, before it takes a database slot. The process still allows
-`UMBRA_DB_CONCURRENCY` reads in
-total (default 4); past that the response is HTTP 503. A read that passes
-`UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 and the SQLite statement
-is interrupted so the slot is released.
+One client may hold **8** catalog reads at once (`PUBLIC_CLIENT_CONCURRENCY`).
+A further read is HTTP 429, body `RateLimited`, before it takes a database
+slot. `message` states that cap (and, when the token bucket is on, the
+sustained rate and burst). `hint` is the rate-limit hint: call serially or
+back off and honor `Retry-After` (1 second), or run `umbra index fetch` and
+search locally. The process still runs `UMBRA_DB_CONCURRENCY` catalog reads
+at once (default 4). A read that finds every slot taken waits for one to
+free, up to `UMBRA_DB_ACQUIRE_TIMEOUT` (default 3 seconds). At most twice
+`UMBRA_DB_CONCURRENCY` reads may be waiting; a further read is HTTP 503 at
+once. That wait holds the caller's in-flight slot, so one IP cannot queue
+more than its cap. If no slot frees in time the response is HTTP 503, body
+`Busy`, with `Retry-After`. `message` states the process cap and how long
+the call waited. `hint` is the same pacing hint. A read that passes
+`UMBRA_REQUEST_TIMEOUT_S` (default 15s) is HTTP 503 with `Retry-After` and
+that same hint, and the SQLite statement is interrupted so the slot is
+released.
 
 ## Page size
 
@@ -186,7 +206,7 @@ hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each
 GET counts toward the 120/min limit: a grid of N thumbnails costs N requests,
 so page modestly and rely on the one-day cache. It does not take one of the
-two concurrent catalog-read slots (a browser fetches several images at once).
+eight concurrent catalog-read slots (a browser fetches several images at once).
 
 `/search`, `/collections/umbra-open-data/items`, and
 `/collections/umbra-open-data/items/{item_id}` add `assets.thumbnail` (`href`
