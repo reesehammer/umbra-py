@@ -206,17 +206,23 @@ The process recomputes the document at most once an hour and sends
 `Cache-Control: public, max-age=3600`. Until that hour is up it serves the
 copy it already computed.
 
-`searches_served` counts successful `GET` and `POST /search` responses and
-successful MCP tool calls since `counting_since`. That timestamp is when the
-counter file was first created. The total starts at zero then. It is not
-backfilled and it is not an estimate. These do not count: `/livez`,
-`/healthz`, and the other probe paths; unknown paths and exploit probes;
+`GET /stats` is mounted only by `umbra serve --public`. A local
+`umbra serve` does not start the counter, write `usage-stats.json`, or
+serve the route.
+
+`searches_served` counts, since `counting_since`, successful `GET` and
+`POST /search` responses and successful calls to these MCP tools:
+`search_catalog`, `find_repeat_sites`, `find_similar`,
+`find_similar_text`, and `watch_site`. That timestamp is when the counter
+file was first created. The total starts at zero then. It is not
+backfilled and it is not an estimate. These do not count: any path other
+than `/search` (including `/livez`, `/healthz`, and exploit probes);
 `HEAD` and `OPTIONS`; HTTP 429 and any error status; a request carrying
 `X-Umbra-Smoke: 1` (or `true` / `yes` / `on`); user agents that look like
 uptime monitors or bots, including this project's own
-`umbra-py-healthz-monitor` and `umbra-py-mcp-smoke`. `UMBRA_STATS_IGNORE_UA`
-is a comma-separated list of extra substrings, matched without regard to
-case. A request that does not clearly qualify is not counted.
+`umbra-py-healthz-monitor` and `umbra-py-mcp-smoke`; MCP tools that read
+one item or the index, render, or stamp a description. A blank user agent
+is not counted. A request that does not clearly qualify is not counted.
 
 `scenes_indexed`, `thumbnails`, and `index_built_at` are read from the
 catalog index and the thumbnail sidecar this process loaded. They are null
@@ -230,19 +236,24 @@ in memory, and replaced each UTC day. It is not written. The file stores the
 coarse name and the count. It does not store the hash, the address, the user
 agent, or the query.
 
-A `place=` string is reduced to a city and a country. A segment that looks
-like a street (a digit, or a word such as "street" or "road") is dropped. A
-bbox or an `intersects` geometry is named only when its centre is within one
-degree of a place label already baked into the index, and only when the box
-is at most five degrees on a side. A geocoded `area` contributes that
-resolved label, reduced the same way. A task name that was not geocoded is
-not a place.
+A place name comes from geocoder output (`resolved_place` or
+`display_name`) or from a bbox or `intersects` geometry whose centre is
+within one degree of a place label already baked into the index. The box
+must be at most five degrees on a side. The label is reduced to a city and
+a country; a segment that looks like a street is dropped. A free-text
+`place=` argument is not stored. When a request also has a bbox, geocoding
+is skipped, so that text never becomes a published place. A task name that
+was not geocoded is not a place.
 
 The counters are kept in `usage-stats.json` beside `catalog.db` on the
 `/data` volume (`XDG_CACHE_HOME`, or `UMBRA_INDEX_DB` when that is set).
-In-memory updates are flushed in batches and again at shutdown, so one
-search does not wait on a write. If the file cannot be written, `/stats`
-still answers from memory and the next restart starts from zero.
+The request path only updates memory. A background thread writes the file,
+and shutdown writes whatever is left, so one search does not wait on a
+write. Names that never reach three clients are dropped when the UTC day
+changes, and the file keeps at most 2,000 names. A file that cannot be
+read, or is over a megabyte, is renamed aside instead of being overwritten
+with a zero. If the volume cannot be written, `/stats` still answers from
+memory and the next restart starts from zero.
 
 This document does not include an uptime percentage or a count of 5xx
 responses over 30 days. The process does not record either. Uptime is the

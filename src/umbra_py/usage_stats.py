@@ -6,10 +6,12 @@ actually ask about. The numbers are a social-proof counter, so they start
 at zero when the file is first created and are never backfilled.
 
 What is counted is narrow on purpose. A successful ``GET`` or ``POST
-/search``, and a successful MCP tool call, count. Probes, health checks,
-unknown paths, ``HEAD`` / ``OPTIONS``, rate-limit and error responses,
-smoke traffic, and known bot or uptime user agents do not. A request that
-does not clearly qualify is dropped.
+/search``, and a successful MCP search tool (``search_catalog``,
+``find_repeat_sites``, ``find_similar``, ``find_similar_text``,
+``watch_site``), count. Probes, health checks, unknown paths, ``HEAD`` /
+``OPTIONS``, rate-limit and error responses, smoke traffic, metadata
+tools, and known bot or uptime user agents do not. A request that does
+not clearly qualify is dropped.
 
 What is stored is narrower still. The file beside the catalog index holds
 the total, the ``counting_since`` timestamp, and a per-place distinct-client
@@ -20,10 +22,10 @@ agents, and the hash itself are not written. Place text is reduced to a
 city and country, or to a baked index label near the query, before it is
 kept.
 
-Recording is off the success path's critical section: an in-memory update
-under one lock, a batched flush, and a flush at shutdown. A stats failure
-is logged and swallowed. If the volume cannot be written, ``/stats`` still
-answers from memory.
+Recording is an in-memory update under one lock. A background thread
+writes the file; the request path does not. A stats failure is logged and
+swallowed. If the volume cannot be written, ``/stats`` still answers from
+memory. The recorder is mounted only by ``umbra serve --public``.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -52,6 +55,10 @@ STATS_CACHE_CONTROL = f"public, max-age={int(STATS_CACHE_TTL_S)}"
 #: it on one UTC day (the high-water mark of that daily count).
 MIN_DISTINCT_CLIENTS = 3
 TOP_PLACES = 10
+#: Cap on stored place names. On a UTC day change, names below
+#: :data:`MIN_DISTINCT_CLIENTS` are dropped and anything still over this
+#: cap loses the lowest counts.
+MAX_PLACES = 2_000
 
 #: Nearest baked place label, in degrees, that may name a bbox. About 111 km
 #: at the equator: a metro, not a street.
@@ -59,7 +66,8 @@ PLACE_MATCH_DEGREES = 1.0
 #: A box wider or taller than this is not named. A continent is not a city.
 PLACE_MAX_SPAN_DEGREES = 5.0
 
-#: In-memory increments between flushes. Shutdown flushes whatever is left.
+#: In-memory increments between wakes of the flush thread. The request
+#: path only sets an event. Shutdown writes whatever is left.
 FLUSH_EVERY = 50
 FLUSH_INTERVAL_S = 30.0
 
@@ -72,8 +80,7 @@ _FILE_VERSION = 1
 _MAX_FILE_BYTES = 1_000_000
 
 #: User-agent substrings that are never counted, matched case-insensitively.
-#: ``UMBRA_STATS_IGNORE_UA`` adds more (comma-separated). Our own probes are
-#: listed by the exact agent they send.
+#: Our own probes are listed by the exact agent they send.
 DEFAULT_IGNORED_UA: tuple[str, ...] = (
     "umbra-py-healthz-monitor",
     "umbra-py-mcp-smoke",
@@ -96,42 +103,19 @@ DEFAULT_IGNORED_UA: tuple[str, ...] = (
     "slurp",
 )
 
-_HEALTH_PATHS = frozenset(
+#: MCP tools that search the catalog. Metadata, renders, and stamps do not.
+_SEARCH_TOOLS = frozenset(
     {
-        "/healthz",
-        "/healthz/live",
-        "/healthz/ready",
-        "/livez",
-        "/readyz",
-        "/docs",
-        "/openapi.json",
-        "/redoc",
+        "search_catalog",
+        "find_repeat_sites",
+        "find_similar",
+        "find_similar_text",
+        "watch_site",
     }
-)
-
-_PROBE_SNIPPETS = (
-    "/.env",
-    "/.git",
-    "/.aws",
-    "/wp-",
-    "/wp-admin",
-    "/phpmyadmin",
-    "/cgi-bin",
-    "/etc/passwd",
-    "/boaform",
-    "/manager/html",
-    "/actuator",
-    "/solr",
-    "/vendor/phpunit",
-    "/shell",
-    "/admin",
-    "/server-status",
-    "/config.json",
 )
 
 _SMOKE_VALUES = frozenset({"1", "true", "yes", "on"})
 _ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
-_TOOL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 
 #: A segment that is a street rather than a city. ``st`` as the *first* token
 #: ("St. Louis") is a saint, not a street.
@@ -283,7 +267,6 @@ def coarsen_label(value: str | None) -> str | None:
 
 def coarse_place(
     *,
-    place: str | None = None,
     resolved_place: str | None = None,
     bbox: Sequence[float] | None = None,
     intersects: Any = None,
@@ -291,15 +274,15 @@ def coarse_place(
 ) -> str | None:
     """One coarse place for a search, or ``None`` when none can be named.
 
-    A geocoded label wins, then a ``place=`` string, then a bbox or intersects
-    geometry whose centre is within :data:`PLACE_MATCH_DEGREES` of a baked
-    index label. The geometry is not returned and is not stored. A box larger
-    than :data:`PLACE_MAX_SPAN_DEGREES` is left unnamed.
+    Only geocoder output (``resolved_place`` or a tool's ``display_name``)
+    and a bbox or intersects geometry whose centre is within
+    :data:`PLACE_MATCH_DEGREES` of a baked index label. A free-text
+    ``place=`` argument is not a name: when a bbox is also set, geocoding
+    is skipped and that text would otherwise be stored. The geometry is
+    not returned and is not stored. A box larger than
+    :data:`PLACE_MAX_SPAN_DEGREES` is left unnamed.
     """
     named = coarsen_label(resolved_place)
-    if named:
-        return named
-    named = coarsen_label(place)
     if named:
         return named
     box = _as_bbox(bbox) or _intersects_bbox(intersects)
@@ -312,7 +295,6 @@ def coarse_place(
 def remember_search_place(
     scope: MutableMapping[str, Any],
     *,
-    place: str | None = None,
     resolved_place: str | None = None,
     bbox: Sequence[float] | None = None,
     intersects: Any = None,
@@ -326,7 +308,6 @@ def remember_search_place(
     """
     try:
         name = coarse_place(
-            place=place,
             resolved_place=resolved_place,
             bbox=bbox,
             intersects=intersects,
@@ -366,17 +347,7 @@ def request_counts(
 
 
 def _is_search_path(path: str) -> bool:
-    if not isinstance(path, str) or not path:
-        return False
-    lowered = path.lower()
-    if ".." in path or "%2e" in lowered or "\\" in path:
-        return False
-    if any(snippet in lowered for snippet in _PROBE_SNIPPETS):
-        return False
-    trimmed = path.rstrip("/") or "/"
-    if trimmed.lower() in _HEALTH_PATHS:
-        return False
-    return trimmed == "/search"
+    return path == "/search"
 
 
 def _identity_excluded(user_agent: str | None, client_name: str | None = None) -> bool:
@@ -397,15 +368,7 @@ def _contains_ignored(value: str | None) -> bool:
     if not value:
         return False
     hay = value.lower()
-    for needle in DEFAULT_IGNORED_UA:
-        if needle in hay:
-            return True
-    extra = os.environ.get("UMBRA_STATS_IGNORE_UA", "")
-    for part in extra.split(","):
-        token = part.strip().lower()
-        if token and token in hay:
-            return True
-    return False
+    return any(needle in hay for needle in DEFAULT_IGNORED_UA)
 
 
 def _is_smoke(value: str | None) -> bool:
@@ -520,8 +483,32 @@ def _scope_headers(scope: Mapping[str, Any]) -> dict[str, str]:
     return found
 
 
-def _client_host(scope: Mapping[str, Any]) -> str | None:
-    client = scope.get("client")
+def _bounded(places: dict[str, int], *, drop_below: int | None) -> dict[str, int]:
+    """Keep at most :data:`MAX_PLACES` names, highest counts first.
+
+    ``drop_below`` removes a name whose count is under that floor. The day
+    roll uses it so a place that never reached :data:`MIN_DISTINCT_CLIENTS`
+    is not kept forever. A snapshot does not, so a restart mid-day still
+    has the clients counted so far.
+    """
+    kept = places
+    if drop_below is not None:
+        kept = {name: count for name, count in places.items() if count >= drop_below}
+    if len(kept) <= MAX_PLACES:
+        return kept
+    ranked = sorted(kept, key=lambda name: (-kept[name], name))
+    return {name: kept[name] for name in ranked[:MAX_PLACES]}
+
+
+def _trim_today(today: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Drop the smallest same-day sets once the map is over :data:`MAX_PLACES`."""
+    sizes = {name: len(hashes) for name, hashes in today.items()}
+    kept = _bounded(sizes, drop_below=None)
+    return {name: today[name] for name in kept}
+
+
+def _host_of(client: Any) -> str | None:
+    """Address from an ASGI ``(host, port)`` pair or an object with ``host``."""
     if isinstance(client, (list, tuple)) and client:
         host = client[0]
     else:
@@ -531,6 +518,10 @@ def _client_host(scope: Mapping[str, Any]) -> str | None:
     if isinstance(host, str) and host:
         return host
     return None
+
+
+def _client_host(scope: Mapping[str, Any]) -> str | None:
+    return _host_of(scope.get("client"))
 
 
 class UsageStats:
@@ -553,6 +544,8 @@ class UsageStats:
         self._facts = facts
         self._clock = clock or time.time
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._flush_requested = threading.Event()
         self._salt = os.urandom(16)
         now = self._clock()
         self._day = _day(now)
@@ -586,10 +579,6 @@ class UsageStats:
         with self._lock:
             return self._clients_locked(place)
 
-    def enable(self) -> None:
-        """Count MCP calls without starting the flush thread."""
-        self.accepting = True
-
     def open(self, index_path: str | os.PathLike[str] | None = None) -> None:
         """Start flushing and load baked place labels off the request path."""
         self.accepting = True
@@ -606,6 +595,7 @@ class UsageStats:
         """Stop the flush thread and write what is still in memory."""
         self.accepting = False
         self._stop.set()
+        self._flush_requested.set()
         flusher = self._flusher
         if flusher is not None and flusher is not threading.current_thread():
             flusher.join(timeout=2)
@@ -666,9 +656,12 @@ class UsageStats:
                     ).hexdigest()
                     self._today.setdefault(label, set()).add(digest)
                 self._pending += 1
-                due = self._pending >= FLUSH_EVERY
-            if due:
-                self.flush()
+                if self._pending >= FLUSH_EVERY:
+                    self._flush_requested.set()
+                if len(self._today) > MAX_PLACES:
+                    self._today = _trim_today(self._today)
+            # No disk I/O here. The flush thread wakes on the event, or on
+            # its 30s interval, and close() writes whatever is left.
         except Exception:
             logger.warning("usage stats dropped a search", exc_info=True)
 
@@ -697,14 +690,20 @@ class UsageStats:
             return _copy(payload)
 
     def flush(self) -> None:
-        """Write the current totals. A disk error is logged once and ignored."""
+        """Write the current totals. A disk error is logged once and ignored.
+
+        The write lock covers the snapshot and the replace, so two flushes
+        cannot publish an older snapshot after a newer one. The request
+        path does not call this.
+        """
         try:
             if not self._persist or self.path is None:
                 return
-            with self._lock:
-                document = self._snapshot_locked()
-                self._pending = 0
-            self._write(document)
+            with self._write_lock:
+                with self._lock:
+                    document = self._snapshot_locked()
+                    self._pending = 0
+                self._write(document)
         except Exception:
             logger.warning("usage stats flush failed", exc_info=True)
 
@@ -716,13 +715,12 @@ class UsageStats:
         except Exception:
             logger.warning("usage stats catalog facts failed", exc_info=True)
             return dict(_EMPTY_FACTS)
-        scenes = raw.get("scenes_indexed")
-        thumbs = raw.get("thumbnails")
-        built = raw.get("index_built_at")
+        if not isinstance(raw, Mapping):
+            return dict(_EMPTY_FACTS)
         return {
-            "scenes_indexed": _count(scenes),
-            "thumbnails": _count(thumbs),
-            "index_built_at": built if isinstance(built, str) else None,
+            "scenes_indexed": raw.get("scenes_indexed"),
+            "thumbnails": raw.get("thumbnails"),
+            "index_built_at": raw.get("index_built_at"),
         }
 
     def _top_locked(self) -> list[dict[str, Any]]:
@@ -750,6 +748,7 @@ class UsageStats:
         self._today.clear()
         self._day = day
         self._salt = os.urandom(16)
+        self._places = _bounded(self._places, drop_below=MIN_DISTINCT_CLIENTS)
 
     def _snapshot_locked(self) -> dict[str, Any]:
         places = dict(self._places)
@@ -760,6 +759,7 @@ class UsageStats:
             for name, count in places.items()
             if _count(count) == count and count > 0 and coarsen_label(name) == name
         }
+        kept = _bounded(kept, drop_below=None)
         return {
             "version": _FILE_VERSION,
             "counting_since": self._counting_since,
@@ -773,14 +773,14 @@ class UsageStats:
             return
         try:
             if path.stat().st_size > _MAX_FILE_BYTES:
-                logger.warning("usage stats file is too large; starting from zero")
+                self._quarantine("too large")
                 return
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            logger.warning("usage stats file could not be read; starting from zero")
+            self._quarantine("unreadable")
             return
         if not isinstance(raw, dict) or raw.get("version") != _FILE_VERSION:
-            logger.warning("usage stats file has an unknown version; starting from zero")
+            self._quarantine("unreadable")
             return
         since = raw.get("counting_since")
         if isinstance(since, str) and _ISO_STAMP.fullmatch(since):
@@ -798,22 +798,56 @@ class UsageStats:
             if count < 1 or coarsen_label(name) != name:
                 continue
             loaded[name] = count
-        self._places = loaded
+        self._places = _bounded(loaded, drop_below=None)
+
+    def _quarantine(self, reason: str) -> None:
+        """Move an unusable counter aside so a later flush cannot erase it."""
+        path = self.path
+        if path is None or not path.is_file():
+            return
+        stamp = datetime.fromtimestamp(self._clock(), timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = path.with_name(f"{path.name}.bad-{stamp}")
+        n = 0
+        while dest.exists():
+            n += 1
+            dest = path.with_name(f"{path.name}.bad-{stamp}-{n}")
+        try:
+            os.replace(path, dest)
+        except OSError:
+            logger.warning(
+                "usage stats file is %s and could not be moved aside; not overwriting it",
+                reason,
+            )
+            self._persist = False
+            return
+        logger.warning(
+            "usage stats file is %s; moved it to %s and starting from zero",
+            reason,
+            dest.name,
+        )
 
     def _write(self, document: Mapping[str, Any]) -> None:
         path = self.path
         if path is None:
             return
+        tmp: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             blob = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            tmp = path.with_name(path.name + ".tmp")
-            with tmp.open("wb") as handle:
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            tmp = Path(tmp_name)
+            with os.fdopen(fd, "wb") as handle:
                 handle.write(blob)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
+            tmp = None
         except OSError as exc:
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if not self._warned:
                 self._warned = True
                 logger.warning(
@@ -829,7 +863,11 @@ class UsageStats:
         self._stop.clear()
 
         def loop() -> None:
-            while not self._stop.wait(FLUSH_INTERVAL_S):
+            while not self._stop.is_set():
+                self._flush_requested.wait(FLUSH_INTERVAL_S)
+                self._flush_requested.clear()
+                if self._stop.is_set():
+                    break
                 self.flush()
 
         thread = threading.Thread(target=loop, name="umbra-usage-flush", daemon=True)
@@ -845,7 +883,7 @@ class UsageStats:
         if getattr(ctx, "method", None) != "tools/call":
             return False
         name, _arguments = _tool_params(ctx)
-        if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+        if name not in _SEARCH_TOOLS:
             return False
         if _result_is_error(result):
             return False
@@ -919,16 +957,7 @@ def _result_is_error(result: Any) -> bool:
 
 def _tool_client(ctx: Any) -> str | None:
     request = getattr(ctx, "request", None)
-    client = getattr(request, "client", None)
-    if client is None:
-        return None
-    if isinstance(client, (tuple, list)) and client:
-        host = client[0]
-    else:
-        host = getattr(client, "host", None)
-    if isinstance(host, bytes):
-        host = host.decode("latin-1", "replace")
-    return host if isinstance(host, str) and host else None
+    return _host_of(getattr(request, "client", None))
 
 
 def _tool_client_name(ctx: Any) -> str | None:
@@ -952,11 +981,9 @@ def _tool_place(ctx: Any, result: Any, anchors: Sequence[tuple[str, float, float
     if not isinstance(resolved, str):
         display = payload.get("display_name")
         resolved = display if isinstance(display, str) else None
-    place = mapping.get("place")
     bbox = mapping.get("bbox")
     intersects = mapping.get("intersects")
     return coarse_place(
-        place=place if isinstance(place, str) else None,
         resolved_place=resolved if isinstance(resolved, str) else None,
         bbox=bbox if isinstance(bbox, (list, tuple)) else None,
         intersects=intersects,
@@ -1011,10 +1038,7 @@ class ToolUsageCount:
     async def __call__(self, ctx: Any, call_next: Callable[..., Any]) -> Any:
         if getattr(ctx, "method", None) != "tools/call":
             return await call_next(ctx)
-        try:
-            result = await call_next(ctx)
-        except BaseException:
-            raise
+        result = await call_next(ctx)
         recorder = self._recorder if self._recorder is not None else current_recorder()
         if recorder is not None and recorder.accepting:
             recorder.observe_tool(ctx, result)

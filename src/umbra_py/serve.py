@@ -3691,7 +3691,6 @@ OPENAPI_SCHEMAS: dict[str, str] = {
 #: the ``/artifacts/*`` routes and appear only when those are mounted.
 CORE_OPENAPI_SCHEMAS: dict[str, str] = {
     "SiteCoverage": "site-coverage",
-    "UsageStats": "usage-stats",
 }
 
 
@@ -4104,20 +4103,26 @@ def build_app(
         # "Terminating session: None" once per request; keep that at DEBUG.
         quiet_stateless_session_teardown()
 
-    def _usage_facts() -> dict[str, Any]:
-        if live:
-            return {"scenes_indexed": None, "thumbnails": None, "index_built_at": None}
-        path = Path(index_path) if index_path is not None else default_index_path()
-        return index_facts(path)
+    # The usage counter is a hosted-API feature. A local ``umbra serve`` does
+    # not write usage-stats.json, start the flush thread, or mount /stats.
+    usage: UsageStats | None = None
+    usage_index: Path | None = None
+    if public:
 
-    usage = UsageStats(stats_path_for(index_path), facts=_usage_facts)
-    install_recorder(usage)
-    if live:
-        usage_index = None
-    elif index_path is not None:
-        usage_index = Path(index_path)
-    else:
-        usage_index = default_index_path()
+        def _usage_facts() -> dict[str, Any]:
+            if live:
+                return {"scenes_indexed": None, "thumbnails": None, "index_built_at": None}
+            path = Path(index_path) if index_path is not None else default_index_path()
+            return index_facts(path)
+
+        usage = UsageStats(stats_path_for(index_path), facts=_usage_facts)
+        install_recorder(usage)
+        if live:
+            usage_index = None
+        elif index_path is not None:
+            usage_index = Path(index_path)
+        else:
+            usage_index = default_index_path()
 
     def _note_usage(
         request: Request,
@@ -4128,6 +4133,8 @@ def build_app(
     ) -> None:
         # The coarse name only. The raw place string and the geometry stay
         # on the request, which is not what the counter writes down.
+        if usage is None:
+            return
         remember_search_place(
             request.scope,
             resolved_place=resolved_place,
@@ -4175,7 +4182,8 @@ def build_app(
                     name="umbra-thumb-relocate",
                     daemon=True,
                 ).start()
-        usage.open(usage_index)
+        if usage is not None:
+            usage.open(usage_index)
         async with mcp_life:
             try:
                 yield
@@ -4185,9 +4193,10 @@ def build_app(
                 # server does not hang on (or leak) in-flight renders.
                 if job_executor is not None:
                     job_executor.shutdown(wait=False)
-                usage.close()
-                if current_recorder() is usage:
-                    install_recorder(None)
+                if usage is not None:
+                    usage.close()
+                    if current_recorder() is usage:
+                        install_recorder(None)
 
     app = fastapi.FastAPI(
         title="Umbra Open Data STAC API",
@@ -4277,8 +4286,9 @@ def build_app(
     # is visible and is not counted. The log is added next and stays outside
     # this counter. On a public app the client-IP rewrite is added after the
     # log, so it runs first and the address hashed for a place is the one the
-    # limiter used. The counter never raises.
-    app.add_middleware(SearchUsageMiddleware, recorder=usage)
+    # limiter used. The counter never raises. A local server has no counter.
+    if usage is not None:
+        app.add_middleware(SearchUsageMiddleware, recorder=usage)
     app.add_middleware(StacSearchLog)
 
     # Outside the search log so a multi-megabyte body is refused before that
@@ -4690,29 +4700,33 @@ def build_app(
         except (TimeoutError, asyncio.TimeoutError):
             return _health_deadline()
 
-    @app.get("/stats", tags=["Ops"], responses={200: _STATS_RESPONSE})
-    async def get_usage_stats() -> JSONResponse:
-        """Usage totals for the docs site. Cached for an hour; rate-limited like /search.
+    if usage is not None:
+        hosted_usage = usage
 
-        The body is the committed ``usage-stats`` contract. ``Cache-Control``
-        is the same window the process keeps. Catalog facts come from the
-        loaded index; a read failure leaves those fields null and still
-        returns 200. This path is not exempt from the token bucket.
-        """
-        try:
-            payload = await asyncio.to_thread(usage.public_payload)
-        except Exception:
-            _log.warning("usage stats payload failed", exc_info=True)
-            payload = {
-                "searches_served": usage.searches_served,
-                "counting_since": usage.counting_since,
-                "scenes_indexed": None,
-                "thumbnails": None,
-                "index_built_at": None,
-                "top_places": [],
-                "generated_at": usage.counting_since,
-            }
-        return JSONResponse(payload, headers={"Cache-Control": STATS_CACHE_CONTROL})
+        @app.get("/stats", tags=["Ops"], responses={200: _STATS_RESPONSE})
+        async def get_usage_stats() -> JSONResponse:
+            """Usage totals for the docs site. Cached for an hour; rate-limited like /search.
+
+            The body is the committed ``usage-stats`` contract. ``Cache-Control``
+            is the same window the process keeps. Catalog facts come from the
+            loaded index; a read failure leaves those fields null and still
+            returns 200. This path is not exempt from the token bucket. A local
+            server does not mount it.
+            """
+            try:
+                payload = await asyncio.to_thread(hosted_usage.public_payload)
+            except Exception:
+                _log.warning("usage stats payload failed", exc_info=True)
+                payload = {
+                    "searches_served": hosted_usage.searches_served,
+                    "counting_since": hosted_usage.counting_since,
+                    "scenes_indexed": None,
+                    "thumbnails": None,
+                    "index_built_at": None,
+                    "top_places": [],
+                    "generated_at": hosted_usage.counting_since,
+                }
+            return JSONResponse(payload, headers={"Cache-Control": STATS_CACHE_CONTROL})
 
     def _unhealthy(exc: Exception) -> Any:
         doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
@@ -6384,6 +6398,8 @@ def build_app(
         document = generate_openapi()
         schemas = document.setdefault("components", {}).setdefault("schemas", {})
         schemas.update(core_openapi_components())
+        if usage is not None:
+            schemas["UsageStats"] = _as_component("UsageStats", "usage-stats")
         if artifacts:
             schemas.update(openapi_components())
         return document

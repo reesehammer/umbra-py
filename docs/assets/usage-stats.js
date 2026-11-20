@@ -87,7 +87,7 @@
     });
     if (!named.length) return;
     var heading = document.createElement("p");
-    heading.textContent = "Places reached by at least 3 people";
+    heading.textContent = "Top places searched (3+ distinct clients in a day)";
     heading.style.margin = "0.6em 0 0.2em";
     heading.style.fontSize = "0.85em";
     root.appendChild(heading);

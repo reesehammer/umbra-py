@@ -66,7 +66,7 @@ def _stats(tmp_path: Path, clock: Clock | None = None) -> UsageStats:
     [
         ("GET", "/search", 200, UA, True),
         ("POST", "/search", 201, UA, True),
-        ("GET", "/search/", 200, UA, True),
+        ("GET", "/search/", 200, UA, False),
         ("HEAD", "/search", 200, UA, False),
         ("OPTIONS", "/search", 200, UA, False),
         ("GET", "/livez", 200, UA, False),
@@ -96,13 +96,6 @@ def _stats(tmp_path: Path, clock: Clock | None = None) -> UsageStats:
 )
 def test_request_counts_keeps_real_searches_only(method, path, status, headers, counted):
     assert request_counts(method, path, status, headers) is counted
-
-
-def test_ignore_ua_env_excludes_a_configured_substring(monkeypatch):
-    monkeypatch.setenv("UMBRA_STATS_IGNORE_UA", "internal-probe, lab-crawler")
-    headers = {"user-agent": "internal-probe/1"}
-    assert request_counts("GET", "/search", 200, headers) is False
-    assert request_counts("GET", "/search", 200, UA) is True
 
 
 def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
@@ -282,22 +275,24 @@ def test_bbox_and_intersects_use_the_nearest_baked_label():
     assert coarse_place(bbox=(-20.0, 10.0, 20.0, 40.0), anchors=anchors) is None
 
 
-def test_a_geocoded_label_wins_over_the_raw_place_and_the_box():
+def test_a_geocoded_label_wins_over_the_box():
     anchors = [("Reykjavík, Capital Region, Iceland", 10.49, -68.007)]
     named = coarse_place(
-        place=RAW_PLACE,
         resolved_place="Tokyo",
         bbox=(-68.02, 10.47, -67.99, 10.51),
         anchors=anchors,
     )
     assert named == "Tokyo"
+    unnamed = coarse_place(resolved_place=RAW_PLACE, anchors=anchors)
+    assert unnamed == "Springfield, United States"
+    assert "Secret" not in (unnamed or "")
 
 
 def test_remember_search_place_keeps_only_the_coarse_name():
     scope: dict = {}
     remember_search_place(
         scope,
-        place=RAW_PLACE,
+        resolved_place=RAW_PLACE,
         bbox=(-89.654321, 39.78, -89.65, 39.79),
     )
     assert scope[USAGE_PLACE_KEY] == "Springfield, United States"
@@ -355,24 +350,52 @@ def test_counts_survive_a_restart_without_inflating_clients(tmp_path):
     assert restarted.distinct_clients("Oslo") == 1
 
 
-def test_a_corrupt_or_poisoned_file_does_not_invent_a_count(tmp_path):
-    path = tmp_path / "usage-stats.json"
-    path.write_text("{", encoding="utf-8")
-    broken = UsageStats(path, clock=Clock(1_700_000_000.0))
+def test_an_unreadable_or_oversized_file_is_kept_aside(tmp_path):
+    clock = Clock(1_700_000_000.0)
+    stamp = "20231114T221320Z"
+
+    broken_path = tmp_path / "broken" / "usage-stats.json"
+    broken_path.parent.mkdir()
+    broken_path.write_text("{", encoding="utf-8")
+    broken = UsageStats(broken_path, clock=clock)
     assert broken.searches_served == 0
-    path.write_text(
-        json.dumps(
-            {
-                "version": 99,
-                "counting_since": "2020-01-01T00:00:00Z",
-                "searches_served": 1000,
-                "places": {"Tokyo": 9},
-            }
-        ),
-        encoding="utf-8",
+    bad = broken_path.with_name(f"usage-stats.json.bad-{stamp}")
+    assert bad.read_text(encoding="utf-8") == "{"
+    broken.flush()
+    assert bad.read_text(encoding="utf-8") == "{"
+    assert json.loads(broken_path.read_text(encoding="utf-8"))["searches_served"] == 0
+
+    huge_path = tmp_path / "huge" / "usage-stats.json"
+    huge_path.parent.mkdir()
+    original = b"x" * 1_000_001
+    huge_path.write_bytes(original)
+    huge = UsageStats(huge_path, clock=clock)
+    assert huge.searches_served == 0
+    huge_bad = huge_path.with_name(f"usage-stats.json.bad-{stamp}")
+    assert huge_bad.read_bytes() == original
+    huge.flush()
+    assert huge_bad.read_bytes() == original
+
+    unknown_path = tmp_path / "unknown" / "usage-stats.json"
+    unknown_path.parent.mkdir()
+    original_json = json.dumps(
+        {
+            "version": 99,
+            "counting_since": "2020-01-01T00:00:00Z",
+            "searches_served": 1000,
+            "places": {"Tokyo": 9},
+        }
     )
-    unknown = UsageStats(path, clock=Clock(1_700_000_000.0))
+    unknown_path.write_text(original_json, encoding="utf-8")
+    unknown = UsageStats(unknown_path, clock=clock)
     assert unknown.searches_served == 0
+    kept = unknown_path.with_name(f"usage-stats.json.bad-{stamp}")
+    assert kept.read_text(encoding="utf-8") == original_json
+    assert "1000" in kept.read_text(encoding="utf-8")
+
+
+def test_a_readable_file_drops_poisoned_places_without_moving_it(tmp_path):
+    path = tmp_path / "usage-stats.json"
     path.write_text(
         json.dumps(
             {
@@ -389,6 +412,39 @@ def test_a_corrupt_or_poisoned_file_does_not_invent_a_count(tmp_path):
     assert loaded.distinct_clients("Tokyo") == 3
     assert loaded.distinct_clients("203.0.113.50") == 0
     assert loaded.distinct_clients("Main Street") == 0
+    assert path.is_file()
+    assert list(tmp_path.glob("usage-stats.json.bad-*")) == []
+    loaded.flush()
+    text = path.read_text(encoding="utf-8")
+    assert "203.0.113.50" not in text
+    assert "Main Street" not in text
+    assert list(tmp_path.glob("usage-stats.json.bad-*")) == []
+
+
+def test_day_roll_drops_places_below_three_clients_and_caps_the_rest(tmp_path, monkeypatch):
+    import umbra_py.usage_stats as usage_mod
+
+    monkeypatch.setattr(usage_mod, "MAX_PLACES", 2)
+    clock = Clock(1_700_000_000.0)
+    stats = UsageStats(tmp_path / "usage-stats.json", clock=clock)
+    stats._places = {"Alpha": 5, "Bravo": 4, "Charlie": 3, "Tiny": 2}
+    clock.now += 86_400
+    stats.record_search(client="203.0.113.8", place=None)
+    assert stats.distinct_clients("Tiny") == 0
+    assert stats.distinct_clients("Charlie") == 0
+    assert stats.distinct_clients("Alpha") == 5
+    assert stats.distinct_clients("Bravo") == 4
+    assert set(stats._places) == {"Alpha", "Bravo"}
+
+
+def test_record_search_does_not_write_the_file(tmp_path):
+    stats = _stats(tmp_path)
+    path = tmp_path / "usage-stats.json"
+    for i in range(60):
+        stats.record_search(client=f"198.51.100.{i}", place="Tokyo")
+    assert stats.searches_served == 60
+    assert not path.exists()
+    assert stats._flush_requested.is_set()
 
 
 def test_an_unwritable_volume_still_answers(tmp_path):
@@ -418,12 +474,16 @@ def test_no_ip_user_agent_or_raw_query_is_stored(tmp_path):
         "client": (SECRET_IP, 443),
         "query_string": f"area={RAW_PLACE}&lon={SECRET_COORD}".encode(),
     }
-    remember_search_place(scope, place=RAW_PLACE, bbox=(-89.654321, 39.78, -89.65, 39.79))
+    remember_search_place(
+        scope,
+        resolved_place=RAW_PLACE,
+        bbox=(-89.654321, 39.78, -89.65, 39.79),
+    )
     for index, host in enumerate(_hosts(3)):
         one = dict(scope)
         one["client"] = (host if index else SECRET_IP, 443)
         if index:
-            remember_search_place(one, place="Springfield, United States")
+            remember_search_place(one, resolved_place="Springfield, United States")
         stats.observe_http(one, 200)
     stats.flush()
     text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
@@ -459,7 +519,7 @@ def _tool_ctx(
 
 def test_mcp_middleware_counts_a_successful_call_and_returns_it(tmp_path):
     stats = _stats(tmp_path)
-    stats.enable()
+    stats.accepting = True
     middleware = ToolUsageCount(stats)
     result = {
         "structuredContent": {
@@ -487,9 +547,31 @@ def test_mcp_middleware_counts_a_successful_call_and_returns_it(tmp_path):
     assert "198.51.100.8" not in text
 
 
+def test_mcp_bbox_and_free_text_place_is_not_stored(tmp_path):
+    stats = _stats(tmp_path)
+    stats.accepting = True
+    stats.anchors = [("Reykjavík, Capital Region, Iceland", 10.49, -68.007)]
+    secret = "find the ships at my secret marina please"
+    middleware = ToolUsageCount(stats)
+
+    async def call_next(ctx):
+        return {"structuredContent": {"count": 1}, "isError": False}
+
+    ctx = _tool_ctx(
+        "198.51.100.8",
+        arguments={"bbox": [-68.02, 10.47, -67.99, 10.51], "place": secret},
+    )
+    asyncio.run(middleware(ctx, call_next))
+    stats.flush()
+    text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
+    assert secret not in text
+    assert "marina" not in text
+    assert json.loads(text)["places"] == {"Reykjavík, Iceland": 1}
+
+
 def test_mcp_middleware_skips_lists_errors_smoke_and_bots(tmp_path):
     stats = _stats(tmp_path)
-    stats.enable()
+    stats.accepting = True
     middleware = ToolUsageCount(stats)
 
     async def ok(ctx):
@@ -511,6 +593,10 @@ def test_mcp_middleware_skips_lists_errors_smoke_and_bots(tmp_path):
     smoke = {"user-agent": "claude-code/2.1", "x-umbra-smoke": "1"}
     asyncio.run(middleware(_tool_ctx("203.0.113.1", headers=smoke), ok))
     asyncio.run(middleware(_tool_ctx("203.0.113.1", headers={"user-agent": "UptimeRobot"}), ok))
+    for tool in ("get_item", "index_stats", "quicklook", "stamp_description"):
+        ctx = _tool_ctx("203.0.113.1")
+        ctx.params["name"] = tool
+        asyncio.run(middleware(ctx, ok))
     assert stats.searches_served == 0
 
 
@@ -526,7 +612,7 @@ def test_mcp_does_not_count_until_the_recorder_is_accepting(tmp_path):
         asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
         assert stats.searches_served == 0
         assert current_recorder() is stats
-        stats.enable()
+        stats.accepting = True
         asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
         assert stats.searches_served == 1
     finally:
@@ -565,7 +651,7 @@ def test_get_stats_is_cached_cors_open_and_rate_limited(tmp_path):
                     href=f"https://example.test/{i}.stac.v2.json",
                 )
             )
-    app = serve.build_app(index_path)
+    app = serve.build_app(index_path, public=True)
     with TestClient(app) as client:
         search = client.get("/search", headers={"User-Agent": "Mozilla/5.0"})
         assert search.status_code == 200
@@ -604,13 +690,53 @@ def test_get_stats_is_cached_cors_open_and_rate_limited(tmp_path):
     assert "UsageStats" in schema["components"]["schemas"]
 
 
+def test_flush_serializes_on_a_unique_temp_file(tmp_path):
+    import threading
+
+    stats = _stats(tmp_path)
+    stats.record_search(client="203.0.113.1", place="Tokyo")
+    threads = [threading.Thread(target=stats.flush) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    path = tmp_path / "usage-stats.json"
+    text = path.read_text(encoding="utf-8")
+    assert json.loads(text)["searches_served"] == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert "203.0.113.1" not in text
+
+
+def test_local_serve_does_not_mount_or_write_stats(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+    from umbra_py.index import CatalogIndex
+    from umbra_py.models import UmbraItem
+
+    doc = json.loads((DATA_DIR / "sample_item.json").read_text())
+    index_path = tmp_path / "catalog.db"
+    with CatalogIndex(index_path) as index:
+        index.add(UmbraItem.from_dict(doc, href="https://example.test/a.stac.v2.json"))
+    app = serve.build_app(index_path)
+    assert app.state.usage is None
+    with TestClient(app) as client:
+        assert client.get("/stats").status_code == 404
+        assert client.get("/search", headers={"User-Agent": "Mozilla/5.0"}).status_code == 200
+        spec = client.get("/openapi.json").json()
+    assert "/stats" not in spec["paths"]
+    assert "UsageStats" not in spec["components"]["schemas"]
+    assert not (tmp_path / "usage-stats.json").exists()
+
+
 def test_stats_goes_through_the_rate_limiter(tmp_path):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from umbra_py import serve
 
-    app = serve.build_app(tmp_path / "catalog.db", rate_limit=1)
+    app = serve.build_app(tmp_path / "catalog.db", public=True, rate_limit=1)
     with TestClient(app) as client:
         first = client.get("/stats")
         second = client.get("/stats")
@@ -631,7 +757,7 @@ def test_search_still_succeeds_when_recording_raises(tmp_path):
     index_path = tmp_path / "catalog.db"
     with CatalogIndex(index_path) as index:
         index.add(UmbraItem.from_dict(doc, href="https://example.test/a.stac.v2.json"))
-    app = serve.build_app(index_path)
+    app = serve.build_app(index_path, public=True)
 
     def boom(scope, status):
         raise RuntimeError("stats")
