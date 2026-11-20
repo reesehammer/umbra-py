@@ -21,7 +21,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import requests
@@ -30,6 +30,62 @@ from .exceptions import GeocodeError
 
 # (min_lon, min_lat, max_lon, max_lat)
 BBox = tuple[float, float, float, float]
+
+
+class _PlaceHit(tuple[BBox, str]):
+    """``(bbox, display_name)`` plus Nominatim address and class when present.
+
+    Unpacking still yields two values, which is what every caller does.
+    The extra fields are how a venue geocode is published as a city rather
+    than as the venue's name.
+    """
+
+    address: dict[str, str] | None
+    kind: str | None
+
+    def __new__(
+        cls,
+        bbox: BBox,
+        display_name: str,
+        address: dict[str, str] | None = None,
+        kind: str | None = None,
+    ) -> _PlaceHit:
+        self = tuple.__new__(cls, (bbox, display_name))
+        self.address = address
+        self.kind = kind
+        return self
+
+
+def _address_fields(match: Mapping[str, Any] | dict[str, Any]) -> dict[str, str] | None:
+    raw = match.get("address")
+    if not isinstance(raw, dict):
+        return None
+    fields = {
+        str(key): value.strip()
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, str) and value.strip()
+    }
+    return fields or None
+
+
+def _place_kind(match: Mapping[str, Any] | dict[str, Any]) -> str | None:
+    for key in ("addresstype", "type", "category"):
+        value = match.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _note_geocode_hit(hit: _PlaceHit) -> _PlaceHit:
+    """Tell the usage counter about this result, when an MCP call is listening."""
+    try:
+        from .usage_stats import note_geocode  # noqa: PLC0415
+
+        note_geocode(hit.address, hit.kind)
+    except Exception:
+        return hit
+    return hit
+
 
 # OpenStreetMap's Nominatim forward-geocoding endpoint. Its usage policy
 # requires a descriptive User-Agent (the shared session supplies one); a
@@ -64,7 +120,12 @@ def geocode_place(
         session = default_session()
 
     try:
-        params: dict[str, str | int] = {"q": query, "format": "jsonv2", "limit": 1}
+        params: dict[str, str | int] = {
+            "q": query,
+            "format": "jsonv2",
+            "limit": 1,
+            "addressdetails": 1,
+        }
         resp = session.get(
             _NOMINATIM_SEARCH_URL,
             params=params,
@@ -89,7 +150,9 @@ def geocode_place(
     if bbox is None:
         raise GeocodeError(f"Geocoding {query!r} returned no usable bounding box.")
     label = match.get("display_name") or query
-    return bbox, str(label)
+    return _note_geocode_hit(
+        _PlaceHit(bbox, str(label), address=_address_fields(match), kind=_place_kind(match))
+    )
 
 
 def _parse_boundingbox(raw: Any) -> BBox | None:
@@ -260,7 +323,10 @@ class PublicGeocodeGate:
             self._cache.move_to_end(key)
             raise GeocodeError(hit[2])
         self._cache.move_to_end(key)
-        return hit[1]
+        found = hit[1]
+        if isinstance(found, _PlaceHit):
+            _note_geocode_hit(found)
+        return found
 
     def _store(self, key: str, entry: tuple[Any, ...]) -> None:
         with self._lock:

@@ -17,6 +17,7 @@ import pytest
 from umbra_py.usage_stats import (
     MIN_DISTINCT_CLIENTS,
     TOP_PLACES,
+    USAGE_FIRST_PAGE,
     USAGE_PLACE_KEY,
     SearchUsageMiddleware,
     ToolUsageCount,
@@ -26,6 +27,7 @@ from umbra_py.usage_stats import (
     current_recorder,
     index_facts,
     install_recorder,
+    note_geocode,
     read_place_anchors,
     remember_search_place,
     request_counts,
@@ -98,6 +100,20 @@ def test_request_counts_keeps_real_searches_only(method, path, status, headers, 
     assert request_counts(method, path, status, headers) is counted
 
 
+def test_only_the_first_page_counts():
+    assert request_counts("GET", "/search", 200, UA) is True
+    assert request_counts("GET", "/search", 200, UA, query={"token": "0"}) is True
+    assert request_counts("GET", "/search", 200, UA, query={"offset": "0"}) is True
+    assert request_counts("GET", "/search", 200, UA, query={"token": ""}) is True
+    assert request_counts("POST", "/search", 200, UA, first_page=True) is True
+    assert request_counts("GET", "/search", 200, UA, query={"token": "10"}) is False
+    assert request_counts("GET", "/search", 200, UA, query={"offset": ["0", "5"]}) is False
+    assert request_counts("GET", "/search", 200, UA, query={"next": "abc"}) is False
+    assert request_counts("POST", "/search", 200, UA, first_page=False) is False
+    # An empty 200 is still a search. The status is what counts, not the features.
+    assert request_counts("GET", "/search", 200, UA, query={"limit": "1"}) is True
+
+
 def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
     stats = _stats(tmp_path)
     scope = {
@@ -115,7 +131,11 @@ def test_observe_http_counts_the_scope_the_middleware_sees(tmp_path):
         200,
     )
     stats.observe_http(scope, 429)
-    assert stats.searches_served == 1
+    stats.observe_http({**scope, "query_string": b"token=10&bbox=1,2,3,4"}, 200)
+    stats.observe_http({**scope, "query_string": b"token=0"}, 200)
+    stats.observe_http({**scope, USAGE_FIRST_PAGE: False}, 200)
+    stats.observe_http({**scope, USAGE_FIRST_PAGE: True, "query_string": b"token=40"}, 200)
+    assert stats.searches_served == 3
 
 
 def test_a_stats_error_does_not_fail_the_response():
@@ -262,6 +282,35 @@ def test_top_places_keeps_ten_highest_counts(tmp_path):
 )
 def test_coarsen_label_keeps_a_city_and_country(raw, expected):
     assert coarsen_label(raw) == expected
+
+
+def test_a_point_of_interest_is_not_published_as_the_venue():
+    venue = "White House, Washington, District of Columbia, United States"
+    assert coarsen_label(venue, kind="tourism") == "Washington, United States"
+    assert coarsen_label(venue, kind="building") == "Washington, United States"
+    assert coarsen_label("White House, United States", kind="attraction") == "United States"
+    address = {
+        "tourism": "White House",
+        "city": "Washington",
+        "state": "District of Columbia",
+        "country": "United States",
+    }
+    assert coarsen_label(venue, address=address, kind="tourism") == "Washington, United States"
+    state_only = {
+        "tourism": "White House",
+        "state": "District of Columbia",
+        "country": "United States",
+    }
+    assert coarsen_label("White House, United States", address=state_only) == (
+        "District of Columbia, United States"
+    )
+    assert (
+        coarsen_label("Austin, Travis County, Texas, United States", kind="city")
+        == "Austin, United States"
+    )
+    assert coarsen_label("Reykjavík, Capital Region, Iceland", kind="administrative") == (
+        "Reykjavík, Iceland"
+    )
 
 
 def test_bbox_and_intersects_use_the_nearest_baked_label():
@@ -519,8 +568,8 @@ def _tool_ctx(
 
 def test_mcp_middleware_counts_a_successful_call_and_returns_it(tmp_path):
     stats = _stats(tmp_path)
-    stats.accepting = True
-    middleware = ToolUsageCount(stats)
+    install_recorder(stats)
+    middleware = ToolUsageCount()
     result = {
         "structuredContent": {
             "resolved_place": "Austin, Travis County, Texas, United States",
@@ -536,23 +585,26 @@ def test_mcp_middleware_counts_a_successful_call_and_returns_it(tmp_path):
         "198.51.100.8",
         arguments={"area": f"ships near {SECRET_COORD}", "place": RAW_PLACE},
     )
-    sent = asyncio.run(middleware(ctx, call_next))
-    assert sent is result
-    assert stats.searches_served == 1
-    assert stats.distinct_clients("Austin, United States") == 1
-    stats.flush()
-    text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
-    assert "Secret" not in text
-    assert SECRET_COORD not in text
-    assert "198.51.100.8" not in text
+    try:
+        sent = asyncio.run(middleware(ctx, call_next))
+        assert sent is result
+        assert stats.searches_served == 1
+        assert stats.distinct_clients("Austin, United States") == 1
+        stats.flush()
+        text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
+        assert "Secret" not in text
+        assert SECRET_COORD not in text
+        assert "198.51.100.8" not in text
+    finally:
+        install_recorder(None)
 
 
 def test_mcp_bbox_and_free_text_place_is_not_stored(tmp_path):
     stats = _stats(tmp_path)
-    stats.accepting = True
     stats.anchors = [("Reykjavík, Capital Region, Iceland", 10.49, -68.007)]
     secret = "find the ships at my secret marina please"
-    middleware = ToolUsageCount(stats)
+    install_recorder(stats)
+    middleware = ToolUsageCount()
 
     async def call_next(ctx):
         return {"structuredContent": {"count": 1}, "isError": False}
@@ -561,18 +613,52 @@ def test_mcp_bbox_and_free_text_place_is_not_stored(tmp_path):
         "198.51.100.8",
         arguments={"bbox": [-68.02, 10.47, -67.99, 10.51], "place": secret},
     )
-    asyncio.run(middleware(ctx, call_next))
-    stats.flush()
-    text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
-    assert secret not in text
-    assert "marina" not in text
-    assert json.loads(text)["places"] == {"Reykjavík, Iceland": 1}
+    try:
+        asyncio.run(middleware(ctx, call_next))
+        stats.flush()
+        text = (tmp_path / "usage-stats.json").read_text(encoding="utf-8")
+        assert secret not in text
+        assert "marina" not in text
+        assert json.loads(text)["places"] == {"Reykjavík, Iceland": 1}
+    finally:
+        install_recorder(None)
+
+
+def test_mcp_venue_geocode_keeps_the_city(tmp_path):
+    stats = _stats(tmp_path)
+    install_recorder(stats)
+    middleware = ToolUsageCount()
+
+    async def call_next(ctx):
+        note_geocode(
+            {
+                "tourism": "White House",
+                "city": "Washington",
+                "state": "District of Columbia",
+                "country": "United States",
+            },
+            "tourism",
+        )
+        return {
+            "structuredContent": {
+                "resolved_place": "White House, Washington, District of Columbia, United States",
+            }
+        }
+
+    try:
+        asyncio.run(middleware(_tool_ctx("198.51.100.9"), call_next))
+        stats.flush()
+        places = json.loads((tmp_path / "usage-stats.json").read_text(encoding="utf-8"))["places"]
+        assert places == {"Washington, United States": 1}
+        assert "White House" not in places
+    finally:
+        install_recorder(None)
 
 
 def test_mcp_middleware_skips_lists_errors_smoke_and_bots(tmp_path):
     stats = _stats(tmp_path)
-    stats.accepting = True
-    middleware = ToolUsageCount(stats)
+    install_recorder(stats)
+    middleware = ToolUsageCount()
 
     async def ok(ctx):
         return {"structuredContent": {"display_name": "Tokyo"}, "isError": False}
@@ -580,43 +666,48 @@ def test_mcp_middleware_skips_lists_errors_smoke_and_bots(tmp_path):
     async def broken(ctx):
         raise RuntimeError("tool failed")
 
-    listed = asyncio.run(middleware(_tool_ctx("203.0.113.1", method="tools/list"), ok))
-    assert listed["structuredContent"]["display_name"] == "Tokyo"
-    with pytest.raises(RuntimeError):
-        asyncio.run(middleware(_tool_ctx("203.0.113.1"), broken))
-    asyncio.run(
-        middleware(
-            _tool_ctx("203.0.113.1"),
-            _ready({"isError": True, "structuredContent": {"display_name": "Tokyo"}}),
-        )
-    )
-    smoke = {"user-agent": "claude-code/2.1", "x-umbra-smoke": "1"}
-    asyncio.run(middleware(_tool_ctx("203.0.113.1", headers=smoke), ok))
-    asyncio.run(middleware(_tool_ctx("203.0.113.1", headers={"user-agent": "UptimeRobot"}), ok))
-    for tool in ("get_item", "index_stats", "quicklook", "stamp_description"):
-        ctx = _tool_ctx("203.0.113.1")
-        ctx.params["name"] = tool
-        asyncio.run(middleware(ctx, ok))
-    assert stats.searches_served == 0
-
-
-def test_mcp_does_not_count_until_the_recorder_is_accepting(tmp_path):
-    stats = _stats(tmp_path)
-    install_recorder(stats)
     try:
-        middleware = ToolUsageCount()
-
-        async def ok(ctx):
-            return {"count": 1}
-
-        asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
+        listed = asyncio.run(middleware(_tool_ctx("203.0.113.1", method="tools/list"), ok))
+        assert listed["structuredContent"]["display_name"] == "Tokyo"
+        with pytest.raises(RuntimeError):
+            asyncio.run(middleware(_tool_ctx("203.0.113.1"), broken))
+        asyncio.run(
+            middleware(
+                _tool_ctx("203.0.113.1"),
+                _ready({"isError": True, "structuredContent": {"display_name": "Tokyo"}}),
+            )
+        )
+        smoke = {"user-agent": "claude-code/2.1", "x-umbra-smoke": "1"}
+        asyncio.run(middleware(_tool_ctx("203.0.113.1", headers=smoke), ok))
+        asyncio.run(middleware(_tool_ctx("203.0.113.1", headers={"user-agent": "UptimeRobot"}), ok))
+        for tool in ("get_item", "index_stats", "quicklook", "stamp_description"):
+            ctx = _tool_ctx("203.0.113.1")
+            ctx.params["name"] = tool
+            asyncio.run(middleware(ctx, ok))
         assert stats.searches_served == 0
-        assert current_recorder() is stats
-        stats.accepting = True
-        asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
-        assert stats.searches_served == 1
     finally:
         install_recorder(None)
+
+
+def test_mcp_counts_only_while_a_recorder_is_installed(tmp_path):
+    stats = _stats(tmp_path)
+    middleware = ToolUsageCount()
+
+    async def ok(ctx):
+        return {"count": 1}
+
+    install_recorder(None)
+    asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
+    assert stats.searches_served == 0
+    assert current_recorder() is None
+    install_recorder(stats)
+    try:
+        asyncio.run(middleware(_tool_ctx("203.0.113.4"), ok))
+        assert stats.searches_served == 1
+        assert current_recorder() is stats
+    finally:
+        install_recorder(None)
+        assert current_recorder() is None
 
 
 def _ready(value):
@@ -682,12 +773,46 @@ def test_get_stats_is_cached_cors_open_and_rate_limited(tmp_path):
         cached = client.get("/stats")
         assert cached.json()["searches_served"] == 1
         assert app.state.usage.searches_served == 2
+        later = client.get("/search?token=5", headers={"User-Agent": "Mozilla/5.0"})
+        assert later.status_code == 200
+        posted = client.post(
+            "/search",
+            json={"limit": 1, "token": 5},
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        assert posted.status_code == 200
+        assert app.state.usage.searches_served == 2
+        empty = client.get(
+            "/search?bbox=0,0,0.01,0.01",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        assert empty.status_code == 200
+        assert empty.json()["features"] == []
+        assert app.state.usage.searches_served == 3
         spec = client.get("/openapi.json")
     schema = spec.json()
     assert schema["paths"]["/stats"]["get"]["responses"]["200"]["content"]["application/json"][
         "schema"
     ] == {"$ref": "#/components/schemas/UsageStats"}
     assert "UsageStats" in schema["components"]["schemas"]
+
+
+def test_stats_failure_is_a_500(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from umbra_py import serve
+
+    app = serve.build_app(tmp_path / "catalog.db", public=True)
+
+    def explode() -> dict:
+        raise RuntimeError("stats failed")
+
+    monkeypatch.setattr(app.state.usage, "public_payload", explode)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/stats")
+    assert response.status_code == 500
+    assert "top_places" not in response.text
 
 
 def test_flush_serializes_on_a_unique_temp_file(tmp_path):

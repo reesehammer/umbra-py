@@ -5,13 +5,15 @@ served, how big the loaded index is, and which coarse places people
 actually ask about. The numbers are a social-proof counter, so they start
 at zero when the file is first created and are never backfilled.
 
-What is counted is narrow on purpose. A successful ``GET`` or ``POST
-/search``, and a successful MCP search tool (``search_catalog``,
-``find_repeat_sites``, ``find_similar``, ``find_similar_text``,
-``watch_site``), count. Probes, health checks, unknown paths, ``HEAD`` /
-``OPTIONS``, rate-limit and error responses, smoke traffic, metadata
-tools, and known bot or uptime user agents do not. A request that does
-not clearly qualify is dropped.
+What is counted is narrow on purpose. The first page of a successful
+``GET`` or ``POST /search`` (no paging token, or a token of zero), and a
+successful MCP search tool (``search_catalog``, ``find_repeat_sites``,
+``find_similar``, ``find_similar_text``, ``watch_site``), count. A later
+page is the same search. Probes, health checks, unknown paths, ``HEAD`` /
+``OPTIONS``, rate-limit and error responses, smoke traffic (including
+this project's replace-crawler canary), metadata tools, and known bot or
+uptime user agents do not. A request that does not clearly qualify is
+dropped.
 
 What is stored is narrower still. The file beside the catalog index holds
 the total, the ``counting_since`` timestamp, and a per-place distinct-client
@@ -19,8 +21,8 @@ the total, the ``counting_since`` timestamp, and a per-place distinct-client
 uses. The salt is random, lives only in memory, and rotates each UTC day,
 so the file cannot be turned back into an address. Raw query strings, user
 agents, and the hash itself are not written. Place text is reduced to a
-city and country, or to a baked index label near the query, before it is
-kept.
+city and country, or to a region and country when the geocoder resolved a
+venue, or to a baked index label near the query, before it is kept.
 
 Recording is an in-memory update under one lock. A background thread
 writes the file; the request path does not. A stats failure is logged and
@@ -30,6 +32,7 @@ memory. The recorder is mounted only by ``umbra serve --public``.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -43,6 +46,16 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
+
+from ._mcp_log import (
+    _argument_mapping,
+    _header_value,
+    _initialize_client,
+    _params_name_and_args,
+    _request_host,
+    _result_is_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +86,47 @@ FLUSH_INTERVAL_S = 30.0
 
 #: Scope key holding the already-coarsened place for this one request.
 USAGE_PLACE_KEY = "umbra.usage_place"
+#: Scope key the search handler sets once it knows the page offset.
+#: True is the first page. Absent, the query string is what decides.
+USAGE_FIRST_PAGE = "umbra.usage_first_page"
+_UNMARKED = object()
+
+#: Query keys that mean "another page of the same search".
+_PAGE_KEYS = frozenset({"token", "offset", "page", "next"})
+
+#: Nominatim ``addresstype`` / ``type`` / ``category`` values whose own name
+#: is a settlement or an admin area. Anything else is a venue: the label's
+#: first segment is the place's name, not a city.
+_SETTLEMENT_KINDS = frozenset(
+    {
+        "administrative",
+        "borough",
+        "boundary",
+        "city",
+        "continent",
+        "country",
+        "county",
+        "district",
+        "hamlet",
+        "island",
+        "locality",
+        "municipality",
+        "neighborhood",
+        "neighbourhood",
+        "place",
+        "postcode",
+        "province",
+        "quarter",
+        "region",
+        "state",
+        "state_district",
+        "suburb",
+        "town",
+        "village",
+    }
+)
+_CITY_ADDRESS_KEYS = ("city", "town", "village", "municipality", "hamlet", "suburb", "county")
+_STATE_ADDRESS_KEYS = ("state", "region", "state_district", "province")
 
 #: File schema. A different version is ignored and the counter starts over
 #: rather than being interpreted as a count it is not.
@@ -236,8 +290,13 @@ def read_place_anchors(index_path: str | os.PathLike[str] | None) -> list[tuple[
         return []
 
 
-def coarsen_label(value: str | None) -> str | None:
-    """A city and country from a place string, or ``None`` when it is not one.
+def coarsen_label(
+    value: str | None,
+    *,
+    address: Mapping[str, Any] | None = None,
+    kind: str | None = None,
+) -> str | None:
+    """A city and country, or ``None`` when the text is not a place.
 
     Nominatim labels run specific to general (``"Austin, Travis County, Texas,
     United States"``). The first and last segments that survive are the city
@@ -245,7 +304,66 @@ def coarsen_label(value: str | None) -> str | None:
     anything that is not a place name is dropped, so a street address does not
     become a published place. One surviving segment (``"Tokyo"``, ``"Iceland"``)
     is kept as a city or a country.
+
+    A structured ``address`` wins when the geocoder returned one: city, town,
+    village, or county, then the state or region, then the country. A venue
+    (``kind`` is not a settlement or an admin area) does not keep its own
+    name. ``"White House, Washington, District of Columbia, United States"``
+    with kind ``tourism`` is ``"Washington, United States"``. With no city
+    left, the state and country, or just the country, are the label.
     """
+    named = _label_from_address(address)
+    if named:
+        return named
+    return _label_from_display(value, drop_venue=_is_venue(kind))
+
+
+def _is_venue(kind: str | None) -> bool:
+    if not isinstance(kind, str):
+        return False
+    token = kind.strip().lower().replace("-", "_").replace(" ", "_")
+    if not token:
+        return False
+    return token not in _SETTLEMENT_KINDS
+
+
+def _label_from_address(address: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(address, Mapping):
+        return None
+    fields: dict[str, str] = {}
+    for key, value in address.items():
+        if isinstance(key, str) and isinstance(value, str) and value.strip():
+            fields[key.lower()] = value.strip()
+    if not fields:
+        return None
+    country = fields.get("country") if _segment_ok(fields.get("country", "")) else None
+    state = _first_component(fields, _STATE_ADDRESS_KEYS)
+    city = _first_component(fields, _CITY_ADDRESS_KEYS)
+    return _join_place(city, state, country)
+
+
+def _first_component(fields: Mapping[str, str], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = fields.get(key)
+        if value and _segment_ok(value):
+            return value
+    return None
+
+
+def _join_place(city: str | None, state: str | None, country: str | None) -> str | None:
+    if city and country and city.casefold() != country.casefold():
+        label = f"{city}, {country}"
+        return label if len(label) <= 80 else country
+    if city and state and city.casefold() != state.casefold():
+        label = f"{city}, {state}"
+        return label if len(label) <= 80 else city
+    if state and country and state.casefold() != country.casefold():
+        label = f"{state}, {country}"
+        return label if len(label) <= 80 else country
+    return country or city or state
+
+
+def _label_from_display(value: str | None, *, drop_venue: bool) -> str | None:
     if not isinstance(value, str):
         return None
     text = " ".join(value.split())
@@ -253,7 +371,10 @@ def coarsen_label(value: str | None) -> str | None:
         return None
     if any(ch in text for ch in "/\\?&=@#"):
         return None
-    kept = [part.strip() for part in text.split(",") if _segment_ok(part.strip())]
+    parts = [part.strip() for part in text.split(",")]
+    if drop_venue:
+        parts = parts[1:]
+    kept = [part for part in parts if _segment_ok(part)]
     if not kept:
         return None
     if len(kept) == 1:
@@ -271,6 +392,8 @@ def coarse_place(
     bbox: Sequence[float] | None = None,
     intersects: Any = None,
     anchors: Sequence[tuple[str, float, float]] = (),
+    address: Mapping[str, Any] | None = None,
+    kind: str | None = None,
 ) -> str | None:
     """One coarse place for a search, or ``None`` when none can be named.
 
@@ -282,7 +405,7 @@ def coarse_place(
     not returned and is not stored. A box larger than
     :data:`PLACE_MAX_SPAN_DEGREES` is left unnamed.
     """
-    named = coarsen_label(resolved_place)
+    named = coarsen_label(resolved_place, address=address, kind=kind)
     if named:
         return named
     box = _as_bbox(bbox) or _intersects_bbox(intersects)
@@ -299,6 +422,8 @@ def remember_search_place(
     bbox: Sequence[float] | None = None,
     intersects: Any = None,
     anchors: Sequence[tuple[str, float, float]] = (),
+    address: Mapping[str, Any] | None = None,
+    kind: str | None = None,
 ) -> None:
     """Attach the coarse place to this request. The raw inputs are not kept.
 
@@ -312,6 +437,8 @@ def remember_search_place(
             bbox=bbox,
             intersects=intersects,
             anchors=anchors,
+            address=address,
+            kind=kind,
         )
         if name:
             scope[USAGE_PLACE_KEY] = name
@@ -324,13 +451,22 @@ def request_counts(
     path: str,
     status: int,
     headers: Mapping[str, str] | None = None,
+    *,
+    query: Mapping[str, Any] | None = None,
+    first_page: bool | None = None,
 ) -> bool:
     """Whether this HTTP response is a real search.
 
     ``GET`` and ``POST /search`` with a 2xx status, a user agent that is not a
-    bot or an uptime probe, and no ``X-Umbra-Smoke`` opt-out. Everything else
-    — health checks, unknown paths, exploit probes, ``HEAD``, ``OPTIONS``,
-    429s, and errors — is false.
+    bot or an uptime probe, and no ``X-Umbra-Smoke`` opt-out. Only the first
+    page counts: no paging token, or a token of zero. A 200 with an empty
+    page is still a search. Everything else — health checks, unknown paths,
+    exploit probes, ``HEAD``, ``OPTIONS``, 429s, errors, and a later page —
+    is false.
+
+    ``first_page`` is the offset the handler already parsed (a POST body
+    token lives there, not in the query). When it is omitted, ``query`` is
+    what decides.
     """
     if method.upper() not in {"GET", "POST"}:
         return False
@@ -338,12 +474,53 @@ def request_counts(
         return False
     if not _is_search_path(path):
         return False
+    if first_page is False:
+        return False
+    if first_page is None and not _query_is_first_page(query):
+        return False
     found = headers or {}
     if _is_smoke(_header_ci(found, "x-umbra-smoke")):
         return False
     if _identity_excluded(_header_ci(found, "user-agent")):
         return False
     return True
+
+
+def _query_is_first_page(query: Mapping[str, Any] | None) -> bool:
+    if not query:
+        return True
+    for key, value in query.items():
+        if str(key).lower() not in _PAGE_KEYS:
+            continue
+        if isinstance(value, (list, tuple)) and not isinstance(value, str):
+            values = value
+        else:
+            values = (value,)
+        if any(_later_page(one) for one in values):
+            return False
+    return True
+
+
+def _later_page(value: Any) -> bool:
+    """True when this token is a page after the first."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip() not in ("", "0")
+    return True
+
+
+def _query_from_scope(scope: Mapping[str, Any]) -> dict[str, list[str]]:
+    raw = scope.get("query_string") or b""
+    text = raw.decode("latin-1") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    found: dict[str, list[str]] = {}
+    for key, value in parse_qsl(text, keep_blank_values=True):
+        found.setdefault(key, []).append(value)
+    return found
 
 
 def _is_search_path(path: str) -> bool:
@@ -465,16 +642,6 @@ def _day(moment: float) -> str:
     return datetime.fromtimestamp(moment, timezone.utc).strftime("%Y-%m-%d")
 
 
-def _scope_header(scope: Mapping[str, Any], name: bytes) -> str | None:
-    for key, value in scope.get("headers") or ():
-        if isinstance(key, bytes) and key.lower() == name:
-            if isinstance(value, bytes):
-                return value.decode("latin-1", "replace")
-            if isinstance(value, str):
-                return value
-    return None
-
-
 def _scope_headers(scope: Mapping[str, Any]) -> dict[str, str]:
     found: dict[str, str] = {}
     for key, value in scope.get("headers") or ():
@@ -524,13 +691,53 @@ def _client_host(scope: Mapping[str, Any]) -> str | None:
     return _host_of(scope.get("client"))
 
 
+class _GeocodeNote:
+    """Structured geocoder fields for the MCP call in progress.
+
+    The middleware creates one and stores it in a context variable before
+    the tool runs. A sync tool thread receives that same object, so filling
+    in ``address`` and ``kind`` is visible when the tool returns.
+    """
+
+    __slots__ = ("address", "kind")
+
+    def __init__(self) -> None:
+        self.address: Mapping[str, str] | None = None
+        self.kind: str | None = None
+
+
+_geocode_note: contextvars.ContextVar[_GeocodeNote | None] = contextvars.ContextVar(
+    "umbra_usage_geocode", default=None
+)
+
+
+def note_geocode(address: Mapping[str, Any] | None, kind: str | None) -> None:
+    """Remember address components for the MCP call in progress.
+
+    No-op when the middleware did not arm a note. ``GET /search`` passes
+    the same fields on the request scope, because that handler runs in
+    another thread.
+    """
+    note = _geocode_note.get()
+    if note is None:
+        return
+    cleaned: dict[str, str] | None = None
+    if isinstance(address, Mapping):
+        cleaned = {
+            str(key): value.strip()
+            for key, value in address.items()
+            if isinstance(key, str) and isinstance(value, str) and value.strip()
+        } or None
+    note.address = cleaned
+    note.kind = kind.strip() if isinstance(kind, str) and kind.strip() else None
+
+
 class UsageStats:
     """In-memory counters flushed to an atomic JSON file.
 
-    ``accepting`` gates MCP recording. The HTTP middleware holds this object
-    and counts whether or not the lifespan has opened it; MCP only counts
-    after :meth:`open`, so a recorder left behind by a test does not keep
-    counting tool calls.
+    MCP counts while this object is the installed recorder.
+    :func:`install_recorder` ``(None)`` on shutdown is what stops it. The
+    HTTP middleware holds this object directly and does not use that flag.
     """
 
     def __init__(
@@ -560,7 +767,6 @@ class UsageStats:
         self._warned = False
         self._flusher: threading.Thread | None = None
         self._stop = threading.Event()
-        self.accepting = False
         self.anchors: list[tuple[str, float, float]] = []
         if self._persist:
             self._load()
@@ -581,7 +787,6 @@ class UsageStats:
 
     def open(self, index_path: str | os.PathLike[str] | None = None) -> None:
         """Start flushing and load baked place labels off the request path."""
-        self.accepting = True
         self._start_flusher()
         threading.Thread(
             target=self._load_anchors,
@@ -593,7 +798,6 @@ class UsageStats:
 
     def close(self) -> None:
         """Stop the flush thread and write what is still in memory."""
-        self.accepting = False
         self._stop.set()
         self._flush_requested.set()
         flusher = self._flusher
@@ -610,7 +814,16 @@ class UsageStats:
             method = scope.get("method")
             if not isinstance(method, str) or not isinstance(path, str):
                 return
-            if not request_counts(method, path, status, headers):
+            marked = scope.get(USAGE_FIRST_PAGE, _UNMARKED)
+            if marked is _UNMARKED:
+                query: Mapping[str, Any] | None = _query_from_scope(scope)
+                first_page = None
+            else:
+                query = None
+                first_page = marked is True
+            if not request_counts(
+                method, path, status, headers, query=query, first_page=first_page
+            ):
                 return
             place = scope.get(USAGE_PLACE_KEY)
             self.record_search(
@@ -620,19 +833,20 @@ class UsageStats:
         except Exception:
             logger.warning("usage stats dropped an HTTP request", exc_info=True)
 
-    def observe_tool(self, ctx: Any, result: Any) -> None:
+    def observe_tool(self, ctx: Any, result: Any, geocode: _GeocodeNote | None = None) -> None:
         """Count one successful MCP tool call. Never raises.
 
         Called from server middleware after the tool returns, so the tool
         signature is unchanged. ``tools/list``, a raised tool error, and an
-        ``isError`` result are not counts.
+        ``isError`` result are not counts. One call is one search, whatever
+        page token the arguments carried.
         """
         try:
             if not self._tool_counts(ctx, result):
                 return
             self.record_search(
-                client=_tool_client(ctx),
-                place=_tool_place(ctx, result, self.anchors),
+                client=_request_host(getattr(ctx, "request", None)),
+                place=_tool_place(ctx, result, self.anchors, geocode),
             )
         except Exception:
             logger.warning("usage stats dropped an MCP call", exc_info=True)
@@ -882,57 +1096,21 @@ class UsageStats:
     def _tool_counts(self, ctx: Any, result: Any) -> bool:
         if getattr(ctx, "method", None) != "tools/call":
             return False
-        name, _arguments = _tool_params(ctx)
+        name, _arguments = _params_name_and_args(ctx)
         if name not in _SEARCH_TOOLS:
             return False
         if _result_is_error(result):
             return False
         request = getattr(ctx, "request", None)
-        headers = getattr(request, "headers", None)
-        if _is_smoke(_header_get(headers, "x-umbra-smoke")):
+        if _is_smoke(_header_value(request, "x-umbra-smoke")):
             return False
-        user_agent = _header_get(headers, "user-agent")
-        client_name = _tool_client_name(ctx)
+        user_agent = _header_value(request, "user-agent")
+        client_name, _version = _initialize_client(ctx)
         return not _identity_excluded(user_agent, client_name)
 
 
 def _copy(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(payload))
-
-
-def _header_get(headers: Any, name: str) -> str | None:
-    getter = getattr(headers, "get", None)
-    if not callable(getter):
-        return None
-    try:
-        value = getter(name)
-        if value is None:
-            value = getter(name.title())
-    except Exception:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode("latin-1", "replace")
-    return value if isinstance(value, str) else None
-
-
-def _tool_params(ctx: Any) -> tuple[Any, Any]:
-    params = getattr(ctx, "params", None)
-    if isinstance(params, dict):
-        return params.get("name"), params.get("arguments")
-    return getattr(params, "name", None), getattr(params, "arguments", None)
-
-
-def _argument_mapping(arguments: Any) -> dict[str, Any]:
-    if isinstance(arguments, dict):
-        return arguments
-    dump = getattr(arguments, "model_dump", None)
-    if not callable(dump):
-        return {}
-    try:
-        dumped = dump()
-    except Exception:
-        return {}
-    return dumped if isinstance(dumped, dict) else {}
 
 
 def _tool_payload(result: Any) -> dict[str, Any]:
@@ -949,32 +1127,13 @@ def _tool_payload(result: Any) -> dict[str, Any]:
     return {}
 
 
-def _result_is_error(result: Any) -> bool:
-    if isinstance(result, dict):
-        return bool(result.get("isError") or result.get("is_error"))
-    return bool(getattr(result, "is_error", False) or getattr(result, "isError", False))
-
-
-def _tool_client(ctx: Any) -> str | None:
-    request = getattr(ctx, "request", None)
-    return _host_of(getattr(request, "client", None))
-
-
-def _tool_client_name(ctx: Any) -> str | None:
-    session = getattr(ctx, "session", None)
-    params = getattr(session, "client_params", None)
-    info = getattr(params, "client_info", None)
-    if info is None and isinstance(params, dict):
-        info = params.get("clientInfo") or params.get("client_info")
-    if isinstance(info, dict):
-        name = info.get("name")
-    else:
-        name = getattr(info, "name", None)
-    return name if isinstance(name, str) else None
-
-
-def _tool_place(ctx: Any, result: Any, anchors: Sequence[tuple[str, float, float]]) -> str | None:
-    _name, arguments = _tool_params(ctx)
+def _tool_place(
+    ctx: Any,
+    result: Any,
+    anchors: Sequence[tuple[str, float, float]],
+    geocode: _GeocodeNote | None = None,
+) -> str | None:
+    _name, arguments = _params_name_and_args(ctx)
     mapping = _argument_mapping(arguments)
     payload = _tool_payload(result)
     resolved = payload.get("resolved_place")
@@ -988,6 +1147,8 @@ def _tool_place(ctx: Any, result: Any, anchors: Sequence[tuple[str, float, float
         bbox=bbox if isinstance(bbox, (list, tuple)) else None,
         intersects=intersects,
         anchors=anchors,
+        address=None if geocode is None else geocode.address,
+        kind=None if geocode is None else geocode.kind,
     )
 
 
@@ -1027,19 +1188,22 @@ class SearchUsageMiddleware:
 class ToolUsageCount:
     """Count a successful MCP ``tools/call`` without changing the tool.
 
-    Installed on the server middleware chain. With no recorder, or before
-    :meth:`UsageStats.open`, it is a pass-through. The tool's arguments and
-    its result are what the client sent and what the tool returned.
+    Installed on the server middleware chain. With no recorder installed it
+    is a pass-through. :func:`install_recorder` ``(None)`` on shutdown is
+    what stops counting. The tool's arguments and its result are what the
+    client sent and what the tool returned.
     """
-
-    def __init__(self, recorder: UsageStats | None = None) -> None:
-        self._recorder = recorder
 
     async def __call__(self, ctx: Any, call_next: Callable[..., Any]) -> Any:
         if getattr(ctx, "method", None) != "tools/call":
             return await call_next(ctx)
-        result = await call_next(ctx)
-        recorder = self._recorder if self._recorder is not None else current_recorder()
-        if recorder is not None and recorder.accepting:
-            recorder.observe_tool(ctx, result)
+        note = _GeocodeNote()
+        token = _geocode_note.set(note)
+        try:
+            result = await call_next(ctx)
+        finally:
+            _geocode_note.reset(token)
+        recorder = current_recorder()
+        if recorder is not None:
+            recorder.observe_tool(ctx, result, note)
         return result

@@ -45,6 +45,10 @@ class AreaFallback:
     matched_by: str | None = None
     place: str | None = None
     hint: str | None = None
+    #: Nominatim ``address`` object when the geocoder returned one.
+    address: dict[str, str] | None = None
+    #: Nominatim ``addresstype``, ``type``, or ``category``.
+    kind: str | None = None
 
 
 def _area_matches_task(source: Any, area: str, *, fuzzy: bool) -> bool:
@@ -91,7 +95,7 @@ def resolve_area_fallback(
     if _area_matches_task(source, area, fuzzy=fuzzy):
         return AreaFallback(area=area, bbox=None)
     try:
-        box, label = geocode(area)
+        hit = geocode(area)
     except GeocodeError as exc:
         if _geocode_not_found(exc):
             hint = f"no task named {area}; try place= or bbox="
@@ -102,7 +106,17 @@ def resolve_area_fallback(
             # an HTTP error.
             hint = f"no task named {area}; geocoding was unavailable"
         return AreaFallback(area=None, bbox=None, hint=hint)
-    return AreaFallback(area=None, bbox=box, matched_by="geocode", place=str(label))
+    box, label = hit[0], hit[1]
+    address = getattr(hit, "address", None)
+    kind = getattr(hit, "kind", None)
+    return AreaFallback(
+        area=None,
+        bbox=box,
+        matched_by="geocode",
+        place=str(label),
+        address=address if isinstance(address, dict) else None,
+        kind=kind if isinstance(kind, str) else None,
+    )
 
 
 def geocode_note(decision: AreaFallback) -> dict[str, Any] | None:

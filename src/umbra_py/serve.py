@@ -220,6 +220,7 @@ from .models import BBox, UmbraItem, _iso_utc, _normalize_assets
 from .schemas import load_schema
 from .usage_stats import (
     STATS_CACHE_CONTROL,
+    USAGE_FIRST_PAGE,
     SearchUsageMiddleware,
     UsageStats,
     current_recorder,
@@ -4116,7 +4117,6 @@ def build_app(
             return index_facts(path)
 
         usage = UsageStats(stats_path_for(index_path), facts=_usage_facts)
-        install_recorder(usage)
         if live:
             usage_index = None
         elif index_path is not None:
@@ -4130,6 +4130,8 @@ def build_app(
         bbox: BBox | None,
         intersects: Any,
         resolved_place: str | None,
+        address: Any = None,
+        kind: str | None = None,
     ) -> None:
         # The coarse name only. The raw place string and the geometry stay
         # on the request, which is not what the counter writes down.
@@ -4141,6 +4143,8 @@ def build_app(
             bbox=bbox,
             intersects=intersects,
             anchors=usage.anchors,
+            address=address if isinstance(address, dict) else None,
+            kind=kind,
         )
 
     @asynccontextmanager
@@ -4183,6 +4187,7 @@ def build_app(
                     daemon=True,
                 ).start()
         if usage is not None:
+            install_recorder(usage)
             usage.open(usage_index)
         async with mcp_life:
             try:
@@ -4709,23 +4714,12 @@ def build_app(
 
             The body is the committed ``usage-stats`` contract. ``Cache-Control``
             is the same window the process keeps. Catalog facts come from the
-            loaded index; a read failure leaves those fields null and still
-            returns 200. This path is not exempt from the token bucket. A local
-            server does not mount it.
+            loaded index; a read failure leaves those fields null. A failure
+            of the payload itself is an error, which the docs panel treats as
+            unavailable. This path is not exempt from the token bucket. A
+            local server does not mount it.
             """
-            try:
-                payload = await asyncio.to_thread(hosted_usage.public_payload)
-            except Exception:
-                _log.warning("usage stats payload failed", exc_info=True)
-                payload = {
-                    "searches_served": hosted_usage.searches_served,
-                    "counting_since": hosted_usage.counting_since,
-                    "scenes_indexed": None,
-                    "thumbnails": None,
-                    "index_built_at": None,
-                    "top_places": [],
-                    "generated_at": hosted_usage.counting_since,
-                }
+            payload = await asyncio.to_thread(hosted_usage.public_payload)
             return JSONResponse(payload, headers={"Cache-Control": STATS_CACHE_CONTROL})
 
     def _unhealthy(exc: Exception) -> Any:
@@ -4857,6 +4851,7 @@ def build_app(
         self_href: str,
         fallback: bool = False,
     ) -> JSONResponse:
+        request.scope[USAGE_FIRST_PAGE] = offset == 0
         limit = _clamp_limit(limit, cap=_search_limit_cap(public=public))
         source = _open()
         try:
@@ -4866,6 +4861,8 @@ def build_app(
             note = None
             baked_ids: set[str] = set()
             resolved_place: str | None = None
+            place_address = None
+            place_kind = None
             # ``fallback`` is GET /search only. /collections/.../items keeps
             # area as a task filter, which is what that route does today.
             if fallback:
@@ -4887,6 +4884,8 @@ def build_app(
                     search_fuzzy = False
                     note = _geocode_fields(decision)
                     resolved_place = decision.place
+                    place_address = decision.address
+                    place_kind = decision.kind
             page, has_next = run_search(
                 source,
                 bbox=search_bbox,
@@ -4922,7 +4921,14 @@ def build_app(
         )
         if note:
             result.update(note)
-        _note_usage(request, bbox=bbox, intersects=intersects, resolved_place=resolved_place)
+        _note_usage(
+            request,
+            bbox=bbox,
+            intersects=intersects,
+            resolved_place=resolved_place,
+            address=place_address,
+            kind=place_kind,
+        )
         return JSONResponse(content=result, media_type=geojson)
 
     @app.get("/collections/{collection_id}/items", tags=["STAC"])
@@ -5093,6 +5099,7 @@ def build_app(
     def _post_response(
         request: Request, parsed: SearchBody, body: Mapping[str, Any], limit: int, offset: int
     ) -> JSONResponse:
+        request.scope[USAGE_FIRST_PAGE] = offset == 0
         source = _open()
         try:
             decision = _decide_area(
@@ -5119,12 +5126,16 @@ def build_app(
             note = None
             baked_ids: set[str] = set()
             resolved_place: str | None = None
+            place_address = None
+            place_kind = None
             if decision.matched_by:
                 search_area = None
                 search_bbox = decision.bbox
                 search_fuzzy = False
                 note = _geocode_fields(decision)
                 resolved_place = decision.place
+                place_address = decision.address
+                place_kind = decision.kind
             page, has_next = run_search(
                 source,
                 bbox=search_bbox,
@@ -5173,6 +5184,8 @@ def build_app(
             bbox=parsed.bbox,
             intersects=parsed.intersects,
             resolved_place=resolved_place,
+            address=place_address,
+            kind=place_kind,
         )
         return JSONResponse(content=result, media_type=geojson)
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/reesehammer/umbra-py/docs/schemas/usage-stats.schema.json",
   "title": "Hosted usage stats",
-  "description": "The JSON object GET /stats returns on umbra serve --public. searches_served counts successful GET and POST /search responses and successful calls to the MCP search tools search_catalog, find_repeat_sites, find_similar, find_similar_text, and watch_site, since counting_since, which is when this counter file was first created. Probes, health checks, errors, smoke traffic, and metadata tools are not included, and the total is not backfilled. scenes_indexed, thumbnails, and index_built_at come from the catalog index and thumbnail sidecar loaded in the process; they are null when that index cannot be read. top_places lists at most ten coarse place names, and only those reached by at least three distinct clients on one UTC day. The document is recomputed at most once an hour. It does not include an uptime percentage or a 5xx count: the process does not record those. Stable within a minor version.",
+  "description": "The JSON object GET /stats returns on umbra serve --public. searches_served counts the first page of a successful GET or POST /search (no paging token, or a token of zero; a later page is the same search) and successful calls to the MCP search tools search_catalog, find_repeat_sites, find_similar, find_similar_text, and watch_site, since counting_since, which is when this counter file was first created. An empty 200 still counts. Probes, health checks, errors, smoke traffic (including the replace-crawler canary), and metadata tools are not included, and the total is not backfilled. scenes_indexed, thumbnails, and index_built_at come from the catalog index and thumbnail sidecar loaded in the process; they are null when that index cannot be read. top_places lists at most ten coarse place names, and only those reached by at least three distinct clients on one UTC day. A venue geocode is published as its city, region, or country. The document is recomputed at most once an hour. It does not include an uptime percentage or a 5xx count: the process does not record those. Stable within a minor version.",
   "type": "object",
   "required": [
     "searches_served",
@@ -32,7 +32,7 @@
     "searches_served": {
       "type": "integer",
       "minimum": 0,
-      "description": "Successful GET and POST /search responses plus successful MCP search tools (search_catalog, find_repeat_sites, find_similar, find_similar_text, watch_site) since counting_since. Health checks, unknown paths, exploit probes, HEAD and OPTIONS, HTTP 429 and other errors, the X-Umbra-Smoke opt-out, metadata tools, and known bot or uptime user agents are not included."
+      "description": "First page of a successful GET or POST /search, plus one count per successful MCP search tool call (search_catalog, find_repeat_sites, find_similar, find_similar_text, watch_site), since counting_since. A paging token or offset other than zero is not another search. An empty 200 still counts. Health checks, unknown paths, exploit probes, HEAD and OPTIONS, HTTP 429 and other errors, the X-Umbra-Smoke opt-out (including the replace-crawler canary), metadata tools, and known bot or uptime user agents are not included."
     },
     "counting_since": {
       "type": "string",

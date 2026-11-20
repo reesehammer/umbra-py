@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
+
+#: Imported automatically by the snippet subprocesses. Not part of the docs.
+SMOKE_HOOK = Path(__file__).resolve().parent / "canary_sitecustomize"
+SMOKE_HEADER = {"X-Umbra-Smoke": "1"}
 
 ROOT = Path(__file__).resolve().parents[1]
 SNIPPETS = ROOT / "docs" / "examples" / "replace_crawler"
@@ -135,13 +140,22 @@ def duckdb_v2_ready(metadata: dict | None, asset_field_names: set[str]) -> bool:
 
 
 def run_snippet(path: Path, *, timeout: int = 180) -> list[str]:
-    """Run ``path`` and return its non-empty stdout lines."""
+    """Run ``path`` and return its non-empty stdout lines.
+
+    ``PYTHONPATH`` points at :data:`SMOKE_HOOK` so the snippet's urllib,
+    requests, and httpx calls send ``X-Umbra-Smoke`` without the program
+    shown in the docs changing.
+    """
+    env = os.environ.copy()
+    previous = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(SMOKE_HOOK) if not previous else str(SMOKE_HOOK) + os.pathsep + previous
     completed = subprocess.run(
         [sys.executable, str(path)],
         check=False,
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
     print(f"--- {path.name} ---")
     if completed.stdout:
@@ -152,7 +166,8 @@ def run_snippet(path: Path, *, timeout: int = 180) -> list[str]:
 
 
 def _fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=60) as response:
+    request = urllib.request.Request(url, headers=SMOKE_HEADER)
+    with urllib.request.urlopen(request, timeout=60) as response:
         payload = json.load(response)
     if not isinstance(payload, dict):
         raise SystemExit(f"search response was not an object: {url}")
