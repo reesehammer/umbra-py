@@ -3290,6 +3290,11 @@ def build_server() -> MCPServer:
     # with "<redacted>".
     quiet_tool_failure_text()
     server.middleware.append(ToolCallLog())
+    # Inside the log middleware, after the tool has returned. Counting is not
+    # part of any tool signature; with no recorder installed this is a no-op.
+    from .usage_stats import ToolUsageCount
+
+    server.middleware.append(ToolUsageCount())
 
     @server.custom_route("/healthz", methods=["GET"], name="healthz")
     async def _healthz(request: Any) -> Any:

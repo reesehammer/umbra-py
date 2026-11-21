@@ -192,6 +192,81 @@ Every response also sends `X-Umbra-License`, `X-Umbra-Attribution`, and
 `Access-Control-Max-Age: 600`, so a browser may reuse that answer for 600
 seconds. The server does not pass `max_age`; 600 is the CORS middleware
 default. `GET /search` with no custom headers does not send a preflight.
+`GET /stats` is the same kind of request: the docs site fetches it with
+`fetch()` and no custom headers.
+
+## Usage stats
+
+`GET /stats` returns a small JSON document. The docs home page reads
+`https://api.umbra-py.space/stats` and, if that fetch fails or takes longer
+than a few seconds, shows a quiet "stats unavailable" line. The same token
+bucket as every other route applies. `/stats` is not a health check.
+
+The process recomputes the document at most once an hour and sends
+`Cache-Control: public, max-age=3600`. Until that hour is up it serves the
+copy it already computed.
+
+`GET /stats` is mounted only by `umbra serve --public`. A local
+`umbra serve` does not start the counter, write `usage-stats.json`, or
+serve the route.
+
+`searches_served` counts, since `counting_since`, the first page of a
+successful `GET` or `POST /search` and one successful call to each of
+these MCP tools: `search_catalog`, `find_repeat_sites`, `find_similar`,
+`find_similar_text`, and `watch_site`. A first page is a request with no
+paging `token` or `offset`, or with that value at zero. A later page is
+the same search and is not counted again. An HTTP 200 with no features
+still counts. That timestamp is when the counter file was first created.
+The total starts at zero then. It is not backfilled and it is not an
+estimate. These do not count: any path other than `/search` (including
+`/livez`, `/healthz`, and exploit probes); `HEAD` and `OPTIONS`; HTTP 429
+and any error status; a request carrying `X-Umbra-Smoke: 1` (or `true` /
+`yes` / `on`), which is what this project's replace-crawler canary sends;
+user agents that look like uptime monitors or bots, including this
+project's own `umbra-py-healthz-monitor` and `umbra-py-mcp-smoke`; MCP
+tools that read one item or the index, render, or stamp a description. A
+blank user agent is not counted. A request that does not clearly qualify
+is not counted.
+
+`scenes_indexed`, `thumbnails`, and `index_built_at` are read from the
+catalog index and the thumbnail sidecar this process loaded. They are null
+when that read fails. `generated_at` is when the cached document was built.
+
+`top_places` is at most ten coarse names. A name is included only when at
+least three distinct clients reached it on the same UTC day. The published
+figure is the high-water mark of that daily count. A client is a salted
+hash of the address the rate limiter already uses. The salt is random, kept
+in memory, and replaced each UTC day. It is not written. The file stores the
+coarse name and the count. It does not store the hash, the address, the user
+agent, or the query.
+
+A place name comes from geocoder output (`resolved_place` or
+`display_name`) or from a bbox or `intersects` geometry whose centre is
+within one degree of a place label already baked into the index. The box
+must be at most five degrees on a side. The label is reduced to a city and
+a country; a segment that looks like a street is dropped. When the
+geocoder returns address components, the published name uses the city,
+town, village, or county, then the state or region and the country. A
+point of interest is not published under the venue's name: a result whose
+class is not a settlement or an admin area keeps the state and country, or
+just the country. A free-text `place=` argument is not stored. When a
+request also has a bbox, geocoding is skipped, so that text never becomes
+a published place. A task name that was not geocoded is not a place.
+
+The counters are kept in `usage-stats.json` beside `catalog.db` on the
+`/data` volume (`XDG_CACHE_HOME`, or `UMBRA_INDEX_DB` when that is set).
+The request path only updates memory. A background thread writes the file,
+and shutdown writes whatever is left, so one search does not wait on a
+write. Names that never reach three clients are dropped when the UTC day
+changes, and the file keeps at most 2,000 names. A file that cannot be
+read, or is over a megabyte, is renamed aside instead of being overwritten
+with a zero. If the volume cannot be written, `/stats` still answers from
+memory and the next restart starts from zero.
+
+This document does not include an uptime percentage or a count of 5xx
+responses over 30 days. The process does not record either. Uptime is the
+external probe history on the `monitoring` branch, described above. 5xx
+responses are only in the log stream.
 
 ## Baked thumbnails
 

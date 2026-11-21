@@ -3954,6 +3954,30 @@ class CatalogIndex:
         collect is published under both ``tasks/`` and ``task-data/``)."""
         return self._conn.execute("SELECT COUNT(DISTINCT id) FROM items").fetchone()[0]
 
+    def place_anchors(self) -> list[tuple[str, float, float]]:
+        """Baked place label and the mean footprint centre of the rows that carry it.
+
+        One entry per distinct ``place`` string from :meth:`bake_places`:
+        ``(label, lat, lon)``. A search bbox is named from the nearest of
+        these, so the usage counter can publish a city without storing the
+        box. An index with no labels, or a schema that has no ``place``
+        column, returns an empty list.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT place, AVG((min_lat + max_lat) / 2.0), "
+                "AVG((min_lon + max_lon) / 2.0) FROM items "
+                "WHERE place IS NOT NULL AND min_lat IS NOT NULL "
+                "AND min_lon IS NOT NULL GROUP BY place"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        anchors: list[tuple[str, float, float]] = []
+        for name, lat, lon in rows:
+            if isinstance(name, str) and name and lat is not None and lon is not None:
+                anchors.append((name, float(lat), float(lon)))
+        return anchors
+
     def stats(self) -> dict[str, object]:
         """Summary counts for ``umbra index info``: item count, acquisition-date
         span, number of distinct tasks, how many items carry a baked place label

@@ -10,6 +10,22 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 ## [Unreleased]
 
 ### Added
+- **`GET /stats` is a cached usage counter on `umbra serve --public`.**
+  It counts the first page of a successful `GET`/`POST /search` (a later
+  `token` or `offset` is the same search) and the MCP search tools
+  `search_catalog`, `find_repeat_sites`, `find_similar`,
+  `find_similar_text`, and `watch_site` since `counting_since` (zero when
+  the counter first starts; probes, health checks, errors, smoke traffic
+  — including the replace-crawler canary — and metadata tools are left
+  out) and reports the loaded index size plus a top-places list. A local
+  `umbra serve` does not mount the route or write the file. The docs home
+  page reads `https://api.umbra-py.space/stats` and labels the total and
+  the top-places list with the counter's start date from `counting_since`
+  (for example Nov 20, 2026), using that date when the field is absent.
+  The README carries a PyPI downloads badge. The totals are written beside
+  the catalog index
+  so a redeploy keeps them. Uptime and a 30-day 5xx count are not in this
+  document: the process does not store them.
 - **A bulk GEC download for an area and a date range.** The
   replace-your-crawler page shows `umbra index fetch`,
   `umbra search --local` (`--bbox`, `--start`, `--end`, `--product GEC`),
