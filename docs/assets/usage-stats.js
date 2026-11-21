@@ -48,16 +48,43 @@
   }
 
   function sinceParts(value) {
+    // counting_since is a UTC timestamp. The label is the Pacific calendar
+    // day, so a launch just after midnight UTC still reads the previous date.
     if (typeof value !== "string") return null;
-    var match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
-    if (!match) return null;
-    var month = MONTHS[Number(match[2]) - 1];
-    var day = Number(match[3]);
-    if (!month || day < 1 || day > 31) return null;
-    return {
-      iso: match[1] + "-" + match[2] + "-" + match[3],
-      label: month + " " + day + ", " + match[1],
-    };
+    var instant = Date.parse(value);
+    if (typeof instant !== "number" || instant !== instant) return null;
+    try {
+      if (typeof Intl === "undefined" || typeof Intl.DateTimeFormat !== "function") return null;
+      var fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Los_Angeles",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+      if (
+        typeof fmt.resolvedOptions !== "function" ||
+        fmt.resolvedOptions().timeZone !== "America/Los_Angeles"
+      ) {
+        return null;
+      }
+      var label = fmt.format(instant);
+      if (typeof label !== "string") return null;
+      label = label.replace(/[\u202f\u00a0]/g, " ");
+      var match = /^([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})$/.exec(label);
+      if (!match) return null;
+      var monthIndex = MONTHS.indexOf(match[1]);
+      if (monthIndex < 0) return null;
+      var month = String(monthIndex + 1);
+      if (month.length < 2) month = "0" + month;
+      var day = match[2];
+      if (day.length < 2) day = "0" + day;
+      return {
+        iso: match[3] + "-" + month + "-" + day,
+        label: match[1] + " " + match[2] + ", " + match[3],
+      };
+    } catch (err) {
+      return null;
+    }
   }
 
   function render(root, data) {
