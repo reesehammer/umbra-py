@@ -27,7 +27,9 @@ API (`umbra serve`) and MCP server sit on the same host.
     `built_at` 2026-10-08, newest plausible acquisition 2026-09-13.
     Not affiliated with Umbra Lab, Inc.
 
-<div id="umbra-usage" hidden></div>
+<div id="umbra-usage" hidden>
+<p id="umbra-usage-lead">Searches served since <time id="umbra-usage-since" datetime="2026-11-20">Nov 20, 2026</time>: <strong id="umbra-usage-count"></strong></p>
+</div>
 
 ## What it gives you
 

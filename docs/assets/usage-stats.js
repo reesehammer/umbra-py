@@ -3,6 +3,8 @@
 (function () {
   var ENDPOINT = "https://api.umbra-py.space/stats";
   var TIMEOUT_MS = 4000;
+  var FALLBACK_SINCE = "Nov 20, 2026";
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   function boot() {
     var root = document.getElementById("umbra-usage");
@@ -45,22 +47,54 @@
     root.appendChild(note);
   }
 
+  function sinceParts(value) {
+    if (typeof value !== "string") return null;
+    var match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (!match) return null;
+    var month = MONTHS[Number(match[2]) - 1];
+    var day = Number(match[3]);
+    if (!month || day < 1 || day > 31) return null;
+    return {
+      iso: match[1] + "-" + match[2] + "-" + match[3],
+      label: month + " " + day + ", " + match[1],
+    };
+  }
+
   function render(root, data) {
-    if (!data || typeof data.searches_served !== "number" || typeof data.counting_since !== "string") {
+    if (!data || typeof data.searches_served !== "number") {
       fail(root);
       return;
     }
     root.hidden = false;
-    root.textContent = "";
     root.style.margin = "1em 0 1.25em";
-    var since = data.counting_since.slice(0, 10);
-    var lead = document.createElement("p");
+    var parts = sinceParts(data.counting_since);
+    var since = parts ? parts.label : FALLBACK_SINCE;
+    var lead = document.getElementById("umbra-usage-lead");
+    if (!lead || lead.parentNode !== root) {
+      root.textContent = "";
+      lead = document.createElement("p");
+      lead.id = "umbra-usage-lead";
+      lead.appendChild(document.createTextNode("Searches served since "));
+      var time = document.createElement("time");
+      time.id = "umbra-usage-since";
+      lead.appendChild(time);
+      lead.appendChild(document.createTextNode(": "));
+      var strong = document.createElement("strong");
+      strong.id = "umbra-usage-count";
+      lead.appendChild(strong);
+      root.appendChild(lead);
+    }
     lead.style.margin = "0.2em 0";
-    lead.appendChild(document.createTextNode("Searches served since " + since + ": "));
-    var strong = document.createElement("strong");
-    strong.textContent = formatNumber(data.searches_served);
-    lead.appendChild(strong);
-    root.appendChild(lead);
+    var sinceEl = document.getElementById("umbra-usage-since");
+    var countEl = document.getElementById("umbra-usage-count");
+    if (sinceEl) {
+      sinceEl.textContent = since;
+      if (typeof sinceEl.setAttribute === "function") {
+        sinceEl.setAttribute("datetime", parts ? parts.iso : "2026-11-20");
+      }
+    }
+    if (countEl) countEl.textContent = formatNumber(data.searches_served);
+    while (lead.nextSibling) root.removeChild(lead.nextSibling);
 
     var bits = [];
     if (typeof data.scenes_indexed === "number") {
@@ -87,7 +121,7 @@
     });
     if (!named.length) return;
     var heading = document.createElement("p");
-    heading.textContent = "Top places searched (3+ distinct clients in a day)";
+    heading.textContent = "Top places searched since " + since + " (3+ distinct clients in a day)";
     heading.style.margin = "0.6em 0 0.2em";
     heading.style.fontSize = "0.85em";
     root.appendChild(heading);

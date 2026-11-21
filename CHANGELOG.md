@@ -19,8 +19,11 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   — including the replace-crawler canary — and metadata tools are left
   out) and reports the loaded index size plus a top-places list. A local
   `umbra serve` does not mount the route or write the file. The docs home
-  page reads `https://api.umbra-py.space/stats`, and the README carries a
-  PyPI downloads badge. The totals are written beside the catalog index
+  page reads `https://api.umbra-py.space/stats` and labels the total and
+  the top-places list with the counter's start date from `counting_since`
+  (for example Nov 20, 2026), using that date when the field is absent.
+  The README carries a PyPI downloads badge. The totals are written beside
+  the catalog index
   so a redeploy keeps them. Uptime and a 30-day 5xx count are not in this
   document: the process does not store them.
 - **A bulk GEC download for an area and a date range.** The
