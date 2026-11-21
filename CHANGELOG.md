@@ -9,6 +9,9 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 
 ## [Unreleased]
 
+### Fixed
+- The docs home panel shows `counting_since` in Pacific time, so `2026-11-21T00:24:29Z` reads Nov 20, 2026 on the search total and the top-places heading.
+
 ### Added
 - **`GET /stats` is a cached usage counter on `umbra serve --public`.**
   It counts the first page of a successful `GET`/`POST /search` (a later
