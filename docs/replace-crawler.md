@@ -42,9 +42,10 @@ on the release. The 2026-11-16 report kept 17,230 rows, quarantined 8, dropped
 [`coverage.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.json)
 measures the bucket against the index, by prefix (`sar-data/tasks/`,
 `sar-data/task-data/`, `open-data/`), sidecar layout, and product. The
-2026-11-16 report indexed 17,230 of 17,985 indexable sidecars (95.8%).
-The missing list on that report is empty. Quarantined rows and dropped
-duplicate ids are accounted, not counted as missing.
+2026-11-16 report indexes 17,230 of 17,994 bucket acquisitions (`pct`
+95.75). `pct_indexable` is 100.0: 17,985 have a sidecar, 755 of those are
+omitted as quarantined rows or duplicate ids, and the other 17,230 are
+indexed. The missing list is empty.
 
 `/healthz` `built_at` and the release notes are the live copy of these
 numbers. The dates above are the snapshot this page was checked against.
@@ -361,10 +362,9 @@ does not filter: the parameter is not read.
 
 Follow the `links` entry whose `rel` is `next`. On a GET search, `method` is
 `GET` and `href` already includes the query, with `token` as the offset.
-Request that URL with no extra parameters. HTTP 429 means the client is over
-the cap. `Retry-After` is integer seconds until a token is free; wait that
-long before the next request. The adapter below raises with that header so
-the caller can wait and try again. The host is
+Request that URL with no extra parameters. On HTTP 429, wait the number of
+seconds in `Retry-After` before the next request. The adapter below raises
+with that header so the caller can wait and try again. The host is
 best effort and has no SLA: 120 requests per minute sustained, per client IP,
 with a burst of 16. Do not page the whole catalog this way. Attribute Umbra,
 CC BY 4.0 (`X-Umbra-Attribution`). The contract is
