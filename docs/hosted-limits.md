@@ -288,6 +288,8 @@ eight concurrent catalog-read slots (a browser fetches several images at once).
 on this host, `type: image/png`, `roles: ["thumbnail"]`) only when that item
 has a bake. An item without one has no thumbnail asset; show a placeholder.
 On-demand `/artifacts/quicklook` and the other `/artifacts/*` routes stay off.
+A browser example that renders `assets.thumbnail.href` is in
+[From a browser](replace-crawler.md#from-a-browser).
 
 ## Bulk use and outages
 
