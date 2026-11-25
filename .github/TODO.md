@@ -12,8 +12,9 @@ still open.
 
 ## Verify hosted API key emails
 
-- **Surfaced in:** optional API keys for the hosted API (sign-up on
-  `POST /keys`, storage in `api-keys.json` beside the catalog index).
+- **Surfaced in:** [PR #340](https://github.com/reesehammer/umbra-py/pull/340)
+  (optional API keys for the hosted API; sign-up on `POST /keys`, storage
+  in `api-keys.json` beside the catalog index).
 - **Code:** `src/umbra_py/api_keys.py` (`signup_from_mapping`,
   `ApiKeyStore.create`).
 
