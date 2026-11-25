@@ -188,6 +188,13 @@ All behaviour is driven by environment variables (set them in the compose file's
 | `UMBRA_WATCHDOG_GRACE_S` | `120` | Startup window during which silence is ignored. |
 | `UMBRA_TRUSTED_PROXY_HOPS` | `1` | Rightmost `X-Forwarded-For` hops used when `X-Real-IP` is absent. Railway does not promise a hop count; leave the default. |
 | `UMBRA_PUBLIC_BASE_URL` | unset | Optional `http(s)://host[:port]` origin for STAC links on `--public` only. A trailing slash is stripped; any other value is ignored. Unset, `--public` uses `X-Forwarded-Proto` and `X-Forwarded-Host` or `Host` when the peer is not loopback. |
+| `UMBRA_API_KEY_RATE_LIMIT` | `600` | Sustained requests per minute for one valid API key on `--public`. Anonymous traffic stays at 120/min. |
+| `UMBRA_API_KEY_BURST` | `64` | Burst for that key, capped at the sustained limit. |
+| `UMBRA_API_KEY_CONCURRENCY` | `32` | Catalog reads one key may hold at once. |
+| `UMBRA_API_KEY_PEPPER` | unset | Optional HMAC pepper for stored key hashes. Unset stores SHA-256. Changing it invalidates existing keys. |
+| `UMBRA_SIGNUP_RATE_LIMIT` | `5` | Successful `POST /keys` creates per IP per window. |
+| `UMBRA_SIGNUP_WINDOW_S` | `3600` | Sign-up window, in seconds. |
+| `UMBRA_SIGNUP_BURST` | `3` | Sign-up burst, capped at the sustained limit. |
 
 If the first-boot fetch fails (e.g. no outbound network), the entrypoint falls
 back to a live S3 walk so the server still answers.

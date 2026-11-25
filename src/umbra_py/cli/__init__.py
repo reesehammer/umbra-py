@@ -106,6 +106,7 @@ from .indexes import (  # noqa: E402
     semantic_info,
     semantic_search,
 )
+from .keys import keys, keys_list, keys_revoke  # noqa: E402
 from .process import chips, convert, stack  # noqa: E402
 from .scenes import describe, download, load_cmd, quicklook, view  # noqa: E402
 

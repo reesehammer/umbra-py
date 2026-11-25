@@ -152,8 +152,9 @@ Run it with ``umbra serve`` (needs the ``serve`` extra:
 community instance: STAC search and Streamable HTTP MCP on one process
 (``POST /mcp``), on-demand artifacts off so this host does not proxy Umbra
 COGs, the baked-thumbnail route left on (a local PNG, not a render), a
-per-client request cap, CC-BY license headers, and a refuse of Canopy / model
-keys and of a live S3 walk. Railway's start command is that flag.
+per-client request cap, optional API keys on a higher limit, CC-BY license
+headers, and a refuse of Canopy / model keys and of a live S3 walk.
+Railway's start command is that flag.
 """
 
 from __future__ import annotations
@@ -181,6 +182,22 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ._geometry import Geometry, parse_geometry
+from .api_keys import (
+    ApiKeyStore,
+    SignupError,
+    api_key_burst,
+    api_key_concurrency,
+    api_key_rate_limit,
+    issued_document,
+    keys_path_for,
+    signup_burst,
+    signup_form_html,
+    signup_from_mapping,
+    signup_rate_limit,
+    signup_result_html,
+    signup_window_s,
+    unauthorized_body,
+)
 from .catalog import DateLike, _coerce_date
 from .constants import (
     ASSET_SCHEMA_FIELD,
@@ -2861,17 +2878,26 @@ class ClientInFlight:
     stays the size of the in-flight set rather than every client ever seen.
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, *, key_limit: int | None = None) -> None:
         if limit < 1:
             raise ValueError("in-flight limit must be >= 1")
+        if key_limit is not None and key_limit < 1:
+            raise ValueError("in-flight limit must be >= 1")
         self.limit = limit
+        self.key_limit = key_limit if key_limit is not None else limit
         self._lock = threading.Lock()
         self._counts: dict[str, int] = {}
+
+    def limit_for(self, client: str) -> int:
+        """The cap for ``client``. Key identities use ``key_limit``."""
+        if client.startswith("key:"):
+            return self.key_limit
+        return self.limit
 
     def acquire(self, client: str) -> bool:
         with self._lock:
             held = self._counts.get(client, 0)
-            if held >= self.limit:
+            if held >= self.limit_for(client):
                 return False
             self._counts[client] = held + 1
             return True
@@ -2994,13 +3020,14 @@ def public_client_ip(peer: str | None, headers: Mapping[str, str]) -> str:
 
 
 def rate_limit_identity(request: Any, *, public: bool) -> str:
-    """Bucket key for the per-client request cap.
+    """Bucket key for an anonymous request.
 
-    Public mode ignores ``Authorization``. A bearer token is not
-    authentication on that host, and a new token per request was a new
-    bucket. The address is whatever :func:`public_client_ip` stored on
-    ``request.client``. Other modes keep :func:`client_identity` (bearer,
-    then the socket peer) so a local ``--rate-limit`` still separates tokens.
+    On the public host this is the edge's client address
+    (:func:`public_client_ip` on ``request.client``). A valid API key does
+    not use this identity; it has its own bucket. A presented key that is
+    invalid or revoked is a 401, not this bucket with a successful response.
+    Other modes keep :func:`client_identity` (bearer, then the socket peer)
+    so a local ``--rate-limit`` still separates tokens.
     """
     if public:
         client = getattr(request, "client", None)
@@ -3191,9 +3218,12 @@ class InFlightClientMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        client = scope.get("client")
-        host = client[0] if client else None
-        token = _inflight_client.set(f"ip:{host or 'unknown'}")
+        identity = scope.get("umbra.rate_identity")
+        if not isinstance(identity, str) or not identity:
+            client = scope.get("client")
+            host = client[0] if client else None
+            identity = f"ip:{host or 'unknown'}"
+        token = _inflight_client.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
@@ -3219,10 +3249,14 @@ class BodyLimitMiddleware:
         app: Any,
         max_bytes: int = PUBLIC_MAX_BODY_BYTES,
         limiter: RateLimiter | None = None,
+        key_limiter: RateLimiter | None = None,
+        keys: ApiKeyStore | None = None,
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
         self.limiter = limiter
+        self.key_limiter = key_limiter
+        self.keys = keys
 
     async def _reject_too_large(self, scope: Mapping[str, Any], send: Any) -> None:
         """413, or 429 when this reject is the request that crosses the cap.
@@ -3230,27 +3264,61 @@ class BodyLimitMiddleware:
         A body that is never parsed still counts, so a client cannot dodge the
         limiter by sending only oversized requests. The limiter's normal path
         does not also count it: this middleware returns before the route.
+        A presented key that is invalid or revoked is 401, not an anonymous
+        413. A valid key spends its own bucket.
         """
-        if self.limiter is not None:
-            client = scope.get("client")
-            host = client[0] if client else None
-            allowed, _remaining, retry_after = self.limiter.hit(f"ip:{host or 'unknown'}")
-            if not allowed:
-                payload = json.dumps(self.limiter.rejection(retry_after, scope="IP")).encode(
-                    "utf-8"
-                )
-                await _send_json(
-                    send,
-                    429,
-                    payload,
-                    extra_headers=[
-                        (b"retry-after", str(retry_after).encode("ascii")),
-                        (b"x-ratelimit-limit", str(self.limiter.limit).encode("ascii")),
-                        (b"x-ratelimit-remaining", b"0"),
-                    ],
-                )
+        headers = _scope_headers(scope)
+        auth = self.keys.authenticate(headers) if self.keys is not None else None
+        client = scope.get("client")
+        host = client[0] if client else None
+        if auth is not None and auth.status in {"invalid", "revoked"}:
+            if self.limiter is not None and not await self._spend(
+                send, self.limiter, f"ip:{host or 'unknown'}", "IP"
+            ):
                 return
+            payload = json.dumps(unauthorized_body(auth.status)).encode("utf-8")
+            await _send_json(
+                send,
+                401,
+                payload,
+                extra_headers=[(b"www-authenticate", b'Bearer realm="umbra-py"')],
+            )
+            return
+        limiter: RateLimiter | None = self.limiter
+        scope_name = "IP"
+        identity = f"ip:{host or 'unknown'}"
+        if (
+            auth is not None
+            and auth.status == "ok"
+            and auth.rate_identity
+            and self.key_limiter is not None
+        ):
+            limiter = self.key_limiter
+            scope_name = "key"
+            identity = auth.rate_identity
+            if auth.record is not None and self.keys is not None:
+                self.keys.touch(auth.record)
+        if limiter is not None and not await self._spend(send, limiter, identity, scope_name):
+            return
         await _send_json(send, 413, _too_large_body())
+
+    async def _spend(self, send: Any, limiter: RateLimiter, identity: str, scope_name: str) -> bool:
+        """Record one hit. False when the 429 was already sent."""
+        allowed, _remaining, retry_after = limiter.hit(identity)
+        if allowed:
+            return True
+        payload = json.dumps(limiter.rejection(retry_after, scope=scope_name)).encode("utf-8")
+        await _send_json(
+            send,
+            429,
+            payload,
+            extra_headers=[
+                (b"retry-after", str(retry_after).encode("ascii")),
+                (b"x-ratelimit-limit", str(limiter.limit).encode("ascii")),
+                (b"x-ratelimit-remaining", b"0"),
+            ],
+        )
+        return False
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http" or scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
@@ -3794,6 +3862,12 @@ _JOB_RESPONSE = _json_response(
     "RenderJob", "Render queued; poll the `self` link until `status` leaves `queued`/`running`."
 )
 
+#: ``POST /keys``. The secret is in this response only.
+_KEY_RESPONSE = _json_response(
+    "ApiKeyIssued",
+    "The new API key. Shown once; only a hash is stored.",
+)
+
 #: ``GET /stats``. The same committed contract the docs site reads.
 _STATS_RESPONSE = _json_response(
     "UsageStats",
@@ -4014,7 +4088,9 @@ def build_app(
     per :data:`PUBLIC_RATE_WINDOW_S`, burst :data:`PUBLIC_RATE_BURST`;
     ``rate_limit`` of ``0`` disables it, and a lower ``rate_limit`` shrinks
     the burst to match), at most :data:`PUBLIC_CLIENT_CONCURRENCY` catalog
-    reads in flight per client, CC-BY license headers,
+    reads in flight per client. A valid API key (``Authorization: Bearer``
+    or ``X-API-Key``) uses its own bucket and a higher in-flight cap; an
+    invalid or revoked key is HTTP 401. CC-BY license headers,
     and a refuse of ``live=True``. Secret env vars are checked in
     :func:`serve`, not here, so tests can build a public app on a machine
     that happens to have a model key.
@@ -4234,41 +4310,95 @@ def build_app(
         expose_headers=list(CORS_EXPOSE_HEADERS),
     )
 
+    api_key_store: ApiKeyStore | None = None
+    key_limiter: RateLimiter | None = None
+    signup_limiter: RateLimiter | None = None
+    if public:
+        api_key_store = ApiKeyStore(keys_path_for(index_path))
+        signup_limiter = RateLimiter(
+            signup_rate_limit(),
+            window_s=signup_window_s(),
+            burst=signup_burst(),
+        )
+    app.state.api_keys = api_key_store
     limiter = RateLimiter(rate_limit) if rate_limit else None
+    if public and limiter is not None:
+        key_limiter = RateLimiter(api_key_rate_limit(), burst=api_key_burst())
+
+    def _rate_limit_response(
+        active: RateLimiter, retry_after: int, scope_name: str
+    ) -> JSONResponse:
+        return JSONResponse(
+            active.rejection(retry_after, scope=scope_name),
+            status_code=429,
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(active.limit),
+                "X-RateLimit-Remaining": "0",
+                "X-Umbra-License": DATA_LICENSE,
+                "X-Umbra-Attribution": ATTRIBUTION,
+                "Link": f'<{LICENSE_URL}>; rel="license"',
+            },
+        )
 
     class _GuardMiddleware(BaseHTTPMiddleware):
-        """CC-BY headers on every response; optional per-client request cap."""
+        """CC-BY headers on every response; optional per-client request cap.
+
+        On ``--public``, a valid API key uses ``key_limiter``. A presented
+        key that does not resolve, or is revoked, is 401. It is not served
+        as anonymous.
+        """
 
         async def dispatch(self, request: Request, call_next: Callable) -> Response:
             path = request.url.path
             remaining: int | None = None
-            if (
-                limiter is not None
-                and request.method != "OPTIONS"
-                and path not in RATE_LIMIT_EXEMPT_PATHS
-            ):
-                allowed, remaining, retry_after = limiter.hit(
-                    rate_limit_identity(request, public=public)
-                )
-                if not allowed:
+            active = limiter
+            scope_name = "IP" if public else "client"
+            identity = rate_limit_identity(request, public=public)
+            if public and api_key_store is not None and request.method != "OPTIONS":
+                auth = api_key_store.authenticate(request.headers)
+                request.scope["umbra.key_presented"] = auth.presented
+                if auth.key_id:
+                    request.scope["umbra.key_id"] = auth.key_id
+                if auth.status == "ok" and auth.rate_identity:
+                    identity = auth.rate_identity
+                    scope_name = "key"
+                    if key_limiter is not None:
+                        active = key_limiter
+                    if auth.record is not None:
+                        api_key_store.touch(auth.record)
+                else:
+                    identity = rate_limit_identity(request, public=True)
+                request.scope["umbra.rate_identity"] = identity
+                if auth.status in {"invalid", "revoked"}:
+                    if limiter is not None and path not in RATE_LIMIT_EXEMPT_PATHS:
+                        allowed, _remaining, retry_after = limiter.hit(identity)
+                        if not allowed:
+                            return _rate_limit_response(limiter, retry_after, "IP")
                     return JSONResponse(
-                        limiter.rejection(retry_after, scope="IP" if public else "client"),
-                        status_code=429,
+                        unauthorized_body(auth.status),
+                        status_code=401,
                         headers={
-                            "Retry-After": str(retry_after),
-                            "X-RateLimit-Limit": str(limiter.limit),
-                            "X-RateLimit-Remaining": "0",
+                            "WWW-Authenticate": 'Bearer realm="umbra-py"',
                             "X-Umbra-License": DATA_LICENSE,
                             "X-Umbra-Attribution": ATTRIBUTION,
                             "Link": f'<{LICENSE_URL}>; rel="license"',
                         },
                     )
+            if (
+                active is not None
+                and request.method != "OPTIONS"
+                and path not in RATE_LIMIT_EXEMPT_PATHS
+            ):
+                allowed, remaining, retry_after = active.hit(identity)
+                if not allowed:
+                    return _rate_limit_response(active, retry_after, scope_name)
             response = await call_next(request)
             response.headers["X-Umbra-License"] = DATA_LICENSE
             response.headers["X-Umbra-Attribution"] = ATTRIBUTION
             response.headers["Link"] = f'<{LICENSE_URL}>; rel="license"'
-            if limiter is not None:
-                response.headers.setdefault("X-RateLimit-Limit", str(limiter.limit))
+            if active is not None:
+                response.headers.setdefault("X-RateLimit-Limit", str(active.limit))
                 if remaining is not None:
                     response.headers.setdefault("X-RateLimit-Remaining", str(remaining))
             return response
@@ -4301,7 +4431,13 @@ def build_app(
     # runs first) so the address is already the edge's client. Rejects count
     # against the same limiter.
     if public:
-        app.add_middleware(BodyLimitMiddleware, max_bytes=PUBLIC_MAX_BODY_BYTES, limiter=limiter)
+        app.add_middleware(
+            BodyLimitMiddleware,
+            max_bytes=PUBLIC_MAX_BODY_BYTES,
+            limiter=limiter,
+            key_limiter=key_limiter,
+            keys=api_key_store,
+        )
         app.add_middleware(ClientIpMiddleware)
 
     # One abandoned probe used to leave its scan running, and the next probe
@@ -4335,7 +4471,8 @@ def build_app(
                 _waiting["n"] -= 1
 
     reads_per_client = PUBLIC_CLIENT_CONCURRENCY
-    client_gate = ClientInFlight(reads_per_client) if public else None
+    key_reads = api_key_concurrency() if public else reads_per_client
+    client_gate = ClientInFlight(reads_per_client, key_limit=key_reads) if public else None
 
     @app.exception_handler(_CatalogBusy)
     async def _catalog_busy(_request: Request, exc: _CatalogBusy) -> JSONResponse:
@@ -4370,9 +4507,14 @@ def build_app(
         client = _inflight_client.get() if client_gate is not None else None
         acquired_client = False
         if client_gate is not None and client:
+            keyed = client.startswith("key:")
             if not client_gate.acquire(client):
                 raise _InFlightLimited(
-                    in_flight_limited_body(reads_per_client, scope="IP", limiter=limiter)
+                    in_flight_limited_body(
+                        client_gate.limit_for(client),
+                        scope="key" if keyed else "IP",
+                        limiter=key_limiter if keyed else limiter,
+                    )
                 )
             acquired_client = True
         try:
@@ -4721,6 +4863,114 @@ def build_app(
             """
             payload = await asyncio.to_thread(hosted_usage.public_payload)
             return JSONResponse(payload, headers={"Cache-Control": STATS_CACHE_CONTROL})
+
+    if api_key_store is not None and signup_limiter is not None:
+        hosted_keys = api_key_store
+        hosted_signup = signup_limiter
+
+        def _signup_ip(request: Request) -> str:
+            client = request.client
+            host = client.host if client is not None else None
+            return f"ip:{host or 'unknown'}"
+
+        def _signup_denied(retry_after: int) -> dict[str, str]:
+            if hosted_signup.window_s == 3600:
+                unit = "request" if hosted_signup.limit == 1 else "requests"
+                rate = f"{hosted_signup.limit} {unit}/hour"
+            else:
+                window = (
+                    int(hosted_signup.window_s)
+                    if hosted_signup.window_s == int(hosted_signup.window_s)
+                    else hosted_signup.window_s
+                )
+                unit = "request" if hosted_signup.limit == 1 else "requests"
+                rate = f"{hosted_signup.limit} {unit} per {window}s"
+            return {
+                "error": "RateLimited",
+                "message": (
+                    "Sign-up rate limit exceeded "
+                    f"(sustained {rate} per IP, burst {hosted_signup.capacity})."
+                ),
+                "hint": (f"Honor Retry-After ({retry_after} seconds) before creating another key."),
+            }
+
+        def _signup_failure(message: str, status: int, *, html_body: bool) -> Response:
+            if html_body:
+                return Response(
+                    signup_form_html(error=message),
+                    status_code=status,
+                    media_type="text/html; charset=utf-8",
+                )
+            error = "RateLimited" if status == 429 else "InvalidRequest"
+            if status == 503:
+                error = "Unavailable"
+            return JSONResponse({"error": error, "message": message}, status_code=status)
+
+        @app.get("/keys", tags=["Ops"])
+        async def get_keys_form() -> Response:
+            """HTML form that creates an API key. The secret is shown once."""
+            return Response(signup_form_html(), media_type="text/html; charset=utf-8")
+
+        @app.post("/keys", tags=["Ops"], responses={201: _KEY_RESPONSE})
+        async def post_keys(request: Request) -> Response:
+            """Create an API key. A JSON body returns JSON; a form post returns HTML.
+
+            Required field is ``email``. Optional: ``name``, ``organization``,
+            ``intended_use``. Anything else is ignored. The secret is in this
+            response only. Sign-ups that succeed are rate-limited per IP.
+            """
+            raw_type = request.headers.get("content-type", "")
+            media = raw_type.split(";", 1)[0].strip().lower()
+            wants_html = media != "application/json"
+            body = await request.body()
+            try:
+                if media == "application/json":
+                    payload = json.loads(body) if body.strip() else {}
+                else:
+                    text = body.decode("utf-8", "replace")
+                    payload = {}
+                    for key, value in parse_qsl(text, keep_blank_values=True):
+                        payload.setdefault(key, value)
+            except (UnicodeError, json.JSONDecodeError):
+                return _signup_failure("Request body is not JSON.", 400, html_body=False)
+            if not isinstance(payload, dict):
+                return _signup_failure("Sign-up body must be an object.", 400, html_body=wants_html)
+            try:
+                signup = signup_from_mapping(payload)
+            except SignupError as exc:
+                return _signup_failure(str(exc), 400, html_body=wants_html)
+            allowed, _remaining, retry_after = hosted_signup.hit(_signup_ip(request))
+            if not allowed:
+                denied = _signup_denied(retry_after)
+                headers = {
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(hosted_signup.limit),
+                    "X-RateLimit-Remaining": "0",
+                }
+                if wants_html:
+                    return Response(
+                        signup_form_html(error=denied["message"]),
+                        status_code=429,
+                        media_type="text/html; charset=utf-8",
+                        headers=headers,
+                    )
+                return JSONResponse(denied, status_code=429, headers=headers)
+            try:
+                secret, record = hosted_keys.create(signup)
+            except UmbraError:
+                return _signup_failure("API keys could not be saved.", 503, html_body=wants_html)
+            if wants_html:
+                return Response(
+                    signup_result_html(secret=secret, email=record.email),
+                    status_code=201,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(
+                issued_document(secret, record),
+                status_code=201,
+                headers={"Cache-Control": "no-store"},
+            )
 
     def _unhealthy(exc: Exception) -> Any:
         doc = health_document(backend="index", ready=False, error=f"{type(exc).__name__}: {exc}")
@@ -6413,6 +6663,8 @@ def build_app(
         schemas.update(core_openapi_components())
         if usage is not None:
             schemas["UsageStats"] = _as_component("UsageStats", "usage-stats")
+        if api_key_store is not None:
+            schemas["ApiKeyIssued"] = _as_component("ApiKeyIssued", "api-key-issued")
         if artifacts:
             schemas.update(openapi_components())
         return document

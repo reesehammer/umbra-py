@@ -10,6 +10,20 @@ still open.
 
 ---
 
+## Verify hosted API key emails
+
+- **Surfaced in:** optional API keys for the hosted API (sign-up on
+  `POST /keys`, storage in `api-keys.json` beside the catalog index).
+- **Code:** `src/umbra_py/api_keys.py` (`signup_from_mapping`,
+  `ApiKeyStore.create`).
+
+Sign-up checks that the email looks like an address and stores it. It does
+not prove the address is theirs. Sending a confirmation message needs a
+mail-provider secret this host does not have, so none was added. Smallest
+change, once a provider and a secret exist: mail a one-time link, and do
+not mark the key active until that link is opened. Until then a key works
+as soon as it is created, and sign-up stays rate-limited per IP.
+
 ## `download_asset` drops a trailing separator on `dest_dir`
 
 - **Surfaced in:** bulk GEC download docs, branch

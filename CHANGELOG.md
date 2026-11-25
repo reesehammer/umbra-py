@@ -13,6 +13,17 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
 - The docs home panel shows `counting_since` in Pacific time, so `2026-11-21T00:24:29Z` reads Nov 20, 2026 on the search total and the top-places heading.
 
 ### Added
+- **Optional API keys on `umbra serve --public`.** `GET /keys` is a sign-up
+  form and `POST /keys` creates a key (email required; name, organization,
+  and intended use optional). The secret is shown once. The host stores a
+  hash in `api-keys.json` beside the catalog index, the same volume as the
+  `/stats` counter, and not the address. Send it as `Authorization: Bearer`
+  or `X-API-Key`. A valid key is limited to 600 requests per minute with a
+  burst of 64 (and 32 catalog reads in flight). Anonymous traffic stays at
+  120 per minute, burst 16, and 8 in flight. An invalid or revoked key is
+  HTTP 401. `umbra keys list` and `umbra keys revoke` manage keys on the
+  host; there is no HTTP admin route. Sign-up is limited per IP. Email is
+  not verified.
 - **`GET /stats` is a cached usage counter on `umbra serve --public`.**
   It counts the first page of a successful `GET`/`POST /search` (a later
   `token` or `offset` is the same search) and the MCP search tools
