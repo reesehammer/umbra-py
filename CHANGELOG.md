@@ -239,12 +239,21 @@ rationale lives in the PR; pre-0.1.0 development history lives in git.
   walk does not take a permit a geocode or a single item read needs.
 
 ### Docs
+- **A provider-shaped search against the hosted API.** [Replace your crawler](docs/replace-crawler.md#use-umbra-py-as-a-provider-backend)
+  shows a plain `requests` adapter (`bbox`, UTC `datetime`,
+  `collections=umbra-open-data`, `product_types=GEC`, `canonical=true`) that
+  follows the `rel=next` GET href, reads the public `assets.gec.href`, and
+  keeps the STAC feature so `assets.thumbnail.href` is available. The browser
+  example on that page renders the thumbnail. Snapshot figures there are the
+  index built 2026-11-16 (17,230 items, acquisitions through 2026-11-12,
+  14,400 thumbnails), checked 2026-11-23.
 - **Browser `GET /search`.** [Replace your crawler](docs/replace-crawler.md#from-a-browser)
   shows a `fetch()` of `https://api.umbra-py.space/search`
   (`collections=umbra-open-data`, `bbox` or a URL-encoded `intersects` point,
   `datetime`, `product_types=GEC`, `canonical=true`). Open data is published
-  in batches: as of the 2026-11-09 snapshot the newest acquisition is
-  2026-09-13, so a last-7-days or last-30-days query is usually empty. The
+  in batches: as of the 2026-11-16 snapshot the newest acquisition is
+  2026-11-12. The archive is a curated site list, so a search for the last
+  few days is often empty. The
   preflight cache is `Access-Control-Max-Age: 600`
   ([Hosted API limits](docs/hosted-limits.md#cors)).
 

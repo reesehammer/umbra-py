@@ -14,11 +14,13 @@ The community API is [https://api.umbra-py.space/](https://api.umbra-py.space/).
 ## Why the index
 
 **Freshness.** The snapshot is what Umbra has published in the open bucket,
-rebuilt on a weekly cadence. Open data is a curated batch, so the newest
-acquisition in the index lags the calendar. `GET /healthz` reports `built_at`
-and `items`. The collection's temporal extent is the same window. On
-2026-10-15 the API was serving a snapshot built that day: 17,205 items,
-acquisitions from 2023-01-16 through 2026-09-13.
+rebuilt on a weekly cadence. Open data is a curated, sparse site list, not
+global recent imagery, so the newest acquisition in the index lags the
+calendar and a search for the last few days is often empty. `GET /healthz`
+reports `built_at` and `items`. The collection's temporal extent is the same
+window. On 2026-11-23 the API was serving the snapshot built 2026-11-16:
+17,230 items, acquisitions from 2023-01-16 through 2026-11-12, 14,400 of
+them with a baked thumbnail.
 
 **Weekly rebuild.** The
 [Publish catalog index](https://github.com/reesehammer/umbra-py/actions/workflows/publish-index.yml)
@@ -33,16 +35,17 @@ a datetime before 2018-01-01 or more than a day ahead, a missing or invalid
 footprint, no public HTTPS asset href, or any href into the private
 `prod-prod-processed` bucket. The dropped rows are
 [`index-validation.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/index-validation.json)
-on the release. The 2026-10-15 report kept 17,205 rows, quarantined 8, dropped
+on the release. The 2026-11-16 report kept 17,230 rows, quarantined 8, dropped
 747 duplicate ids, and recorded no remaining violations.
 
 **Coverage.**
 [`coverage.json`](https://github.com/reesehammer/umbra-py/releases/download/catalog-index/coverage.json)
 measures the bucket against the index, by prefix (`sar-data/tasks/`,
 `sar-data/task-data/`, `open-data/`), sidecar layout, and product. The
-2026-10-15 report indexed 17,205 of 17,960 indexable sidecars (95.8%).
-Sidecars the walk did not take are listed there; quarantined rows are not
-counted as missing.
+2026-11-16 report indexes 17,230 of 17,994 bucket acquisitions (`pct`
+95.75). `pct_indexable` is 100.0: 17,985 have a sidecar, 755 of those are
+omitted as quarantined rows or duplicate ids, and the other 17,230 are
+indexed. The missing list is empty.
 
 `/healthz` `built_at` and the release notes are the live copy of these
 numbers. The dates above are the snapshot this page was checked against.
@@ -86,7 +89,7 @@ note, including how `umbra-py:products` lines up with the keys, is
 Each program lists GEC acquisitions whose footprint intersects longitude
 85.49–85.56 and latitude 28.26–28.32, on or after 2026-09-01, and prints the
 GEC href. That box is the September 2026 Nepal disaster coverage, which the
-2026-10-15 snapshot actually contains. `limit` is a page of 5. The index
+2026-11-16 snapshot contains. `limit` is a page of 5. The index
 orders by task, then acquisition date, then datetime, then id — a page is the
 first matches in that order, which inside one bbox is the earliest passes.
 
@@ -199,9 +202,10 @@ named `gec` exists. The HTTP and `pystac-client` programs run either way.
 
 ## From a browser
 
-Open data is published in batches. As of the snapshot built 2026-11-09, the
-newest acquisition is 2026-09-13, so a search for the last 7 days or the last
-30 days is usually empty. Read the collection `extent.temporal` (on
+Open data is published in batches. As of the snapshot built 2026-11-16, the
+newest acquisition is 2026-11-12. The archive is a curated, sparse site list,
+not global recent imagery, so a search for the last few days is often empty
+even when `/healthz` is fresh. Read the collection `extent.temporal` (on
 [`umbra-open-data`](https://api.umbra-py.space/collections/umbra-open-data))
 for the acquisition window, or [`/healthz`](https://api.umbra-py.space/healthz)
 `built_at` for when that snapshot was built, instead of assuming the archive
@@ -224,6 +228,18 @@ passes in it.
 does. For the box instead of the point, drop `intersects` and set
 `bbox` to `85.49,28.26,85.56,28.32`.
 
+`features[].assets.thumbnail.href` is the baked PNG,
+`https://api.umbra-py.space/artifacts/thumbnail/{id}.png`, when this snapshot
+has one. The 2026-11-16 index has a bake for 14,400 of 17,230 items. A
+missing `thumbnail` asset, or HTTP 404 from that URL, means skip the preview.
+The PNG response sends `Cache-Control: public, max-age=86400`. A
+cross-origin fetch also receives `Access-Control-Allow-Origin: *` (the same
+CORS policy as `/search`; see [CORS](hosted-limits.md#cors)). Each thumbnail
+GET counts toward the 120 requests per minute cap. It does not take a
+catalog-read slot, so several images can load together; page modestly and
+let the one-day cache do the rest. Build the element with `createElement`,
+and put any label in `textContent`.
+
 ```js
 const params = new URLSearchParams({
   collections: "umbra-open-data",
@@ -240,6 +256,18 @@ for (const item of page.features) {
   // Footprint positions are often [lon, lat, height]. Use the first two.
   const [lon, lat] = item.geometry.coordinates[0][0];
   console.log(item.properties.datetime, lon, lat, item.assets.gec?.href);
+  const thumb = item.assets.thumbnail?.href;
+  if (thumb) {
+    const figure = document.createElement("figure");
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = thumb;
+    const caption = document.createElement("figcaption");
+    caption.textContent = item.id;
+    img.addEventListener("error", () => figure.remove());
+    figure.append(img, caption);
+    document.body.append(figure);
+  }
 }
 const next = page.links.find((link) => link.rel === "next");
 if (next) {
@@ -296,6 +324,119 @@ Imagery `href`s point at Umbra's public bucket. Attribute Umbra under
 CC BY 4.0. The API rate limit is 120 requests per minute per client, with a
 short burst. On HTTP 429, back off and honor `Retry-After`, or run
 `umbra index fetch` and search locally.
+
+## Use umbra-py as a provider backend
+
+A tool that already searches several sensors through one adapter,
+`search(bbox, start, end)` returning scenes, can call this API with plain
+`requests`. `bbox` is west, south, east, north. `start` and `end` are
+timezone-aware datetimes; the query sends them as UTC in `datetime=start/end`.
+The collection is `umbra-open-data`. `product_types=GEC` is the geocoded
+GeoTIFF Umbra publishes. `canonical=true` keeps one copy of a republished
+collect. `limit` is the page size; this host clamps it at 500.
+
+The same collect is often published twice, under `sar-data/tasks/...` and
+under `sar-data/task-data/...`, as two STAC ids. `canonical=true` keeps one
+of them. An item that is not a republished pair is canonical too. How the
+index picks that copy is
+[One copy of a republished collect](#one-copy-of-a-republished-collect).
+
+Checked 2026-11-23: `bbox=159.1,-31.9,159.4,-31.6` and
+`datetime=2025-06-22T00:00:00Z/2025-06-23T00:00:00Z` with `product_types=GEC`
+returns 2 features, one under each prefix. `canonical=true` keeps the
+`sar-data/task-data/` copy.
+
+`assets.gec.href` on this API is already a public HTTPS URL on
+`umbra-open-data-catalog`. Umbra's static sidecar can leave that href empty,
+or point it at a private bucket. The index stores the public URL, and
+`/search` returns that href. Pass the whole feature through. A UI that reads
+`assets.thumbnail.href` then finds the baked PNG when the item has one.
+
+`/search` accepts `polarizations` (comma-separated, for example `HH`). An
+item is kept when it exposes at least one of those values. The same list is
+`properties["sar:polarizations"]` if you filter a page you already hold.
+Instrument mode is not a query parameter. It is
+`properties["sar:instrument_mode"]` on the feature (`SPOTLIGHT` on the pair
+above). Filter that in Python. Sending `instrument_mode` on the query string
+does not filter: the parameter is not read.
+
+Follow the `links` entry whose `rel` is `next`. On a GET search, `method` is
+`GET` and `href` already includes the query, with `token` as the offset.
+Request that URL with no extra parameters. On HTTP 429, wait the number of
+seconds in `Retry-After` before the next request. The adapter below raises
+with that header so the caller can wait and try again. The host is
+best effort and has no SLA: 120 requests per minute sustained, per client IP,
+with a burst of 16. Do not page the whole catalog this way. Attribute Umbra,
+CC BY 4.0 (`X-Umbra-Attribution`). The contract is
+[Hosted API limits](hosted-limits.md).
+
+```python
+from datetime import timezone
+
+import requests
+
+SEARCH = "https://api.umbra-py.space/search"
+
+
+def search_umbra_gec(bbox, start, end, max_results=10, session=None):
+    session = session or requests.Session()
+    window = (
+        f"{start.astimezone(timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+        f"/{end.astimezone(timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+    )
+    params = {
+        "bbox": ",".join(map(str, bbox)),
+        "datetime": window,
+        "collections": "umbra-open-data",
+        "product_types": "GEC",
+        "canonical": "true",
+        "limit": min(max_results, 500),
+    }
+    url, scenes = SEARCH, []
+    while url and len(scenes) < max_results:
+        response = session.get(url, params=params, timeout=30)
+        params = None  # the next href already carries the query
+        if response.status_code == 429:
+            wait = response.headers.get("Retry-After")
+            raise RuntimeError(f"rate limited, retry after {wait}")
+        response.raise_for_status()
+        page = response.json()
+        for item in page.get("features", []):
+            href = (item.get("assets") or {}).get("gec", {}).get("href")
+            if href:
+                scenes.append(item)
+                if len(scenes) >= max_results:
+                    break
+        url = next(
+            (link["href"] for link in page.get("links", []) if link.get("rel") == "next"),
+            None,
+        )
+    return scenes
+```
+
+For a bulk or offline search, skip the API. `umbra index fetch` downloads
+the weekly snapshot. `CatalogIndex.from_release()` is that same download and
+opens the file; the returned index is a context manager. `search` takes
+`bbox` as four numbers, `start` and `end` as inclusive acquisition dates,
+`product_types=["GEC"]`, and `canonical=True`.
+`download_item(item, dest_dir=..., assets=["GEC"])` writes the primary GEC.
+That search does not call the host, so it does not use the rate cap. The
+CLI, the output directory, and a stdlib GET of the same hrefs are
+[Download the GEC GeoTIFFs](#download-the-gec-geotiffs).
+
+```python
+from umbra_py import CatalogIndex, download_item
+
+with CatalogIndex.from_release() as index:
+    for item in index.search(
+        bbox=(159.1, -31.9, 159.4, -31.6),
+        start="2025-06-22",
+        end="2025-06-23",
+        product_types=["GEC"],
+        canonical=True,
+    ):
+        download_item(item, dest_dir="gec", assets=["GEC"])
+```
 
 ## Download the GEC GeoTIFFs
 
