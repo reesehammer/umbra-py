@@ -375,7 +375,9 @@ def llms_full_txt() -> str:
         "pagination), and `GET`/`POST /sites` to rank the most repeat-imaged sites "
         "(the discovery step before the analysis routes), with an OpenAPI doc at "
         "`/docs`. `umbra serve --public` hosts this next to MCP at `/mcp` "
-        "(on-demand artifacts off, baked thumbnails on, rate-limited, CC-BY headers)."
+        "(on-demand artifacts off, baked thumbnails on, rate-limited, CC-BY "
+        "headers). Optional API keys from `POST /keys` raise that limit; a "
+        "request with no key stays on the per-IP limit. An invalid key is HTTP 401."
     )
     lines.append("")
 

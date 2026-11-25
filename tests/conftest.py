@@ -60,5 +60,12 @@ def _clear_public_host_env(monkeypatch):
     for name in (
         "UMBRA_PUBLIC_BASE_URL",
         "UMBRA_TRUSTED_PROXY_HOPS",
+        "UMBRA_API_KEY_RATE_LIMIT",
+        "UMBRA_API_KEY_BURST",
+        "UMBRA_API_KEY_CONCURRENCY",
+        "UMBRA_API_KEY_PEPPER",
+        "UMBRA_SIGNUP_RATE_LIMIT",
+        "UMBRA_SIGNUP_BURST",
+        "UMBRA_SIGNUP_WINDOW_S",
     ):
         monkeypatch.delenv(name, raising=False)

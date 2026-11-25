@@ -97,25 +97,43 @@ def test_public_client_ip_prefers_x_real_ip_and_buckets_ipv6(monkeypatch):
 
 
 @pytestmark_public_app
-def test_public_rate_limit_ignores_bearer_and_keeps_one_x_real_ip(tmp_path):
+def test_public_rate_limit_keeps_one_bucket_per_x_real_ip(tmp_path):
+    """A request with no API key is still one bucket per edge address."""
     index_path = _index(tmp_path)
     app = serve.build_app(index_path, public=True, rate_limit=2, cache_dir=tmp_path / "art")
     with _client(app) as client:
-        first = {"x-real-ip": "203.0.113.9", "authorization": "Bearer aaa"}
-        assert client.get("/search?limit=1", headers=first).status_code == 200
-        rotated = {
-            "x-real-ip": "203.0.113.9",
-            "authorization": "Bearer bbb",
-            "x-forwarded-for": "198.51.100.1",
-        }
-        assert client.get("/search?limit=1", headers=rotated).status_code == 200
+        headers = {"x-real-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1"}
+        assert client.get("/search?limit=1", headers=headers).status_code == 200
+        assert client.get("/search?limit=1", headers=headers).status_code == 200
         blocked = client.get(
             "/search?limit=1",
             headers={
                 "x-real-ip": "203.0.113.9",
-                "authorization": "Bearer ccc",
                 "x-forwarded-for": "198.51.100.2, 203.0.113.8",
             },
+        )
+        assert blocked.status_code == 429
+        other = client.get("/search?limit=1", headers={"x-real-ip": "203.0.113.10"})
+        assert other.status_code == 200
+
+
+@pytestmark_public_app
+def test_public_unknown_bearer_is_401_and_does_not_open_a_bucket(tmp_path):
+    """A presented key that is not active is 401. It does not get its own 200s."""
+    index_path = _index(tmp_path)
+    app = serve.build_app(index_path, public=True, rate_limit=2, cache_dir=tmp_path / "art")
+    with _client(app) as client:
+        for token in ("aaa", "bbb"):
+            denied = client.get(
+                "/search?limit=1",
+                headers={"x-real-ip": "203.0.113.9", "authorization": f"Bearer {token}"},
+            )
+            assert denied.status_code == 401
+            assert denied.json()["message"] == "API key is invalid."
+        # Those two 401s spent the anonymous bucket (burst 2 at --rate-limit 2).
+        blocked = client.get(
+            "/search?limit=1",
+            headers={"x-real-ip": "203.0.113.9", "authorization": "Bearer ccc"},
         )
         assert blocked.status_code == 429
         other = client.get("/search?limit=1", headers={"x-real-ip": "203.0.113.10"})

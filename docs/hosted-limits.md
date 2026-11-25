@@ -66,18 +66,22 @@ that is still fetching).
 
 ## Rate limit
 
-**120 requests per minute**, sustained, per client IP, with a **burst of 16**.
+**120 requests per minute**, sustained, per client IP, with a **burst of 16**,
+for a request that does not send an API key.
 That is a token bucket. `PUBLIC_RATE_LIMIT` tokens refill across the
 60-second window (`PUBLIC_RATE_WINDOW_S`); the bucket holds
 `PUBLIC_RATE_BURST` tokens. A client may
 spend the burst at once, including several `/search` calls in parallel, and
 then continues at about 2 requests per second. The average stays 120
 requests per minute. A `--rate-limit` lower than the burst uses that lower
-number as the burst. `--rate-limit 0` disables the limit.
+number as the burst. `--rate-limit 0` disables the limit, including the
+higher key bucket.
 
-A client is the address Railway's edge accepted. `--public` reads
-`X-Real-IP` and ignores `Authorization`. A bearer token is not a separate
-bucket. `X-Forwarded-For` is only the fallback: the rightmost
+A client with no API key is the address Railway's edge accepted. `--public`
+reads `X-Real-IP`. A valid API key is a separate bucket, described below.
+An `Authorization: Bearer` or `X-API-Key` value that is not an active key
+is HTTP 401. It is not treated as anonymous. `X-Forwarded-For` is only the
+fallback: the rightmost
 `UMBRA_TRUSTED_PROXY_HOPS` entries (default 1), never the leftmost.
 Railway overwrites `X-Real-IP` and does not promise a fixed hop count, so
 leave that fallback at the default. IPv4 is the full address. IPv6 collapses
@@ -94,14 +98,116 @@ the sustained rate and the burst (`sustained 120 requests/min per IP, burst
 search locally, which has no rate limit. `X-RateLimit-Limit` is the sustained
 allowance. `X-RateLimit-Remaining` is whole tokens left in the bucket. The
 bucket is per process. A request body over 1 MiB counts as well (HTTP 413,
-or 429 when that hit crosses the cap).
+or 429 when that hit crosses the cap). `X-RateLimit-Limit` and
+`X-RateLimit-Remaining` are the allowance of the tier that accepted the
+request: the per-IP bucket, or the per-key bucket when the key is valid.
+
+## API keys
+
+A key is optional. Anonymous calls keep the per-IP limit above. A valid key
+gets its own token bucket: **600 requests per minute** sustained
+(`UMBRA_API_KEY_RATE_LIMIT`, default 600) and a **burst of 64**
+(`UMBRA_API_KEY_BURST`, default 64, and never higher than the sustained
+limit). That is what a short script needs: about 10 `/search` calls a second,
+or about 23 calls in a couple of seconds, fits in the burst, and a scrape
+that stays over 600 per minute still receives HTTP 429 with `Retry-After`.
+One key may hold **32** catalog reads at once (`UMBRA_API_KEY_CONCURRENCY`,
+default 32). The process-wide slot pool (`UMBRA_DB_CONCURRENCY`, default 4)
+is unchanged, so extra overlapping reads wait or receive HTTP 503 the same
+way an anonymous caller does once the process is full.
+
+Send the key on any request, including `/mcp` and `/search`:
+
+```python
+import requests
+
+issued = requests.post(
+    "https://api.umbra-py.space/keys",
+    json={
+        "email": "you@example.com",
+        "name": "Ada",
+        "organization": "Example Lab",
+        "intended_use": "short bursts of /search for one site",
+    },
+    timeout=30,
+)
+issued.raise_for_status()
+key = issued.json()["key"]  # shown once
+
+response = requests.get(
+    "https://api.umbra-py.space/search",
+    params={"limit": 1},
+    headers={"Authorization": f"Bearer {key}"},
+    timeout=30,
+)
+response.raise_for_status()
+```
+
+`X-API-Key: <key>` is the same credential. If both headers are set they must
+be the same key. `GET /keys` is the same form in a browser
+(`https://api.umbra-py.space/keys`). `POST /keys` with
+`Content-Type: application/json` returns JSON. A browser form post returns
+HTML. Required field: `email` (checked as an address). Optional: `name`,
+`organization`, `intended_use`, each a single line of at most 200 characters.
+Nothing else is stored. There is no mail provider on this host, so the
+address is not verified.
+
+The secret is in that create response and then nowhere else. The file
+`api-keys.json` sits beside `usage-stats.json` and `catalog.db` on the
+`/data` volume, so a redeploy keeps it. The file holds a SHA-256 of the
+secret, or HMAC-SHA256 when `UMBRA_API_KEY_PEPPER` is set. The pepper is
+optional. Set it before issuing keys; changing it later makes existing keys
+fail with HTTP 401. The file also holds the email, the optional fields,
+`created_at`, whether the key is revoked, and the UTC day it was last used.
+It does not hold the secret or an address.
+
+Sign-up itself is limited per IP: **5 successful creates per hour**, burst
+**3** (`UMBRA_SIGNUP_RATE_LIMIT`, `UMBRA_SIGNUP_WINDOW_S` default 3600,
+`UMBRA_SIGNUP_BURST`). A failed email check does not spend that budget. The
+429 names the sign-up cap and sends `Retry-After`. The anonymous request
+bucket still applies to `GET /keys` and `POST /keys` as well.
+
+`/stats` does not include emails or keys. A request with `X-Umbra-Smoke: 1`
+is still excluded from the counter.
+
+Keyed request logs may include `key_id`, the first 12 hex digits of the
+hash. They do not include the secret. On those lines `client_ip` (and
+`client_net` on `mcp_tool`) is null. Anonymous lines are unchanged.
+
+Operators list and revoke keys on the host, not over HTTP:
+
+```text
+umbra keys list --db /data/umbra-py/catalog.db
+umbra keys revoke you@example.com --db /data/umbra-py/catalog.db
+umbra keys revoke you@example.com --created 2026-11-25T16:43:00Z --db /data/umbra-py/catalog.db
+```
+
+`list` prints the email, the created date, and `active` or `revoked`. It
+does not print the secret or the hash. `revoke` needs `--created` when that
+email has more than one active key. `--db` is the catalog index; the key
+file is `api-keys.json` in the same directory. Omit `--db` to use
+`UMBRA_INDEX_DB` or the shared index path.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `UMBRA_API_KEY_RATE_LIMIT` | `600` | Sustained requests per minute for one valid key. |
+| `UMBRA_API_KEY_BURST` | `64` | Burst for that key, capped at the sustained limit. |
+| `UMBRA_API_KEY_CONCURRENCY` | `32` | Catalog reads one key may hold at once. |
+| `UMBRA_API_KEY_PEPPER` | unset | HMAC pepper. Unset stores SHA-256. Not required. |
+| `UMBRA_SIGNUP_RATE_LIMIT` | `5` | Successful sign-ups per IP per window. |
+| `UMBRA_SIGNUP_WINDOW_S` | `3600` | Sign-up window, in seconds. |
+| `UMBRA_SIGNUP_BURST` | `3` | Sign-up burst, capped at the sustained limit. |
+
+A non-numeric or non-positive value is ignored and the default is used.
 
 ## Concurrent catalog reads
 
-One client may hold **8** catalog reads at once (`PUBLIC_CLIENT_CONCURRENCY`).
+One anonymous client may hold **8** catalog reads at once
+(`PUBLIC_CLIENT_CONCURRENCY`). A valid API key may hold 32
+(`UMBRA_API_KEY_CONCURRENCY`).
 A further read is HTTP 429, body `RateLimited`, before it takes a database
 slot. `message` states that cap (and, when the token bucket is on, the
-sustained rate and burst). `hint` is the rate-limit hint: call serially or
+sustained rate and burst, for the tier that was used). `hint` is the rate-limit hint: call serially or
 back off and honor `Retry-After` (1 second), or run `umbra index fetch` and
 search locally. The process still runs `UMBRA_DB_CONCURRENCY` catalog reads
 at once (default 4). A read that finds every slot taken waits for one to
@@ -279,7 +385,7 @@ status and those headers with an empty body (`Content-Length` is the PNG size
 on 200) and counts toward the same limit. The URL is the item id, not a content
 hash, so the PNG is not marked `immutable`: a later sidecar can replace the
 bytes for that id. The same CORS headers as the rest of this API apply. Each
-GET counts toward the 120/min limit: a grid of N thumbnails costs N requests,
+GET counts toward the caller's limit (120/min anonymous, or the key's limit): a grid of N thumbnails costs N requests,
 so page modestly and rely on the one-day cache. It does not take one of the
 eight concurrent catalog-read slots (a browser fetches several images at once).
 
@@ -338,7 +444,9 @@ filters use `@message`. The same logger writes `mcp_request` (each
 `client_ip`. On this host that is `X-Real-IP`, or the trusted
 `X-Forwarded-For` hop (`UMBRA_TRUSTED_PROXY_HOPS`, default 1) when
 `X-Real-IP` is absent. `client_net` is only on `mcp_tool`, and it is the
-hash of that same address.
+hash of that same address. When the request presented an API key, `client_ip`
+and `client_net` are null and `key_id` is the first 12 hex digits of the key
+hash. The secret is not logged.
 
 A tool line has:
 
@@ -354,7 +462,8 @@ A tool line has:
 | `limit` | Present when `limit` is an integer from 0 to 10000000 |
 | `collection` | Present when `collection` or `collections` is a short token such as `umbra-open-data` |
 | `bbox`, `place` | True when that argument was set. The coordinates and the place name are not logged |
-| `client_net` | First 16 hex characters of SHA-256 over `24:<IPv4 /24>` or `64:<IPv6 /64>` of the same address `client_ip` records. An IPv4-mapped IPv6 address uses the IPv4 `/24`. The public host stores an IPv6 client as its `/64`, and that network hashes the same as any address inside it. The address is not logged. The same prefix hashes the same on every replica |
+| `client_net` | First 16 hex characters of SHA-256 over `24:<IPv4 /24>` or `64:<IPv6 /64>` of the same address `client_ip` records. An IPv4-mapped IPv6 address uses the IPv4 `/24`. The public host stores an IPv6 client as its `/64`, and that network hashes the same as any address inside it. The address is not logged. The same prefix hashes the same on every replica. Null when the request presented an API key |
+| `key_id` | Present when the request presented an API key: the first 12 hex digits of the key hash. The secret is not logged |
 
 `level` is `error` when `outcome` is not `ok`, and `info` otherwise.
 `@level:error AND @message:mcp_tool` is the failed tool calls.

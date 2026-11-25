@@ -1416,6 +1416,25 @@ def test_usage_stats_payload_matches_the_contract(tmp_path):
     assert list(_validator("usage-stats.schema.json").iter_errors(below))
 
 
+def test_issued_api_key_matches_the_contract():
+    from umbra_py.api_keys import ApiKeyRecord, digest_key, issued_document
+
+    record = ApiKeyRecord(
+        digest=digest_key("umbra_not-this-secret", None),
+        email="ada@example.com",
+        name=None,
+        organization=None,
+        intended_use=None,
+        created_at="2026-11-25T16:43:00Z",
+        revoked=False,
+        last_used=None,
+    )
+    payload = issued_document("umbra_" + "a" * 32, record)
+    _check("api-key-issued.schema.json", payload)
+    assert "digest" not in payload
+    assert payload["key"].startswith("umbra_")
+
+
 def test_a_missing_install_says_where_it_looked(tmp_path, monkeypatch):
     from umbra_py import schemas
 

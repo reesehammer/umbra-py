@@ -23,7 +23,9 @@ is :func:`_client_network_hash` of that same client: the first 16 hex
 characters of SHA-256 over ``24:<IPv4 /24>`` or ``64:<IPv6 /64>``. An
 IPv4-mapped IPv6 address uses the IPv4 ``/24``. The same prefix hashes the
 same on every replica. This module does not read the forwarding headers
-itself.
+itself. A request that presented an API key logs ``key_id`` (the first 12
+hex digits of the key hash) and leaves ``client_ip`` and ``client_net``
+null. The secret is not logged.
 
 A search logs the client IP, the user agent, HTTP method, path, status and
 duration, plus the query parameters ``bbox``, ``datetime``, ``limit``,
@@ -51,7 +53,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any
 from urllib.parse import parse_qsl
 
@@ -204,6 +206,7 @@ _CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}\Z")
 _CLIENT_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}\Z")
 _UA_PRODUCT = re.compile(r"([A-Za-z][A-Za-z0-9._+-]{0,63})/([A-Za-z0-9][A-Za-z0-9._+-]{0,31})")
 _ERROR_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_KEY_ID = re.compile(r"[0-9a-f]{12}\Z")
 _COUNT_LIST_KEYS = ("items", "sites", "matches", "passes", "results", "features")
 _LIMIT_MAX = 10_000_000
 _COLLECTION_MAX = 8
@@ -212,6 +215,21 @@ _COLLECTION_MAX = 8
 def _client_ip(scope: Scope) -> str | None:
     client = scope.get("client")
     return _clip(client[0]) if client else None
+
+
+def _key_log_overlay(scope: Scope) -> dict[str, Any]:
+    """Drop the address when the request presented an API key.
+
+    ``key_id`` is the short hash prefix the guard stored. The secret is not
+    on the scope, and this does not read the header.
+    """
+    if not scope.get("umbra.key_presented"):
+        return {}
+    overlay: dict[str, Any] = {"client_ip": None}
+    key_id = scope.get("umbra.key_id")
+    if isinstance(key_id, str) and _KEY_ID.fullmatch(key_id):
+        overlay["key_id"] = key_id
+    return overlay
 
 
 def _client_network_hash(host: str | None) -> str | None:
@@ -452,6 +470,7 @@ def _mcp_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]:
         "user_agent": _header(scope, b"user-agent"),
         "mcp_protocol_version": _header(scope, b"mcp-protocol-version"),
     }
+    record.update(_key_log_overlay(scope))
     record.update(_body_fields(body, truncated))
     return record
 
@@ -502,6 +521,7 @@ def _search_record(scope: Scope, body: bytes, truncated: bool) -> dict[str, Any]
         "method": scope.get("method"),
         "path": scope.get("path"),
     }
+    record.update(_key_log_overlay(scope))
     record.update(_search_query_fields(scope))
     if scope.get("method") == "POST":
         record.update(_search_body_fields(body, truncated))
@@ -719,6 +739,9 @@ def _emit_tool_line(
     mapping = _argument_mapping(arguments)
     client_name, client_version = _client_identity(ctx, request)
     outcome = _outcome(note, escaped, result)
+    request_scope = getattr(request, "scope", None)
+    keyed = isinstance(request_scope, Mapping) and bool(request_scope.get("umbra.key_presented"))
+    key_id = request_scope.get("umbra.key_id") if isinstance(request_scope, Mapping) else None
     record: dict[str, Any] = {
         "level": "error" if outcome != "ok" else "info",
         "msg": "mcp_tool",
@@ -729,13 +752,15 @@ def _emit_tool_line(
         "client_name": client_name,
         "client_version": client_version,
         "session_id": _session_id(ctx, request),
-        "client_net": _client_network_hash(_request_host(request)),
+        "client_net": None if keyed else _client_network_hash(_request_host(request)),
         "argument_keys": sorted(
             key for key in mapping if isinstance(key, str) and _ARG_KEY.fullmatch(key)
         ),
         "bbox": _was_set(mapping.get("bbox")),
         "place": _was_set(mapping.get("place")),
     }
+    if keyed and isinstance(key_id, str) and _KEY_ID.fullmatch(key_id):
+        record["key_id"] = key_id
     if "limit" in mapping:
         limit = _limit_value(mapping["limit"])
         if limit is not None:

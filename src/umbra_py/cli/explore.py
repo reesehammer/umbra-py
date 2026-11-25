@@ -111,9 +111,9 @@ def mcp(http: bool, host: str | None, port: int | None, path: str) -> None:
     "--public",
     is_flag=True,
     help="Hosted community instance: STAC search + MCP on one URL, on-demand "
-    "artifacts off (baked thumbnails stay on), per-client rate limit keyed on "
-    "the edge's client IP, CC-BY license headers, and a refuse of --live and "
-    "of Canopy / model API keys. Railway's start command.",
+    "artifacts off (baked thumbnails stay on), per-IP rate limit, optional "
+    "API keys on a higher per-key limit, CC-BY license headers, and a refuse "
+    "of --live and of Canopy / model API keys. Railway's start command.",
 )
 @click.option(
     "--rate-limit",
